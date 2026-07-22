@@ -1,7 +1,10 @@
 """Library migration: placement correctness and the copy-safety guarantees."""
 import csv
 import json
+import stat
 from pathlib import Path
+
+import pytest
 
 from qobuz_librarian.library import migrate as m
 
@@ -387,3 +390,50 @@ def test_run_migrate_gates_on_insufficient_destination_space(tmp_path, monkeypat
     with patch("builtins.input", side_effect=["y"]):
         migrate_mode.run_migrate_mode(_args())
     assert executed == [1]
+
+
+# ── statx directory-incarnation proof ────────────────────────────────────────
+
+def _statx_result(mask):
+    """A well-formed directory statx result carrying exactly ``mask``."""
+    value = m._Statx()
+    value.mask = mask
+    value.mode = stat.S_IFDIR | 0o755
+    value.ino = 4242
+    value.dev_minor = 64
+    value.btime.tv_sec = 1780678551
+    value.btime.tv_nsec = 803587439
+    value.mnt_id = 9583
+    return value
+
+
+def test_directory_identity_proves_filesystem_without_atime(monkeypatch):
+    # ZFS with atime=off reports every field the proof reads but clears
+    # STATX_ATIME; the incarnation proof must still succeed.
+    mask = (m._STATX_BASIC_STATS & ~0x0020) | m._STATX_BTIME | m._STATX_MNT_ID
+    monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
+    identity = m._statx_directory_identity(3, b"", 0)
+    assert identity[2] == 4242          # inode
+    assert identity[4] == 1780678551    # birth time
+    assert identity[6] == 9583          # mount id
+
+
+def test_directory_identity_rejects_missing_birth_time(monkeypatch):
+    mask = m._STATX_BASIC_STATS | m._STATX_MNT_ID  # no STATX_BTIME
+    monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
+    with pytest.raises(OSError):
+        m._statx_directory_identity(3, b"", 0)
+
+
+def test_directory_identity_rejects_missing_mount_id(monkeypatch):
+    mask = m._STATX_BASIC_STATS | m._STATX_BTIME  # no STATX_MNT_ID
+    monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
+    with pytest.raises(OSError):
+        m._statx_directory_identity(3, b"", 0)
+
+
+def test_directory_identity_rejects_missing_inode(monkeypatch):
+    mask = (m._STATX_BASIC_STATS | m._STATX_BTIME | m._STATX_MNT_ID) & ~m._STATX_INO
+    monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
+    with pytest.raises(OSError):
+        m._statx_directory_identity(3, b"", 0)

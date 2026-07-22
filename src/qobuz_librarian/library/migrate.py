@@ -409,6 +409,9 @@ def _album_key(meta: dict) -> tuple:
 _RENAME_NOREPLACE = 1
 _AT_EMPTY_PATH = 0x1000
 _AT_SYMLINK_NOFOLLOW = 0x100
+_STATX_TYPE = 0x0001
+_STATX_MODE = 0x0002
+_STATX_INO = 0x0100
 _STATX_BASIC_STATS = 0x07FF
 _STATX_BTIME = 0x0800
 _STATX_MNT_ID = 0x1000
@@ -473,17 +476,24 @@ def _statx_function():
         ) from exc
 
 
-def _statx_directory_identity(descriptor, path, flags) -> list:
-    statx = _statx_function()
+def _statx_probe(descriptor, path, flags, mask) -> _Statx:
     value = _Statx()
     ctypes.set_errno(0)
-    if statx(
-            int(descriptor), os.fsencode(path), flags,
-            _STATX_BASIC_STATS | _STATX_BTIME | _STATX_MNT_ID,
+    if _statx_function()(
+            int(descriptor), os.fsencode(path), flags, mask,
             ctypes.byref(value)):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
-    required = _STATX_BASIC_STATS | _STATX_BTIME | _STATX_MNT_ID
+    return value
+
+
+def _statx_directory_identity(descriptor, path, flags) -> list:
+    value = _statx_probe(
+        descriptor, path, flags,
+        _STATX_BASIC_STATS | _STATX_BTIME | _STATX_MNT_ID)
+    # Only the fields the identity reads must be present; a filesystem that
+    # omits unused stats such as atime (ZFS atime=off) can still be proved.
+    required = _STATX_TYPE | _STATX_MODE | _STATX_INO | _STATX_BTIME | _STATX_MNT_ID
     if value.mask & required != required or value.btime.tv_nsec >= 1_000_000_000:
         raise OSError("filesystem cannot prove directory incarnation safely")
     device = os.makedev(value.dev_major, value.dev_minor)
@@ -503,13 +513,8 @@ def _statx_directory_identity(descriptor, path, flags) -> list:
 
 def _descriptor_mount_id(descriptor) -> int:
     """Return the held entry's Linux mount ID, refusing weak fallbacks."""
-    value = _Statx()
-    ctypes.set_errno(0)
-    if _statx_function()(
-            int(descriptor), b"", _AT_EMPTY_PATH | _AT_SYMLINK_NOFOLLOW,
-            _STATX_MNT_ID, ctypes.byref(value)):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
+    value = _statx_probe(
+        descriptor, b"", _AT_EMPTY_PATH | _AT_SYMLINK_NOFOLLOW, _STATX_MNT_ID)
     if not value.mask & _STATX_MNT_ID or value.mnt_id <= 0:
         raise OSError("filesystem cannot prove mount identity safely")
     return int(value.mnt_id)
