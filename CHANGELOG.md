@@ -2,6 +2,12 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [0.11.3] - 2026-07-22
+
+A migration fix for filesystems that don't track file access time.
+
+- Library migration works again on ZFS datasets with `atime=off`, and on any filesystem that doesn't report an access time. The check that proves a source or destination folder is genuinely itself was demanding the access-time field even though it never reads it, so it refused to migrate with "safety could not be proved". The same proof backs the backup step behind Upgrade, Downsample, and Repair, so those are covered on these filesystems too. Downloads were never affected.
+
 ## [0.11.2] - 2026-07-15
 
 A first-run fix and a documentation accuracy pass.
