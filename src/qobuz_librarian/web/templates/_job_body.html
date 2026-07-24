@@ -13,7 +13,7 @@
   {% if not embedded_surface|default(false) %}
   <header class="ql-page-header ql-page-header--actions ql-job-header">
     <div class="ql-job-heading">
-      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }} — {% endif %}{{ job.title }}{% endif %}</h1>
+      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }}, {% endif %}{{ job.title }}{% endif %}</h1>
     </div>
     <span id="job-status-badge" class="ql-status-chip ql-job-status
       {%- if job.status.value == 'done' %} is-success
@@ -64,16 +64,20 @@
   {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
   <div class="ql-notice ql-notice-warning ql-job-error" role="alert">
     <div class="ql-notice-copy">
-      <strong>{% if kept.on_disk %}Original files kept safely{% else %}Original files were kept while Repair stopped{% endif %}</strong>
+      <strong>{% if kept.on_disk %}Original files kept safely{% else %}Original files are no longer kept{% endif %}</strong>
+      {# Say why this backup exists. The record carries an exact per-stage
+         reason, and collapsing every stage into one "kept while Repair
+         stopped" told people nothing had changed even where the replacement
+         had already landed in the album. #}
       {% for recovery in job.recoveries %}
       <div>
-        {{ recovery.backed_up }} of {{ recovery.requested }} original file{% if recovery.requested != 1 %}s{% endif %} kept while Repair stopped.
+        {{ recovery.backed_up }} of {{ recovery.requested }} original file{% if recovery.requested != 1 %}s{% endif %} kept.{% if recovery.reason %} {{ recovery.reason }}{% endif %}
       </div>
       {% endfor %}
       {% if kept.on_disk %}
       <span>Review or restore {% if job.recoveries|length == 1 %}it{% else %}them{% endif %} under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</span>
       {% else %}
-      <span>The kept cop{% if job.recoveries|length == 1 %}y is{% else %}ies are{% endif %} no longer on disk — restored or cleaned up outside this job, so there's nothing left to review.</span>
+      <span>The kept cop{% if job.recoveries|length == 1 %}y is{% else %}ies are{% endif %} no longer on disk, restored or cleaned up outside this job, so there's nothing left to review.</span>
       {% if job.attention == 'recovery' %}
       <form action="/jobs/{{ job.id }}/acknowledge-recovery" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -86,7 +90,7 @@
   {% endif %}
 
   {% if s == 'awaiting_review' %}
-    {# The scan's own summary carries its caveats — an artist it couldn't check,
+    {# The scan's own summary carries its caveats, an artist it couldn't check,
        a result cap it hit. Gating it on candidate_cap_hit meant a review whose
        sweep was incomplete presented its count as the whole answer. #}
     {% if job.summary %}
@@ -113,7 +117,7 @@
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or writes_paused %} disabled{% endif %}{% if writes_paused %} title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-            {%- if job.execute_kind == 'downsample' %} data-confirm="{% if not ds_originals_chosen() %}Downsample the selected albums now? You'll first choose whether to keep your hi-res originals — nothing is rewritten until you do.{% elif keeps_ds_originals() %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"
+            {%- if job.execute_kind == 'downsample' %} data-confirm="{% if not ds_originals_chosen() %}Downsample the selected albums now? You'll first choose whether to keep your hi-res originals; nothing is rewritten until you do.{% elif keeps_ds_originals() %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected files now? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Repair selected files ({count})? Files are replaced only after each new copy verifies."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Repair — Qobuz Librarian{% endblock %}
+{% block title %}Repair, Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
 
@@ -17,7 +17,7 @@
   {% endwith %}
 </section>
 {% elif not repair_job or repair_job.status.value in ('failed', 'canceled') %}
-{# A failed or cancelled run stays on the page — but with the launcher under
+{# A failed or cancelled run stays on the page, but with the launcher under
    it, or the surface owned by a dead job had no way to start another scan. #}
 {% if repair_job and qobuz_ready %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
@@ -42,7 +42,7 @@
 <section class="ql-work-card ql-work-card-primary">
   <div class="ql-work-card-copy">
     <p class="ql-work-card-title">{% if repair_resume %}Resume repair scan{% else %}Scan for damaged files{% endif %}</p>
-    <p class="ql-work-card-text">Repair reads every file end to end looking for damage — its own deeper pass, separate from the library scan. Nothing is replaced until you review and approve a verified repair.</p>
+    <p class="ql-work-card-text">Repair reads every file end to end looking for damage, its own deeper pass, separate from the library scan. Nothing is replaced until you review and approve a verified repair.</p>
   </div>
   <form action="/repair" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

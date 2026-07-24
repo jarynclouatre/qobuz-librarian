@@ -33,6 +33,7 @@ from qobuz_librarian.file_exclusion import (
 from qobuz_librarian.integrations.rip import flac_audio_offset, flac_audio_ok
 from qobuz_librarian.library import repair_cache, scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks, parse_track_num
+from qobuz_librarian.library.tags import similarity, strip_edition_suffix
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log
 
@@ -57,7 +58,7 @@ def _throttle_lookup():
 
 def _qobuz_track_by_isrc(isrc, token):
     """ISRC→Qobuz track, served from the on-disk cache when present so a re-scan
-    — and any album that shares the ISRC — skips the lookup. Only a positive
+    (and any album that shares the ISRC) skips the lookup. Only a positive
     result is cached; a miss is left uncached so an outage doesn't stick."""
     cached = repair_cache.get_track(isrc)
     if cached is not None:
@@ -89,7 +90,7 @@ def truncated_tracks_after_download(album_dir, token):
 
 def warn_if_download_truncated(album_dir, token, label):
     """Run the post-download truncation recheck and log a Repair nudge for any
-    track shorter than its real Qobuz recording. Advisory only — it never alters
+    track shorter than its real Qobuz recording. Advisory only: it never alters
     or fails the download. A clean run logs nothing; a lost token or a Qobuz
     outage says so plainly (so an unverified album isn't mistaken for a clean
     one) instead of silently reporting nothing. Returns the short-track list."""
@@ -99,19 +100,19 @@ def warn_if_download_truncated(album_dir, token, label):
         log.info(fmt(C.YELLOW,
             f"  ⚠  {label or 'this album'} imported, but its track lengths "
             "couldn't be verified against Qobuz (auth lost or Qobuz "
-            "unavailable) — re-run Repair once Qobuz is reachable."))
+            "unavailable). Re-run Repair once Qobuz is reachable."))
         return []
     if short:
         n = len(short)
         log.info(fmt(C.YELLOW,
             f"  ⚠  {label or 'this album'}: {n} track{'s' if n != 1 else ''} "
-            "shorter than the Qobuz length — run Repair to refill."))
+            "shorter than the Qobuz length. Run Repair to refill."))
     return short
 
 # Lossless FLAC compresses music to roughly 0.40-0.65 of raw PCM; even very
 # compressible material rarely lands below ~0.30. A file whose *audio portion*
 # (file size minus metadata) is under 15% of the uncompressed-equivalent size
-# for the duration STREAMINFO claims is almost certainly truncated — the
+# for the duration STREAMINFO claims is almost certainly truncated: the
 # header survives tail damage and lies about how much audio is actually
 # present.
 _BYTE_SIZE_TRUNCATED_RATIO = 0.15
@@ -132,6 +133,38 @@ def _flac_decode_ok(path, *, descriptor=None):
         return True
     ok = flac_audio_ok(Path(path), descriptor=descriptor)
     return True if ok is None else ok
+
+
+# How alike two titles must read before an ISRC match is trusted to be the same
+# recording. Deliberately low: the job is to reject a tag pointing at an
+# unrelated song, not to referee edition wording. Measured against the real
+# library, a wrong match scored 0.21 while every genuine pair scored 0.87 or
+# better; the closest a real pair came to rejection was 0.56 ("Ace of Spades"
+# against its live version), which stays trusted.
+_SAME_RECORDING_SIM = 0.50
+
+# Said about a file that is genuinely damaged but whose ISRC resolves to some
+# other song. The damage is real, the refill target is not, so the file is
+# offered a whole-album re-download rather than a swap for that other song.
+_MISMATCHED_DAMAGE_DIAGNOSTIC = (
+    "damaged, but its ISRC names a different recording, so a single-track "
+    "refill would fetch the wrong song")
+
+
+def _same_recording(local_title, qobuz_title):
+    """True when the matched Qobuz track reads like the same song as the file.
+
+    An ISRC tag anchors identity for the whole repair path, but nothing
+    guarantees the tag itself is right. A mis-tagged file resolves to a
+    stranger, and a stranger's duration is not evidence about this file.
+    Edition suffixes are stripped first so a remaster still counts as itself.
+    Either title missing returns True, which leaves files that carry nothing to
+    compare exactly where they were.
+    """
+    if not local_title or not qobuz_title:
+        return True
+    return similarity(strip_edition_suffix(local_title),
+                      strip_edition_suffix(qobuz_title)) >= _SAME_RECORDING_SIM
 
 
 def _stat_identity(value):
@@ -443,7 +476,7 @@ def _scan_held_repair_source(
         report["unverified"] += 1
         return
     if qt is None:
-        # These files have an ISRC — it just matched nothing at Qobuz. A broken
+        # These files have an ISRC, it just matched nothing at Qobuz. A broken
         # one belongs in the same bucket carrying a diagnostic, not under
         # "no ISRC tag", which is where the report files them by name.
         entry = {"path": path, "title": title, "isrc": isrc}
@@ -469,11 +502,42 @@ def _scan_held_repair_source(
         "isrc": isrc,
         "title": qt.get("title") or title,
         "track_number": qt.get("track_number") or et.get("tracknumber") or 0,
+        # What the file on disk calls itself. The two above describe the
+        # matched Qobuz recording, which is the right thing to re-download and
+        # the wrong thing to name a review row after: when the ISRC is wrong
+        # they belong to another song entirely, and the user is left looking
+        # for a track their album does not contain.
+        "local_title": title,
+        "local_track_number": parse_track_num(et.get("tracknumber")),
     }
+    # Whether the ISRC named this song at all decides what may be done about
+    # any damage, not whether damage is looked for. Detection below never
+    # consults it; the refill target always does, because refilling by an ISRC
+    # that names a stranger fetches the stranger.
+    same_recording = _same_recording(title, qt.get("title"))
+
+    def damaged(reason, **extra):
+        """File the damage against the right bucket for its identity.
+
+        A file whose ISRC names the same recording can be refilled from that
+        one track. A file whose ISRC names something else cannot, however
+        certain the damage is, so it goes to isrc_mismatch carrying a
+        diagnostic, which offers a whole-album re-download instead of a
+        surgical swap for a different song.
+        """
+        entry.update(reason=reason, **extra)
+        if same_recording:
+            _append_verified_truncated(report, source, entry)
+            return
+        entry["diagnostic"] = _MISMATCHED_DAMAGE_DIAGNOSTIC
+        if source.intact():
+            report["isrc_mismatch"].append(entry)
+        else:
+            report["unverified"] += 1
+
     if qdur <= 0:
         if not _flac_decode_ok(path, descriptor=source.descriptor):
-            entry["reason"] = "decode_failed"
-            _append_verified_truncated(report, source, entry)
+            damaged("decode_failed")
         else:
             _append_verified_ok(report, source, isrc)
         return
@@ -483,19 +547,30 @@ def _scan_held_repair_source(
         if (audio_size < expected_uncompressed * _BYTE_SIZE_TRUNCATED_RATIO
                 and shutil.which("flac") is not None
                 and not _flac_decode_ok(path, descriptor=source.descriptor)):
-            entry.update(actual_size=actual_size, reason="byte_size_short")
-            _append_verified_truncated(report, source, entry)
+            damaged("byte_size_short", actual_size=actual_size)
             return
 
     loss = qdur - flen
-    if (flen > 0 and loss > min_short_seconds
-            and (flen < qdur * max_ratio or loss > max_short_seconds)):
+    short_against_match = (
+        flen > 0 and loss > min_short_seconds
+        and (flen < qdur * max_ratio or loss > max_short_seconds))
+    if short_against_match and same_recording:
         _append_verified_truncated(report, source, entry)
         return
 
+    # Short against a track that is not this song. The gap measures the
+    # distance between two different recordings, so it proves nothing here, but
+    # the file still gets its decode check below: real damage counts however
+    # badly the tag is written.
     if not _flac_decode_ok(path, descriptor=source.descriptor):
-        entry.update(actual_size=actual_size, reason="decode_failed")
-        _append_verified_truncated(report, source, entry)
+        damaged("decode_failed", actual_size=actual_size)
+        return
+
+    if short_against_match:
+        if source.intact():
+            report["isrc_mismatch"].append(entry)
+        else:
+            report["unverified"] += 1
         return
 
     _append_verified_ok(report, source, isrc)
@@ -507,20 +582,32 @@ def scan_dir_for_isrc_repairs(album_dir, token,
     """Pair each FLAC in album_dir to its Qobuz recording via ISRC, then flag
     truncation by duration comparison (>30 s short AND either <85% ratio or
     >60 s short, so a long track can't hide a big shortfall behind the ratio).
-    Returns a dict with four keys: verified_truncated — ISRC match + duration
-    short → safe to refill verified_ok — ISRC match, duration normal (count,
-    not list) no_isrc_tag — no ISRC tag; recording identity unverifiable
-    isrc_no_match — ISRC tag present but Qobuz returned no match Only
-    verified_truncated files are ever deleted and refilled; everything else is
-    surfaced to the user without modification. ISRC identity is mandatory:
-    album-edition guessing (find_qobuz_album_for_dir) can silently swap a 1992
-    master for its 2011 remaster, which is wrong for surgical repair.
+
+    Buckets returned:
+
+    * verified_truncated: ISRC match, same recording, and either short or
+      undecodable. The only files ever deleted and refilled.
+    * verified_ok: ISRC match, nothing wrong (a count, not a list).
+    * no_isrc_tag: no ISRC tag, so recording identity is unverifiable.
+    * isrc_no_match: ISRC tag present, Qobuz returned nothing.
+    * isrc_mismatch: ISRC tag present, but the match is a different song. Two
+      kinds live here. Without a `diagnostic` the file merely runs short, so
+      the shortfall means nothing and it is reported and left alone. With a
+      `diagnostic` the file is genuinely damaged, and it is offered a
+      whole-album re-download, because the one thing that must never happen is
+      refilling it from an ISRC that names another recording.
+
+    Everything outside verified_truncated is surfaced without modification.
+    ISRC identity is mandatory: album-edition guessing
+    (find_qobuz_album_for_dir) can silently swap a 1992 master for its 2011
+    remaster, which is wrong for surgical repair. The tag can still be wrong,
+    which is what the isrc_mismatch bucket is for.
     """
     report = {
         "verified_truncated": [],
         "verified_ok": 0,
         # Per-ISRC counts of files that matched a Qobuz recording AND passed
-        # the gate — i.e. POSITIVELY re-verified, not merely "not flagged
+        # the gate, i.e. POSITIVELY re-verified, not merely "not flagged
         # truncated". A track whose lookup returned nothing lands in
         # isrc_no_match, so callers that must prove a refill is intact (repair
         # backup deletion) check membership here rather than absence from
@@ -528,7 +615,12 @@ def scan_dir_for_isrc_repairs(album_dir, token,
         "verified_ok_isrcs": Counter(),
         "no_isrc_tag": [],
         "isrc_no_match": [],
-        # FLACs we could not decode-check because the flac tool is absent —
+        # Matched an ISRC that turned out to name a different song. Kept apart
+        # from isrc_no_match: there the lookup found nothing, here it found the
+        # wrong thing, and only the second case means the file's own tag is
+        # suspect.
+        "isrc_mismatch": [],
+        # FLACs we could not decode-check because the flac tool is absent,
         # counted so the summary can say so, never reported as "verified ok".
         "unverified": 0,
     }
@@ -558,7 +650,7 @@ def scan_dir_for_isrc_repairs(album_dir, token,
 
 
 _REPAIR_LOG_HEADER = (
-    "# Replaced-tracks log — albums to refresh on offline clients\n"
+    "# Replaced-tracks log: albums to refresh on offline clients\n"
     "#\n"
     "# Repair replaces a truncated file in place. Most music servers keep\n"
     "# the same track ID (so ratings/play counts survive), which means an\n"
@@ -566,7 +658,7 @@ _REPAIR_LOG_HEADER = (
     "# file until you refresh that album. For each album below, on your\n"
     "# client: remove it from the offline cache, then re-download/re-sync.\n"
     "#\n"
-    "# Once an entry is handled, delete its line. Append-only — anything\n"
+    "# Once an entry is handled, delete its line. Append-only: anything\n"
     "# you leave behind is preserved across runs.\n"
     "#\n"
     "# Format:  YYYY-MM-DD HH:MM  |  Artist  |  Album  |  Track\n"
@@ -579,7 +671,7 @@ def _one_log_line(value):
     """Collapse a tag value to a single safe field for the pipe-delimited log:
     '|' would break the column split, and an embedded newline (legal in Vorbis
     comments / ID3 and copied straight from tags) would split the row across two
-    physical lines — which read_repair_log_entries then drops both halves of."""
+    physical lines, which read_repair_log_entries then drops both halves of."""
     return ((value or "?").strip()
             .replace("|", "/").replace("\r", " ").replace("\n", " "))
 
@@ -589,7 +681,7 @@ def append_repair_log(entries):
     so the user knows which albums to refresh on caching clients.
 
     Serializes through fcntl.flock so concurrent appenders can't interleave
-    the header-check + header-write with each other's data lines — today
+    the header-check + header-write with each other's data lines. Today
     the run-lock serializes everything, but the locking here keeps the
     output parseable if a future code path ever writes outside that scope.
     """

@@ -29,7 +29,7 @@ Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what y
 - **Downsample.** Convert hi-res FLACs to 44.1 / 48 kHz FLAC to reclaim space. Run it on demand, or apply it automatically to new downloads.
 - **New releases.** A periodic pass lists new albums by artists in your library for review and leaves them un-ticked so they cannot all be queued by accident.
 - **Clean import.** beets handles tagging and cover art, and files land in your library in a single move. Lyrics are fetched on import; **Lyrics** mode backfills tracks you already have.
-- **Repair.** ISRC-anchored scanning finds truncated or corrupt FLACs and repairs exact tracks when matching is safe. If a damaged file cannot be matched by ID, the review can offer a whole-album redownload instead.
+- **Repair.** ISRC-anchored scanning finds truncated or corrupt FLACs and refills exact tracks when the ISRC resolves to that same recording. Damage is found whatever the tag says, but a file whose ISRC is missing, unmatched, or names a different song is never offered a single-track swap; the review offers a whole-album redownload instead.
 - **Library migration.** **Migrate** reorganises an existing library into the folder structure `Artist/Album (Year)`. Copy mode leaves the original library in place; optional move mode relocates originals after preview. Merging existing duplicate album folders is a CLI-only option.
 - **Crash-safe queue.** Job records and review lists survive restarts; interrupted downloads are marked failed and can be retried. A shared run lock keeps the web app and CLI from writing at the same time within one deployment.
 
@@ -91,7 +91,7 @@ If you already run streamrip elsewhere, copy `password_or_token` from `~/.config
 
 ## Security
 
-The web UI requires sign-in by default: a single shared credential, stored as a salted PBKDF2 hash, with per-IP brute-force limiting. The bundled `compose.yaml` ships hardened (`no-new-privileges`, `cap_drop: [ALL]`, memory and PID limits) and runs as `PUID:PGID` rather than root; credential files are written `0600` by the entrypoint and the app.
+The web UI requires sign-in by default: a single shared credential, stored as a salted PBKDF2 hash, with brute-force limiting per source IP and per username. The bundled `compose.yaml` ships hardened (`no-new-privileges`, `cap_drop: [ALL]`, memory and PID limits) and runs as `PUID:PGID` rather than root; credential files are written `0600` by the entrypoint and the app.
 
 On first boot there is no account yet, and the setup screen stays open until one is created. On a shared or untrusted network, seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env`, or set `WEB_BIND=127.0.0.1` to keep the port off the LAN, before starting the container. On a private home LAN, creating the account promptly is usually sufficient.
 
@@ -100,7 +100,7 @@ For internet exposure, put it behind an authenticating reverse proxy, a VPN, or 
 ## Operational limitations
 
 - **Stop before database maintenance.** Never sync, restore, or replace the live beets/SQLite database while Qobuz Librarian is running; stop the app first.
-- **A repair that can't prove itself keeps a backup.** Repair moves the files it replaces (or the full original album, for whole-album Repair) into a recovery backup and removes it once every replacement verifies. When that proof can't complete, the backup is kept and flagged on Settings → Diagnostics; review the album and its recovery notice before restoring or removing it.
+- **A repair that can't prove itself keeps a backup.** Repair moves the files it replaces (or the full original album, for whole-album Repair) into a recovery backup and removes it once every replacement verifies. When that proof can't complete, the backup is kept and flagged on Settings → Diagnostics, and the job page states what actually happened to the files: the replacement may already be in the album with your original only in the backup. Review both before restoring or removing it.
 - **Some filesystem metadata may differ after a copy.** Cross-filesystem migrations and safety backups preserve the music and ordinary file metadata, but do not guarantee exact extended attributes, access-control lists (ACLs), or file ownership.
 - **One library, one container.** The staging area is single-writer. The run-lock keeps the CLI and web container from running at the same time in one stack, but two stacks pointed at the same mount can still conflict.
 - **Qobuz only.** This drives streamrip's Qobuz path; Tidal, Deezer, and SoundCloud are not supported.

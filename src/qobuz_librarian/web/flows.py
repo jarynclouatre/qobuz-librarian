@@ -1,7 +1,7 @@
 """Scan / execute logic behind the web Artist and Library flows.
 
 These wrap the same engine the CLI uses (catalog matching, gap detection,
-process_album) but without any terminal prompts — a scan attaches review
+process_album) but without any terminal prompts, a scan attaches review
 candidates to the job, and execution runs over the candidates the user kept.
 """
 import argparse
@@ -84,7 +84,7 @@ def _set_empty_library_summary(job):
     from qobuz_librarian import config as _cfg
     from qobuz_librarian.web import jobs as _job_mgr
     job.error = (
-        f"Nothing to scan — no artist folders were found in {_cfg.MUSIC_ROOT}. "
+        f"Nothing to scan: no artist folders were found in {_cfg.MUSIC_ROOT}. "
         "Qobuz Librarian expects one folder per artist, each holding album "
         "folders. Check the music folder path in Settings."
     )
@@ -274,7 +274,7 @@ def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False):
 
 
 def candidate_matches_query(c, q):
-    """The review filter's predicate — artist or album title contains ``q``.
+    """The review filter's predicate, artist or album title contains ``q``.
 
     Shared by the fragment render and the bulk selection/dismiss endpoints so
     what the user sees is exactly what a bulk action touches. It folds case
@@ -297,8 +297,8 @@ def is_gap_candidate(c):
 
 def library_review_summary(candidates):
     """The parked library review's one-line summary, without the trailing
-    period. Every writer of that summary — the scan when it parks, the
-    restart rebuild — goes through here, so the History card cannot call Gap
+    period. Every writer of that summary (the scan when it parks, the
+    restart rebuild) goes through here, so the History card cannot call Gap
     Fill candidates "missing albums" or disagree with the tabs it describes.
     Splits with the same predicate the tabs use."""
     gaps = sum(1 for c in candidates if is_gap_candidate(c))
@@ -321,7 +321,7 @@ def fold_new_candidates(parked, cands):
     """Merge a refresh's finds into a parked review, keyed by Qobuz album id
     (falling back to artist+title for keyless carry-overs).
 
-    Entries the refresh didn't touch — and the user's ticks on them — are
+    Entries the refresh didn't touch, and the user's ticks on them, are
     never changed. An album the refresh found in the OTHER class (a missing
     album now partially on disk, or a gapped album deleted by hand) swaps to
     the fresh candidate with its tick preserved; absence from the refresh is
@@ -329,12 +329,12 @@ def fold_new_candidates(parked, cands):
     nothing is removed on that basis. Candidates the user dismissed while the
     refresh ran are checked against a fresh hidden snapshot so the fold can't
     resurrect them. Returns (added, updated), or None when the review stopped
-    being parked mid-refresh (approved/discarded) — the caller should leave
+    being parked mid-refresh (approved/discarded), the caller should leave
     the scan's results alone so they park as their own review."""
     from qobuz_librarian.web import jobs as job_mgr
 
     _key = fold_key
-    # Loaded fresh, NOT the scan's own snapshot from its start — the window a
+    # Loaded fresh, NOT the scan's own snapshot from its start, the window a
     # refresh runs is exactly when a dismissal would be missed.
     hidden = hidden_mod.load()
     with parked._lock:
@@ -351,7 +351,7 @@ def fold_new_candidates(parked, cands):
             fresh = fresh_by_key.get(key)
             if (fresh is not None
                     and is_gap_candidate(fresh) != is_gap_candidate(c)):
-                # Disk reality changed class — the fresh row replaces this one
+                # Disk reality changed class, the fresh row replaces this one
                 # below, wearing the user's tick.
                 swapped_ticks[key] = bool(c.get("selected"))
                 updated += 1
@@ -396,7 +396,7 @@ def refold_restored_missing(artists, fingerprints):
 
     Dismissing drops rows from the parked job for good, so clearing the
     hidden entries alone leaves Restore looking like a no-op until some
-    future scan re-carries them — and most users never scan again. Rebuild
+    future scan re-carries them, and most users never scan again. Rebuild
     the restored artists'/albums' candidate specs from the saved scan state
     and fold them back in, unselected. Returns how many rejoined the review,
     or None when no library review is parked (they return on the next scan)."""
@@ -445,7 +445,7 @@ def refold_restored_missing(artists, fingerprints):
 
 def refold_into_living_review(picks, execute_kind="library", ticked=True):
     """Fold a list of picks back into the newest parked review of
-    ``execute_kind``, ticked by default — so they come back ready to retry
+    ``execute_kind``, ticked by default, so they come back ready to retry
     instead of stranding in a dead job. Callers include picks a cancelled
     download never reached, albums that failed during a partial approval, and
     the unticked Gap Fill candidate left by a partial import. The living review
@@ -476,7 +476,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
 def _park_library_failures(failed_cands, execute_kind="library",
                            ticked=True, summary=None):
     """After a whole-review download (every candidate ticked) finishes, retire
-    empties the living review — so the albums that FAILED to download would
+    empties the living review, so the albums that FAILED to download would
     vanish until the next scan. Re-park them as a fresh living review of
     ``execute_kind``, ticked, so they come back ready to retry (mirrors the
     split-off review left by a partial approval). Persisted so a restart
@@ -522,7 +522,7 @@ def _park_library_failures(failed_cands, execute_kind="library",
 
 def _return_new_release_picks(picks):
     """A new release stays in the New Releases review until it's downloaded or
-    dismissed — so picks that failed, were cancelled, or never ran fold back
+    dismissed, so picks that failed, were cancelled, or never ran fold back
     into the parked new-release review, ticked; with none parked (the whole
     review was ticked at approve) they re-park as a fresh one. The persistent
     baseline consumed these ids at check time, so without this they'd never
@@ -536,18 +536,18 @@ def _return_new_release_picks(picks):
 def _fold_partial_gap_fill(full_album, artist_name, n_missing):
     """A partial download (some tracks failed) leaves the album on disk with
     gaps. Fold it into the living Library review as an unticked Gap Fill
-    candidate right away — the app tracks its own downloads, so the gap must
+    candidate right away, the app tracks its own downloads, so the gap must
     not wait for the next manual refresh to become visible. With no library
     review parked, a fresh one is parked so /library shows it. Runs after
     prune_library_review_candidates, which just dropped the album's stale
-    Missing candidates — this replaces them with the honest remainder."""
+    Missing candidates, this replaces them with the honest remainder."""
     spec = _album_candidate_spec(
         {**full_album, "_partial_missing_count": n_missing},
         artist_name, selected=False)
     if refold_into_living_review([spec], ticked=False) is None:
         _park_library_failures(
             [spec], ticked=False,
-            summary="1 album downloaded only partly — the missing tracks "
+            summary="1 album downloaded only partly: the missing tracks "
                     "are ready as Gap Fill.")
 
 
@@ -582,7 +582,7 @@ def prune_library_review_candidates(album):
             job.notify_review_changed()
             job_mgr.finalize_review_if_empty(job)
         except Exception as e:
-            # Pruning is housekeeping on the side of a successful download —
+            # Pruning is housekeeping on the side of a successful download,
             # never let it turn that success into a failure.
             log.info(f"  couldn't prune review {job.id}: {e}")
     return dropped
@@ -593,10 +593,10 @@ def drop_owned_missing_candidates(job):
     executes: a missing-album candidate whose folder now holds music (grabbed
     from Search while the review sat parked, or added by hand) is dropped
     instead of downloaded again. A folder that merely shares the album's name
-    but holds no audio — a failed download, deleted tracks, a leftover shell —
+    but holds no audio (a failed download, deleted tracks, a leftover shell)
     is NOT ownership: the scanner reads tracks and rightly still lists that
     album missing, so dropping it here would silently hide a real gap. Gap Fill
-    candidates are left alone — their album folder exists by definition;
+    candidates are left alone, their album folder exists by definition;
     full-album imports already prune them via prune_library_review_candidates.
     Returns how many of the dropped candidates were selected (the number the
     user believes they're about to download)."""
@@ -666,7 +666,7 @@ def _flag_new_since_last_scan(job, mode):
     record this walk's set for next time. First-ever run badges nothing (no
     baseline to diff). Skipped on a cancelled scan so a partial run can't
     poison the baseline."""
-    # Snapshot under the lock — the scan worker appends candidates to this
+    # Snapshot under the lock, the scan worker appends candidates to this
     # list and we walk it twice here, which without a snapshot is not safe
     # against a same-instant append. `dismiss_albums` uses the same pattern.
     with job._lock:
@@ -707,14 +707,14 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
     Selection is server-backed (saved as the user ticks), so "hide the rest"
     means: of this artist's candidates, hide the ones whose saved `selected`
     flag is off and keep the ticked ones. Other artists' candidates and their
-    selections are never touched — critical now that pagination means most of
+    selections are never touched, critical now that pagination means most of
     them aren't even on the page that triggered the hide.
 
     ``gap_only`` narrows the hide to one side of a library review's tab split:
     True drops only Gap Fill candidates, False only fully missing albums, None
     (the default) both. The button only ever shows one tab's rows, so it must
     not silently dismiss the other tab's. ``query`` narrows the same way for
-    an active review filter — only the rows the user can see leave.
+    an active review filter, only the rows the user can see leave.
 
     The hidden albums are recorded in the durable store so future bulk walks of
     that scope skip them, then dropped from this job's review list. Returns the
@@ -734,7 +734,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
             return None
         # The store's key deliberately ignores parentheticals so editions of one
         # album stay dismissed together, but that also collapses genuinely
-        # different records — "The Asylum Albums (1972-1975)" and "(1976-1980)"
+        # different records, "The Asylum Albums (1972-1975)" and "(1976-1980)"
         # share a key. Writing an unticked row's key would hide the ticked one
         # it collides with, for good and under the other album's title. A ticked
         # album wins: its twin is left in the review rather than dismissed into
@@ -762,7 +762,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
     drop = {c["cid"] for c in to_hide}
     with job._lock:
         # Re-read the ticks under the lock: a selection saved while the store
-        # write above ran was promised "keep the ticked ones", so it wins —
+        # write above ran was promised "keep the ticked ones", so it wins,
         # dropping the stale snapshot's ids wholesale would dismiss an album
         # the user just ticked.
         ticked_meanwhile = [c for c in job.candidates
@@ -773,7 +773,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
         job.candidates = [c for c in job.candidates
                           if c["cid"] not in drop or c["cid"] in keep]
     if ticked_meanwhile:
-        # Their dismissals were already written durably — take them back out,
+        # Their dismissals were already written durably, take them back out,
         # or the next bulk walk skips albums that are visibly ticked here.
         fps = [hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
                for c in ticked_meanwhile]
@@ -787,7 +787,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
 
 def _scan_library_artist(artist_dir, token, partial_only, hidden):
     """Worker: find one artist's gaps. Runs in a pool thread (its own HTTP
-    session); returns plain data so the caller adds candidates serially —
+    session); returns plain data so the caller adds candidates serially,
     keeping job.candidates single-writer. Also returns the artist's id and its
     lossless catalog ids so the caller can seed the new-release baseline (the
     discography is already fetched here)."""
@@ -798,7 +798,7 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
         single_store=hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None,
         want_missing=not partial_only)
     artist_id = str(result.artist_id) if result.artist_id else None
-    # None signals "don't seed a baseline" — a transient short-page fetch
+    # None signals "don't seed a baseline", a transient short-page fetch
     # isn't the whole discography, so seeding it would later dump the dropped
     # albums as "new".
     catalog_ids = None if result.catalog_incomplete else [
@@ -860,12 +860,12 @@ def scan_library(job, token, partial_only=False, force_full=False):
         and previous_scan.get("complete")
         and previous_scan.get("hidden_signature", "") == hidden_sig
         # Saved candidates computed under a different quality policy must not
-        # carry forward — a settings change re-derives even unchanged folders.
+        # carry forward, a settings change re-derives even unchanged folders.
         and previous_scan.get("quality_signature", "") == quality_sig
     )
     # The two refreshes and the fingerprint pass below run before the main
     # artist loop, and on a first scan of a large library each takes real
-    # minutes — without progress ticks the job sits on "Waiting for output"
+    # minutes, without progress ticks the job sits on "Waiting for output"
     # looking hung the whole time.
     downsample_refresh_started_at = time.time()
     log.info(f"Reading albums from {plural(len(artists), 'artist folder')} on disk…")
@@ -1016,9 +1016,9 @@ def scan_library(job, token, partial_only=False, force_full=False):
             try:
                 name, artist_name, gaps, artist_id, catalog_ids = fut.result()
             except (AuthLost, QobuzUnavailable):
-                # A lost token or an unreachable API isn't a per-artist hiccup
-                # — cancel the rest and fail the scan rather than silently
-                # report a partial library as the full picture.
+                # A lost token or an unreachable API isn't a per-artist
+                # hiccup, so cancel the rest and fail the scan rather than
+                # silently report a partial library as the full picture.
                 for f in futures:
                     f.cancel()
                 raise
@@ -1035,7 +1035,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
                 baseline_seen[artist_id] = catalog_ids
             artist_candidates = []
             for gap in gaps:
-                # Library is a discovery list — leave candidates unticked so a
+                # Library is a discovery list, leave candidates unticked so a
                 # single click can't queue hundreds nobody reviewed.
                 spec = _gap_candidate_spec(
                     gap, artist_name or name, selected=False, artist_key=name)
@@ -1057,7 +1057,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
                               found=total, hit=hit, unit="artist")
             if gaps:
                 tail = "with Gap Fill candidates" if partial_only else "to fill"
-                log.info(f"  {artist_name} — {plural(len(gaps), 'album')} {tail}")
+                log.info(f"  {artist_name} - {plural(len(gaps), 'album')} {tail}")
             since_save += 1
             if since_save >= _CHECKPOINT_EVERY:
                 since_save = 0
@@ -1068,7 +1068,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
     flush_resolve_cache()
     baseline_save_failed = False
     if job.cancel_requested:
-        # Deliberate stop — discard this kind's progress so it isn't auto-resumed.
+        # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
         scan_checkpoint.clear(kind)
     else:
         # Only a reached-all-artists crawl stamps "last scanned" or seeds the
@@ -1090,7 +1090,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
             quality_sig=quality_sig,
         )
         # Publish Upgrade/Downsample from their OWN completeness, gated only
-        # on a complete catalog crawl — NOT on library_complete.
+        # on a complete catalog crawl, NOT on library_complete.
         if catalog_complete:
             if downsample_refresh.complete:
                 downsample_state.save(
@@ -1111,7 +1111,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
         if catalog_complete:
             _record_last_scan()
             _flag_new_since_last_scan(job, kind)
-            # The crawl reached every artist cleanly — establish the new-release
+            # The crawl reached every artist cleanly, establish the new-release
             # baseline from the catalog snapshot (only the first time; the daily
             # check keeps it fresh after), and clear this kind's checkpoint.
             if not new_releases_mod.is_baseline_complete():
@@ -1147,7 +1147,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
 
 def scan_new_releases(job, token):
     """Surface albums that appeared in library artists' Qobuz catalogs since the
-    last check and that the user doesn't own or hasn't hidden — flagged as new
+    last check and that the user doesn't own or hasn't hidden, flagged as new
     for review, but left un-ticked so one click can't queue the whole list.
     Cheap (one catalog call per artist, no track fetches), so it's the quick
     "what's new" pass rather than the full gap scan."""
@@ -1162,7 +1162,7 @@ def scan_new_releases(job, token):
     state = new_releases_mod.load()
     seen = state.get("seen") or {}
     # If the catalog fetch limit has grown since the baseline was captured,
-    # the old baseline is missing everything past the previous cap — a plain
+    # the old baseline is missing everything past the previous cap, a plain
     # diff would dump that whole back-slice as "new".
     cur_limit = int(cfg.ARTIST_CATALOG_LIMIT)
     prev_limit = state.get("baseline_limit")
@@ -1178,7 +1178,7 @@ def scan_new_releases(job, token):
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # This run's reached artists; merged over the prior baseline at the end (so a
     # run where some/all artists errored can't wipe their baselines and re-surface
-    # everything — only artists actually reached get their snapshot refreshed).
+    # everything, only artists actually reached get their snapshot refreshed).
     current_seen = {}
     from qobuz_librarian.web.jobs import pool_initializer_kwargs
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel",
@@ -1226,7 +1226,7 @@ def scan_new_releases(job, token):
                               result.artist_name or futures[fut].name,
                               found=total, hit=hit, unit="artist")
             if result.new_gaps:
-                log.info(f"  {result.artist_name} — "
+                log.info(f"  {result.artist_name} - "
                          f"{plural(len(result.new_gaps), 'new release')}")
     flush_resolve_cache()
     saved = None
@@ -1331,7 +1331,7 @@ def execute_albums(job, chosen, token):
     cancelled_cand = None
     # Fold-back recovery is kind-scoped: this function executes both library
     # and new-release batches, and their picks must never cross into each
-    # other's review — a library pick returns to the Library review, a
+    # other's review, a library pick returns to the Library review, a
     # new-release pick to the New Releases review (it stays there until
     # downloaded or dismissed).
     is_library_run = getattr(job, "execute_kind", "") == "library"
@@ -1340,7 +1340,7 @@ def execute_albums(job, chosen, token):
     def _fold_back_unfinished():
         # Token death / outage mid-batch: once something has imported, this
         # job is headed for FAILED (approve's no-harm re-park only covers the
-        # nothing-landed case) — fold the picks this run didn't finish back
+        # nothing-landed case), fold the picks this run didn't finish back
         # into the living review, ticked, so they come back to retry like any
         # other early exit.
         if not job._imported_any:
@@ -1355,11 +1355,11 @@ def execute_albums(job, chosen, token):
             break
         processed = i
         album_id = cand["payload"].get("album_id")
-        label = f"[{i}/{len(chosen)}] {cand.get('artist','')} — {cand['title']}"
+        label = f"[{i}/{len(chosen)}] {cand.get('artist','')} - {cand['title']}"
         log.info(label)
         job._progress_scope = (i, len(chosen), "album")
         job.push_progress("Downloading albums", i, len(chosen),
-                          f"{cand.get('artist','')} — {cand['title']}", unit="album")
+                          f"{cand.get('artist','')} - {cand['title']}", unit="album")
         try:
             full = get_album(album_id, token)
         except (AuthLost, QobuzUnavailable):
@@ -1385,7 +1385,7 @@ def execute_albums(job, chosen, token):
             continue
         if result and result.get("result") == "cancelled":
             # Cancelled mid-download: processed already points past this album,
-            # so the cancel fold-back below would drop its pick — remember it.
+            # so the cancel fold-back below would drop its pick, remember it.
             cancelled_cand = cand
         if result and result.get("imported") and result.get("n_ok", 0) > 0:
             job._imported_any = True
@@ -1395,11 +1395,11 @@ def execute_albums(job, chosen, token):
                 fallback_artist=cand.get("artist"),
                 downsample=True,
             )
-            # The album is on disk now — any OTHER parked library review still
+            # The album is on disk now, any OTHER parked library review still
             # offering it is stale.
             prune_library_review_candidates(full)
             # A partial (some tracks landed, some failed) isn't a full
-            # download — count it apart so the summary doesn't claim it
+            # download, count it apart so the summary doesn't claim it
             # finished, and surface the remainder NOW (after the prune, which
             # would otherwise drop the fresh candidate as a same-id stale one)
             # instead of leaving it invisible until the next manual refresh.
@@ -1422,7 +1422,7 @@ def execute_albums(job, chosen, token):
         # AND the ones that failed along the way fold back into the living
         # review, ticked, so a cancel mid-batch doesn't strand them in this
         # dead job. When the whole review was ticked at approval there is no
-        # living review to fold into, so park a fresh one — the finish path
+        # living review to fold into, so park a fresh one, the finish path
         # and the new-release side both already do that.
         unrun = chosen[processed:]
         if cancelled_cand is not None:
@@ -1459,7 +1459,7 @@ def execute_albums(job, chosen, token):
         # off review.
         refold_into_living_review(failed_cands)
     elif failed_cands and is_nr_run:
-        # A new release that failed to download wasn't downloaded — it goes
+        # A new release that failed to download wasn't downloaded, it goes
         # back to the New Releases review rather than being consumed (the
         # baseline already recorded it, so nothing else would re-offer it).
         _return_new_release_picks(failed_cands)
@@ -1484,7 +1484,7 @@ def scan_upgrades(job, token):
         return
     args = build_args()
     capped = load_capped()
-    # Upgrades the user dismissed ("I'm happy with my copy") — independent of
+    # Upgrades the user dismissed ("I'm happy with my copy"), independent of
     # the auto-`capped` memory and of the missing-album hides.
     hidden = hidden_mod.load()
     log.info(f"Scanning {plural(len(artists), 'artist')} for quality upgrades")
@@ -1511,7 +1511,7 @@ def scan_upgrades(job, token):
                     spec.get("title"),
                     current_hidden):
                 continue
-            # Unticked by default — like the gap scan, one click shouldn't
+            # Unticked by default, like the gap scan, one click shouldn't
             # re-rip hundreds of albums nobody reviewed.
             job.add_candidate(
                 kind="upgrade",
@@ -1527,7 +1527,7 @@ def scan_upgrades(job, token):
         job.push_progress("Scanning for upgrades", done, n, name,
                           found=total, hit=hit, unit="artist")
         if added:
-            log.info(f"  {name} — {plural(added, 'album')} to upgrade")
+            log.info(f"  {name} - {plural(added, 'album')} to upgrade")
 
     refresh = upgrade_state.refresh_for_artists(
         artists,
@@ -1569,7 +1569,7 @@ def execute_upgrades(job, chosen, token):
     # off per-album consolidation prompts (the CLI upgrade walk does the same).
     args.auto_upgrade = True
     args.consolidate = False
-    # Outcomes that aren't a failure — the album just didn't need (or couldn't
+    # Outcomes that aren't a failure: the album just didn't need (or couldn't
     # safely take) an upgrade.
     _skip = BENIGN_UPGRADE_RESULTS
     ok = 0
@@ -1581,11 +1581,11 @@ def execute_upgrades(job, chosen, token):
             break
         processed = i
         album_id = cand["payload"].get("album_id")
-        log.info(f"[{i}/{len(chosen)}] {cand.get('artist','')} — "
+        log.info(f"[{i}/{len(chosen)}] {cand.get('artist','')} - "
                  f"{cand.get('title') or '?'}")
         job._progress_scope = (i, len(chosen), "album")
         job.push_progress("Upgrading albums", i, len(chosen),
-                          f"{cand.get('artist','')} — {cand.get('title') or '?'}", unit="album")
+                          f"{cand.get('artist','')} - {cand.get('title') or '?'}", unit="album")
         try:
             album = get_album(album_id, token)
         except (AuthLost, QobuzUnavailable):
@@ -1678,7 +1678,7 @@ def execute_upgrades(job, chosen, token):
 def scan_downsamples(job):
     """Scan the library for FLACs stored above CD rate.
 
-    Local only — the answer comes off disk, so unlike the upgrade scan there's
+    Local only, the answer comes off disk, so unlike the upgrade scan there's
     no Qobuz lookup and no token. Serial (the per-file read is fast and disk-
     bound; fanning out would just thrash the spindle) with a cancel check and
     per-artist progress.
@@ -1707,7 +1707,7 @@ def scan_downsamples(job):
             if hidden_mod.is_hidden(
                     hidden_mod.SCOPE_DOWNSAMPLE, c.artist, c.title, current_hidden):
                 continue
-            # Unticked by default — a downsample is irreversible, so nothing is
+            # Unticked by default, a downsample is irreversible, so nothing is
             # shrunk without an explicit per-album tick.
             job.add_candidate(
                 kind="downsample",
@@ -1723,7 +1723,7 @@ def scan_downsamples(job):
         job.push_progress("Scanning for hi-res files", done, n, name,
                           found=total, hit=hit, unit="artist")
         if added:
-            log.info(f"  {name} — {plural(added, 'album')} above CD rate")
+            log.info(f"  {name} - {plural(added, 'album')} above CD rate")
 
     refresh = downsample_state.refresh_for_artists(
         artists,
@@ -1779,10 +1779,10 @@ def execute_downsamples(job, chosen, token=None, args=None):
             continue
         album_dir = Path(raw_album_dir)
         title = cand.get("title") or album_dir.name
-        log.info(f"[{i}/{len(chosen)}] {cand.get('artist', '')} — {title}")
+        log.info(f"[{i}/{len(chosen)}] {cand.get('artist', '')} - {title}")
         job._progress_scope = (i, len(chosen), "album")
         job.push_progress("Downsampling albums", i, len(chosen),
-                          f"{cand.get('artist', '')} — {title}", unit="album")
+                          f"{cand.get('artist', '')} - {title}", unit="album")
         if not album_dir.is_dir():
             log.info("  skipped: folder no longer exists")
             skipped += 1
@@ -1806,7 +1806,7 @@ def execute_downsamples(job, chosen, token=None, args=None):
             continue
         if res.get("resampled") and not res.get("cancelled"):
             # A Stop mid-album leaves the rest of its tracks hi-res: don't
-            # count it done or mark it capped — the state refresh below
+            # count it done or mark it capped, the state refresh below
             # re-lists the remainder so the run can be finished later.
             shrunk += 1
             mark_local_album_capped(album_dir)
@@ -1842,10 +1842,10 @@ def execute_downsamples(job, chosen, token=None, args=None):
         job.error = (f"{plural(total_errors, 'file')} couldn't be downsampled "
                      "(left unchanged); see the log.")
     if total_flush_warns:
-        # These files WERE rewritten — only the folder flush failed
+        # These files WERE rewritten, only the folder flush failed
         # afterwards, so the swap may not survive a power loss.
         note = (f"{plural(total_flush_warns, 'file')} resampled but couldn't "
-                f"be flushed to disk — check the drive; see the log.")
+                f"be flushed to disk, check the drive; see the log.")
         job.error = f"{job.error} {note}" if job.error else note
 
 
@@ -1858,6 +1858,28 @@ def _kept_originals_note():
             "nothing is freed until they expire or you remove them in Settings.")
 
 # ── Repair flow ───────────────────────────────────────────────────────────────
+
+def _repair_damage_detail(truncated):
+    """Say what the scan measured instead of asserting truncation.
+
+    A file that will not decode is damaged and can be called that outright. A
+    file that merely runs shorter than the recording its ISRC names has only
+    been measured against a catalogue, so the card reports the gap and leaves
+    the verdict to the person reading it.
+    """
+    broken = [t for t in truncated if t.get("reason")]
+    short = [t for t in truncated if not t.get("reason")]
+    parts = []
+    if broken:
+        parts.append(f"{plural(len(broken), 'track')} won't decode")
+    if short:
+        worst = max(float(t.get("qobuz_duration") or 0)
+                    - float(t.get("file_length") or 0) for t in short)
+        lead = "up to " if len(short) > 1 else ""
+        parts.append(f"{plural(len(short), 'track')} {lead}"
+                     f"{int(round(worst))}s shorter than the catalogue version")
+    return ", ".join(parts) or plural(len(truncated), "damaged track")
+
 
 def _repair_album_outcome(album_dir, name, token):
     """Scan one album into an outcome dict: counts, review-candidate specs, and
@@ -1878,18 +1900,35 @@ def _repair_album_outcome(album_dir, name, token):
     out["unverified"] = scan.get("unverified", 0)
     truncated = scan["verified_truncated"]
     if truncated:
+        detail = _repair_damage_detail(truncated)
         out["specs"].append({
             "kind": "repair", "title": album_dir.name, "artist": name,
-            "detail": f"{plural(len(truncated), 'truncated track')}",
+            "detail": detail,
             "payload": {"album_dir": str(album_dir), "artist_name": name,
                         "verified_truncated": truncated}})
+        # The sweep opens by promising that problems appear in the log, so each
+        # flagged album has to say so as it is found. Without this the log runs
+        # empty for hours and then a review appears from nowhere.
+        out["warns"].append(f"  {name} - {album_dir.name}: {detail}")
+    for entry in scan.get("isrc_mismatch", []):
+        if entry.get("diagnostic"):
+            # Damaged as well as mis-tagged, so it is picked up below as a
+            # re-download candidate and reported there. Saying it here too
+            # printed the same file twice in slightly different words.
+            continue
+        out["warns"].append(
+            f"    ~ {album_dir.name} - {entry.get('local_title') or '?'}: "
+            f"shorter than its ISRC match, but that match is "
+            f"\"{entry.get('title') or '?'}\", a different recording. "
+            "Left alone; check the file's ISRC tag if you think it is wrong.")
     # Damaged files that can't be matched to a Qobuz recording can't be
-    # surgically refilled — offer a whole-album re-download instead (the user
-    # confirms it in review). Both no-match buckets carry them: no ISRC at all,
-    # or an ISRC Qobuz doesn't know.
+    # surgically refilled, so offer a whole-album re-download instead (the user
+    # confirms it in review). Every bucket that can hold one carries them: no
+    # ISRC at all, an ISRC Qobuz doesn't know, or an ISRC that names some other
+    # song (where a single-track refill would fetch that other song).
     suspicious = [
         entry
-        for bucket in ("isrc_no_match", "no_isrc_tag")
+        for bucket in ("isrc_no_match", "no_isrc_tag", "isrc_mismatch")
         for entry in scan.get(bucket, [])
         if entry.get("diagnostic")
     ]
@@ -1898,25 +1937,35 @@ def _repair_album_outcome(album_dir, name, token):
         if matched and matched.get("id"):
             m_title = matched.get("title") or album_dir.name
             m_year = album_year(matched) or "?"
+            detail = (f"{plural(len(suspicious), 'damaged file')} can't be "
+                      f"verified by ID. Re-download the whole album fresh "
+                      f"as “{m_title}” ({m_year})")
             out["specs"].append({
                 "kind": "redownload", "title": album_dir.name, "artist": name,
-                "detail": (f"{plural(len(suspicious), 'damaged file')} can't be "
-                           f"verified by ID. Re-download the whole album fresh "
-                           f"as “{m_title}” ({m_year})"),
+                "detail": detail,
                 "payload": {"album_dir": str(album_dir), "artist_name": name,
                             "album_id": matched.get("id"),
                             "matched_title": m_title}})
+            # The sweep promises every problem reaches the log. A re-download
+            # candidate is a problem, and without this it produced a review
+            # card and no line at all, so hours of scanning read as idle and
+            # then a review appeared from nowhere.
+            out["warns"].append(f"  {name} - {album_dir.name}: {detail}")
         else:
             for e in suspicious:
+                # Name the file, not the recording its ISRC resolved to: when
+                # the tag is wrong those are different songs and the user would
+                # be sent looking for a track this album does not contain.
                 out["warns"].append(
-                    f"    ⚠ {album_dir.name} — {e.get('title') or '?'}: "
+                    f"    ⚠ {album_dir.name} - "
+                    f"{e.get('local_title') or e.get('title') or '?'}: "
                     f"{e['diagnostic']}; couldn't match this folder to a Qobuz "
                     "album to re-download. Check by hand.")
     return out
 
 
 def _scan_repair_artist(artist_dir, token, job, beat=None):
-    """Scan one artist's albums for damaged FLACs — runs on a pool worker.
+    """Scan one artist's albums for damaged FLACs, runs on a pool worker.
 
     Returns ``(name, agg)``; ``agg`` carries per-artist counts and a list of
     review-candidate specs the caller adds on the single writer thread, so the
@@ -1948,8 +1997,8 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
 def _repair_item(artist, albums, flagged):
     """One consistent live-status line for the whole-library repair sweep.
 
-    Every progress push during the sweep — the per-album heartbeat, the
-    per-artist completion tick, and the failure tick — renders through this so
+    Every progress push during the sweep, the per-album heartbeat, the
+    per-artist completion tick, and the failure tick, renders through this so
     the job page's detail line updates *in place* (the artist and the counts
     climbing) instead of structurally flip-flopping between an artist-name form
     and a bare-tally form, which reads as flicker. ``artist`` is whichever one a
@@ -1965,7 +2014,7 @@ def _repair_item(artist, albums, flagged):
 def _emit_repair_heartbeat(beat, job, artist_name):
     """Refresh the live progress line from whichever worker crosses the interval,
     so it keeps ticking even while every worker is deep inside one large artist
-    and no future has completed — otherwise a long stretch with no completed
+    and no future has completed, otherwise a long stretch with no completed
     artist looks like a hang. Pushed through the progress channel, not the log,
     so the activity log stays a list of flagged albums rather than a scroll of
     heartbeats. Counts are shared under ``beat['lock']``."""
@@ -2027,7 +2076,7 @@ def scan_repairs(job, token):
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # Scan artists in parallel (each worker gets its own HTTP session), but
     # add candidates, advance progress, and write the checkpoint on THIS one
-    # thread so they stay single-writer — the same shape the library scan
+    # thread so they stay single-writer, the same shape the library scan
     # uses.
     from qobuz_librarian.web.jobs import pool_initializer_kwargs
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="repairscan",
@@ -2047,7 +2096,7 @@ def scan_repairs(job, token):
             try:
                 name, agg = fut.result()
             except (AuthLost, QobuzUnavailable):
-                # A lost token or an unreachable API isn't a per-artist hiccup —
+                # A lost token or an unreachable API isn't a per-artist hiccup,
                 # stop the sweep rather than report a partial library as whole.
                 # The checkpoint stays, so it resumes once auth/network is back.
                 for f in futures:
@@ -2089,10 +2138,10 @@ def scan_repairs(job, token):
     # Honest summary: report what was actually decode-verified, and never
     # claim completeness the scan didn't earn. With the flac tool present,
     # an unverified track means the file couldn't be read or changed while
-    # it was being checked — unreadable is an ownership problem, not a
+    # it was being checked, unreadable is an ownership problem, not a
     # missing tool.
     unver_reason = (
-        "the app couldn't read them or they changed mid-check — check "
+        "the app couldn't read them or they changed mid-check, check "
         "file ownership and PUID"
         if shutil.which("flac") else "no flac tool"
     )
@@ -2202,7 +2251,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
                     "result": "recovery_record_failed",
                 }
             pin_repair_recovery(
-                "repair backup kept — recovery record and automatic restore "
+                "repair backup kept, recovery record and automatic restore "
                 "did not complete")
             recovery, _ = checkpoint_recovery(
                 "restore",
@@ -2227,7 +2276,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
                 )
             else:
                 pin_repair_recovery(
-                    "repair backup kept — automatic restore after an error did "
+                    "repair backup kept, automatic restore after an error did "
                     "not complete")
                 recovery, _ = checkpoint_recovery(
                     "restore",
@@ -2255,7 +2304,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
                              "album's backup.")
                 else:
                     pin_repair_recovery(
-                        "repair backup kept — could not be proven redundant "
+                        "repair backup kept, could not be proven redundant "
                         "after a verified re-download")
                     log.info("  Re-download verified, but the original "
                              "album's backup couldn't be proven redundant; "
@@ -2268,7 +2317,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
             else:
                 result["repair_unverified"] = True
                 pin_repair_recovery(
-                    "repair backup kept — replacement not durable")
+                    "repair backup kept, replacement not durable")
                 log.info("  Re-download landed, but the rebuilt album or its "
                          "companions couldn't be flushed safely; keeping your "
                          f"backup at {backup}.")
@@ -2279,11 +2328,11 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
                 )
         elif imported_ok:
             # Imported, but a decode pass alone doesn't prove the re-rip kept
-            # every track — a truncated or short result could be WORSE than
+            # every track, a truncated or short result could be WORSE than
             # the damaged original it replaced.
             result["repair_unverified"] = True
             pin_repair_recovery(
-                "repair backup kept — replacement could not be verified "
+                "repair backup kept, replacement could not be verified "
                 "complete")
             log.info("  Re-download landed but couldn't be verified as complete "
                      f"as the original; keeping your backup at {backup}.")
@@ -2304,7 +2353,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
                 )
             else:
                 pin_repair_recovery(
-                    "repair backup kept — automatic restore did not complete")
+                    "repair backup kept, automatic restore did not complete")
                 checkpoint_recovery(
                     "restore",
                     "The replacement did not complete and automatic "
@@ -2381,7 +2430,7 @@ def _checkpoint_repair_recovery(job, recovery):
 
 def execute_repairs(job, chosen, token):
     """Refill ISRC-verified truncated tracks, or re-download whole albums
-    whose damage couldn't be ID-verified — depending on each candidate."""
+    whose damage couldn't be ID-verified, depending on each candidate."""
     from qobuz_librarian.modes.repair import (
         RepairRecoveryRequired,
         repair_album_dir,
@@ -2400,11 +2449,11 @@ def execute_repairs(job, chosen, token):
         p = cand["payload"]
         # Pin the progress card to album-level scope so the inner per-album
         # phases (download / import / downsample) read "album i / N" instead of
-        # resetting it to 1 / 1 — the card now reflects the whole batch.
+        # resetting it to 1 / 1, the card now reflects the whole batch.
         job._progress_scope = (i, len(chosen), "album")
         job.push_progress("Repairing damaged albums", i, len(chosen),
-                          f"{p['artist_name']} — {cand['title']}", unit="album")
-        log.info(f"[{i}/{len(chosen)}] {p['artist_name']} — {cand['title']}")
+                          f"{p['artist_name']} - {cand['title']}", unit="album")
+        log.info(f"[{i}/{len(chosen)}] {p['artist_name']} - {cand['title']}")
         _note_staging_wait(job, "Repairing damaged albums", i, len(chosen))
         try:
             if cand.get("kind") == "redownload":
@@ -2442,7 +2491,7 @@ def execute_repairs(job, chosen, token):
             continue
         # Each chosen album was flagged as damaged, so anything that didn't
         # end up downloaded-and-imported is a real failure. A kept backup is
-        # not one — a verified repair counts, and the backup is reported in
+        # not one, a verified repair counts, and the backup is reported in
         # the summary's recovery tail.
         if (result and result.get("n_ok", 0) > 0 and result.get("imported")
                 and result.get("n_fail", 0) == 0
@@ -2593,7 +2642,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     skipped = max(0, total - processed)
     if not processed:
         job.summary = (
-            f"Nothing needed checking — all {plural(total, 'track')} have "
+            f"Nothing needed checking, all {plural(total, 'track')} have "
             "lyrics or were checked before. Tick “Re-check everything” to "
             "redo them.")
         log.info(job.summary)
@@ -2738,7 +2787,7 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
                 space += (". The in-place move is blocked unless you re-run with "
                           "“proceed even if low on space” checked")
         parts.append(space)
-    # Show the manifest where the user can actually find it — the container
+    # Show the manifest where the user can actually find it, the container
     # path means nothing from a phone. Settings does the same for every path
     # it displays. Runtime import: app imports flows at startup.
     from qobuz_librarian.web.app import _resolve_host_path
@@ -2943,7 +2992,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         finally:
             set_staging_holder(None)
     for failed_src, reason in result.failures[:50]:
-        job.push_line(f"failed: {failed_src} — {reason}")
+        job.push_line(f"failed: {failed_src} - {reason}")
     companion_outcomes = getattr(result, "companion_outcomes", ())
     companion_skipped = sum(
         status == engine.SKIPPED
@@ -2955,12 +3004,12 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     )
     for source, _destination, status, reason in companion_outcomes:
         if status == engine.FAILED:
-            job.push_line(f"sidecar failed: {source} — {reason}")
+            job.push_line(f"sidecar failed: {source} - {reason}")
     recoveries = tuple(getattr(result, "recoveries", ()))
     for recovery in recoveries:
         location = recovery.get("location", "unknown location")
         restart = recovery.get("restart", "Inspect it before another migration.")
-        job.push_line(f"kept for recovery: {location} — {restart}")
+        job.push_line(f"kept for recovery: {location} - {restart}")
 
     verb = "moved" if in_place else "copied"
     parts = [f"{plural(result.copied, 'file')} {verb} into {dest}"]

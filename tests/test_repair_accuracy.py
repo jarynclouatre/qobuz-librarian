@@ -54,7 +54,12 @@ def _names(entries):
     return {Path(e["path"]).name for e in entries}
 
 
-_QT = {"duration": 4.0, "title": "t", "track_number": 1, "isrc": "USABC1234500"}
+# The title has to read like the file's own ("02.flac" is tagged "02"), because
+# a catalogue title that names a different song withdraws the single-track
+# refill on purpose. These fixtures are about lease and decode behaviour, so
+# they must not trip the identity gate as a side effect.
+_QT = {"duration": 4.0, "title": "02", "track_number": 1,
+       "isrc": "USABC1234500"}
 
 
 def test_shallow_scan_catches_frame_crc_corruption(tmp_path, _need_tools):
@@ -265,3 +270,178 @@ def test_shallow_scan_files_corrupt_unmatched_isrc_under_no_match(
     diagnosed = [e for e in r["isrc_no_match"] if e.get("diagnostic")]
     assert [Path(e["path"]).name for e in diagnosed] == ["01.flac"], (
         f"corrupt unmatched-ISRC file must carry its diagnostic (got {r})")
+
+
+def _qt(title, duration, isrc):
+    return {"duration": duration, "title": title, "track_number": 1,
+            "isrc": isrc}
+
+
+def test_short_file_is_left_alone_when_its_isrc_names_another_song(
+        tmp_path, _need_tools):
+    """A wrong ISRC tag resolves to a stranger, and a stranger's duration is
+    not evidence about this file. Measured on a real library: a 128 s Crass
+    track carried an ISRC belonging to a 407 s recording of a different song,
+    so the scan called it truncated and offered to replace it with that other
+    song wearing the original's tags."""
+    album = tmp_path / "Crass" / "Yes Sir, I Will (1983)"
+    album.mkdir(parents=True)
+    p = album / "The Five Knuckle Shuffle.flac"
+    _make_flac(p, isrc="GBBTF1800330")
+    assert _decodes(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=_qt("A Rock 'n' Roll Swindler", 407.0,
+                                "GBBTF1800330")):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    assert r["verified_truncated"] == [], (
+        f"a healthy file must not be offered for repair (got {r})")
+    assert _names(r["isrc_mismatch"]) == {"The Five Knuckle Shuffle.flac"}, (
+        f"it belongs under the mismatch heading instead (got {r})")
+    assert r["isrc_mismatch"][0]["local_title"] == "The Five Knuckle Shuffle"
+
+
+def test_short_file_still_flags_when_the_isrc_names_the_same_song(
+        tmp_path, _need_tools):
+    """The duration test is the only thing that catches a clean truncation
+    (decodes fine, header rewritten to the short length), so a trustworthy
+    match must keep flagging."""
+    album = tmp_path / "Artist" / "Album (2020)"
+    album.mkdir(parents=True)
+    p = album / "Congoman.flac"
+    _make_flac(p, isrc="USVPR9300310")
+    assert _decodes(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=_qt("Congoman", 398.0, "USVPR9300310")):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    assert _names(r["verified_truncated"]) == {"Congoman.flac"}, (
+        f"a short file matching its own recording still repairs (got {r})")
+    assert r["isrc_mismatch"] == []
+
+
+def test_edition_wording_does_not_count_as_a_different_song(
+        tmp_path, _need_tools):
+    """A remaster suffix marks the same recording, so it must not buy a short
+    file an exemption from the truncation gate."""
+    album = tmp_path / "Iron Maiden" / "Fear of the Dark (1992)"
+    album.mkdir(parents=True)
+    p = album / "Childhood's End (2015 Remaster).flac"
+    _make_flac(p, isrc="GBCHB1500092")
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=_qt("Childhood's End", 280.0, "GBCHB1500092")):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    assert _names(r["verified_truncated"]) == {
+        "Childhood's End (2015 Remaster).flac"}, (
+        f"an edition suffix is not a different recording (got {r})")
+
+
+def test_a_mismatched_isrc_never_hides_a_file_that_will_not_decode(
+        tmp_path, _need_tools):
+    """Damage counts however badly the tag is written, but it decides only
+    that something is wrong, never what to fetch.
+
+    Detection must not consult the tag, so this file is still reported. The
+    refill target must, because refilling by an ISRC that names another song
+    downloads that other song, puts this file's title on it and then deletes
+    this file. So the damage lands in isrc_mismatch carrying a diagnostic,
+    which offers a whole-album re-download, and never in verified_truncated,
+    which is the single-track swap.
+    """
+    album = tmp_path / "Artist" / "Album (2020)"
+    album.mkdir(parents=True)
+    p = album / "Broken.flac"
+    _make_flac(p, isrc="USABC9999900")
+    _frame_corrupt(p)
+    assert not _decodes(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=_qt("Something Else Entirely", 407.0,
+                                "USABC9999900")):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    assert r["verified_truncated"] == [], (
+        f"a wrong ISRC must never become a refill target (got {r})")
+    assert _names(r["isrc_mismatch"]) == {"Broken.flac"}, (
+        f"a broken file must still be caught and reported (got {r})")
+    entry = r["isrc_mismatch"][0]
+    assert entry["reason"] in ("decode_failed", "byte_size_short")
+    assert entry["diagnostic"], (
+        "without a diagnostic nothing offers this file a re-download")
+
+
+def test_damage_still_repairs_when_the_isrc_names_the_same_song(
+        tmp_path, _need_tools):
+    """The counterpart to the test above: a right tag keeps the cheap fix.
+
+    Only the mismatched case loses the single-track refill, so an undamaged
+    tag must still take the surgical path rather than a whole-album pull.
+    """
+    album = tmp_path / "Artist" / "Album (2020)"
+    album.mkdir(parents=True)
+    p = album / "Real Song.flac"
+    _make_flac(p, isrc="USABC1111100")
+    _frame_corrupt(p)
+    assert not _decodes(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=_qt("Real Song", 240.0, "USABC1111100")):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    assert _names(r["verified_truncated"]) == {"Real Song.flac"}, (
+        f"damage with a trustworthy tag still refills one track (got {r})")
+    assert r["isrc_mismatch"] == []
+
+
+def test_damage_with_no_catalogue_duration_still_checks_the_title(
+        tmp_path, _need_tools):
+    """The zero-duration branch reached verified_truncated without ever
+    comparing titles, so a wrong tag got the same wrong-song refill by a
+    different route. Every route into that bucket has to agree on identity."""
+    album = tmp_path / "Artist" / "Album (2020)"
+    album.mkdir(parents=True)
+    p = album / "Broken.flac"
+    _make_flac(p, isrc="USABC8888800")
+    _frame_corrupt(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=_qt("Some Other Song", 0.0, "USABC8888800")):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    assert r["verified_truncated"] == [], (
+        f"a missing catalogue duration is not permission to guess (got {r})")
+    assert r["isrc_mismatch"] and r["isrc_mismatch"][0]["diagnostic"]
+
+
+def test_flagged_entries_name_the_file_on_disk(tmp_path, _need_tools):
+    """A review row points at a file the user has to find. Labelling it with
+    the matched recording's title sends them looking for a track their album
+    does not contain, which is exactly what a wrong ISRC produces."""
+    album = tmp_path / "Artist" / "Album (2020)"
+    album.mkdir(parents=True)
+    p = album / "03 - Broken.flac"
+    _make_flac(p, isrc="USABC7777700")
+    from mutagen.flac import FLAC
+    f = FLAC(str(p))
+    f["title"] = "Broken Beyond Repair"
+    f["tracknumber"] = "3"
+    f.save()
+    _frame_corrupt(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value={"duration": 407.0, "title": "A Rock 'n' Roll "
+                             "Swindler", "track_number": 4,
+                             "isrc": "USABC7777700"}):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+
+    entry = (r["verified_truncated"] or r["isrc_mismatch"])[0]
+    assert entry["local_title"] == "Broken Beyond Repair", (
+        f"the row must name the local file (got {entry})")
+    assert entry["local_track_number"] == 3
+    assert entry["title"] == "A Rock 'n' Roll Swindler", (
+        "the matched recording stays on the entry so the report can say "
+        "which song the tag actually points at")

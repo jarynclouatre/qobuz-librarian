@@ -19,8 +19,8 @@
     <span class="ql-review-truncated">
       {% for t in c.payload.verified_truncated[:12] %}
       <span class="ql-review-truncated-line">
-        <span class="readout ql-review-track-number">{% if t.track_number %}{{ '%02d'|format(t.track_number) }}{% else %}··{% endif %}</span>
-        {{ t.title }}{% if t.reason == 'decode_failed' %} <span class="ql-review-truncated-muted">· won't decode</span>{% endif %}
+        <span class="readout ql-review-track-number">{% if t.local_track_number or t.track_number %}{{ '%02d'|format(t.local_track_number or t.track_number) }}{% else %}··{% endif %}</span>
+        {{ t.local_title or t.title }}{% if t.reason == 'decode_failed' %} <span class="ql-review-truncated-muted">· won't decode</span>{% endif %}
       </span>
       {% endfor %}
       {% if (c.payload.verified_truncated | length) > 12 %}

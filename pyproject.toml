@@ -7,8 +7,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qobuz-librarian"
-version = "0.12.1"
-description = "Qobuz Librarian — album/artist downloader and music-library maintenance tool"
+version = "0.12.2"
+description = "Qobuz Librarian: album/artist downloader and music-library maintenance tool"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
@@ -71,7 +71,7 @@ line-length = 100
 # focused on correctness and maintainability.
 select = ["E", "F", "W", "I"]
 ignore = [
-    "E501",  # line length — handled by formatter, not lint
+    "E501",  # line length, handled by the formatter rather than lint
     "E701",  # multi-statement on one line (used for terse if-guards)
     "E731",  # lambda assignment
     "E741",  # ambiguous variable name (e.g. `l` in tight one-liners)
@@ -80,6 +80,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests pull in patches/fixtures whose imports are used by `with patch(...)`
 # blocks; ruff can't always see those uses. F811 fires when a fixture imported
-# from another test module is also taken as a parameter — the pytest way to
+# from another test module is also taken as a parameter: the pytest way to
 # share one.
 "tests/*" = ["F401", "F811"]

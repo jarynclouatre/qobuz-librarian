@@ -1,7 +1,7 @@
 """Tests for the repair sweep/scanner and a few CLI entry points. The bulk of
 the coverage here is the data-safety machinery around repair: truncated
 originals are backed up before a re-rip, and the backup is only dropped once the
-refills are proven back in place and re-verified — an outage or a still-short
+refills are proven back in place and re-verified. An outage or a still-short
 re-rip must keep the backup rather than lose the only good copy.
 """
 import os
@@ -21,10 +21,13 @@ def _track(isrc="GB1234567890", length=240.0, path="/music/track.flac", **kw):
 
 def test_scan_isrc_repairs_truncation_gates(tmp_path):
     # Both gates (duration mismatch + decode) must fire for a "verified truncated".
+    # The stub's title matches the file's ("Track"), because a catalogue title
+    # naming a different song withdraws the single-track refill on purpose and
+    # that identity rule is covered in test_repair_accuracy, not here.
     source = tmp_path / "track.flac"
     source.write_bytes(b"held source")
     track = _track(length=169.0, path=str(source))
-    qt = {"duration": 200.0, "title": "T", "track_number": 1}
+    qt = {"duration": 200.0, "title": "Track", "track_number": 1}
     with patch("qobuz_librarian.repair_log._read_held_audio_meta", return_value=track), \
          patch("qobuz_librarian.repair_log._qobuz_track_by_isrc", return_value=qt):
         assert len(scan_dir_for_isrc_repairs(tmp_path, "token")["verified_truncated"]) == 1
@@ -33,7 +36,7 @@ def test_scan_isrc_repairs_truncation_gates(tmp_path):
     with patch("qobuz_librarian.repair_log._read_held_audio_meta",
                return_value=_track(length=10.0, path=str(source))), \
          patch("qobuz_librarian.repair_log._qobuz_track_by_isrc",
-               return_value={"duration": 0, "title": "T", "track_number": 1}), \
+               return_value={"duration": 0, "title": "Track", "track_number": 1}), \
          patch("qobuz_librarian.repair_log._flac_decode_ok", return_value=True):
         assert scan_dir_for_isrc_repairs(tmp_path, "token")["verified_ok"] == 1
 
@@ -41,7 +44,7 @@ def test_scan_isrc_repairs_truncation_gates(tmp_path):
     bad = _track(length=0.0, path=str(source))
     with patch("qobuz_librarian.repair_log._read_held_audio_meta", return_value=bad), \
          patch("qobuz_librarian.repair_log._qobuz_track_by_isrc",
-               return_value={"duration": 0, "title": "T", "track_number": 1}), \
+               return_value={"duration": 0, "title": "Track", "track_number": 1}), \
          patch("qobuz_librarian.repair_log._flac_decode_ok", return_value=False):
         assert len(scan_dir_for_isrc_repairs(tmp_path, "token")["verified_truncated"]) == 1
 
@@ -123,7 +126,7 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
 def test_no_isrc_redownload_keeps_an_unprovable_backup(
         tmp_path, monkeypatch):
     # A verified re-download retires the original album's backup only when it
-    # can be proven redundant; this fixture's backup can't be, so it stays —
+    # can be proven redundant; this fixture's backup can't be, so it stays,
     # and no disposal transaction may even start for it.
     from qobuz_librarian.library.backup import BackupResult
     from qobuz_librarian.web import flows
@@ -330,7 +333,7 @@ def test_refills_intact_counts_duplicate_isrcs_as_a_multiset(tmp_path, monkeypat
 
 def test_refills_intact_propagates_qobuz_outage(tmp_path, monkeypatch):
     # A token loss or Qobuz outage during re-verification must propagate, not
-    # collapse to "still truncated" — an outage is not a verdict on the refill.
+    # collapse to "still truncated": an outage is not a verdict on the refill.
     from collections import Counter
 
     from qobuz_librarian.modes import repair
@@ -368,7 +371,7 @@ def test_refills_intact_keeps_backup_on_an_unexpected_rescan_error(tmp_path, mon
 
 def test_repair_leaves_a_preexisting_track_sharing_the_recording_alone(tmp_path, monkeypatch):
     # A track that was already in the target dir's sibling album under the
-    # same ISRC must NOT be moved — it isn't a refill, it's an existing copy.
+    # same ISRC must NOT be moved; it isn't a refill, it's an existing copy.
     repair, album_dir, owned_dir = _repair_relocation_dirs(
         tmp_path, monkeypatch)
     owned = owned_dir / "01 - First Fires.flac"
@@ -401,7 +404,7 @@ def _parse_argv(argv):
 
 
 def test_parse_args_rejects_incompatible_flag_combos():
-    # Each of these combos silently dropped one side before — reject at parse.
+    # Each of these combos silently dropped one side before, so reject at parse.
     invalid = [
         ["--auto-safe", "Some Artist - Album"],
         ["--force", "--artist", "Radiohead"],
@@ -501,7 +504,7 @@ def _backup_files(tmp_path):
 def test_repair_counts_a_verified_refill_and_settles_its_backup(
         tmp_path, monkeypatch):
     # This fixture album never receives a superseding track, so the real
-    # retirement proof refuses and the backup is kept — the repair still
+    # retirement proof refuses and the backup is kept; the repair still
     # counts; the kept backup rides along for the summary's recovery tail.
     result, p = _call_repair_album_dir(tmp_path / "kept", monkeypatch,
                                        n_ok=1, n_fail=0, imported=True,
@@ -682,7 +685,7 @@ def test_scan_report_classifies_repair_outcomes(tmp_path, monkeypatch):
 
 def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(monkeypatch):
     # A whole-album re-download that imported but failed the completeness check
-    # keeps the backup and must not render "Repaired 1/1" — the active copy is
+    # keeps the backup and must not render "Repaired 1/1"; the active copy is
     # an unverified, possibly incomplete replacement.
     from qobuz_librarian.web import flows
 
@@ -725,7 +728,7 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
 def test_refill_gates_require_refills_on_top_of_the_baseline(tmp_path, monkeypatch):
     # A healthy PRE-EXISTING file sharing the wanted ISRC (a twin on another
     # disc that was never truncated) must not vouch for a refill that never
-    # came back — both gates count against the post-backup baseline, and an
+    # came back: both gates count against the post-backup baseline, and an
     # unreadable baseline (None) is unverifiable, never a pass.
     from collections import Counter
 
@@ -796,7 +799,7 @@ def test_retag_marks_an_unconsumed_twin_source_failed(tmp_path, monkeypatch):
 
 def test_retag_callback_records_total_failure_on_exception(monkeypatch):
     # The executor catches and logs a retag exception, so the carry state is
-    # unknown to the backup resolution — every source must already be marked
+    # unknown to the backup resolution; every source must already be marked
     # failed, or the empty set reads as "all tags carried" and the only copy
     # of the originals' metadata is deleted.
     from pathlib import Path
@@ -818,7 +821,7 @@ def test_retag_callback_records_total_failure_on_exception(monkeypatch):
 
 def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
     # Audio verifiably repaired but the originals' tags couldn't be carried:
-    # the backup is kept AND pinned — the age sweep proves redundancy by
+    # the backup is kept AND pinned: the age sweep proves redundancy by
     # same-path same-or-larger bytes, which the refill satisfies, so without
     # the pin the only copy of those tags is reaped on schedule.
     import qobuz_librarian.modes.repair as repair_mod
@@ -845,7 +848,7 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
             qi["imported"] = True
             retag = qi.get("pre_import_retag")
             if callable(retag):
-                # No staged refill carries any tags — the whole carry fails.
+                # No staged refill carries any tags, so the whole carry fails.
                 retag([])
 
     monkeypatch.setattr(repair_mod, "_execute_download_queue", fake_execute)
@@ -873,7 +876,7 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
 
 def test_strict_confirm_reasks_on_a_typo(monkeypatch):
     # The downsample keep-vs-delete answer is SAVED as the standing default,
-    # so a typo must not read as "delete the originals from now on" — strict
+    # so a typo must not read as "delete the originals from now on": strict
     # mode re-asks until it gets a real yes or no.
     from qobuz_librarian.ui_cli import prompts
 
@@ -909,3 +912,62 @@ def test_repair_with_no_successful_refill_reports_the_download_failure(
     assert result["n_ok"] == 0 and result["n_fail"] == 1
     assert [r.stage for r in recoveries][-1] == "refill"
     assert not any("could not be proven" in r.reason for r in recoveries)
+
+
+def test_refill_is_not_rejected_because_another_folder_holds_that_name(
+        tmp_path, monkeypatch):
+    """A track that appears on two records used to break its own repair.
+
+    before_names is the census of ONE folder, the one the resolved parent
+    album maps to. Comparing a receipt item's bare filename against it, with
+    no check that the item landed there, rejected a refill that had gone
+    somewhere else entirely because an unrelated album happened to hold a
+    track of the same name. The repair was correct on disk and the user was
+    told its location could not be proven.
+    """
+    repair, album_dir, landed_dir = _repair_relocation_dirs(
+        tmp_path, monkeypatch)
+    elsewhere = repair.cfg.MUSIC_ROOT / "Other Artist" / "Other Album (1995)"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "07 - Melissa Juice.flac").write_bytes(b"unrelated copy")
+    refill = landed_dir / "07 - Melissa Juice.flac"
+    refill.write_bytes(b"receipt-owned-refill")
+
+    moved = repair._relocate_refilled_into_album_dir(
+        album_dir,
+        landed_dir,
+        {"GBCFB1300101"},
+        before_names={"07 - Melissa Juice.flac"},
+        before_dir=elsewhere,
+        ownership_receipt=_sealed_import_receipt(
+            repair.cfg.MUSIC_ROOT, [refill], landed_dir),
+        expected_refills=1,
+    )
+    assert moved == 1, "the refill landed outside the sampled folder"
+    assert (album_dir / refill.name).read_bytes() == b"receipt-owned-refill"
+    assert (elsewhere / "07 - Melissa Juice.flac").read_bytes() == (
+        b"unrelated copy")
+
+
+def test_refill_is_still_rejected_when_that_folder_already_held_it(
+        tmp_path, monkeypatch):
+    """The guard itself has to survive the fix above: a receipt naming a file
+    that was already sitting in the sampled folder cannot be trusted as a
+    fresh refill, because nothing distinguishes it from what was there."""
+    repair, album_dir, landed_dir = _repair_relocation_dirs(
+        tmp_path, monkeypatch)
+    refill = landed_dir / "01 - First Fires.flac"
+    refill.write_bytes(b"was-already-here")
+
+    with pytest.raises(repair._RepairRelocationUncertain):
+        repair._relocate_refilled_into_album_dir(
+            album_dir,
+            landed_dir,
+            {"GBCFB1300101"},
+            before_names={"01 - First Fires.flac"},
+            before_dir=landed_dir,
+            ownership_receipt=_sealed_import_receipt(
+                repair.cfg.MUSIC_ROOT, [refill], landed_dir),
+            expected_refills=1,
+        )
+    assert refill.read_bytes() == b"was-already-here"

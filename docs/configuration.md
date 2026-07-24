@@ -40,7 +40,7 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 | `REPAIR_CACHE_ENABLED` | `true` | Cache the repair scan's Qobuz ISRC lookups (files are still decode-tested fresh every scan) |
 | `REPAIR_CACHE_TTL_DAYS` | `30` | How long a cached ISRC lookup is reused before re-verifying (`0` = keep until the db is deleted) |
 | `UPGRADE_SCAN_ENABLED` | `true` | Show Upgrade and include the quality-upgrade pass in Library scans (`false` hides Upgrade and skips that pass) |
-| `AUTO_UPGRADE_ENABLED` | `false` | CLI-only compatibility option: during CLI gap-fill walks, also offer eligible quality upgrades. In the web UI, use Upgrade for quality work. |
+| `AUTO_UPGRADE_ENABLED` | `false` | Let an ordinary download or gap-fill run also upgrade an album Qobuz can now serve better, in the CLI and the web app alike. It backs up and replaces the whole album folder; the CLI asks first, the web app does not. Leave it off and use Upgrade, which reviews the same candidates before anything is replaced. |
 | `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample hi-res FLACs as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
@@ -136,7 +136,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 **Keeping the token out of the environment.** `docker inspect` exposes environment variables, so to keep the Qobuz token out of them, point `QOBUZ_USER_AUTH_TOKEN_FILE` at a file containing only the token (a [Docker secret](https://docs.docker.com/engine/swarm/secrets/) or read-only bind mount) instead of setting `QOBUZ_USER_AUTH_TOKEN`. The web-login password supports the same pattern with `WEB_AUTH_PASSWORD_FILE`.
 
-**Hardening.** The bundled `compose.yaml` ships with `mem_limit: 1g`, `pids_limit: 256`, `no-new-privileges`, `cap_drop: [ALL]`, and `0600` token files. It adds back only the capabilities needed for the PUID/PGID handover. The built-in login is a single shared credential with per-IP brute-force limiting (5 failures an hour before a 429), which is appropriate for a trusted network; use a proxy, VPN, or Tailscale for internet exposure. The image is multi-arch (`linux/amd64`, `linux/arm64`), so arm64 NAS boxes run natively, and a `--read-only` rootfs works with `--tmpfs /tmp` (or `APP_HOME=/var/tmp` with `--tmpfs /var/tmp`). See [SECURITY.md](../SECURITY.md).
+**Hardening.** The bundled `compose.yaml` ships with `mem_limit: 1g`, `pids_limit: 256`, `no-new-privileges`, `cap_drop: [ALL]`, and `0600` token files. It adds back only the capabilities needed for the PUID/PGID handover. The built-in login is a single shared credential with brute-force limiting (a 429 after 5 failures an hour from one IP, or 10 against the same username from anywhere, so rotating source addresses does not defeat it), which is appropriate for a trusted network; use a proxy, VPN, or Tailscale for internet exposure. The image is multi-arch (`linux/amd64`, `linux/arm64`), so arm64 NAS boxes run natively, and a `--read-only` rootfs works with `--tmpfs /tmp` (or `APP_HOME=/var/tmp` with `--tmpfs /var/tmp`). See [SECURITY.md](../SECURITY.md).
 
 ## Notifications
 

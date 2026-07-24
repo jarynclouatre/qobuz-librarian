@@ -140,7 +140,7 @@ def test_submit_refuses_job_without_durable_admission(monkeypatch):
 
 def test_late_cancel_does_not_discard_a_parked_review():
     # A cancel flag arriving just as a scan parks its results must not flip
-    # AWAITING_REVIEW to CANCELED — the found candidates would be lost.
+    # AWAITING_REVIEW to CANCELED, and the found candidates would be lost.
     job = jm.Job(title="scan")
     job.status = jm.JobStatus.RUNNING
     job.cancel_requested = True
@@ -193,7 +193,7 @@ def test_per_artist_rescan_supersedes_only_that_artists_parked_review(
 def test_download_dedup_respects_new_edition_and_single_track_intent():
     # Folding a /download onto an in-flight job must respect intent, not just the
     # album id: "get this edition too" is a deliberate extra copy and a one-track
-    # grab is its own thing — neither should be swallowed by an unrelated job for
+    # grab is its own thing, and neither should be swallowed by an unrelated job for
     # the same album, and a full-album download must not fold onto a one-track grab.
     from qobuz_librarian.web import app as app_mod
 
@@ -237,7 +237,7 @@ def test_new_release_review_never_owns_the_library_surface():
 
 def test_parked_review_candidate_does_not_swallow_a_download():
     # An album that merely appears among a parked review's candidates is not
-    # queued for anything — refusing an explicit /download with "already
+    # queued for anything, so refusing an explicit /download with "already
     # queued" over it would be false.
     from qobuz_librarian.web import app as app_mod
 
@@ -744,7 +744,7 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
 
 
 def test_new_release_check_refused_without_baseline(client, monkeypatch):
-    # "Check for new releases" is a library-walk-and-compare — useless until a
+    # "Check for new releases" is a library-walk-and-compare, useless until a
     # full library scan has built the baseline.
     import qobuz_librarian.web.app as app_mod
     from qobuz_librarian.library import new_releases
@@ -813,7 +813,7 @@ def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):
 
 
 def test_parked_review_does_not_defer_settings(tmp_path, monkeypatch):
-    """A parked review can sit for weeks — a save made next to one must apply
+    """A parked review can sit for weeks, so a save made next to one must apply
     right away, not wait in the pending slot for a job that may never run."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import settings_store as ss
@@ -836,7 +836,7 @@ def test_parked_review_does_not_defer_settings(tmp_path, monkeypatch):
 def test_quality_change_flags_the_stale_upgrade_review(
         client, tmp_path, monkeypatch):
     """Lowering/raising the download quality leaves a saved Upgrade
-    review promising dead targets — the save must say a refresh updates it.
+    review promising dead targets, so the save must say a refresh updates it.
     An unchanged save stays quiet."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import settings_store as ss
@@ -860,7 +860,7 @@ def test_quality_change_flags_the_stale_upgrade_review(
 
 def test_settings_save_only_pins_changed_fields(tmp_path, monkeypatch):
     """Saving the Settings form must not freeze untouched fields into the
-    settings file — the file wins over env on load, so writing a field that
+    settings file: the file wins over env on load, so writing a field that
     merely matched its current value would silently stop that env var from
     ever applying again. Only real changes (and fields saved before) persist."""
     import json
@@ -884,7 +884,7 @@ def test_settings_save_only_pins_changed_fields(tmp_path, monkeypatch):
     assert on_disk == {"LYRICS_ENABLED": False}
 
     # A field that was saved before stays in the file even when a later save
-    # posts it unchanged — the user set it deliberately, so it keeps winning.
+    # posts it unchanged; the user set it deliberately, so it keeps winning.
     ok, _ = ss.save({"LYRICS_ENABLED": False, "PREFER_HIRES": False})
     on_disk = json.loads((tmp_path / "s.json").read_text())
     assert on_disk == {"LYRICS_ENABLED": False, "PREFER_HIRES": False}
@@ -983,7 +983,7 @@ def test_folder_move_recovery_pause_names_cause_and_exact_paths(
 
     assert blocked.status_code == 503
     assert "move of album folders inside your library was interrupted" in blocked.text
-    assert "nothing has been lost" in blocked.text
+    assert "Nothing has been lost" in blocked.text
     assert all(str(path) in blocked.text for path in affected_paths)
     assert "Post-import folder-move recovery needs attention" in blocked.text
     assert "interrupted download" not in blocked.text
@@ -1467,7 +1467,7 @@ def test_approve_refuses_parked_library_review_without_credentials(
 
 def test_auth_failure_before_any_import_reparks_the_review():
     """Qobuz dying on the FIRST album of an approved run must not consume the
-    review — the picks go back to awaiting-review instead of a failed job."""
+    review: the picks go back to awaiting-review instead of a failed job."""
     from qobuz_librarian.api.auth import AuthLost
 
     job = jm.Job(title="Library scan")
@@ -1592,7 +1592,7 @@ def test_first_downsample_keep_choice_applies_while_a_job_is_running(
     """The keep/delete pick made at the first-downsample prompt must take
     effect for the run it launches even when another job is already active.
     settings_store.save() defers its in-memory apply while a job runs, so the
-    approve path applies the choice itself — otherwise the run reads the still
+    approve path applies the choice itself; otherwise the run reads the still
     unset value and deletes the hi-res originals despite a 'keep' choice."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import jobs as job_mgr
@@ -1604,7 +1604,7 @@ def test_first_downsample_keep_choice_applies_while_a_job_is_running(
     monkeypatch.setattr(
         "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
     monkeypatch.setattr(job_mgr._scan_queue, "put", lambda item: None)
-    # A job is running in the other lane, so save() takes its deferral branch —
+    # A job is running in the other lane, so save() takes its deferral branch,
     # the exact condition that can strand the choice at its unset default.
     monkeypatch.setattr(ss, "_any_active_job", lambda: True)
     state = {
@@ -1758,7 +1758,7 @@ def test_non_htmx_search_post_returns_to_dashboard(client, monkeypatch):
 
 
 def test_queue_shows_empty_state_when_only_parked_reviews_exist(client):
-    # Parked reviews render on their own surfaces, not in the queue — so a
+    # Parked reviews render on their own surfaces, not in the queue, so a
     # registry holding nothing but a parked review must still show the queue's
     # empty state rather than a blank page (the stack wrapper with no sections).
     review = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Downsample scan")
@@ -1871,7 +1871,7 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
 
 def test_retry_keeps_the_new_edition_override(client, monkeypatch):
     # "Download this edition anyway" lives on the job (execute_args), not just
-    # in the run closure — a retried edition download that lost the flag would
+    # in the run closure; a retried edition download that lost the flag would
     # hit the owned-album skip and quietly do nothing.
     from qobuz_librarian.web import app as webapp
     from qobuz_librarian.web import job_persistence
@@ -1914,7 +1914,7 @@ def test_retry_finishes_a_download_whose_settlement_refused_after_clearing_it(
     client, monkeypatch,
 ):
     """A download that imported and then stranded a file in staging is not a
-    pre-launch abort, so the blocked-item settler refuses it — but it parks the
+    pre-launch abort, so the blocked-item settler refuses it, but it parks the
     staging on the way out, which is the whole of what the recovery was waiting
     on. Retry used to report that refusal and leave the job Failed until it was
     pressed a second time.
@@ -2001,7 +2001,7 @@ def test_undo_burns_the_one_shot_in_the_archive(client, monkeypatch, tmp_path):
 def test_undo_bounces_when_the_staging_mutex_is_held(client, monkeypatch, tmp_path):
     """Undo behind a long staging-lock holder (library-wide Lyrics scan,
     migration) must bounce naming the holder instead of hanging the request
-    until the holder finishes — the DONE job page can't show progress, so a
+    until the holder finishes; the DONE job page can't show progress, so a
     blocking wait is invisible. The timer below is a watchdog: without the fix
     the request blocks on the held lock, the timer releases it, the undo runs
     to completion and the 503 assert fails instead of the test hanging."""
@@ -2243,7 +2243,7 @@ def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch)
 
 def test_search_download_prunes_parked_library_review(client, monkeypatch, tmp_path):
     """A Search download that imports an album must drop that album from a
-    parked library review — otherwise the stale review offers to download it
+    parked library review; otherwise the stale review offers to download it
     again. Other candidates and their ticks stay put."""
     from qobuz_librarian.web import app as webapp
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
@@ -2276,7 +2276,7 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
     """Approving a parked review re-checks the disk: a missing-album candidate
     whose folder appeared while the review sat parked is dropped (and counted
     in the redirect note) instead of downloaded again. Gap Fill candidates are
-    exempt — their folder exists by definition."""
+    exempt: their folder exists by definition."""
     from qobuz_librarian.web import app as webapp
     monkeypatch.setattr(webapp, "_read_creds",
                         lambda: {"auth_token": "t", "user_id": "u"})
@@ -2318,7 +2318,7 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
         assert [c["title"] for c in split.candidates] == ["Roseland NYC Live"]
         # The note is rendered on /library.
         r = client.get("/library?approved=1&skipped=1")
-        assert "1 album already in your library — skipped." in r.text
+        assert "1 album already in your library, skipped." in r.text
     finally:
         _remove_job(job)
         if split is not None:
@@ -2354,8 +2354,8 @@ def test_library_approve_when_everything_is_already_on_disk(client, monkeypatch)
 
 def test_drop_owned_keeps_a_missing_album_whose_folder_is_an_empty_shell(
         tmp_path, monkeypatch):
-    """A fully-missing candidate whose only on-disk match is an empty folder —
-    a failed download or deleted tracks that left the directory behind — stays
+    """A fully-missing candidate whose only on-disk match is an empty folder,
+    a failed download or deleted tracks that left the directory behind, stays
     in the review. A name-matching shell with no audio isn't ownership, and the
     scanner still lists that album missing; dropping it would hide a real gap."""
     from qobuz_librarian.web import flows
@@ -2408,7 +2408,7 @@ def test_library_select_all_scoped_to_tab(client):
 
 def test_select_all_scoped_to_the_active_filter(client):
     """With a filter showing 3 rows, Select all must not silently flip
-    the other thousand — and Deselect must scope the same way so a filtered
+    the other thousand, and Deselect must scope the same way so a filtered
     select-all can be undone filtered."""
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     job.execute_kind = "library"
@@ -2454,7 +2454,7 @@ def test_dismiss_rest_scoped_to_the_active_filter(client):
 
 
 def test_review_pages_split_on_a_candidate_budget():
-    """Pagination counts candidates, not just artists — a few prolific
+    """Pagination counts candidates, not just artists: a few prolific
     artists must not put thousands of rows in one page's DOM. Whole groups
     stay together; a single over-budget group still gets its own page."""
     from qobuz_librarian.web import app as webapp
@@ -2601,7 +2601,7 @@ def test_a_finished_download_is_not_failed_by_another_items_recovery(
         monkeypatch):
     """Startup recovery is process-wide. A download whose own completion is
     durably acknowledged was written up as "Failed / Recovery attention"
-    because some other item's recovery was outstanding — one blocked in the
+    because some other item's recovery was outstanding; one blocked in the
     terminal owns no web job id at all and relabelled every finished download
     in History at once.
     """
@@ -2611,7 +2611,7 @@ def test_a_finished_download_is_not_failed_by_another_items_recovery(
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
 
-    saved = jm.Job(title="Burial — Distant Lights", artist="Burial")
+    saved = jm.Job(title="Burial, Distant Lights", artist="Burial")
     saved.kind = "download"
     saved.album_id = "abc123"
     saved.status = jm.JobStatus.RUNNING
@@ -2639,7 +2639,7 @@ def test_a_download_holding_the_outstanding_recovery_still_says_so(monkeypatch):
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
 
-    saved = jm.Job(title="Agalloch — The White EP", artist="Agalloch")
+    saved = jm.Job(title="Agalloch, The White EP", artist="Agalloch")
     saved.kind = "download"
     saved.album_id = "def456"
     saved.status = jm.JobStatus.RUNNING
@@ -2669,7 +2669,7 @@ def test_a_finished_job_keeps_its_log_across_a_restart(monkeypatch):
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
 
-    saved = jm.Job(title="Agalloch — The White EP", artist="Agalloch")
+    saved = jm.Job(title="Agalloch, The White EP", artist="Agalloch")
     saved.kind = "download"
     saved.push_line("  ✓  Download succeeded.")
     saved.push_line("  ✓  beets import succeeded.")
@@ -2716,7 +2716,7 @@ def test_a_long_finished_log_is_stored_as_a_marked_tail(monkeypatch):
 
 def test_a_running_job_does_not_rewrite_its_log_on_every_snapshot(monkeypatch):
     """A running job's log is on screen live, and persist() is debounced but
-    still frequent — re-serialising a growing blob each time would rewrite the
+    still frequent, and re-serialising a growing blob each time would rewrite the
     whole log over and over on a NAS.
     """
     from qobuz_librarian.web import job_persistence
@@ -2725,7 +2725,7 @@ def test_a_running_job_does_not_rewrite_its_log_on_every_snapshot(monkeypatch):
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
 
-    running = jm.Job(title="Burial — Untrue", artist="Burial")
+    running = jm.Job(title="Burial, Untrue", artist="Burial")
     running.kind = "download"
     running.status = jm.JobStatus.RUNNING
     running.push_line("  ── Downloading full album ──")
@@ -2736,7 +2736,7 @@ def test_a_running_job_does_not_rewrite_its_log_on_every_snapshot(monkeypatch):
 
 def test_persistence_restores_awaiting_review_with_candidates(monkeypatch):
     """The headline reliability win: a completed scan's candidates survive a
-    container restart — the user can still approve them instead of re-scanning
+    container restart; the user can still approve them instead of re-scanning
     from artist 1."""
     from qobuz_librarian.web import job_persistence
 
@@ -2769,7 +2769,7 @@ def test_persistence_restores_awaiting_review_with_candidates(monkeypatch):
     assert len(restored.candidates) == 1
     assert restored.candidates[0]["payload"] == {"album_id": "abc"}
 
-    # And the user can still approve — the execute_fn was rebound from the
+    # And the user can still approve: the execute_fn was rebound from the
     # kind registry rather than vanishing with the dead closure.
     jm.start_worker()
     assert jm.approve(restored, ["c0"]) is True
@@ -2779,7 +2779,7 @@ def test_persistence_restores_awaiting_review_with_candidates(monkeypatch):
 
 def test_rehydrated_review_never_mints_colliding_cids(monkeypatch):
     """A job rebuilt with pre-existing candidates (restart, tab split) must
-    advance its cid counter past them — a fresh c0/c1 colliding with inherited
+    advance its cid counter past them; a fresh c0/c1 colliding with inherited
     rows made a cid-keyed dismiss delete unrelated, even ticked, candidates."""
     from qobuz_librarian.web import job_persistence
 
@@ -2794,7 +2794,7 @@ def test_rehydrated_review_never_mints_colliding_cids(monkeypatch):
     saved.candidates = [
         {"cid": "c57", "seq": 57, "kind": "album", "title": "A", "artist": "X",
          "detail": "", "payload": {}, "selected": True},
-        # A legacy row persisted before seq existed — recovered from the cid.
+        # A legacy row persisted before seq existed, recovered from the cid.
         {"cid": "c656", "kind": "album", "title": "B", "artist": "Y",
          "detail": "", "payload": {}, "selected": False},
     ]
@@ -2843,7 +2843,7 @@ def test_library_download_parks_unselected_and_keeps_only_picks():
 def test_library_review_rebuilds_from_saved_state_when_no_live_job():
     """F1: with the baseline complete but no live library job (swept cancel,
     discarded scan job, corrupt restart row), the Missing Albums / Gap Fill
-    review must rebuild from saved scan state — never 'Baseline ready' + no
+    review must rebuild from saved scan state, never 'Baseline ready' + no
     tabs. Retiring the review (discard / worked-through) blocks the rebuild."""
     from qobuz_librarian.library import library_scan_state
     from qobuz_librarian.web import app as webapp
@@ -2908,7 +2908,7 @@ def test_partial_scan_does_not_resurrect_a_retired_library_review():
                          "artists": {}},
             },
         })
-        # Candidates are present, so a rebuild WOULD produce a job — proving the
+        # Candidates are present, so a rebuild WOULD produce a job, proving the
         # None is the retirement block holding, not an empty candidate list.
         assert webapp._review_job_from_library_state() is None
     finally:
@@ -2936,7 +2936,7 @@ def test_bring_back_lifts_a_retired_library_review():
         assert job is not None
         assert {c["title"] for c in job.candidates} == {"The Mantle"}
         _remove_job(job)
-        # Idempotent — nothing left to lift once it's cleared.
+        # Idempotent: nothing left to lift once it's cleared.
         assert lss.clear_review_retired() is False
     finally:
         lss._write_state(original)
@@ -3057,7 +3057,7 @@ def test_whole_review_download_retires_and_reparks_failures(monkeypatch, tmp_pat
 
 def test_reparked_failures_resolve_the_token_at_approve_time(monkeypatch, tmp_path):
     """The retry review parked for failed downloads must look the Qobuz token
-    up when it is APPROVED, not reuse the value from the run that failed —
+    up when it is APPROVED, not reuse the value from the run that failed,
     otherwise a token replaced in Settings never reaches it and every retry
     fails with the same 'update it in Settings' error until a restart."""
     from qobuz_librarian.library import library_scan_state as lss
@@ -3105,7 +3105,7 @@ def test_reparked_failures_resolve_the_token_at_approve_time(monkeypatch, tmp_pa
 def test_partial_run_failure_folds_back_into_the_living_review(monkeypatch, tmp_path):
     """On a partial approve (only some picks ticked), a living split-off
     review still holds the unticked picks. An album that FAILS on that run must
-    fold back into it, ticked, to retry — matching the whole-review re-park —
+    fold back into it, ticked, to retry (matching the whole-review re-park),
     instead of surviving only as the job's error line until a manual refresh."""
     from qobuz_librarian.modes import process as process_mod
     from qobuz_librarian.web import flows
@@ -3116,7 +3116,7 @@ def test_partial_run_failure_folds_back_into_the_living_review(monkeypatch, tmp_
                          payload={"album_id": "u1"}, selected=False)
     running = _inject_job(jm.JobStatus.RUNNING, "Library scan")
     running.execute_kind = "library"
-    running._consumed_whole_review = False   # partial approve — the remnant lives
+    running._consumed_whole_review = False   # partial approve, so the remnant lives
     running.add_candidate(kind="album", title="Downloaded OK", artist="Agalloch",
                           payload={"album_id": "ok1"}, selected=True)
     running.add_candidate(kind="album", title="Failed One", artist="Agalloch",
@@ -3151,7 +3151,7 @@ def test_partial_run_failure_folds_back_into_the_living_review(monkeypatch, tmp_
 
 def test_new_release_run_recoveries_never_touch_the_library_review(monkeypatch):
     """A failed or cancelled NEW-RELEASE download run must not fold its albums
-    into the parked Library review — new-release results never enter the
+    into the parked Library review; new-release results never enter the
     Library tabs. Guards both fold-back call sites in execute_albums, which
     also runs new-release batches."""
     from qobuz_librarian.modes import process as process_mod
@@ -3209,7 +3209,7 @@ def test_auth_death_mid_batch_folds_unfinished_picks_back(monkeypatch, tmp_path)
     (approve's no-harm re-park only covers the nothing-landed case), so on a
     partial approve the picks the run never finished must fold back into the
     living split-off review, ticked. Before anything lands the fold must NOT
-    fire — approve() restores the whole review instead, and folding here too
+    fire; approve() restores the whole review instead, and folding here too
     would offer the same picks twice."""
     from qobuz_librarian.api.auth import AuthLost
     from qobuz_librarian.modes import process as process_mod
@@ -3408,7 +3408,7 @@ def test_clear_history_serializes_with_durable_resume_publication(
 
 def test_persist_survives_non_json_candidate_payload(monkeypatch):
     """A stray non-JSON value in a candidate payload (a Path, say) must coerce
-    to text at the write boundary, not raise TypeError — that escaped the
+    to text at the write boundary, not raise TypeError, which escaped the
     sqlite guard, killed the worker, and lost the whole parked review."""
     from pathlib import Path
 
@@ -3610,7 +3610,7 @@ def test_shutdown_keeps_run_lock_until_workers_and_direct_writes_settle(
 
 def test_parked_review_does_not_block_cli_handoff(client):
     """The staging race the handoff guards against needs a running worker; a
-    review waiting on the user has none, and it can wait for weeks — refusing
+    review waiting on the user has none, and it can wait for weeks, so refusing
     on it would make terminal mode unreachable."""
     import qobuz_librarian.web.app as app_mod
     review = _inject_job(jm.JobStatus.AWAITING_REVIEW)
@@ -3938,7 +3938,7 @@ def test_session_tokens_are_per_login_and_revocable():
 
 def test_restore_backup_rejects_path_shaped_names(client, tmp_path, monkeypatch):
     # The Restore form posts a bare directory name; anything path-shaped is a
-    # probe, not a backup the diagnostics list rendered — it must not resolve
+    # probe, not a backup the diagnostics list rendered, so it must not resolve
     # outside the backup dir or restore anything.
     from qobuz_librarian import config as cfg
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
@@ -4097,7 +4097,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
 def test_fold_swaps_candidate_class_and_keeps_the_tick(monkeypatch):
     """An album that changed on disk while the review sat parked (missing →
     partially added, or a gapped album deleted by hand) must swap to the fresh
-    candidate class instead of being silently swallowed as a duplicate key —
+    candidate class instead of being silently swallowed as a duplicate key,
     and the user's tick must survive the swap."""
     from qobuz_librarian.web import app as webapp
 
@@ -4185,7 +4185,7 @@ def test_fold_does_not_resurrect_albums_dismissed_during_the_refresh(
     scan.add_candidate(kind="album", title="Dismissed Mid-Scan", artist="X",
                        payload={"album_id": "d1"}, selected=False)
     jm.registry.add(scan)
-    # Hidden AFTER the scan built its candidate list — the stale-snapshot case.
+    # Hidden AFTER the scan built its candidate list: the stale-snapshot case.
     hidden_mod.hide(hidden_mod.SCOPE_MISSING, [("X", "Dismissed Mid-Scan", "")])
     try:
         webapp._fold_into_parked_library_review(scan)
@@ -4200,7 +4200,7 @@ def test_fold_does_not_resurrect_albums_dismissed_during_the_refresh(
 
 def test_fold_skips_a_review_approved_mid_refresh(monkeypatch):
     """Approve flips the review out of AWAITING_REVIEW between scan finish
-    and fold — the refresh must keep its candidates and park normally instead
+    and fold: the refresh must keep its candidates and park normally instead
     of leaking finds into the executing job."""
     from qobuz_librarian.web import app as webapp
 
@@ -4298,7 +4298,7 @@ def test_post_baseline_library_scan_control_recedes(client, monkeypatch):
 def test_volume_gate_reopens_without_a_restart(tmp_path, monkeypatch):
     # A writability verdict sealed at startup leaves downloads refusing after
     # the ownership of a root-created music folder is fixed, while Diagnostics
-    # — which re-checks live — shows green. The gate probes live and has to
+    # (which re-checks live) shows green. The gate probes live and has to
     # agree with Diagnostics.
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import app as webapp
@@ -4443,7 +4443,7 @@ def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
 
 
 def test_failed_new_release_pick_returns_to_a_new_release_review():
-    """A failed new-release download wasn't downloaded — it folds back into
+    """A failed new-release download wasn't downloaded, so it folds back into
     the parked New Releases review (or re-parks a fresh one), ticked, instead
     of being consumed with the dead job. It must never land in a Library
     review."""
@@ -4477,8 +4477,8 @@ def test_failed_new_release_pick_returns_to_a_new_release_review():
 
 def test_partial_import_folds_an_instant_gap_fill_candidate():
     """An album that lands with some tracks failed becomes a Gap Fill
-    candidate in the living Library review immediately — unticked, honest
-    detail — instead of waiting for the next manual refresh."""
+    candidate in the living Library review immediately, unticked, with honest
+    detail, instead of waiting for the next manual refresh."""
     from qobuz_librarian.web import flows
 
     parked = jm.Job(title="Library scan")
@@ -4501,7 +4501,7 @@ def test_partial_import_folds_an_instant_gap_fill_candidate():
 
 
 def test_partial_new_release_download_returns_to_the_nr_review(monkeypatch):
-    """A New Releases download that lands only partly isn't downloaded — the
+    """A New Releases download that lands only partly isn't downloaded, so the
     release goes back to the New Releases review (ticked, like a failure), and
     its remainder must NOT leak into the Library review as Gap Fill."""
     from qobuz_librarian.modes import process as process_mod
@@ -4581,14 +4581,14 @@ def test_dismiss_honours_a_tick_saved_during_the_store_write(monkeypatch):
 
 def test_new_edition_download_folds_onto_an_identical_running_job():
     """"Get this edition too" deliberately skips the owned-album fold, but two
-    identical new-edition submits are the same tap twice — the second folds
+    identical new-edition submits are the same tap twice, so the second folds
     onto the in-flight job instead of queueing a concurrent duplicate."""
     from qobuz_librarian.web import app as web_app
 
-    running = _inject_job(jm.JobStatus.RUNNING, "Album — edition")
+    running = _inject_job(jm.JobStatus.RUNNING, "Album, edition")
     running.album_id = "ALB9"
     running.execute_args = {"new_edition": True}
-    other = _inject_job(jm.JobStatus.RUNNING, "Other — edition")
+    other = _inject_job(jm.JobStatus.RUNNING, "Other, edition")
     other.album_id = "OTHER"
     other.execute_args = {"new_edition": True}
     try:
@@ -4659,7 +4659,7 @@ def test_settings_storage_separates_the_library_from_the_drive(client, monkeypat
 
 def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
     # The old reply was text/plain "CSRF token missing or invalid" with no nav,
-    # and because it wasn't HTML the middleware skipped minting a cookie too —
+    # and because it wasn't HTML the middleware skipped minting a cookie too,
     # so the retry failed identically.
     client.cookies.clear()
     r = client.post("/settings/behavior", data={"form_complete": "1"},
@@ -4680,7 +4680,7 @@ def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
 
 
 def test_connection_badge_reports_only_what_qobuz_has_confirmed(client, monkeypatch):
-    # "Connected" must not show for any saved token — one that has never
+    # "Connected" must not show for any saved token; one that has never
     # authenticated, or one Qobuz has rejected.
     import qobuz_librarian.web.app as app_mod
     monkeypatch.setattr(app_mod, "_read_creds",
@@ -4779,3 +4779,128 @@ def test_a_missing_column_is_added_whatever_the_version_stamp_says(
     cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
     con.close()
     assert {"single", "attention", "recoveries", "log_lines"} <= cols
+
+
+def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
+    """A failed run stays on /repair on purpose, with the launcher under it.
+    The launcher's freshness line and resume offer were only ever computed on
+    the idle branch, so that page rendered its own finish time above the words
+    "No repair scan has finished yet" and never offered a resume."""
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import jobs as job_mgr
+
+    monkeypatch.setattr(webapp, "_read_creds",
+                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
+    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
+
+    failed = job_mgr.Job(title="Repair scan")
+    failed.execute_kind = "repair"
+    failed.status = job_mgr.JobStatus.FAILED
+    monkeypatch.setattr(webapp, "_repair_current_job", lambda: failed)
+    monkeypatch.setattr(webapp, "_tool_last_run_age", lambda _kind: "2 days ago")
+    monkeypatch.setattr(
+        "qobuz_librarian.library.scan_checkpoint.load",
+        lambda _kind: {"scanned": ["A", "B"], "candidates": []})
+
+    page = client.get("/repair")
+    assert page.status_code == 200
+    assert "No repair scan has finished yet" not in page.text, (
+        "the page was showing a scan while denying one had finished")
+    assert "Last repair scan 2 days ago" in page.text
+    assert "Resume" in page.text, "an interrupted sweep must still offer resume"
+
+
+def test_repair_sweep_logs_the_albums_it_sends_for_re_download(monkeypatch):
+    """The sweep header promises every problem appears in the log. A damaged
+    file that cannot be identified produces a whole-album re-download card,
+    and that card used to reach the review with no log line at all, so a long
+    scan read as idle and then a review appeared from nowhere."""
+    from pathlib import Path
+
+    from qobuz_librarian.web import flows
+
+    monkeypatch.setattr(
+        "qobuz_librarian.repair_log.scan_dir_for_isrc_repairs",
+        lambda *a, **k: {
+            "verified_ok": 3, "unverified": 0, "verified_truncated": [],
+            "isrc_mismatch": [],
+            "no_isrc_tag": [],
+            "isrc_no_match": [{"path": "/music/A/B/02.flac", "title": "Two",
+                               "local_title": "Two", "isrc": "X",
+                               "diagnostic": "won't decode"}],
+        })
+    monkeypatch.setattr(
+        flows, "find_qobuz_album_for_dir",
+        lambda *a, **k: {"id": "42", "title": "Mezzanine",
+                         "release_date_original": "1998-04-20"})
+
+    out = flows._repair_album_outcome(
+        Path("/music/Massive Attack/Mezzanine (1998)"), "Massive Attack",
+        "token")
+
+    assert any(k["kind"] == "redownload" for k in out["specs"])
+    assert any("Mezzanine (1998)" in w for w in out["warns"]), (
+        f"the flagged album never reached the log (got {out['warns']})")
+
+
+def test_kept_backup_says_why_it_was_kept(client, monkeypatch):
+    """Every kept backup rendered the same line, "N of N original files kept
+    while Repair stopped", whatever actually happened. In the case that
+    produced it most often the replacement had already landed in the album, so
+    the page told people nothing had changed while their album held a
+    different file. The record carries an exact reason; show it."""
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import jobs as job_mgr
+
+    monkeypatch.setattr(webapp, "_read_creds",
+                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
+    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
+
+    reason = ("The replacement is in the album but could not be shown to be "
+              "any better than the original, which is kept here.")
+    job = job_mgr.Job(title="Repair")
+    job.execute_kind = "repair"
+    job.status = job_mgr.JobStatus.FAILED
+    job.recoveries = [{
+        "version": 1, "kind": "repair-backup", "status": "retained",
+        "location": "/upgrade_backups/gone", "album_dir": "/music/A/B",
+        "stage": "verification", "reason": reason, "complete": True,
+        "requested": 1, "backed_up": 1, "receipt": None,
+    }]
+    monkeypatch.setattr(webapp, "_repair_current_job", lambda: job)
+
+    page = client.get("/repair")
+    assert page.status_code == 200
+    assert reason in page.text, (
+        "the kept backup does not say what actually happened to the files")
+    assert "kept while Repair stopped" not in page.text
+
+
+def test_a_damaged_mismatched_file_is_reported_once(monkeypatch):
+    """It belongs in two places at once: the mismatch bucket describes why it
+    cannot be refilled, the re-download harvest decides what to do about it.
+    Reporting from both printed the same file twice in different words."""
+    from pathlib import Path
+
+    from qobuz_librarian.web import flows
+
+    entry = {"path": "/music/A/B/03.flac", "title": "A Rock 'n' Roll Swindler",
+             "local_title": "Broken Beyond Repair", "isrc": "GBBTF1800330",
+             "file_length": 6.0, "qobuz_duration": 407.0,
+             "reason": "decode_failed", "diagnostic": "damaged, but its ISRC "
+             "names a different recording"}
+    monkeypatch.setattr(
+        "qobuz_librarian.repair_log.scan_dir_for_isrc_repairs",
+        lambda *a, **k: {
+            "verified_ok": 2, "unverified": 0, "verified_truncated": [],
+            "isrc_mismatch": [entry], "no_isrc_tag": [], "isrc_no_match": [],
+        })
+    monkeypatch.setattr(flows, "find_qobuz_album_for_dir", lambda *a, **k: None)
+
+    out = flows._repair_album_outcome(
+        Path("/music/Artist/Wrong Tag (2026)"), "Artist", "token")
+
+    named = [w for w in out["warns"] if "Broken Beyond Repair" in w]
+    assert len(named) == 1, f"reported {len(named)} times: {out['warns']}"
+    assert "A Rock 'n' Roll Swindler" not in named[0], (
+        "the row must not be labelled with the song the bad tag points at")

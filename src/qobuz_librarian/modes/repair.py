@@ -1,4 +1,4 @@
-"""Album repair mode — ISRC-anchored refill of truncated FLACs."""
+"""Album repair mode: ISRC-anchored refill of truncated FLACs."""
 import errno
 import json
 import os
@@ -134,7 +134,7 @@ def _snapshot_flac_metadata(path):
 
 def _restore_flac_metadata(path, snap):
     """Replace a refilled FLAC's tags + embedded art with the snapshot from the
-    truncated original it replaces, so only the audio changed — album, track
+    truncated original it replaces, so only the audio changed, album, track
     number, title and art stay exactly as the user had them. Returns True on a
     successful write."""
     if _FLAC is None or not snap:
@@ -151,7 +151,7 @@ def _restore_flac_metadata(path, snap):
         f.tags[k] = vals
     # Only swap embedded art when the original actually had some. A truncated
     # original downloaded without art (or with less) must not strip the
-    # freshly-downloaded refill's Qobuz cover — that would downgrade the result.
+    # freshly-downloaded refill's Qobuz cover, that would downgrade the result.
     pics_ok = True
     if snap["pictures"]:
         f.clear_pictures()
@@ -159,8 +159,8 @@ def _restore_flac_metadata(path, snap):
             try:
                 f.add_picture(pic)
             except Exception:
-                # Keep going — losing one malformed picture mustn't abort the
-                # tag carry — but report the restore incomplete so the backup
+                # Keep going, losing one malformed picture mustn't abort the
+                # tag carry, but report the restore incomplete so the backup
                 # (which still holds the original art) isn't deleted on it.
                 pics_ok = False
     try:
@@ -197,7 +197,7 @@ def _backup_source_by_isrc(verified_truncated, album_dir, backup_path):
 
 def _retag_refills_in_staging(staged_dirs, source_by_isrc):
     """Carry the truncated originals' tags + art onto the matching refills (by
-    ISRC) while they're still in staging — before beets files them. A
+    ISRC) while they're still in staging, before beets files them. A
     recording that also appears on a compilation is downloaded by its track ID
     (so the audio is the right recording) but tagged by Qobuz for whatever
     album it files that ISRC under; without this the refill would import as
@@ -234,7 +234,7 @@ def _make_retag_callback(retag_sources, retag_failed):
     """The pre-import retag hook the executor calls on the staged refills.
 
     An exception inside the carry surfaces in the executor's catch-and-log,
-    but the carry state is then unknown — so every source is recorded as
+    but the carry state is then unknown, so every source is recorded as
     failed BEFORE the attempt and only the confirmed non-failures are cleared
     after. Without that, the backup resolution would read the empty set as
     "all tags carried" and delete the only copy of the originals' metadata."""
@@ -248,8 +248,8 @@ def _make_retag_callback(retag_sources, retag_failed):
 def _resolve_parent_album(album_dir, artist_name, verified_truncated,
                           wanted_isrcs, token):
     """Pick the Qobuz album that should drive where the refill is filed. Qobuz
-    files a recording under whichever album it returns first for the ISRC —
-    often a compilation the track also appears on — so the most-common ISRC
+    files a recording under whichever album it returns first for the ISRC,
+    often a compilation the track also appears on, so the most-common ISRC
     album can be the wrong edition.
     """
     try:
@@ -712,7 +712,7 @@ def _repair_receipt_items(root, receipt, expected_refills):
 
 
 def _discover_refill_files(root, receipt, wanted_isrcs, before_names,
-                           expected_refills=None):
+                           expected_refills=None, before_parts=None):
     records = []
     landed = {}
     created = {}
@@ -728,10 +728,15 @@ def _discover_refill_files(root, receipt, wanted_isrcs, before_names,
             created[parts] = directory
         for item in items:
             name = item["name"]
-            if (
-                not name.lower().endswith(".flac")
-                or name in before_names
-            ):
+            # before_names is the census of one folder, so it can only speak
+            # about files IN that folder. Matching on the bare name alone
+            # rejected a refill that had landed somewhere else entirely just
+            # because an unrelated album held a track of the same name, which
+            # is the normal case for a track that appears on two records.
+            # before_parts None means the folder is unknown, so stay strict.
+            already_there = name in before_names and (
+                before_parts is None or item["source_parts"] == before_parts)
+            if not name.lower().endswith(".flac") or already_there:
                 raise OSError(
                     "repair import receipt does not identify a new FLAC")
             scope = landed.get(item["landed_parts"])
@@ -1369,7 +1374,7 @@ def _remove_exact_empty_landed_dir(landed):
 def _relocate_refilled_into_album_dir(
         album_dir, landed_dir, wanted_isrcs, before_names, *,
         ownership_receipt=None, expected_refills=None,
-        held_root=None, held_album=None):
+        held_root=None, held_album=None, before_dir=None):
     """Move only exact files named by the sealed Beets import receipt."""
     del landed_dir  # The sealed receipt, not a cache/path guess, owns sources.
     root = held_root
@@ -1394,12 +1399,19 @@ def _relocate_refilled_into_album_dir(
         ):
             raise _RepairAnchorChanged(
                 "repair target changed before refill relocation")
+        before_parts = None
+        if before_dir is not None:
+            try:
+                before_parts = _repair_relative_parts(root, before_dir)
+            except OSError:
+                before_parts = None
         records, landed_scopes, created_directories = _discover_refill_files(
             root,
             ownership_receipt,
             wanted_isrcs,
             before_names,
             expected_refills,
+            before_parts=before_parts,
         )
 
         def preflight_anchors_match():
@@ -1476,11 +1488,11 @@ def _refills_present_in(album_dir, wanted_counts, baseline_counts):
 
     ``wanted_counts`` is a Counter of ISRC → how many truncated originals with
     that ISRC went to backup; ``baseline_counts`` is the ISRC census of what
-    remained on disk after that move (None = the baseline couldn't be read —
-    unverifiable, so never True). A plain set membership test would pass when
+    remained on disk after that move (None = the baseline couldn't be read,
+    so the result is unverifiable and never True). A plain set membership test would pass when
     only ONE of two same-ISRC originals came back, and a bare count would let
     a healthy pre-existing file sharing the ISRC vouch for a refill that never
-    returned — either way the backup holding the second file gets deleted. So
+    returned, either way the backup holding the second file gets deleted. So
     require baseline + wanted of each ISRC, counted."""
     if not wanted_counts:
         return True
@@ -1494,7 +1506,7 @@ def _refills_present_in(album_dir, wanted_counts, baseline_counts):
 def _refills_intact(album_dir, wanted_counts, token, baseline_counts):
     """True only when none of the refilled ISRCs is still flagged truncated by
     a fresh duration scan. A presence check can't tell a complete refill from a
-    short-but-decodable one — the exact failure repair exists to fix — so the
+    short-but-decodable one, the exact failure repair exists to fix, so the
     rebuilt folder is re-verified against the same gate before the originals'
     backup is trusted as redundant. Caller guarantees wanted_counts is
     non-empty; AuthLost / QobuzUnavailable propagate so a transient outage
@@ -1510,7 +1522,7 @@ def _refills_intact(album_dir, wanted_counts, token, baseline_counts):
         return False
     # Require POSITIVE re-verification: every wanted ISRC must have re-matched
     # a Qobuz recording AND passed the truncation gate. Checking only "not
-    # flagged truncated" was unsafe — a wanted ISRC whose post-repair lookup
+    # flagged truncated" was unsafe, a wanted ISRC whose post-repair lookup
     # transiently returned nothing (4xx, index lag, strict-equality miss)
     # lands in isrc_no_match, NOT verified_truncated, so it would read as
     # intact and the only good-enough original's backup would be deleted while
@@ -1580,7 +1592,7 @@ def _prompt_library_album_for_repair(args, token):
             continue
         if not 1 <= idx <= len(albums):
             log.info(fmt(C.GRAY,
-                f"  Out of range — pick 1-{len(albums)}."))
+                f"  Out of range, pick 1-{len(albums)}."))
             continue
         album_dir = albums[idx - 1]
         break
@@ -1618,7 +1630,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                      *, recovery_checkpoint=None):
     """Back up truncated originals, ISRC-refill them, resolve the backup.
 
-    Non-interactive and self-contained — the CLI repair mode and the web
+    Non-interactive and self-contained, the CLI repair mode and the web
     Repair flow both call this so there is one implementation of the
     risky part. Forces no-upgrade for the run so a quality delta can never
     escalate a surgical repair into a full wipe-and-replace. Auth lost
@@ -1702,7 +1714,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         # rather than stranding the only copies in the backup dir.
         wanted_isrcs = {_norm_isrc(b.get("isrc")) for b in verified_truncated}
         wanted_isrcs.discard("")
-        # Per-ISRC counts of the originals going to backup — the presence gate
+        # Per-ISRC counts of the originals going to backup, the presence gate
         # needs the multiset, not just the set, so two same-ISRC truncated files
         # (a .1.flac collision pair, or the same recording on two discs) aren't
         # treated as repaired when only one refill lands.
@@ -1711,8 +1723,8 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
 
         album = _resolve_parent_album(album_dir, artist_name,
                                       verified_truncated, wanted_isrcs, token)
-        # A synthetic fallback has no real catalog id, so it can't predict an
-        # on-disk landing dir — skip the prediction in that case.
+        # A synthetic fallback has no real catalog id, so it can't predict
+        # an on-disk landing dir. Skip the prediction in that case.
         real_album_id = (album.get("id")
                          if album.get("id") not in (None, "repair") else None)
 
@@ -1728,7 +1740,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         qi = _build_queue_item(
             album=album,
             album_dir=album_dir,
-            label=f"{artist_name} — {album_dir.name}  [repair]",
+            label=f"{artist_name} - {album_dir.name}  [repair]",
             missing=missing_tracks,
             present=present_synth,
             upgrade_only=False,
@@ -1740,10 +1752,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         landed_pre = (find_album_dir_filesystem(album)
                       if real_album_id is not None else None)
         before_names = set()
+        before_dir = None
         if landed_pre is not None and not _repair_paths_same(
                 landed_pre, album_dir):
             try:
                 before_names = _secure_refill_names(landed_pre)
+                before_dir = landed_pre
             except OSError as exc:
                 log.info(fmt(C.RED,
                     f"  ✗  The refill folder could not be read safely "
@@ -1789,7 +1803,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         )
         if backup_path is None:
             log.info(fmt(C.RED,
-                "  ✗  Backup could not start — aborting repair without "
+                "  ✗  Backup could not start, aborting repair without "
                 "changing the selected files."))
             return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
         if getattr(backup_path, "complete", False) is not True:
@@ -1834,7 +1848,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "restored.",
             )
             log.info(fmt(C.RED,
-                "  ✗  Backup stopped partway through — Repair was aborted. "
+                "  ✗  Backup stopped partway through, Repair was aborted. "
                 f"Restored {restored} moved file(s); remaining recovery files "
                 f"are at:\n     {backup_path}"))
             return {
@@ -1896,7 +1910,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
 
         if not held_album.matches():
             pin_repair_recovery(
-                "repair backup kept — the selected album changed after backup")
+                "repair backup kept, the selected album changed after backup")
             checkpoint_recovery(
                 backup_path,
                 "backup",
@@ -1948,9 +1962,9 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             # Preserve the backup and point the user at it.
             if backup_path and backup_path.exists():
                 pin_repair_recovery(
-                    "repair backup kept — authentication was lost mid-refill")
+                    "repair backup kept, authentication was lost mid-refill")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Auth lost mid-refill — truncated originals preserved at:\n"
+                    f"  ⚠  Auth lost mid-refill, truncated originals preserved at:\n"
                     f"     {backup_path}\n"
                     f"     Re-run Repair once your token is refreshed, or restore "
                     f"them by hand."))
@@ -1967,9 +1981,9 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             # clobber them.
             if backup_path and backup_path.exists():
                 pin_repair_recovery(
-                    "repair backup kept — refill was interrupted")
+                    "repair backup kept, refill was interrupted")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Repair interrupted — truncated originals preserved at:\n"
+                    f"  ⚠  Repair interrupted, truncated originals preserved at:\n"
                     f"     {backup_path}\n"
                     f"     Re-run Repair to retry, or restore them by hand."))
             interrupt_with_recovery(
@@ -1981,7 +1995,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
 
         if not held_album.matches():
             pin_repair_recovery(
-                "repair backup kept — album or library root changed during "
+                "repair backup kept, album or library root changed during "
                 "refill")
             log.info(fmt(C.RED,
                 "  ✗  The selected album or library root changed during "
@@ -2024,10 +2038,11 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     expected_refills=qi.get("n_ok", 0),
                     held_root=held_root,
                     held_album=held_album,
+                    before_dir=before_dir,
                 )
         except _RepairRelocationUncertain as exc:
             pin_repair_recovery(
-                "repair backup kept — refill location could not be proven")
+                "repair backup kept, refill location could not be proven")
             recovery_reason = (
                 "The replacement track's final location could not be proven."
             )
@@ -2065,9 +2080,9 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         except BaseException as exc:
             if backup_path and backup_path.exists():
                 pin_repair_recovery(
-                    "repair backup kept — refill placement was interrupted")
+                    "repair backup kept, refill placement was interrupted")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Repair interrupted during refill placement — "
+                    f"  ⚠  Repair interrupted during refill placement, "
                     f"the originals are preserved at:\n     {backup_path}"))
             interrupt_with_recovery(
                 exc,
@@ -2080,7 +2095,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         download_clean = (relocation_ok and n_fail_final == 0 and n_ok_final > 0
                           and qi.get("imported", False))
         # "Back in place" = the refilled files returned to album_dir. Success
-        # additionally requires they're verifiably NOT still truncated — a
+        # additionally requires they're verifiably NOT still truncated, a
         # presence check alone would let a short re-rip pass, and "no ISRC to
         # verify by" is unproven, not proven.
         back_in_place = download_clean and _refills_present_in(
@@ -2091,17 +2106,17 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                                            baseline_counts)
             except (AuthLost, QobuzUnavailable) as exc:
                 # _refills_intact verifies via Qobuz, so a token loss / outage
-                # here aborts before the backup-resolution block below — leaving
+                # here aborts before the backup-resolution block below, leaving
                 # the truncated originals orphaned in the backup dir with no
                 # pointer for the user. Surface the location (same as the
                 # download-phase AuthLost branch) before re-raising.
                 if backup_path and backup_path.exists():
                     pin_repair_recovery(
-                        "repair backup kept — final refill verification was "
+                        "repair backup kept, final refill verification was "
                         "unavailable")
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  Couldn't verify the re-downloaded tracks "
-                        f"(auth lost / Qobuz unavailable) — truncated originals "
+                        f"(auth lost / Qobuz unavailable), truncated originals "
                         f"preserved at:\n     {backup_path}\n"
                         f"     Re-run Repair once Qobuz is reachable, or restore "
                         f"them by hand."))
@@ -2118,19 +2133,19 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         if backup_path and backup_path.exists():
             if repaired and retag_failed:
                 # The audio is verifiably fixed, but the originals' tags/art
-                # couldn't be carried onto some refills — the backup holds the
+                # couldn't be carried onto some refills, the backup holds the
                 # only copy of that metadata, so keep it. Pin it too: the age
                 # sweep proves redundancy by same-path same-or-larger bytes,
-                # which the (usually larger) refill satisfies — without the pin
+                # which the (usually larger) refill satisfies, without the pin
                 # the only copy of those tags would be reaped on schedule.
                 if not pin_unverified_upgrade_backup(
                         backup_path,
-                        "repair kept — original tags/art not carried onto the "
+                        "repair kept, original tags/art not carried onto the "
                         "refill; this backup holds their only copy"):
                     warn_pin_failed(backup_path)
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Repaired, but the original tags/art couldn't be "
-                    f"carried onto {len(retag_failed)} refilled track(s) — "
+                    f"carried onto {len(retag_failed)} refilled track(s), "
                     f"keeping the backup; it still holds them.\n"
                     f"     Backup: {backup_path}"))
                 checkpoint_recovery(
@@ -2147,17 +2162,17 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "originals' backup was removed.",
                     )
                     log.info(fmt(C.GREEN,
-                        "  ✓  Replacement tracks verified — removed the "
+                        "  ✓  Replacement tracks verified, removed the "
                         "truncated originals' backup."))
                 else:
                     if not pin_unverified_upgrade_backup(
                             backup_path,
-                            "repair backup kept — could not be proven "
+                            "repair backup kept, could not be proven "
                             "redundant after a verified refill"):
                         warn_pin_failed(backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Replacement tracks verified, but the originals' "
-                        "backup couldn't be proven redundant — keeping it:\n"
+                        "backup couldn't be proven redundant, keeping it:\n"
                         f"     {backup_path}"))
                     checkpoint_recovery(
                         backup_path,
@@ -2168,26 +2183,29 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             elif back_in_place:
                 # The re-downloaded tracks are physically back but couldn't be
                 # verified as intact (still short of the listed length, or no
-                # ISRC to check against). Keep the originals — deleting the
+                # ISRC to check against). Keep the originals, deleting the
                 # only other copy on a presence check alone is how a bad re-
                 # rip silently replaces a good-enough track with a worse one.
                 pin_repair_recovery(
-                    "repair backup kept — replacement could not be verified "
+                    "repair backup kept, replacement could not be verified "
                     "intact")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  The re-download is also short of its listed length — "
-                    f"Qobuz's own copy looks truncated, so this track can't be "
-                    f"repaired from Qobuz. Kept your original; re-running won't "
-                    f"change it. Backup:\n     {backup_path}"))
+                    f"  ⚠  The re-download is also short of its listed length, "
+                    f"so Qobuz's own copy looks no better than yours. The "
+                    f"album now holds that download and your original is kept "
+                    f"in the backup below; restore it from Settings, "
+                    f"Diagnostics to put it back. Re-running won't change "
+                    f"this. Backup:\n     {backup_path}"))
                 checkpoint_recovery(
                     backup_path,
                     "verification",
-                    "The replacement track returned to the album but could "
-                    "not be verified intact.",
+                    "The replacement is in the album but could not be shown "
+                    "to be any better than the original, which is kept here. "
+                    "Restore puts the original back.",
                 )
             elif n_fail_final > 0:
                 pin_repair_recovery(
-                    "repair backup kept — one or more refills failed")
+                    "repair backup kept, one or more refills failed")
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  {n_fail_final} track(s) failed to re-download. "
                     f"Truncated originals preserved at:\n     {backup_path}"))
@@ -2202,14 +2220,14 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 # couldn't reclaim it). Restore so the album is at least back
                 # to its pre-repair state instead of silently short a track.
                 log.info(fmt(C.YELLOW,
-                    "  ⚠  Refill didn't return to the album folder — "
+                    "  ⚠  Refill didn't return to the album folder, "
                     "restoring truncated originals so it isn't left short."))
                 try:
                     n_restored = restore_gap_fill_backup(
                         backup_path, album_dir)
                 except BaseException as exc:
                     pin_repair_recovery(
-                        "repair backup kept — automatic restore was "
+                        "repair backup kept, automatic restore was "
                         "interrupted")
                     interrupt_with_recovery(
                         exc,
@@ -2227,7 +2245,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "  ✓  Restored truncated originals; re-run Repair to retry."))
                 else:
                     pin_repair_recovery(
-                        "repair backup kept — automatic restore was partial or "
+                        "repair backup kept, automatic restore was partial or "
                         "failed")
                     log.info(fmt(C.RED,
                         f"  ✗  Restored {n_restored} track(s); remaining "
@@ -2250,7 +2268,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             } for b in verified_truncated]
             if append_repair_log(log_entries):
                 log.info(fmt(C.CYAN,
-                    f"  📋  Logged {len(log_entries)} replaced track(s) — "
+                    f"  📋  Logged {len(log_entries)} replaced track(s), "
                     f"refresh these albums on any offline client:\n"
                     f"     {cfg.REPAIR_LOG_PATH}"))
 
@@ -2295,7 +2313,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     "repaired" | "clean" | "skipped" | "failed" | "recovery".
     """
     if not quiet:
-        section(f"Repair scan — {truncate(album_dir.name, 60)}")
+        section(f"Repair scan, {truncate(album_dir.name, 60)}")
         log.info(fmt(C.GRAY,
             "  Resolving every FLAC by ISRC against Qobuz "
             "(no album-edition guessing) …"))
@@ -2305,32 +2323,34 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     verified_ok        = scan["verified_ok"]
     isrc_no_match      = scan["isrc_no_match"]
     no_isrc_tag        = scan["no_isrc_tag"]
+    isrc_mismatch      = scan.get("isrc_mismatch") or []
 
-    if quiet and not verified_truncated and not any(
-            x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag)):
+    if (quiet and not verified_truncated and not isrc_mismatch and not any(
+            x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag))):
         return "clean"
     if quiet:
         # Commit the caller's \r progress line and head the report.
         print()
         log.info(fmt(C.BOLD + C.WHITE,
-            f"  {artist_name} — {truncate(album_dir.name, 50)}"))
+            f"  {artist_name} - {truncate(album_dir.name, 50)}"))
 
     log.info(fmt(C.GRAY,
         f"  {verified_ok} verified ok  ·  "
         f"{len(verified_truncated)} verified truncated  ·  "
         f"{len(isrc_no_match)} ISRC has no Qobuz match  ·  "
-        f"{len(no_isrc_tag)} no ISRC tag"))
+        f"{len(no_isrc_tag)} no ISRC tag  ·  "
+        f"{len(isrc_mismatch)} ISRC names another song"))
 
     if isrc_no_match:
         log.info(fmt(C.GRAY,
-            "\n  Skipped (ISRC tag present but no Qobuz match — "
+            "\n  Skipped (ISRC tag present but no Qobuz match, "
             "Apple Music import or removed from Qobuz?):"))
         for x in isrc_no_match[:10]:
             diag = x.get("diagnostic")
             if diag:
                 log.info(fmt(C.YELLOW,
                     f"    • {truncate(x['title'], 50)}  "
-                    f"[isrc={x['isrc']}] — {diag}"))
+                    f"[isrc={x['isrc']}], {diag}"))
             else:
                 log.info(fmt(C.GRAY,
                     f"    • {truncate(x['title'], 50)}  "
@@ -2340,19 +2360,55 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 f"    ... and {len(isrc_no_match) - 10} more"))
     if no_isrc_tag:
         log.info(fmt(C.GRAY,
-            "\n  Skipped (no ISRC tag — can't verify recording "
+            "\n  Skipped (no ISRC tag, can't verify recording "
             "identity, refusing to guess):"))
         for x in no_isrc_tag[:10]:
             diag = x.get("diagnostic")
             if diag:
                 log.info(fmt(C.YELLOW,
-                    f"    • {truncate(x['title'], 60)} — {diag}"))
+                    f"    • {truncate(x['title'], 60)}: {diag}"))
             else:
                 log.info(fmt(C.GRAY,
                     f"    • {truncate(x['title'], 60)}"))
         if len(no_isrc_tag) > 10:
             log.info(fmt(C.GRAY,
                 f"    ... and {len(no_isrc_tag) - 10} more"))
+
+    # Two different outcomes share this bucket, so they can't share one
+    # heading: a short file is genuinely left alone, a damaged one still needs
+    # dealing with and just can't be refilled a track at a time.
+    mismatch_damaged = [x for x in isrc_mismatch if x.get("diagnostic")]
+    mismatch_short = [x for x in isrc_mismatch if not x.get("diagnostic")]
+
+    def _mismatch_row(x, colour):
+        log.info(
+            fmt(colour, f"    • {truncate(x.get('local_title') or '?', 40)}")
+            + fmt(C.GRAY,
+                f"   {_format_mmss(x['file_length']):>5}"
+                f" / {_format_mmss(x['qobuz_duration']):>5}"
+                f"  matched \"{truncate(x.get('title') or '?', 30)}\""
+                f"  [isrc={x.get('isrc')}]"))
+
+    if mismatch_damaged:
+        log.info(fmt(C.YELLOW,
+            "\n  Damaged, but the ISRC names a different song, so a "
+            "single-track refill would fetch that song instead. Re-download "
+            "the whole album, or fix the ISRC tag first:"))
+        for x in mismatch_damaged[:10]:
+            _mismatch_row(x, C.YELLOW)
+        if len(mismatch_damaged) > 10:
+            log.info(fmt(C.GRAY,
+                f"    ... and {len(mismatch_damaged) - 10} more"))
+
+    if mismatch_short:
+        log.info(fmt(C.GRAY,
+            "\n  Left alone (runs short, but its ISRC names a different "
+            "song, so the length proves nothing):"))
+        for x in mismatch_short[:10]:
+            _mismatch_row(x, C.WHITE)
+        if len(mismatch_short) > 10:
+            log.info(fmt(C.GRAY,
+                f"    ... and {len(mismatch_short) - 10} more"))
 
     if not verified_truncated:
         if not quiet:
@@ -2368,11 +2424,14 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         "  on-disk / Qobuz   ISRC"))
     for b in verified_truncated:
         qt = b["qobuz_track"]
-        title = b["title"]
+        # Name the row after the file on disk. The matched recording's own
+        # title is the right thing to re-download and the wrong thing to label
+        # a file with, because a mis-tagged ISRC makes them different songs.
+        title = b.get("local_title") or b["title"]
         ver = qt.get("version") or ""
         if ver and ver.lower() not in title.lower():
             title = f"{title} ({ver})"
-        tnum = b["track_number"]
+        tnum = b.get("local_track_number") or b["track_number"]
         tnum_str = f"#{tnum:>2}" if tnum else "   "
         log.info(
             fmt(C.WHITE, f"    {tnum_str}  {truncate(title, 50):<50}")
@@ -2382,7 +2441,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 f"  {b['isrc']}"))
 
     # Repair moves the truncated originals aside before re-ripping, so it has to
-    # stop here under --dry-run — reaching repair_album_dir would mutate the
+    # stop here under --dry-run, reaching repair_album_dir would mutate the
     # filesystem (and an interrupt mid-repair could strand the originals).
     if getattr(args, "dry_run", False):
         log.info(fmt(C.YELLOW,
@@ -2428,7 +2487,7 @@ def _all_library_album_dirs():
 
 
 def run_album_repair_mode(args, token, *, loop=False):
-    """ISRC-anchored refill of truncated FLACs — replaces are matched on
+    """ISRC-anchored refill of truncated FLACs, replaces are matched on
     ISRC so the new file is the same recording as the old one.
 
     `'*'` at the artist prompt sweeps the whole library. --no-upgrade is
@@ -2454,7 +2513,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     if not loop:
                         return
                     continue
-                section(f"Repair scan — whole library "
+                section(f"Repair scan, whole library "
                         f"({len(targets)} album(s))")
                 log.info(fmt(C.GRAY,
                     "  Albums with no damaged tracks are skipped silently. "
@@ -2469,7 +2528,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                 try:
                     for i, (adir, aldir) in enumerate(targets, 1):
                         _line = (f"  [{i}/{len(targets)}] Scanning "
-                                 f"{truncate(adir.name, 28)} — "
+                                 f"{truncate(adir.name, 28)} - "
                                  f"{truncate(aldir.name, 30)}…")
                         if sys.stdout.isatty():
                             print(f"\r{_line:<90}", end="", flush=True)
@@ -2491,7 +2550,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                 except KeyboardInterrupt:
                     print()
                     log.info(fmt(C.YELLOW,
-                        "  Interrupted — stopping library repair sweep."))
+                        "  Interrupted, stopping library repair sweep."))
                 else:
                     if sys.stdout.isatty():
                         print(f"\r{' ' * 90}\r", end="", flush=True)
