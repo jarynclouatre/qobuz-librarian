@@ -294,20 +294,20 @@
                  data-search-item data-search-key="album-{{ e.id }}" data-owned="0">
               <label class="ql-table-check" role="cell">
                 <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="album-{{ e.id }}"
-                       aria-label="Select {{ g.title }}{% if e.version %} {{ e.version }}{% endif %} by {{ g.artist }}">
+                       aria-label="Select {{ e.title }}{% if e.version %} {{ e.version }}{% endif %} by {{ g.artist }}">
               </label>
               <div class="ql-subcell" role="cell">
                 {% if e.cover %}<img src="{{ e.cover }}" alt="" loading="lazy" width="32" height="32" class="ql-subcover">
                 {% else %}<span class="ql-subcover ql-cover-placeholder" aria-hidden="true"></span>{% endif %}
                 <div>
-                  <p class="ql-subtitle">{{ g.title }} <span class="ql-subver">{{ e.version or ((e.year ~ ' edition') if e.year and e.year != '?' else 'Alternate edition') }}</span></p>
+                  <p class="ql-subtitle">{{ e.title }}{% if e.version %} <span class="ql-subver">{{ e.version }}</span>{% endif %}</p>
                   <p class="ql-table-subtitle ql-sub-mobile">{{ e.tracks }} track{{ 's' if e.tracks != 1 else '' }}{% if e.year and e.year != '?' %} · {{ e.year }}{% endif %}</p>
                 </div>
               </div>
               <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
               <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
               <span role="cell">{{ quality_badge(e) }}</span>
-              <span class="ql-table-action" role="cell">{{ download_form(e.id, g.title, g.artist, '', g.owned, True) }}</span>
+              <span class="ql-table-action" role="cell">{{ download_form(e.id, e.title, g.artist, '', g.owned, True) }}</span>
             </div>
             {% endfor %}
           </div>

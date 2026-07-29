@@ -3199,42 +3199,62 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         g = dict(res, editions=[])
                         by_key[key] = g
                         album_groups.append(g)
-                    g["owned"] = g["owned"] or res["owned"]
                     # A complete edition outranks a part-finished one: if any
-                    # edition of this record is whole on disk, the row is owned.
-                    if res.get("partial") and not g["owned"]:
-                        g["partial"] = True
-                        g["have_tracks"] = res.get("have_tracks")
-                        g["want_tracks"] = res.get("want_tracks")
-                    if g["owned"]:
-                        g["partial"] = False
+                    # edition of this record is whole on disk, search must not
+                    # offer a plain Download for the record at all.
+                    g["owned"] = g["owned"] or res["owned"]
                     if res.get("disk_year"):
                         g["disk_year"] = res["disk_year"]
+                    # Each edition keeps its OWN title and its own ownership
+                    # verdict. Sharing the group's title made a plain pressing
+                    # render as the deluxe it was grouped under, right down to
+                    # the download confirmation naming a record you had not
+                    # picked; sharing one verdict put a count from one pressing
+                    # beside the track total of another.
                     g["editions"].append({
                         "id": res["id"],
+                        "title": res["title"],
                         "version": (alb.get("version") or "").strip(),
                         "year": res["year"], "tracks": res["tracks"],
                         "quality": res["quality"], "hires": res["hires"],
                         "lossy": res["lossy"], "bit_depth": res["bit_depth"],
                         "sample_rate": res["sample_rate"],
                         "cover": res["cover"],
+                        "owned": bool(res["owned"]),
+                        "partial": bool(res.get("partial")),
+                        "have_tracks": res.get("have_tracks"),
+                        "want_tracks": res.get("want_tracks"),
                     })
                 for g in album_groups:
                     eds = g["editions"]
-                    # Float the pressing you actually own to the top (matched by
-                    # the on-disk year) so it's the row and the rest read as
-                    # "other versions" instead of offering you your own copy.
-                    if g["owned"] and g.get("disk_year"):
-                        for i, e in enumerate(eds):
-                            if str(e["year"]) == str(g["disk_year"]):
-                                if i:
-                                    eds.insert(0, eds.pop(i))
-                                break
+                    # The row shows exactly one edition, so it has to be one the
+                    # ownership check actually ran against: a complete copy
+                    # first (that is the one you own, and the rest read as
+                    # "other versions"), then a part-finished one, so the
+                    # "N of M" beside it counts the same pressing the Download
+                    # button would fetch.
+                    rep_i = 0
+                    owned = [i for i, e in enumerate(eds) if e["owned"]]
+                    part = [i for i, e in enumerate(eds) if e["partial"]]
+                    if owned:
+                        rep_i = owned[0]
+                        if g.get("disk_year"):
+                            for i in owned:
+                                if str(eds[i]["year"]) == str(g["disk_year"]):
+                                    rep_i = i
+                                    break
+                    elif part:
+                        rep_i = part[0]
+                    if rep_i:
+                        eds.insert(0, eds.pop(rep_i))
                     rep = eds[0]
-                    for f in ("id", "year", "tracks", "quality",
+                    for f in ("id", "title", "year", "tracks", "quality",
                               "hires", "lossy", "bit_depth", "sample_rate",
                               "cover", "version"):
                         g[f] = rep[f]
+                    g["partial"] = rep["partial"] and not g["owned"]
+                    g["have_tracks"] = rep["have_tracks"]
+                    g["want_tracks"] = rep["want_tracks"]
                     g["others"] = eds[1:]
         except (SystemExit, NoCredsError):
             error = "No Qobuz credentials set. Visit Settings."

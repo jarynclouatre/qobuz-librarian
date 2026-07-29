@@ -743,6 +743,82 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
     assert 'name="album_id" value="album1"' in r.text   # still downloadable
 
 
+# The Doors put out a 25-track "50th Anniversary Deluxe Edition" and two plain
+# 11-track pressings of Waiting for the Sun, none of which carries a version
+# field. That is the shape that breaks a grouped row.
+_WAITING = [
+    {"id": "deluxe", "title": "Waiting for the Sun (50th Anniversary Deluxe Edition)",
+     "artist": {"name": "The Doors"}, "year": 1968, "tracks_count": 25,
+     "maximum_bit_depth": 24, "maximum_sampling_rate": 192},
+    {"id": "cd", "title": "Waiting for the Sun",
+     "artist": {"name": "The Doors"}, "year": 1968, "tracks_count": 11,
+     "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+    {"id": "hires", "title": "Waiting For The Sun",
+     "artist": {"name": "The Doors"}, "year": 1968, "tracks_count": 11,
+     "maximum_bit_depth": 24, "maximum_sampling_rate": 96},
+]
+
+
+def _search_waiting_for_the_sun(client, monkeypatch, folder):
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(search_mod, "search_albums", lambda *_a, **_kw: list(_WAITING))
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: folder)
+    r = client.post("/search", data={"q": "Waiting for the Sun", "kind": "album"},
+                    headers={"HX-Request": "true"})
+    assert r.status_code == 200
+    table = r.text[r.text.index('data-search-view-panel="table"'):
+                   r.text.index('data-search-view-panel="grid"')]
+    return table
+
+
+def _subrow_titles(table):
+    import re
+    return [re.sub(r"<[^>]+>", "", m).strip()
+            for m in re.findall(r'class="ql-subtitle">(.*?)</p>', table, re.S)]
+
+
+def test_other_versions_are_named_by_their_own_release(client, monkeypatch, tmp_path):
+    # Every alternate pressing was drawn with the GROUP's title, so the plain
+    # 11-track album was offered as the 25-track deluxe it had been grouped
+    # under, and the download confirmation named that deluxe too. Two different
+    # records, one name, and no way to tell from the row which one you get.
+    folder = tmp_path / "Waiting for the Sun (1968)"
+    folder.mkdir()
+    table = _search_waiting_for_the_sun(client, monkeypatch, folder)
+
+    subs = _subrow_titles(table)
+    assert subs == ["Waiting for the Sun", "Waiting For The Sun"]
+    assert not any("Deluxe" in s for s in subs)
+    # The invented "<year> edition" label stood in for a version the release
+    # never had, so both pressings read identically.
+    assert "1968 edition" not in table
+    # The confirm prompt and the aria-label name the pressing being fetched.
+    assert 'Download "Waiting For The Sun" by The Doors?' in table
+
+
+def test_a_grouped_row_counts_the_pressing_it_shows(client, monkeypatch, tmp_path):
+    # The "N of M" came from whichever pressing matched a folder on disk and the
+    # track total from whichever pressing represented the group, so a row read
+    # "25 tracks" and "3 of 11" at once. Ticking it fetched 22 tracks, not 8.
+    import re
+    folder = tmp_path / "Waiting for the Sun (1968)"
+    folder.mkdir()
+    for n, t in enumerate(("Hello I Love You", "Love Street", "Not to Touch the Earth"), 1):
+        (folder / f"{n:02d} - {t}.flac").write_bytes(b"\x00")
+
+    table = _search_waiting_for_the_sun(client, monkeypatch, folder)
+    row = table[:table.index('class="ql-version-panel')]
+
+    total = re.findall(r'ql-table-mono ql-num" role="cell">([^<]*)<', row)[-1].strip()
+    have, want = re.search(r'ql-partial-label"[^>]*>\s*(\d+) of (\d+)\s*<', row).groups()
+    assert have == "3"
+    assert want == total, f"badge counts {want} tracks, row shows {total}"
+
+
 def test_new_release_check_refused_without_baseline(client, monkeypatch):
     # "Check for new releases" is a library-walk-and-compare, useless until a
     # full library scan has built the baseline.

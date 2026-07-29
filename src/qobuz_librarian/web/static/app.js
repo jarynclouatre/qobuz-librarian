@@ -586,6 +586,15 @@
       function visibleItem(item) {
         return item && item.offsetParent !== null;
       }
+      // "Select all" means every album listed, one per record. An alternate
+      // pressing is a deliberate individual tick: sweeping an open versions
+      // fold in selected a record and two more pressings of that same record,
+      // and the duplicate guard keys on album id, so all three were accepted as
+      // separate downloads into one folder.
+      function bulkSelectable(box) {
+        return visibleItem(box.closest("[data-search-item]"))
+          && !box.closest(".ql-version-panel");
+      }
       function syncBoxes() {
         root.querySelectorAll("[data-search-select]").forEach(function (cb) {
           cb.checked = !!selected[cb.dataset.searchKey];
@@ -596,8 +605,8 @@
           selectedCount.textContent = keys.length + " selected";
         }
         if (selectAll) {
-          var selectable = Array.prototype.filter.call(root.querySelectorAll("[data-search-select]"),
-            function (cb) { return visibleItem(cb.closest("[data-search-item]")); });
+          var selectable = Array.prototype.filter.call(
+            root.querySelectorAll("[data-search-select]"), bulkSelectable);
           var selectableKeys = {};
           selectable.forEach(function (cb) { selectableKeys[cb.dataset.searchKey] = true; });
           var allKeys = Object.keys(selectableKeys);
@@ -616,9 +625,15 @@
         var on = root.classList.contains("is-filtering-owned");
         // Count what is actually on screen: both the table and the grid are in
         // the DOM at once, so counting every [data-search-item] counts each
-        // album twice.
+        // album twice. Alternate pressings are rows, not albums, so they are
+        // left out too: with a versions fold open they made turning the filter
+        // ON raise the total, from "23 albums" to "25 albums not in your
+        // library".
         var shown = Array.prototype.filter.call(
-          root.querySelectorAll("[data-search-item]"), visibleItem).length;
+          root.querySelectorAll("[data-search-item]"),
+          function (el) {
+            return visibleItem(el) && !el.closest(".ql-version-panel");
+          }).length;
         if (meta) {
           if (on) {
             meta.textContent = shown + " album" + (shown === 1 ? "" : "s")
@@ -656,7 +671,10 @@
         if (evt.target.closest && evt.target.closest("[data-search-select-all]")) {
           var on = evt.target.checked;
           root.querySelectorAll("[data-search-select]").forEach(function (box) {
-            if (!visibleItem(box.closest("[data-search-item]"))) return;
+            // Ticking it adds the albums; clearing it leaves nothing behind,
+            // including any alternate pressing picked by hand.
+            if (on ? !bulkSelectable(box)
+                   : !visibleItem(box.closest("[data-search-item]"))) return;
             selected[box.dataset.searchKey] = on;
           });
           syncBoxes();
