@@ -574,26 +574,35 @@ def _job_admission_response(request):
 def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
     """Return a 503 response if the run-lock is busy OR a critical volume
     was unwritable at startup, else None."""
+    reason = ""
+    action = None
     if _CLI_MODE:
+        reason = "Terminal mode is holding the library."
         msg = ("Terminal (CLI) mode is on, so downloads and scans are paused "
                "here. Resume on Settings → Mode (Resume web app).")
+        action = {"href": "/settings#mode", "label": "Open Settings"}
     elif _LOCK_BUSY_PID is not None:
+        reason = "Another Qobuz Librarian run is using the library."
         msg = ("Another Qobuz Librarian run is active. Downloads and scans are "
                "paused so only one process writes to the library at a time. "
                "Stop the other run first, then restart Qobuz Librarian.")
     elif (unwritable := _unwritable_volumes()):
+        reason = "A folder Qobuz Librarian must write to is read-only."
+        action = {"href": "/settings#diagnostics-list", "label": "Open Diagnostics"}
         msg = (f"Required {plural(len(unwritable), 'volume')} not "
                "writable: "
                f"{', '.join(unwritable)}. On a NAS, set "
                "PUID/PGID to the share owner and confirm the host "
                "directories exist. Downloads can't run until fixed.")
     elif _LOCK_UNENFORCEABLE:
+        reason = "The data folder can't hold the safety lock."
         msg = ("The data folder can't hold the single-writer safety lock "
                "(read-only, or a mount without file locking), so a second "
                "run writing the library at the same time would go unnoticed. "
                "Downloads and scans are paused. Move the data folder to a "
                "writable filesystem that supports file locking, then restart.")
     elif not _run_lock_intact():
+        reason = "The safety lock that keeps one writer at a time was lost."
         msg = ("The single-writer safety lock was lost. Downloads and scans "
                "are paused so another process cannot write to the library "
                "at the same time. Restart Qobuz Librarian before continuing.")
@@ -605,16 +614,26 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
             )
 
             paths = "; ".join(str(path) for path in relocation.paths)
+            # relocation.reason is str(exc) from the relocation code — an
+            # internal diagnostic, not an explanation. It belongs in the log,
+            # which this message points at; the user gets what happened to
+            # their music and what to do.
+            logging.getLogger("qobuz_librarian").warning(
+                "post-import relocation recovery: %s (paths: %s)",
+                relocation.reason or "reason not reported",
+                paths or "none reported")
+            reason = "A move of album folders inside your library was interrupted."
             msg = (
-                "An interrupted library-folder move could not be verified safely. "
-                f"Recovery reason: {relocation.reason or 'reason not reported'}. "
-                f"Paths needing attention: {paths or 'none reported'}. "
-                "Downloads and scans are paused so the files remain unchanged. "
-                f"See the “{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the "
-                "application log for the same details. Resolve the reported "
-                "recovery problem, then restart Qobuz Librarian."
+                "Qobuz Librarian can't confirm that move finished, so downloads "
+                "and scans are paused and your files are left exactly as they "
+                "are — nothing has been lost. "
+                + (f"The folders involved: {paths}. " if paths else "")
+                + "Restart Qobuz Librarian; if this screen comes back, the "
+                f"“{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the container "
+                "log has the technical detail."
             )
         else:
+            reason = "An interrupted download couldn't be verified."
             msg = ("An interrupted download could not be verified safely. Downloads "
                    "and scans are paused, and its saved queue and staged files were "
                    "left unchanged. Open that download from Queue or History and "
@@ -624,8 +643,10 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
         _startup_recovery_status_value() == "resume_required"
         and not _durable_resume_allowed(durable_resume_job_id or "")
     ):
+        reason = "An interrupted download is waiting to be settled."
         origin = _startup_recovery_origin_value()
         if origin == "cli":
+            action = {"href": "/settings#mode", "label": "Open Settings"}
             msg = ("An interrupted terminal download has saved recovery state. "
                    "Other library changes are paused. Switch to terminal mode "
                    "in Settings, then resume that download there.")
@@ -639,11 +660,17 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
                    "resumed from the interface where it started.")
     else:
         return None
+    unwritable_now = _unwritable_volumes()
     if _is_htmx(request):
         return HTMLResponse(
             _ql_notice_html("error", html.escape(msg)),
             status_code=200)
-    return _tr(request, "lock_busy.html", {"msg": msg}, status_code=503)
+    return _tr(request, "lock_busy.html",
+               {"msg": msg, "reason": reason, "action": action,
+                # "Try again" only helps where retrying can succeed; the rest
+                # need something fixed first and the button was false comfort.
+                "can_retry": _LOCK_BUSY_PID is not None or bool(unwritable_now)},
+               status_code=503)
 
 
 def _web_writes_paused() -> bool:

@@ -945,7 +945,7 @@ def test_lock_busy_refuses_destructive_routes(monkeypatch):
 
 
 def test_folder_move_recovery_pause_names_cause_and_exact_paths(
-        client, monkeypatch, tmp_path):
+        client, monkeypatch, tmp_path, caplog):
     from qobuz_librarian.library.post_import_relocation import (
         RelocationRecoveryResult,
         RelocationRecoveryStatus,
@@ -975,17 +975,21 @@ def test_folder_move_recovery_pause_names_cause_and_exact_paths(
         ),
     )
 
-    blocked = client.post(
-        "/download", data={"album_id": "1"}, follow_redirects=False
-    )
+    with caplog.at_level("WARNING", logger="qobuz_librarian"):
+        blocked = client.post(
+            "/download", data={"album_id": "1"}, follow_redirects=False
+        )
+    assert "exact relocation evidence changed" in caplog.text
 
     assert blocked.status_code == 503
-    assert "interrupted library-folder move" in blocked.text
-    assert "exact relocation evidence changed" in blocked.text
-    assert "Paths needing attention" in blocked.text
+    assert "move of album folders inside your library was interrupted" in blocked.text
+    assert "nothing has been lost" in blocked.text
     assert all(str(path) in blocked.text for path in affected_paths)
     assert "Post-import folder-move recovery needs attention" in blocked.text
     assert "interrupted download" not in blocked.text
+    # The internal reason is a str(exc) from the relocation code. It goes to the
+    # log the message points at, not onto the screen.
+    assert "exact relocation evidence changed" not in blocked.text
 
 
 def test_nav_shows_qobuz_setup_when_credentials_are_missing(client, monkeypatch):

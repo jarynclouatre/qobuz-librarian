@@ -4,9 +4,11 @@
 
 <div class="ql-list-page ql-system-page">
 <div class="ql-system-card">
+{# The subtitle used to hard-code one of seven causes, so six of them were
+   told the wrong thing directly above the right thing. #}
 <header class="ql-page-header">
   <h1>Service paused</h1>
-  <p>Another run is using the library right now. Try again when that work is finished.</p>
+  {% if reason %}<p>{{ reason }}</p>{% endif %}
 </header>
 
 <div class="ql-notice ql-notice-error ql-system-notice">
@@ -18,7 +20,12 @@
 </div>
 
 <div class="ql-system-actions">
-  <button type="button" data-reload class="ql-btn ql-btn-primary w-full sm:w-auto">Try again</button>
+  {% if action %}
+  <a href="{{ action.href }}" class="ql-btn ql-btn-primary w-full sm:w-auto">{{ action.label }}</a>
+  {% endif %}
+  {% if can_retry %}
+  <button type="button" data-reload class="ql-btn {{ 'ql-btn-ghost' if action else 'ql-btn-primary' }} w-full sm:w-auto">Try again</button>
+  {% endif %}
   <a href="/" class="ql-btn ql-btn-ghost w-full sm:w-auto">Back to Search</a>
 </div>
 </div>
