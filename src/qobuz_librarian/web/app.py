@@ -15,7 +15,6 @@ import shutil
 import stat
 import threading
 import time
-import tomllib
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from qobuz_librarian import __version__
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import NoCredsError
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
@@ -1622,32 +1622,7 @@ _here = Path(__file__).parent
 templates = Jinja2Templates(directory=str(_here / "templates"))
 
 
-def _app_version() -> str:
-    """Prefer source-checkout metadata so stale editable installs don't lie."""
-    for parent in _here.parents:
-        pyproject = parent / "pyproject.toml"
-        if pyproject.exists():
-            try:
-                data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-                version = data.get("project", {}).get("version")
-                if version:
-                    return str(version)
-            except (OSError, tomllib.TOMLDecodeError):
-                break
-    try:
-        from importlib.metadata import version as _pkg_version
-        return _pkg_version("qobuz-librarian")
-    except Exception:
-        # Only reached on a broken / non-installed run; "unknown" is honest,
-        # a hardcoded number here just goes stale on the next bump.
-        return "unknown"
-
-
-try:
-    _APP_VERSION = _app_version()
-except Exception:
-    _APP_VERSION = "unknown"
-templates.env.globals["app_version"] = _APP_VERSION
+templates.env.globals["app_version"] = __version__
 templates.env.globals["repo_url"] = "https://github.com/jarynclouatre/qobuz-librarian"
 # Server epoch at render, so a live elapsed clock can tick from a client-side
 # baseline instead of trusting the browser's wall clock against a server epoch.
@@ -1724,7 +1699,7 @@ def _asset_version() -> str:
             h.update((static_dir / name).read_bytes())
         except OSError:
             pass
-    return h.hexdigest()[:12] or _APP_VERSION
+    return h.hexdigest()[:12] or __version__
 
 
 _ASSET_VERSION = _asset_version()

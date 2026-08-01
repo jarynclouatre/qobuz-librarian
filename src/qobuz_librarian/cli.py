@@ -8,8 +8,8 @@ import re
 import shutil
 import subprocess
 
+from qobuz_librarian import __version__, run_lock
 from qobuz_librarian import config as cfg
-from qobuz_librarian import run_lock
 from qobuz_librarian.api.auth import (
     AuthLost,
     NoCredsError,
@@ -498,13 +498,6 @@ class _ExitOneArgParser(argparse.ArgumentParser):
 
 
 def parse_args():
-    try:
-        from importlib.metadata import version as _pkg_version
-        _version = _pkg_version("qobuz-librarian")
-    except Exception:
-        # Only reached on a broken / non-installed editable run; "unknown" is
-        # honest, a hardcoded number here just goes stale on the next bump.
-        _version = "unknown"
     p = _ExitOneArgParser(
         description="Qobuz Librarian — download albums/artists from Qobuz and "
                     "keep a library complete, only fetching what's missing. "
@@ -529,7 +522,7 @@ def parse_args():
             "  4   transient network/API error — retry later\n"
             "  64  config / required tool missing"
         ))
-    p.add_argument("--version", action="version", version=f"qobuz-librarian {_version}")
+    p.add_argument("--version", action="version", version=f"qobuz-librarian {__version__}")
     p.add_argument("query", nargs="*", help="search query or Qobuz album URL")
     p.add_argument("--artist",       metavar="NAME",
                    help="Run artist mode on NAME (skips interactive menu)")
