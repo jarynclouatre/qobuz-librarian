@@ -25,18 +25,14 @@ tests/
 .gitattributes
 .env
 *.local
-notes/
-TODO.md
-TODO.local.md
 
 # Build artifacts.
 *.egg-info
 dist/
 build/
 
-# README assets and the dev-only logo generator.
+# README assets.
 assets/
-scripts/make_logo.py
 
 # Docs only the README links to.
 CHANGELOG.md
