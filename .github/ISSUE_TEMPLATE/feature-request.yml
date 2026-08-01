@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an idea
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: The workflow you want
+      description: What are you trying to accomplish? Walk through it as a user.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today
+      description: Either the manual steps you take now, or "this is impossible right now."
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why the current behaviour isn't enough
+      description: Be specific, e.g. "the Upgrade walk replaces the entire album, but I want to upgrade only the lossy tracks within an album."
+    validations:
+      required: true
+  - type: input
+    id: prior-art
+    attributes:
+      label: Anything off-the-shelf you've seen do this well
+      description: Optional. Link if it helps.
