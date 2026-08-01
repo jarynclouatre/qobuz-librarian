@@ -233,7 +233,7 @@
     <a href="/queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}">
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
       <span>Queue</span>
-      <span class="js-queue-badge ql-tab-count {% if queue_has_running %}is-warning{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
+      <span class="js-queue-badge ql-tabbar-count {% if queue_has_running %}is-warning{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
       {% if history_attention %}<span class="ql-tab-dot is-attention" data-attention-badge aria-label="A finished job needs your review"></span>{% endif %}
     </a>
     <a href="/settings" class="ql-tab {% if page=='settings' %}is-active{% endif %}">

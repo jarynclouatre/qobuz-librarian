@@ -241,6 +241,17 @@
   background-size: 0.82rem 0.82rem;
 }
 
+/* Part-selected groups. appearance:none suppresses the browser's own mixed
+   mark, so without this a half-ticked artist is drawn as an empty box. */
+.ql-checkbox:indeterminate {
+  border-color: var(--ql-gold);
+  background-color: var(--ql-gold);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M4 8h8' fill='none' stroke='%23241803' stroke-width='2.1' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 0.82rem 0.82rem;
+}
+
 .ql-checkbox:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
   outline-offset: 2px;

@@ -88,6 +88,7 @@
    those cases only: a global important `hidden` would also beat the
    `hidden lg:flex` reveal pattern and take the desktop sidebar with it. */
 .ql-tab-count.hidden,
+.ql-tabbar-count.hidden,
 .ql-queue-badge.hidden,
 .ql-review-tool.hidden,
 .ql-btn.hidden {
@@ -470,29 +471,37 @@ h1, h2, h3 {
   background: var(--ql-gold);
   box-shadow: 0 0 8px color-mix(in oklab, var(--ql-gold) 60%, transparent);
 }
-.ql-tabbar .ql-tab-count {
+/* The tab bar's own count. It has its own name because it is a filled pill on
+   a dark bar, while .ql-tab-count is a tinted chip inside a tab strip; sharing
+   one name let the chip's rules reach in here and repaint this. Every box and
+   colour it needs is declared right here, both halves of each colour pair. */
+.ql-tabbar-count {
   position: absolute;
   top: -0.3rem;
   left: calc(50% + 0.55rem);
+  display: inline-grid;
+  place-items: center;
   min-width: 0.95rem;
+  height: 0.95rem;
   border-radius: 999px;
   background: var(--ql-gold);
   color: var(--ql-gold-ink);
   font-family: var(--ql-font-mono);
   font-size: 0.58rem;
   font-weight: 700;
-  line-height: 0.95rem;
+  line-height: 1;
   text-align: center;
   padding-inline: 0.18rem;
   /* Ring in the bar's own color, so the pill reads as a badge sitting near
      the icon instead of a blob merged into it. */
   box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--ql-bg) 97%, #000);
 }
-[data-theme="winter"] .ql-tabbar .ql-tab-count {
+[data-theme="winter"] .ql-tabbar-count {
   box-shadow: 0 0 0 1.5px #efe6d4;
 }
-.ql-tabbar .ql-tab-count.is-warning {
+.ql-tabbar-count.is-warning {
   background: var(--ql-warning);
+  color: var(--ql-gold-ink);
 }
 .ql-tab-more {
   position: static;
@@ -1829,7 +1838,11 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-weight: 500;
   cursor: pointer;
 }
-.ql-toggle {
+/* The button-driven switch, whose knob is a real element. Distinct from
+   .ql-toggle in tokens.css, which is a checkbox that paints its knob as a
+   background layer -- when both answered to one name, this rule's
+   background-color could not clear that layer and the switch drew two knobs. */
+.ql-toggle-switch {
   position: relative;
   width: 2.125rem;
   height: 1.1875rem;
@@ -1839,7 +1852,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   background-color: color-mix(in oklab, var(--ql-text) 12%, transparent);
   transition: background-color 150ms ease, border-color 150ms ease;
 }
-.ql-toggle i {
+.ql-toggle-switch i {
   position: absolute;
   left: 2px;
   top: 2px;
@@ -1849,11 +1862,11 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   background-color: var(--ql-text-2);
   transition: transform 150ms ease, background-color 150ms ease;
 }
-.ql-search-filter[aria-pressed="true"] .ql-toggle {
+.ql-search-filter[aria-pressed="true"] .ql-toggle-switch {
   border-color: color-mix(in oklab, var(--ql-gold) 46%, transparent);
   background-color: color-mix(in oklab, var(--ql-gold) 26%, transparent);
 }
-.ql-search-filter[aria-pressed="true"] .ql-toggle i {
+.ql-search-filter[aria-pressed="true"] .ql-toggle-switch i {
   transform: translateX(0.9375rem);
   background-color: var(--ql-gold);
 }
@@ -3244,23 +3257,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   padding-inline: 0.32rem;
   font-size: 0.625rem;
 }
-.ql-tab-count {
-  display: inline-grid;
-  min-width: 1.25rem;
-  height: 1.25rem;
-  place-items: center;
-  border-radius: 0.375rem;
-  padding-inline: 0.35rem;
-  background-color: color-mix(in oklab, var(--color-base-content) 9%, transparent);
-  color: color-mix(in oklab, var(--color-base-content) 72%, transparent);
-  font-size: 0.6875rem;
-  font-weight: 700;
-  line-height: 1;
-}
-.ql-tab-count.is-warning {
-  background-color: color-mix(in oklab, var(--color-warning) 22%, transparent);
-  color: var(--color-warning);
-}
 .ql-row-action {
   flex: none;
 }
@@ -3382,19 +3378,35 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
   outline-offset: -2px;
 }
+/* The count chip inside a tab strip: the review tabs, and Queue / History.
+   One definition, all of it here. */
 .ql-tab-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 999px;
+  padding: 0.25rem 0.4375rem;
   font-family: var(--ql-font-mono);
   font-size: 0.65625rem;
   font-weight: 600;
+  line-height: 1;
   color: var(--ql-text-3);
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
-  border-radius: 999px;
-  padding: 0.25rem 0.4375rem;
-  line-height: 1;
+}
+/* Filled, not tinted: warning ink on a warning tint reads at 3.7:1 in winter.
+   --ql-gold-ink already flips with the theme, so both halves stay legible. */
+.ql-tab-count.is-warning {
+  background-color: var(--ql-warning);
+  color: var(--ql-gold-ink);
 }
 .ql-review-tabs button.is-active .ql-tab-count {
   color: var(--ql-gold);
   background-color: color-mix(in oklab, var(--ql-gold) 12%, transparent);
+}
+/* Gold on its own tint collapses to 2.5:1 against a cream page. */
+[data-theme="winter"] .ql-review-tabs button.is-active .ql-tab-count {
+  color: var(--ql-text);
 }
 .ql-review-tabs-static button {
   cursor: default;
