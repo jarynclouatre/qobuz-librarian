@@ -512,6 +512,28 @@
         }
         saveSelection();
       }
+      // "Hide owned" is a pure CSS filter, so nothing used to count what
+      // survived it: hiding every result left a blank panel under a heading
+      // that still claimed there was an album to see.
+      function applyOwnedFilterCount() {
+        var meta = root.querySelector("[data-search-count]");
+        var empty = root.querySelector("[data-owned-empty]");
+        var on = root.classList.contains("is-filtering-owned");
+        // Count what is actually on screen: both the table and the grid are in
+        // the DOM at once, so counting every [data-search-item] counts each
+        // album twice.
+        var shown = Array.prototype.filter.call(
+          root.querySelectorAll("[data-search-item]"), visibleItem).length;
+        if (meta) {
+          if (on) {
+            meta.textContent = shown + " album" + (shown === 1 ? "" : "s")
+              + " not in your library";
+          } else if (meta.dataset.fullLabel) {
+            meta.textContent = meta.dataset.fullLabel;
+          }
+        }
+        if (empty) empty.classList.toggle("hidden", !(on && shown === 0));
+      }
       function setView(name) {
         root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
           panel.classList.toggle("hidden", panel.dataset.searchViewPanel !== name);
@@ -558,6 +580,7 @@
           var next = hideOwnedButton.getAttribute("aria-pressed") !== "true";
           hideOwnedButton.setAttribute("aria-pressed", next ? "true" : "false");
           root.classList.toggle("is-filtering-owned", next);
+          applyOwnedFilterCount();
           syncBoxes();
           return;
         }
@@ -604,8 +627,15 @@
         if (!keys.length || bulkButton.disabled) return;
         var forms = keys.map(firstFormForKey).filter(Boolean);
         if (!forms.length) return;
-        var albumLabel = keys.length === 1 ? "album" : "albums";
-        window.qlConfirm("Download " + keys.length + " selected " + albumLabel + "? They queue now and import into your library.", { action: "Download" }).then(function (ok) {
+        // The keys carry their own type ("track-…" vs "album-…"), so the noun
+        // does not have to be guessed — it used to say "albums" for tracks.
+        var nTracks = keys.filter(function (k) { return k.indexOf("track-") === 0; }).length;
+        var nAlbums = keys.length - nTracks;
+        function part(n, one) { return n + " " + (n === 1 ? one : one + "s"); }
+        var what = nTracks && nAlbums
+          ? part(nAlbums, "album") + " and " + part(nTracks, "track")
+          : part(keys.length, nTracks ? "track" : "album");
+        window.qlConfirm("Download " + what + "? They queue now and import into your library.", { action: "Download" }).then(function (ok) {
           if (ok) runBulkDownload(forms);
         });
       }

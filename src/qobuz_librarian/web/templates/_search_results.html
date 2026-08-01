@@ -210,7 +210,8 @@
         </form>
         {% endif %}
         <h2 class="ql-search-context-title">{{ selected_artist.name }}</h2>
-        <span class="ql-search-context-meta">
+        <span class="ql-search-context-meta" data-search-count
+              data-full-label="{%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases{%- elif selected_artist.shown and selected_artist.shown > n_albums -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz{%- else -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz{%- endif -%}">
           {%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}
           {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases
           {%- elif selected_artist.shown and selected_artist.shown > n_albums -%}
@@ -223,12 +224,14 @@
           {%- endif -%}
         </span>
         {% else %}
-        <span class="ql-search-context-meta">{{ n_albums }} album{{ 's' if n_albums != 1 else '' }}</span>
+        <span class="ql-search-context-meta" data-search-count
+              data-full-label="{{ n_albums }} album{{ 's' if n_albums != 1 else '' }}">{{ n_albums }} album{{ 's' if n_albums != 1 else '' }}</span>
         {% endif %}
       </div>
       {{ search_tools(hide_owned=True) }}
     </div>
     {{ bulk_bar() }}
+    <p class="ql-review-page-empty hidden" data-owned-empty>Every result here is already in your library. Turn off &ldquo;Hide owned&rdquo; to see them.</p>
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">
       <div class="ql-table ql-search-table ql-table--albums" role="table" aria-label="Album search results">

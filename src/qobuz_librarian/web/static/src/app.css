@@ -2051,8 +2051,10 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-table-title-cell > div {
   min-width: 0;
 }
-.ql-cover,
-.ql-result-art {
+/* .ql-result-art is not in this group: it is the search row's own art, sized at
+   3.25rem above (3rem on a phone). Listing it here made an unconditional rule
+   that sat after both, so it silently won — including over the media query. */
+.ql-cover {
   width: 2.875rem;
   height: 2.875rem;
   flex: none;
