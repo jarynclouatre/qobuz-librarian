@@ -97,7 +97,9 @@
 {%- endmacro %}
 
 {% if error %}
-<div class="ql-notice ql-notice-error" data-flash><span>{{ error }} Refresh the queue or check Settings.</span></div>
+{# Each sender writes its own complete sentence, including what to do next; the
+   page used to append generic advice to messages it could not see. #}
+<div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
 {# The queue is work in flight; parked reviews live on their own pages and in

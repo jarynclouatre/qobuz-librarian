@@ -75,10 +75,23 @@ def build_args():
 
 
 def _set_empty_library_summary(job):
-    job.summary = (
-        "No artist folders were found in the configured music library. "
-        "Check that it contains your artist folders."
+    """Nothing to scan. Say what the app expected to find and where to fix it.
+
+    The layout and the pointer to Settings used to go to the log, which the user
+    never sees, leaving a message that only told them to check that their folder
+    contained folders.
+    """
+    from qobuz_librarian import config as _cfg
+    from qobuz_librarian.web import jobs as _job_mgr
+    job.error = (
+        f"Nothing to scan — no artist folders were found in {_cfg.MUSIC_ROOT}. "
+        "Qobuz Librarian expects one folder per artist, each holding album "
+        "folders. Check the music folder path in Settings."
     )
+    # A run that never scanned anything is not a clean pass. submit_scan leaves
+    # an explicitly-set terminal status alone, so this keeps the green Done
+    # chip off a scan the user still has to fix something for.
+    job.status = _job_mgr.JobStatus.FAILED
     log.info("No artist folders found in the configured music library.")
     log.info("  Expected layout: <music library>/<Artist>/<Album (Year)>/<track>.flac")
     log.info("  Check the music library path in Settings.")

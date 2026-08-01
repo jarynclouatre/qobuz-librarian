@@ -185,10 +185,13 @@
     {% if job.finished_at %}
     <p class="ql-job-finished">Finished {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed(job.finished_at - job.started_at) }}{% endif %}</p>
     {% endif %}
-    {% if job.error %}
-    <div class="ql-notice ql-notice-error ql-job-error"><span>{{ job.error }}</span></div>
-    {% elif job.summary %}
+    {# A partial run sets both: the summary is what it managed, the error is
+       what went wrong. Showing only the error threw away the outcome. #}
+    {% if job.summary %}
     <div class="ql-job-summary ql-job-summary--terminal"><span>{{ job.summary }}</span></div>
+    {% endif %}
+    {% if job.error %}
+    <div class="ql-notice ql-notice-error ql-job-error"><span>{{ job.error | strip_log_pointer(job.log_lines) }}</span></div>
     {% endif %}
     {% if job.log_lines %}
     <div class="log-console">
@@ -219,7 +222,11 @@
         <button type="submit" class="ql-btn ql-btn-danger ql-btn-sm">Undo (removes track)</button>
       </form>
       {% endif %}
+      {# On the tool's own page this reads "Back to Repair" while you are on
+         Repair. The header's copy is already gated the same way. #}
+      {% if not embedded_surface|default(false) %}
       <a href="{{ _back_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ _back_label }}</a>
+      {% endif %}
     </div>
   {% endif %}
 </div>

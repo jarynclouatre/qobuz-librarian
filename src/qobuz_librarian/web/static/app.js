@@ -742,6 +742,7 @@
         window.htmx.ajax("GET", "/queue",
           { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
       } else { location.reload(); }
+      if (window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
     });
   }
 

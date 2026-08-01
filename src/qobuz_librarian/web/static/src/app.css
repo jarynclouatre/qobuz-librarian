@@ -2829,11 +2829,22 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   line-height: 1.2;
   white-space: nowrap;
 }
+/* Desktop keeps the card region contained beside the downloads table. On a
+   phone a 27rem inner scroller is most of the screen and slices a card through
+   its own text, so the list flows with the page like the table below it. */
 .ql-history-cards {
-  max-height: 27rem;
-  overflow-y: auto;
-  overscroll-behavior: contain;
   border-radius: 16px;
+}
+@media (min-width: 768px) {
+  .ql-history-cards {
+    max-height: 27rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+.ql-history-truncated {
+  margin: 0 0 0.5rem;
+  color: var(--ql-text-3);
 }
 .ql-history-row--compact {
   padding-block: 0.6rem;

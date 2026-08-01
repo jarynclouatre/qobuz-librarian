@@ -347,6 +347,10 @@
       }
       refresh();
       setInterval(refresh, 12000);
+      // The queue view swaps itself the moment a job finishes; without this the
+      // badge kept claiming a queued job for up to a poll interval after the
+      // page it points at had gone empty.
+      window.qlRefreshQueueBadge = refresh;
     })();
     // Global keyboard shortcuts. "/" focuses the search box; Esc dismisses
     // any visible alert and blurs the focused input; "g s/q/h" navigate.

@@ -1648,8 +1648,25 @@ def _fmt_elapsed(seconds):
     return f"{hours}h {minutes}m"
 
 
+_LOG_POINTER_RE = re.compile(r"\s*[;.]?\s*(see the log|see job log)\.?\s*$",
+                             re.IGNORECASE)
+
+
+def _strip_log_pointer(message, log_lines):
+    """Drop a trailing "see the log" from a message when there is no log.
+
+    Log lines live in memory, so anything that outlived a restart has none, and
+    the pointer was printed directly above "No log output was retained for this
+    job."
+    """
+    if log_lines:
+        return message
+    return _LOG_POINTER_RE.sub("", message or "").strip() or message
+
+
 templates.env.globals["fmt_clock"] = _fmt_clock
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
+templates.env.filters["strip_log_pointer"] = _strip_log_pointer
 # Whether to show a Log out control — true only when auth is on and set up.
 templates.env.globals["auth_active"] = web_auth.auth_active
 
@@ -2285,7 +2302,12 @@ def _repair_current_job():
     of handing a parked review off to /jobs/{id} — and it's why a review is never
     hidden behind a "Start scan" button that would silently discard it."""
     states = (job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
-              job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING)
+              job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING,
+              # A run that failed or was cancelled is part of the phase set too.
+              # Dropping it sent the page back to its idle launcher on the next
+              # reload, where the freshness line — which counts only clean
+              # passes — then reported a scan from weeks earlier.
+              job_mgr.JobStatus.FAILED, job_mgr.JobStatus.CANCELED)
     cur = None
     for j in job_mgr.registry.all():
         if getattr(j, "execute_kind", "") != "repair" or j.status not in states:
@@ -3245,16 +3267,22 @@ def _make_download_run(
                     if retryable:
                         j.attention = ""
                         j.error = (
-                            "The download stopped before import completed. "
-                            "Its exact recovery state was saved; use Retry to "
-                            "continue it safely."
+                            "This download stopped before it finished "
+                            "importing. Everything it had was saved, so Retry "
+                            "picks up where it left off."
                         )
                     else:
+                        # No Retry is rendered in this state — only the one job
+                        # holding the durable recovery can be retried, and by
+                        # definition that isn't this one. Naming Retry here sent
+                        # people looking for a button that isn't on the page.
                         j.attention = "recovery"
                         j.error = (
-                            "The download did not reach a safely settled "
-                            "completion. Its recovery state was retained; "
-                            "use Retry to settle it and try again."
+                            "This download stopped part-way and couldn't be "
+                            "confirmed as finished cleanly. Nothing was added "
+                            "to your library and the part-finished files were "
+                            "left alone. Downloads stay paused until this is "
+                            "cleared under Settings > Diagnostics."
                         )
         benign = {"already_complete", "skipped_already_higher_quality",
                   "skipped_has_extras", "dry_run", "user_skipped",
@@ -7886,6 +7914,11 @@ async def queue_history(request: Request, p: int = 1):
         ))
         total = job_persistence.history_count(
             bulk=False, exclude_recoveries=True)
+        # Count the archive, not the cards that happened to render: the card
+        # layer is capped, so a headline built from it under-reported the
+        # history by however much it had dropped.
+        bulk_total = len(recoveries) + job_persistence.history_count(
+            bulk=True, exclude_recoveries=True)
         pages = max(1, (total + _HISTORY_PER_PAGE - 1) // _HISTORY_PER_PAGE)
         page = min(max(1, page), pages)
         rows = _stamp(job_persistence.history_page(
@@ -7894,13 +7927,15 @@ async def queue_history(request: Request, p: int = 1):
             bulk=False,
             exclude_recoveries=True,
         ))
-        return bulk, total, pages, page, rows
+        return bulk, bulk_total, total, pages, page, rows
 
     loop = asyncio.get_running_loop()
-    bulk_jobs, total, pages, p, rows = await loop.run_in_executor(None, lambda: _load_page(p))
+    bulk_jobs, bulk_total, total, pages, p, rows = await loop.run_in_executor(
+        None, lambda: _load_page(p))
     return _tr(request, "history.html", {
         "page": "queue", "active_tab": "history",
         "bulk_jobs": bulk_jobs, "jobs": rows,
+        "bulk_total": bulk_total, "bulk_shown": len(bulk_jobs),
         "cur_page": p, "pages": pages, "total": total,
     })
 

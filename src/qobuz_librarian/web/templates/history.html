@@ -57,7 +57,7 @@
 {%- endmacro %}
 
 {% if bulk_jobs or jobs %}
-{% set history_count = (bulk_jobs | length) + total %}
+{% set history_count = bulk_total + total %}
 <div class="ql-activity-toolbar">
   <p class="ql-mono-meta">{{ history_count }} job{% if history_count != 1 %}s{% endif %} in history</p>
   <form action="/queue/clear" method="post">
@@ -72,8 +72,11 @@
 <section class="ql-activity-section" aria-labelledby="history-jobs-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-jobs-heading">Jobs</h2>
-    <span class="ql-activity-count">{{ bulk_jobs | length }}</span>
+    <span class="ql-activity-count">{{ bulk_total }}</span>
   </header>
+  {% if bulk_total > bulk_shown %}
+  <p class="ql-mono-meta ql-history-truncated">Showing the {{ bulk_shown }} most recent of {{ bulk_total }}.</p>
+  {% endif %}
   <div class="ql-history-cards">
     <div class="ql-activity-list ql-panelize">
       {% for job in bulk_jobs %}
@@ -87,10 +90,9 @@
           <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% elif job.recoveries %}
           <p class="ql-row-meta ql-row-meta--error">Original files are being kept safely. Review or restore them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-          {% elif job.error %}
-          <p class="ql-row-meta ql-row-meta--error">{{ job.error }}</p>
-          {% elif job.summary %}
-          <p class="ql-row-meta">{{ job.summary }}</p>
+          {% else %}
+          {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
+          {% if job.error %}<p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>{% endif %}
           {% endif %}
         </div>
         {{ job_side(job) }}
@@ -115,8 +117,9 @@
         <p class="ql-row-title">
           <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} — {% endif %}{{ job.title }}</a>
         </p>
+        {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
         {% if job.error %}
-        <p class="ql-row-meta ql-row-meta--error">{{ job.error }}</p>
+        <p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>
         {% endif %}
       </div>
       {{ job_side(job) }}
