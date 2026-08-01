@@ -1,4 +1,7 @@
 [data-theme="night"] {
+  /* Tells the UA which palette its own widgets and default focus rings should
+     use; without it they resolve light on a near-black page. */
+  color-scheme: dark;
   --ql-bg: #0f0b07;
   --ql-bg-2: #171109;
   --ql-surface: #1a140c;
@@ -33,6 +36,7 @@
 }
 
 [data-theme="winter"] {
+  color-scheme: light;
   --ql-bg: #f3ecdf;
   --ql-bg-2: #ece2cf;
   --ql-surface: #fbf7ee;

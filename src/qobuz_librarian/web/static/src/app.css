@@ -5250,6 +5250,25 @@ details[open] > .ql-disclosure-summary::after {
 .ql-review-artist-check {
   flex: none;
 }
+/* The drawn box stays 16px; the target does not. This checkbox sits inside a
+   <summary>, and a <summary> toggles on any click that isn't consumed, so a
+   near-miss collapsed the group the user was working in instead of selecting
+   it. The label gives it a 44px target and the negative margin keeps the row's
+   layout exactly as it was. */
+.ql-review-artist-hit {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 0.85rem;
+  margin: -0.85rem;
+  cursor: pointer;
+}
+/* The disclosure row's own focus ring. Without it this fell through to
+   Chromium's, which resolves to a near-black outline on the night page. */
+.ql-review-summary:focus-visible {
+  outline: 2px solid var(--ql-gold);
+  outline-offset: -2px;
+}
 .ql-group-dismiss {
   position: absolute;
   top: 0.55rem;

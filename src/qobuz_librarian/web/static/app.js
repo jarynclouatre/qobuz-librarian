@@ -341,14 +341,46 @@
 
   // Tap-driven drawer support for mobile browsers.
   function closeDrawer(dd) {
+    var hadFocus = dd.contains(document.activeElement);
     dd.classList.remove("ql-mobile-drawer-open");
     dd.removeAttribute("open");
-    if (dd.contains(document.activeElement) && document.activeElement.blur) {
-      document.activeElement.blur();
-    }
     var b = dd.querySelector("[aria-expanded]");
     if (b) b.setAttribute("aria-expanded", "false");
+    // Hand focus back to the control that opened it. Blurring instead left it
+    // on <body>, which costs a dead Tab and then restarts at "Skip to content".
+    if (hadFocus) {
+      var summary = dd.querySelector("summary");
+      if (summary && summary.focus) summary.focus();
+      else if (document.activeElement && document.activeElement.blur) {
+        document.activeElement.blur();
+      }
+    }
   }
+
+  // A sheet that covers the viewport keeps Tab inside itself; without this,
+  // tabbing out of the drawer walks the page underneath it.
+  document.addEventListener("keydown", function (evt) {
+    if (evt.key !== "Tab") return;
+    var dd = document.querySelector("details.ql-mobile-drawer[open]");
+    if (!dd || !dd.contains(document.activeElement)) return;
+    var sheet = dd.querySelector(".ql-sheet");
+    if (!sheet) return;
+    var focusable = Array.prototype.filter.call(
+      sheet.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'),
+      function (el) { return el.offsetParent !== null; });
+    var summary = dd.querySelector("summary");
+    if (summary) focusable.unshift(summary);
+    if (!focusable.length) return;
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (evt.shiftKey && document.activeElement === first) {
+      evt.preventDefault();
+      last.focus();
+    } else if (!evt.shiftKey && document.activeElement === last) {
+      evt.preventDefault();
+      first.focus();
+    }
+  });
   window.qlCloseDropdowns = function (root) {
     var scope = root || document;
     var nodes = [];
@@ -1132,20 +1164,30 @@
         cb.style.outline = "2px solid #ef4444";
         setTimeout(function () { cb.style.outline = ""; }, 1500);
       }
-      // Serialize per-box saves so the server matches the checkbox.
-      cb.disabled = true;
+      // Serialize per-box saves so the server matches the checkbox. NOT by
+      // disabling it: disabling the element that has focus hands focus to
+      // <body>, and re-enabling never gives it back, so a keyboard user had to
+      // Tab from the top of the page again for every single tick. A busy flag
+      // does the same job and leaves focus where the user put it.
+      if (cb.dataset.saving === "1") return;
+      cb.dataset.saving = "1";
+      cb.setAttribute("aria-busy", "true");
+      function done() {
+        delete cb.dataset.saving;
+        cb.removeAttribute("aria-busy");
+      }
       var body = "cid=" + encodeURIComponent(cb.value) + "&checked=" + (cb.checked ? "1" : "0");
       post("/jobs/" + id + "/select", body)
         .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
         .then(function (c) {
-          cb.disabled = false;
+          done();
           if (det) delete det.dataset.selectionOverride;
           if (c) applyCounts(c);
           updateHideLabels();
           updateArtistChecks();
         })
         .catch(function () {
-          cb.disabled = false;
+          done();
           revert();
           showToast("Couldn't save that choice. Try again.", "error");
         });
@@ -1229,13 +1271,14 @@
       var previousRows = Array.prototype.map.call(
         det.querySelectorAll(".cb"), function (cb) { return cb.checked; });
       det._selecting = true;
+      // Same reason as saveTick: this box is usually the one with focus.
       var header = det.querySelector("[data-artist-select]");
-      if (header) header.disabled = true;
+      if (header) header.setAttribute("aria-busy", "true");
       det.dataset.selectionOverride = on ? "1" : "0";
       applyGroupChoice(det, on, false);
       bulkSelect(on, "artist", det.dataset.artist || "").then(function (result) {
         det._selecting = false;
-        if (header) header.disabled = false;
+        if (header) header.removeAttribute("aria-busy");
         if (result.ok) {
           applyGroupChoice(det, on, true);
         } else {
@@ -1433,7 +1476,10 @@
       if (t.closest("[data-hide]")) return;
       // The artist checkbox sits inside a <summary>: its own activation runs
       // instead of the summary's, but stop the bubble so nothing else fires.
-      if (t.closest("[data-artist-select]")) { e.stopPropagation(); return; }
+      if (t.closest("[data-artist-select], .ql-review-artist-hit")) {
+        e.stopPropagation();
+        return;
+      }
       var allBtn = t.closest("[data-select-all]");
       if (allBtn) { bulkSelect(allBtn.getAttribute("data-select-all") === "1", "all"); return; }
       var pageBtn = t.closest("[data-select-page]");
