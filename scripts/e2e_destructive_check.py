@@ -115,7 +115,7 @@ def test_downsample_refuses_bad_encode_keeps_original():
         orig = de.read_local_bit_depth
         calls = {"n": 0}
 
-        def fake_bps(p):
+        def fake_bps(p, *, pass_fds=()):
             calls["n"] += 1
             # first call (source) = 24; later call (output verify) = 16 (wrong)
             return 24 if calls["n"] == 1 else 16
@@ -124,7 +124,10 @@ def test_downsample_refuses_bad_encode_keeps_original():
             r = resample_one(f.name, 96000, 48000, af, base_dir=t)
         finally:
             de.read_local_bit_depth = orig
-        check("downsample aborts on depth mismatch", r[4] is not None, str(r[4]))
+        # Name the depth guard: any other refusal (a stub with the wrong
+        # signature, a missing tool) would otherwise read as this one firing.
+        check("downsample aborts on depth mismatch",
+              r[4] is not None and "expected 24-bit" in r[4], str(r[4]))
         check("downsample left original intact on mismatch",
               f.read_bytes() == before)
     finally:
@@ -171,9 +174,12 @@ def test_gap_fill_backup_restore_round_trips():
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library.backup import backup_gap_fill_files, restore_gap_fill_backup
     t = Path(tempfile.mkdtemp())
+    old_backup, old_root = cfg.UPGRADE_BACKUP_DIR, cfg.MUSIC_ROOT
     try:
-        old_dir = cfg.UPGRADE_BACKUP_DIR
         cfg.UPGRADE_BACKUP_DIR = t / "backups"
+        # The backup refuses any album outside the configured music tree, so
+        # the throwaway tree has to be that tree for the run.
+        cfg.MUSIC_ROOT = t
         album = t / "Artist" / "Album (2020)"
         f1 = album / "01 - A.flac"
         f2 = album / "02 - B.flac"
@@ -188,8 +194,8 @@ def test_gap_fill_backup_restore_round_trips():
         check("gap-fill restored byte-identical",
               f1.exists() and f2.exists()
               and f1.read_bytes() == h1 and f2.read_bytes() == h2)
-        cfg.UPGRADE_BACKUP_DIR = old_dir
     finally:
+        cfg.UPGRADE_BACKUP_DIR, cfg.MUSIC_ROOT = old_backup, old_root
         shutil.rmtree(t, ignore_errors=True)
 
 
