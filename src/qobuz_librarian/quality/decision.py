@@ -282,6 +282,31 @@ def is_local_album_capped(album_dir, capped, album=None):
     return False
 
 
+def clear_local_album_cap(album_dir):
+    """Forget that an album was downsampled — the undo path.
+
+    The cap exists so Upgrade never re-offers an album the user deliberately
+    shrank. Restoring the hi-res originals makes that no longer true, and
+    nothing used to remove the entry, so an undone downsample left the album
+    invisible to Upgrade for good. Clears the path key and any entry that would
+    still match it by folder identity.
+    """
+    key = _local_album_cap_key(album_dir)
+    if not key:
+        return 0
+    path = Path(album_dir)
+    capped = load_capped()
+    drop = [k for k, v in capped.items()
+            if k == key
+            or (isinstance(v, dict) and v.get("scope") == "local_album"
+                and str(v.get("album_dir") or "") == str(path))]
+    for k in drop:
+        capped.pop(k, None)
+    if drop:
+        save_capped(capped)
+    return len(drop)
+
+
 def mark_album_capped(album_id, qobuz_album, post_qual):
     if not album_id:
         return

@@ -8682,6 +8682,23 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             # partial or a rewritten copy, so the backup always wins the swap.
             n = restore_gap_fill_backup(
                 carried, origin, keep_larger_dst=False)
+            if n and kind == "downsample":
+                # Undoing a downsample has to undo everything it recorded, not
+                # just the files: the album is no longer shrunk, so the cap that
+                # hides it from Upgrade must go, and the saved candidate counts
+                # for that artist are now wrong on both tool pages.
+                from qobuz_librarian.quality.decision import clear_local_album_cap
+                try:
+                    clear_local_album_cap(origin)
+                except OSError:
+                    logging.getLogger("qobuz_librarian").exception(
+                        "couldn't clear the downsample cap for %s", origin)
+                try:
+                    from qobuz_librarian.web import flows
+                    flows._refresh_downsample_artist_state(Path(origin).parent)
+                except Exception:
+                    logging.getLogger("qobuz_librarian").exception(
+                        "downsample state refresh failed after undo")
             if n and not carried.exists():
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _ql_notice_html(

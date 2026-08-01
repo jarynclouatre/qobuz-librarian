@@ -36,6 +36,22 @@ from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import flac_cache
 
 
+def _discard_unused_stash(kept_dir, log):
+    """Drop a safety copy for a run that rewrote nothing.
+
+    discard_redundant_backup re-proves every file byte-identical at its origin
+    before removing anything, so this can only ever discard copies of files that
+    were left untouched.
+    """
+    if kept_dir is None:
+        return
+    try:
+        from qobuz_librarian.library.backup import discard_redundant_backup
+        discard_redundant_backup(kept_dir)
+    except OSError:
+        log("  ⚠ downsample: couldn't clear the unused safety copy; "
+            "it will expire on its own.")
+
 def _fsync_quiet(path):
     """Best-effort fsync of a file or directory. The downsample swap overwrites
     the only lossless master in place, so the encoded replacement (and its
@@ -932,6 +948,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
 
     n_uncopied = 0
     source_receipts = {}
+    kept_dir = None
     if keep_originals:
         from qobuz_librarian.library.backup import stash_downsample_originals
         kept_dir, copied, receipts = stash_downsample_originals(
@@ -953,10 +970,11 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             log(f"  ⚠ downsample: {n_uncopied} file(s) have no safety copy — "
                 "left untouched.")
         candidates = protected
-        if kept_dir is not None and candidates and verbose:
-            log(f"  ⤷ originals kept {cfg.UPGRADE_BACKUP_RETENTION_DAYS} "
-                f"day(s): restore from Settings → Diagnostics")
         if not candidates:
+            # Nothing to rewrite after all — the copies we just took are not a
+            # safety net for anything, so don't leave them parked as a 7-day
+            # "undo" for a run that changed nothing.
+            _discard_unused_stash(kept_dir, log)
             return {"resampled": 0, "errors": n_uncopied, "saved_bytes": 0}
 
     saved_total = 0
@@ -1035,6 +1053,16 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     if verbose and resampled:
         log(f"  ✓ downsample: {resampled} resampled, "
             f"saved {human(saved_total)}")
+    # The stash is taken up front, before a single file is encoded, so "we kept
+    # your originals" used to be claimed on the intent to rewrite. Say it — and
+    # keep it — only once something actually was rewritten.
+    if kept_dir is not None:
+        if resampled:
+            if verbose:
+                log(f"  ⤷ originals kept {cfg.UPGRADE_BACKUP_RETENTION_DAYS} "
+                    f"day(s): restore from Settings → Diagnostics")
+        else:
+            _discard_unused_stash(kept_dir, log)
 
     return {"resampled": resampled,
             "errors": errors + n_uncopied,
