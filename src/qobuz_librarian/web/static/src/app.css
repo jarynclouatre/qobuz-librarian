@@ -6014,3 +6014,22 @@ details[data-artist].htmx-swapping {
     bottom: calc(4.4rem + env(safe-area-inset-bottom));
   }
 }
+
+/* Search's selection bar. From 768px up the results are an inner scroller, so
+   the bar stays on screen where it sits, above the list. Below that the list
+   is page scroll and a bar at the top of it is 20 screens behind you by the
+   time you have finished picking, so it docks over the tab bar instead. Same
+   reason as the block above: it belongs at the END of the file, after the
+   `.ql-bulk-bar` rules it has to beat. */
+@media (max-width: 767.98px) {
+  .ql-bulk-bar {
+    position: fixed;
+    left: 0.625rem;
+    right: 0.625rem;
+    bottom: calc(3.6rem + env(safe-area-inset-bottom));
+    z-index: 25;
+  }
+  .ql-search-results:has(.ql-bulk-bar:not(.hidden)) {
+    padding-bottom: 4.5rem;
+  }
+}
