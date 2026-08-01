@@ -4747,6 +4747,11 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   background: var(--ql-owned);
   box-shadow: 0 0 8px color-mix(in oklab, var(--ql-owned) 60%, transparent);
 }
+/* A token Qobuz has rejected is not a connection; the dot says so. */
+.ql-conn-line--stale .ql-conn-dot {
+  background: var(--ql-danger);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--ql-danger) 60%, transparent);
+}
 .ql-conn-line .ql-conn-who {
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);

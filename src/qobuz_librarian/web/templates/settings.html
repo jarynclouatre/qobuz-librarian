@@ -64,6 +64,12 @@
   <span>Qobuz rejected this token, so it was not saved. Get a fresh token from
   play.qobuz.com, then try again.</span>
 </div>
+{% elif error == "unreachable" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>Qobuz couldn&rsquo;t be reached to check this token, so it was not saved
+  and the one you already have is still in use. Try again when you&rsquo;re back
+  online.</span>
+</div>
 {% elif error == "empty" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <span>Token cannot be empty. Paste the <code>token</code> value from
@@ -104,8 +110,12 @@
           It stays on this server and is only sent to Qobuz.
         </p>
       </div>
-      {% if auth_token_set %}
-      <span class="ql-conn-line"><span class="ql-conn-dot"></span>Connected{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
+      {# "Connected" is a claim about Qobuz accepting the token, so it waits for
+         Qobuz to have accepted it. A saved-but-unproven token says so. #}
+      {% if auth_token_set and token_verified is not sameas false %}
+      <span class="ql-conn-line"><span class="ql-conn-dot"></span>{% if token_verified %}Connected{% else %}Token saved{% endif %}{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
+      {% elif auth_token_set %}
+      <span class="ql-conn-line ql-conn-line--stale"><span class="ql-conn-dot"></span>Token not authenticating{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
       {% else %}
       <span class="ql-badge ql-badge-primary">Required for search</span>
       {% endif %}

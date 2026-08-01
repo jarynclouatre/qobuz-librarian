@@ -4389,3 +4389,45 @@ def test_settings_storage_separates_the_library_from_the_drive(client, monkeypat
     monkeypatch.setattr(app_mod, "_is_mount_point", lambda _p: False)
     r = client.get("/settings")
     assert "Drive holding your music: 520 GB free of 3.83 TB" in r.text
+
+
+def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
+    # The old reply was text/plain "CSRF token missing or invalid" with no nav,
+    # and because it wasn't HTML the middleware skipped minting a cookie too —
+    # so the retry failed identically.
+    client.cookies.clear()
+    r = client.post("/settings/behavior", data={"form_complete": "1"},
+                    follow_redirects=False)
+
+    assert r.status_code == 403
+    assert "CSRF token missing or invalid" not in r.text
+    assert "went stale" in r.text.lower()
+    assert "Reload and try again" in r.text
+    assert "ql_csrf" in r.headers.get("set-cookie", "")
+
+    # And an htmx action gets told to reload rather than swallowing a 403.
+    client.cookies.clear()
+    r = client.post("/settings/behavior", data={"form_complete": "1"},
+                    headers={"HX-Request": "true"}, follow_redirects=False)
+    assert r.headers.get("HX-Refresh") == "true"
+    assert "ql_csrf" in r.headers.get("set-cookie", "")
+
+
+def test_connection_badge_reports_only_what_qobuz_has_confirmed(client, monkeypatch):
+    # "Connected" used to show for any saved token, including one that had never
+    # authenticated — and a token Qobuz had rejected.
+    import qobuz_librarian.web.app as app_mod
+    monkeypatch.setattr(app_mod, "_read_creds",
+                        lambda: {"user_id": "u", "auth_token": "t"})
+
+    monkeypatch.setattr(app_mod, "_TOKEN_VALID", True)
+    assert "Connected" in client.get("/settings").text
+
+    monkeypatch.setattr(app_mod, "_TOKEN_VALID", None)
+    body = client.get("/settings").text
+    assert "Token saved" in body and ">Connected" not in body
+
+    monkeypatch.setattr(app_mod, "_TOKEN_VALID", False)
+    body = client.get("/settings").text
+    assert "Token not authenticating" in body
+    assert "Connected" not in body

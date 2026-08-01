@@ -1999,6 +1999,16 @@ async def _initial_artist_search_html(request: Request, query: str) -> str:
     )
 
 
+def render_error_page(request, code, title, msg):
+    """The app's styled error page, reusable from middleware.
+
+    The CSRF middleware runs outside the route layer and used to answer with
+    bare text, which is how a refused action became an unstyled dead end.
+    """
+    return _tr(request, "error.html",
+               {"code": code, "title": title, "msg": msg}, status_code=code)
+
+
 @app.exception_handler(StarletteHTTPException)
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Render a styled page for a mistyped/stale URL instead of a bare
@@ -8252,6 +8262,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
     return _tr(request, "settings.html", {
         "music_storage": music_storage,
         "library_size": library_size,
+        # True once Qobuz has accepted the saved token, False once it has
+        # rejected it, None when it has never been asked.
+        "token_verified": _TOKEN_VALID,
         "user_id": creds.get("user_id", "") if user_id is None else user_id,
         "auth_token_set": bool(creds.get("auth_token")),
         "auth_token_prefill": auth_token_prefill,
@@ -8366,6 +8379,15 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
         # visually masked) field so the user can fix a paste slip without
         # re-typing it — same as the needuser/empty/creds branches.
         return _settings_response(request, error="rejected",
+                                  user_id=user_id.strip(),
+                                  auth_token_prefill=auth_token.strip(),
+                                  diagnostics=diags)
+    if verdict == "unreachable" and new_token and _TOKEN_VALID:
+        # Couldn't check it, and the token already saved is one that has
+        # authenticated. Overwriting a known-good credential with an unproven
+        # one — and then reporting "Connected" — is how a working install
+        # became a broken one during a network blip.
+        return _settings_response(request, error="unreachable",
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)

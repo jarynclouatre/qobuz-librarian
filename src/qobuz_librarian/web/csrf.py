@@ -16,6 +16,40 @@ def _new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+_STALE_MESSAGE = ("This page had been open too long to be trusted with that "
+                  "action, so nothing was changed. Reload and try again.")
+
+
+def _stale_page_response(request, token):
+    """A refusal the user can act on, carrying a fresh token so the retry works."""
+    from starlette.responses import HTMLResponse
+    if request.headers.get("HX-Request"):
+        # htmx swallows a non-2xx body, and the app's toast host reads this
+        # verbatim; HX-Refresh reloads the page with the new cookie in place.
+        resp = HTMLResponse("", status_code=200,
+                            headers={"HX-Refresh": "true"})
+    else:
+        from qobuz_librarian.web.app import render_error_page
+        resp = render_error_page(request, 403, "That page went stale",
+                                 _STALE_MESSAGE)
+    _set_csrf_cookie(request, resp, token)
+    return resp
+
+
+def _set_csrf_cookie(request, response, token):
+    secure = (request.url.scheme == "https"
+              or request.headers.get("x-forwarded-proto") == "https")
+    response.set_cookie(
+        CSRF_COOKIE_NAME,
+        token,
+        max_age=60 * 60 * 24 * 30,
+        samesite="strict",
+        httponly=True,
+        secure=secure,
+        path="/",
+    )
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
@@ -50,9 +84,14 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if not cookie_token or not submitted or not secrets.compare_digest(
                 str(cookie_token).encode("utf-8"), str(submitted).encode("utf-8")
             ):
-                return PlainTextResponse(
-                    "CSRF token missing or invalid", status_code=403
-                )
+                # Ordinary causes: a tab left open past the cookie's 30 days, a
+                # browser that clears cookies, a privacy extension. The old
+                # reply was a bare white page reading "CSRF token missing or
+                # invalid" with no nav and no way back — and because it was
+                # text/plain, the minting below skipped it too, so retrying
+                # failed exactly the same way. Say what happened in English and
+                # always hand back a usable token.
+                return _stale_page_response(request, token)
 
         response = await call_next(request)
         # Mint the cookie only when the client has none AND we're returning an
