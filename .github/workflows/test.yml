@@ -68,3 +68,15 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run build
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Nothing else builds the image until docker.yml runs, and that only fires
+      # on release:published — a Dockerfile or image-lock.txt that no longer
+      # resolves would surface with the release already public and no image
+      # behind it. Build only, so this needs no registry credentials.
+      - name: Build the runtime image (no push)
+        run: docker build .
