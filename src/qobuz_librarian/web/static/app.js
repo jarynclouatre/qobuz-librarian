@@ -205,9 +205,12 @@
     evt.preventDefault();
     evt.stopPropagation();
     var msg = el.getAttribute("data-confirm");
-    if (msg.indexOf("{count}") !== -1) {
+    if (msg.indexOf("{count}") !== -1 || msg.indexOf("{s}") !== -1) {
       var m = (el.textContent || "").match(/[\d,]+/);
-      msg = msg.replace("{count}", m ? m[0] : "the");
+      // {s} pluralises from the same live number as {count}; a plural rendered
+      // server-side goes stale the moment the selection changes.
+      var one = !!m && m[0].replace(/,/g, "") === "1";
+      msg = msg.replace("{count}", m ? m[0] : "the").replace(/\{s\}/g, one ? "" : "s");
     }
     window.qlConfirm(msg, {
       action: el.getAttribute("data-confirm-action") || "",
@@ -1041,8 +1044,10 @@
       if (tabsNav) tabsNav.classList.toggle("hidden", c.total === 0);
       if (filterRow && !curQuery()) filterRow.classList.toggle("hidden", c.artists < 4);
       if (dsTotal) {
+        // "smaller", not "reclaimed": with originals kept, the run costs more
+        // disk than it saves until the backups expire.
         dsTotal.textContent = c.reclaimable_label
-          ? " · ~" + c.reclaimable_label + " reclaimable" : "";
+          ? " · ~" + c.reclaimable_label + " smaller" : "";
       }
       cont.dataset.reviewTotal = c.total;
       cont.dataset.reviewSelected = c.selected;

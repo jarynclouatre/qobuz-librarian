@@ -1883,6 +1883,9 @@ def _tr(request, name, context, *, status_code=200):
         )
     context.setdefault("cli_mode", _CLI_MODE)
     context.setdefault("lock_unenforceable", _LOCK_UNENFORCEABLE)
+    # Every tool page offered its Start button while writes were paused and let
+    # the POST bounce the user onto a 503. Refuse at offer time, not submit time.
+    context.setdefault("writes_paused", _web_writes_paused())
     # Error/utility renders (e.g. the 404 page) don't name a nav section; an
     # explicit empty page just leaves every nav link inactive instead of
     # relying on Jinja's undefined-is-falsey behaviour.
@@ -6753,25 +6756,6 @@ async def job_approve(request: Request, job_id: str):
     if job.execute_kind != "library" or tab not in ("missing", "gaps"):
         tab = ""
     loop = asyncio.get_running_loop()
-    # First downsample while the keep-vs-delete choice is unmade: force it
-    # here, before anything is rewritten.
-    if (job.execute_kind == "downsample"
-            and job.status == job_mgr.JobStatus.AWAITING_REVIEW
-            and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
-        choice = (form.get("keep_choice") or "").strip().lower()
-        if choice in ("keep", "delete"):
-            from qobuz_librarian.web import settings_store
-
-            def _save_keep_choice():
-                # Persist as the standing default AND apply in-memory now.
-                settings_store.save({"DOWNSAMPLE_KEEP_ORIGINALS": choice})
-                cfg.DOWNSAMPLE_KEEP_ORIGINALS = choice
-
-            await loop.run_in_executor(None, _save_keep_choice)
-        else:
-            return _tr(request, "downsample_keep_choice.html", {
-                "job": job, "page": "downsample",
-                "backup_retention_days": cfg.UPGRADE_BACKUP_RETENTION_DAYS})
     skipped = 0
     if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
             and job.execute_kind in _LIBRARY_SURFACE_KINDS):
@@ -6798,6 +6782,29 @@ async def job_approve(request: Request, job_id: str):
         if not has_pick:
             return RedirectResponse(url=f"{dest}?noselection=1{_skip_q}",
                                     status_code=303)
+        # Only now that the run is going to happen: the keep-vs-delete answer
+        # is a standing policy saved to Settings, and it used to be asked and
+        # saved before anything checked there was a single album ticked — so an
+        # approve that turned out to be a no-op still changed what every future
+        # downsample does with your originals.
+        if (job.execute_kind == "downsample"
+                and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
+            choice = (form.get("keep_choice") or "").strip().lower()
+            if choice in ("keep", "delete"):
+                from qobuz_librarian.web import settings_store
+
+                def _save_keep_choice():
+                    # Persist as the standing default AND apply in-memory now.
+                    settings_store.save({"DOWNSAMPLE_KEEP_ORIGINALS": choice})
+                    cfg.DOWNSAMPLE_KEEP_ORIGINALS = choice
+
+                await loop.run_in_executor(None, _save_keep_choice)
+            else:
+                with job._lock:
+                    picked = sum(1 for c in job.candidates if c.get("selected"))
+                return _tr(request, "downsample_keep_choice.html", {
+                    "job": job, "page": "downsample", "picked": picked,
+                    "backup_retention_days": cfg.UPGRADE_BACKUP_RETENTION_DAYS})
     # Selection is saved server-side as the user ticks (the paginated review
     # no longer carries every checkbox in the form), so approve runs against
     # the saved flags — passing None keeps them as-is rather than reading the

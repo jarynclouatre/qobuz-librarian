@@ -74,10 +74,10 @@
   {% endif %}
 
   {% if s == 'awaiting_review' %}
-    {# The review tools row already states the live count; repeating the scan
-       summary above it printed the same fact twice. Keep the box only when it
-       carries the candidate-cap warning, which exists nowhere else. #}
-    {% if job.summary and job.candidate_cap_hit %}
+    {# The scan's own summary carries its caveats — an artist it couldn't check,
+       a result cap it hit. Gating it on candidate_cap_hit meant a review whose
+       sweep was incomplete presented its count as the whole answer. #}
+    {% if job.summary %}
     <div class="ql-job-summary ql-job-summary--review"><span>{{ job.summary }}</span></div>
     {% endif %}
 
@@ -100,15 +100,17 @@
           <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary"
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
-            {% if not _bar_selected %} disabled{% endif %}
+            {% if not _bar_selected or writes_paused %} disabled{% endif %}{% if writes_paused %} title="Paused while terminal mode is active" aria-disabled="true"{% endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm="{% if not ds_originals_chosen() %}Downsample the selected albums now? You'll first choose whether to keep your hi-res originals — nothing is rewritten until you do.{% elif keeps_ds_originals() %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected files now? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Repair selected files ({count})? Files are replaced only after each new copy verifies."
+            {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
             {%- else %} data-confirm="Download selected albums ({count})? They queue now and import into your library."
             {%- endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if ds_originals_chosen() %}Downsample{% else %}Continue{% endif %}"{% if ds_originals_chosen() and not keeps_ds_originals() %} data-confirm-danger{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-confirm-danger{% endif %}
             {%- elif job.execute_kind == 'repair' %} data-confirm-action="Repair"
+            {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-confirm-danger
             {%- else %} data-confirm-action="Download"
             {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ _bar_selected }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
           {% set _result_count = review_counts.total %}

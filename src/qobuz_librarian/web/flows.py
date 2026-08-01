@@ -1809,12 +1809,16 @@ def execute_downsamples(job, chosen, token=None, args=None):
     job._progress_scope = None
     if job.cancel_requested:
         job.summary = (f"Stopped early. Downsampled {plural(shrunk, 'album')} "
-                       f"({format_size(total_saved)} reclaimed), "
-                       f"{len(chosen) - processed} not started.")
+                       f"({format_size(total_saved)} smaller), "
+                       f"{len(chosen) - processed} not started."
+                       + _kept_originals_note())
         log.info(job.summary)
         return
+    # "Reclaimed" is a claim about free space. When the originals are kept, a
+    # full copy of every one of them is written to the backup folder, so the
+    # run costs MORE disk than it saves until that retention expires.
     summary = (f"Finished. Downsampled {plural(shrunk, 'album')}, "
-               f"reclaimed {format_size(total_saved)}.")
+               f"{format_size(total_saved)} smaller." + _kept_originals_note())
     if skipped:
         summary += f" {plural(skipped, 'album')} skipped (no longer on disk)."
     job.summary = summary
@@ -1829,6 +1833,14 @@ def execute_downsamples(job, chosen, token=None, args=None):
                 f"be flushed to disk — check the drive; see the log.")
         job.error = f"{job.error} {note}" if job.error else note
 
+
+def _kept_originals_note():
+    """The sentence that stops a downsample summary overstating what it freed."""
+    if cfg.DOWNSAMPLE_KEEP_ORIGINALS != "keep":
+        return ""
+    days = cfg.UPGRADE_BACKUP_RETENTION_DAYS
+    return (f" Your hi-res originals are kept for {plural(days, 'day')}, so "
+            "nothing is freed until they expire or you remove them in Settings.")
 
 # ── Repair flow ───────────────────────────────────────────────────────────────
 

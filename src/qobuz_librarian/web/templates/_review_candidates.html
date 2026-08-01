@@ -43,7 +43,7 @@
     </div>
     {% if not review_tab %}
     <p class="ql-review-count">
-      <span data-summary-count>{{ labels.review_summary_count(job, review_counts.total, review_counts.artists) }}</span>{% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %} · ~{{ review_reclaimable_label }} reclaimable{% endif %}</span>{% endif %}
+      <span data-summary-count>{{ labels.review_summary_count(job, review_counts.total, review_counts.artists) }}</span>{% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %} · ~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
     </p>
     {% endif %}
     <div class="ql-review-summary-actions">
@@ -110,6 +110,17 @@
       cleanly before it replaces the original.</span>
   </div>
   {% endif %}
+  {% endif %}
+
+  {# Upgrade is the one destructive tool with no undo at all, and it was the
+     only one whose review said nothing about what it does. #}
+  {% if job.execute_kind == 'upgrade' %}
+  <div class="ql-notice ql-notice-warning ql-review-warning">
+    <span><strong>This replaces your files and cannot be undone.</strong> Each
+      album you pick is set aside, downloaded again from Qobuz at the higher
+      quality, and the copy you have now is removed once the replacement has
+      been verified. Unlike Downsample, no originals are kept.</span>
+  </div>
   {% endif %}
 
   <div id="review-page" class="ql-review-page">

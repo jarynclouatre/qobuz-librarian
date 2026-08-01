@@ -41,7 +41,7 @@
     <div class="ql-work-card-actions">
       <form action="/upgrade/review" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"
+        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="Paused while terminal mode is active" aria-disabled="true"{% endif %}
 >Review candidates</button>
       </form>
     </div>

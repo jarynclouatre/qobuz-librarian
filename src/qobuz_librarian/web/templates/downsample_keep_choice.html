@@ -11,7 +11,7 @@
   <section class="ql-work-card ql-work-card-primary">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">Keep a backup of your hi-res originals?</p>
-      <p class="ql-work-card-text">Downsampling rewrites your files in place to save space. Choose what happens to the hi-res originals — you can change it later in Settings.</p>
+      <p class="ql-work-card-text">{% if picked %}You picked {{ picked }} album{{ 's' if picked != 1 }}. {% endif %}Downsampling rewrites your files in place to save space. Choose what happens to the hi-res originals — you can change it later in Settings.</p>
     </div>
     <div class="ql-work-card-actions gap-3">
       <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
