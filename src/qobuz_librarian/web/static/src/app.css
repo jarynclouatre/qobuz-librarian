@@ -1725,6 +1725,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-weight: 560;
 }
 .ql-owned-label,
+.ql-partial-label,
 .ql-quality-badge {
   display: inline-flex;
   align-items: center;
@@ -1750,6 +1751,13 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   width: 0.875rem;
   height: 0.875rem;
   flex: none;
+}
+/* Part-finished: on disk but short of the release's track count, so it keeps
+   its download button. Reads as a caution, not a completion. */
+.ql-partial-label {
+  color: var(--ql-warning);
+  border-color: color-mix(in oklab, var(--ql-warning) 32%, transparent);
+  background-color: color-mix(in oklab, var(--ql-warning) 8%, transparent);
 }
 .ql-search-root {
   display: grid;

@@ -2955,20 +2955,35 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             # that would contradict its own purpose.
             if _album_raws:
                 def _annotate_owned():
-                    # Mark owned with the SAME filesystem resolver the
-                    # download and scan paths use, so the badge agrees with
-                    # them.
+                    # Same filesystem resolver the download and scan paths use.
+                    # "Owned" means COMPLETE, not "a folder with a file in it":
+                    # a part-finished album used to read "In library" and lose
+                    # both its checkbox and its download button, which is the
+                    # gap-fill case this app exists for.
                     from qobuz_librarian.library.catalog import _count_audio_files_in, _dir_year
                     for res, alb in zip(results, _album_raws):
                         try:
                             folder = find_album_dir_filesystem(alb)
-                            # A folder with the album's name but no audio (a
-                            # failed download, deleted tracks) isn't "in library"
-                            # — the same empty-shell guard the review reconcile uses.
-                            if folder is None or not _count_audio_files_in(folder):
+                            if folder is None:
                                 continue
-                            res["owned"] = True
+                            have = _count_audio_files_in(folder)
+                            if not have:
+                                # A folder with the album's name but no audio (a
+                                # failed download, deleted tracks) isn't in the
+                                # library — the empty-shell guard the review
+                                # reconcile uses.
+                                continue
                             res["disk_year"] = _dir_year(folder.name)
+                            try:
+                                want = int(alb.get("tracks_count") or 0)
+                            except (TypeError, ValueError):
+                                want = 0
+                            if want and have < want:
+                                res["partial"] = True
+                                res["have_tracks"] = have
+                                res["want_tracks"] = want
+                            else:
+                                res["owned"] = True
                         except Exception:
                             pass
                 try:
@@ -3021,6 +3036,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         by_key[key] = g
                         album_groups.append(g)
                     g["owned"] = g["owned"] or res["owned"]
+                    # A complete edition outranks a part-finished one: if any
+                    # edition of this record is whole on disk, the row is owned.
+                    if res.get("partial") and not g["owned"]:
+                        g["partial"] = True
+                        g["have_tracks"] = res.get("have_tracks")
+                        g["want_tracks"] = res.get("want_tracks")
+                    if g["owned"]:
+                        g["partial"] = False
                     if res.get("disk_year"):
                         g["disk_year"] = res["disk_year"]
                     g["editions"].append({
@@ -5677,6 +5700,39 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 lambda: call_within(cfg.WEB_FETCH_TIMEOUT, get_album, album_id, token)),
             timeout=cfg.WEB_FETCH_TIMEOUT,
         )
+        if not download_as_new_edition and track_id:
+            # A single track was excluded from the guard entirely, so nothing
+            # checked whether that track was already on disk before fetching it
+            # again. Ask about the one track, not the whole album.
+            def _track_already_there():
+                from qobuz_librarian.library.catalog import (
+                    compute_missing,
+                    find_album_dir_filesystem,
+                    find_existing_tracks,
+                )
+                try:
+                    album_dir = find_album_dir_filesystem(album)
+                except Exception:
+                    return False
+                if album_dir is None:
+                    return False
+                try:
+                    existing_tracks, _ = find_existing_tracks(album, album_dir=album_dir)
+                except Exception:
+                    return False
+                qobuz_tracks = (album.get("tracks") or {}).get("items") or []
+                if not (existing_tracks and qobuz_tracks):
+                    return False
+                _missing, present = compute_missing(qobuz_tracks, existing_tracks)
+                return any(str(t.get("id") or "") == track_id for t in present)
+
+            if await loop.run_in_executor(None, _track_already_there):
+                msg = "That track is already in your library."
+                if _is_htmx(request):
+                    return HTMLResponse(_ql_notice_html("warning", html.escape(msg)))
+                return RedirectResponse(
+                    url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
+
         if not download_as_new_edition and not track_id:
             def _already_complete():
                 from qobuz_librarian.library.catalog import (

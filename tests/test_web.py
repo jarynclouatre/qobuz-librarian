@@ -695,7 +695,8 @@ def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path
     }
     owned = tmp_path / "Das Tor (2013)"
     owned.mkdir()
-    (owned / "01 - Das Tor.flac").write_bytes(b"\x00")  # real audio => in library
+    for n in range(1, 11):
+        (owned / f"{n:02d} - Das Tor.flac").write_bytes(b"\x00")
 
     monkeypatch.setattr(search_mod, "search_albums", lambda *_a, **_kw: [album])
     monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: owned)
@@ -707,6 +708,39 @@ def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path
     assert "In library" in r.text
     assert "quality-upgrade" not in r.text
     assert ">Upgrade<" not in r.text
+
+
+def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch, tmp_path):
+    # One file in the folder is not the album. Calling it "In library" took away
+    # the checkbox and the download button on exactly the albums gap fill exists
+    # to finish.
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    album = {
+        "id": "album1",
+        "title": "Das Tor",
+        "artist": {"name": "Paysage d'Hiver"},
+        "year": 2013,
+        "tracks_count": 10,
+        "maximum_bit_depth": 24,
+    }
+    partial = tmp_path / "Das Tor (2013)"
+    partial.mkdir()
+    (partial / "01 - Das Tor.flac").write_bytes(b"\x00")
+
+    monkeypatch.setattr(search_mod, "search_albums", lambda *_a, **_kw: [album])
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: partial)
+
+    r = client.post("/search", data={"q": "Das Tor", "kind": "album"},
+                    headers={"HX-Request": "true"})
+
+    assert r.status_code == 200
+    assert "In library" not in r.text
+    assert "1 of 10" in r.text
+    assert 'name="album_id" value="album1"' in r.text   # still downloadable
 
 
 def test_new_release_check_refused_without_baseline(client, monkeypatch):

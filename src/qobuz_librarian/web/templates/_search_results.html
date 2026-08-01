@@ -277,7 +277,7 @@
             </div>
             <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
-            <span role="cell">{% if g.owned %}<span class="ql-owned-label">In library</span>{% else %}{{ quality_badge(g) }}{% endif %}</span>
+            <span role="cell">{% if g.owned %}<span class="ql-owned-label">In library</span>{% elif g.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ g.have_tracks }} of {{ g.want_tracks }}</span>{% else %}{{ quality_badge(g) }}{% endif %}</span>
             <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, '', False, True) }}{% endif %}</span>
           </div>
           {% if g.others %}
@@ -328,7 +328,7 @@
           <p class="ql-grid-meta">{{ g.year }} · {{ g.tracks }} track{{ 's' if g.tracks != 1 else '' }}{% if g.others %} · +{{ g.others | length }} version{{ 's' if g.others | length != 1 else '' }}{% endif %}</p>
         </div>
         <div class="ql-grid-footer">
-          {% if g.owned %}<span class="ql-owned-label">In library</span>{% else %}{{ quality_badge(g) }}{% endif %}
+          {% if g.owned %}<span class="ql-owned-label">In library</span>{% elif g.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ g.have_tracks }} of {{ g.want_tracks }}</span>{% else %}{{ quality_badge(g) }}{% endif %}
           {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, '', False, True) }}{% endif %}
         </div>
       </div>
