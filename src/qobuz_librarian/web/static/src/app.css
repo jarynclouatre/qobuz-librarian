@@ -573,6 +573,10 @@ h1, h2, h3 {
   min-height: 3.25rem;
   align-items: center;
   gap: 0.625rem;
+  /* Paired with viewport-fit=cover in the head: the page now extends into the
+     display cutout, so the bar has to hold itself clear of the status bar. On
+     a device without a cutout this resolves to 0 and nothing moves. */
+  padding-top: calc(0.55rem + env(safe-area-inset-top));
   border-bottom: 1px solid var(--ql-line);
   background:
     linear-gradient(180deg, color-mix(in oklab, var(--ql-surface-2) 62%, var(--ql-bg)) 0%,

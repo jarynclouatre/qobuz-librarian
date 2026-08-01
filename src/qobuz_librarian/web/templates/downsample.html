@@ -64,7 +64,7 @@
     <section class="ql-work-card ql-empty-work ql-quality-entry-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">No downsample candidates saved</p>
-        <p class="ql-work-card-text">Refresh checks the files already on disk{% if keeps_ds_originals() %} — rewrites keep their hi-res originals for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% endif %}. Scan library on the Library page rebuilds every candidate list in one pass.</p>
+        <p class="ql-work-card-text">Refresh checks the files already on disk{% if keeps_ds_originals() %} — rewrites keep their hi-res originals for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% endif %}. A library scan rebuilds every candidate list in one pass.</p>
       </div>
       <div class="ql-work-card-actions">
         <form action="/downsample" method="post" data-busy-submit>
