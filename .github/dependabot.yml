@@ -1,6 +1,5 @@
 # Monthly, grouped, so dependency PRs arrive as one digest per ecosystem
-# instead of a drip — the pins are deliberate (see docker/image-lock.txt),
-# this is the reminder they exist.
+# instead of a drip — the pins are deliberate, this is the reminder they exist.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -10,6 +9,14 @@ updates:
     groups:
       python-deps:
         patterns: ["*"]
+    # pip picks up every .txt one level down, which includes the image lock.
+    # That file is a whole resolved set produced inside the runtime base image
+    # by scripts/lock-image-deps.sh, with streamrip's and beets' caps applied —
+    # bumping one line of it by hand ships a combination nothing resolved or
+    # smoke-tested. Refresh it by rerunning that script; the docker ecosystem
+    # below still watches the base image and pins in the Dockerfile.
+    exclude-paths:
+      - docker/image-lock.txt
   - package-ecosystem: npm
     directory: /
     schedule:
