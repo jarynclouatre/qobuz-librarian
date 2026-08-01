@@ -343,10 +343,16 @@
       </div>
       {% endfor %}
     </dl>
-    {% if music_storage %}
+    {% if library_size or music_storage %}
     <div class="ql-storage">
-      <p class="ql-storage-meta">Music folder: {{ music_storage.used }} used · {{ music_storage.free }} free</p>
-      <div class="ql-storage-bar"><i style="width: {{ music_storage.pct }}%"></i></div>
+      {% if library_size %}
+      <p class="ql-storage-meta">Your library: {{ library_size }} — as of the last scan</p>
+      {% endif %}
+      {% if music_storage %}
+      <p class="ql-storage-meta">{% if music_storage.own_volume %}Music drive{% else %}Drive holding your music{% endif %}: {{ music_storage.free }} free of {{ music_storage.total }}</p>
+      <div class="ql-storage-bar" role="img"
+           aria-label="{{ music_storage.pct }}% of that drive is used"><i style="width: {{ music_storage.pct }}%"></i></div>
+      {% endif %}
     </div>
     {% endif %}
     <p class="ql-form-note">

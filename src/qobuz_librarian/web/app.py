@@ -5885,6 +5885,19 @@ _census_cache: tuple | None = None
 _CENSUS_TTL = 300.0
 
 
+def _is_mount_point(path) -> bool:
+    """Whether ``path`` is the root of its own filesystem.
+
+    Decides whether the free-space figure beside it covers the music alone or a
+    disk shared with everything else on the machine, so the label can say which.
+    """
+    try:
+        p = Path(path)
+        return p.stat().st_dev != p.parent.stat().st_dev
+    except OSError:
+        return False
+
+
 def _census_view():
     """Quality-census context for the Library page, shaped from the scan
     cache. One table walk over every cached tag row — cheap, but not
@@ -8214,19 +8227,31 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
     creds_from_env = bool(cfg.QOBUZ_USER_AUTH_TOKEN)
     cli_only_env = os.environ.get("QL_CLI_ONLY", "").strip().lower() in (
         "1", "true", "yes", "on")
+    # Two separate facts. disk_usage() measures the FILESYSTEM the music folder
+    # sits on, never the folder — it was labelled "Music folder: 3.31 TB used"
+    # while the folder held 1.6 MB. The library's own size comes from the census
+    # the Library page already shows, and the volume figure is labelled by what
+    # it actually covers: its own mount (the usual Docker bind, or a dataset
+    # with a quota) or a disk shared with everything else on the machine.
     music_storage = None
     try:
         du = shutil.disk_usage(cfg.MUSIC_ROOT)
+
         def _tb(n):
             return f"{n / 1e12:.2f} TB" if n >= 1e12 else f"{n / 1e9:.0f} GB"
+
         music_storage = {
-            "used": _tb(du.used), "free": _tb(du.free),
+            "free": _tb(du.free), "total": _tb(du.total),
             "pct": round(du.used / du.total * 100, 1) if du.total else 0,
+            "own_volume": _is_mount_point(cfg.MUSIC_ROOT),
         }
     except OSError:
         pass
+    census = _census_view()
+    library_size = census.get("total") if census else ""
     return _tr(request, "settings.html", {
         "music_storage": music_storage,
+        "library_size": library_size,
         "user_id": creds.get("user_id", "") if user_id is None else user_id,
         "auth_token_set": bool(creds.get("auth_token")),
         "auth_token_prefill": auth_token_prefill,

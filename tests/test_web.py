@@ -4359,3 +4359,33 @@ def test_approve_rechecks_the_write_pause_after_awaits(client, monkeypatch):
     assert r.status_code in (200, 303, 503)
     assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
     assert any(c.get("selected") for c in job.candidates)
+
+
+def test_settings_storage_separates_the_library_from_the_drive(client, monkeypatch):
+    # The one line used to read "Music folder: 3.31 TB used", which is the whole
+    # filesystem — on an instance holding 1.6 MB of music.
+    import shutil
+
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_read_creds",
+                        lambda: {"user_id": "u", "auth_token": "t"})
+    monkeypatch.setattr(app_mod, "_census_view",
+                        lambda: {"total": "38,201 tracks · 412 GB"})
+    monkeypatch.setattr(
+        shutil, "disk_usage",
+        lambda _p: type("du", (), {"used": 3_310_000_000_000,
+                                   "free": 520_000_000_000,
+                                   "total": 3_830_000_000_000})())
+
+    monkeypatch.setattr(app_mod, "_is_mount_point", lambda _p: True)
+    r = client.get("/settings")
+    assert "Your library: 38,201 tracks · 412 GB" in r.text
+    assert "Music drive: 520 GB free of 3.83 TB" in r.text
+    assert "Music folder: 3.31 TB used" not in r.text
+
+    # Sharing a disk with everything else says so instead of implying the
+    # figures are the music's own.
+    monkeypatch.setattr(app_mod, "_is_mount_point", lambda _p: False)
+    r = client.get("/settings")
+    assert "Drive holding your music: 520 GB free of 3.83 TB" in r.text
