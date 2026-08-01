@@ -1,13 +1,13 @@
 """Interactive session mode picker."""
 import textwrap
 
-from qobuz_librarian.ui_cli.colors import C, fmt, text_width
+from qobuz_librarian.ui_cli.colors import C, fmt, text_width, wrap
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.sentinels import Mode
 
 # (key, name, mode, what it does). Held as data rather than pre-wrapped lines
 # so the descriptions can be laid out to the terminal actually in front of the
-# user — hand-wrapped at ~110 columns, they shredded on a phone.
+# user; hand-wrapped at ~110 columns, they shredded on a phone.
 _CHOICES = [
     ("1", "Search", Mode.ALBUM,
      "find and download one album (name or Qobuz URL)"),
@@ -39,7 +39,7 @@ def _print_choices():
     """Two columns while they fit, name over description when they don't."""
     width = text_width()
     name_col = max(len(name) for _key, name, _mode, _desc in _CHOICES)
-    head_len = len("    N) ") + name_col + len(" — ")
+    head_len = len("    N) ") + name_col + len(": ")
     for key, name, _mode, desc in _CHOICES:
         if width - head_len < 32:
             log.info(fmt(C.WHITE, f"    {key}) {name}"))
@@ -47,7 +47,7 @@ def _print_choices():
                 log.info(fmt(C.GRAY, f"       {line}"))
             continue
         lines = textwrap.wrap(desc, width - head_len)
-        log.info(fmt(C.WHITE, f"    {key}) {name.ljust(name_col)} — {lines[0]}"))
+        log.info(fmt(C.WHITE, f"    {key}) {name.ljust(name_col)}: {lines[0]}"))
         for line in lines[1:]:
             log.info(fmt(C.GRAY, " " * head_len + line))
 
@@ -56,8 +56,8 @@ def interactive_session_mode():
     """Top-of-loop menu. Re-prompts on unrecognized input rather than
     falling through to album mode on a typo."""
     print()
-    log.info(fmt(C.GRAY,
-        "  Qobuz Librarian: download Qobuz albums and fill your library's gaps."))
+    log.info(fmt(C.GRAY, wrap(
+        "Qobuz Librarian: download Qobuz albums and fill your library's gaps.")))
     log.info(fmt(C.BOLD + C.CYAN, "  What would you like to do?"))
     _print_choices()
     log.info(fmt(C.WHITE, "    q) Quit"))

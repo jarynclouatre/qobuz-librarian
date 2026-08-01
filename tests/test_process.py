@@ -538,6 +538,100 @@ def test_upgrade_verification_keeps_backup_when_replacement_is_short(monkeypatch
     assert proc._upgrade_replacement_verified({"id": "x"}, complete, backup) is True
 
 
+def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path):
+    import os
+    import sqlite3
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+
+    music = tmp_path / "music"
+    album = music / "Artist" / "Album"
+    album.mkdir(parents=True)
+    old_files = [album / "01.flac", album / "02.flac"]
+    for path in old_files:
+        path.write_bytes(b"old")
+
+    database = tmp_path / "beets.db"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+    monkeypatch.setattr(cfg, "BEETS_TIMEOUT", 5)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT)")
+        connection.execute(
+            "CREATE TABLE items ("
+            "id INTEGER PRIMARY KEY, path BLOB NOT NULL, album_id INTEGER, title TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE album_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, key TEXT, value TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE item_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, key TEXT, value TEXT)"
+        )
+        connection.execute("INSERT INTO albums VALUES (10, 'Original')")
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, 10, ?)",
+            [
+                (1, os.fsencode(old_files[0]), "Old one"),
+                (2, os.fsencode(old_files[1]), "Old two"),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO album_attributes VALUES (1, 10, 'source', 'old')"
+        )
+        connection.execute(
+            "INSERT INTO item_attributes VALUES (1, 1, 'source', 'old')"
+        )
+    connection.close()
+
+    snapshot = beets.capture_beets_album_entries(album)
+    assert snapshot is not None
+
+    backup = tmp_path / "backup"
+    album.rename(backup)
+    album.mkdir()
+    replacement_files = [album / f"0{number}.flac" for number in range(1, 4)]
+    for path in replacement_files:
+        path.write_bytes(b"new")
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO albums VALUES (20, 'Replacement')")
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, 20, ?)",
+            [
+                (11, os.fsencode(replacement_files[0]), "New one"),
+                (12, os.fsencode(replacement_files[1]), "New two"),
+                (13, os.fsencode(replacement_files[2]), "New three"),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO album_attributes VALUES (2, 20, 'source', 'new')"
+        )
+        connection.execute(
+            "INSERT INTO item_attributes VALUES (2, 11, 'source', 'new')"
+        )
+    connection.close()
+
+    assert beets.retire_replaced_beets_entries(
+        snapshot, album, replacement_files
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT id FROM items ORDER BY id").fetchall() == [
+            (11,), (12,), (13,)
+        ]
+        assert connection.execute("SELECT id FROM albums ORDER BY id").fetchall() == [
+            (20,)
+        ]
+        assert connection.execute(
+            "SELECT entity_id FROM item_attributes ORDER BY id"
+        ).fetchall() == [(11,)]
+        assert connection.execute(
+            "SELECT entity_id FROM album_attributes ORDER BY id"
+        ).fetchall() == [(20,)]
+    connection.close()
+
+
 def test_upgrade_verification_rejects_a_masked_per_track_downgrade(monkeypatch, tmp_path):
     from qobuz_librarian.modes import process as proc
 

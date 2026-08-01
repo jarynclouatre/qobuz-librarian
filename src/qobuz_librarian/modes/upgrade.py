@@ -1,4 +1,4 @@
-"""Upgrade walk mode — review saved baseline quality upgrade candidates."""
+"""Upgrade walk mode: review saved baseline quality upgrade candidates."""
 import time
 from pathlib import Path
 
@@ -87,14 +87,15 @@ def run_upgrade_walk_mode(args, token):
     keeps its walk value by grouping saved candidates by artist, but it no
     longer performs a separate live upgrade scan.
 
-    Returns the exit code: 0 when the walk finished, non-zero when it was cut
-    short. The interactive menu ignores it; --upgrade-walk exits with it.
+    Returns the exit code: 0 when the walk finished cleanly, non-zero when it
+    was cut short or approved replacement work failed. The interactive menu
+    ignores it; --upgrade-walk exits with it.
     """
     if not cfg.UPGRADE_SCAN_ENABLED:
         log.info(fmt(C.YELLOW, "  Upgrade scanning is turned off."))
         return 0
     clear_scan_caches()
-    banner("Upgrade walk — saved Library candidates")
+    banner("Upgrade walk: saved Library candidates")
 
     saved_state = upgrade_state.load()
     if not saved_state.get("complete"):
@@ -112,27 +113,28 @@ def run_upgrade_walk_mode(args, token):
         return 0
 
     # A saved candidate is a record of a past scan, not a fact about the
-    # library now — set aside anything whose album folder has gone since,
+    # library now. Set aside anything whose album folder has gone since,
     # instead of presenting it (and calling it high-confidence) as if it were
     # still there. Candidates from older scans don't carry the folder, and a
     # missing music root proves nothing about any of them; both present as
     # before.
-    n_gone = 0
+    n_stale_candidates = 0
     if Path(cfg.MUSIC_ROOT).is_dir():
         still = []
         for c in saved:
             d = (c.get("payload") or {}).get("album_dir")
             if d and not Path(d).is_dir():
-                n_gone += 1
-                vlog(f"  gone from disk: {c.get('artist') or '?'} — "
+                n_stale_candidates += 1
+                vlog(f"  gone from disk: {c.get('artist') or '?'}: "
                      f"{c.get('title') or '?'}")
             else:
                 still.append(c)
         saved = still
-    if n_gone:
+    if n_stale_candidates:
         log.info(fmt(C.YELLOW,
-            f"  {plural(n_gone, 'saved candidate')} no longer in the library "
-            "— run a Library refresh to clear them."))
+            f"  {plural(n_stale_candidates, 'saved candidate')} no longer in "
+            "the library. "
+            "Run a Library refresh to clear them."))
     if not saved:
         log.info(fmt(C.YELLOW,
             "  Nothing left to review. Run a Library refresh first."))
@@ -151,7 +153,9 @@ def run_upgrade_walk_mode(args, token):
     n_reviewed = 0
     n_upgraded_albums = 0
     n_unverified_albums = 0
+    n_catalogue_failed = 0
     n_failed_albums = 0
+    n_gone_albums = 0
     no_answer = False
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
 
@@ -161,7 +165,7 @@ def run_upgrade_walk_mode(args, token):
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
 
     # Auto-accept-all gate. Skipped under --dry-run (which changes nothing), so
-    # a preview run doesn't prompt to "run unattended" — matching downsample.py.
+    # a preview run doesn't prompt to "run unattended", matching downsample.py.
     auto_accept_all = False
     if (not args.yes and not getattr(args, "auto_safe", False)
             and not getattr(args, "dry_run", False)):
@@ -198,7 +202,7 @@ def run_upgrade_walk_mode(args, token):
                          f"{fmt(C.MAGENTA, detail)}")
             log.info("")
 
-            # --auto-safe — fully unattended path.
+            # --auto-safe is the fully unattended path.
             if getattr(args, "auto_safe", False):
                 low_conf = []
                 for _c in candidates:
@@ -222,7 +226,7 @@ def run_upgrade_walk_mode(args, token):
                         f"({len(low_conf)}/{len(candidates)} low-confidence)."))
                     for _t, _rs in low_conf:
                         log.info(fmt(C.GRAY,
-                            f"     · {truncate(_t, 50)}  —  {'; '.join(_rs)}"))
+                            f"     · {truncate(_t, 50)}: {'; '.join(_rs)}"))
                     unsafe_artists.append((artist_name, low_conf))
                     log.info("")
                     continue
@@ -232,7 +236,7 @@ def run_upgrade_walk_mode(args, token):
                 _flush_stdin()
                 # on_eof=None so a closed stdin is distinguishable from a No:
                 # the walk would otherwise skip every artist and call that a
-                # success — the same lie the downsample walk told.
+                # success, the same lie the downsample walk told.
                 answer = confirm(f"  Upgrade {plural(n_albums, 'album')}?",
                                  default_yes=False,
                                  auto_yes=args.yes or auto_accept_all,
@@ -279,13 +283,17 @@ def run_upgrade_walk_mode(args, token):
                     # there but its tracks are not). Not benign: it must show
                     # in the closing summary, and the saved state is left for
                     # a Library refresh to clear.
-                    n_gone += 1
+                    n_gone_albums += 1
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
                 if _pr_result in BENIGN_UPGRADE_RESULTS:
                     if _pr_result not in {"cancelled", "dry_run"}:
                         _refresh_saved_state_after_upgrade(
                             album, _proc_result, token, args)
+                    time.sleep(cfg.ARTIST_API_DELAY)
+                    continue
+                if (_proc_result or {}).get("catalogue_unverified", False):
+                    n_catalogue_failed += 1
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
                 if (_proc_result or {}).get("upgrade_unverified", False):
@@ -296,7 +304,7 @@ def run_upgrade_walk_mode(args, token):
                     continue
                 if not (_proc_result or {}).get("imported", False):
                     # Attempted (Qobuz had a higher-quality copy) but didn't
-                    # land — backup failed, download failed, import failed.
+                    # land: backup failed, download failed, or import failed.
                     n_failed_albums += 1
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
@@ -320,31 +328,38 @@ def run_upgrade_walk_mode(args, token):
     finally:
         args.consolidate = saved_consolidate
 
+    n_failed_attempts = (n_failed_albums + n_unverified_albums
+                         + n_catalogue_failed + n_gone_albums)
+    n_gone = n_stale_candidates + n_gone_albums
+
     log.info("")
     if no_answer:
         log.warning(block(fmt(C.YELLOW,
             "  ✗  The walk stopped: each artist needs a confirmation and "
             "there is no terminal to give one. Re-run with --yes (or "
             "--auto-safe) to accept unattended.")))
-    elif n_upgraded_albums or not (n_failed_albums or n_unverified_albums
-                                   or n_gone):
+    elif n_failed_attempts:
+        log.info(fmt(C.RED, "  ✗  Upgrade walk finished with errors."))
+    elif n_upgraded_albums or not n_gone:
         log.info(fmt(C.GREEN, "  ✓  Upgrade walk complete."))
     else:
-        # Every candidate failed, went unverified or was gone from disk — a
-        # green tick would misreport the run.
-        log.info(fmt(C.YELLOW, "  ⚠  Upgrade walk finished — nothing was "
+        log.info(fmt(C.YELLOW, "  ⚠  Upgrade walk finished; nothing was "
                                "upgraded."))
     log.info(fmt(C.GRAY,
-        f"     Reviewed {plural(n_reviewed, 'artist')} — upgraded tracks in "
+        f"     Reviewed {plural(n_reviewed, 'artist')}; upgraded tracks in "
         f"{plural(n_upgraded_albums, 'album')}."))
     if n_gone:
         log.info(fmt(C.YELLOW,
-            f"     ⚠  {plural(n_gone, 'candidate')} no longer in the library "
-            "— run a Library refresh to clear them."))
+            f"     ⚠  {plural(n_gone, 'candidate')} no longer in the library. "
+            "Run a Library refresh to clear them."))
+    if n_catalogue_failed:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  {plural(n_catalogue_failed, 'replacement')} needs "
+            "Beets catalogue attention (backup retained)."))
     if n_unverified_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_unverified_albums, 'album')} kept the original "
-            "(upgrade couldn't be verified complete — backup retained)."))
+            "(upgrade couldn't be verified complete; backup retained)."))
     if n_failed_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_failed_albums, 'album')} couldn't be upgraded "
@@ -357,7 +372,7 @@ def run_upgrade_walk_mode(args, token):
             log.info(fmt(C.WHITE, f"     {_a}"))
             for _t, _rs in _lc:
                 log.info(fmt(C.GRAY,
-                    f"       · {truncate(_t, 50)}  —  {'; '.join(_rs)}"))
+                    f"       · {truncate(_t, 50)}: {'; '.join(_rs)}"))
         log.info(fmt(C.GRAY,
             "     Re-run without --auto-safe to review these interactively."))
-    return EXIT_GENERAL if no_answer else 0
+    return EXIT_GENERAL if no_answer or n_failed_attempts else 0

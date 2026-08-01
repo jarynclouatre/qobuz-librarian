@@ -269,8 +269,8 @@ def test_execute_migration_copies_selected_and_keeps_originals(tmp_path):
 
 def test_execute_migration_blocks_low_space_in_place_move(tmp_path, monkeypatch):
     # An in-place move into a destination that's known to be short on space must
-    # be refused before any file is touched — running out mid-move would scatter
-    # the library — unless the user passes the deliberate low-space override.
+    # be refused before any file is touched; running out mid-move would scatter
+    # the library unless the user passes the deliberate low-space override.
     from qobuz_librarian.library import migrate as engine
     from qobuz_librarian.web import flows
     from qobuz_librarian.web import jobs as jm
@@ -319,7 +319,7 @@ def test_fingerprint_lookup_resolves_album_year_and_is_placeable():
 def test_run_migrate_gates_on_insufficient_destination_space(tmp_path, monkeypatch):
     # Short on space: an unattended (--yes) run must refuse outright (a partial
     # in-place move scatters the library), and an interactive run needs a typed
-    # override — not the casual confirm that could be answered with a stray "y".
+    # override, not the casual confirm that could be answered with a stray "y".
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -390,6 +390,37 @@ def test_run_migrate_gates_on_insufficient_destination_space(tmp_path, monkeypat
     with patch("builtins.input", side_effect=["y"]):
         migrate_mode.run_migrate_mode(_args())
     assert executed == [1]
+
+
+def test_migrate_dry_run_leaves_destination_untouched(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from qobuz_librarian.modes import migrate as migrate_mode
+
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    existing = destination / "keep.txt"
+    existing.write_text("unchanged", encoding="utf-8")
+    monkeypatch.setattr(migrate_mode, "HAVE_MUTAGEN", True)
+    monkeypatch.setattr(
+        migrate_mode.engine, "collect_items", lambda *_args, **_kwargs: []
+    )
+    args = SimpleNamespace(
+        migrate_src=str(source),
+        migrate_dest=str(destination),
+        dry_run=True,
+        yes=False,
+        verbose=False,
+        in_place=False,
+        acoustid=False,
+    )
+
+    assert migrate_mode.run_migrate_mode(args) == 0
+    assert migrate_mode.run_migrate_mode(args) == 0
+    assert list(destination.iterdir()) == [existing]
+    assert existing.read_text(encoding="utf-8") == "unchanged"
 
 
 # ── statx directory-incarnation proof ────────────────────────────────────────

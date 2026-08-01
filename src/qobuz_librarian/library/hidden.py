@@ -10,7 +10,7 @@ Keyed on a fingerprint, not the Qobuz album id: dedup can resolve to a
 different edition (a new id) of the same album on a later scan, and an id key
 would let that edition slip back onto the list. The fingerprint keeps every
 edition of one album dismissed together. The year is kept for the Hidden view
-but is deliberately not part of the match key — a remaster carries a different
+but is deliberately not part of the match key; a remaster carries a different
 year, and a missing year (common from Qobuz) would otherwise mis-key.
 
 Hides are scoped so the two walks don't cross-contaminate: a "missing" hide
@@ -18,17 +18,18 @@ Hides are scoped so the two walks don't cross-contaminate: a "missing" hide
 hide (don't offer to re-rip this album I own at higher quality). Restoring one
 scope never touches the other.
 
-Explicit single-artist scans do NOT consult this store — typing a name is a
+Explicit single-artist scans do NOT consult this store. Typing a name is a
 conscious request to see everything by that artist. Only the bulk walks filter
 on it.
 """
 import threading
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.library.tags import normalize, strip_album_decorations_strict
+from qobuz_librarian.library.tags import strip_album_decorations_strict
 
 SCOPE_MISSING = "missing"
 SCOPE_UPGRADE = "upgrade"
@@ -53,19 +54,21 @@ def _store_lock():
         yield
 
 
-def album_fingerprint(artist, title):
-    """Loose key tying every edition of one album together.
+def _fingerprint_text(value):
+    text = unicodedata.normalize("NFKD", value or "").casefold()
+    return "".join(
+        char for char in text
+        if char.isalnum() or unicodedata.category(char).startswith("S")
+    )
 
-    Returns None when artist or title normalize to nothing (pure-CJK / emoji
-    titles) — the caller treats that as 'can't fingerprint', so such an album
-    is never matched against the store and stays visible rather than being
-    wrongly hidden.
-    """
-    a = normalize(artist or "")
+
+def album_fingerprint(artist, title):
+    """Unicode-safe loose key tying every edition of one album together."""
+    a = _fingerprint_text(artist)
     # The strict strip: the loose one collapsed distinct albums into one key
     # ('Alone' with 'Alone (Again)'), so dismissing one buried the other and
     # a kept album could vanish under a dismissed sibling's fingerprint.
-    t = normalize(strip_album_decorations_strict(title or ""))
+    t = _fingerprint_text(strip_album_decorations_strict(title or ""))
     if not a or not t:
         return None
     return f"{a}|{t}"
@@ -77,7 +80,7 @@ def _entry_rows(entry):
     One key can cover several rows: the fingerprint deliberately ties every
     edition of an album together, and Qobuz lists editions as separate
     releases. Entries written before rows were kept carry only the first one at
-    the top level, so derive a single row from those — the counts on screen
+    the top level, so derive a single row from those. The counts on screen
     have to mean the same thing for an old store as a new one.
     """
     rows = entry.get("rows")
@@ -96,7 +99,7 @@ def load():
     """Return the whole store as {scope: {fingerprint: entry}}, tolerating a
     missing file by returning empty scopes. A corrupt file is moved aside
     (….corrupt) with a warning rather than silently overwritten by the next
-    save() — which would destroy the dismissed-album list with no trace."""
+    save(), which would destroy the dismissed-album list with no trace."""
     base = {s: {} for s in _SCOPES}
     data = state_file.load_json_object(
         cfg.HIDDEN_FILE, "the hidden-albums store",
@@ -115,11 +118,11 @@ def _rekeyed(bucket):
     """Entries under the fingerprint the current key function produces.
 
     A store written before the strict title key computed its keys with the
-    loose one, which merged distinct albums — one entry can therefore cover
+    loose one, which merged distinct albums; one entry can therefore cover
     rows that now belong under several keys. Rebuild each entry's key(s) from
     the full titles its rows kept; entries whose rows don't recompute (no
     titles recorded, artist lost) stay under their stored key. In-memory
-    only — the next save persists the re-keyed form."""
+    only; the next save persists the re-keyed form."""
     out = {}
     for old_key, entry in bucket.items():
         rows = _entry_rows(entry)
@@ -150,7 +153,7 @@ def _rekeyed(bucket):
     return out
 
 
-_SAVE_FAILED_MSG = ("Couldn't save that — the data folder looks full or "
+_SAVE_FAILED_MSG = ("Couldn't save that: the data folder looks full or "
                     "read-only, so it would have come back after a restart.")
 
 
@@ -179,7 +182,7 @@ def hide(scope, items):
     """Record dismissals. `items` is an iterable of (artist, title, year).
 
     Returns the number of ROWS newly recorded, which is what left the user's
-    review — not the number of fingerprints, which is smaller whenever two
+    review, not the number of fingerprints, which is smaller whenever two
     editions of one album were both on the list. The two used to be reported
     side by side as if they were the same number.
     """
@@ -221,9 +224,9 @@ def restore(scope, artists):
     with _store_lock():
         store = load()
         bucket = store.get(scope) or {}
-        targets = {normalize(a) for a in artists if normalize(a)}
+        targets = {_fingerprint_text(a) for a in artists if _fingerprint_text(a)}
         drop = [fp for fp, e in bucket.items()
-                if normalize(e.get("artist") or "") in targets]
+                if _fingerprint_text(e.get("artist") or "") in targets]
         rows = sum(len(_entry_rows(bucket[fp])) for fp in drop)
         for fp in drop:
             bucket.pop(fp, None)
@@ -244,7 +247,7 @@ def take_all(scope):
     """Clear a scope and return the artist names it held, in one lock hold.
     The Dismissed page's Bring-all-back needs the names for the refold; read
     outside the lock, a dismissal landing in between would be cleared but
-    never refolded — gone from both lists."""
+    never refolded, gone from both lists."""
     return _restore_all(scope)[1]
 
 
@@ -263,7 +266,7 @@ def _restore_all(scope):
 
 
 def restore_albums(scope, fingerprints):
-    """Un-hide specific albums by fingerprint — the same key is_hidden looks up.
+    """Un-hide specific albums by fingerprint, the same key is_hidden looks up.
 
     Unknown fingerprints are silently skipped: the Hidden page can render
     against a slightly stale store (another tab just restored the same row, or
@@ -285,7 +288,7 @@ def restore_albums(scope, fingerprints):
 def hidden_by_artist(scope, store=None):
     """[{artist, rows, albums: [{title, year, ts, fp, others}]}] for the Hidden view.
 
-    One entry per fingerprint, because that is the unit Restore can act on —
+    One entry per fingerprint because that is the unit Restore can act on;
     every edition under a key was dismissed together and comes back together.
     ``others`` lists the further titles the key covers so the page can say so
     instead of appearing to have lost them, and ``rows`` is how many review rows
@@ -316,12 +319,12 @@ def hidden_by_artist(scope, store=None):
 
 
 def count(scope, store=None):
-    """Review rows dismissed in this scope — the same unit the review counts."""
+    """Review rows dismissed in this scope, the same unit the review counts."""
     bucket = (store if store is not None else load()).get(scope) or {}
     return sum(len(_entry_rows(e)) for e in bucket.values())
 
 
-# ── Singles — a deliberately downloaded track, not a gap ───────────────────────
+# Singles: a deliberately downloaded track, not a gap.
 
 def is_single(artist, title, store):
     """True when (artist, title) is marked as a deliberately downloaded single, so
@@ -353,8 +356,9 @@ def mark_single(artist, title, year, album_id):
 
 
 def unmark_single(artist, title):
-    """Drop the single mark — graduation (the folder is now complete) or the user
-    chose to complete the album. Returns True if a mark was removed."""
+    """Drop the single mark after graduation or completing the album.
+
+    Returns True if a mark was removed."""
     fp = album_fingerprint(artist, title)
     if fp is None:
         return False
@@ -366,7 +370,7 @@ def unmark_single(artist, title):
         bucket.pop(fp, None)
         store[SCOPE_SINGLE] = bucket
         # Best-effort on purpose: unmark runs as internal bookkeeping inside
-        # undo/repair/graduation flows — a failed cleanup write shouldn't
+        # undo/repair/graduation flows; a failed cleanup write shouldn't
         # abort those; save() already leaves a verbose trail.
         save(store)
     return True

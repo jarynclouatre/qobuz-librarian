@@ -18,7 +18,7 @@
   --ql-gold-dim: #523d1b;
   --ql-owned: #a8bc7c;
   --ql-danger: #c8553d;
-  --ql-warning: #d9a441;
+  --ql-warning: #dc8642;
   --ql-info: #7fa6b8;
   --ql-shadow: 0 24px 50px -30px rgb(0 0 0 / 0.95);
   --ql-shadow-soft: 0 8px 22px -16px rgb(0 0 0 / 0.6);
@@ -53,7 +53,7 @@
   --ql-gold-dim: #ead8b4;
   --ql-owned: #64803a;
   --ql-danger: #b84935;
-  --ql-warning: #885c0f;
+  --ql-warning: #9a551f;
   --ql-info: #5e7f8d;
   --ql-shadow: 0 14px 30px -20px rgb(84 56 15 / 0.4);
   --ql-shadow-soft: 0 8px 18px -14px rgb(84 56 15 / 0.28);
@@ -128,7 +128,7 @@
   background: linear-gradient(180deg, #dda748 0%, #c78a24 55%, #b2761a 100%);
 }
 
-/* A disabled primary drops the brass entirely — dimmed gold still reads as
+/* A disabled primary drops the brass entirely. Dimmed gold still reads as
    "the thing to press", which is exactly wrong while nothing is selected. */
 .ql-btn-primary:disabled,
 .ql-btn-primary[aria-disabled="true"],

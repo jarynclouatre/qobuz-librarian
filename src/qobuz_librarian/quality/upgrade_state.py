@@ -26,6 +26,16 @@ class RefreshResult:
     fingerprints: dict[str, str] = field(default_factory=dict)
     hidden_signature: str = ""
     refresh_started_at: float = 0.0
+    quality_signature: str = ""
+
+
+def quality_signature(streamrip_quality=None, prefer_hires=None) -> str:
+    """Quality policy that shapes Upgrade candidates and their labels."""
+    if streamrip_quality is None:
+        streamrip_quality = getattr(cfg, "STREAMRIP_QUALITY", "")
+    if prefer_hires is None:
+        prefer_hires = getattr(cfg, "PREFER_HIRES", False)
+    return f"{streamrip_quality}|{bool(prefer_hires)}"
 
 
 def _empty_state():
@@ -38,6 +48,7 @@ def _empty_state():
         "fingerprints": {},
         "artist_updated_at": {},
         "hidden_signature": "",
+        "quality_signature": "",
         "candidates": [],
     }
 
@@ -102,6 +113,7 @@ def load():
                               if isinstance(data.get("artist_updated_at"), dict)
                               else {}),
         "hidden_signature": str(data.get("hidden_signature") or ""),
+        "quality_signature": str(data.get("quality_signature") or ""),
         "candidates": (data.get("candidates")
                        if isinstance(data.get("candidates"), list) else []),
     })
@@ -130,6 +142,9 @@ def _state_from_result(result: RefreshResult):
         "fingerprints": dict(result.fingerprints),
         "artist_updated_at": {name: now for name in result.artists_scanned},
         "hidden_signature": result.hidden_signature,
+        "quality_signature": (
+            getattr(result, "quality_signature", "") or quality_signature()
+        ),
         "candidates": list(result.candidates),
     }
 
@@ -138,6 +153,8 @@ def _preserve_concurrent_artist_updates(data, refresh_started_at):
     if not refresh_started_at:
         return data
     current = load()
+    if current.get("quality_signature") != data.get("quality_signature"):
+        return data
     current_artist_updated_at = current.get("artist_updated_at") or {}
     current_fingerprints = current.get("fingerprints") or {}
     preserved_artists = {
@@ -235,6 +252,7 @@ def update_artist(
         scan_artist = _default_scan_artist(token, args, capped)
 
     name = artist_dir.name
+    scan_quality_signature = quality_signature()
     fingerprint = artist_fingerprint(artist_dir)
     try:
         specs = _candidate_specs(artist_dir, scan_artist(artist_dir), hidden)
@@ -264,9 +282,21 @@ def update_artist(
             "fingerprints": fingerprints,
             "artist_updated_at": artist_updated_at,
             "hidden_signature": state.get("hidden_signature", ""),
+            "quality_signature": (
+                scan_quality_signature
+                if state.get("quality_signature") == scan_quality_signature
+                else state.get("quality_signature", "")
+            ),
             "candidates": kept,
         })
-    return RefreshResult(specs, [name], {}, True, {name: fingerprint})
+    return RefreshResult(
+        specs,
+        [name],
+        {},
+        True,
+        {name: fingerprint},
+        quality_signature=scan_quality_signature,
+    )
 
 
 def refresh_for_artists(
@@ -286,6 +316,7 @@ def refresh_for_artists(
 ):
     """Refresh upgrade candidates for ``artists`` and persist review specs."""
     refresh_started_at = time.time()
+    scan_quality_signature = quality_signature()
     if scan_artist is None:
         scan_artist = _default_scan_artist(token, args, capped)
 
@@ -302,6 +333,7 @@ def refresh_for_artists(
         skip_unchanged
         and previous.get("complete")
         and previous.get("hidden_signature", "") == hidden_sig
+        and previous.get("quality_signature", "") == scan_quality_signature
     )
     to_scan: list[Path] = []
     reused: list[tuple[Path, list[dict]]] = []
@@ -369,7 +401,7 @@ def refresh_for_artists(
 
     result = RefreshResult(
         specs, artists_scanned, errors, complete, fingerprints, hidden_sig,
-        refresh_started_at)
+        refresh_started_at, scan_quality_signature)
     # A cancelled refresh only contains the artists reached before the cancel.
     # Keep the last complete snapshot instead of turning a partial crawl into a
     # saved review list.

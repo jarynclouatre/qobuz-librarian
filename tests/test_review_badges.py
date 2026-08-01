@@ -23,12 +23,36 @@ def test_mark_ready_wins_over_previous_seen(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "REVIEW_BADGE_STATE_FILE",
                         tmp_path / "review-badges.json")
 
-    review_badges.mark_seen("upgrade", now=500.0)
+    review_badges.mark_ready("upgrade", now=500.0)
+    first = review_badges.ready_generation("upgrade")
+    review_badges.mark_seen("upgrade", first)
     assert review_badges.snapshot()["upgrade"] is False
 
     review_badges.mark_ready("upgrade", now=100.0)
+    second = review_badges.ready_generation("upgrade")
+    review_badges.mark_ready("upgrade", now=100.0)
+    third = review_badges.ready_generation("upgrade")
 
+    assert first < second < third
+    review_badges.mark_seen("upgrade", second)
     assert review_badges.snapshot()["upgrade"] is True
+    review_badges.mark_seen("upgrade", third)
+    assert review_badges.snapshot()["upgrade"] is False
+
+
+def test_generation_clear_keeps_a_newer_badge(monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import review_badges
+
+    monkeypatch.setattr(cfg, "REVIEW_BADGE_STATE_FILE",
+                        tmp_path / "review-badges.json")
+
+    review_badges.mark_ready("library", now=100.0)
+    old = review_badges.ready_generation("library")
+    review_badges.mark_ready("library", now=200.0)
+
+    assert review_badges.clear_ready_if_generation("library", old) is False
+    assert review_badges.snapshot()["library"] is True
 
 
 def test_badge_write_failures_are_non_fatal(monkeypatch, tmp_path):
@@ -40,7 +64,7 @@ def test_badge_write_failures_are_non_fatal(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "REVIEW_BADGE_STATE_FILE", blocker / "badges.json")
 
     review_badges.mark_ready("library")
-    review_badges.mark_seen("library")
+    review_badges.mark_seen("library", review_badges.ready_generation("library"))
     review_badges.clear_ready("library")
 
 

@@ -1,4 +1,4 @@
-"""Walk modes — library walk, walk+queue, and album fill walk."""
+"""Walk modes: library walk, walk+queue, and album fill walk."""
 import os
 import re
 import sys
@@ -13,6 +13,7 @@ from qobuz_librarian.library.scanner import (
 )
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes.artist import (
+    _consolidation_disabled_notice,
     run_artist_gap_fill,
     run_artist_missing_albums,
 )
@@ -30,7 +31,7 @@ def _queue_saver(mode):
 
     A durable item that stops for attention stays blocked in the journal on
     purpose, and while that stands the journal refuses to be rewritten as
-    pending. The walk can't settle it — that happens at the next launch — so it
+    pending. The walk can't settle it; that happens at the next launch, so it
     says so once and carries on rather than dying on the refusal.
     """
     told = []
@@ -79,7 +80,7 @@ def _atomic_append(path, header_lines, entry):
     Plain "a" mode leaves a truncated line on the disk if the process dies
     mid-write; the next reader silently drops the partial line and the
     entry is lost. Writing the full intended content to a unique sibling temp
-    and renaming it eliminates the partial-write window — and a unique name
+    and renaming it eliminates the partial-write window, and a unique name
     (not a shared ``.tmp``) avoids clobbering a concurrent writer or orphaning
     a fixed temp if a write is interrupted.
     """
@@ -121,7 +122,7 @@ def record_walk_seen(artist_name, seen=None):
         _atomic_append(
             cfg.WALK_SEEN_FILE,
             header_lines=[
-                "# Library walk decisions — artists you've answered y/N for during the library walk.\n",
+                "# Library walk decisions: artists you've answered y/N for during the library walk.\n",
                 "# Skipped on future walks so you don't loop the same names.\n",
                 "# To revisit an artist, delete its line below (or delete this whole file).\n",
                 "# Comments start with '# ' (hash + space). One artist per line.\n",
@@ -190,7 +191,7 @@ def record_album_walk_seen(artist_name, album_name, seen=None):
         _atomic_append(
             cfg.ALBUM_WALK_SEEN_FILE,
             header_lines=[
-                "# Album fill walk decisions — albums you've answered "
+                "# Album fill walk decisions: albums you've answered "
                 "y/N for during the album fill walk.\n",
                 "# Format: Artist | Album, one per line.\n",
                 "# To revisit an album, delete its line below "
@@ -222,7 +223,7 @@ _ALBUM_WALK_DECIDED = {
 def run_album_walk_mode(args, token):
     """Album fill walk: scan every album under every artist and
     prompt only on incomplete ones."""
-    banner("Album gaps — fill missing tracks in albums you already own")
+    banner("Album gaps: fill missing tracks in albums you already own")
 
     all_artists = list_library_artists()
     if not all_artists:
@@ -258,6 +259,7 @@ def run_album_walk_mode(args, token):
     print()
 
     saved_consolidate = args.consolidate
+    _consolidation_disabled_notice(args, "Album gaps")
     args.consolidate = False
 
     shared_queue = []
@@ -277,7 +279,7 @@ def run_album_walk_mode(args, token):
     def _flush_queue():
         nonlocal n_albums_filled
         if not shared_queue:
-            log.info(fmt(C.GRAY, "    Queue is empty — nothing to flush."))
+            log.info(fmt(C.GRAY, "    Queue is empty; nothing to flush."))
             return
         _save_queue(shared_queue)
         log.info(fmt(C.CYAN,
@@ -293,7 +295,7 @@ def run_album_walk_mode(args, token):
             clear_pending_queue()
         else:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  {len(shared_queue)} album(s) couldn't be downloaded — "
+                f"  ⚠  {len(shared_queue)} album(s) couldn't be downloaded; "
                 f"kept in the queue to retry on the next launch."))
 
     try:
@@ -311,7 +313,7 @@ def run_album_walk_mode(args, token):
                 for ad in _albs
             ):
                 vlog(f"  [{i}/{len(artists)}] {artist_query}: "
-                     "all albums already decided — skipping.")
+                     "all albums already decided; skipping.")
                 continue
 
             print()
@@ -351,11 +353,11 @@ def run_album_walk_mode(args, token):
                     elif _result == "no_qobuz_match":
                         n_albums_unmatched += 1
                     elif _result == "sibling_skipped":
-                        pass  # a folded duplicate folder — recorded seen, not summarized
+                        pass  # a folded duplicate folder; recorded seen, not summarized
                     else:
                         # Matched a candidate then rejected it (false_match,
                         # low_overlap, predicted_path_mismatch) or it had no
-                        # tracks — not the same as "no Qobuz match".
+                        # tracks; not the same as "no Qobuz match".
                         n_albums_unplaced += 1
                 n_artists_scanned += 1
                 if stopped:
@@ -368,7 +370,7 @@ def run_album_walk_mode(args, token):
                 # approvals wouldn't actually reach disk despite the message.
                 _save_queue(shared_queue)
                 log.info(fmt(C.GRAY,
-                    "\n  Walk interrupted — queue is persisted to "
+                    "\n  Walk interrupted; queue is persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name}; resume next launch."))
                 interrupted = True
                 break
@@ -377,7 +379,7 @@ def run_album_walk_mode(args, token):
                 # so the run exits with the right status and message.
                 if shared_queue:
                     log.info(fmt(C.GRAY,
-                        f"  Queue retained ({len(shared_queue)} album(s)) — "
+                        f"  Queue retained ({len(shared_queue)} album(s)); "
                         f"persisted to {cfg.PENDING_QUEUE_FILE.name} for resume."))
                 raise
     finally:
@@ -400,7 +402,7 @@ def run_album_walk_mode(args, token):
         else:
             _save_queue(shared_queue)
             log.info(fmt(C.GRAY,
-                f"  Queue retained ({len(shared_queue)} album(s)) — "
+                f"  Queue retained ({len(shared_queue)} album(s)); "
                 f"persisted to {cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
@@ -424,7 +426,7 @@ def run_album_walk_mode(args, token):
 
 def run_walk_queued_mode(args, token):
     """Walk artists, accumulate decisions across artists, flush on demand."""
-    banner("Library walk — scan artists, queue, download when you choose")
+    banner("Library walk: scan artists, queue, download when you choose")
 
     all_artists = list_library_artists()
     if not all_artists:
@@ -464,6 +466,7 @@ def run_walk_queued_mode(args, token):
 
     shared_queue = []
     saved_consolidate = args.consolidate
+    _consolidation_disabled_notice(args, "Library walk")
     args.consolidate = False
 
     _save_queue = _queue_saver("walk_queue")
@@ -473,7 +476,7 @@ def run_walk_queued_mode(args, token):
 
     def _flush_queue():
         if not shared_queue:
-            log.info(fmt(C.GRAY, "  Queue is empty — nothing to process."))
+            log.info(fmt(C.GRAY, "  Queue is empty; nothing to process."))
             return 0
         _save_queue(shared_queue)
         log.info(fmt(C.CYAN,
@@ -486,8 +489,8 @@ def run_walk_queued_mode(args, token):
                 clear_pending_queue()
             else:
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  {len(shared_queue)} album(s) couldn't be downloaded "
-                    f"— kept in the queue to retry on the next launch."))
+                    f"  ⚠  {len(shared_queue)} album(s) couldn't be downloaded; "
+                    f"they were kept in the queue to retry on the next launch."))
         return sum(1 for r in results
                    if r.get("result") in ("downloaded", "partial"))
 
@@ -504,10 +507,10 @@ def run_walk_queued_mode(args, token):
             try:
                 r = input(fmt(C.CYAN,
                     f"  [{i + 1}/{len(artists)}] {truncate(d.name, 50)}"
-                    f"{qhint} — scan? [y/N/p/s/f]: "
+                    f"{qhint}: scan? [y/N/p/s/f]: "
                 )).strip()
             except EOFError:
-                log.info(fmt(C.GRAY, "\n  EOF — stopping walk."))
+                log.info(fmt(C.GRAY, "\n  EOF; stopping walk."))
                 break
             rl = r.lower()
 
@@ -538,7 +541,7 @@ def run_walk_queued_mode(args, token):
             decided = True
             if rl in ("y", "yes"):
                 # d came straight from list_library_artists(), so it already is
-                # the artist folder to scan — no need to fuzzy-resolve it again.
+                # the artist folder to scan; no need to fuzzy-resolve it again.
                 artist_query = re.sub(r"\s+", " ",
                                       d.name.replace("_", " ")).strip()
                 if normalize(artist_query) in VA_NORMALIZED:
@@ -546,7 +549,7 @@ def run_walk_queued_mode(args, token):
                         "  ⚠  'Various Artists' isn't a real artist; skipping."))
                 else:
                     print()
-                    banner(f"Scanning — {artist_query}")
+                    banner(f"Scanning: {artist_query}")
                     try:
                         clear_scan_caches()
                         gap_fill_result = run_artist_gap_fill(
@@ -568,15 +571,15 @@ def run_walk_queued_mode(args, token):
                             )
                             _save_now()
                     except KeyboardInterrupt:
-                        # Persist the in-memory queue now — the current artist's
+                        # Persist the in-memory queue now; the current artist's
                         # approvals are in shared_queue but save_callback hadn't
                         # fired for this in-progress artist yet.
                         _save_queue(shared_queue)
                         log.info(fmt(C.GRAY,
-                            "\n  Artist scan interrupted — stopping the walk. "
+                            "\n  Artist scan interrupted; stopping the walk. "
                             f"Queue saved to {cfg.PENDING_QUEUE_FILE.name}."))
                         decided = False
-                        # Stop, like the album walk's Ctrl-C does — the message
+                        # Stop, like the album walk's Ctrl-C does; the message
                         # above promises the walk ends here.
                         break
 
@@ -609,7 +612,7 @@ def run_walk_queued_mode(args, token):
             # fail again over the original error, so keep the queue for next launch.
             _save_queue(shared_queue)
             log.info(fmt(C.GRAY,
-                f"  Queue retained — persisted to "
+                f"  Queue retained; persisted to "
                 f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
         elif shared_queue:
             print()
@@ -627,12 +630,12 @@ def run_walk_queued_mode(args, token):
                 else:
                     _save_queue(shared_queue)
                     log.info(fmt(C.GRAY,
-                        f"  Queue retained — persisted to "
+                        f"  Queue retained; persisted to "
                         f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
             except KeyboardInterrupt:
                 _save_queue(shared_queue)
                 log.info(fmt(C.GRAY,
-                    f"\n  Interrupted — queue persisted to "
+                    f"\n  Interrupted; queue persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{% if job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }} — {% endif %}{{ job.title }}{% endif %} — Qobuz Librarian{% endblock %}
+{% block title %}{% if job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }} - {% endif %}{{ job.display_title }}{% endif %} - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
 {% import "_job_labels.html" as labels %}
@@ -8,8 +8,7 @@
 
 {% if historical %}
 <div class="ql-job-summary ql-job-banner">
-  <span>This job is archived. The live log was not kept; status and summary are
-    shown below.</span>
+  <span>This job is archived. Its saved status and details are shown below.</span>
 </div>
 {% endif %}
 

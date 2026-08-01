@@ -688,6 +688,7 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
     # keeps the backup and must not render "Repaired 1/1"; the active copy is
     # an unverified, possibly incomplete replacement.
     from qobuz_librarian.web import flows
+    from qobuz_librarian.web import jobs as job_mgr
 
     class _Job:
         cancel_requested = False
@@ -695,6 +696,7 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
         _imported_any = False
         summary = ""
         error = ""
+        status = job_mgr.JobStatus.RUNNING
 
         def push_progress(self, *a, **k):
             pass
@@ -723,6 +725,7 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
     assert callback_seen
     assert "Repaired 0/1" in job.summary
     assert job.error
+    assert job.status == job_mgr.JobStatus.FAILED
 
 
 def test_refill_gates_require_refills_on_top_of_the_baseline(tmp_path, monkeypatch):

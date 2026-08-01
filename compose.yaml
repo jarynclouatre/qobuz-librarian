@@ -34,6 +34,9 @@ services:
       # putting PUID/PGID in .env. PUID=0 PGID=0 runs as root if you need it.
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
+      # Writable home for tools when the root filesystem is read-only.
+      # Keep /tmp unless the matching tmpfs mount is changed too.
+      APP_HOME: "${APP_HOME:-/tmp}"
       # Timezone for timestamps in History and the job pages ("2 hr ago"
       # stays right either way; exact times follow this). IANA name, e.g.
       # America/Edmonton. Empty = UTC.
@@ -71,9 +74,9 @@ services:
       BEETS_PATH_SINGLETON: "${BEETS_PATH_SINGLETON:-}"
       BEETS_PATH_COMP:      "${BEETS_PATH_COMP:-}"
       # Comma-separated list of beets plugins. Empty = honour /config/beets/
-      # config.yaml (seeded with `fetchart` and `inline`; this REPLACES that list,
-      # so keep `inline`; it drives the multi-disc `Disc N/` folder field).
-      # Useful extras: lastgenre, replaygain, scrub, edit, embedart.
+      # config.yaml. A custom list replaces its choices for managed imports;
+      # the app adds inline, artwork requirements, and its import guards.
+      # Useful choices: lastgenre, replaygain, scrub, edit, embedart.
       BEETS_PLUGINS: "${BEETS_PLUGINS:-}"
 
       # streamrip config (generated on first run)
@@ -89,6 +92,7 @@ services:
       WEB_AUTH: "${WEB_AUTH:-}"
       # Optionally seed the login from .env instead of the first-visit setup
       # screen; provide BOTH (they also act as a password reset on restart).
+      # Passwords need at least 15 characters; common values are refused.
       # Empty = use the setup screen. An env value is visible to `docker inspect`.
       WEB_AUTH_USER:     "${WEB_AUTH_USER:-}"
       WEB_AUTH_PASSWORD: "${WEB_AUTH_PASSWORD:-}"
@@ -165,10 +169,10 @@ services:
       # ── Optional features (off by default) ────────────────────────────────
       # Hide the Upgrade page and skip quality-upgrade scanning entirely.
       UPGRADE_SCAN_ENABLED: "${UPGRADE_SCAN_ENABLED:-true}"
-      # Let an ordinary download or gap-fill run also upgrade an album Qobuz can
-      # now serve better. It backs up and replaces the whole album folder; the
-      # CLI asks first, the web app does not. The dedicated Upgrade surface
-      # reviews the same candidates first and remains the normal place for it.
+      # Let an ordinary CLI download or gap-fill run also upgrade an album Qobuz
+      # can now serve better. The CLI asks before replacing the whole folder.
+      # Ordinary web downloads keep the selected edition; the Upgrade page
+      # reviews replacements before anything moves.
       AUTO_UPGRADE_ENABLED: "${AUTO_UPGRADE_ENABLED:-false}"
       UPGRADE_BACKUP_RETENTION_DAYS: "${UPGRADE_BACKUP_RETENTION_DAYS:-7}"
       # Let the Upgrade walk also re-rip tracks downloaded as singles (off = leave

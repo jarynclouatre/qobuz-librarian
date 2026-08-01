@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}History — Qobuz Librarian{% endblock %}
+{% block title %}History | Qobuz Librarian{% endblock %}
 {% block content %}
 
 {% import "_job_labels.html" as labels %}
@@ -31,15 +31,23 @@
         <span class="ql-status-chip is-warning" title="The saved Repair recovery details could not be read.">Recovery unreadable</span>
       {% elif job.recoveries %}
         <span class="ql-status-chip is-warning" title="Original files remain in a Repair recovery folder.">Recovery needed</span>
+      {% elif job.execute_args_unreadable %}
+        <span class="ql-status-chip is-warning" title="The saved details needed to retry this job could not be read.">Retry unavailable</span>
       {% elif job.attention == 'recovery' %}
         <span class="ql-status-chip is-warning" title="The saved download recovery must be settled before retrying.">Recovery attention</span>
+      {% elif job.attention == 'partial' %}
+        <span class="ql-status-chip is-warning" title="This album is missing tracks; open it for details.">Incomplete</span>
+      {% elif job.attention == 'lossy' %}
+        <span class="ql-status-chip is-warning" title="Qobuz does not have every track in lossless quality.">Lossless unavailable</span>
+      {% elif job.attention == 'catalog' %}
+        <span class="ql-status-chip is-warning" title="The deleted track still has a stale Beets catalogue entry.">Catalogue cleanup</span>
       {% elif job.attention %}
-        <span class="ql-status-chip is-warning" title="Finished below your target quality — open it for details.">Below target quality</span>
+        <span class="ql-status-chip is-warning" title="Finished below your target quality; open it for details.">Below target quality</span>
       {% endif %}
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
       <div class="ql-activity-actions">
         {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-        {% if job.status == 'failed' and job.album_id and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
+        {% if job.status == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           {% if recovery_retry %}
@@ -50,7 +58,7 @@
         </form>
         {% endif %}
         {% if not job.recovery_unreadable %}
-        <a href="{{ '/repair' if job.execute_kind == 'repair' else ('/library' if job.execute_kind == 'library' else '/jobs/' ~ job.id) }}" class="ql-row-open">Open →</a>
+        <a href="/jobs/{{ job.id }}" class="ql-row-open">Open →</a>
         {% endif %}
       </div>
     </div>
@@ -63,7 +71,7 @@
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
-            data-confirm="Clear finished jobs from history? Recovery records stay until their backups are resolved."
+            data-confirm="Clear finished jobs from history? Active single-track Undo and recovery records stay until resolved."
             data-confirm-action="Clear history" data-confirm-danger>Clear history</button>
   </form>
 </div>
@@ -84,7 +92,7 @@
         {{ labels.kind_tile(job, 'ql-job-tile--done') }}
         <div class="ql-activity-main">
           <p class="ql-row-title">
-            <a href="{{ '/settings#diagnostics-list' if job.recovery_unreadable else '/jobs/' ~ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} — {% endif %}{{ job.title }}</a>
+            <a href="{{ '/settings#diagnostics-list' if job.recovery_unreadable else '/jobs/' ~ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
           </p>
           {% if job.recovery_unreadable %}
           <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
@@ -130,7 +138,7 @@
       {{ labels.kind_tile(job, 'ql-job-tile--done') }}
       <div class="ql-activity-main">
         <p class="ql-row-title">
-          <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} — {% endif %}{{ job.title }}</a>
+          <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
         </p>
         {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
         {% if job.error %}

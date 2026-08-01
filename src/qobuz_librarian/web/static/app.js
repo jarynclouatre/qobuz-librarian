@@ -8,7 +8,7 @@
   // This tab's id, sent on review mutations so the server's review-changed
   // nudge can name where a change came from. The tab that made the change
   // skips the reload (its DOM is already current from the action's own
-  // response) — reloading it too replaced the page mid-interaction and ate
+  // response). Reloading it too replaced the page mid-interaction and ate
   // the next tick of anyone working quickly down a review list.
   var TAB_ID = Math.random().toString(36).slice(2, 10)
     + Date.now().toString(36);
@@ -66,6 +66,36 @@
     });
   }
 
+  function markSearchDownloadOwned(form) {
+    if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
+    var item = form.closest("[data-search-item]");
+    var key = item && item.dataset.searchKey;
+    var root = item && item.closest("[data-search-results-root]");
+    var peers = item ? [item] : [];
+    if (root && key) {
+      peers = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"),
+        function (peer) { return peer.dataset.searchKey === key; });
+    }
+    peers.forEach(function (peer) {
+      peer.dataset.owned = "1";
+      peer.classList.add("is-owned");
+      var checkbox = peer.querySelector("[data-search-select]");
+      if (checkbox) {
+        checkbox.checked = false;
+        var label = checkbox.closest("label");
+        if (label) label.remove();
+        else checkbox.remove();
+      }
+      var download = peer.querySelector("[data-search-download-form]");
+      if (download) {
+        var owned = document.createElement("span");
+        owned.className = "ql-owned-label";
+        owned.textContent = "In library";
+        download.replaceWith(owned);
+      }
+    });
+  }
+
   // Disable a search-result button only after a real queue success.
   document.addEventListener("htmx:afterRequest", function (evt) {
     var form = evt.target;
@@ -92,7 +122,7 @@
 
   // Animate a fully hidden artist group before htmx removes it. Dismissals
   // target the group's positioning SHELL (the dismiss button lives beside the
-  // <details>, not inside it), so match the shell as well as a bare details —
+  // <details>, not inside it), so match the shell as well as a bare details;
   // matching only the details left the swap unanimated and, worse, skipped
   // the qlHidden recount, so an emptied page kept its stale counts.
   document.addEventListener("htmx:beforeSwap", function (evt) {
@@ -110,7 +140,7 @@
   });
 
   // Every global shortcut lives here. base.html used to bind "/" and Escape as
-  // well, without the modifier guards — so Ctrl+/ and friends were swallowed
+  // well, without the modifier guards, so Ctrl+/ and friends were swallowed
   // into the search box, and both layers ran on every keypress.
   //
   // "/" jumps to the search box from anywhere, unless you're already typing
@@ -253,7 +283,7 @@
     }).then(function (ok) {
       if (!ok) return;
       if (el.tagName === "FORM") {
-        // A form's click() never submits it — fire a real submit event so
+        // A form's click() never submits it. Fire a real submit event so
         // htmx (or the browser) takes it from here.
         el.requestSubmit();
         return;
@@ -467,7 +497,7 @@
         var qs = url.searchParams.toString();
         history.replaceState(null, "", url.pathname + (qs ? "?" + qs : "") + url.hash);
       }
-    } catch (e) { /* malformed URL — leave it alone */ }
+    } catch (e) { /* malformed URL; leave it alone */ }
   }
   function fade(el) { collapse(el, function () { if (el.parentNode) el.remove(); }); }
   function autoDismissFlashes() {
@@ -484,7 +514,7 @@
 
   // Programmatic toast for async failures and review actions.
   // `message` is a string (rendered as text, never markup) or a prebuilt
-  // node — the node form is what lets a receipt carry a real link, which a
+  // node. The node form is what lets a receipt carry a real link, which a
   // textContent-only toast structurally couldn't.
   function showToast(message, kind) {
     var host = document.getElementById("download-toast");
@@ -512,7 +542,7 @@
   // carrying the token that matches it. htmx handles this on its own; the raw
   // fetch() paths have to say so and reload.
   function pageWentStale() {
-    showToast("That page went stale — reloading.", "error");
+    showToast("That page went stale. Reloading.", "error");
     setTimeout(function () { window.location.reload(); }, 900);
   }
 
@@ -593,7 +623,7 @@
       // separate downloads into one folder.
       function bulkSelectable(box) {
         return visibleItem(box.closest("[data-search-item]"))
-          && !box.closest(".ql-version-panel");
+          && !box.closest("[data-version-panel]");
       }
       function syncBoxes() {
         root.querySelectorAll("[data-search-select]").forEach(function (cb) {
@@ -611,6 +641,9 @@
           selectable.forEach(function (cb) { selectableKeys[cb.dataset.searchKey] = true; });
           var allKeys = Object.keys(selectableKeys);
           var picked = allKeys.filter(function (k) { return selected[k]; }).length;
+          selectAll.disabled = allKeys.length === 0;
+          selectAll.closest(".ql-search-select-all").classList.toggle(
+            "hidden", allKeys.length === 0);
           selectAll.checked = allKeys.length > 0 && picked === allKeys.length;
           selectAll.indeterminate = picked > 0 && picked < allKeys.length;
         }
@@ -632,7 +665,7 @@
         var shown = Array.prototype.filter.call(
           root.querySelectorAll("[data-search-item]"),
           function (el) {
-            return visibleItem(el) && !el.closest(".ql-version-panel");
+            return visibleItem(el) && !el.closest("[data-version-panel]");
           }).length;
         if (meta) {
           if (on) {
@@ -738,6 +771,7 @@
             return {
               ok: r.ok,
               stale: r.ok && r.headers.get("HX-Refresh") === "true",
+              outcome: r.headers.get("X-QL-Download-Outcome") || "",
               text: text,
             };
           });
@@ -749,21 +783,38 @@
         var forms = keys.map(firstFormForKey).filter(Boolean);
         if (!forms.length) return;
         // The keys carry their own type ("track-…" vs "album-…"), so the noun
-        // does not have to be guessed — it used to say "albums" for tracks.
+        // does not have to be guessed. It used to say "albums" for tracks.
         var nTracks = keys.filter(function (k) { return k.indexOf("track-") === 0; }).length;
         var nAlbums = keys.length - nTracks;
         function part(n, one) { return n + " " + (n === 1 ? one : one + "s"); }
         var what = nTracks && nAlbums
           ? part(nAlbums, "album") + " and " + part(nTracks, "track")
           : part(keys.length, nTracks ? "track" : "album");
+        if (forms.length <= 3) {
+          var names = forms.map(itemLabel).filter(Boolean);
+          if (names.length === forms.length) {
+            what = names.length === 1
+              ? names[0]
+              : names.slice(0, -1).join(", ")
+                + (names.length === 2 ? " and " : ", and ")
+                + names[names.length - 1];
+          }
+        }
         window.qlConfirm("Download " + what + "? They queue now and import into your library.", { action: "Download" }).then(function (ok) {
           if (ok) runBulkDownload(forms);
         });
       }
       function itemTitle(form) {
+        if (form.dataset.searchTitle) return form.dataset.searchTitle;
         var item = form.closest && form.closest("[data-search-item]");
         var el = item && item.querySelector(".ql-table-title, .ql-grid-title, .ql-result-title, .ql-subtitle");
         return el ? el.textContent.replace(/\s+/g, " ").trim() : "";
+      }
+      function itemLabel(form) {
+        var title = itemTitle(form);
+        if (!title) return "";
+        var artist = form.dataset.searchArtist || "";
+        return "“" + title + "”" + (artist ? " by " + artist : "");
       }
       function runBulkDownload(forms) {
         var original = bulkButton.textContent;
@@ -771,7 +822,8 @@
         bulkButton.textContent = "Queueing...";
         var queued = 0;
         var queuedTracks = 0;
-        var skipped = 0;
+        var duplicates = 0;
+        var owned = 0;
         var failed = 0;
         var stale = false;
         var firstTitle = "";
@@ -781,15 +833,19 @@
             return postForm(form).then(function (res) {
               if (res.stale) { stale = true; failed += 1; }
               else if (!res.ok || res.text.indexOf("ql-notice-error") >= 0) failed += 1;
-              else if (res.text.indexOf("ql-notice-warning") >= 0) {
-                skipped += 1;
+              else if (res.outcome === "duplicate") {
+                duplicates += 1;
                 markSearchDownloadQueued(form);
-              } else {
+              } else if (res.outcome === "owned") {
+                owned += 1;
+                markSearchDownloadOwned(form);
+              } else if (res.outcome === "queued"
+                         || (!res.outcome && res.text.indexOf("ql-notice-success") >= 0)) {
                 queued += 1;
                 if (form.querySelector('input[name="track_id"]')) queuedTracks += 1;
                 if (!firstTitle) firstTitle = itemTitle(form);
                 markSearchDownloadQueued(form);
-              }
+              } else failed += 1;
             }).catch(function () { failed += 1; });
           });
         });
@@ -812,20 +868,21 @@
               : what + " queued");
           }
           function cnt(n, one, many) { return n + " " + (n === 1 ? one : many); }
-          if (skipped) parts.push(skipped + " already queued");
+          if (duplicates) parts.push(duplicates + " already queued");
+          if (owned) parts.push(owned + " already in library");
           if (failed) parts.push(failed + " failed");
           var receipt = document.createElement("span");
           receipt.appendChild(document.createTextNode(
             (parts.length ? parts.join(", ") + ". " : "Nothing queued. ")));
-          if (queued || skipped) {
+          if (queued || duplicates) {
             var link = document.createElement("a");
             link.href = "/queue";
             link.className = "ql-inline-link";
             link.textContent = "View queue";
             receipt.appendChild(link);
           }
-          showToast(receipt, failed ? "error" : "success");
-          // Surface the Background-work strip without a reload — it's the
+          showToast(receipt, failed ? "error" : (queued || duplicates ? "success" : "info"));
+          // Surface the Background-work strip without a reload. It's the
           // page's persistent signal that something is now running.
           if (queued && window.htmx && document.getElementById("dashboard-active")) {
             window.htmx.ajax("GET", "/",
@@ -842,7 +899,7 @@
       }
       // Hand the shared exit hook to this (the live) results root. The old
       // per-root beforeunload listeners piled up across searches and iOS
-      // never fires beforeunload at all — pagehide does.
+      // never fires beforeunload at all; pagehide does.
       searchExitSave = saveSelection;
     });
   }
@@ -1123,7 +1180,7 @@
     var reviewItemSingular = cont.dataset.reviewItemSingular || "album";
     var reviewItemPlural = cont.dataset.reviewItemPlural || "albums";
     // Live, not baked: on a library review the dismiss vocabulary follows
-    // whichever tab is active NOW — the data attributes only know the tab the
+    // whichever tab is active now. The data attributes only know the tab the
     // page was first rendered with.
     function dismissItemSingular() {
       if (reviewKind === "library" && curTab()) {
@@ -1191,7 +1248,7 @@
       lastCounts.gap_total = parseInt(cont.dataset.reviewGapTotal || "0", 10);
       lastCounts.gap_selected = parseInt(cont.dataset.reviewGapSelected || "0", 10);
     }
-    // The active tab's share of the counts — the bulk bar acts on the active
+    // The active tab's share of the counts. The bulk bar acts on the active
     // tab only, so it counts the active tab only. Untabbed reviews fall back
     // to the whole set.
     function tabCounts(c) {
@@ -1202,6 +1259,26 @@
       return tab === "gaps"
         ? { total: c.gap_total, selected: c.gap_selected }
         : { total: c.missing_total, selected: c.missing_selected };
+    }
+
+    function reviewPageCounts(box) {
+      if (!box || box.dataset.reviewTotal === undefined) return null;
+      var c = {
+        total: parseInt(box.dataset.reviewTotal || "0", 10),
+        selected: parseInt(box.dataset.reviewSelected || "0", 10),
+        artists: parseInt(box.dataset.reviewArtists || "0", 10),
+        reclaimable: parseInt(box.dataset.reviewReclaimable || "0", 10),
+        reclaimable_label: box.dataset.reviewReclaimableLabel || "",
+        hidden_total: parseInt(box.dataset.reviewHiddenTotal || "0", 10),
+        filtered_rest: parseInt(box.dataset.filteredRest || "0", 10),
+      };
+      if (box.dataset.reviewMissingTotal !== undefined) {
+        c.missing_total = parseInt(box.dataset.reviewMissingTotal || "0", 10);
+        c.missing_selected = parseInt(box.dataset.reviewMissingSelected || "0", 10);
+        c.gap_total = parseInt(box.dataset.reviewGapTotal || "0", 10);
+        c.gap_selected = parseInt(box.dataset.reviewGapSelected || "0", 10);
+      }
+      return c;
     }
 
     // Counts come from the server because the DOM only holds one page. The
@@ -1384,6 +1461,11 @@
       header.indeterminate = picked > 0 && picked < total;
     }
 
+    function groupCandidateIds(det) {
+      var raw = det.dataset.cids || "";
+      return raw ? raw.split(",").filter(function (cid) { return cid; }) : [];
+    }
+
     function bulkSelect(on, scope, artist) {
       if (bulkBusy) {
         showToast("Another selection is still saving. Try again in a moment.", "error");
@@ -1391,30 +1473,46 @@
         return Promise.resolve({ ok: false, busy: true });
       }
       bulkBusy = true;
+      var requestTab = curTab();
+      var requestQuery = curQuery();
+      var requestGeneration = loadGen;
       var body = "on=" + (on ? "1" : "0") + "&scope=" + scope +
-                 "&tab=" + encodeURIComponent(curTab()) +
-                 "&q=" + encodeURIComponent(curQuery());
+                 "&tab=" + encodeURIComponent(requestTab) +
+                 "&q=" + encodeURIComponent(requestQuery);
       if (scope === "artist") body += "&artist=" + encodeURIComponent(artist || "");
       if (scope === "page") {
         pageBox() && pageBox().querySelectorAll("details[data-artist]").forEach(function (det) {
-          body += "&artist=" + encodeURIComponent(det.dataset.artist || "");
+          groupCandidateIds(det).forEach(function (cid) {
+            body += "&cid=" + encodeURIComponent(cid);
+          });
         });
       }
       return post("/jobs/" + id + "/select-all", body)
         .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
         .then(function (c) {
           bulkBusy = false;
-          applyCounts(c);
+          var current = requestTab === curTab() &&
+                        requestQuery === curQuery() &&
+                        requestGeneration === loadGen;
+          var counts = c;
+          if (!current && typeof c.filtered_rest === "number") {
+            counts = Object.assign({}, c);
+            delete counts.filtered_rest;
+          }
+          applyCounts(counts);
           warnPersistFailed(c);
-          if (scope === "all" || scope === "page") {
+          var accepted = new Set(c.accepted_cids || []);
+          if (current && (scope === "all" || scope === "page")) {
             pageBox() && pageBox().querySelectorAll("details[data-artist]").forEach(function (det) {
+              var ids = groupCandidateIds(det);
+              if (!ids.length || !ids.every(function (cid) { return accepted.has(cid); })) return;
               det.dataset.selectionOverride = on ? "1" : "0";
               applyGroupChoice(det, on, true);
             });
           }
           updateHideLabels();
           updateArtistChecks();
-          return { ok: true, counts: c };
+          return { ok: true, counts: c, current: current, accepted: accepted };
         })
         .catch(function () {
           bulkBusy = false;
@@ -1447,9 +1545,11 @@
       bulkSelect(on, "artist", det.dataset.artist || "").then(function (result) {
         det._selecting = false;
         if (header) header.removeAttribute("aria-busy");
-        if (result.ok) {
+        if (result.ok && result.current && groupCandidateIds(det).every(function (cid) {
+          return result.accepted.has(cid);
+        })) {
           applyGroupChoice(det, on, true);
-        } else {
+        } else if (!result.ok) {
           delete det.dataset.selectionOverride;
           det.dataset.selectionRecovering = "1";
           det.querySelectorAll(".cb").forEach(function (cb, index) {
@@ -1502,7 +1602,7 @@
         btn.classList.toggle("hidden", total > 0 && picked === total);
         lbl.textContent = artistDismissLabel(picked);
         // The rendered confirm counts the moment the page was built; ticks
-        // since then change what the button will take. Rewrite it live — and
+        // since then change what the button will take. Rewrite it live, and
         // give the button a confirm at all when it reappears on a group that
         // rendered fully selected (the template omits one at rest == 0).
         var rest = total - picked;
@@ -1615,7 +1715,7 @@
     // Fetch and swap one review page. Requests are generation-tagged and only
     // the newest response may render: a tab click while a fetch is in flight
     // issues its own request instead of being dropped, and the slow old-tab
-    // response is discarded on arrival — otherwise its rows would paint under
+    // response is discarded on arrival. Otherwise its rows would paint under
     // the newly selected tab while the hidden approval field already points
     // at the new tab.
     var loading = false;
@@ -1645,6 +1745,7 @@
               if (d.dataset.artist) openArtists[d.dataset.artist] = true;
             });
             host.innerHTML = txt;
+            applyCounts(reviewPageCounts(host.querySelector("#review-groups")));
             host.querySelectorAll("details[data-artist]").forEach(function (d) {
               if (d.dataset.artist && openArtists[d.dataset.artist]) d.open = true;
             });
@@ -1806,7 +1907,7 @@
     // A refresh or Back rebuilds the page collapsed, so the browser's own
     // scroll restore lands past the end of a list fifteen times shorter and
     // the artist being worked through is closed. Record which groups are open
-    // and where the user stood — per job and tab, this browser tab only —
+    // and where the user stood, per job and tab in this browser tab only,
     // reopen the groups, wait for their lazy rows, then put the scroll back.
     function placeKey() { return "ql-review-place:" + id + ":" + curTab(); }
     var placeTimer = null;
@@ -1854,7 +1955,7 @@
       Promise.all(waits).then(function () {
         window.removeEventListener("wheel", noteMove);
         window.removeEventListener("touchmove", noteMove);
-        // The user got there first — don't yank the page out from under them.
+        // The user got there first. Don't yank the page out from under them.
         if (moved || !(place.y > 0)) return;
         requestAnimationFrame(function () { window.scrollTo(0, place.y); });
       });
@@ -1866,32 +1967,37 @@
 
     // Keep review pages in sync across tabs.
     var rsrc = new EventSource("/api/jobs/" + id + "/review-stream");
+    var reviewNavigating = false;
+    function beginReviewNavigation() { reviewNavigating = true; }
     function shutReview() {
       try { rsrc.close(); } catch (e) {}
+      form.removeEventListener("submit", beginReviewNavigation);
       document.body.removeEventListener("qlHidden", onQlHidden);
       document.removeEventListener("htmx:beforeSwap", onReviewSwap);
       window.removeEventListener("scroll", savePlace);
       window.removeEventListener("pagehide", recordPlace);
       if (placeTimer) clearTimeout(placeTimer);
     }
+    form.addEventListener("submit", beginReviewNavigation);
     function onReviewSwap(e) {
       if (e.detail && e.detail.target && e.detail.target.id === "job-content") shutReview();
     }
     document.addEventListener("htmx:beforeSwap", onReviewSwap);
     rsrc.addEventListener("review", function (e) {
-      // Our own change echoing back — the DOM and counts are already current
+      if ((e.data || "") === "save_failed") {
+        showToast("Your latest choice couldn't be saved to disk. It may not survive a restart. Check the data folder.", "error");
+        return;
+      }
+      // Our own change echoing back. The DOM and counts are already current
       // from the action's response, and reloading now would swap the page out
       // from under the user's next click.
-      if ((e.data || "") === TAB_ID) return;
+      if (reviewNavigating || (e.data || "") === TAB_ID) return;
       loadPage(curPage(), curQuery());
-      post("/jobs/" + id + "/select", "cid=&checked=0")  // no-op tick → returns counts
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (c) { if (c) applyCounts(c); });
     });
     rsrc.addEventListener("closed", function (e) {
       // An archived/restored review has no live producer, so the server ends
       // the stream with "inactive" right away. Hides and ticks still work
-      // there, so keep the count listeners — only stop the dead stream.
+      // there, so keep the count listeners and only stop the dead stream.
       if ((e.data || "") === "inactive") {
         try { rsrc.close(); } catch (err) {}
         return;
@@ -1916,8 +2022,160 @@
     initJobContent();
   }
 
+  var keyboardSearchForm = null;
+  var pendingSearchFocus = null;
+  var activeSearchRequests = [];
+  var latestSearchSubmission = 0;
+
+  function isSearchRequestForm(form) {
+    return form && form.matches && form.matches("form")
+      && form.getAttribute("hx-target") === "#search-results";
+  }
+
+  function searchRequestForm(event) {
+    var source = event.detail && event.detail.elt;
+    var form = source && (source.matches("form") ? source : source.closest("form"));
+    return isSearchRequestForm(form) ? form : null;
+  }
+
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!isSearchRequestForm(form)) return;
+    latestSearchSubmission += 1;
+    form.dataset.searchSubmission = latestSearchSubmission;
+  }, true);
+
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var form = searchRequestForm(event);
+    if (!form || !event.detail.xhr) return;
+    var generation = parseInt(form.dataset.searchSubmission || "0", 10);
+    if (!generation || activeSearchRequests.some(function (xhr) {
+      return xhr.qlSearchSubmission === generation;
+    })) {
+      latestSearchSubmission += 1;
+      generation = latestSearchSubmission;
+      form.dataset.searchSubmission = generation;
+    }
+    event.detail.xhr.qlSearchSubmission = generation;
+    var previousRequests = activeSearchRequests.slice();
+    if (activeSearchRequests.indexOf(event.detail.xhr) === -1) {
+      activeSearchRequests.push(event.detail.xhr);
+    }
+    previousRequests.forEach(function (xhr) {
+      try { xhr.abort(); } catch (error) { /* request already finished */ }
+    });
+    var results = document.getElementById("search-results");
+    var status = document.getElementById("search-status");
+    if (results) results.setAttribute("aria-busy", "true");
+    if (status) status.textContent = "Searching...";
+  });
+
+  function restoreSearchFormFromUrl() {
+    var form = document.querySelector(".ql-search-form");
+    if (!form || typeof URL !== "function") return;
+    try {
+      var url = new URL(location.href);
+      var kind = url.searchParams.get("kind");
+      if (["artist", "album", "track"].indexOf(kind) === -1) kind = "artist";
+      var query = form.querySelector('input[name="q"]');
+      if (query) query.value = url.searchParams.get("q") || "";
+      form.querySelectorAll('input[name="kind"]').forEach(function (radio) {
+        radio.checked = radio.value === kind;
+      });
+    } catch (error) { /* leave the form alone if the address cannot be read */ }
+  }
+
+  document.addEventListener("htmx:afterRequest", function (event) {
+    if (!event.detail.xhr) return;
+    var failed = event.detail.successful !== true;
+    var index = activeSearchRequests.indexOf(event.detail.xhr);
+    if (index === -1) return;
+    activeSearchRequests.splice(index, 1);
+    if (activeSearchRequests.length) return;
+    var results = document.getElementById("search-results");
+    var status = document.getElementById("search-status");
+    if (results) results.setAttribute("aria-busy", "false");
+    if (status) status.textContent = "";
+    if (failed && event.detail.xhr.qlSearchSubmission === latestSearchSubmission) {
+      restoreSearchFormFromUrl();
+    }
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    var button = event.target && event.target.closest && event.target.closest("#search-results button[type=submit]");
+    if (!button || !button.form || !button.form.matches(".ql-result-action-form, .ql-search-back-form")) return;
+    keyboardSearchForm = button.form;
+  }, true);
+
+  document.addEventListener("pointerdown", function () {
+    keyboardSearchForm = null;
+  }, true);
+
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var source = event.detail && event.detail.elt;
+    var form = source && (source.matches("form") ? source : source.closest("form"));
+    if (!form || form !== keyboardSearchForm) return;
+    var artist = form.querySelector('input[name="artist_id"]');
+    pendingSearchFocus = {
+      form: form,
+      returning: form.classList.contains("ql-search-back-form"),
+      artistId: artist ? artist.value : form.dataset.searchArtistId
+    };
+    keyboardSearchForm = null;
+  });
+
+  function restoreSearchFocus(event) {
+    var target = event.detail && event.detail.target;
+    if (!pendingSearchFocus || !target || target.id !== "search-results") return;
+    var pending = pendingSearchFocus;
+    pendingSearchFocus = null;
+    requestAnimationFrame(function () {
+      var control = null;
+      if (pending.returning && pending.artistId) {
+        Array.prototype.some.call(target.querySelectorAll('input[name="artist_id"]'), function (input) {
+          if (input.value !== pending.artistId) return false;
+          control = input.form && input.form.querySelector("button[type=submit]");
+          return !!control;
+        });
+      } else {
+        control = target.querySelector(".ql-search-back");
+      }
+      (control || target).focus();
+    });
+  }
+
+  document.addEventListener("htmx:afterRequest", function (event) {
+    if (!pendingSearchFocus || !event.detail || event.detail.successful !== false) return;
+    var source = event.detail.elt;
+    var form = source && (source.matches("form") ? source : source.closest("form"));
+    if (form !== pendingSearchFocus.form) return;
+    var control = form.querySelector("button[type=submit]");
+    pendingSearchFocus = null;
+    requestAnimationFrame(function () {
+      if (control && document.contains(control)) control.focus();
+    });
+  });
+
+  function revealSearchFeedback(event) {
+    var target = event.detail && event.detail.target;
+    if (!target || target.id !== "search-results") return;
+    requestAnimationFrame(function () {
+      var empty = target.querySelector(".ql-search-empty");
+      var tabbar = document.querySelector(".ql-tabbar");
+      if (!empty || !tabbar || getComputedStyle(tabbar).display === "none") return;
+      var feedbackBottom = empty.getBoundingClientRect().bottom;
+      var navigationTop = tabbar.getBoundingClientRect().top;
+      if (feedbackBottom > navigationTop) {
+        window.scrollBy(0, feedbackBottom - navigationTop + 12);
+      }
+    });
+  }
+
   // Re-scan swapped content for flashes and streams.
   document.addEventListener("htmx:afterSwap", initAll);
+  document.addEventListener("htmx:afterSwap", restoreSearchFocus);
+  document.addEventListener("htmx:afterSwap", revealSearchFeedback);
   // A restored artist deep-link replays itself once on load; drop the artist it
   // carried afterwards so the next search the user types is its own.
   document.addEventListener("htmx:afterRequest", function (e) {

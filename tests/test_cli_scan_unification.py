@@ -1,10 +1,12 @@
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 
-def test_upgrade_walk_uses_saved_upgrade_state(monkeypatch):
+def test_upgrade_walk_uses_saved_state_and_reports_failed_work(
+        monkeypatch, caplog):
     from qobuz_librarian.modes import upgrade
 
     args = SimpleNamespace(
@@ -15,16 +17,28 @@ def test_upgrade_walk_uses_saved_upgrade_state(monkeypatch):
     )
     state = {
         "complete": True,
-        "candidates": [{
-            "artist": "Artist",
-            "title": "Album",
-            "detail": "CD -> 24-bit / 96 kHz",
-            "payload": {
-                "album_id": "alb-1",
-                "title_similarity": 1.0,
-                "needed_edition_swap": False,
+        "candidates": [
+            {
+                "artist": "Artist",
+                "title": "Album One",
+                "detail": "CD -> 24-bit / 96 kHz",
+                "payload": {
+                    "album_id": "alb-1",
+                    "title_similarity": 1.0,
+                    "needed_edition_swap": False,
+                },
             },
-        }],
+            {
+                "artist": "Artist",
+                "title": "Album Two",
+                "detail": "CD -> 24-bit / 96 kHz",
+                "payload": {
+                    "album_id": "alb-2",
+                    "title_similarity": 1.0,
+                    "needed_edition_swap": False,
+                },
+            },
+        ],
     }
     processed = []
 
@@ -38,12 +52,16 @@ def test_upgrade_walk_uses_saved_upgrade_state(monkeypatch):
                         lambda album_id, token: {"id": album_id, "title": "Album"})
     monkeypatch.setattr(upgrade, "process_album",
                         lambda album, *a, **kw: processed.append(album["id"])
-                        or {"imported": True})
+                        or {"imported": album["id"] == "alb-1"})
     monkeypatch.setattr(upgrade.time, "sleep", lambda *_: None)
 
-    upgrade.run_upgrade_walk_mode(args, "tok")
+    with caplog.at_level("INFO", logger="qobuz_librarian"):
+        result = upgrade.run_upgrade_walk_mode(args, "tok")
 
-    assert processed == ["alb-1"]
+    assert processed == ["alb-1", "alb-2"]
+    assert result == upgrade.EXIT_GENERAL
+    assert "Upgrade walk finished with errors." in caplog.text
+    assert "Upgrade walk complete." not in caplog.text
     assert args.consolidate is True
 
 
@@ -292,12 +310,156 @@ def test_upgrade_walk_refuses_when_upgrade_disabled(monkeypatch, caplog):
     assert "Upgrade scanning is turned off." in caplog.text
 
 
-def test_downsample_walk_updates_only_affected_artist_after_success(monkeypatch):
+def test_lyrics_failures_are_reported_by_cli_and_web(monkeypatch, caplog):
+    from contextlib import nullcontext
+
+    from qobuz_librarian.library import lyrics as library_lyrics
+    from qobuz_librarian.modes import lyrics as lyrics_mode
+    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import jobs as job_mod
+
+    result = {
+        "total": 10,
+        "processed": 7,
+        "wrote-synced": 1,
+        "already-plain": 1,
+        "not-found": 1,
+        "skipped-tags": 1,
+        "skipped-long": 1,
+        "unsafe-path": 1,
+        "providers-unavailable": 1,
+    }
+    args = SimpleNamespace(
+        dry_run=False,
+        lyrics_rescan=False,
+        lyrics_synced_only=False,
+    )
+    monkeypatch.setattr(lyrics_mode, "HAVE_LYRICS", True)
+    monkeypatch.setattr(lyrics_mode, "banner", lambda *_: None)
+    monkeypatch.setattr(lyrics_mode, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(lyrics_mode, "run_library_lyrics", lambda **_kw: result)
+
+    with caplog.at_level("INFO", logger="qobuz_librarian"):
+        exit_code = lyrics_mode.run_library_lyrics_mode(args)
+
+    assert exit_code == lyrics_mode.EXIT_GENERAL
+    assert "Lyrics pass finished with errors." in caplog.text
+    assert "missing" in caplog.text and "longer than 20 minutes" in caplog.text
+    assert "refused as unsafe" in caplog.text
+    assert "Lyrics pass complete." not in caplog.text
+
+    monkeypatch.setattr(library_lyrics, "HAVE_LYRICS", True)
+    monkeypatch.setattr(
+        library_lyrics, "run_library_lyrics", lambda **_kw: result)
+    monkeypatch.setattr(job_mod, "staging_lock", lambda: nullcontext())
+    monkeypatch.setattr(job_mod, "set_staging_holder", lambda *_: None)
+    job = SimpleNamespace(
+        cancel_requested=False,
+        error="",
+        status=job_mod.JobStatus.RUNNING,
+        summary="",
+    )
+
+    flows.run_library_lyrics(job)
+
+    assert job.status == job_mod.JobStatus.FAILED
+    assert "1 track missing tags" in job.summary
+    assert "1 track too long" in job.summary
+    assert "1 unsafe path refused" in job.summary
+    assert "3 skipped (already checked)" in job.summary
+
+
+def test_lyrics_interrupt_reports_saved_partial_result(monkeypatch, caplog):
+    import signal
+
+    from qobuz_librarian.modes import lyrics as lyrics_mode
+
+    args = SimpleNamespace(
+        dry_run=False,
+        lyrics_rescan=True,
+        lyrics_synced_only=False,
+    )
+
+    def stopped_run(**kwargs):
+        signal.raise_signal(signal.SIGINT)
+        assert kwargs["should_stop"]()
+        return {
+            "total": 10,
+            "processed": 2,
+            "stop_total": 4,
+            "stop_stage": "fetch",
+            "stopped": 1,
+            "wrote-synced": 1,
+            "write-error": 1,
+        }
+
+    monkeypatch.setattr(lyrics_mode, "HAVE_LYRICS", True)
+    monkeypatch.setattr(lyrics_mode, "banner", lambda *_: None)
+    monkeypatch.setattr(lyrics_mode, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(lyrics_mode, "run_library_lyrics", stopped_run)
+
+    with caplog.at_level("INFO", logger="qobuz_librarian"):
+        exit_code = lyrics_mode.run_library_lyrics_mode(args)
+
+    assert exit_code == lyrics_mode.EXIT_GENERAL
+    assert "Lyrics pass stopped early." in caplog.text
+    assert "2 of 4 tracks checked" in caplog.text
+    assert "6 skipped (already checked)" in caplog.text
+    assert "2 left for the next run" in caplog.text
+    assert "1 track hit an error" in caplog.text
+    assert "Lyrics pass complete." not in caplog.text
+
+
+def test_cli_help_and_menu_fit_a_narrow_terminal(monkeypatch, capsys):
+    import builtins
+    import sys
+
+    from qobuz_librarian import cli
+    from qobuz_librarian.ui_cli import menu
+
+    monkeypatch.setenv("COLUMNS", "40")
+    monkeypatch.setattr(cli.cfg, "STAGING_DIR", Path("/staging"))
+    monkeypatch.setattr(cli, "_in_container", lambda: True)
+    monkeypatch.setattr(
+        cli, "_compose_service_name", lambda: "qobuz-librarian")
+    monkeypatch.setattr(sys, "argv", ["qobuz-librarian", "--help"])
+    with pytest.raises(SystemExit) as stopped:
+        cli.parse_args()
+    help_lines = capsys.readouterr().out.splitlines()
+
+    assert stopped.value.code == 0
+    assert max(map(len, help_lines)) <= 40
+    assert any(line.rstrip().endswith("\\") for line in help_lines)
+    help_text = " ".join(line.strip() for line in help_lines)
+    assert "step 2" not in help_text
+    assert help_text.count("missing album suggestions") == 3
+    assert "docker compose run --rm" in help_text
+    copyable_help = help_text.replace("\\ ", "")
+    assert "qobuz-librarian beet import /staging" in copyable_help
+
+    records = []
+    monkeypatch.setattr(menu.log, "info", records.append)
+    monkeypatch.setattr(
+        builtins, "input", lambda *_: (_ for _ in ()).throw(EOFError))
+
+    menu.interactive_session_mode()
+
+    visible = [
+        re.sub(r"\x1b\[[0-9;]*m", "", line)
+        for record in records
+        for line in str(record).splitlines()
+    ]
+    assert max(map(len, visible)) <= 40
+
+
+def test_downsample_walk_reports_incomplete_and_updates_checked_artist(
+        monkeypatch, caplog):
     from qobuz_librarian.library.downsample import DownsampleCandidate
     from qobuz_librarian.modes import downsample
 
     args = SimpleNamespace(dry_run=False, yes=False)
     artist_dir = Path("/music/Artist")
+    denied_dir = Path("/music/Denied")
     candidate = DownsampleCandidate(
         album_dir=artist_dir / "Album",
         artist="Artist",
@@ -316,14 +478,14 @@ def test_downsample_walk_updates_only_affected_artist_after_success(monkeypatch)
         refresh_calls.append(list(artists))
         return downsample.downsample_state.RefreshResult(
             [candidate],
-            ["Artist"],
-            {},
-            True,
+            ["Artist", "Denied"],
+            {"Denied": "no access"},
+            False,
         )
 
     monkeypatch.setattr(downsample, "HAVE_DOWNSAMPLE", True)
     monkeypatch.setattr(downsample, "list_library_artists",
-                        lambda: [artist_dir])
+                        lambda: [artist_dir, denied_dir])
     monkeypatch.setattr(downsample.downsample_state, "refresh_for_artists",
                         fake_refresh)
     monkeypatch.setattr(downsample.downsample_state, "update_artist",
@@ -338,15 +500,18 @@ def test_downsample_walk_updates_only_affected_artist_after_success(monkeypatch)
     monkeypatch.setattr(downsample, "confirm", lambda *a, **k: True)
     monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
 
-    downsample.run_downsample_walk_mode(args)
+    result = downsample.run_downsample_walk_mode(args)
 
-    assert refresh_calls == [[artist_dir]]
+    assert result != 0
+    assert refresh_calls == [[artist_dir, denied_dir]]
     assert update_calls == ["Artist"]
     assert badge_calls == [("downsample", False)]
+    assert "1 artist couldn't be checked" in caplog.text
+    assert "Downsample walk complete" not in caplog.text
 
 
-def test_downsample_walk_marks_successful_album_locally_capped(
-        tmp_path, monkeypatch):
+def test_downsample_walk_marks_success_and_reports_file_failure(
+        tmp_path, monkeypatch, caplog):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library.downsample import DownsampleCandidate
     from qobuz_librarian.modes import downsample
@@ -391,9 +556,28 @@ def test_downsample_walk_marks_successful_album_locally_capped(
     monkeypatch.setattr(downsample, "confirm", lambda *a, **k: True)
     monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
 
-    downsample.run_downsample_walk_mode(args)
+    result = downsample.run_downsample_walk_mode(args)
 
+    assert result == 0
     assert decision.is_local_album_capped(album_dir, decision.load_capped())
+
+    caplog.clear()
+    monkeypatch.setattr(
+        downsample,
+        "downsample_dir",
+        lambda *a, **k: {
+            "resampled": 0,
+            "saved_bytes": 0,
+            "errors": 1,
+            "flush_warnings": 0,
+        },
+    )
+
+    result = downsample.run_downsample_walk_mode(args)
+
+    assert result != 0
+    assert "Downsample walk finished with errors" in caplog.text
+    assert "Downsample walk complete" not in caplog.text
 
 
 def test_cli_new_release_check_refuses_without_baseline(monkeypatch):

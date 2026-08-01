@@ -1,4 +1,4 @@
-"""Downsample walk — shrink hi-res library files to CD rate.
+"""Downsample walk: shrink hi-res library files to CD rate.
 
 Pure local housekeeping: no Qobuz lookup, so it runs without credentials. The
 resample is irreversible (the hi-res original is overwritten in place, with no
@@ -29,12 +29,12 @@ def run_downsample_walk_mode(args):
     NO; --yes accepts every one and --dry-run lists what would shrink and
     changes nothing.
 
-    Returns the exit code: 0 when the walk finished, non-zero when it was cut
-    short or couldn't ask. The interactive menu ignores it; --downsample-walk
-    exits with it.
+    Returns the exit code: 0 when the walk finished without file errors,
+    non-zero when it failed, was cut short, or couldn't ask. The interactive
+    menu ignores it; --downsample-walk exits with it.
     """
     clear_scan_caches()
-    banner("Downsample — bring hi-res library files down to CD rate")
+    banner("Downsample: bring hi-res library files down to CD rate")
 
     if not HAVE_DOWNSAMPLE:
         log.info(fmt(C.YELLOW,
@@ -79,12 +79,13 @@ def run_downsample_walk_mode(args):
         on_artist=_on_artist,
         persist=not args.dry_run,
     )
+    unchecked = len(refresh.errors)
     candidates_by_artist = {}
     for candidate in refresh.candidates:
         candidates_by_artist.setdefault(candidate.artist, []).append(candidate)
 
-    # First downsample with the keep-vs-delete choice unmade: ask once — the
-    # web UI asks the same thing — and save it as the standing default
+    # First downsample with the keep-vs-delete choice unmade: ask once. The
+    # web UI asks the same thing and saves it as the standing default
     # (changeable later in Settings).
     if (refresh.candidates and not args.dry_run
             and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
@@ -98,18 +99,18 @@ def run_downsample_walk_mode(args):
             # Closed stdin never answered.
             cfg.DOWNSAMPLE_KEEP_ORIGINALS = "keep"
             log.info(fmt(C.GRAY,
-                "  No input available — keeping originals for this run; "
+                "  No input available; keeping originals for this run. "
                 "set the preference in Settings."))
         else:
             _choice = "keep" if keep else "delete"
             settings_store.save({"DOWNSAMPLE_KEEP_ORIGINALS": _choice})
             cfg.DOWNSAMPLE_KEEP_ORIGINALS = _choice
             log.info(fmt(C.GRAY,
-                f"  Saved — originals will be {'kept' if keep else 'deleted'}; "
+                f"  Saved. Originals will be {'kept' if keep else 'deleted'}; "
                 "change this any time in Settings."))
         log.info("")
 
-    # Auto-accept gate. Skipped under --yes, which has already answered it —
+    # Auto-accept gate. Skipped under --yes, which has already answered it;
     # otherwise an unattended run stalls here and then declines every artist.
     auto_accept_all = False
     if refresh.candidates and not args.dry_run and not args.yes:
@@ -124,7 +125,7 @@ def run_downsample_walk_mode(args):
             log.info(fmt(C.GREEN, "  ✓ Auto-accepting every artist. Walk away."))
     log.info("")
 
-    n_scanned = len(refresh.artists_scanned)
+    n_scanned = len(refresh.artists_scanned) - unchecked
     n_albums_done = 0
     total_saved = 0
     total_errors = 0
@@ -145,7 +146,7 @@ def run_downsample_walk_mode(args):
             est_total = sum(c.est_saving for c in candidates)
             log.info(fmt(C.BOLD + C.WHITE, f"  {artist_name}"))
             log.info(fmt(C.MAGENTA,
-                f"  {plural(n_albums, 'album')} above CD rate — "
+                f"  {plural(n_albums, 'album')} above CD rate, "
                 f"~{format_size(est_total)} reclaimable:"))
             log.info("")
             for c in candidates:
@@ -211,10 +212,18 @@ def run_downsample_walk_mode(args):
             "unattended.")))
     elif interrupted:
         log.info(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
+    elif unchecked:
+        log.warning(block(fmt(C.YELLOW,
+            f"  ✗  Downsample walk incomplete: {plural(unchecked, 'artist')} "
+            "couldn't be checked. Re-run to retry.")))
+    elif total_errors:
+        log.info(fmt(C.RED,
+            "  ✗  Downsample walk finished with errors. Re-run to retry the "
+            "files left unchanged."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Downsample walk complete."))
     log.info(fmt(C.GRAY,
-        f"     Scanned {plural(n_scanned, 'artist')} — downsampled "
+        f"     Checked {plural(n_scanned, 'artist')}; downsampled "
         f"{plural(n_albums_done, 'album')}, reclaimed {format_size(total_saved)}."))
     if total_errors:
         log.info(fmt(C.YELLOW,
@@ -223,6 +232,7 @@ def run_downsample_walk_mode(args):
     if total_flush_warns:
         log.info(fmt(C.YELLOW,
             f"     {plural(total_flush_warns, 'file')} resampled but couldn't "
-            f"be flushed to disk — the swap may not survive a power loss; "
+            f"be flushed to disk. The swap may not survive a power loss; "
             f"check the drive."))
-    return EXIT_GENERAL if (no_answer or interrupted) else 0
+    return EXIT_GENERAL if (no_answer or interrupted or unchecked
+                            or total_errors) else 0

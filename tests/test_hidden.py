@@ -17,7 +17,7 @@ def test_hide_is_scoped_durable_and_restorable(monkeypatch, tmp_path):
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
     assert hidden.hide(hidden.SCOPE_MISSING, [("Portishead", "Dummy", "1994")]) == 1
     # Another edition keys to the same album, so it joins that entry rather than
-    # opening a second one — but it is a second row off the user's review, and
+    # opening a second one, but it is a second row off the user's review, and
     # the counts he reads have to say so.
     assert hidden.hide(hidden.SCOPE_MISSING,
                        [("Portishead", "Dummy (Remaster)", None)]) == 1
@@ -44,6 +44,17 @@ def test_hide_is_scoped_durable_and_restorable(monkeypatch, tmp_path):
     assert hidden.count(hidden.SCOPE_MISSING) == 0
 
 
+def test_non_latin_album_can_be_hidden_and_restored(monkeypatch, tmp_path):
+    monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
+
+    assert hidden.hide(hidden.SCOPE_MISSING,
+                       [("宇多田ヒカル", "初恋 💿", "2018")]) == 1
+    store = hidden.load()
+    assert hidden.is_hidden(hidden.SCOPE_MISSING,
+                            "宇多田ヒカル", "初恋 💿", store)
+    assert hidden.restore(hidden.SCOPE_MISSING, ["宇多田ヒカル"]) == 1
+
+
 def test_store_written_before_rows_were_kept_still_counts(monkeypatch, tmp_path):
     # An entry saved by an older build has no row list; it stands for the one
     # row it recorded, so upgrading doesn't make a curated list appear empty.
@@ -65,7 +76,7 @@ def test_store_written_before_rows_were_kept_still_counts(monkeypatch, tmp_path)
 
 
 def test_corrupt_store_is_preserved_not_silently_wiped(monkeypatch, tmp_path):
-    # A corrupt store must NOT be silently overwritten by the next save() —
+    # A corrupt store must NOT be silently overwritten by the next save(),
     # that would destroy a curated hide list.
     p = tmp_path / "h.json"
     p.write_text('{"missing": {"a|b": {"artist": "A"}}, THIS IS BROKEN',
@@ -80,5 +91,4 @@ def test_corrupt_store_is_preserved_not_silently_wiped(monkeypatch, tmp_path):
     # the new hide still persisted, to a fresh valid file
     saved = hidden.load()
     assert hidden.album_fingerprint("New", "Album") in saved[hidden.SCOPE_MISSING]
-
 

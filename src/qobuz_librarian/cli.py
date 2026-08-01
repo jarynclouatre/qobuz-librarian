@@ -5,9 +5,11 @@ lazy-imported from qobuz_librarian.modes to keep startup fast.
 """
 import argparse
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 
 from qobuz_librarian import __version__, run_lock
 from qobuz_librarian import config as cfg
@@ -25,7 +27,15 @@ from qobuz_librarian.queue.persistence import (
     offer_resume_pending_queue,
     offer_resume_startup_recovery,
 )
-from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, set_color_enabled
+from qobuz_librarian.ui_cli.colors import (
+    C,
+    banner,
+    block,
+    fmt,
+    set_color_enabled,
+    text_width,
+    wrap,
+)
 from qobuz_librarian.ui_cli.errors import (
     EXIT_AUTH,
     EXIT_CONFIG,
@@ -408,7 +418,7 @@ def _die_unsettled_startup_recovery(
 
         relocation = result.post_import_relocation
         # The prose reflows to the terminal; the paths do not. A path is only
-        # copyable if every character survives to the screen — reflow would
+        # copyable if every character survives to the screen; reflow would
         # collapse doubled spaces and wrap long ones at inner spaces.
         intro = (
             "\n✗  An interrupted library-folder move could not be verified safely.\n"
@@ -468,7 +478,7 @@ def acquire_run_lock():
             f"   The web app may be holding the lock. Either:\n"
             f"     1. In the web UI (http://<host>:{cfg.WEB_PORT}), open Settings → Mode\n"
             f"        and switch to terminal mode, then re-run this command.\n"
-            f"        (Or just use the web UI — every CLI mode is also a web action.)\n"
+            f"        (Or just use the web UI; every CLI mode is also a web action.)\n"
             f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
             f"        then re-run, then `docker compose start {_svc}`.\n\n"
             f"   Only one writer can use /staging at a time.\n"),
@@ -505,7 +515,7 @@ def _in_container() -> bool:
 def _missing_tool_hint(tool: str, install_hint: str) -> str:
     if _in_container():
         return (f"\n✗  `{tool}` not in PATH inside the container.\n"
-                f"   This means the image is broken — rebuild with "
+                f"   This means the image is broken. Rebuild with "
                 f"`docker compose build --no-cache`.\n")
     return f"\n✗  `{tool}` not in PATH. {install_hint}\n"
 
@@ -514,14 +524,14 @@ def check_rip():
     try:
         r = subprocess.run(["rip", "--version"], capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
-            # rip is on PATH (no FileNotFoundError) but exited nonzero — it's
+            # rip is on PATH (no FileNotFoundError) but exited nonzero; it is
             # installed and broken, not missing.
             # streamrip colours its errors; foreign escapes mid-message
             # would make block() give up wrapping the whole thing.
             detail = re.sub(r"\x1b\[[0-9;]*m",
                             "", (r.stderr or r.stdout or "")).strip()
             die(fmt(C.RED,
-                f"\n✗  `rip --version` exited {r.returncode} — streamrip is "
+                f"\n✗  `rip --version` exited {r.returncode}. streamrip is "
                 f"installed but not working"
                 + (f":\n     {detail}" if detail else ".")
                 + "\n   Reinstall it with `pipx reinstall streamrip` "
@@ -534,7 +544,7 @@ def check_rip():
     except (PermissionError, subprocess.TimeoutExpired) as e:
         die(fmt(C.RED,
             f"\n✗  `rip --version` couldn't run ({e}). The streamrip binary "
-            "may be broken — reinstall it with `pipx reinstall streamrip`.\n"),
+            "may be broken. Reinstall it with `pipx reinstall streamrip`.\n"),
             EXIT_CONFIG)
 
 
@@ -574,73 +584,181 @@ class _ExitOneArgParser(argparse.ArgumentParser):
         return super().exit(status, message)
 
 
+class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog):
+        super().__init__(prog, width=text_width())
+
+    def _format_action_invocation(self, action):
+        if isinstance(action, argparse.BooleanOptionalAction):
+            option = action.option_strings[0]
+            return option.replace("--", "--[no-]", 1)
+        return super()._format_action_invocation(action)
+
+
+_HELP_EXAMPLES = (
+    ("qobuz-librarian", "interactive menu"),
+    ("qobuz-librarian https://open.qobuz.com/album/abc", "one album by URL"),
+    ('qobuz-librarian "radiohead in rainbows"', "search and download"),
+    ('qobuz-librarian --artist "Paysage d\'Hiver"', "fill artist gaps"),
+    ("qobuz-librarian --upgrade-walk --auto-safe",
+     "unattended upgrade pass"),
+    ("qobuz-librarian --dry-run --artist Beatles",
+     "preview without downloading"),
+)
+
+
+def _wrap_shell_command(command, width, *, initial_indent="  ",
+                        continuation_indent="    "):
+    tokens = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", command)
+    command_lines = []
+    line = initial_indent
+    for token in tokens:
+        separator = "" if line.isspace() else " "
+        if not line.isspace() and len(line + separator + token) > width - 2:
+            command_lines.append(line + " \\")
+            line = continuation_indent + token
+        else:
+            line += separator + token
+    command_lines.append(line)
+    return command_lines
+
+
+def _help_example(command, comment, width):
+    command_lines = _wrap_shell_command(command, width)
+
+    suffix = "  # " + comment
+    if len(command_lines[-1] + suffix) <= width:
+        command_lines[-1] += suffix
+        return command_lines
+    command_lines.extend(textwrap.wrap(
+        comment,
+        width=width,
+        initial_indent="    # ",
+        subsequent_indent="      ",
+        break_long_words=False,
+        break_on_hyphens=False,
+    ))
+    return command_lines
+
+
+def _help_description():
+    return textwrap.fill(
+        "Qobuz Librarian: download albums and artists from Qobuz and keep a "
+        "library complete, fetching only what is missing. Run with no "
+        "arguments for an interactive menu.",
+        width=text_width(),
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+def _beets_recovery_command():
+    staging = shlex.quote(str(cfg.STAGING_DIR))
+    if _in_container():
+        service = shlex.quote(_compose_service_name())
+        return f"docker compose run --rm {service} beet import {staging}"
+    return f"beet import {staging}"
+
+
+def _help_epilog():
+    width = text_width()
+    lines = ["Examples (credentials required):"]
+    for command, comment in _HELP_EXAMPLES:
+        lines.extend(_help_example(command, comment, width))
+
+    recovery_heading = (
+        "After --no-import (Compose host):"
+        if _in_container() else "After --no-import:")
+    lines.extend(("", recovery_heading))
+    lines.extend(_help_example(
+        _beets_recovery_command(), "finish importing staged albums", width))
+
+    lines.extend(("", *textwrap.wrap(
+        "Credentials: set them on the web UI Settings page first, or use "
+        "QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID environment variables.",
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )))
+    lines.extend(textwrap.wrap(
+        f"On a fresh install, open http://<host>:{cfg.WEB_PORT}/settings.",
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ))
+    lines.extend(("", "Exit codes:"))
+    for code, description in (
+        ("0", "success"),
+        ("1", "general failure (including interrupt)"),
+        ("2", "authentication token invalid or missing"),
+        ("3", "another writer holds the run lock"),
+        ("4", "transient network or API error; retry later"),
+        ("64", "configuration or required tool missing"),
+    ):
+        prefix = f"  {code:<4}"
+        lines.extend(textwrap.wrap(
+            description,
+            width=width,
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=False,
+            break_on_hyphens=False,
+        ))
+    return "\n".join(lines)
+
+
 def parse_args():
     p = _ExitOneArgParser(
-        description="Qobuz Librarian — download albums/artists from Qobuz and "
-                    "keep a library complete, only fetching what's missing. "
-                    "Run with no arguments for an interactive menu.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples (all require credentials — set them first):\n"
-            "  qobuz-librarian                                  # interactive menu\n"
-            "  qobuz-librarian https://open.qobuz.com/album/abc # one album by URL\n"
-            "  qobuz-librarian \"radiohead in rainbows\"          # search and download\n"
-            "  qobuz-librarian --artist \"Paysage d'Hiver\"       # fill artist gaps\n"
-            "  qobuz-librarian --upgrade-walk --auto-safe       # unattended upgrade pass\n"
-            "  qobuz-librarian --dry-run --artist Beatles       # preview without downloading\n\n"
-            "Credentials: set them on the web UI Settings page first (browse to\n"
-            f"http://<host>:{cfg.WEB_PORT}/settings on a fresh install), or via\n"
-            "QOBUZ_USER_AUTH_TOKEN / QOBUZ_USER_ID env vars.\n\n"
-            "Exit codes:\n"
-            "  0   success\n"
-            "  1   general failure (incl. interrupt)\n"
-            "  2   auth: token invalid or missing\n"
-            "  3   another writer holds the run lock\n"
-            "  4   transient network/API error — retry later\n"
-            "  64  config / required tool missing"
-        ))
+        usage="%(prog)s [options]\n       [query ...]",
+        description=_help_description(),
+        formatter_class=_HelpFormatter,
+        epilog=_help_epilog())
     p.add_argument("--version", action="version", version=f"qobuz-librarian {__version__}")
     p.add_argument("query", nargs="*", help="search query or Qobuz album URL")
     p.add_argument("--artist",       metavar="NAME",
-                   help="Run artist mode on NAME (skips interactive menu)")
+                   help="run artist mode on NAME (skips interactive menu)")
     p.add_argument("--library-walk", action="store_true",
-                   help="Walk every artist: fill gaps, then offer albums you're "
+                   help="walk every artist: fill gaps, then offer albums you're "
                         "missing; queue as you go (same as menu Library walk).")
     p.add_argument("--album-gaps", action="store_true",
-                   help="Fill missing tracks in every incomplete album you own; "
+                   help="fill missing tracks in every incomplete album you own; "
                         "never suggests albums you don't have.")
     p.add_argument("--repair", action="store_true",
-                   help="Re-download damaged (truncated) tracks you own. '*' at "
+                   help="re-download damaged (truncated) tracks you own. '*' at "
                         "the artist prompt sweeps the whole library.")
     p.add_argument("--upgrade-walk", action="store_true",
-                   help="Review saved Library upgrade candidates. Per-artist "
+                   help="review saved Library upgrade candidates. Per-artist "
                         "confirm (enter=skip), auto-advance.")
     p.add_argument("--downsample-walk", action="store_true",
-                   help="Scan the library for hi-res files and downsample them "
+                   help="scan the library for hi-res files and downsample them "
                         "to CD rate in place (per-artist confirm; --dry-run lists "
-                        "only). Local — no Qobuz login needed.")
+                        "only). Local; no Qobuz login needed.")
     p.add_argument("--check-new-releases", dest="check_new_releases",
                    action="store_true",
                    help="walk library artists and report what's new on Qobuz "
                         "since the last check (same engine the web auto-check "
                         "uses); --dry-run skips advancing the baseline")
     p.add_argument("--lyrics-walk", action="store_true",
-                   help="Fetch lyrics for tracks already in the library that "
+                   help="fetch lyrics for tracks already in the library that "
                         "are missing them (LYRICS_FORMAT / LYRICS_PROVIDERS "
-                        "settings apply). Local — no Qobuz login needed.")
+                        "settings apply). Local; no Qobuz login needed.")
     p.add_argument("--lyrics-rescan", action="store_true",
-                   help="With --lyrics-walk: re-check every track, ignoring the "
+                   help="with --lyrics-walk: re-check every track, ignoring the "
                         "saved per-track state.")
     p.add_argument("--lyrics-synced-only", action="store_true",
-                   help="With --lyrics-walk: only write timed (synced) lyrics, "
+                   help="with --lyrics-walk: only write timed (synced) lyrics, "
                         "never plain.")
     p.add_argument("--no-catalog",   action="store_true",
-                   help="Artist mode: skip step 2 (don't show missing albums)")
+                   help="skip missing album suggestions in Artist mode and "
+                        "Library walk")
     p.add_argument("--include-comps", action="store_true",
-                   help="Artist mode: include compilation/various-artists releases in step 2")
+                   help="include compilation/various-artists releases in "
+                        "missing album suggestions for Artist mode and "
+                        "Library walk")
     p.add_argument("--dry-run",      action="store_true", help="show plan, download nothing")
     p.add_argument("--no-import",    action="store_true",
-                   help="download but skip beets import (run `beet import <staging>` afterward)")
+                   help="download but skip beets import; see the recovery "
+                        "command below")
     p.add_argument("--force",        action="store_true",
                    help="redownload everything (album mode only)")
     # Default comes from config (PREFER_HIRES, env/Settings overridable) so
@@ -664,12 +782,13 @@ def parse_args():
                    help="force-disable quality upgrades for this run (plain gap-fill)")
     # Unattended upgrade-walk gate.
     p.add_argument("--auto-safe",    action="store_true",
-                   help="Auto-confirm only safe candidates (requires --upgrade-walk).")
-    # Step 2 noise filter: hide/show short releases (singles, very small EPs).
+                   help="auto-confirm only safe candidates (requires --upgrade-walk).")
+    # Missing-album noise filter: hide/show short releases.
     p.add_argument("--include-singles", action="store_true",
                    help=f"include releases with fewer than {cfg.MISSING_ALBUMS_MIN_TRACKS} tracks "
-                        f"in step 2 of artist mode")
-    p.add_argument("--no-color",     action="store_true", help="disable ANSI colors")
+                        "in missing album suggestions for Artist mode and "
+                        "Library walk")
+    p.add_argument("--no-color",     action="store_true", help="disable ANSI colours")
     p.add_argument("--quiet", "-q",  action="store_true",
                    help="suppress info-level console output (warnings/errors "
                         "still print; the log file keeps recording)")
@@ -679,7 +798,7 @@ def parse_args():
     p.add_argument("--no-downsample",  dest="no_downsample",
                    action="store_true",
                    help="force-skip pre-import downsampling for this run "
-                        "(only relevant when DOWNSAMPLE_HIRES_ENABLED is on)")
+                        "(only relevant when downsampling is enabled)")
     p.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
                    action=argparse.BooleanOptionalAction,
                    default=cfg.MIGRATE_MULTI_ARTIST,
@@ -719,7 +838,7 @@ def parse_args():
             and not args.migrate:
         p.error("--in-place / --acoustid / --migrate-src / --migrate-dest only "
                 "apply with --migrate")
-    # --include-singles only affects the missing-albums step of artist mode —
+    # --include-singles only affects the missing-albums step of artist mode;
     # which the library walk runs per artist, so it applies there too.
     if (args.include_singles and not (args.artist or args.library_walk)
             and (args.query or other_run_mode)):
@@ -732,14 +851,14 @@ def parse_args():
     # The upgrade walk reviews saved Library candidates; a query would be
     # silently ignored, so reject it instead of surprising the user.
     if args.upgrade_walk and args.query:
-        p.error("--upgrade-walk reviews saved Library candidates — drop the "
+        p.error("--upgrade-walk reviews saved Library candidates. Drop the "
                 "query, or run a normal search without --upgrade-walk")
     # --artist dispatches before the positional query, so extra words after the
     # artist name would be silently dropped. Reject so the user picks one.
     if args.artist and args.query:
-        p.error("--artist NAME scans that one artist — drop the extra words, "
+        p.error("--artist NAME scans that one artist. Drop the extra words, "
                 "or search them as an album without --artist")
-    # Exactly one whole-run mode executes per invocation — main() dispatches
+    # Exactly one whole-run mode executes per invocation; main() dispatches
     # the first it finds and returns, so a second would be silently dropped.
     requested = [name for name, on in (
         ("a query (album mode)", bool(args.query)),
@@ -755,12 +874,12 @@ def parse_args():
         ("--check-new-releases", args.check_new_releases),
     ) if on]
     if len(requested) > 1:
-        p.error("run one mode at a time — got " + ", ".join(requested))
-    # With no mode, the run falls through to the interactive menu — whose
+        p.error("run one mode at a time; got " + ", ".join(requested))
+    # With no mode, the run falls through to the interactive menu, whose
     # prompts --quiet would silence, leaving a bare input cursor.
     if args.quiet and not requested:
         p.error("--quiet is for unattended runs and silences the interactive "
-                "menu — name a mode (a query, --artist, --upgrade-walk, …) "
+                "menu. Name a mode (a query, --artist, --upgrade-walk, …) "
                 "or drop --quiet")
     # --include-comps controls compilation filtering in artist mode (and the
     # library walk's per-artist pass).
@@ -777,7 +896,7 @@ def parse_args():
         p.error("--auto-safe only applies to --upgrade-walk")
     # An empty --artist (e.g. `--artist "$VAR"` with VAR unset) is falsy, so it
     # would silently fall through to the interactive menu instead of running
-    # artist mode — confusing in a script. Reject it.
+    # artist mode, which would be confusing in a script. Reject it.
     if args.artist is not None and not args.artist.strip():
         p.error("--artist needs an artist name")
     if (args.lyrics_rescan or args.lyrics_synced_only) and not args.lyrics_walk:
@@ -820,9 +939,9 @@ def main():
             log.info(fmt(C.GRAY, "  No walk-seen state to clear."))
         return
 
-    banner("Qobuz Librarian  —  search · artist · library · repair · upgrade")
+    banner("Qobuz Librarian: search · artist · library · repair · upgrade")
 
-    # Single-instance lock first — fail fast before doing any other work.
+    # Single-instance lock first; fail fast before doing any other work.
     # Hold the file handle for the lifetime of main() so the lock persists.
     _lockfile = acquire_run_lock()  # noqa: F841
 
@@ -860,7 +979,7 @@ def main():
             except OSError as e:
                 die(fmt(C.RED,
                     f"\n✗  Couldn't delete {f}: {e}\n"
-                    "   Check the volume permissions / PUID-PGID — /data must be writable.\n"),
+                    "   Check the volume permissions / PUID-PGID; /data must be writable.\n"),
                     EXIT_GENERAL)
         if removed:
             log.info(fmt(C.GREEN, "  ✓  Cleared walk-seen state:"))
@@ -877,7 +996,7 @@ def main():
         raise SystemExit(run_migrate_mode(args))
 
     # Lyrics backfill reads/writes library files and fetches from lyric
-    # providers — no streamrip, ffmpeg or Qobuz token involved.
+    # providers; no streamrip, ffmpeg or Qobuz token involved.
     if args.lyrics_walk:
         require_music_root()
         from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
@@ -894,7 +1013,7 @@ def main():
         run_check_new_releases_mode(args)
         return
 
-    # Downsample walk is local-only — it reads hi-res files off disk and
+    # Downsample walk is local-only; it reads hi-res files off disk and
     # resamples them in place, never touching Qobuz.
     if args.downsample_walk:
         check_media_tools()
@@ -917,11 +1036,11 @@ def main():
         verify_streamrip_downloads_folder()
         if not HAVE_MUTAGEN:
             log.info(fmt(C.YELLOW,
-                "  ⚠  mutagen not installed — falling back to filename-only "
+                "  ⚠  mutagen not installed; falling back to filename-only "
                 "detection."))
             if _in_container():
                 log.info(fmt(C.GRAY,
-                    "     The bundled image installs mutagen by default — if "
+                    "     The bundled image installs mutagen by default. If "
                     "it's missing here, rebuild with `docker compose build "
                     "--no-cache`."))
             else:
@@ -1019,7 +1138,7 @@ def main():
     # ── Decide the entry mode ─────────────────────────────────────────────────
     # Single-shot flag paths first (each skips the menu loop), then positional
     # args / URL → album mode, then the interactive menu. The single-shot paths
-    # still respect AuthLost / KeyboardInterrupt cleanly — all caught at the
+    # still respect AuthLost / KeyboardInterrupt cleanly; all caught at the
     # bottom by main()'s wrapper.
     if args.artist:
         from qobuz_librarian.modes.artist import run_artist_mode
@@ -1044,11 +1163,11 @@ def main():
     if args.upgrade_walk:
         if args.consolidate:
             # The walk switches this off (per-album prompts are unbearable at
-            # scale) — say so instead of accepting the flag silently.
+            # scale). Say so instead of accepting the flag silently.
             log.info(fmt(C.GRAY,
                 "  · The upgrade walk always skips sibling-folder "
                 "consolidation; ignoring --consolidate."))
-        # AUTO_UPGRADE_ENABLED must stay False as the global default — it
+        # AUTO_UPGRADE_ENABLED must stay False as the global default; it
         # controls passive upgrades during ordinary gap-fill walks.
         args.auto_upgrade = True
         from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
@@ -1136,17 +1255,22 @@ def _check_staging_occupied():
             if d.is_dir() and not d.name.startswith(".")
         ]
         if subdirs:
-            log.info(fmt(C.YELLOW,
-                f"\n  ⚠  {len(subdirs)} album folder(s) remain in "
-                f"{cfg.STAGING_DIR} — run `beet import {cfg.STAGING_DIR}` "
-                "to finish importing."))
+            location = " from the Compose host" if _in_container() else ""
+            notice = wrap(
+                f"{len(subdirs)} album folder(s) remain in {cfg.STAGING_DIR}. "
+                f"Keep other downloads paused, then run{location}:",
+                indent="  ⚠  ", hanging="     ")
+            command = "\n".join(_wrap_shell_command(
+                _beets_recovery_command(), text_width(),
+                initial_indent="    ", continuation_indent="      "))
+            log.info(fmt(C.YELLOW, f"\n{notice}\n{command}"))
     except OSError:
         pass
 
 
 def _maybe_drop_privileges():
     """Re-exec under gosu to PUID/PGID when started as root. The entrypoint drops
-    PID 1 to PUID/PGID, but `docker exec ...
+    PID 1 to PUID/PGID, but Docker exec commands bypass the entrypoint.
     """
     import os
     import shutil
@@ -1205,12 +1329,12 @@ def _entry():
                 "or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"), EXIT_AUTH)
         except QobuzUnavailable as e:
             die(fmt(C.YELLOW,
-                f"\n⚠  Qobuz is temporarily unavailable — {e}\n"
+                f"\n⚠  Qobuz is temporarily unavailable: {e}\n"
                 "   Nothing was lost; any queued work was saved. Re-run when it's "
                 "back.\n"), EXIT_TRANSIENT)
     finally:
         # Persist any artist resolutions this run discovered (no-op when none),
-        # so the next CLI walk skips the search calls — only the web flows
+        # so the next CLI walk skips the search calls; only the web flows
         # flushed before, leaving every CLI walk to re-resolve from cold.
         from qobuz_librarian.library.discovery import flush_resolve_cache
         flush_resolve_cache()

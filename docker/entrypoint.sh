@@ -6,27 +6,27 @@ BEETS_DIR="$CONFIG_DIR/beets"
 STREAMRIP_DIR="$CONFIG_DIR/streamrip"
 
 # ── First-run bootstrap ───────────────────────────────────────────────────────
-# /staging /music /data /upgrade_backups are normally mounted volumes — the
+# /staging /music /data /upgrade_backups are normally mounted volumes. The
 # mkdir is a no-op when they exist. With --read-only and a missing mount,
 # `mkdir -p` would fail under `set -e`; warn instead so the writability
 # diagnostics below can run and surface the real problem to the user.
 mkdir -p "$BEETS_DIR" "$STREAMRIP_DIR" 2>/dev/null || \
-    echo "[warn] couldn't create $CONFIG_DIR subdirs — mount /config read-write." >&2
+    echo "[warn] couldn't create $CONFIG_DIR subdirs. Mount /config read-write." >&2
 for d in /staging /music /data /upgrade_backups; do
     [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || \
-        echo "[warn] couldn't create $d — add a mount, or remove --read-only on the rootfs." >&2
+        echo "[warn] couldn't create $d. Add a mount, or remove --read-only on the rootfs." >&2
 done
 
 if [ ! -f "$BEETS_DIR/config.yaml" ]; then
     echo "[init] Creating default beets config at $BEETS_DIR/config.yaml"
     cp /app/docker/beets-default.yaml "$BEETS_DIR/config.yaml" 2>/dev/null || \
-        echo "[warn] couldn't seed beets config — mount /config read-write." >&2
+        echo "[warn] couldn't seed beets config. Mount /config read-write." >&2
 fi
 
 if [ ! -f "$STREAMRIP_DIR/config.toml" ]; then
     echo "[init] Creating default streamrip config at $STREAMRIP_DIR/config.toml"
     cp /app/docker/streamrip-default.toml "$STREAMRIP_DIR/config.toml" 2>/dev/null || \
-        echo "[warn] couldn't seed streamrip config — mount /config read-write." >&2
+        echo "[warn] couldn't seed streamrip config. Mount /config read-write." >&2
 fi
 
 # Enforce the streamrip settings the librarian depends on, every boot. These
@@ -34,15 +34,15 @@ fi
 # across image rebuilds, so a config written by an older build is brought into
 # line rather than left stale. Best-effort: a read-only /config leaves the
 # value alone and the writability check below explains why.
-#   downloads_enabled=false  — its downloads.db otherwise blocks re-download of
+#   downloads_enabled=false: its downloads.db otherwise blocks re-download of
 #     any track the user removed by hand. The ^anchor in the key match leaves
 #     failed_downloads_enabled untouched.
-#   add_singles_to_folder=true — per-track gap-fill must land each track in its
+#   add_singles_to_folder=true: per-track gap-fill must land each track in its
 #     own folder, or beets routes multiple albums into one on-disk folder.
-#   download_booklets=false — the librarian imports audio only; a fetched
+#   download_booklets=false: the librarian imports audio only; a fetched
 #     booklet PDF never lands in the library, just clutters /staging and
 #     inflates the leftover count that can abort a --yes run.
-#   check_for_updates=false — streamrip is pinned into the image, so its
+#   check_for_updates=false: streamrip is pinned into the image, so its
 #     "a new version is available" notice can't be acted on; turning it off
 #     also drops a PyPI request from every download.
 enforce_streamrip() {
@@ -50,7 +50,7 @@ enforce_streamrip() {
     # Match the key with flexible whitespace around '=' so a hand-edited
     # 'downloads_enabled=false' (or extra spaces) is found and rewritten in
     # place. Demanding exactly '^key = ' would miss it, fall through to the
-    # section-append branch below, and insert a DUPLICATE key — which makes the
+    # section-append branch below, and insert a duplicate key, which makes the
     # TOML unparseable and breaks every download. The '^' anchor still spares
     # longer keys like failed_downloads_enabled.
     cur=$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*\(.*\)/\1/p" "$cfg" 2>/dev/null)
@@ -61,19 +61,19 @@ enforce_streamrip() {
         if sed -i "s/^${key}[[:space:]]*=.*/${key} = ${want}/" "$cfg" 2>/dev/null; then
             echo "[init] Set streamrip ${key}=${want} (was ${cur})."
         else
-            echo "[warn] couldn't set streamrip ${key}=${want} — mount /config read-write." >&2
+            echo "[warn] couldn't set streamrip ${key}=${want}. Mount /config read-write." >&2
         fi
     elif grep -q "^\[${section}\]" "$cfg" 2>/dev/null; then
-        # Key absent (an older streamrip's config predates it) — add it under its
+        # Key absent (an older streamrip's config predates it), add it under its
         # section rather than skipping, which would silently keep streamrip's
         # default. Appending at EOF would land it under the wrong [table].
         if sed -i "/^\[${section}\]/a ${key} = ${want}" "$cfg" 2>/dev/null; then
             echo "[init] Added streamrip ${key}=${want} under [${section}]."
         else
-            echo "[warn] couldn't add streamrip ${key}=${want} — mount /config read-write." >&2
+            echo "[warn] couldn't add streamrip ${key}=${want}. Mount /config read-write." >&2
         fi
     else
-        echo "[warn] streamrip config has no [${section}] — can't enforce ${key}=${want}." >&2
+        echo "[warn] streamrip config has no [${section}], can't enforce ${key}=${want}." >&2
     fi
 }
 enforce_streamrip downloads_enabled false database
@@ -97,7 +97,7 @@ export BEETSDIR="$BEETS_DIR"
 # Run as a non-root uid:gid so downloaded/imported files aren't root-owned.
 # Defaults to 1000:1000; set PUID/PGID to match the owner of your media share
 # (find them with `id -u` / `id -g`). PUID=0 PGID=0 deliberately runs as root.
-# gosu takes a numeric uid:gid directly — no account needs to exist.
+# gosu takes a numeric uid:gid directly; no account needs to exist.
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 APP_USER="root"
@@ -112,14 +112,14 @@ case "${PUID}${PGID}" in
         ;;
     *)
         # Canonicalize to plain decimal first: the root checks below compare
-        # strings, and PUID=00 is still uid 0 — with extra digits it would
+        # strings, and PUID=00 is still uid 0. With extra digits it would
         # slip past "= 0" and run as root while reading as non-root. (Not
         # $((...)): a leading zero makes sh parse 08/09 as bad octal.)
         PUID="$(printf '%s' "$PUID" | sed 's/^0*\([0-9]\)/\1/')"
         PGID="$(printf '%s' "$PGID" | sed 's/^0*\([0-9]\)/\1/')"
         # Root must be the explicit, deliberate pair 0:0. A mixed pair like
         # 0:1000 still runs UID 0 (full root), and 1000:0 grants the root
-        # group — both look like a normal PUID/PGID setup while quietly
+        # group. Both look like a normal PUID/PGID setup while quietly
         # keeping root privileges, so refuse them outright.
         if { [ "$PUID" = "0" ] && [ "$PGID" != "0" ]; } || \
            { [ "$PGID" = "0" ] && [ "$PUID" != "0" ]; }; then
@@ -127,12 +127,12 @@ case "${PUID}${PGID}" in
             exit 1
         fi
         APP_USER="${PUID}:${PGID}"
-        # /music is the user's library — possibly a huge NAS mount — so it's
+        # /music is the user's library, possibly a huge NAS mount, so it is
         # never recursively chowned; its permissions are theirs to manage (the
         # writability check below guides them if PUID doesn't match). The rest
         # are small app-managed volumes: chown them so a fresh deploy doesn't
         # warn "not writable" on every boot until the user fixes it by hand.
-        # Only entries with the wrong owner are touched — chown(2) bumps ctime
+        # Only entries with the wrong owner are touched. chown(2) bumps ctime
         # even when nothing changes, which would break every sealed backup
         # receipt on every restart. Non-fatal on failure (a NAS-bound staging
         # just falls through to the writability warning).
@@ -187,6 +187,9 @@ case "${1:-web}" in
         ;;
     cli)
         shift
+        run qobuz-librarian "$@"
+        ;;
+    -*)
         run qobuz-librarian "$@"
         ;;
     *)

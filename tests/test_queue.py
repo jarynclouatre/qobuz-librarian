@@ -69,7 +69,7 @@ def test_build_queue_item_defaults_and_copies_siblings():
     assert item["backup_path"] is None
     assert (item["n_ok"], item["n_fail"]) == (0, 0)
     assert item["imported"] is False and item["result"] is None
-    # siblings_to_delete must be a copy — mutating the caller's list mustn't leak in.
+    # siblings_to_delete must be a copy, so caller mutation cannot leak in.
     original.append(Path("/c"))
     assert len(item["siblings_to_delete"]) == 2
 
@@ -82,7 +82,7 @@ def test_queue_item_round_trips_and_resets_runtime_fields():
     restored = _deserialize_queue_item(_serialize_queue_item(item))
     assert restored["album_dir"] == item["album_dir"]
     assert restored["quality"] == 3
-    # Runtime accounting is per-run state, not persisted — it resets on restore.
+    # Runtime accounting is per-run state, not persisted, and resets on restore.
     assert restored["n_ok"] == 0 and restored["imported"] is False
 
 
@@ -156,10 +156,12 @@ def test_executor_gap_fill_backup_restored_when_track_returns_lossy(monkeypatch,
         "auto_upgrade": False,
     }
     args = Namespace(no_import=False, consolidate=False)
-    executor._resolve_queue_item(item, args, imported_globally=True)
+    result = executor._resolve_queue_item(item, args, imported_globally=True)
 
     assert owned.exists()
     assert owned.read_bytes() == b"the-owned-original"
+    assert result["result"] == "partial"
+    assert result["n_lossy_only"] == 1
 
 
 def test_executor_auto_downsample_marker_prefers_signature_over_old_folder(
@@ -313,11 +315,14 @@ def test_executor_self_heal_retry_no_files_keeps_first_download_state(
     def fake_verify(_album, _staged_dirs, *, redownload_at_max, **_kw):
         dirs = redownload_at_max()
         return {"under": True, "recovered": False, "retried": True,
-                "n_below": 1, "served": (16, 44100),
-                "target": (24, 96000), "staged_dirs": dirs}
+                "n_below": 1, "n_unknown": 0, "served": (16, 44100),
+                "target": (24, 96000), "source": (24, 192000),
+                "effective_tier": 3, "staged_dirs": dirs}
 
     monkeypatch.setattr(executor, "run_album_download", fake_download)
     monkeypatch.setattr(executor, "verify_and_recover", fake_verify)
+    shortfalls = []
+    monkeypatch.setattr(executor, "on_quality_shortfall", shortfalls.append)
 
     args = Namespace(dry_run=False, no_import=False, no_downsample=True,
                      consolidate=False)
@@ -330,6 +335,7 @@ def test_executor_self_heal_retry_no_files_keeps_first_download_state(
     assert results[-1]["n_ok"] == 1
     assert imported_dirs == [[first_staged]]
     assert (first_staged / "01.flac").read_bytes() == b"first"
+    assert shortfalls == [item["quality_verdict"]]
 
 
 def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypatch, tmp_path):
@@ -378,7 +384,7 @@ def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypa
 
 def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, tmp_path):
     # Regression: the bulk/web upgrade path (this executor) must carry non-
-    # audio companions — booklets, scans, .cue/.log, hand-placed art — out of
+    # audio companions (booklets, scans, .cue/.log, and hand-placed art) out of
     # the backup into the rebuilt album before reaping it, exactly as the
     # single-album process.py path does.
     from qobuz_librarian.library.backup import backup_album_dir
@@ -644,7 +650,7 @@ def test_failed_import_parking_refuses_a_same_name_replacement(
 def test_reimport_parked_albums_clears_moved_and_keeps_skipped(monkeypatch, tmp_path):
     """A parked album is cleared only when its audio actually leaves disk on the
     retry import. A beets run that exits 0 while skipping the album (e.g. a
-    library duplicate) leaves the files in place — the parked copy must be kept,
+    library duplicate) leaves the files in place. The parked copy must be kept,
     not deleted on the strength of the exit code, since it's the only copy."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations.staging import park_trees
@@ -673,7 +679,7 @@ def test_reimport_parked_albums_clears_moved_and_keeps_skipped(monkeypatch, tmp_
         # the good album and leave the skipped one's files where they are.
         if dirs[0] == good_group.trees[0].path:
             good_flac.unlink()
-        return "ok"  # exit 0 either way — the disk, not this, decides cleanup
+        return "ok"  # Exit 0 either way; the disk decides cleanup.
     monkeypatch.setattr(executor, "beets_import_albums", fake_import)
 
     assert executor._reimport_parked_albums()[0] is True
@@ -685,7 +691,7 @@ def test_reimport_parked_albums_clears_moved_and_keeps_skipped(monkeypatch, tmp_
 def test_reimport_parked_albums_preserves_non_audio_companions(monkeypatch, tmp_path):
     """When beets imports the audio out of a parked album, the non-audio
     companions it leaves behind (booklets, scans) must be rescued, not deleted
-    with the staging husk — the same data-loss shape as the upgrade-backup path."""
+    with the staging husk, the same data-loss shape as the upgrade-backup path."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations.staging import park_trees
     from qobuz_librarian.queue import executor
@@ -718,7 +724,7 @@ def test_reimport_parked_albums_preserves_non_audio_companions(monkeypatch, tmp_
 
 
 def test_queue_runs_post_download_truncation_recheck_on_success(monkeypatch, tmp_path):
-    # The post-download length recheck must fire on the QUEUE path too — walk,
+    # The post-download length recheck must also fire on the queue path: walk,
     # artist/album queue, resume, repair refill and the web single-track grab all
     # flow through _execute_download_queue, so a clean truncation in a freshly
     # filled album would otherwise never be surfaced on the bulk-fill workflow.
@@ -792,7 +798,7 @@ def test_executor_gap_fill_backup_survives_partial_beets_move(monkeypatch, tmp_p
     gfb = bkmod.backup_gap_fill_files([str(owned)], album_dir)
     assert gfb is not None and not owned.exists()
     # beets exited 0 and moved one fresh track in, leaving the rest in staging
-    # — the album is 2 tracks on Qobuz but only 1 landed.
+    # The album is 2 tracks on Qobuz but only 1 landed.
     (album_dir / "02 - fresh.flac").write_bytes(b"\x00" * 1000)
 
     monkeypatch.setattr(executor, "find_album_dir_filesystem", lambda _a: album_dir)
@@ -816,7 +822,7 @@ def test_executor_gap_fill_backup_survives_partial_beets_move(monkeypatch, tmp_p
 
 def test_executor_gap_fill_backup_kept_when_extras_satisfy_the_count(monkeypatch, tmp_path):
     """The resolved folder holds ENOUGH audio files, but an expected track is
-    still absent — extras make up the number. A raw file count reads that as
+    still absent because extras make up the number. A raw file count reads that as
     whole and deletes the gap-fill backup, the moved-aside track's only copy;
     the gate has to match every expected track one-to-one."""
     from qobuz_librarian.library import backup as bkmod
@@ -830,7 +836,7 @@ def test_executor_gap_fill_backup_kept_when_extras_satisfy_the_count(monkeypatch
     owned.write_bytes(b"the-owned-original")
     gfb = bkmod.backup_gap_fill_files([str(owned)], album_dir)
     assert gfb is not None and not owned.exists()
-    # Two audio files land — the expected count (2) is satisfied — but the
+    # Two audio files land and satisfy the expected count (2), but the
     # moved-aside "Alpha" never came back; a bonus file makes up the number.
     (album_dir / "02 - Beta.flac").write_bytes(b"\x00" * 1000)
     (album_dir / "09 - Bonus.flac").write_bytes(b"\x00" * 1000)
@@ -857,7 +863,7 @@ def test_executor_gap_fill_backup_kept_when_extras_satisfy_the_count(monkeypatch
 
 def test_executor_upgrade_backup_kept_when_companion_carry_fails(monkeypatch, tmp_path):
     """A verified upgrade whose booklet/scan copy-out fails must keep the
-    backup — deleting it would take the only copy of the companions with it."""
+    backup. Deleting it would take the only copy of the companions with it."""
     from qobuz_librarian.queue import executor
 
     album_dir = tmp_path / "music" / "Artist" / "Album"
@@ -893,5 +899,3 @@ def test_executor_upgrade_backup_kept_when_companion_carry_fails(monkeypatch, tm
 
     assert bp.exists()
     assert (bp / "booklet.pdf").read_bytes() == b"the-only-booklet"
-
-

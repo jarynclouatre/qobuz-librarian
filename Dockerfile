@@ -30,11 +30,11 @@ WORKDIR /app
 # streamrip and beets install --no-deps: both cap a few helpers (Pillow,
 # aiofiles, tomlkit) far below the versions the librarian runs and verifies, so
 # letting them resolve their own trees would either downgrade those or fail the
-# build outright. image-lock.txt supplies the whole dependency set instead —
+# build outright. image-lock.txt supplies the whole dependency set instead.
 # core beets, the fetchart + inline plugins (beets-default.yaml), the
 # chroma/AcoustID path (pyacoustid here, fpcalc via libchromaprint-tools in the
 # runtime stage) that beets-chroma.yaml and the migration fingerprint stage use,
-# the app's own deps, and every transitive dependency — pinned to a verified
+# the app's own deps, and every transitive dependency, pinned to a verified
 # resolution so a rebuild can't drift to newer releases. Regenerate it with
 # scripts/lock-image-deps.sh after changing the streamrip ref or beets pin.
 COPY docker/image-lock.txt ./image-lock.txt
@@ -45,7 +45,7 @@ RUN pip install --no-cache-dir --no-deps \
 
 # App source. image-lock.txt already installed the app's dependencies above, so
 # the editable install only links /app/src (--no-deps). The .pth references
-# /app/src — kept at the same path in the runtime stage.
+# /app/src, kept at the same path in the runtime stage.
 COPY LICENSE README.md pyproject.toml ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir -e . --no-deps
@@ -60,7 +60,7 @@ RUN npm ci --no-audit --no-fund \
         --minify
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
-# No git, no compilers, no pip caches — just the venv + ffmpeg + tiny helpers.
+# No git, no compilers, no pip caches, just the venv + ffmpeg + tiny helpers.
 FROM python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.title="Qobuz Librarian"
@@ -69,12 +69,12 @@ LABEL org.opencontainers.image.source="https://github.com/jarynclouatre/qobuz-li
 # The image REDISTRIBUTES third-party tools under their own licenses (streamrip
 # is GPL-3.0-or-later, mutagen GPL-2.0-or-later, plus ffmpeg/flac/beets), so the
 # standard machine-readable label reflects the whole image, not just this app.
-# This project's OWN source is MIT — see the dedicated label below and LICENSE.
+# This project's OWN source is MIT. See the dedicated label below and LICENSE.
 LABEL org.opencontainers.image.licenses="MIT AND GPL-3.0-or-later AND GPL-2.0-or-later"
 LABEL com.qobuzlibrarian.app-code-license="MIT"
 
 # ffmpeg: rip/compress (runtime). flac: `flac -t` integrity checks and
-# `metaflac` header reads — the reference tools verify frame CRCs and ignore
+# `metaflac` header reads. The reference tools verify frame CRCs and ignore
 # embedded cover art, which ffmpeg's decoder does not. gosu: clean PUID/PGID
 # drop. procps: ps/top for operators debugging from inside the container.
 # libchromaprint-tools: fpcalc, for the optional beets `chroma` (AcoustID)
@@ -121,7 +121,7 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 8666
 
-# Explicit marker for the `_in_container()` runtime check in cli.py — Docker
+# Explicit marker for the `_in_container()` runtime check in cli.py. Docker
 # also creates /.dockerenv, but this also covers Podman/Buildah/rootless.
 ENV QL_IN_CONTAINER=1
 # entrypoint.sh exports BEETSDIR for the PID-1 process tree, but
@@ -130,12 +130,26 @@ ENV QL_IN_CONTAINER=1
 # without needing -e BEETSDIR=/config/beets every time.
 ENV BEETSDIR=/config/beets
 
-# Lets `docker compose ps` / orchestrators detect a wedged container.
+# Lets `docker compose ps` and orchestrators detect an unsafe container.
+# Process liveness remains available separately at /healthz.
 # 0.0.0.0 is a bind address, not a destination, so coerce it to 127.0.0.1
 # (uvicorn binds to all interfaces in that case, loopback included). A
 # user who pins WEB_HOST to a specific interface gets that hostname back.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,os; h=os.environ.get('WEB_HOST','0.0.0.0'); h='127.0.0.1' if h=='0.0.0.0' else h; urllib.request.urlopen('http://'+h+':'+os.environ.get('WEB_PORT','8666')+'/healthz', timeout=4)" || exit 1
+    CMD python -c "import urllib.request,os; h=os.environ.get('WEB_HOST','0.0.0.0'); h='127.0.0.1' if h=='0.0.0.0' else h; urllib.request.urlopen('http://'+h+':'+os.environ.get('WEB_PORT','8666')+'/readyz', timeout=4)" || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["web"]
+
+# CI installs only the pinned test additions over the finished runtime, then
+# runs the same suite that exercises source installs. This stage is never the
+# default image and its test files and packages do not reach a release.
+FROM runtime AS test
+COPY requirements-test.txt ./requirements-test.txt
+RUN pip install --no-cache-dir -r requirements-test.txt
+COPY tests/ ./tests/
+COPY docker/entrypoint.sh docker/streamrip-default.toml ./docker/
+USER appuser
+RUN PYTEST_ADDOPTS="-p no:cacheprovider" python -m pytest -q
+
+FROM runtime AS final

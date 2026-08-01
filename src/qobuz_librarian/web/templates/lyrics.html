@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Lyrics — Qobuz Librarian{% endblock %}
+{% block title %}Lyrics | Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
 
@@ -9,11 +9,11 @@
   </header>
 
   <div class="ql-work-status">
-    <span class="ql-status-chip {% if lyrics_running %}is-info{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
-      {% if lyrics_running %}Scanning{% elif have_lyrics %}Ready{% else %}Unavailable{% endif %}
+    <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
+      {% if lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif have_lyrics %}Ready{% else %}Unavailable{% endif %}
     </span>
     <span>
-      {% if lyrics_running %}Fetching lyrics across your library…{% elif last_run %}Last lyrics scan {{ last_run }}.{% else %}No lyrics scan has finished yet.{% endif %}
+      {% if lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif last_run %}Last lyrics scan {{ last_run }}.{% else %}No lyrics scan has finished yet.{% endif %}
     </span>
     {% if have_lyrics and not lyrics_running %}
     <span>
@@ -30,6 +30,12 @@
     <p>Fetching missing lyrics across your library. <a href="/jobs/{{ lyrics_running.id }}" class="ql-inline-link">Watch progress →</a></p>
   </div>
   {% else %}
+  {% if lyrics_failed %}
+  <div class="ql-tool-note ql-tool-note-warning" role="alert">
+    <p class="ql-tool-note-title">Last lyrics scan failed</p>
+    <p>{{ lyrics_failed.error or lyrics_failed.summary }} <a href="/jobs/{{ lyrics_failed.id }}" class="ql-inline-link">Open details →</a></p>
+  </div>
+  {% endif %}
   <form action="/lyrics" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <div class="ql-option-stack">

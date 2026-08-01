@@ -16,7 +16,7 @@ Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing 
 docker compose run --rm -it qobuz-librarian cli
 ```
 
-Three menu modes also have flags that jump straight to them — still interactive (they confirm per artist or prompt for one), so keep `-it`:
+Three menu modes also have flags that jump straight to them. They are still interactive (they confirm per artist or prompt for one), so keep `-it`:
 
 ```bash
 # The artist walk over every artist, queueing as you go
@@ -38,6 +38,10 @@ docker compose run --rm qobuz-librarian cli https://open.qobuz.com/album/abcd123
 # Work through one artist's catalogue (--include-singles and/or
 # --include-comps to also offer singles and compilation appearances)
 docker compose run --rm qobuz-librarian cli --artist "Paysage d'Hiver"
+
+# Report releases added since the last completed Library baseline.
+# A normal run advances the baseline; add --dry-run to leave it unchanged.
+docker compose run --rm qobuz-librarian cli --check-new-releases
 
 # Sweep every artist for quality upgrades, auto-confirming upgrades the scanner can classify safely
 docker compose run --rm qobuz-librarian cli --upgrade-walk --auto-safe

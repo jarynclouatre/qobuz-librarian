@@ -67,6 +67,16 @@ def _single_track_item(label):
     )
 
 
+def test_managed_import_progress_uses_album_folder(tmp_path):
+    staging = tmp_path / "staging"
+    run = staging / (".qobuz-run-" + "a" * 24)
+
+    assert beets_module._beets_progress_album(
+        str(run / "Safe Album" / "01.flac"), staging
+    ) == "Safe Album"
+    assert beets_module._beets_progress_album(str(run), staging) == "Importing album"
+
+
 def test_download_quarantine_checkpoint_is_persisted_before_error_propagates(
     tmp_path, monkeypatch, authority
 ):
@@ -140,8 +150,8 @@ def test_download_quarantine_checkpoint_is_persisted_before_error_propagates(
 def test_cancelled_download_discards_staging_and_clears_journal(
     tmp_path, monkeypatch, authority
 ):
-    # A user cancel is deliberate: the partial rip is thrown away — including
-    # a group parked for a rejected broken track — and the journal item is
+    # A user cancel is deliberate: the partial rip is thrown away, including
+    # a group parked for a rejected broken track, and the journal item is
     # settled, so later downloads never wait on a restart.
     staging = tmp_path / "staging"
     monkeypatch.setattr(cfg, "STAGING_DIR", staging)

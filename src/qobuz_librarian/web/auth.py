@@ -2,7 +2,7 @@
 
 One username + password, opt-out via WEB_AUTH=none. Follows web/csrf.py's
 cookie conventions (HttpOnly/SameSite, secrets.compare_digest) and persists
-the credential the way the streamrip token is persisted — an atomic 0600
+the credential the way the streamrip token is persisted: an atomic 0600
 file in DATA_DIR.
 
 The session cookie carries a random per-login token, not a credential-derived
@@ -17,6 +17,8 @@ import secrets
 import tempfile
 import threading
 import time
+import unicodedata
+import urllib.parse
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
@@ -26,12 +28,42 @@ from qobuz_librarian import config as cfg
 SESSION_COOKIE = "ql_session"
 LOGIN_PATH = "/login"
 SETUP_PATH = "/setup"
-MIN_PASSWORD_LEN = 8
+MIN_PASSWORD_LEN = 15
+
+
+class PasswordRejected(ValueError):
+    pass
+
+
+class SessionPersistenceError(RuntimeError):
+    pass
+
+
+_BLOCKED_PASSWORD_KEYS = frozenset({
+    "123456789012345",
+    "aaaaaaaaaaaaaaa",
+    "adminadminadmin",
+    "changeme123456",
+    "changemechangeme",
+    "changemetosomethingstrong",
+    "correcthorsebatterystaple",
+    "iloveyouiloveyou",
+    "letmeinletmein",
+    "password123456",
+    "passwordpassword",
+    "qobuzlibrarian",
+    "qobuzlibrarian123",
+    "qobuzlibrarianadmin",
+    "qobuzlibrarianpassword",
+    "qwerty123456789",
+    "welcomewelcome",
+    "xxxxxxxxxxxxxxx",
+})
 
 # Reachable without a session: the auth pages handle their own gating, the
-# health probe must answer monitors, and the login page pulls in static
+# health probes must answer monitors, and the login page pulls in static
 # assets + the service worker before the user is signed in.
-_OPEN_PATHS = {"/healthz", "/sw.js", "/favicon.ico"}
+_OPEN_PATHS = {"/healthz", "/readyz", "/sw.js", "/favicon.ico"}
 _OPEN_PREFIXES = ("/static/",)
 
 _PBKDF2_ROUNDS = 600_000
@@ -43,7 +75,7 @@ def safe_next_path(raw) -> str:
 
     Only same-app paths pass: a leading "/" with a normal second character.
     "//host" (protocol-relative) and "/\\host" (browsers fold backslash into
-    slash) would leave the app — an attacker could mail a login link that lands
+    slash) would leave the app. An attacker could mail a login link that lands
     on a look-alike site after a *successful* sign-in. Control characters are
     header-injection material, and bouncing back to /login or /setup would
     just loop.
@@ -59,6 +91,25 @@ def safe_next_path(raw) -> str:
     if bare in (LOGIN_PATH, SETUP_PATH) or bare.startswith("/api/"):
         return ""
     return p
+
+
+def safe_current_path(raw, host: str) -> str:
+    """Local path from an HTMX current-page URL, or an empty string."""
+    value = str(raw or "").strip()
+    if value.startswith("/"):
+        return safe_next_path(value)
+    try:
+        current = urllib.parse.urlsplit(value)
+    except ValueError:
+        return ""
+    if (current.scheme not in ("http", "https") or not current.netloc
+            or current.username or current.password
+            or current.netloc.casefold() != (host or "").casefold()):
+        return ""
+    target = current.path or "/"
+    if current.query:
+        target += "?" + current.query
+    return safe_next_path(target)
 
 # Credential file cache.
 _cred_cache: dict | None = None
@@ -100,16 +151,35 @@ def _load_sessions() -> dict[str, float]:
         return {}
 
 
-def _save_sessions_locked() -> None:
+def _save_sessions_locked() -> bool:
+    fd = None
+    tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(dir=str(cfg.DATA_DIR),
                                    prefix=".qobuz_web_sessions.", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None
+        with stream as f:
             json.dump(_sessions, f)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, _SESSIONS_FILE)
+        tmp = ""
+        return True
     except OSError:
-        pass
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 _sessions: dict[str, float] = _load_sessions()
@@ -117,7 +187,7 @@ _sessions: dict[str, float] = _load_sessions()
 
 def auth_disabled() -> bool:
     """True only when WEB_AUTH is the literal 'none'. Blank/unset leaves auth
-    ON — disabling is a deliberate opt-out, never the side effect of an empty
+    on. Disabling is a deliberate opt-out, never the side effect of an empty
     field. Read live from the env so it tracks the running environment."""
     return os.environ.get("WEB_AUTH", "").strip().lower() == "none"
 
@@ -127,6 +197,24 @@ def hash_password(password: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt,
                              _PBKDF2_ROUNDS)
     return f"pbkdf2_sha256${_PBKDF2_ROUNDS}${salt.hex()}${dk.hex()}"
+
+
+def _password_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(char for char in normalized if char.isalnum())
+
+
+def new_password_error(username: str, password: str) -> str:
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"Use a password of at least {MIN_PASSWORD_LEN} characters."
+    password_key = _password_key(password)
+    username_key = _password_key(username)
+    username_variants = ({username_key, username_key * 2, username_key * 3}
+                         if username_key else set())
+    if password_key in _BLOCKED_PASSWORD_KEYS or password_key in username_variants:
+        return ("Choose a less common password. A long passphrase of unrelated "
+                "words works well.")
+    return ""
 
 
 def _verify_hash(stored: str, password: str) -> bool:
@@ -160,7 +248,7 @@ def _read() -> dict:
         _cred_cache_path = current
         return _cred_cache
     except FileNotFoundError:
-        # No creds file yet (fresh install) — a stable "unconfigured" state,
+        # No creds file yet (fresh install), a stable "unconfigured" state,
         # safe to cache so the open-setup phase doesn't re-stat every request.
         _cred_cache = {}
         _cred_cache_path = current
@@ -182,7 +270,7 @@ def credentials_configured() -> bool:
 
 
 def creds_file_present_but_unreadable() -> bool:
-    """True when the creds file exists but can't be read as valid credentials —
+    """True when the creds file exists but can't be read as valid credentials,
     a transient I/O error or a corrupt/half-written file. Distinct from a fresh
     install (no file at all): something IS configured here, we just can't read it,
     so callers must fail closed rather than fall back to the unauthenticated
@@ -198,8 +286,12 @@ def set_credentials(username: str, password: str) -> bool:
     """Persist username + password hash + a fresh session secret, atomically
     and 0600. Returns False if the data volume isn't writable so callers can
     show a clear message instead of 500ing. The new session secret rotates on
-    every call, so resetting the password logs out any existing browser."""
+    every call, so resetting the password logs out any existing browser. Raises
+    PasswordRejected before writing when the new password does not meet policy."""
     global _cred_cache, _cred_cache_path
+    error = new_password_error(username, password)
+    if error:
+        raise PasswordRejected(error)
     # Never overwrite an existing-but-unreadable creds file: a transient read
     # error must not let the open /setup page clobber the admin account.
     if creds_file_present_but_unreadable():
@@ -297,10 +389,7 @@ def apply_env_credentials() -> str:
         return "unchanged"
     if not set_credentials(user, password):
         return "failed"
-    # The /setup form enforces an 8-char minimum; this env-seed path bypasses
-    # it, so flag a too-short env password rather than silently coming up with a
-    # trivially guessable password as the only thing gating the UI.
-    return "applied_weak" if len(password) < MIN_PASSWORD_LEN else "applied"
+    return "applied"
 
 
 def verify_login(username: str, password: str) -> bool:
@@ -320,12 +409,19 @@ def mint_session() -> str:
     """Issue a fresh per-login session token (the cookie value) and return it."""
     token = secrets.token_urlsafe(32)
     now = time.time()
+    digest = _token_digest(token)
     with _sessions_lock:
         for t, exp in list(_sessions.items()):
             if exp <= now:
                 del _sessions[t]
-        _sessions[_token_digest(token)] = now + _COOKIE_MAX_AGE
-        _save_sessions_locked()
+        previous = _sessions.get(digest)
+        _sessions[digest] = now + _COOKIE_MAX_AGE
+        if not _save_sessions_locked():
+            if previous is None:
+                _sessions.pop(digest, None)
+            else:
+                _sessions[digest] = previous
+            raise SessionPersistenceError("The web session could not be saved.")
     return token
 
 
@@ -368,7 +464,7 @@ def _secure(request) -> bool:
 
 def set_session_cookie(response, request) -> None:
     # SameSite=strict (matching the CSRF cookie): the session is the auth
-    # credential, and no app flow needs it carried on a cross-site first hop —
+    # credential, and no app flow needs it carried on a cross-site first hop.
     # a deep link from elsewhere just bounces once through /login, which
     # re-issues it. Strict keeps the auth cookie off every cross-site request.
     response.set_cookie(
@@ -386,7 +482,7 @@ def clear_session_cookie(response) -> None:
 
 
 def auth_active() -> bool:
-    """Auth is both enabled and set up — the only state in which a Log out
+    """Auth is both enabled and set up, the only state in which a Log out
     control makes sense. Exposed to templates as a global."""
     return not auth_disabled() and credentials_configured()
 
@@ -407,7 +503,7 @@ def _norm_user(username: str) -> str:
 def check_login_rate_limit(ip: str, username: str = "") -> bool:
     """True if BOTH this IP and this account may attempt a login. The per-account
     counter (keyed on the submitted username) blocks an attacker who rotates
-    source IPs against one account — the per-IP counter alone is bypassable."""
+    source IPs against one account; the per-IP counter alone is bypassable."""
     now = time.monotonic()
     uname = _norm_user(username)
     with _login_lock:
@@ -434,7 +530,7 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
     """Seconds until this IP or account may try again; 0 when not locked.
 
     The throttle is deliberately checked before the password is verified, so a
-    correct password cannot clear it — that is what stops an attacker learning
+    correct password cannot clear it. That is what stops an attacker learning
     they have found it. The user therefore has to be told how long it is, and
     the message that says "wait an hour" is wrong for all but the first second.
     """
@@ -510,7 +606,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return Response(
                     "Login is configured but its credentials can't be read right "
                     "now. Try again shortly.", status_code=503)
-            # Nothing protects the box yet — force the setup screen, but let
+            # Nothing protects the box yet. Force the setup screen, but let
             # the setup GET/POST through so a login can actually be created.
             if path == SETUP_PATH:
                 return await call_next(request)
@@ -519,22 +615,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
         cookie = request.cookies.get(SESSION_COOKIE)
         if cookie and verify_session(cookie):
             return await call_next(request)
-        if path == LOGIN_PATH:
+        if path in (LOGIN_PATH, SETUP_PATH):
             return await call_next(request)
         return self._reject(request, LOGIN_PATH)
 
     @staticmethod
     def _reject(request, location):
+        if request.headers.get("HX-Request") == "true":
+            target = safe_current_path(
+                request.headers.get("HX-Current-URL"),
+                request.headers.get("host", ""),
+            )
+            if location == LOGIN_PATH and target:
+                location += "?next=" + urllib.parse.quote(target)
+            return Response(status_code=401, headers={"HX-Redirect": location})
         # API/SSE callers get a machine-readable 401.
         if request.scope["path"].startswith("/api/"):
             return JSONResponse({"detail": "authentication required"},
                                 status_code=401)
-        if request.headers.get("HX-Request") == "true":
-            return Response(status_code=401, headers={"HX-Redirect": location})
         # Remember where a plain page GET was headed so login can land there
         # instead of dumping every deep link on the dashboard.
         if location == LOGIN_PATH and request.method == "GET":
-            import urllib.parse
             target = request.scope["path"]
             qs = request.scope.get("query_string", b"").decode("utf-8", "ignore")
             if qs:

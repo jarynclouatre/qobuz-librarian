@@ -40,7 +40,7 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 | `REPAIR_CACHE_ENABLED` | `true` | Cache the repair scan's Qobuz ISRC lookups (files are still decode-tested fresh every scan) |
 | `REPAIR_CACHE_TTL_DAYS` | `30` | How long a cached ISRC lookup is reused before re-verifying (`0` = keep until the db is deleted) |
 | `UPGRADE_SCAN_ENABLED` | `true` | Show Upgrade and include the quality-upgrade pass in Library scans (`false` hides Upgrade and skips that pass) |
-| `AUTO_UPGRADE_ENABLED` | `false` | Let an ordinary download or gap-fill run also upgrade an album Qobuz can now serve better, in the CLI and the web app alike. It backs up and replaces the whole album folder; the CLI asks first, the web app does not. Leave it off and use Upgrade, which reviews the same candidates before anything is replaced. |
+| `AUTO_UPGRADE_ENABLED` | `false` | Let an ordinary CLI download or gap-fill run also upgrade an album Qobuz can now serve better, after confirmation. Ordinary web downloads keep the selected edition; use the Upgrade page to review and approve web replacements. |
 | `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample hi-res FLACs as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
@@ -84,7 +84,7 @@ The default Compose `/config` named volume is supported for the beets database. 
 
 Set folder and file naming with `BEETS_PATH_DEFAULT`, `BEETS_PATH_SINGLETON`, and `BEETS_PATH_COMP` on the **Settings** page or in `.env`. These use beets path syntax, for example `$albumartist/$album ($year)/$track - $title`.
 
-Set the loaded plugins with `BEETS_PLUGINS`. The seeded config enables `fetchart` and `inline`; keep `inline`, as it supports the multi-disc folder field. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
+Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field, the artwork plugins required by `ARTWORK`, and its internal import guards. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
 
 For a `pip` or `pipx` installation, install beets 2.12.0 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused because the import and recovery contract is verified against 2.12.0.
 
@@ -128,15 +128,17 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 ## Deployment
 
-**Login.** The web UI requires sign-in out of the box. The password is stored as a salted PBKDF2 hash (`0600`, never plaintext) and the session is an `HttpOnly` cookie. Set the credentials on the first-visit screen, or seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env` so the box comes up already locked down. Those two double as a password reset: change them and restart. To reset without env vars, stop the container, delete `.qobuz_web_auth.json` from the data volume, and set new credentials on the next visit.
+**Login.** The web UI requires sign-in out of the box. The password is stored as a salted PBKDF2 hash (`0600`, never plaintext) and the session is an `HttpOnly` cookie backed by a persisted token digest. If that session cannot be saved, sign-in returns a clear 503 instead of issuing a cookie that will stop working after restart. New and reset passwords need at least 15 characters, and common or product-name passwords are refused; existing credentials keep working after an upgrade. Set the credentials on the first-visit screen, or seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env` so the box comes up already locked down. Those two double as a password reset: change them and restart. The same policy applies when the password comes from `WEB_AUTH_PASSWORD_FILE`; a changed invalid seed stops startup without replacing the saved login. To reset without env vars, stop the container, delete `.qobuz_web_auth.json` from the data volume, and set new credentials on the next visit.
 
 `WEB_AUTH=none` disables login. Use it only on a trusted LAN or behind your own authenticating proxy. The container logs a warning every boot while login is off.
+
+**Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory is unavailable, the single-writer lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
 
 **Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address so the failed-login throttle counts attempts per real client, not per the shared proxy IP. Point it at your proxy, not `*`.
 
 **Keeping the token out of the environment.** `docker inspect` exposes environment variables, so to keep the Qobuz token out of them, point `QOBUZ_USER_AUTH_TOKEN_FILE` at a file containing only the token (a [Docker secret](https://docs.docker.com/engine/swarm/secrets/) or read-only bind mount) instead of setting `QOBUZ_USER_AUTH_TOKEN`. The web-login password supports the same pattern with `WEB_AUTH_PASSWORD_FILE`.
 
-**Hardening.** The bundled `compose.yaml` ships with `mem_limit: 1g`, `pids_limit: 256`, `no-new-privileges`, `cap_drop: [ALL]`, and `0600` token files. It adds back only the capabilities needed for the PUID/PGID handover. The built-in login is a single shared credential with brute-force limiting (a 429 after 5 failures an hour from one IP, or 10 against the same username from anywhere, so rotating source addresses does not defeat it), which is appropriate for a trusted network; use a proxy, VPN, or Tailscale for internet exposure. The image is multi-arch (`linux/amd64`, `linux/arm64`), so arm64 NAS boxes run natively, and a `--read-only` rootfs works with `--tmpfs /tmp` (or `APP_HOME=/var/tmp` with `--tmpfs /var/tmp`). See [SECURITY.md](../SECURITY.md).
+**Hardening.** The bundled `compose.yaml` ships with `mem_limit: 1g`, `pids_limit: 256`, `no-new-privileges`, `cap_drop: [ALL]`, and `0600` token files. It adds back only the capabilities needed for the PUID/PGID handover. The built-in login is a single shared credential with brute-force limiting (a 429 after 5 failures an hour from one IP, or 10 against the same username from anywhere, so rotating source addresses does not defeat it), which is appropriate for a trusted network; use a proxy, VPN, or Tailscale for internet exposure. The image is multi-arch (`linux/amd64`, `linux/arm64`), so arm64 NAS boxes run natively, and a `--read-only` rootfs works with `--tmpfs /tmp`. For a `/var/tmp` mount instead, set `APP_HOME=/var/tmp` in `.env` and use `--tmpfs /var/tmp`. See [SECURITY.md](../SECURITY.md).
 
 ## Notifications
 

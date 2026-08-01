@@ -83,7 +83,7 @@
 }
 
 /* The component rules below are unlayered, so they outrank Tailwind's layered
-   utilities — including `hidden`, which badge and button rules that set their
+   utilities, including `hidden`, which badge and button rules that set their
    own `display` were silently defeating (the empty Queue badge dot). Scoped to
    those cases only: a global important `hidden` would also beat the
    `hidden lg:flex` reveal pattern and take the desktop sidebar with it. */
@@ -367,7 +367,7 @@ h1, h2, h3 {
 .ql-queue-badge.is-warning {
   background-color: color-mix(in oklab, var(--color-warning) 24%, transparent);
 }
-/* Review-ready marker: a small glowing dot right after the label — reads as
+/* Review-ready marker: a small glowing dot right after the label. It reads as
    "something new here", not as a stray bar at the row's far edge. */
 .ql-review-badge {
   width: 0.375rem;
@@ -1172,16 +1172,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   .ql-local-links {
     justify-content: flex-start;
   }
-  .ql-segmented {
-    width: 100%;
-  }
-  .ql-segmented label {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-  .ql-segmented span {
-    min-width: 0;
-  }
   .ql-locked-search-form .ql-search-row {
     flex-direction: column;
   }
@@ -1792,9 +1782,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   display: inline;
 }
 .ql-search-back {
+  display: inline-flex;
+  min-height: 1.5rem;
+  align-items: center;
   border: 0;
   background: transparent;
-  padding: 0;
+  padding: 0 0.25rem;
   color: var(--ql-text-3);
   font-size: 0.8125rem;
   font-weight: 500;
@@ -1835,6 +1828,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-search-select-all {
   display: inline-flex;
+  min-height: 1.5rem;
   align-items: center;
   gap: 0.5rem;
   color: var(--ql-text-2);
@@ -1965,9 +1959,10 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   white-space: nowrap;
 }
 .ql-bulk-clear {
+  min-height: 1.5rem;
   border: 0;
   background: transparent;
-  padding: 0;
+  padding: 0 0.25rem;
   color: var(--ql-text-3);
   font-size: 0.8125rem;
   font-weight: 500;
@@ -2055,8 +2050,13 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-table-check {
   display: inline-flex;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
   align-items: center;
   justify-content: center;
+}
+.ql-table-check:has(.ql-checkbox) {
+  cursor: pointer;
 }
 .ql-table-title-cell {
   display: flex;
@@ -2065,11 +2065,9 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   gap: 0.75rem;
 }
 .ql-table-title-cell > div {
+  flex: 1 1 auto;
   min-width: 0;
 }
-/* .ql-result-art is not in this group: it is the search row's own art, sized at
-   3.25rem above (3rem on a phone). Listing it here made an unconditional rule
-   that sat after both, so it silently won — including over the media query. */
 .ql-cover {
   width: 2.875rem;
   height: 2.875rem;
@@ -2159,13 +2157,22 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-weight: 480;
 }
 .ql-table-sub {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
-  align-items: center;
+  align-items: start;
   gap: 0.5rem;
   margin-top: 0.1875rem;
 }
+.ql-table-release-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.125rem 0.5rem;
+}
 .ql-sub-artist {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--ql-text-2);
@@ -2176,13 +2183,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   white-space: nowrap;
 }
 .ql-sub-version {
+  flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
   color: var(--ql-text-3);
   font-size: 0.75rem;
   line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .ql-sub-mobile {
   display: none;
@@ -2309,6 +2315,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-grid-tile {
   position: relative;
   display: grid;
+  align-self: start;
   min-width: 0;
   gap: 0.7rem;
   border: 1px solid var(--ql-line-soft);
@@ -2335,12 +2342,13 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   left: 0.65rem;
   z-index: 1;
   display: inline-flex;
-  min-width: 1.45rem;
-  min-height: 1.45rem;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
   align-items: center;
   justify-content: center;
   border-radius: var(--ql-radius-sm);
   background-color: color-mix(in oklab, var(--ql-bg) 84%, transparent);
+  cursor: pointer;
 }
 .ql-grid-cover {
   width: 100%;
@@ -2381,6 +2389,79 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-size: 0.71875rem;
   color: var(--ql-text-3);
 }
+.ql-grid-versions-toggle {
+  width: 100%;
+  min-height: 2rem;
+  justify-content: space-between;
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--ql-radius-sm);
+  color: var(--ql-text-2);
+  font-size: 0.6875rem;
+}
+.ql-grid-version-panel {
+  display: grid;
+  gap: 0.15rem;
+  border-top: 1px solid var(--ql-line-soft);
+  padding-top: 0.45rem;
+}
+.ql-grid-version-panel.hidden {
+  display: none;
+}
+.ql-grid-version-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 1.15rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: var(--ql-radius-sm);
+  padding: 0.45rem 0.35rem;
+}
+.ql-grid-version-row + .ql-grid-version-row {
+  border-top: 1px solid color-mix(in oklab, var(--ql-line-soft) 72%, transparent);
+}
+.ql-grid-version-row:has(.ql-checkbox:checked) {
+  background-color: color-mix(in oklab, var(--ql-gold) 8%, transparent);
+}
+.ql-grid-version-check {
+  display: inline-flex;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  align-items: center;
+  justify-content: center;
+}
+.ql-grid-version-check:has(.ql-checkbox) {
+  cursor: pointer;
+}
+.ql-grid-version-copy {
+  min-width: 0;
+}
+.ql-grid-version-copy p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ql-text);
+  font-size: 0.75rem;
+  font-weight: 690;
+  line-height: 1.25;
+}
+.ql-grid-version-copy span {
+  display: block;
+  margin-top: 0.14rem;
+  color: var(--ql-text-3);
+  font-family: var(--ql-font-mono);
+  font-size: 0.625rem;
+  line-height: 1.25;
+}
+.ql-grid-version-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.3rem;
+}
+.ql-grid-version-action .ql-owned-label,
+.ql-grid-version-action .ql-partial-label {
+  padding: 0.24rem 0.34rem;
+  font-size: 0.59375rem;
+}
 .ql-grid-tile.is-owned .ql-grid-cover,
 .ql-grid-tile.is-owned .ql-grid-title {
   opacity: 0.62;
@@ -2403,6 +2484,9 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   margin-top: 0.25rem;
   color: var(--ql-text-2);
   font-size: 0.8125rem;
+}
+.ql-search-select-all.hidden {
+  display: none;
 }
 @media (max-width: 760px) {
   .ql-dashboard {
@@ -2847,18 +2931,8 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   line-height: 1.2;
   white-space: nowrap;
 }
-/* Desktop keeps the card region contained beside the downloads table. On a
-   phone a 27rem inner scroller is most of the screen and slices a card through
-   its own text, so the list flows with the page like the table below it. */
 .ql-history-cards {
   border-radius: 16px;
-}
-@media (min-width: 768px) {
-  .ql-history-cards {
-    max-height: 27rem;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
 }
 .ql-history-truncated {
   margin: 0 0 0.5rem;
@@ -3265,7 +3339,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   background-color: color-mix(in oklab, var(--ql-gold) 12%, transparent);
   color: color-mix(in oklab, var(--ql-gold) 78%, var(--ql-text));
 }
-/* "new" marker on review rows: quiet outline, not gold — hundreds can render
+/* "new" marker on review rows: quiet outline, not gold. Hundreds can render
    at once and the gold budget belongs to selection and the primary action. */
 .ql-badge-new {
   border-color: color-mix(in oklab, var(--ql-text) 20%, transparent);
@@ -3347,7 +3421,8 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-review-summary-actions {
   display: flex;
-  flex: none;
+  min-width: 0;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.25rem 0.9rem;
@@ -3494,7 +3569,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 @media (max-width: 1023.98px) {
   .ql-review-summary-row {
-    /* The real header height, measured by app.js — a hard-coded guess here
+    /* The real header height, measured by app.js. A hard-coded guess here
        left a see-through band that sliced album rows on every scroll. */
     top: var(--ql-mobilebar-h, 4rem);
   }
@@ -3507,6 +3582,16 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
+  }
+}
+@media (min-width: 640px) and (max-width: 1199.98px) {
+  .ql-review-summary-row {
+    flex-direction: column;
+    align-items: stretch;
+    margin-inline: 0;
+  }
+  .ql-review-summary-row .ql-review-filter-row {
+    width: 100%;
   }
 }
 @media (max-width: 639.98px) {
@@ -3701,6 +3786,29 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-list-page > *,
 .ql-settings-page > * {
   min-width: 0;
+}
+@media (min-width: 1024px) {
+  .ql-main {
+    max-width: 72rem;
+  }
+  .ql-tool-page:not(.ql-tool-page--wide),
+  .ql-list-page,
+  .ql-settings-page {
+    width: min(100%, 70rem);
+    max-width: none;
+  }
+  .ql-tool-page:not(.ql-tool-page--wide) > :not(.ql-page-header):not(.ql-quality-tabs) {
+    width: min(100%, 56rem);
+    margin-inline: auto;
+  }
+  .ql-list-page > :not(.ql-page-header),
+  .ql-settings-page > :not(.ql-page-header) {
+    width: min(100%, 64rem);
+    margin-inline: auto;
+  }
+  .ql-migrate-page > :not(.ql-page-header) {
+    width: min(100%, 54rem);
+  }
 }
 .ql-job-page .ql-page-header h1 {
   font-size: clamp(1.35rem, 2.4vw, 1.95rem);
@@ -4561,7 +4669,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-census-seg-h96   { background: color-mix(in oklab, var(--ql-gold) 48%, transparent); }
 .ql-census-seg-h192  { background: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-surface)); }
 .ql-census-seg-other { background: color-mix(in oklab, var(--ql-text-3) 35%, var(--ql-surface-2)); }
-/* The whole queue card opens its job's surface — a thumb target, not just the
+/* The whole queue card opens its job's surface, a thumb target, not just the
    title text. Buttons sit above the stretched link so they still win the tap. */
 .ql-activity-row--queue {
   position: relative;
@@ -4589,7 +4697,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   color: var(--ql-text);
 }
 
-/* App-drawn confirm dialog — replaces the browser's native popup. */
+/* App-drawn confirm dialog replaces the browser's native popup. */
 .ql-confirm {
   margin: auto;
   width: min(26rem, calc(100vw - 2.5rem));
@@ -4638,7 +4746,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-census-n { color: var(--ql-text-2); }
 .ql-census-gb { margin-left: auto; color: var(--ql-text); }
 /* Narrow phones: the long tier names wrap unevenly in the flex row, so pin
-   every row to the same two-line shape — name first, counts beneath it. */
+   every row to the same two-line shape: name first, counts beneath it. */
 @media (max-width: 479.98px) {
   .ql-census-row {
     display: grid;
@@ -5506,6 +5614,35 @@ details[open] > .ql-disclosure-summary::after {
     backdrop-filter: blur(12px);
   }
 }
+@media (min-width: 640px) {
+  .ql-job-shell[data-job-view="review"] {
+    display: flex;
+    flex-direction: column;
+  }
+  .ql-job-shell[data-job-view="review"] #review-form {
+    display: flex;
+    flex: 1 0 auto;
+    flex-direction: column;
+  }
+  .ql-job-shell[data-job-view="review"] .ql-review-footer {
+    margin-top: auto;
+  }
+}
+@media (min-width: 640px) and (max-width: 767.98px) {
+  .ql-job-shell[data-job-view="review"] {
+    min-height: calc(100svh - var(--ql-mobilebar-h, 4rem) - 0.9rem - var(--ql-tabbar-h, 3.6rem));
+  }
+}
+@media (min-width: 768px) and (max-width: 1023.98px) {
+  .ql-job-shell[data-job-view="review"] {
+    min-height: calc(100svh - var(--ql-mobilebar-h, 4rem) - 2.15rem - var(--ql-tabbar-h, 3.6rem));
+  }
+}
+@media (min-width: 1024px) {
+  .ql-job-shell[data-job-view="review"] {
+    min-height: calc(100vh - 4.9rem);
+  }
+}
 .ql-review-footer-actions {
   display: flex;
   flex-direction: column;
@@ -5638,7 +5775,7 @@ details[open] > .ql-disclosure-summary::after {
   align-items: center;
   gap: 0.8rem;
   border-top: 1px solid var(--ql-line-soft);
-  padding: 0.6rem 0.95rem 0.6rem 1.05rem;
+  padding: 0.6rem 0.95rem 0.6rem 2rem;
   transition: background-color 140ms ease, box-shadow 140ms ease;
 }
 .ql-review-candidate:hover {
@@ -5729,12 +5866,36 @@ details[open] > .ql-disclosure-summary::after {
 .ql-review-truncated-more {
   color: var(--ql-text-3);
 }
+@media (min-width: 1024px) {
+  .ql-review-candidate {
+    grid-template-columns: auto 2.25rem minmax(0, 1fr);
+    gap: 0.75rem;
+    padding-block: 0.45rem;
+  }
+  .ql-review-cover {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+  .ql-review-candidate-body {
+    grid-template-columns: minmax(0, 1fr) fit-content(48%);
+    align-items: center;
+    column-gap: 1.5rem;
+  }
+  .ql-review-candidate-detail {
+    justify-self: end;
+    overflow-wrap: anywhere;
+    text-align: right;
+  }
+  .ql-review-truncated {
+    grid-column: 1 / -1;
+  }
+}
 @media (max-width: 480px) {
   .ql-review-candidate {
     grid-template-columns: auto 2.5rem minmax(0, 1fr);
     align-items: start;
     gap: 0.65rem;
-    padding: 0.6rem 0.75rem;
+    padding: 0.6rem 0.75rem 0.6rem 2rem;
   }
   .ql-review-cover {
     width: 2.5rem;
@@ -5816,6 +5977,11 @@ details[open] > .ql-disclosure-summary::after {
 }
 .ql-migrate-page {
   max-width: 54rem;
+}
+@media (min-width: 1024px) {
+  .ql-migrate-page {
+    max-width: none;
+  }
 }
 .ql-migrate-panel {
   overflow: hidden;
@@ -5914,9 +6080,12 @@ details[open] > .ql-disclosure-summary::after {
   align-items: flex-start;
   gap: 0.625rem;
   border: 1px solid color-mix(in oklab, var(--ql-seam) 22%, transparent);
+  border-inline-start-width: 0.25rem;
+  border-inline-start-color: var(--ql-seam);
   background-color: color-mix(in oklab, var(--ql-seam) 9%, var(--color-base-200));
   border-radius: 0.5rem;
-  padding: 0.875rem 1rem;
+  padding-block: 0.875rem;
+  padding-inline: 0.75rem 1rem;
   color: var(--ql-text);
   font-size: 0.875rem;
   line-height: 1.4;
@@ -5926,6 +6095,36 @@ details[open] > .ql-disclosure-summary::after {
 .ql-notice-success { --ql-seam: var(--color-success); }
 .ql-notice-warning { --ql-seam: var(--color-warning); }
 .ql-notice-error   { --ql-seam: var(--color-error); }
+.ql-notice:not(:has(> svg))::before {
+  content: "";
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+  background-color: var(--ql-seam);
+  -webkit-mask: var(--ql-notice-icon) center / contain no-repeat;
+  mask: var(--ql-notice-icon) center / contain no-repeat;
+}
+.ql-notice-info {
+  --ql-notice-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v6'/%3E%3Cpath d='M12 7.5h.01'/%3E%3C/svg%3E");
+}
+.ql-notice-success {
+  --ql-notice-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 2.5 2.5L16 9'/%3E%3C/svg%3E");
+}
+.ql-notice-warning {
+  --ql-notice-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 2 21h20L12 3Z'/%3E%3Cpath d='M12 9v5'/%3E%3Cpath d='M12 17.5h.01'/%3E%3C/svg%3E");
+}
+.ql-notice-error {
+  --ql-notice-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m9 9 6 6m0-6-6 6'/%3E%3C/svg%3E");
+}
+@media (forced-colors: active) {
+  .ql-notice {
+    border-inline-start-color: CanvasText;
+  }
+  .ql-notice:not(:has(> svg))::before {
+    background-color: CanvasText;
+    forced-color-adjust: none;
+  }
+}
 .ql-notice strong {
   color: var(--ql-text);
 }
@@ -6006,7 +6205,7 @@ details[open] > .ql-disclosure-summary::after {
   text-shadow: none;
 }
 
-/* htmx spinners must not reserve layout while idle — only occupy space during
+/* htmx spinners must not reserve layout while idle. They only occupy space during
    an in-flight request. */
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator,
@@ -6110,7 +6309,7 @@ details[data-artist].htmx-swapping {
 
 /* Phone: the fixed bottom nav owns the bottom edge, so the sticky review
    footer and toasts sit above it. This lives at the END of the file on
-   purpose — the base rules (`.ql-review-footer { bottom: 0 }`,
+   purpose. The base rules (`.ql-review-footer { bottom: 0 }`,
    `.ql-toast-host { bottom: 1rem }`) have equal specificity, and anywhere
    earlier they win the cascade and the nav covers the review actions. */
 @media (max-width: 1023.98px) {

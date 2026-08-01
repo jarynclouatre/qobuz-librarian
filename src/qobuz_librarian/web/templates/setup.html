@@ -3,19 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Set up login — Qobuz Librarian</title>
-  <link rel="icon" type="image/png" href="/static/icon.png?v={{ asset_version }}">
-  <script nonce="{{ request.state.csp_nonce }}">
-    (function () {
-      try {
-        var t = localStorage.getItem('ql-theme');
-        if (t !== 'night' && t !== 'winter') {
-          t = matchMedia('(prefers-color-scheme: light)').matches ? 'winter' : 'night';
-        }
-        document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    })();
-  </script>
+  <title>{% if setup_conflict %}Login already created{% else %}Set up login{% endif %} | Qobuz Librarian</title>
+  {% include "_app_head.html" %}
   <link href="/static/dist/app.css?v={{ asset_version }}" rel="stylesheet">
   <script src="/static/app.js?v={{ asset_version }}"></script>
 </head>
@@ -26,9 +15,16 @@
         <img src="/static/qobuz-librarian-mark.png?v={{ asset_version }}" alt="" class="ql-auth-logo">
         <div class="ql-auth-title">
           <h1>Qobuz Librarian</h1>
-          <p>Protect the web UI</p>
+          <p>{% if setup_conflict %}Login already created{% else %}Protect the web UI{% endif %}</p>
         </div>
       </div>
+      {% if setup_conflict %}
+      <p class="ql-auth-copy">
+        A login was created in another browser or tab while this page was open.
+        The username and password entered here were not saved.
+      </p>
+      <a href="/login" class="ql-btn ql-btn-primary w-full">Sign in</a>
+      {% else %}
       <p class="ql-auth-copy">
         Set a username and password.
       </p>
@@ -60,7 +56,7 @@
                    autocomplete="new-password" class="ql-input pr-12">
             {{ secret_toggle("password", "password") }}
           </div>
-          <p class="ql-field-help">At least 8 characters.</p>
+          <p class="ql-field-help">At least 15 characters. Spaces are fine.</p>
         </div>
         <div class="ql-field">
           <label class="ql-field-label" for="confirm">Confirm password</label>
@@ -72,6 +68,7 @@
         </div>
         <button type="submit" class="ql-btn ql-btn-primary w-full">Create login</button>
       </form>
+      {% endif %}
     </div>
   </main>
 </body>

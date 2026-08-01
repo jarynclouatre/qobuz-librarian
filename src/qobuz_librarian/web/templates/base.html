@@ -5,27 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="csrf-token" content="{{ request.state.csrf_token }}">
   <title>{% block title %}Qobuz Librarian{% endblock %}</title>
-  <link rel="icon" type="image/png" href="/static/icon-192.png?v={{ asset_version }}">
-  <link rel="apple-touch-icon" href="/static/icon-192.png?v={{ asset_version }}">
-  <link rel="manifest" href="/static/manifest.json">
-  <meta name="theme-color" content="#0f0b07">
-  <script nonce="{{ request.state.csp_nonce }}">
-    (function () {
-      try {
-        var t = localStorage.getItem('ql-theme');
-        if (t !== 'night' && t !== 'winter') {
-          t = matchMedia('(prefers-color-scheme: light)').matches ? 'winter' : 'night';
-        }
-        document.documentElement.setAttribute('data-theme', t);
-        var m = document.querySelector('meta[name="theme-color"]');
-        if (m) m.setAttribute('content', t === 'winter' ? '#f3ecdf' : '#0f0b07');
-      } catch (e) {}
-    })();
-  </script>
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Qobuz Librarian">
+  {% include "_app_head.html" %}
   <link rel="preload" href="/static/vendor/inter/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link href="/static/dist/app.css?v={{ asset_version }}" rel="stylesheet">
   <script src="/static/vendor/htmx-2.0.4.min.js"></script>

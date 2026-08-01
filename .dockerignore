@@ -15,8 +15,8 @@ node_modules
 .tailwindcache
 src/qobuz_librarian/web/static/dist
 
-# Tests and CI: not needed at runtime.
-tests/
+# CI configuration is not needed in the build context. Tests are available to
+# the explicit test stage but are never copied into the runtime image.
 .github/
 
 # VCS + ignored locals.

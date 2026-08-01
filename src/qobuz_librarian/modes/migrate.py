@@ -2,7 +2,7 @@
 
 Wires ``library.migrate`` (the planning/copy engine) to the terminal: resolve
 and validate the source and destination, build the plan, show a real preview,
-confirm, then copy. Local-only — it reorganises files on disk and never needs a
+confirm, then copy. Local-only: it reorganises files on disk and never needs a
 Qobuz login.
 """
 from pathlib import Path
@@ -51,7 +51,7 @@ def _resolve_paths(args):
 
 
 def _progress_printer():
-    """Heartbeat progress — a per-file line on a 47k-file library would bury
+    """Heartbeat progress: a per-file line on a 47k-file library would bury
     everything else, so log on each phase change and every 500 files."""
     state = {"phase": ""}
 
@@ -81,11 +81,11 @@ def _print_preview(plan, verbose: bool, in_place: bool,
             f"{_artist_count(plan.placed)} artist(s)"))
     if resume_entries:
         log.info(fmt(C.WHITE,
-            f"    {len(resume_entries)} existing file(s) verified — "
+            f"    {len(resume_entries)} existing file(s) verified; "
             "cover art and sidecars can be resumed"))
     if s["unplaceable"]:
         log.info(fmt(C.YELLOW,
-            f"    {s['unplaceable']} couldn't be identified — left where they are"))
+            f"    {s['unplaceable']} couldn't be identified; left where they are"))
     unsafe_collisions = s["collision"] - len(resume_entries)
     if unsafe_collisions:
         log.info(fmt(C.YELLOW,
@@ -110,14 +110,14 @@ def _print_preview(plan, verbose: bool, in_place: bool,
             log.info(fmt(C.GRAY, f"      ? {truncate(str(e.source), 70)}"))
         for e in plan.collisions[:50]:
             log.info(fmt(C.GRAY,
-                f"      ! {truncate(str(e.source), 55)} — {e.reason}"))
+                f"      ! {truncate(str(e.source), 55)}: {e.reason}"))
 
 
 def run_migrate_mode(args):
     """Returns the exit code: 0 when the migration ran (or the user declined
     it), non-zero when it could not start or did not finish cleanly. The
     interactive menu ignores it; the --migrate flag exits with it."""
-    section("Library migration — organise an existing collection")
+    section("Library migration: organise an existing collection")
 
     if not HAVE_MUTAGEN:
         log.info(fmt(C.RED,
@@ -137,7 +137,7 @@ def run_migrate_mode(args):
     log.info(fmt(C.GRAY, f"  Destination: {dest}"))
     if in_place:
         log.info(fmt(C.YELLOW + C.BOLD,
-            "  In-place mode: files are MOVED into place — originals are "
+            "  In-place mode: files are MOVED into place; originals are "
             "relocated, not copied, and folders left empty are removed."))
     else:
         log.info(fmt(C.GREEN,
@@ -155,20 +155,8 @@ def run_migrate_mode(args):
     _print_preview(plan, bool(getattr(args, "verbose", False)), in_place,
                    resume_entries)
 
-    # Nothing can be approved until the exact preview has a durable,
-    # non-overwriting audit record beside the destination.
-    try:
-        manifest_artifact = engine.write_manifest(plan)
-        manifest = Path(manifest_artifact["path"])
-        log.info(fmt(C.GRAY, f"  Full plan written to {manifest}"))
-    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as e:
-        log.info(fmt(C.RED,
-            "  ✗  Couldn't record the migration preview safely, so nothing "
-            f"was approved or copied ({e})."))
-        return EXIT_GENERAL
-
     if getattr(args, "dry_run", False):
-        log.info(fmt(C.CYAN, "  Dry run — nothing was copied."))
+        log.info(fmt(C.CYAN, "  Dry run: nothing was copied."))
         return 0
     if not plan.placed and not resume_entries:
         log.info(fmt(C.GRAY, "  Nothing to place. Stopping."))
@@ -187,7 +175,7 @@ def run_migrate_mode(args):
     if short:
         log.info(fmt(C.YELLOW,
             f"  ⚠  The destination is short on space (needs ~{format_size(need)}, "
-            f"only {format_size(free)} free) — a move that runs out leaves the "
+            f"only {format_size(free)} free); a move that runs out leaves the "
             "library half-relocated."))
         try:
             ack = input(fmt(C.RED, "  Type 'yes' to migrate anyway: ")).strip().lower()
@@ -210,6 +198,19 @@ def run_migrate_mode(args):
                      auto_yes=bool(getattr(args, "yes", False))):
         log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
         return 0
+
+    # Seal the exact approved plan before execution. A preview, refusal, or
+    # decline stays read-only; an approved migration still cannot copy without
+    # a durable, non-overwriting audit record beside the destination.
+    try:
+        manifest_artifact = engine.write_manifest(plan)
+        manifest = Path(manifest_artifact["path"])
+        log.info(fmt(C.GRAY, f"  Full plan written to {manifest}"))
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as e:
+        log.info(fmt(C.RED,
+            "  ✗  Couldn't record the approved migration safely, so nothing "
+            f"was copied ({e})."))
+        return EXIT_GENERAL
 
     if not engine.verify_audit_artifact(plan, manifest_artifact):
         log.info(fmt(C.RED,
@@ -285,10 +286,10 @@ def run_migrate_mode(args):
     if result.failed:
         log.info(fmt(C.RED, f"  ✗  {result.failed} failed:"))
         for src, reason in result.failures[:50]:
-            log.info(fmt(C.RED, f"       {truncate(str(src), 60)} — {reason}"))
+            log.info(fmt(C.RED, f"       {truncate(str(src), 60)}: {reason}"))
         if result.failed > 50:
             log.info(fmt(C.RED,
-                f"       … and {result.failed - 50} more — see {results_manifest}"))
+                f"       … and {result.failed - 50} more; see {results_manifest}"))
     if result.cancelled:
         log.info(fmt(C.YELLOW,
             "  ⚠  Stopped early; the destination holds a partial copy."))
@@ -303,7 +304,7 @@ def run_migrate_mode(args):
         f"  Results:     {results_manifest}\n"
         "  Spot-check it before pointing the tool at it as your main library."))
     # A run that lost files, stopped early, or left a recovery behind is not a
-    # success, however much of it landed — a script chaining off this must see
+    # success, however much of it landed. A script chaining off this must see
     # the difference.
     if (result.failed or companion_failed or result.cancelled
             or getattr(result, "recoveries", ())):

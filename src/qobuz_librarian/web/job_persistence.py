@@ -3,7 +3,7 @@
 Without this, the registry + work queues in ``jobs.py`` are in-memory only:
 a container restart (compose update, OOM, host reboot) silently drops every
 queued/running download (orphaning staging) and throws away a completed
-scan's AWAITING_REVIEW candidates — minutes of API work gone, the user
+scan's AWAITING_REVIEW candidates, losing minutes of API work, and the user
 re-scans from artist #1.
 
 With this module:
@@ -15,14 +15,13 @@ With this module:
     in the History view (see ``history_page`` / ``history_count``).
   - AWAITING_REVIEW comes back with candidates intact so the user can
     still approve. The execute function is resolved from ``execute_kind``
-    via a lookup table the caller provides — closures aren't serialisable.
+    via a lookup table the caller provides; closures aren't serialisable.
   - PENDING / RUNNING from the prior session are marked
-    FAILED("interrupted on restart — submit again") so the user sees
+    FAILED("interrupted on restart; submit again") so the user sees
     them rather than them silently vanishing.
 
-Log lines and live progress are NOT persisted: too chatty (a long walk
-logs thousands of lines) and not load-bearing for resume. A reloaded
-job's log starts empty with one explanatory line.
+Terminal log lines are persisted with the finished job. Live progress is not:
+it changes too often and cannot be resumed after a process restart.
 
 If the SQLite file can't be opened (read-only volume, disk full), ordinary
 history updates degrade to a no-op.  Job admission is stricter: work that can
@@ -103,6 +102,17 @@ def _decode_recoveries(value) -> tuple[list[dict], bool]:
     return recoveries, False
 
 
+def _decode_execute_args(value) -> tuple[dict, bool]:
+    """Return saved retry details and whether they are unreadable."""
+    try:
+        args = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}, True
+    if type(args) is not dict:
+        return {}, True
+    return args, False
+
+
 def _note_write_failure(what: str, e: Exception) -> None:
     global _warned_write_failure
     if not _warned_write_failure:
@@ -121,7 +131,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     """Return the persistent WAL connection, opening it on first call.
 
     Returns None and disables further attempts when the volume isn't
-    writable — the in-memory registry is still correct, the user just
+    writable. The in-memory registry is still correct; the user just
     forgoes restart durability rather than seeing a stream of OSError
     on every status change.
     """
@@ -162,7 +172,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     single        TEXT NOT NULL DEFAULT '{}',
     attention     TEXT NOT NULL DEFAULT '',
     recoveries    TEXT NOT NULL DEFAULT '[]',
-    log_lines     TEXT NOT NULL DEFAULT '[]'
+    log_lines     TEXT NOT NULL DEFAULT '[]',
+    quality_shortfall TEXT NOT NULL DEFAULT '{}',
+    edition       TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -191,7 +203,7 @@ CREATE TABLE IF NOT EXISTS post_import_relocation_handoffs (
 """
 
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 7
 
 
 def init() -> None:
@@ -217,7 +229,7 @@ def init() -> None:
             # Ask the table what it has; user_version is only a stamp. Gating
             # these on the number leaves a db already carrying it unable to
             # gain a missing column, and every persist() then fails into
-            # _note_write_failure, which swallows it — a silent dead archive.
+            # _note_write_failure, which swallows it and leaves a dead archive.
             cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
             for column, definition in (
                 # Single-track download undo info, so a restart keeps the Undo
@@ -230,6 +242,8 @@ def init() -> None:
                 ("recoveries", "TEXT NOT NULL DEFAULT '[]'"),
                 # A finished job's activity log.
                 ("log_lines", "TEXT NOT NULL DEFAULT '[]'"),
+                ("quality_shortfall", "TEXT NOT NULL DEFAULT '{}'"),
+                ("edition", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if column not in cols:
                     conn.execute(
@@ -241,7 +255,7 @@ def init() -> None:
         except sqlite3.Error as e:
             # A transient/locked/full/corrupt jobs.db here would otherwise
             # propagate out of restore_jobs() into the caller's broad
-            # "couldn't restore prior jobs — starting fresh" handler, masking
+            # "couldn't restore prior jobs; starting fresh" handler, masking
             # a recoverable condition and then leaving every later persist()
             # silently non- durable.
             _log.warning("job persistence schema/migration failed; running "
@@ -253,8 +267,9 @@ _PERSIST_SQL = (
     "INSERT OR REPLACE INTO jobs "
     "(id, title, artist, album_id, kind, status, phase, candidates, "
     " error, summary, review_verb, execute_kind, execute_args, "
-    " created_at, finished_at, single, attention, recoveries, log_lines) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " created_at, finished_at, single, attention, recoveries, log_lines, "
+    " quality_shortfall, edition) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 _CURRENT_JOB_SINGLE = object()
 # jobs.py imports this module, so the names live here rather than reaching
@@ -287,6 +302,13 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
             if status_value in _TERMINAL_STATUSES else [],
             default=str,
         )
+        quality_shortfall_json = json.dumps(
+            getattr(job, "quality_shortfall", {}) or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as e:
         _note_write_failure(f"serialize {job.id}", e)
         return None
@@ -307,6 +329,8 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
         getattr(job, "attention", "") or "",
         recoveries_json,
         log_json,
+        quality_shortfall_json,
+        str(getattr(job, "edition", "") or "").strip(),
     )
 
 
@@ -336,6 +360,53 @@ def persist(job) -> bool:
         if getattr(job, "_preserve_persisted_single", False) is True:
             return _persist_preserving_single_locked(job)
         return _persist_locked(job)
+
+
+def acknowledge_attention(job_id: str, expected_attention: str) -> bool:
+    """Clear one non-recovery attention marker without rewriting the job."""
+    if (
+        not isinstance(job_id, str)
+        or not job_id
+        or not isinstance(expected_attention, str)
+        or not expected_attention
+        or expected_attention == "recovery"
+    ):
+        return False
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attention FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            current = row[0] or ""
+            if not current:
+                conn.rollback()
+                return True
+            if current != expected_attention:
+                conn.rollback()
+                return False
+            changed = conn.execute(
+                "UPDATE jobs SET attention='' WHERE id=? AND attention=?",
+                (job_id, expected_attention),
+            )
+            if changed.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            _note_write_failure(f"acknowledge attention for {job_id}", exc)
+            return False
 
 
 def _persist_preserving_single_locked(job) -> bool:
@@ -493,6 +564,105 @@ def persist_recoveries(job) -> bool:
                 _note_write_failure(
                     f"persist Repair recovery for {job_id}", exc)
                 return False
+
+
+def acknowledge_missing_recoveries(job, is_missing) -> bool:
+    """Durably retire exact Repair backups confirmed missing by the caller."""
+    if not callable(is_missing):
+        return False
+    with job._lock:
+        recoveries = list(getattr(job, "recoveries", []) or [])
+        if (
+            getattr(job, "attention", "") != "recovery"
+            or not recoveries
+            or any(not _valid_repair_recovery(record) for record in recoveries)
+        ):
+            return False
+        try:
+            if any(not is_missing(record) for record in recoveries):
+                return False
+        except Exception as exc:
+            _log.debug("couldn't verify missing Repair recovery: %s", exc)
+            return False
+
+        resolution = (
+            "The missing Repair backup was acknowledged; no kept originals "
+            "remain."
+            if len(recoveries) == 1
+            else "The missing Repair backups were acknowledged; no kept "
+                 "originals remain."
+        )
+        acknowledgement_lines = []
+        for record in recoveries:
+            line = (
+                "Acknowledged missing Repair recovery folder: "
+                f"{record['location']}"
+            )
+            acknowledgement_lines.append(job._CTRL_RE.sub("", line))
+
+        saved = False
+        next_summary = ""
+        with _lock:
+            conn = _get_conn()
+            if conn is not None:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute(
+                        "SELECT recoveries, attention, summary, log_lines "
+                        "FROM jobs WHERE id=?",
+                        (job.id,),
+                    ).fetchone()
+                    persisted, unreadable = _decode_recoveries(
+                        row[0] if row is not None else None
+                    )
+                    if (
+                        row is None
+                        or unreadable
+                        or persisted != recoveries
+                        or (row[1] or "") != "recovery"
+                    ):
+                        conn.rollback()
+                    else:
+                        archived_lines = json.loads(row[3] or "[]")
+                        if type(archived_lines) is not list:
+                            raise ValueError("saved job log is not a list")
+                        archived_lines.extend(acknowledgement_lines)
+                        if len(archived_lines) > job.LOG_PERSIST_CAP:
+                            archived_lines = archived_lines[-job.LOG_PERSIST_CAP:]
+                            archived_lines[0] = job._PERSIST_TRUNCATION_MARKER
+                        log_json = json.dumps(archived_lines, default=str)
+                        next_summary = (
+                            f"{(row[2] or '').rstrip()} {resolution}"
+                        ).lstrip()
+                        changed = conn.execute(
+                            "UPDATE jobs SET recoveries='[]', attention='', "
+                            "summary=?, log_lines=? WHERE id=?",
+                            (next_summary, log_json, job.id),
+                        )
+                        if changed.rowcount != 1:
+                            conn.rollback()
+                        else:
+                            conn.commit()
+                            saved = True
+                except (sqlite3.Error, TypeError, ValueError) as exc:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                    _note_write_failure(
+                        f"acknowledge missing Repair recovery for {job.id}",
+                        exc,
+                    )
+        if not saved:
+            return False
+        job.attention = ""
+        job.recoveries = []
+        job.summary = next_summary
+        job.log_lines.extend(acknowledgement_lines)
+        if len(job.log_lines) > job.LOG_CAP + job._LOG_SLACK:
+            del job.log_lines[:len(job.log_lines) - job.LOG_CAP]
+            job.log_lines[0] = job._TRUNCATION_MARKER
+        return True
 
 
 def acknowledge_durable_completion(
@@ -1001,7 +1171,7 @@ def load_one(job_id: str) -> Optional[dict]:
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 "candidates, error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
-                "recoveries, log_lines "
+                "recoveries, log_lines, quality_shortfall, edition "
                 "FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
@@ -1010,6 +1180,7 @@ def load_one(job_id: str) -> Optional[dict]:
             return None
     if row is None:
         return None
+    execute_args, execute_args_unreadable = _decode_execute_args(row[12])
     try:
         return {
             "id": row[0], "title": row[1], "artist": row[2], "album_id": row[3],
@@ -1017,12 +1188,15 @@ def load_one(job_id: str) -> Optional[dict]:
             "candidates": json.loads(row[7] or "[]"),
             "error": row[8], "summary": row[9] or "", "review_verb": row[10] or "Download",
             "execute_kind": row[11] or "",
-            "execute_args": json.loads(row[12] or "{}"),
+            "execute_args": execute_args,
+            "execute_args_unreadable": execute_args_unreadable,
             "created_at": row[13], "finished_at": row[14],
             "single": json.loads(row[15] or "{}"),
             "attention": row[16] or "",
             "recoveries": json.loads(row[17] or "[]"),
             "log_lines": json.loads(row[18] or "[]"),
+            "quality_shortfall": json.loads(row[19] or "{}"),
+            "edition": row[20] or "",
         }
     except (ValueError, TypeError):
         return None
@@ -1030,8 +1204,9 @@ def load_one(job_id: str) -> Optional[dict]:
 
 def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
     """Drop the oldest terminal rows past ``keep`` so the archive doesn't
-    grow without bound. Non-terminal jobs and unresolved Repair recoveries are
-    never pruned here. Best-effort: a sqlite error logs and bows out."""
+    grow without bound. Non-terminal jobs, unresolved Repair recoveries, and
+    active single-track Undo records are never pruned here. Best-effort: a
+    sqlite error logs and bows out."""
     if keep <= 0:
         return
     retained = (
@@ -1044,18 +1219,28 @@ def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
         if conn is None:
             return
         try:
-            retained_sql = " AND id != ?" if retained is not None else ""
-            params = (retained, keep) if retained is not None else (keep,)
-            conn.execute(
-                "DELETE FROM jobs WHERE id IN ("
-                "  SELECT id FROM jobs "
-                "  WHERE status IN ('done', 'failed', 'canceled') "
-                "    AND COALESCE(recoveries, '[]') = '[]'"
-                f"{retained_sql} "
-                "  ORDER BY COALESCE(finished_at, created_at) DESC "
-                "  LIMIT -1 OFFSET ?)",
-                params,
-            )
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id, single FROM jobs "
+                "WHERE status IN ('done', 'failed', 'canceled') "
+                "AND COALESCE(recoveries, '[]') = '[]' "
+                "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC"
+            ).fetchall()
+            ordinary_seen = 0
+            removable = []
+            for job_id, raw_single in rows:
+                if job_id == retained:
+                    continue
+                try:
+                    single = json.loads(raw_single or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if type(single) is not dict or has_active_single_undo(single):
+                    continue
+                ordinary_seen += 1
+                if ordinary_seen > keep:
+                    removable.append((job_id,))
+            conn.executemany("DELETE FROM jobs WHERE id=?", removable)
             conn.execute(
                 "DELETE FROM durable_job_completions "
                 "WHERE NOT EXISTS (SELECT 1 FROM jobs "
@@ -1068,13 +1253,17 @@ def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
             )
             conn.commit()
         except sqlite3.Error as e:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
             _log.debug("prune_finished(%d) failed: %s", keep, e)
 
 
 _TERMINAL_SQL = "status IN ({})".format(
     ", ".join(f"'{name}'" for name in _TERMINAL_STATUSES))
 # The History view also lists parked reviews (with an Open link back to their
-# surface) — but clearing and pruning must never touch them.
+# surface), but clearing and pruning must never touch them.
 _HISTORY_SQL = "status IN ('done', 'failed', 'canceled', 'awaiting_review')"
 
 
@@ -1100,7 +1289,7 @@ def _kind_clause(bulk):
 
 def history_count(
         bulk: Optional[bool] = None, *, exclude_recoveries: bool = False) -> int:
-    """How many finished jobs are on disk — for paginating the History view."""
+    """How many finished jobs are on disk, for paginating the History view."""
     clause, params = _kind_clause(bulk)
     if exclude_recoveries:
         clause += "AND COALESCE(recoveries, '[]') = '[]' "
@@ -1120,12 +1309,12 @@ def history_page(limit: int, offset: int,
                  bulk: Optional[bool] = None,
                  status: Optional[str] = None, *,
                  exclude_recoveries: bool = False) -> list[dict]:
-    """A page of finished jobs, newest first — the browsable record behind the
+    """A page of finished jobs, newest first: the browsable record behind the
     History view. Lighter than ``load_all`` (no candidates/args): just what a
     history row shows, plus the id to open the full job. The ``id`` tiebreaker
     keeps paging stable when finish times collide. ``bulk`` narrows to the
     card layer (True), the downloads table (False), or everything (None).
-    ``status`` narrows in SQL — a caller filtering the returned page itself
+    ``status`` narrows in SQL. A caller filtering the returned page itself
     would silently lose older matching rows whenever the newest ``limit``
     rows are mostly other statuses."""
     clause, params = _kind_clause(bulk)
@@ -1141,7 +1330,8 @@ def history_page(limit: int, offset: int,
         try:
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
-                "execute_kind, created_at, finished_at, attention, recoveries "
+                "execute_kind, execute_args, created_at, finished_at, "
+                "attention, recoveries, edition "
                 "FROM jobs "
                 f"WHERE {_HISTORY_SQL} {clause}"
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC "
@@ -1153,13 +1343,17 @@ def history_page(limit: int, offset: int,
             return []
     result = []
     for row in rows:
-        recoveries, recovery_unreadable = _decode_recoveries(row[11])
+        recoveries, recovery_unreadable = _decode_recoveries(row[12])
+        execute_args, execute_args_unreadable = _decode_execute_args(row[8])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
-            "created_at": row[8], "finished_at": row[9],
-            "attention": row[10] or "", "recoveries": recoveries,
+            "execute_args": execute_args,
+            "execute_args_unreadable": execute_args_unreadable,
+            "created_at": row[9], "finished_at": row[10],
+            "attention": row[11] or "", "recoveries": recoveries,
+            "edition": row[13] or "",
             "recovery_unreadable": recovery_unreadable,
         })
     return result
@@ -1174,7 +1368,8 @@ def recovery_history() -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
-                "execute_kind, created_at, finished_at, attention, recoveries "
+                "execute_kind, execute_args, created_at, finished_at, "
+                "attention, recoveries, edition "
                 "FROM jobs "
                 "WHERE COALESCE(recoveries, '[]') != '[]' "
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC"
@@ -1184,22 +1379,26 @@ def recovery_history() -> list[dict]:
             return []
     result = []
     for row in rows:
-        recoveries, recovery_unreadable = _decode_recoveries(row[11])
+        recoveries, recovery_unreadable = _decode_recoveries(row[12])
         if not recoveries and not recovery_unreadable:
             continue
+        execute_args, execute_args_unreadable = _decode_execute_args(row[8])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
-            "created_at": row[8], "finished_at": row[9],
-            "attention": row[10] or "", "recoveries": recoveries,
+            "execute_args": execute_args,
+            "execute_args_unreadable": execute_args_unreadable,
+            "created_at": row[9], "finished_at": row[10],
+            "attention": row[11] or "", "recoveries": recoveries,
+            "edition": row[13] or "",
             "recovery_unreadable": recovery_unreadable,
         })
     return result
 
 
 def last_finished_at(execute_kind: str) -> Optional[float]:
-    """When a job of this ``execute_kind`` last finished cleanly, or None — backs
+    """When a job of this ``execute_kind`` last finished cleanly, or None. Backs
     the per-tool "Last scan …" freshness line. Only DONE counts (a failed/cancelled
     run isn't a completed pass), and the archive outlives the in-memory cap, so the
     line survives restarts. Reads the durable jobs.db rather than a separate stamp
@@ -1222,7 +1421,7 @@ def last_finished_at(execute_kind: str) -> Optional[float]:
 
 
 def attention_count() -> int:
-    """How many finished jobs still carry an attention marker — drives the
+    """How many finished jobs still carry an attention marker. Drives the
     warning dot on the Queue nav until each flagged job page has been opened."""
     with _lock:
         conn = _get_conn()
@@ -1236,8 +1435,25 @@ def attention_count() -> int:
             return 0
 
 
+def has_active_single_undo(single) -> bool:
+    """Whether a saved single-track result still has an action to finish."""
+    cleanup = single.get("catalog_cleanup") if type(single) is dict else None
+    cleanup_pending = (
+        type(cleanup) is dict
+        and cleanup.get("pending") is True
+        and isinstance(cleanup.get("path"), str)
+        and bool(cleanup["path"])
+    )
+    return (
+        type(single) is dict
+        and type(single.get("owned_path")) is dict
+        and bool(single["owned_path"])
+        and (single.get("removed") is not True or cleanup_pending)
+    )
+
+
 def clear_history(*, retain_job_id: str | None = None) -> None:
-    """Delete ordinary finished jobs; retain unresolved Repair recoveries."""
+    """Delete ordinary finished jobs; retain recovery and Undo state."""
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -1248,13 +1464,21 @@ def clear_history(*, retain_job_id: str | None = None) -> None:
                 if isinstance(retain_job_id, str) and retain_job_id
                 else None
             )
-            retained_sql = " AND id != ?" if retained is not None else ""
-            conn.execute(
-                f"DELETE FROM jobs WHERE {_TERMINAL_SQL} "
-                "AND COALESCE(recoveries, '[]') = '[]'"
-                f"{retained_sql}",
-                (retained,) if retained is not None else (),
-            )
+            rows = conn.execute(
+                f"SELECT id, recoveries, single FROM jobs WHERE {_TERMINAL_SQL}"
+            ).fetchall()
+            removable = []
+            for job_id, raw_recoveries, raw_single in rows:
+                if job_id == retained or (raw_recoveries or "[]") != "[]":
+                    continue
+                try:
+                    single = json.loads(raw_single or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if type(single) is not dict or has_active_single_undo(single):
+                    continue
+                removable.append((job_id,))
+            conn.executemany("DELETE FROM jobs WHERE id=?", removable)
             conn.execute(
                 "DELETE FROM durable_job_completions "
                 "WHERE NOT EXISTS (SELECT 1 FROM jobs "
@@ -1271,7 +1495,7 @@ def clear_history(*, retain_job_id: str | None = None) -> None:
 
 
 def load_all() -> list[dict]:
-    """Return every persisted job as a plain dict — caller rehydrates into
+    """Return every persisted job as a plain dict; caller rehydrates into
     a Job. Returns [] when the db can't be opened."""
     with _lock:
         conn = _get_conn()
@@ -1282,7 +1506,7 @@ def load_all() -> list[dict]:
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 "candidates, error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
-                "recoveries, log_lines "
+                "recoveries, log_lines, quality_shortfall, edition "
                 "FROM jobs ORDER BY created_at"
             ).fetchall()
         except sqlite3.Error as e:
@@ -1294,6 +1518,7 @@ def load_all() -> list[dict]:
             recoveries, recovery_unreadable = _decode_recoveries(r[17])
             if recovery_unreadable:
                 raise ValueError("recovery payload is invalid")
+            execute_args, execute_args_unreadable = _decode_execute_args(r[12])
             # Only AWAITING_REVIEW jobs need their candidates on restore; all
             # other statuses are either rehydrated as live state (RUNNING →
             # FAILED) or displayed as history without candidates.
@@ -1304,12 +1529,15 @@ def load_all() -> list[dict]:
                 "candidates": candidates,
                 "error": r[8], "summary": r[9] or "", "review_verb": r[10] or "Download",
                 "execute_kind": r[11] or "",
-                "execute_args": json.loads(r[12] or "{}"),
+                "execute_args": execute_args,
+                "execute_args_unreadable": execute_args_unreadable,
                 "created_at": r[13], "finished_at": r[14],
                 "single": json.loads(r[15] or "{}"),
                 "attention": r[16] or "",
                 "recoveries": recoveries,
                 "log_lines": json.loads(r[18] or "[]"),
+                "quality_shortfall": json.loads(r[19] or "{}"),
+                "edition": r[20] or "",
             })
         except (ValueError, TypeError) as e:
             _log.info("skipping unreadable jobs.db row %s: %s", r[0], e)

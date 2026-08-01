@@ -1,6 +1,16 @@
 {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
 <div id="review-groups" class="ql-review-groups" data-page="{{ review_page }}"
-     data-filtered-rest="{{ review_filtered_rest | default(0) }}">
+     data-filtered-rest="{{ review_filtered_rest | default(0) }}"
+     data-review-total="{{ review_counts.total }}"
+     data-review-selected="{{ review_counts.selected }}"
+     data-review-artists="{{ review_counts.artists }}"
+     data-review-reclaimable="{{ review_counts.reclaimable }}"
+     data-review-reclaimable-label="{{ review_reclaimable_label }}"
+     data-review-hidden-total="{{ review_hidden_count }}"
+     {% if review_tab %}data-review-missing-total="{{ review_tab_counts.missing }}"
+     data-review-missing-selected="{{ review_tab_counts.missing_selected }}"
+     data-review-gap-total="{{ review_tab_counts.gaps }}"
+     data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"{% endif %}>
   {% for artist, items in review_groups %}
   {% with open = (review_groups | length == 1), lazy = (review_groups | length != 1) %}{% include "_review_group.html" %}{% endwith %}
   {% endfor %}

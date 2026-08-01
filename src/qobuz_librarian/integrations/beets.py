@@ -774,15 +774,33 @@ def _under_retry_dir(p):
     return rel.parts and rel.parts[0] == cfg.BEETS_RETRY_DIR
 
 
+def _is_isolated_run_name(name):
+    prefix = ".qobuz-run-"
+    nonce = name[len(prefix) :] if name.startswith(prefix) else ""
+    return len(nonce) == 24 and all(char in "0123456789abcdef" for char in nonce)
+
+
 def _under_isolated_run(p):
     """True for a per-rip hidden root that bulk staging work must ignore."""
     try:
         first = p.relative_to(cfg.STAGING_DIR).parts[0]
     except (IndexError, ValueError):
         return False
-    prefix = ".qobuz-run-"
-    nonce = first[len(prefix) :] if first.startswith(prefix) else ""
-    return len(nonce) == 24 and all(char in "0123456789abcdef" for char in nonce)
+    return _is_isolated_run_name(first)
+
+
+def _beets_progress_album(line, staging_root):
+    stripped = line.strip()
+    prefix = os.fspath(staging_root).rstrip("/") + "/"
+    if not stripped.startswith(prefix):
+        return None
+    parts = stripped[len(prefix) :].split("/")
+    if parts and _is_isolated_run_name(parts[0]):
+        parts = parts[1:]
+    album = parts[0].split(" (", 1)[0].strip() if parts else ""
+    if not album or album in (".", "..") or _is_isolated_run_name(album):
+        return "Importing album"
+    return album
 
 
 def _prepare_staging_tags(
@@ -977,7 +995,7 @@ def _prepare_staging_tags(
             fmt(
                 C.YELLOW,
                 f"  ⚠  Set aside {len(moved)} untagged file(s) → {quarantine}\n"
-                "     (cancelled-rip leftovers, or files needing a manual retag — "
+                "     (cancelled-rip leftovers, or files needing a manual retag; "
                 "not deleted).",
             )
         )
@@ -4439,8 +4457,8 @@ def _configured_beets_plugins(runtime=None):
 
 def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
     """The beets config override the import runs with, as a YAML string. Forces
-    the keys the import contract depends on — library/directory, non-
-    interactive, non-incremental, autotag off, and move on — and lets
+    the keys the import contract depends on: library/directory, non-
+    interactive, non-incremental, autotag off, and move on. It lets
     everything else fall through to the user's config.yaml.
     """
     import re as _re
@@ -4518,7 +4536,7 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
         "disabled_plugins: [" + ", ".join(_yaml_sq(plugin) for plugin in sorted(disabled)) + "]\n"
     )
 
-    # Emitting `plugins:` replaces the config.yaml list, so re-add inline —
+    # Emitting `plugins:` replaces the config.yaml list, so re-add inline;
     # the seeded path template's `multidisc` field comes from it, and dropping
     # it would flatten multi-disc albums into one folder. The art guard is
     # always loaded after fetchart; the one-run ownership hook, when requested,
@@ -4531,7 +4549,7 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
     _plugins.append(_ART_GUARD_PLUGIN)
     if ownership_enabled:
         _plugins.append(_OWNERSHIP_PLUGIN)
-    # Plugin names must be plain identifiers — anything else would break the
+    # Plugin names must be plain identifiers. Anything else would break the
     # YAML structure (and likely isn't a real beets plugin anyway).
     safe_plugins = [p for p in _plugins if _re.match(r"^[A-Za-z0-9_]+$", p)]
     if safe_plugins:
@@ -5028,7 +5046,7 @@ def relocate_disc_album_artwork(album_dir) -> bool:
     Beets gives a multi-disc album's import task the DISC directories as its
     source paths, and fetchart searches only those, so a cover sitting in the
     album root is never offered as a candidate. `beet import` moves only audio,
-    so the cover is then left behind in staging — and any leftover keeps the
+    so the cover is then left behind in staging. Any leftover keeps the
     download's staging run present, which the durable completion proof reads as
     a download that never finished. That stops the queue and reports the album
     as failed even though every track imported.
@@ -5127,10 +5145,10 @@ def beets_import_paths(consolidate=True, *, source_files_out=None, album_dirs=No
 def beets_import_albums(album_dirs, *, ownership_out=None):
     """Run beets import scoped to ``album_dirs`` and return a tri-state code:
 
-    - ``"ok"`` — import succeeded.
-    - ``"timeout"`` — the idle-timeout guard fired; the executor decides
+    - ``"ok"``: import succeeded.
+    - ``"timeout"``: the idle-timeout guard fired; the executor decides
       whether to retry based on ``cfg.BEETS_MAX_ATTEMPTS``.
-    - ``"error"`` — any other failure (config missing, non-zero exit,
+    - ``"error"``: any other failure (config missing, non-zero exit,
       silent skip). The executor won't retry these.
 
     Consolidation is left to the caller (run once per batch instead of per
@@ -5754,7 +5772,7 @@ def _run_owned_beets_capture(args, *, env, timeout, database_exclusion, before_s
 
 def _wait_or_idle_kill(proc, last_output):
     """Block until proc exits. Raise subprocess.TimeoutExpired ONLY if it emits
-    no output for cfg.BEETS_TIMEOUT seconds — a genuinely hung import (DB
+    no output for cfg.BEETS_TIMEOUT seconds, indicating a genuinely hung import (DB
     lock, an unexpected prompt, a deadlocked plugin).
     """
     idle_limit = cfg.BEETS_TIMEOUT
@@ -6116,7 +6134,7 @@ def _beets_direct_guarded(
     log.info(fmt(C.CYAN, "  ⟳  Running beets import ..."))
     out_lines = []
     last_output = [time.monotonic()]
-    # Captured by _reader for per-album progress updates — list-of-1 so the
+    # Captured by _reader for per-album progress updates. A list-of-1 lets the
     # nested function can mutate without `nonlocal`.
     last_album = [None]
     seen_albums = [0]
@@ -6181,20 +6199,15 @@ def _beets_direct_guarded(
             return False, "error"
 
     def _handle_beets_output_line(line):
-        prefix = staging_root + "/"
         out_lines.append(line)
         stripped = line.strip()
         if not stripped:
             return
         # Staging-path echoes are too noisy for the log, but they're the
-        # signal that tells us which album beets is on. Pull the first path
-        # segment after the staging root (the album folder) and use it as the
-        # live "Importing: …" subtitle.
-        idx = stripped.find(prefix)
-        if idx >= 0:
-            rest = stripped[idx + len(prefix) :]
-            album = rest.split("/", 1)[0].split(" (", 1)[0].strip()
-            if album and album != last_album[0]:
+        # signal that tells us which album beets is on.
+        album = _beets_progress_album(stripped, staging_root)
+        if album is not None:
+            if album != last_album[0]:
                 last_album[0] = album
                 seen_albums[0] += 1
                 report_progress("Importing into your library", seen_albums[0], total_albums, album)
@@ -6340,7 +6353,7 @@ def _beets_direct_guarded(
             fmt(
                 C.RED,
                 f"  ✗  beets import produced no output for {cfg.BEETS_TIMEOUT}s "
-                f"— assuming hung, killed. Files remain in staging for a "
+                f"and was killed as hung. Files remain in staging for a "
                 f"manual retry. (Raise/disable with BEETS_TIMEOUT.)",
             )
         )
@@ -6368,14 +6381,14 @@ def _beets_direct_guarded(
     )
 
     # beets moves audio out of staging into the library, so the honest success
-    # signal is whether the staged tracks actually left — not a phrase in beets'
+    # signal is whether the staged tracks actually left, not a phrase in beets'
     # output. beets prints "Skipping." per item (a duplicate, an unreadable
     # file), so matching that text flagged a whole album failed when a single
     # track was skipped; an exit-0 run that moved nothing is the real silent skip.
     audio_after = _count_audio_under(paths, include_retry=explicit_paths)
     moved_any = audio_before > 0 and audio_after < audio_before
     # An explicit album import that finds zero audio (every track quarantined as
-    # untagged before the run) imported nothing — it must not read as success, or
+    # untagged before the run) imported nothing. It must not read as success, or
     # the executor marks a never-imported album done instead of parking/re-ripping.
     imported_nothing = proc.returncode == 0 and (
         (audio_before > 0 and not moved_any) or (explicit_paths and audio_before == 0)
@@ -6585,7 +6598,7 @@ def _consolidation_row_key(row):
     return tuple((type(value), value) for value in row)
 
 
-def _consolidation_item_dir(value):
+def _catalogue_item_path(value):
     raw = os.fspath(value)
     if isinstance(raw, bytes):
         raw = os.fsdecode(raw)
@@ -6606,10 +6619,15 @@ def _consolidation_item_dir(value):
         raise ValueError("beets item is outside the library") from None
     if not relative.parts:
         raise ValueError("invalid beets item path")
-    directory = os.path.dirname(path)
-    if not directory or directory == path:
+    return Path(path)
+
+
+def _consolidation_item_dir(value):
+    path = _catalogue_item_path(value)
+    directory = path.parent
+    if directory == path:
         raise ValueError("invalid beets album directory")
-    return directory
+    return str(directory)
 
 
 def _consolidation_disc_parent(directory):
@@ -6657,6 +6675,392 @@ def _consolidation_album_attributes(connection, columns, album_ids):
             )
         )
     return grouped, rows
+
+
+@dataclass(frozen=True)
+class BeetsAlbumSnapshot:
+    item_columns: tuple
+    item_rows: tuple
+    item_attribute_columns: tuple
+    item_attribute_rows: tuple
+    album_columns: tuple
+    album_rows: tuple
+    album_attribute_columns: tuple
+    album_attribute_rows: tuple
+
+    @property
+    def item_ids(self):
+        if not self.item_columns:
+            return ()
+        index = self.item_columns.index("id")
+        return tuple(row[index] for row in self.item_rows)
+
+    @property
+    def album_ids(self):
+        if not self.album_columns:
+            return ()
+        index = self.album_columns.index("id")
+        return tuple(row[index] for row in self.album_rows)
+
+
+def _replacement_catalogue_columns(connection):
+    known_tables = {
+        "albums",
+        "items",
+        "album_attributes",
+        "item_attributes",
+        "migrations",
+    }
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    required = {"albums", "items", "album_attributes", "item_attributes"}
+    if not required.issubset(tables) or not tables.issubset(known_tables):
+        raise sqlite3.DatabaseError("unrecognised beets database schema")
+    for table in tables:
+        if connection.execute(
+            f"PRAGMA foreign_key_list({_sql_identifier(table)})"
+        ).fetchone() is not None:
+            raise sqlite3.DatabaseError("foreign keys make exact retirement unverifiable")
+    if connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND tbl_name IN ('albums', 'items', 'album_attributes', "
+        "'item_attributes') LIMIT 1"
+    ).fetchone() is not None:
+        raise sqlite3.DatabaseError("custom triggers make exact retirement unverifiable")
+
+    album_columns = _consolidation_columns(connection, "albums")
+    item_columns = _consolidation_columns(connection, "items")
+    album_attribute_columns = _consolidation_columns(connection, "album_attributes")
+    item_attribute_columns = _consolidation_columns(connection, "item_attributes")
+    if (
+        "id" not in album_columns
+        or not {"id", "album_id", "path"}.issubset(item_columns)
+        or not {"id", "entity_id"}.issubset(album_attribute_columns)
+        or not {"id", "entity_id"}.issubset(item_attribute_columns)
+    ):
+        raise sqlite3.DatabaseError("unrecognised beets database schema")
+    return (
+        album_columns,
+        item_columns,
+        album_attribute_columns,
+        item_attribute_columns,
+    )
+
+
+def capture_beets_album_entries(album_dir):
+    """Capture the exact Beets rows owned by one album folder."""
+    try:
+        root = _catalogue_item_path(Path(album_dir) / "placeholder").parent
+    except (OSError, TypeError, ValueError):
+        return None
+
+    database_anchor = None
+    try:
+        database_anchor = _open_beets_database_anchor()
+        if database_anchor is None:
+            return None
+        if database_anchor["descriptor"] is None:
+            return BeetsAlbumSnapshot((), (), (), (), (), (), (), ())
+
+        def inspect(connection):
+            (
+                album_columns,
+                item_columns,
+                album_attribute_columns,
+                item_attribute_columns,
+            ) = _replacement_catalogue_columns(connection)
+            item_id_index = item_columns.index("id")
+            item_path_index = item_columns.index("path")
+            item_album_index = item_columns.index("album_id")
+            selected = []
+            for row in connection.execute(
+                f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
+                "FROM items ORDER BY id"
+            ):
+                item_path = _catalogue_item_path(row[item_path_index])
+                if item_path == root or root in item_path.parents:
+                    item_id = row[item_id_index]
+                    album_id = row[item_album_index]
+                    if type(item_id) is not int or item_id <= 0:
+                        raise sqlite3.DatabaseError("invalid beets item identity")
+                    if album_id is not None and (type(album_id) is not int or album_id <= 0):
+                        raise sqlite3.DatabaseError("invalid beets album identity")
+                    selected.append(tuple(row))
+            if len(selected) > 4096:
+                raise sqlite3.DatabaseError("album has too many beets entries")
+
+            item_ids = tuple(row[item_id_index] for row in selected)
+            album_ids = tuple(
+                sorted(
+                    {
+                        row[item_album_index]
+                        for row in selected
+                        if row[item_album_index] is not None
+                    }
+                )
+            )
+            item_attribute_rows = _consolidation_rows_for_ids(
+                connection,
+                "item_attributes",
+                item_attribute_columns,
+                "entity_id",
+                item_ids,
+            )
+            album_rows = _consolidation_rows_for_ids(
+                connection, "albums", album_columns, "id", album_ids
+            )
+            if len(album_rows) != len(album_ids):
+                raise sqlite3.DatabaseError("beets album identity is incomplete")
+            album_attribute_rows = _consolidation_rows_for_ids(
+                connection,
+                "album_attributes",
+                album_attribute_columns,
+                "entity_id",
+                album_ids,
+            )
+            return BeetsAlbumSnapshot(
+                tuple(item_columns),
+                tuple(selected),
+                tuple(item_attribute_columns),
+                tuple(item_attribute_rows),
+                tuple(album_columns),
+                tuple(album_rows),
+                tuple(album_attribute_columns),
+                tuple(album_attribute_rows),
+            )
+
+        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
+        timeout = float(timeout) if timeout and timeout > 0 else 5.0
+        return inspect_sqlite_source(
+            database_anchor,
+            _beets_database_anchor_matches,
+            inspect,
+            connect=sqlite3.connect,
+            timeout=timeout,
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        _close_beets_database_anchor(database_anchor)
+
+
+def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
+    """Retire only captured rows after proving the replacement catalogue."""
+    if not isinstance(snapshot, BeetsAlbumSnapshot):
+        return False
+    try:
+        replacement_root = _catalogue_item_path(Path(replacement_dir) / "placeholder").parent
+        expected_paths = tuple(
+            sorted({_catalogue_item_path(path) for path in replacement_paths})
+        )
+        if (
+            not expected_paths
+            or len(expected_paths) > 4096
+            or any(path.parent != replacement_root and replacement_root not in path.parents
+                   for path in expected_paths)
+        ):
+            return False
+    except (OSError, TypeError, ValueError):
+        return False
+
+    database_anchor = None
+    transaction = None
+    try:
+        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
+        timeout = float(timeout) if timeout and timeout > 0 else 5.0
+        database_anchor = _open_beets_database_anchor()
+        if database_anchor is None or database_anchor["descriptor"] is None:
+            return False
+        transaction = AtomicSQLiteWrite(
+            database_anchor,
+            _beets_database_anchor_matches,
+            connect=sqlite3.connect,
+            timeout=timeout,
+        )
+        connection = transaction.open()
+        connection.execute("BEGIN IMMEDIATE")
+        (
+            album_columns,
+            item_columns,
+            album_attribute_columns,
+            item_attribute_columns,
+        ) = _replacement_catalogue_columns(connection)
+        if snapshot.item_columns and (
+            tuple(item_columns) != snapshot.item_columns
+            or tuple(item_attribute_columns) != snapshot.item_attribute_columns
+            or tuple(album_columns) != snapshot.album_columns
+            or tuple(album_attribute_columns) != snapshot.album_attribute_columns
+        ):
+            raise sqlite3.DatabaseError("beets schema changed during replacement")
+
+        item_ids = snapshot.item_ids
+        current_items = _consolidation_rows_for_ids(
+            connection, "items", item_columns, "id", item_ids
+        )
+        if tuple(map(_consolidation_row_key, current_items)) != tuple(
+            map(_consolidation_row_key, snapshot.item_rows)
+        ):
+            raise sqlite3.IntegrityError("captured beets items changed")
+        current_item_attributes = _consolidation_rows_for_ids(
+            connection,
+            "item_attributes",
+            item_attribute_columns,
+            "entity_id",
+            item_ids,
+        )
+        if tuple(map(_consolidation_row_key, current_item_attributes)) != tuple(
+            map(_consolidation_row_key, snapshot.item_attribute_rows)
+        ):
+            raise sqlite3.IntegrityError("captured beets item metadata changed")
+
+        item_id_index = item_columns.index("id")
+        item_path_index = item_columns.index("path")
+        captured_ids = set(item_ids)
+        replacement_rows = {path: [] for path in expected_paths}
+        for row in connection.execute(
+            f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
+            "FROM items ORDER BY id"
+        ):
+            item_id = row[item_id_index]
+            path = _catalogue_item_path(row[item_path_index])
+            if item_id in captured_ids:
+                continue
+            if path in replacement_rows:
+                replacement_rows[path].append(item_id)
+            elif path == replacement_root or replacement_root in path.parents:
+                raise sqlite3.IntegrityError("replacement catalogue has an unexpected item")
+        if any(len(ids) != 1 for ids in replacement_rows.values()):
+            raise sqlite3.IntegrityError("replacement catalogue is incomplete")
+
+        retiring_album_ids = []
+        if item_ids:
+            placeholders = ",".join("?" for _ in item_ids)
+            for album_id in snapshot.album_ids:
+                remaining = connection.execute(
+                    f"SELECT 1 FROM items WHERE album_id = ? "
+                    f"AND id NOT IN ({placeholders}) LIMIT 1",
+                    (album_id, *item_ids),
+                ).fetchone()
+                if remaining is None:
+                    retiring_album_ids.append(album_id)
+
+            if retiring_album_ids:
+                album_id_index = snapshot.album_columns.index("id")
+                expected_albums = tuple(
+                    row
+                    for row in snapshot.album_rows
+                    if row[album_id_index] in retiring_album_ids
+                )
+                current_albums = _consolidation_rows_for_ids(
+                    connection,
+                    "albums",
+                    album_columns,
+                    "id",
+                    retiring_album_ids,
+                )
+                if tuple(map(_consolidation_row_key, current_albums)) != tuple(
+                    map(_consolidation_row_key, expected_albums)
+                ):
+                    raise sqlite3.IntegrityError("captured beets albums changed")
+                expected_attributes = tuple(
+                    row
+                    for row in snapshot.album_attribute_rows
+                    if row[snapshot.album_attribute_columns.index("entity_id")]
+                    in retiring_album_ids
+                )
+                current_attributes = _consolidation_rows_for_ids(
+                    connection,
+                    "album_attributes",
+                    album_attribute_columns,
+                    "entity_id",
+                    retiring_album_ids,
+                )
+                if tuple(map(_consolidation_row_key, current_attributes)) != tuple(
+                    map(_consolidation_row_key, expected_attributes)
+                ):
+                    raise sqlite3.IntegrityError("captured beets album metadata changed")
+
+            deleted_attributes = connection.execute(
+                f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
+                item_ids,
+            )
+            if deleted_attributes.rowcount != len(snapshot.item_attribute_rows):
+                raise sqlite3.IntegrityError("captured beets item metadata changed")
+            deleted_items = connection.execute(
+                f"DELETE FROM items WHERE id IN ({placeholders})", item_ids
+            )
+            if deleted_items.rowcount != len(item_ids):
+                raise sqlite3.IntegrityError("captured beets items changed")
+
+        if retiring_album_ids:
+            placeholders = ",".join("?" for _ in retiring_album_ids)
+            expected_attribute_count = sum(
+                1
+                for row in snapshot.album_attribute_rows
+                if row[snapshot.album_attribute_columns.index("entity_id")]
+                in retiring_album_ids
+            )
+            deleted_attributes = connection.execute(
+                f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})",
+                retiring_album_ids,
+            )
+            if deleted_attributes.rowcount != expected_attribute_count:
+                raise sqlite3.IntegrityError("captured beets album metadata changed")
+            deleted_albums = connection.execute(
+                f"DELETE FROM albums WHERE id IN ({placeholders})", retiring_album_ids
+            )
+            if deleted_albums.rowcount != len(retiring_album_ids):
+                raise sqlite3.IntegrityError("captured beets albums changed")
+
+        if not item_ids:
+            connection.rollback()
+            return True
+
+        def validate(current):
+            if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                return False
+            if _consolidation_rows_for_ids(
+                current, "items", item_columns, "id", item_ids
+            ):
+                return False
+            counts = {path: 0 for path in expected_paths}
+            for item_id, raw_path in current.execute("SELECT id, path FROM items"):
+                if item_id in captured_ids:
+                    return False
+                path = _catalogue_item_path(raw_path)
+                if path in counts:
+                    counts[path] += 1
+            return all(count == 1 for count in counts.values())
+
+        transaction.commit_and_publish(
+            lambda: _beets_database_anchor_matches(database_anchor), validate
+        )
+        clear_scan_caches()
+        return True
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            raise
+        outcome = (
+            "the committed catalogue change may already be visible"
+            if transaction is not None and transaction.published
+            else "leaving the captured entries unchanged"
+        )
+        log.info(
+            fmt(
+                C.YELLOW,
+                f"  ⚠  Couldn't safely retire the replaced Beets entries ({exc}); "
+                f"{outcome}.",
+            )
+        )
+        return False
+    finally:
+        if transaction is not None:
+            transaction.close()
+        _close_beets_database_anchor(database_anchor)
 
 
 def _fold_duplicate_album_group(
@@ -7003,24 +7407,30 @@ def _consolidate_duplicate_albums(protected_paths=None):
         clear_scan_caches()
 
 
+@dataclass(frozen=True)
+class ForgetBeetsEntriesResult:
+    complete: bool
+    removed: int = 0
+
+
 def forget_beets_entries(paths):
     """Drop beets DB entries for files that were deleted outside beets.
     Consolidation removes duplicate sibling tracks straight off disk; without
     this their rows linger in the beets library, so someone who also runs
     `beet` by hand sees ghost tracks until the next `beet update`. `beet
     remove` is used rather than a direct sqlite delete so beets cleans up the
-    album row and any flexible-attribute rows along with the item — leaving
+    album row and any flexible-attribute rows along with the item, leaving
     the database consistent.
     """
     paths = [str(p) for p in paths if str(p)]
     if not paths:
-        return 0
+        return ForgetBeetsEntriesResult(True)
 
     def _ghost_warning(reason):
         # The files are already gone from disk, so a remove that can't run
         # leaves their rows behind as ghost entries in `beet ls` until a
-        # hand-run `beet update` notices the missing files. Returning 0
-        # silently reads as "nothing to forget", so say what happened.
+        # hand-run `beet update` notices the missing files. Keep the warning
+        # alongside the structured failure returned to the caller.
         log.info(
             fmt(
                 C.YELLOW,
@@ -7033,7 +7443,7 @@ def forget_beets_entries(paths):
     runtime = _resolve_beets_runtime()
     if runtime is None:
         _ghost_warning("a supported Beets runtime could not be found")
-        return 0
+        return ForgetBeetsEntriesResult(False)
     config_dir = os.path.abspath(os.fspath(cfg.BEETS_CONFIG_DIR))
     beet_env = {**os.environ, "BEETSDIR": config_dir}
     for variable in _OWNERSHIP_ENV_KEYS:
@@ -7052,7 +7462,7 @@ def forget_beets_entries(paths):
             query.append(",")
         query.append("path:" + path)
 
-    def _run_guarded():
+    def _tracked_ids(stage):
         try:
             listing = _run_owned_beets_capture(
                 base + ["ls", "-f", "$id", *query],
@@ -7062,11 +7472,22 @@ def forget_beets_entries(paths):
                 before_spawn=lambda: _require_beets_runtime(runtime),
             )
         except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
-            _ghost_warning(f"couldn't read the library — {exc}")
-            return 0
-        tracked = sum(1 for line in listing.stdout.splitlines() if line.strip())
+            _ghost_warning(f"couldn't {stage} the library: {exc}")
+            return None
+        if listing.returncode != 0:
+            _ghost_warning(
+                f"couldn't {stage} the library: beet ls exited "
+                f"{listing.returncode}"
+            )
+            return None
+        return [line for line in listing.stdout.splitlines() if line.strip()]
+
+    def _run_guarded():
+        tracked = _tracked_ids("read")
+        if tracked is None:
+            return ForgetBeetsEntriesResult(False)
         if not tracked:
-            return 0
+            return ForgetBeetsEntriesResult(True)
         try:
             rm = _run_owned_beets_capture(
                 base + ["remove", "-f", *query],
@@ -7075,7 +7496,7 @@ def forget_beets_entries(paths):
                 database_exclusion=exclusion,
                 before_spawn=lambda: _require_beets_runtime(runtime),
             )
-            # A nonzero exit is usually a transient DB lock — retry once
+            # A nonzero exit is usually a transient DB lock. Retry once
             # before falling back to the manual-recovery message.
             if rm.returncode != 0:
                 rm = _run_owned_beets_capture(
@@ -7085,17 +7506,23 @@ def forget_beets_entries(paths):
                     database_exclusion=exclusion,
                     before_spawn=lambda: _require_beets_runtime(runtime),
                 )
-        except (OSError, subprocess.SubprocessError) as exc:
-            _ghost_warning(f"beet remove couldn't run — {exc}")
-            return 0
-        if rm.returncode == 0:
-            return tracked
-        _ghost_warning(f"beet remove exited {rm.returncode}")
-        return 0
+        except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
+            _ghost_warning(f"beet remove couldn't run: {exc}")
+            return ForgetBeetsEntriesResult(False)
+        if rm.returncode != 0:
+            _ghost_warning(f"beet remove exited {rm.returncode}")
+            return ForgetBeetsEntriesResult(False)
+        remaining = _tracked_ids("verify")
+        if remaining is None:
+            return ForgetBeetsEntriesResult(False)
+        if remaining:
+            _ghost_warning("beet remove left the deleted track(s) catalogued")
+            return ForgetBeetsEntriesResult(False)
+        return ForgetBeetsEntriesResult(True, len(tracked))
 
     exclusion = _SQLiteDatabaseExclusion()
     database_anchor = None
-    result = 0
+    result = ForgetBeetsEntriesResult(False)
     caught = None
     try:
         database_anchor = _open_beets_database_anchor()
@@ -7105,7 +7532,7 @@ def forget_beets_entries(paths):
         _preflight_beets_database_anchor(database_anchor)
         result = _run_guarded()
     except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        _ghost_warning(f"couldn't read the library — {exc}")
+        _ghost_warning(f"couldn't read the library: {exc}")
     except BaseException as exc:
         caught = exc
 
@@ -7113,7 +7540,7 @@ def forget_beets_entries(paths):
     _close_beets_database_anchor(database_anchor)
     if exclusion_error is not None:
         _ghost_warning("the database exclusion could not be released safely")
-        result = 0
+        result = ForgetBeetsEntriesResult(False)
     if caught is not None:
         if exclusion_error is not None and hasattr(caught, "add_note"):
             caught.add_note("beets database exclusion cleanup also failed")
@@ -7215,7 +7642,7 @@ def staging_preflight(args):
                 sys.exit(EXIT_GENERAL)
             log.info(fmt(C.YELLOW, f"  ⚠  lyric hook failed during preflight: {_le}."))
         # Tag signatures taken before the import: the hook above only EMBEDS
-        # lyrics — sidecar/both modes finish in the post-import pass, same as
+        # lyrics. Sidecar/both modes finish in the post-import pass, same as
         # a queue flush, and the landed folders are only findable this way.
         from qobuz_librarian.library.catalog import (
             find_album_dir_by_track_signatures,

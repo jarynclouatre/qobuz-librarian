@@ -2,9 +2,9 @@
 
 Two job shapes share one worker and one log-streaming mechanism:
 
-* **Simple job** — `submit(job, fn)`. Runs `fn(job)` to completion. Used for a
+* **Simple job**: `submit(job, fn)`. Runs `fn(job)` to completion. Used for a
   single-album download.
-* **Scan / review / execute job** — `submit_scan(job, scan_fn, execute_fn)`.
+* **Scan / review / execute job**: `submit_scan(job, scan_fn, execute_fn)`.
   `scan_fn(job)` inspects the library/catalog and attaches *candidates*. The
   job then parks in `AWAITING_REVIEW` so the user can pick which candidates to
   act on in the web UI. `approve(job, ids)` resumes it and runs
@@ -62,6 +62,11 @@ def _is_durable_recovery_job(job) -> bool:
         type(job) is Job
         and durable_recovery_job_id() == job.id
     )
+
+
+def cancel_is_protected(job) -> bool:
+    """True while generic cancellation would sever durable recovery."""
+    return _is_durable_recovery_job(job)
 
 
 def _current_job_cancel_requested() -> bool:
@@ -151,7 +156,7 @@ def _propagate_job_to_thread(target):
     """Wrap a helper-thread target so it inherits the SPAWNING thread's
     current_job. Used for rip.py's output-reader thread: it logs streamrip's
     live progress + per-track errors via the shared logger, and JobLogHandler
-    routes records by thread — so without carrying the job onto that thread its
+    routes records by thread, so without carrying the job onto that thread its
     lines would be dropped. current_job is captured here, on the spawning
     (worker) thread; the wrapped target re-applies it on the helper thread."""
     job = getattr(_TLS, "current_job", None)
@@ -215,8 +220,48 @@ REVIEW_CHANGED = "\x00REVIEW\x00"
 _MISSING = object()
 
 
+def _quality_pair(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        bits, rate = int(value[0]), int(value[1])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return [bits, rate] if bits > 0 and rate > 0 else None
+
+
+def _quality_shortfall_record(verdict):
+    if not isinstance(verdict, dict):
+        return {}
+    target = _quality_pair(verdict.get("target"))
+    if target is None:
+        return {}
+    record = {
+        "version": 1,
+        "target": target,
+        "served": _quality_pair(verdict.get("served")),
+        "source": _quality_pair(verdict.get("source")),
+        "n_below": max(0, int(verdict.get("n_below") or 0)),
+        "n_unknown": max(0, int(verdict.get("n_unknown") or 0)),
+        "retried": verdict.get("retried") is True,
+        "recovered": verdict.get("recovered") is True,
+    }
+    tier = verdict.get("effective_tier")
+    if type(tier) is int and 2 <= tier <= 4:
+        record["effective_tier"] = tier
+    return record
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def release_title(title, edition="") -> str:
+    title = str(title or "").strip() or "?"
+    edition = str(edition or "").strip()
+    if not edition or edition.casefold() in title.casefold():
+        return title
+    return f"{title} ({edition})"
 
 
 @dataclass
@@ -225,9 +270,10 @@ class Job:
     title: str        = ""
     artist: str       = ""
     album_id: str     = ""
+    edition: str      = ""
     # Single-track download undo info, set by the Get-track flow: the resolved
     # album dir, the downloaded track's isrc/number, and its exact
-    # file/directory ownership record — enough for /undo to cleanly reverse
+    # file/directory ownership record, enough for /undo to cleanly reverse
     # it.
     single: dict      = field(default_factory=dict)
     kind: str         = "download"          # download | scan
@@ -239,7 +285,7 @@ class Job:
     progress_total: int   = 0
     progress_item: str    = ""
     progress_found: int   = 0   # running tally of results found so far
-    # Artists with at least one find so far — the server-side count behind the
+    # Artists with at least one find so far, the server-side count behind the
     # scan page's "across N artists".
     progress_found_artists: int = 0
     # What current/total are counting, so the UI can label a bare "12 / 350"
@@ -250,12 +296,13 @@ class Job:
     #   {cid, kind, title, artist, detail, payload, selected}
     candidates: list  = field(default_factory=list)
     error: Optional[str] = None
-    # Short, user-facing outcome shown as a callout on the finished job page —
-    # e.g. why a scan found nothing — so it isn't buried in the log.
+    # Short, user-facing outcome shown as a callout on the finished job page,
+    # e.g. why a scan found nothing, so it isn't buried in the log.
     summary: str = ""
-    # Set when a finished job needs the user's eyes — e.g. a download that
+    # Set when a finished job needs the user's eyes, e.g. a download that
     # stayed under the quality target after the automatic retry.
     attention: str = ""
+    quality_shortfall: dict = field(default_factory=dict)
     # Exact retained Repair backups.
     recoveries: list = field(default_factory=list)
     # The verb the review screen's submit button uses. Most jobs download what
@@ -264,6 +311,7 @@ class Job:
     # How to rebind execute_fn after a container restart.
     execute_kind: str = ""
     execute_args: dict = field(default_factory=dict)
+    execute_args_unreadable: bool = False
     cancel_requested: bool = False
     created_at: float = field(default_factory=time.time)
     # When the job actually started working (left the queue).
@@ -287,7 +335,7 @@ class Job:
     _preserve_persisted_single: bool = field(default=False, repr=False)
     _single_undo_unavailable: bool = field(default=False, repr=False)
     # When set to (current, total, unit), push_progress reports THESE counts
-    # in place of the caller's — so a multi-item execute (repairing 16 albums)
+    # in place of the caller's, so a multi-item execute (repairing 16 albums)
     # keeps the progress card on "album 3 / 16" even while each album's inner
     # phases (download, import, downsample) report their own 1 / 1.
     _progress_scope: Optional[tuple] = field(default=None, repr=False)
@@ -295,12 +343,16 @@ class Job:
     def __post_init__(self):
         self.sync_cand_seq()
 
+    @property
+    def display_title(self) -> str:
+        return release_title(self.title, self.edition)
+
     def sync_cand_seq(self):
         """Advance the cid counter past any candidates this job already carries.
 
         A job rebuilt with pre-existing candidates (restart rehydration, the
         tab-split) would otherwise mint fresh cids from c0 and collide with
-        the rows it inherited — a cid-keyed dismiss then deletes unrelated
+        the rows it inherited. A cid-keyed dismiss then deletes unrelated
         candidates. Must be re-run by any code that assigns ``candidates``
         after construction."""
         highest = -1
@@ -327,8 +379,8 @@ class Job:
                     q.put_nowait(line)
                 except queue.Full:
                     # A consumer that fell behind (throttled tab, slow link):
-                    # drop its oldest buffered line to keep the live tail —
-                    # and the closing STREAM_END — flowing rather than
+                    # drop its oldest buffered line to keep the live tail
+                    # and the closing STREAM_END flowing rather than
                     # freezing the stream.
                     try:
                         q.get_nowait()
@@ -350,7 +402,7 @@ class Job:
     # MB in jobs.db to answer what the tail almost always answers.
     LOG_PERSIST_CAP = 500
     _PERSIST_TRUNCATION_MARKER = "[… earlier output not kept on disk …]"
-    # Strip C0 control bytes except \t (\x09) and \n (\x0a) — a stray NUL or
+    # Strip C0 control bytes except \t (\x09) and \n (\x0a). A stray NUL or
     # ESC byte from streamrip/beets truncates some browsers' SSE display and
     # garbles the JSON status endpoint.
     _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -394,7 +446,7 @@ class Job:
 
         ``found`` is a running tally (e.g. albums with gaps so far); ``hit`` is
         a one-off {artist, albums} the scanning page appends to its live preview
-        — it is deliberately left out of the stored snapshot so a reconnect
+        It is deliberately left out of the stored snapshot so a reconnect
         replay doesn't duplicate a preview row. ``unit`` names what current/total
         count ("artist"/"album"/"track") so the UI can label the bare numbers."""
         # An execute loop can pin the counts to an overall scope (e.g. album
@@ -404,7 +456,7 @@ class Job:
             current, total, unit = scope
         # Write the snapshot fields under the lock so a reconnecting subscriber
         # reading them via _progress_snapshot() (also under the lock) can't catch
-        # a torn mix — e.g. the new phase label with the previous phase's counts.
+        # a torn mix, e.g. the new phase label with the previous phase's counts.
         with self._lock:
             self.progress_phase = phase
             self.progress_current = current
@@ -432,7 +484,7 @@ class Job:
         second tab (or phone) reflects a tick/untick/hide without a manual
         reload. Fanned out as a distinct event the SSE layer maps to
         `event: review`, carrying the originating tab's id (when the change came
-        from a tab at all) so that tab can skip the reload — its DOM is already
+        from a tab at all) so that tab can skip the reload; its DOM is already
         current from the action's own response, and reloading it anyway would
         replace the page mid-interaction and eat the next tick of someone
         working quickly down a list. Other tabs still re-fetch the
@@ -452,7 +504,7 @@ class Job:
 
     # Cap replay so a late subscriber doesn't get thousands of historical
     # lines blasted at them (and so the bounded queue isn't filled by history
-    # alone — that would silently drop live lines).
+    # alone, which would silently drop live lines).
     from qobuz_librarian import config as _cfg2
     REPLAY_TAIL = _cfg2.JOB_LOG_REPLAY_TAIL
     del _cfg2
@@ -512,6 +564,8 @@ class Job:
             if len(self.candidates) >= self.CANDIDATE_CAP:
                 capped = not self._candidate_cap_noted
                 self._candidate_cap_noted = True
+                if isinstance(self.execute_args, dict):
+                    self.execute_args["_candidate_cap_hit"] = True
             else:
                 # Append regardless of whether the cap was hit EARLIER: a
                 # mid-scan hide can shrink the list back below the cap, and a
@@ -537,7 +591,24 @@ class Job:
         """True once a scan hit CANDIDATE_CAP and stopped listing further finds,
         so summaries can say results were truncated instead of implying the full
         found-count is reviewable."""
-        return self._candidate_cap_noted
+        saved = (
+            self.execute_args.get("_candidate_cap_hit", False)
+            if isinstance(self.execute_args, dict)
+            else False
+        )
+        return self._candidate_cap_noted or saved is True
+
+    @property
+    def unchecked_artists(self) -> int:
+        """Number of artists an incomplete scan could not check."""
+        if self._unchecked_artists > 0:
+            return self._unchecked_artists
+        saved = (
+            self.execute_args.get("_unchecked_artists", 0)
+            if isinstance(self.execute_args, dict)
+            else 0
+        )
+        return saved if type(saved) is int and saved > 0 else 0
 
     def selected_candidates(self) -> list:
         return [c for c in self.candidates if c.get("selected")]
@@ -578,7 +649,7 @@ class Job:
         return n
 
     def selection_counts(self) -> dict:
-        """Authoritative review tallies for the UI — computed server-side so a
+        """Authoritative review tallies for the UI, computed server-side so a
         paginated page (which holds only some checkboxes) still shows the true
         whole-set numbers. ``reclaimable`` sums est_saving over selected
         candidates for the downsample review's "space reclaimed" figure."""
@@ -649,7 +720,7 @@ class JobRegistry:
     def _prune_locked(self):
         """Evict the oldest finished jobs past MAX_FINISHED. Caller holds _lock.
 
-        Keeps the most recently finished — a restart rehydrates the on-disk
+        Keeps the most recently finished. A restart rehydrates the on-disk
         archive in creation order, so ordering by finish time (not insertion)
         is what makes "the last N finished" hold there too. The SQLite row
         stays after eviction so /jobs/{id} can still render the archive view;
@@ -667,7 +738,7 @@ class JobRegistry:
         for job in finished:
             if excess <= 0:
                 break
-            # Don't evict a job a client is still streaming/viewing — that
+            # Don't evict a job a client is still streaming/viewing. That
             # would 404 it out from under them; it's pruned once the stream
             # closes.
             age = now - (job.finished_at or job.created_at)
@@ -678,12 +749,14 @@ class JobRegistry:
             excess -= 1
 
     def clear_finished(self):
-        """Drop ordinary terminal jobs, retaining unresolved recoveries."""
+        """Drop ordinary terminal jobs, retaining recovery and Undo state."""
         with self._lock:
             keep = [jid for jid in self._order
                     if (self._jobs.get(jid)
                         and (self._jobs[jid].status not in TERMINAL
                              or self._jobs[jid].recoveries
+                             or job_persistence.has_active_single_undo(
+                                 self._jobs[jid].single)
                              or jid == durable_recovery_job_id()))]
             dropped = [jid for jid in self._jobs.keys() if jid not in keep]
             for jid in dropped:
@@ -783,7 +856,7 @@ def active_library_operations() -> list[str]:
         return list(_library_operations.values())
 
 # Review ticks save the whole candidate list, and on a big library that list
-# runs to tens of megabytes — written per checkbox, each tap waited on a
+# runs to tens of megabytes. Written per checkbox, each tap waited on a
 # multi-hundred-ms serialize+write.
 _PERSIST_DELAY = 1.5
 _persist_timers: dict[str, threading.Timer] = {}
@@ -795,10 +868,14 @@ def persist_soon(job) -> None:
         with _persist_timers_lock:
             _persist_timers.pop(job.id, None)
         # A job pruned or dismissed while the timer ran must not be written
-        # back — restore would resurrect a review the user already discarded.
+        # back; restore would resurrect a review the user already discarded.
         if registry.get(job.id) is not job:
             return
-        job_persistence.persist(job)
+        if not job_persistence.persist(job):
+            # The request already returned before this background write ran.
+            # Tell every open copy of the review that its latest tick is only
+            # in memory and may disappear on a restart.
+            job.notify_review_changed("save_failed")
     with _persist_timers_lock:
         if job.id in _persist_timers:
             return
@@ -892,7 +969,7 @@ def staging_lock():
     return _staging_lock
 
 
-# Human label for a long staging-lock hold — a library-wide Lyrics scan holds
+# Human label for a long staging-lock hold. A library-wide Lyrics scan holds
 # the mutex for its whole (possibly hours-long) run, not per album.
 _staging_holder: Optional[str] = None
 _staging_holder_lock = threading.Lock()
@@ -991,7 +1068,7 @@ def _run_task(job: Job, fn):
 
 def _run_post_job_hook(payload: dict) -> None:
     """Run the POST_JOB_HOOK command (if set) with ``payload`` as JSON on
-    stdin. Errors are logged via vlog and never raised — a broken hook
+    stdin. Errors are logged via vlog and never raised; a broken hook
     can't kill the worker."""
     import json
     import os
@@ -1010,7 +1087,7 @@ def _run_post_job_hook(payload: dict) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             # Own process group, so the timeout can kill a hook's whole
-            # pipeline — killing just the shell leaves its children running.
+            # pipeline. Killing just the shell leaves its children running.
             start_new_session=True,
         )
     except OSError as e:
@@ -1020,7 +1097,7 @@ def _run_post_job_hook(payload: dict) -> None:
         proc.communicate(json.dumps(payload).encode("utf-8"),
                          timeout=_cfg.POST_JOB_HOOK_TIMEOUT)
     except subprocess.TimeoutExpired:
-        # communicate() doesn't kill or reap on timeout — without this the shell
+        # communicate() doesn't kill or reap on timeout. Without this the shell
         # child and its open stdin pipe linger as a zombie under PID 1.
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -1036,6 +1113,8 @@ def _fire_post_job_hook(job):
         "id": job.id,
         "status": job.status.value,
         "title": job.title,
+        "edition": job.edition,
+        "display_title": job.display_title,
         "artist": job.artist,
         "error": job.error,
         "finished_at": job.finished_at,
@@ -1055,7 +1134,7 @@ def fire_auth_lost_hook():
     payload = {
         "id": "qobuz-auth",
         "status": "auth_lost",
-        "title": "Qobuz token rejected — replace it on the Settings page",
+        "title": "Qobuz token rejected: replace it on the Settings page",
         "artist": None,
         "error": "Qobuz returned 401 for the saved token",
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -1084,7 +1163,7 @@ def _worker_loop(work_queue: "queue.Queue"):
                 pass
             continue
         # Settings changes deferred while we were busy are applied BEFORE the
-        # next job so "apply now" takes effect for it — but NOT while the
+        # next job so "apply now" takes effect for it, but NOT while the
         # OTHER lane is mid-execution.
         try:
             from qobuz_librarian.web import settings_store
@@ -1092,7 +1171,7 @@ def _worker_loop(work_queue: "queue.Queue"):
                 settings_store.drain_pending()
         except Exception:
             pass
-        # Sole worker thread — catching BaseException ensures one
+        # Sole worker thread. Catching BaseException ensures one
         # crashed job can't take down the whole queue.
         try:
             canceled_pending = False
@@ -1221,6 +1300,7 @@ def resubmit_failed(job: Job, fn) -> bool:
                 "error": job.error,
                 "summary": job.summary,
                 "attention": job.attention,
+                "quality_shortfall": dict(job.quality_shortfall),
                 "cancel_requested": job.cancel_requested,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
@@ -1237,6 +1317,7 @@ def resubmit_failed(job: Job, fn) -> bool:
             job.error = None
             job.summary = ""
             job.attention = ""
+            job.quality_shortfall = {}
             job.cancel_requested = False
             job.started_at = None
             job.finished_at = None
@@ -1302,7 +1383,7 @@ def finalize_review_if_empty(job: Job) -> bool:
     """Complete a triage review once dismissal has emptied its candidate list.
 
     Dismissing the last album leaves nothing to act on, so the job must not stay
-    in AWAITING_REVIEW — otherwise the dashboard keeps showing the "N new
+    in AWAITING_REVIEW. Otherwise the dashboard keeps showing the "N new
     releases" banner (now zero) and the job page stays badged "awaiting review"
     over an empty list. Mirror submit_scan's found-nothing path and mark it DONE.
     Returns True if it finalized the job (so callers can refresh the view).
@@ -1311,16 +1392,48 @@ def finalize_review_if_empty(job: Job) -> bool:
         if job.status != JobStatus.AWAITING_REVIEW or job.candidates:
             return False
         job.status = JobStatus.DONE
-        if job.execute_kind == "downsample":
-            job.summary = "All albums reviewed. Albums kept hi-res can be restored later."
+        job.finished_at = time.time()
+        unchecked = job.unchecked_artists
+        if job.candidate_cap_hit or unchecked:
+            parts = ["All listed albums reviewed."]
+            if job.candidate_cap_hit:
+                parts.append("The scan hit the result cap, so some finds may "
+                             "not have been listed.")
+            if unchecked:
+                parts.append(
+                    f"{unchecked} artist{'s' if unchecked != 1 else ''} "
+                    "couldn't be checked; scan again to finish.")
+            if job.execute_kind == "downsample":
+                parts.append("Albums kept hi-res can be restored later.")
+            else:
+                parts.append("Dismissed items can be restored later.")
+            job.summary = " ".join(parts)
+        elif job.execute_kind == "downsample":
+            job.summary = ("All albums reviewed. Albums kept hi-res can be "
+                           "restored later.")
         else:
             job.summary = "All albums reviewed. Dismissed items can be restored later."
     job_persistence.persist(job)
     if job.execute_kind == "library":
-        # Worked through to empty — retire the baseline's review so the
+        # Worked through to empty. Retire the baseline's review so the
         # saved-state reconstruction doesn't rebuild it from stale scan state.
         from qobuz_librarian.library import library_scan_state
         library_scan_state.mark_review_retired(reason="worked_through")
+        badge_generation = review_badges.ready_generation("library")
+        other_candidates = False
+        for other in registry.awaiting_review():
+            if other.execute_kind != "library":
+                continue
+            with other._lock:
+                if other.status == JobStatus.AWAITING_REVIEW and other.candidates:
+                    other_candidates = True
+                    break
+        if not other_candidates:
+            # A newer scan may light the badge between the snapshot and this
+            # clear. Only retire the generation that belonged to the review
+            # we just emptied.
+            review_badges.clear_ready_if_generation(
+                "library", badge_generation)
     return True
 
 
@@ -1333,7 +1446,7 @@ def approve(
 ):
     """Resume a reviewed job: run execute_fn over the selected candidates.
 
-    Selection is server-backed — each tick is saved as it happens — so the web
+    Selection is server-backed: each tick is saved as it happens, so the web
     approve passes selected_ids=None and the already-saved `selected` flags
     drive the run. selected_ids is still honoured when given (the CLI/tests set
     the selection at approve time); None means "use whatever is already saved."
@@ -1350,7 +1463,7 @@ def approve(
     """
     # Flip the status under the job lock so a second concurrent approve
     # (double-click, two tabs) loses the check and can't enqueue the execute
-    # phase a second time — which would re-download and re-import every album.
+    # phase a second time, which would re-download and re-import every album.
     parked = None
     with job._review_action_lock, job._lock:
         if job.status != JobStatus.AWAITING_REVIEW or job._execute_fn is None:
@@ -1390,7 +1503,7 @@ def approve(
         job.status = JobStatus.PENDING
         job.finished_at = None
         # Restart the elapsed clock at approve so the execute phase (downloading /
-        # repairing) times itself — otherwise it keeps counting from the scan
+        # repairing) times itself; otherwise it keeps counting from the scan
         # start and folds in however long the results sat awaiting review, making
         # "Downloading · 1:17" read as download time when it was mostly browsing.
         job.started_at = time.time()
@@ -1434,7 +1547,7 @@ def approve(
             j._execute_fn(j, chosen)
         except (Exception, SystemExit) as e:
             # Qobuz went away before ANYTHING landed: put the review back
-            # exactly as it was instead of burying the picks in a failed job —
+            # exactly as it was instead of burying the picks in a failed job.
             # a months-old review's ticks would otherwise be gone for good.
             from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
             if (j._imported_any or j.cancel_requested or j.recoveries
@@ -1442,7 +1555,7 @@ def approve(
                                           SystemExit))):
                 raise
             with j._lock:
-                # A cancel/discard that landed while the run was dying wins —
+                # A cancel/discard that landed while the run was dying wins;
                 # only a still-RUNNING job goes back to review.
                 if j.status != JobStatus.RUNNING or j.cancel_requested:
                     raise
@@ -1451,7 +1564,7 @@ def approve(
                 j.error = None
             j.push_line(
                 "Couldn't reach Qobuz, so nothing was downloaded. Your "
-                "review and picks are untouched — reconnect and try again.")
+                "review and picks are untouched. Reconnect and try again.")
             job_persistence.persist(j)
             j.notify_review_changed()
 
@@ -1459,25 +1572,36 @@ def approve(
     return True
 
 
-def cancel_review(job: Job) -> bool:
-    """Discard a job that's waiting for review without executing anything."""
+def cancel_review(job: Job) -> Optional[bool]:
+    """Discard a waiting review, or return None when it could not be saved."""
     # Flip under the job lock so this can't race approve() (which also flips
     # AWAITING_REVIEW under the lock); otherwise a cancel could land after an
     # approve already queued the execute phase, showing CANCELED while work
     # runs.
-    with job._review_action_lock, job._lock:
-        if job.status != JobStatus.AWAITING_REVIEW:
-            return False
-        job.status = JobStatus.CANCELED
-        job.finished_at = time.time()
-    job_persistence.persist(job)
-    if job.execute_kind == "library":
-        # Discarded — retire the baseline's review so the saved-state
-        # reconstruction doesn't immediately rebuild what the user threw away.
-        from qobuz_librarian.library import library_scan_state
-        library_scan_state.mark_review_retired(reason="discarded")
-    job.end_stream()
-    return True
+    with job._review_action_lock:
+        with job._lock:
+            if job.status != JobStatus.AWAITING_REVIEW:
+                return False
+            previous_finished_at = job.finished_at
+            canceled_at = time.time()
+            job.status = JobStatus.CANCELED
+            job.finished_at = canceled_at
+        if not job_persistence.persist(job):
+            with job._lock:
+                if (
+                    job.status == JobStatus.CANCELED
+                    and job.finished_at == canceled_at
+                ):
+                    job.status = JobStatus.AWAITING_REVIEW
+                    job.finished_at = previous_finished_at
+            return None
+        if job.execute_kind == "library":
+            # Discarded. Retire the baseline's review so the saved-state
+            # reconstruction doesn't immediately rebuild what was discarded.
+            from qobuz_librarian.library import library_scan_state
+            library_scan_state.mark_review_retired(reason="discarded")
+        job.end_stream()
+        return True
 
 
 def restore_jobs(
@@ -1491,17 +1615,17 @@ def restore_jobs(
     ``execute_registry`` maps an ``execute_kind`` string to a factory
     ``factory(job, execute_args)`` that returns the bound execute_fn to use
     when the user later approves a reloaded AWAITING_REVIEW job. The
-    factory is invoked lazily, on approve — so it can re-read a fresh
+    factory is invoked lazily on approve, so it can re-read a fresh
     Qobuz token (the one captured at original-submit time is gone).
 
     Three behaviours by saved status:
-      * DONE / FAILED / CANCELED — loaded as-is so /queue still shows them.
-      * AWAITING_REVIEW — loaded with candidates intact, execute_fn rebound
+      * DONE / FAILED / CANCELED: loaded as-is so /queue still shows them.
+      * AWAITING_REVIEW: loaded with candidates intact, execute_fn rebound
         from ``execute_registry`` if the kind is known. If the kind is
         unknown (registry change between releases), the job is rebadged
         FAILED with a hint to re-run the original scan.
-      * PENDING / RUNNING / SCANNING — the closures that drove them are
-        gone, so they're rebadged FAILED("interrupted on restart — submit
+      * PENDING / RUNNING / SCANNING: the closures that drove them are
+        gone, so they're rebadged FAILED("interrupted on restart; submit
         again") and saved back. The user sees them rather than them
         silently vanishing.
     """
@@ -1532,6 +1656,7 @@ def restore_jobs(
             title=row.get("title") or "",
             artist=row.get("artist") or "",
             album_id=row.get("album_id") or "",
+            edition=row.get("edition") or "",
             kind=row.get("kind") or "download",
             status=status,
             phase=row.get("phase") or "",
@@ -1541,8 +1666,10 @@ def restore_jobs(
             review_verb=row.get("review_verb") or "Download",
             execute_kind=row.get("execute_kind") or "",
             execute_args=row.get("execute_args") or {},
+            execute_args_unreadable=bool(row.get("execute_args_unreadable")),
             single=row.get("single") or {},
             attention=row.get("attention") or "",
+            quality_shortfall=row.get("quality_shortfall") or {},
             recoveries=row.get("recoveries") or [],
             log_lines=list(row.get("log_lines") or []),
             created_at=(
@@ -1615,7 +1742,13 @@ def restore_jobs(
             # album_id, and only those get a Retry button on the job + history
             # pages.
             restart = "Interrupted by a container restart. "
-            if job.album_id:
+            if job.execute_args_unreadable:
+                job.error = (
+                    restart
+                    + "The saved details needed to retry this job couldn't "
+                    "be read. Start it again from its original page."
+                )
+            elif job.album_id:
                 job.error = restart + "Use Retry to download it again."
             elif job.execute_kind == "lyrics":
                 job.error = restart + "Start it again from the Lyrics page."
@@ -1632,7 +1765,7 @@ def restore_jobs(
             interrupted += 1
             job_persistence.persist(job)
         elif status == JobStatus.SCANNING:
-            # A scan caught mid-crawl isn't a failure — record it as cancelled
+            # A scan caught mid-crawl isn't a failure. Record it as cancelled
             # (neutral) with a note in the summary, not a red error.
             job.status = JobStatus.CANCELED
             # Library scans auto-resume from their checkpoint when the app next
@@ -1640,7 +1773,7 @@ def restore_jobs(
             # picks up when its scan is started again; every other kind restarts.
             if job.execute_kind == "library":
                 # Only a pre-baseline scan auto-resumes; after the baseline the
-                # affordance is the dashboard's manual resume notice — don't
+                # affordance is the dashboard's manual resume notice; don't
                 # promise an auto-resume that never comes.
                 from qobuz_librarian.library import new_releases
                 if new_releases.is_baseline_complete():
@@ -1669,6 +1802,15 @@ def restore_jobs(
                 job.finished_at = time.time()
                 interrupted += 1
                 job_persistence.persist(job)
+            elif job.execute_args_unreadable:
+                job.status = JobStatus.FAILED
+                job.error = (
+                    "The saved details needed to resume this review couldn't "
+                    "be read. Start it again from its original page."
+                )
+                job.finished_at = time.time()
+                interrupted += 1
+                job_persistence.persist(job)
             elif (factory := execute_registry.get(job.execute_kind)) is None:
                 job.status = JobStatus.FAILED
                 job.error = ("Couldn't restore this job's executor across "
@@ -1677,13 +1819,28 @@ def restore_jobs(
                 interrupted += 1
                 job_persistence.persist(job)
             else:
-                job._execute_fn = factory(job, job.execute_args)
-                review += 1
+                try:
+                    execute_fn = factory(job, job.execute_args)
+                    if not callable(execute_fn):
+                        raise TypeError("restored executor is not callable")
+                except Exception:
+                    job.status = JobStatus.FAILED
+                    job.error = (
+                        "The saved details needed to resume this review "
+                        "couldn't be restored. Start it again from its "
+                        "original page."
+                    )
+                    job.finished_at = time.time()
+                    interrupted += 1
+                    job_persistence.persist(job)
+                else:
+                    job._execute_fn = execute_fn
+                    review += 1
         else:
             historical += 1
         restored.append(job)
     # Insert once, then bound the in-memory finished set to MAX_FINISHED just
-    # like a live add() would — the archive on disk keeps up to PERSIST_KEEP
+    # like a live add() would. The archive on disk keeps up to PERSIST_KEEP
     # so an evicted job still renders via /jobs/{id}.
     with registry._lock:
         for job in restored:
@@ -1716,6 +1873,7 @@ def load_historical_job(job_id: str) -> Optional[Job]:
         title=row.get("title") or "",
         artist=row.get("artist") or "",
         album_id=row.get("album_id") or "",
+        edition=row.get("edition") or "",
         kind=row.get("kind") or "download",
         status=status,
         phase=row.get("phase") or "",
@@ -1725,9 +1883,12 @@ def load_historical_job(job_id: str) -> Optional[Job]:
         review_verb=row.get("review_verb") or "Download",
         execute_kind=row.get("execute_kind") or "",
         execute_args=row.get("execute_args") or {},
+        execute_args_unreadable=bool(row.get("execute_args_unreadable")),
         single=row.get("single") or {},
         attention=row.get("attention") or "",
+        quality_shortfall=row.get("quality_shortfall") or {},
         recoveries=row.get("recoveries") or [],
+        log_lines=list(row.get("log_lines") or []),
         created_at=(
             row.get("created_at")
             if type(row.get("created_at")) in (int, float)
@@ -1758,10 +1919,14 @@ def request_cancel(job: Job) -> bool:
     """
     # A durable retry must keep its original job identity until the saved
     # journal settles.
-    if _is_durable_recovery_job(job):
+    if cancel_is_protected(job):
         return False
-    if job.status == JobStatus.AWAITING_REVIEW and cancel_review(job):
-        return True
+    if job.status == JobStatus.AWAITING_REVIEW:
+        review_canceled = cancel_review(job)
+        if review_canceled is True:
+            return True
+        if review_canceled is None:
+            return False
     # Either it wasn't in review, or an approve() flipped it to PENDING
     # between the check and cancel_review's locked re-check.
     with job._lock:
@@ -1779,13 +1944,15 @@ def request_cancel(job: Job) -> bool:
     return True
 
 
-def note_quality_shortfall():
+def note_quality_shortfall(verdict):
     """Queue-layer callback: the download being processed stayed under the
     quality target after the automatic recovery attempt. Flag the owning web
     job so History marks it for review (see Job.attention)."""
     job = getattr(_TLS, "current_job", None)
     if job is not None:
-        job.attention = "quality"
+        with job._lock:
+            job.attention = "quality"
+            job.quality_shortfall = _quality_shortfall_record(verdict)
 
 
 from qobuz_librarian.queue import executor as _queue_executor  # noqa: E402

@@ -1,6 +1,7 @@
-"""Core album processing — detect gaps, prompt, download, import, consolidate."""
+"""Core album processing: detect gaps, prompt, download, import, consolidate."""
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock
@@ -12,9 +13,12 @@ from qobuz_librarian.download import (
     run_album_download,
     validated_staged_album_dirs,
 )
+from qobuz_librarian.download_result import incomplete_track_counts
 from qobuz_librarian.integrations.beets import (
     beets_import_paths,
+    capture_beets_album_entries,
     relocate_disc_album_artwork,
+    retire_replaced_beets_entries,
     staging_preflight,
 )
 from qobuz_librarian.integrations.lyrics import (
@@ -114,7 +118,7 @@ def _recover_incomplete_upgrade_backup(backup, album_dir, *, operation):
 
     if not pin_unverified_upgrade_backup(
             backup,
-            f"{operation} recovery kept — automatic reconciliation did not "
+            f"{operation} recovery kept; automatic reconciliation did not "
             "complete"):
         warn_pin_failed(backup)
     unresolved = (
@@ -134,7 +138,7 @@ def _recover_incomplete_upgrade_backup(backup, album_dir, *, operation):
 
 def force_cleanup_preflight(album, args):
     """With --force, move an existing album dir aside to a backup before
-    re-import — so beets doesn't make '<n>.1.flac' collisions against the old
+    re-import, so beets doesn't make '<n>.1.flac' collisions against the old
     files, and a re-download that fails can be restored.
 
     Returns the backup Path when the folder was moved aside; True when there's
@@ -212,7 +216,7 @@ def _folder_tracks_checked(folder):
     """(tracks, degraded) for an album folder, read through read_album_dir so
     lengths/quality come from the same reader the rest of the app uses.
     degraded=True means part of the tree couldn't be read, so the list may be
-    INCOMPLETE — counts and quality drawn from it must not authorize deleting
+    INCOMPLETE. Counts and quality drawn from it must not authorize deleting
     anything (a transient read error would read as a smaller album)."""
     errs = []
     tracks = read_album_dir(folder, walk_errors=errs)
@@ -345,7 +349,7 @@ def _track_identity_conflicts(original, replacement):
 
 def _upgrade_replacement_verified(album, album_dir, backup_path):
     """True only when the freshly imported album is at least as complete as the
-    backed-up original — same-or-more tracks AND same-or-more playtime. The
+    backed-up original: same-or-more tracks AND same-or-more playtime. The
     success gate clears `flac -t` per file, which proves each file decodes but
     not that the matcher kept every track or that a re-rip didn't land short.
     """
@@ -370,7 +374,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
         log.info(fmt(C.YELLOW,
             "  ⚠  Couldn't fully read the "
             f"{'backup' if old_degraded else 'imported album'} while verifying "
-            "the upgrade — keeping the backup."))
+            "the upgrade; keeping the backup."))
         return False
     new_n, new_secs = len(new_tracks), _tracks_seconds(new_tracks)
     old_n, old_secs = len(old_tracks), _tracks_seconds(old_tracks)
@@ -380,17 +384,17 @@ def _upgrade_trees_verified(post_dir, backup_path):
     if old_n == 0:
         log.info(fmt(C.YELLOW,
             "  ⚠  Couldn't read the upgrade backup (empty or unreadable) "
-            "— keeping it."))
+            "; keeping it."))
         return False
     if new_n < old_n:
         log.info(fmt(C.YELLOW,
             f"  ⚠  Upgrade landed {new_n} track(s) but the original held "
-            f"{old_n} — keeping the backup."))
+            f"{old_n}; keeping the backup."))
         return False
     if old_secs > 0 and new_secs < old_secs * _UPGRADE_VERIFY_DURATION_RATIO:
         log.info(fmt(C.YELLOW,
             f"  ⚠  Upgrade playtime {int(new_secs)}s falls short of the "
-            f"original {int(old_secs)}s (a track may be truncated) — "
+            f"original {int(old_secs)}s (a track may be truncated); "
             f"keeping the backup."))
         return False
     # Every original must have one identity-paired replacement.
@@ -398,7 +402,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
     if pairs is None:
         log.info(fmt(C.YELLOW,
             "  ⚠  Couldn't prove one unique replacement for every original "
-            "track — keeping the backup."))
+            "track; keeping the backup."))
         return False
     for ot, nt in pairs:
         oq, nq = _track_quality(ot), _track_quality(nt)
@@ -406,7 +410,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
         if _track_identity_conflicts(ot, nt):
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Upgrade matched {title} to a different recording "
-                "identity — keeping the backup."))
+                "identity; keeping the backup."))
             return False
         relation = quality_relation(nq, oq)
         if relation not in ("equal", "higher"):
@@ -416,31 +420,31 @@ def _upgrade_trees_verified(post_dir, backup_path):
                 else f"returned at {_fmt_quality(nq)} instead of {_fmt_quality(oq)}"
             )
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Upgrade for {title} {detail} — keeping the backup."))
+                f"  ⚠  Upgrade for {title} {detail}; keeping the backup."))
             return False
         old_channels = _known_track_channels(ot)
         new_channels = _known_track_channels(nt)
         if old_channels is None or new_channels is None:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Couldn't verify the channel layout for {title} "
-                "— keeping the backup."))
+                "; keeping the backup."))
             return False
         if new_channels != old_channels:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Upgrade for {title} changed from {old_channels} to "
-                f"{new_channels} channels — keeping the backup."))
+                f"{new_channels} channels; keeping the backup."))
             return False
         old_duration = _known_track_duration(ot)
         new_duration = _known_track_duration(nt)
         if old_duration is None or new_duration is None:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Couldn't verify the playtime for {title} "
-                "— keeping the backup."))
+                "; keeping the backup."))
             return False
         if new_duration < old_duration * _UPGRADE_VERIFY_DURATION_RATIO:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Upgrade for {title} is shorter than the original "
-                "— keeping the backup."))
+                "; keeping the backup."))
             return False
     return True
 
@@ -476,6 +480,20 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
         expected_replacement_receipt=receipt,
     )
     return (dest, updated) if updated is not None else None
+
+
+def _replacement_audio_paths(replacement_path, receipt):
+    try:
+        files = receipt["tree"]["files"]
+        if not isinstance(files, dict):
+            return ()
+        return tuple(
+            replacement_path / relative
+            for relative in files
+            if Path(relative).suffix.lower() in cfg.AUDIO_EXTS
+        )
+    except (KeyError, TypeError, ValueError):
+        return ()
 
 
 def detect_sibling_album_groups(album_dirs):
@@ -547,8 +565,8 @@ def process_album(album, args, *, allow_force=True, label=None,
     if not is_lossless_album(album):
         log.info(fmt(C.RED,
             f"\n  ✗  {label_prefix}Lossy-only on Qobuz "
-            f"({album.get('title') or '?'} — {album_quality_label(album)})."))
-        log.info(fmt(C.GRAY, "     Skipping — no lossless version on Qobuz."))
+            f"({album.get('title') or '?'}, {album_quality_label(album)})."))
+        log.info(fmt(C.GRAY, "     Skipping: no lossless version on Qobuz."))
         return {"result": "lossy_only"}
 
     qobuz_tracks = (album.get("tracks") or {}).get("items") or []
@@ -566,7 +584,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         missing, present = qobuz_tracks, []
     elif treat_as_new:
         # Deliberately fetching a different edition of an album the user
-        # already owns — a remaster or new mix to keep alongside the original.
+        # already owns, such as a remaster or new mix kept alongside the original.
         album_dir = None
         existing = []
         missing, present = qobuz_tracks, []
@@ -581,6 +599,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     # warrant an upgrade-replace.
     auto_upgrade_active = False    # if True, do backup-then-wipe-then-redownload
     upgrade_backup_path = None     # populated after backup_album_dir succeeds
+    replaced_beets_entries = None
     upgrade_existing_label = None  # before-quality label, set in the auto-upgrade branch
 
     # Quality-upgrade replace path.
@@ -598,7 +617,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         if qbits and qrate else "Qobuz quality")
 
         if cls == "all_higher":
-            # Existing strictly better than Qobuz everywhere — never replace.
+            # Existing strictly better than Qobuz everywhere. Never replace.
             log.info(fmt(C.GREEN,
                 f"\n  ✓  Already higher quality than Qobuz "
                 f"({qual['n_above']} track(s) above target)."))
@@ -617,7 +636,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             # Has missing tracks. Will fall through to gap-fill prompt with
             # explicit warning that this creates mixed quality.
             log.info(fmt(C.YELLOW,
-                f"     ⚠  {len(missing)} track(s) missing — filling them at "
+                f"     ⚠  {len(missing)} track(s) missing; filling them at "
                 f"{target_label} would mix quality."))
 
         elif cls in ("all_lower", "mixed_below"):
@@ -625,7 +644,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             # safe.
             if qual.get("n_unknown"):
                 log.info(fmt(C.YELLOW,
-                    f"\n  ⚠  Can't auto-upgrade — {qual['n_unknown']} track(s) "
+                    f"\n  ⚠  Can't auto-upgrade: {qual['n_unknown']} track(s) "
                     f"have unreadable quality and would be replaced unverified; "
                     f"filling gaps only."))
                 # Fall through to plain gap-fill; do NOT set auto_upgrade_active.
@@ -635,7 +654,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     album, album_dir, existing, extras, token, args)
                 if _exp is not None and _exp_qual["classification"] in ("all_lower", "mixed_below"):
                     log.info(fmt(C.MAGENTA,
-                        f"\n  ↑  Switching to {_exp.get('title') or '?'!r} — "
+                        f"\n  ↑  Switching to {_exp.get('title') or '?'!r}; "
                         f"covers your {len(existing)} tracks "
                         f"with {len(_exp_extras)} local-only at {album_quality_label(_exp)}"))
                     album = _exp
@@ -672,7 +691,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         and _exp_qual["classification"] in ("all_lower", "mixed_below")
                         and not _exp_extras):
                     log.info(fmt(C.MAGENTA,
-                        f"\n  ↑  Switching to {_exp.get('title') or '?'!r} — "
+                        f"\n  ↑  Switching to {_exp.get('title') or '?'!r}; "
                         f"covers your {len(existing)} tracks at {album_quality_label(_exp)}"))
                     album = _exp
                     qobuz_tracks = (_exp.get("tracks") or {}).get("items") or []
@@ -718,7 +737,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             "n_total": len(qobuz_tracks),
                             "n_extras": len(extras)}
             else:
-                # No extras — auto-upgrade is safe.
+                # No extras, so auto-upgrade is safe.
                 _qcounts = {}
                 for _t in existing:
                     _bb, _rr = existing_track_quality(_t)
@@ -743,7 +762,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     # map each local track to its single best Qobuz match so
                     # duplicate matches (one local file matching both "Foo"
                     # and "Foo (Edit)" via title-stripping) don't cause re-
-                    # ripping the same track twice — which would collide at
+                    # ripping the same track twice, which would collide at
                     # the destination filename and produce a 0-byte fallback
                     # that cleanup_lossy then deletes, losing the original.
                     _claimed_qids = set()
@@ -810,7 +829,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         "n_total": len(qobuz_tracks)}
             # Has missing tracks.
             log.info(fmt(C.YELLOW,
-                f"     ⚠  {len(missing)} track(s) missing — filling them at "
+                f"     ⚠  {len(missing)} track(s) missing; filling them at "
                 f"{target_label} would mix quality."))
 
         elif cls == "mixed_both":
@@ -838,7 +857,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     # If caller asked for upgrade-only but the auto-upgrade branch above
     # didn't fire (quality classification didn't match upgrade criteria,
     # extras blocked it, etc.), bail rather than silently fall through to
-    # gap-fill — the user explicitly asked NOT to fill missing tracks.
+    # gap-fill because the user explicitly asked not to fill missing tracks.
     if upgrade_only and not auto_upgrade_active:
         if not present:
             # A different fact than "no upgrade applies": the album isn't in
@@ -895,6 +914,27 @@ def process_album(album, args, *, allow_force=True, label=None,
     # ── Pre-flight: staging dir state (BEFORE backup so sys.exit can't strand it)
     staging_preflight(args)
 
+    if (
+        (auto_upgrade_active or use_force)
+        and album_dir is not None
+        and album_dir.exists()
+    ):
+        replaced_beets_entries = capture_beets_album_entries(album_dir)
+        if replaced_beets_entries is None:
+            log.info(fmt(
+                C.RED,
+                "  ✗  Couldn't safely identify this album's Beets entries; "
+                "refusing to replace its folder.",
+            ))
+            log_fetch({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "album_id": album.get("id"),
+                "artist": (album.get("artist") or {}).get("name"),
+                "title": album.get("title"),
+                "result": "replacement_aborted_catalogue_failed",
+            })
+            return {"result": "replacement_aborted_catalogue_failed"}
+
     # ── Auto-upgrade: back up the existing folder before redownload ──────────
     # Same-filesystem move, so this is fast (rename, not copy). The backup
     # is restored if anything fails before beets import succeeds.
@@ -938,7 +978,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     if use_force:
         force_outcome = force_cleanup_preflight(album, args)
         if force_outcome is None:
-            # Symlink — no safe --force path; skip without asking anything further.
+            # A symlink has no safe --force path; skip without asking again.
             return {"result": "cancelled"}
         if force_outcome is False:
             if not confirm("\n  Proceed with --force despite expected '<n>.1.flac' collisions?",
@@ -960,6 +1000,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     failed_tracks, lossy_tracks, broken_tracks = [], [], []
     imported = False
     upgrade_unverified = False
+    catalogue_unverified = False
     elapsed = 0.0
     download_phase_completed = False
     transient_lyric_sigs = []
@@ -995,7 +1036,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         # imported.
         if is_cancel_requested():
             log.info(fmt(C.YELLOW,
-                "\n  Cancelled — retaining the partial download for review; "
+                "\n  Cancelled; retaining the partial download for review. "
                 "nothing imported."))
             retain_download_staging(download_result)
             return {"result": "cancelled", "imported": False,
@@ -1003,7 +1044,7 @@ def process_album(album, args, *, allow_force=True, label=None,
 
         # A wipe-replace (auto-upgrade or --force moved the original aside)
         # that came back partial gets rolled back to the original by the
-        # finally below — so importing the partial first would only strand its
+        # finally below, so importing the partial first would only strand its
         # rows in beets once the backup is restored over it.
         if ((auto_upgrade_active or use_force) and n_ok > 0
                 and (n_fail > 0 or n_lossy > 0) and not args.no_import):
@@ -1015,7 +1056,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 "leaving its isolated staging run untouched for review"
             )
             log.info(fmt(C.YELLOW,
-                f"\n  Re-download came back incomplete — {disposition} and "
+                f"\n  Re-download came back incomplete; {disposition} and "
                 "keeping your original."))
             return {"result": "partial", "imported": False,
                     "n_ok": n_ok, "n_fail": n_fail, "n_lossy": n_lossy}
@@ -1095,7 +1136,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             "leaving its isolated staging run untouched for review"
                         )
                         log.info(fmt(C.YELLOW,
-                            "\n  Recovery re-download came back incomplete — "
+                            "\n  Recovery re-download came back incomplete; "
                             f"{disposition} and keeping your original."))
                         return {"result": "partial", "imported": False,
                                 "n_ok": n_ok, "n_fail": n_fail,
@@ -1124,7 +1165,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         if args.no_import:
             log.info(fmt(C.YELLOW, f"\n  --no-import: skipping beets. Files remain in {cfg.STAGING_DIR}/"))
         elif n_ok == 0:
-            log.info(fmt(C.YELLOW, "\n  Skipping beets import — nothing succeeded."))
+            log.info(fmt(C.YELLOW, "\n  Skipping beets import: nothing succeeded."))
         else:
             log.info("")
             # A multi-disc cover sits in the album root, which beets' import
@@ -1137,7 +1178,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     vlog(f"artwork relocation raised: {_ae}")
             # A brand-new album (no folder found on disk) lands in a fresh
             # directory, so it can't split an existing beets album into
-            # duplicate rows — skip the full-library de-dup scan for it.
+            # duplicate rows, so skip the full-library de-dup scan for it.
             imported = beets_import_paths(
                 consolidate=album_dir is not None,
                 album_dirs=staged_dirs_for_import,
@@ -1186,7 +1227,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     album, album_dir, upgrade_backup_path))
             if upgrade_verified:
                 # Carry non-audio companions (booklets, art, .cue/.log) from
-                # the backup into the rebuilt album before deleting it — the
+                # the backup into the rebuilt album before deleting it. The
                 # audio-only verification ignores them, so they'd be lost.
                 carried = _carry_non_audio_from_backup(
                     album, album_dir, upgrade_backup_path)
@@ -1197,7 +1238,31 @@ def process_album(album, args, *, allow_force=True, label=None,
                         if auto_upgrade_active
                         else _intentional_replacement_verified
                     )
-                    if dispose_backup(
+                    catalogue_retired = (
+                        replaced_beets_entries is not None
+                        and retire_replaced_beets_entries(
+                            replaced_beets_entries,
+                            replacement_path,
+                            _replacement_audio_paths(
+                                replacement_path, replacement_receipt
+                            ),
+                        )
+                    )
+                    if not catalogue_retired:
+                        upgrade_unverified = True
+                        catalogue_unverified = True
+                        if not pin_unverified_upgrade_backup(
+                                upgrade_backup_path,
+                                "upgrade kept; the replaced Beets entries "
+                                "could not be retired safely"):
+                            warn_pin_failed(upgrade_backup_path)
+                        log.info(fmt(C.YELLOW,
+                            "  ⚠  Upgrade landed, but its Beets catalogue "
+                            "couldn't be reconciled safely."))
+                        log.info(fmt(C.GRAY,
+                            f"     Backup remains at {upgrade_backup_path} "
+                            "until you reconcile it."))
+                    elif dispose_backup(
                         upgrade_backup_path,
                         replacement_path=replacement_path,
                         expected_replacement_receipt=replacement_receipt,
@@ -1210,7 +1275,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         upgrade_unverified = True
                         if not pin_unverified_upgrade_backup(
                                 upgrade_backup_path,
-                                "upgrade kept — final exact replacement proof "
+                                "upgrade kept; final exact replacement proof "
                                 "did not hold"):
                             warn_pin_failed(upgrade_backup_path)
                         log.info(fmt(C.YELLOW,
@@ -1225,14 +1290,14 @@ def process_album(album, args, *, allow_force=True, label=None,
                         warn_pin_failed(upgrade_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Upgrade landed, but the rebuilt album or its "
-                        "companions couldn't be flushed safely — keeping the "
+                        "companions couldn't be flushed safely; keeping the "
                         "backup."))
                     log.info(fmt(C.GRAY,
                         f"     Backup remains at {upgrade_backup_path}; keep it "
                         "until you've confirmed the rebuilt album is safe."))
             elif upgrade_succeeded and auto_upgrade_active:
                 # Passed the decode/lossy gate but the rebuilt folder isn't
-                # verifiably as complete as the original — keep the only full
+                # verifiably as complete as the original. Keep the only full
                 # copy instead of deleting it.
                 upgrade_unverified = True
                 if not pin_unverified_upgrade_backup(upgrade_backup_path):
@@ -1248,7 +1313,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             elif download_phase_completed and args.no_import:
                 if not pin_unverified_upgrade_backup(
                         upgrade_backup_path,
-                        "upgrade backup kept — --no-import leaves the "
+                        "upgrade backup kept; --no-import leaves the "
                         "replacement outside the verified library flow"):
                     warn_pin_failed(upgrade_backup_path)
                 log.info(fmt(C.YELLOW,
@@ -1270,7 +1335,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 else:
                     if not pin_unverified_upgrade_backup(
                             upgrade_backup_path,
-                            "upgrade backup kept — automatic restore did not "
+                            "upgrade backup kept; automatic restore did not "
                             "complete"):
                         warn_pin_failed(upgrade_backup_path)
                     log.info(fmt(C.RED,
@@ -1307,7 +1372,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 # physically holds the EXTRAS (which are audio) after the
                 # present tracks were moved to the backup, so a >0 check
                 # passes even when the re-rip landed elsewhere / imported
-                # nothing and the present tracks were never restored — and the
+                # nothing and the present tracks were never restored. The
                 # backup (their only copy) would be deleted.
                 _filled_ok = folder_holds_all_tracks(
                     _filled, qobuz_tracks, destructive=True)
@@ -1327,7 +1392,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     ):
                         if not pin_unverified_upgrade_backup(
                                 gap_fill_backup_path,
-                                "gap-fill backup kept — final exact "
+                                "gap-fill backup kept; final exact "
                                 "replacement proof did not hold"):
                             warn_pin_failed(gap_fill_backup_path)
                         log.info(fmt(C.YELLOW,
@@ -1337,23 +1402,23 @@ def process_album(album, args, *, allow_force=True, label=None,
                     _gap_fill_not_located = True
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
-                            "gap-fill backup kept — replacement not durable"):
+                            "gap-fill backup kept; replacement not durable"):
                         warn_pin_failed(gap_fill_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Gap-fill landed, but the filled album couldn't "
-                        "be flushed safely — keeping the backed-up tracks."))
+                        "be flushed safely; keeping the backed-up tracks."))
                     log.info(fmt(C.GRAY,
                         f"     Backup remains at {gap_fill_backup_path}."))
                 else:
                     _gap_fill_not_located = True
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
-                            "gap-fill backup kept — the complete replacement "
+                            "gap-fill backup kept; the complete replacement "
                             "could not be located"):
                         warn_pin_failed(gap_fill_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Gap-fill imported but the filled album couldn't be "
-                        f"located on disk — keeping backed-up tracks at "
+                        f"located on disk; keeping backed-up tracks at "
                         f"{gap_fill_backup_path}."))
             elif download_phase_completed and args.no_import:
                 # Gate on download_phase_completed like the upgrade branch above:
@@ -1361,7 +1426,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 # the restore branch, not keep a backup while the album is short.
                 if not pin_unverified_upgrade_backup(
                         gap_fill_backup_path,
-                        "gap-fill backup kept — --no-import leaves the "
+                        "gap-fill backup kept; --no-import leaves the "
                         "replacement outside the verified library flow"):
                     warn_pin_failed(gap_fill_backup_path)
                 log.info(fmt(C.YELLOW,
@@ -1381,18 +1446,18 @@ def process_album(album, args, *, allow_force=True, label=None,
                 else:
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
-                            "gap-fill backup kept — automatic restore was "
+                            "gap-fill backup kept; automatic restore was "
                             "partial or failed"):
                         warn_pin_failed(gap_fill_backup_path)
                     log.info(fmt(C.RED,
                         f"  ✗  Restored {_n_back} track(s); remaining originals "
-                        f"preserved at {gap_fill_backup_path} — reconcile by hand."))
+                        f"preserved at {gap_fill_backup_path}; reconcile by hand."))
 
     # ── Consolidation ────────────────────────────────────────────────────────
     n_consolidated = 0
     # treat_as_new keeps this download as its own edition; consolidation folds
     # editions together by deleting overlapping sibling tracks, so the two are
-    # mutually exclusive — never consolidate a deliberately-separate edition.
+    # mutually exclusive. Never consolidate a deliberately separate edition.
     if args.consolidate and not treat_as_new:
         if imported:
             try:
@@ -1401,7 +1466,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(fmt(C.GRAY, "\n  Consolidation interrupted."))
         else:
             log.info(fmt(C.YELLOW,
-                "\n  --consolidate requested but beets import didn't succeed — skipping."))
+                "\n  --consolidate requested but beets import didn't succeed; skipping."))
 
     # ── Post-import cleanup: folder layout and duplicate cover art ──────────
     if imported:
@@ -1514,6 +1579,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                  f"staging path(s) for next-launch retry")
 
     # ── Summary ──────────────────────────────────────────────────────────────
+    n_retryable, n_truly_lossy = incomplete_track_counts(download_result)
+    _broken = set(broken_tracks)
+    truly_lossy = [t for t in lossy_tracks if t not in _broken]
     if already_confirmed and not n_fail and not n_lossy and imported and not _gap_fill_not_located:
         if auto_upgrade_active and not upgrade_unverified:
             log.info(fmt(C.MAGENTA + C.BOLD,
@@ -1527,7 +1595,6 @@ def process_album(album, args, *, allow_force=True, label=None,
         section("Result")
         log.info("")
         log.info(f"  {fmt(C.GREEN if n_ok else C.GRAY,    '✓ downloaded:')}    {n_ok}")
-        n_truly_lossy = n_lossy - len(broken_tracks)
         if n_truly_lossy:
             log.info(f"  {fmt(C.YELLOW, '⚠ lossy on Qobuz:')} {n_truly_lossy}")
         if broken_tracks:
@@ -1542,8 +1609,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.RED, "\n  failed tracks:"))
             for t in failed_tracks[:10]:
                 log.info(f"     {truncate(t, 60)}")
-        _broken = set(broken_tracks)
-        truly_lossy = [t for t in lossy_tracks if t not in _broken]
         if truly_lossy:
             log.info(fmt(C.YELLOW,
                 "\n  only available lossy on Qobuz (would need another source):"))
@@ -1556,16 +1621,16 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(f"     {truncate(t, 60)}")
         log.info("")
 
-    if n_ok and n_fail:
+    if n_ok and (n_retryable or n_truly_lossy):
         result_status = "partial"
     elif n_ok and not imported and not args.no_import:
         # Tracks ripped but didn't make it into the library (a beets failure, or
-        # an upgrade/--force the finally-block rolled back to the original) — the
+        # an upgrade/--force the finally block rolled back to the original), the
         # library is unchanged, so don't log this as a completed "downloaded".
         result_status = "not_imported"
     elif n_ok:
         result_status = "downloaded"
-    elif n_fail:
+    elif n_retryable or n_truly_lossy:
         result_status = "failed"
     else:
         result_status = "nothing_landed"
@@ -1590,6 +1655,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "auto_upgrade": bool(auto_upgrade_active),
         "upgrade_backup_path": str(upgrade_backup_path) if upgrade_backup_path else None,
         "upgrade_restored": upgrade_restored,
+        "catalogue_unverified": catalogue_unverified,
         "consolidated": bool(args.consolidate and imported),
         "consolidated_tracks_removed": n_consolidated,
         "elapsed_s": int(elapsed),
@@ -1608,8 +1674,14 @@ def process_album(album, args, *, allow_force=True, label=None,
     return {
         "result": result_status,
         "n_ok": n_ok, "n_fail": n_fail, "n_lossy": n_lossy,
+        "n_broken": max(n_retryable - n_fail, 0),
+        "n_lossy_only": n_truly_lossy,
+        "failed_tracks": failed_tracks,
+        "lossy_tracks": truly_lossy,
+        "broken_tracks": broken_tracks,
         "imported": imported,
         "upgrade_unverified": upgrade_unverified,
+        "catalogue_unverified": catalogue_unverified,
         "auto_upgrade": bool(auto_upgrade_active),
         "quality_verdict": quality_verdict,
     }

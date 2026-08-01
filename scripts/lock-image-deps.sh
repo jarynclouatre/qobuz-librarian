@@ -10,14 +10,14 @@
 # straight from the Dockerfile so they can't drift; the app's own dependencies
 # come from requirements.txt so that stays the single source for those. After
 # running, review the diff, rebuild, and run scripts/smoke_test.sh before you
-# commit — a fresh resolve can pull newer versions that need a quick sanity pass.
+# commit. A fresh resolve can pull newer versions that need a quick sanity pass.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 streamrip_ref=$(grep -oE 'streamrip @ git\+https://[^"]+' Dockerfile | head -1)
 beets_pin=$(grep -oE 'beets==[0-9.]+' Dockerfile | head -1)
-# Resolve inside the same base image the runtime uses — read it from the
+# Resolve inside the same base image the runtime uses. Read it from the
 # Dockerfile like the pins above. A hard-coded python tag drifts: a lock
 # resolved on 3.12 can pick version-conditional deps and wheels the shipped
 # 3.14 interpreter never saw.
@@ -35,7 +35,8 @@ echo "==> Resolving image deps (${base_image}, streamrip ${streamrip_ref##*@}, $
 frozen=$(docker run --rm -i -v "$PWD/requirements.txt:/tmp/requirements.txt:ro" \
     "$base_image" bash -s <<EOF
 set -e
-apt-get update -qq && apt-get install -y -qq git build-essential >/dev/null 2>&1
+apt-get update -qq && apt-get install -y -qq \
+    git build-essential zlib1g-dev libjpeg62-turbo-dev >/dev/null 2>&1
 pip install --no-cache-dir -q -r /tmp/requirements.txt >/dev/null
 pip install --no-cache-dir -q "$streamrip_ref" "syncedlyrics>=1.0" >/dev/null
 pip install --no-cache-dir -q --no-deps "$beets_pin" >/dev/null
@@ -56,12 +57,13 @@ EOF
     echo "# different library versions. These are a verified, self-consistent set."
     echo "# The Dockerfile installs streamrip and beets --no-deps (they cap Pillow,"
     echo "# aiofiles and tomlkit below what the librarian runs and verifies), then"
-    echo "# installs this file. Don't edit by hand — regenerate with"
+    echo "# installs this file. Don't edit by hand. Regenerate with"
     echo "# scripts/lock-image-deps.sh."
     # streamrip and beets are installed --no-deps in the image (the Dockerfile
-    # pins them directly), so drop them here — listing beets would drag in its
+    # pins them directly), so drop them here. Listing beets would drag in its
     # heavy numba/scipy extras the librarian never uses.
     echo "$frozen" | grep -vE '^-e |^# Editable|^streamrip @ |^beets==|^qobuz-librarian' | sort -f
 } > docker/image-lock.txt
 
+python3 scripts/check_image_lock.py
 echo "==> Wrote docker/image-lock.txt ($(grep -cE '==' docker/image-lock.txt) packages pinned)"

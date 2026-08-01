@@ -20,6 +20,12 @@
 {# A failed or cancelled run stays on the page, but with the launcher under
    it, or the surface owned by a dead job had no way to start another scan. #}
 {% if repair_job and qobuz_ready %}
+{% if repair_job.status.value == 'failed' %}
+<div class="ql-work-status" role="alert">
+  <span class="ql-status-chip is-error">Repair failed</span>
+  <span>The failed albums remain below. Review the details, then start a new scan when you are ready.</span>
+</div>
+{% endif %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
 {% endif %}
 <div class="ql-work-status">

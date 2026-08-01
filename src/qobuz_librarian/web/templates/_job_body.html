@@ -13,7 +13,7 @@
   {% if not embedded_surface|default(false) %}
   <header class="ql-page-header ql-page-header--actions ql-job-header">
     <div class="ql-job-heading">
-      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }}, {% endif %}{{ job.title }}{% endif %}</h1>
+      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }}, {% endif %}{{ job.display_title }}{% endif %}</h1>
     </div>
     <span id="job-status-badge" class="ql-status-chip ql-job-status
       {%- if job.status.value == 'done' %} is-success
@@ -153,6 +153,7 @@
     {% endif %}
 
   {% elif s in ('pending', 'scanning', 'running') %}
+    {% set _cancel_protected = job.id == cancel_protected_job_id %}
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
         <span id="job-activity" aria-live="polite">{% if s == 'scanning' %}{{ job.progress_phase or 'Scanning' }}{% elif s == 'running' %}{{ job.progress_phase or labels.job_activity(job) }}{% else %}Queued{% endif %}</span>
@@ -160,7 +161,7 @@
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
       </p>
-      {% if not job.cancel_requested %}
+      {% if not job.cancel_requested and not _cancel_protected %}
       <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% set _pending = s == 'pending' %}
@@ -170,6 +171,12 @@
       </form>
       {% endif %}
     </div>
+
+    {% if _cancel_protected %}
+    <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
+      <span>This interrupted-download recovery stays active until its saved step settles.</span>
+    </div>
+    {% endif %}
 
     {% if s == 'pending' and queue_wait is defined and queue_wait %}
     <div class="ql-job-wait-note" id="queue-wait-note">
@@ -208,6 +215,35 @@
     {% if job.summary %}
     <div class="ql-job-summary ql-job-summary--terminal"><span>{{ job.summary }}</span></div>
     {% endif %}
+    {% set catalog_cleanup = job.single.get('catalog_cleanup') if job.single else none %}
+    {% if catalog_cleanup and catalog_cleanup.get('pending') %}
+    <div class="ql-notice ql-notice-warning ql-job-banner" role="alert">
+      <div class="ql-notice-copy">
+        <strong>Catalogue cleanup still needed</strong>
+        <div>The downloaded track is gone, but its stale Beets catalogue entry could not be cleared yet. Retry below; if it keeps failing, run <code>beet update</code>.</div>
+      </div>
+    </div>
+    {% endif %}
+    {% if job.execute_args_unreadable %}
+    <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
+      <div class="ql-notice-copy">
+        <strong>Retry unavailable</strong>
+        <div>The saved details needed to retry this job could not be read. Start the download again from Search or Library.</div>
+      </div>
+    </div>
+    {% endif %}
+    {% set quality_shortfall = quality_shortfall_view(job.quality_shortfall) %}
+    {% if quality_shortfall %}
+    <div class="ql-notice ql-notice-warning ql-job-banner" data-quality-shortfall role="status">
+      <div class="ql-notice-copy">
+        <strong>Below target quality</strong>
+        <div>Target: {{ quality_shortfall.target }}{% if quality_shortfall.source %}. Qobuz source: {{ quality_shortfall.source }}{% endif %}.</div>
+        <div>{% if quality_shortfall.served %}Lowest delivered: {{ quality_shortfall.served }}.{% else %}Delivered quality could not be measured.{% endif %}</div>
+        {% if quality_shortfall.affected %}<div>{{ quality_shortfall.affected }}.</div>{% endif %}
+        <div>{{ quality_shortfall.retry }}</div>
+      </div>
+    </div>
+    {% endif %}
     {% if job.error %}
     <div class="ql-notice ql-notice-error ql-job-error"><span>{{ job.error | strip_log_pointer(job.log_lines) }}</span></div>
     {% endif %}
@@ -221,7 +257,7 @@
     {% endif %}
     <div class="ql-job-actions">
       {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-      {% if s == 'failed' and job.album_id and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
+      {% if s == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% if recovery_retry %}
@@ -231,7 +267,13 @@
         <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm">Retry</button>
       </form>
       {% endif %}
-      {% if s in ('done', 'failed') and job.single and job.single.get('owned_path') and not job.single.get('removed') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
+      {% if s in ('done', 'failed') and catalog_cleanup and catalog_cleanup.get('pending') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
+      <form action="/jobs/{{ job.id }}/undo" method="post"
+            hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Retry catalogue cleanup</button>
+      </form>
+      {% elif s in ('done', 'failed') and job.single and job.single.get('owned_path') and not job.single.get('removed') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
       <form action="/jobs/{{ job.id }}/undo" method="post"
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML"
             data-confirm="Remove the downloaded track and undo the single?"

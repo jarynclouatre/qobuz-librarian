@@ -39,4 +39,6 @@ htmlcov/
 # Node + Tailwind build
 node_modules/
 .tailwindcache/
-src/qobuz_librarian/web/static/dist/
+!src/qobuz_librarian/web/static/dist/
+src/qobuz_librarian/web/static/dist/*
+!src/qobuz_librarian/web/static/dist/app.css

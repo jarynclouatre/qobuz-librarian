@@ -1,4 +1,4 @@
-"""Library-wide lyric backfill — fetch lyrics for tracks already on disk.
+"""Library-wide lyric backfill: fetch lyrics for tracks already on disk.
 
 The manual counterpart to the import-time hook in ``integrations/lyrics.py``:
 that hook lyrics each album as it's downloaded, this walks the whole library
@@ -6,7 +6,7 @@ and fills in whatever's missing. Both lean on the same provider engine
 (``integrations/lyric_fetch``) and the same per-track state file, so a backfill
 skips tracks the import hook already lyriced and vice-versa.
 
-Local apart from the provider HTTP — no Qobuz login needed. Honours the
+Local apart from the provider HTTP; no Qobuz login needed. Honours the
 ``LYRICS_FORMAT`` / ``LYRICS_PROVIDERS`` settings; ``LYRICS_ENABLED`` only
 gates the automatic import-time fetch, so an explicit backfill runs regardless.
 """
@@ -31,7 +31,7 @@ def iter_library_flacs(*, artist_dirs=None):
     neither has to re-stat the file.
 
     ``artist_dirs=None`` walks every artist under MUSIC_ROOT (the whole-library
-    backfill). Pass a list to scope to one artist — the per-artist Lyrics tool
+    backfill). Pass a list to scope to one artist; the per-artist Lyrics tool
     uses this to fill gaps for just one artist without re-walking everything.
     """
     artists = artist_dirs if artist_dirs is not None else list_library_artists()
@@ -64,7 +64,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     resolved, and provider-unavailable tracks are re-tried on the next run.
 
     ``artist_dirs`` (default None = whole library) scopes the walk to those
-    artists only — the per-artist Lyrics tool passes the one resolved dir.
+    artists only; the per-artist Lyrics tool passes the one resolved dir.
     """
     log = log or _default_log
     items = list(iter_library_flacs(artist_dirs=artist_dirs))
@@ -75,7 +75,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
 
     # Seed the state file with a fast, no-network classification of files that
     # already carry lyrics, so the fetch pass only queries providers for the
-    # tracks that actually need them — and its progress count reflects real
+    # tracks that actually need them, and its progress count reflects real
     # work instead of ticking through thousands of already-lyriced files.
     if not rescan and not dry_run:
         report_progress("Scanning library lyrics", 0, total, "")
@@ -94,6 +94,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
                 "total": total,
                 "processed": processed,
                 "stop_total": indexed.get("stop-total", total),
+                "stop_stage": "index",
                 "stopped": 1,
             }
 
@@ -117,4 +118,55 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
         if outcome not in {"stopped", "stop-total"})
     if counts.get("stopped"):
         result["stop_total"] = counts.get("stop-total", result["processed"])
+        result["stop_stage"] = "fetch"
     return result
+
+
+def summarize_lyrics_result(result):
+    """Group the fetch engine's outcomes for CLI and Web summaries."""
+    total = max(0, int(result.get("total", 0)))
+    processed = max(0, int(result.get("processed", 0)))
+    stopped = bool(result.get("stopped"))
+    candidate_total = (
+        max(processed, int(result.get("stop_total", processed)))
+        if stopped else processed
+    )
+
+    def count(*outcomes):
+        return sum(int(result.get(outcome, 0)) for outcome in outcomes)
+
+    summary = {
+        "total": total,
+        "processed": processed,
+        "stopped": stopped,
+        "candidate_total": candidate_total,
+        "already_checked": max(0, total - candidate_total),
+        "unfinished": max(0, candidate_total - processed),
+        "wrote": count(
+            "wrote-synced", "wrote-plain",
+            "dry:wrote-synced", "dry:wrote-plain",
+        ),
+        "already": count(
+            "already-synced", "already-plain", "kept-existing-plain",
+        ),
+        "not_found": count("not-found"),
+        "missing_tags": count("skipped-tags"),
+        "too_long": count("skipped-long"),
+        "policy_skipped": count("skipped"),
+        "unsafe": count("unsafe-path"),
+        "unavailable": count("providers-unavailable"),
+        "errors": count("write-error", "exception", "error"),
+    }
+    accounted = sum(
+        summary[key]
+        for key in (
+            "wrote", "already", "not_found", "missing_tags", "too_long",
+            "policy_skipped", "unsafe", "unavailable", "errors",
+        )
+    )
+    summary["other_errors"] = max(0, processed - accounted)
+    summary["failures"] = (
+        summary["unsafe"] + summary["unavailable"]
+        + summary["errors"] + summary["other_errors"]
+    )
+    return summary

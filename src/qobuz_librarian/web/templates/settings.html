@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_secret_toggle.html" import secret_toggle %}
-{% block title %}Settings — Qobuz Librarian{% endblock %}
+{% block title %}Settings - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
 
@@ -42,7 +42,7 @@
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
   </svg>
   <span>A saved file couldn't be read, so anything it held is showing its default
-    here rather than what you chose — check download quality and downsampling
+    here rather than what you chose. Check download quality and downsampling
     below before saving, or this page will write the defaults back. The
     unreadable copy is kept in your data folder as
     {% for name in corrupt_stores %}<code>{{ name }}</code>{{ ', ' if not loop.last }}{% endfor %};
@@ -55,7 +55,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>Quality setting changed — run a library refresh to update the Upgrade candidates. New downloads already use the new setting.</span>
+  <span>Quality setting changed. Run a Library refresh after it takes effect. Until then, the saved Upgrade review cannot be approved.</span>
 </div>
 {% endif %}
 
@@ -147,7 +147,7 @@
       </p>
     </details>
     {% endif %}
-    {# Once connected the whole form collapses — replacing the account or
+    {# Once connected the whole form collapses. Replacing the account or
        token is a rare event and two open inputs read as a chore to fill. #}
     {% if auth_token_set %}<details class="ql-settings-details">
       <summary class="ql-disclosure-summary">Change account or token</summary>
@@ -234,7 +234,7 @@
     {% if lock_unenforceable %}
     <div class="ql-mode-row">
       <div class="min-w-0">
-        <p class="ql-mode-state">Safety lock unavailable — downloads paused</p>
+        <p class="ql-mode-state">Safety lock unavailable. Downloads paused.</p>
         <p class="ql-mode-help">The data folder must support the safety lock so interrupted work can be recovered without two runs changing the library at once. Check its permissions and filesystem locking support, then restart Qobuz Librarian.</p>
       </div>
     </div>
@@ -315,7 +315,7 @@
               {% if kind == 'enum' %}
               <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select text-base sm:max-w-sm sm:text-xs">
                 {% if not behavior[key] %}
-                <option value="" selected>— not chosen yet —</option>
+                <option value="" selected>Not chosen yet</option>
                 {% endif %}
                 {% for c in choices %}
                 <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
@@ -370,7 +370,7 @@
     {% if library_size or music_storage %}
     <div class="ql-storage">
       {% if library_size %}
-      <p class="ql-storage-meta">Your library: {{ library_size }} — as of the last scan</p>
+      <p class="ql-storage-meta">Your library: {{ library_size }}, as of the last scan</p>
       {% endif %}
       {% if music_storage %}
       <p class="ql-storage-meta">{% if music_storage.own_volume %}Music drive{% else %}Drive holding your music{% endif %}: {{ music_storage.free }} free of {{ music_storage.total }}</p>
@@ -381,7 +381,7 @@
     {% endif %}
     <p class="ql-form-note">
       Bringing over an existing collection? <a href="/migrate" class="ql-inline-link">Library migration</a>
-      copies or moves it into the <code>Artist/Album (Year)</code> layout — a one-time, reviewed step.
+      copies or moves it into the <code>Artist/Album (Year)</code> layout as a one-time, reviewed step.
     </p>
   </div>
 </section>
@@ -393,7 +393,7 @@
         <h2>Library maintenance</h2>
         <p>
           A normal library scan already picks up changes and new releases. Use a
-          full rescan only after large manual changes to your files — it ignores
+          full rescan only after large manual changes to your files. It ignores
           the unchanged-folder cache and re-reads every artist, so it takes as
           long as a first scan.
         </p>

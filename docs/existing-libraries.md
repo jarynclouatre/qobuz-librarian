@@ -31,7 +31,7 @@ It places each file by its tags (album artist, album, title, track, disc). For f
 
 Migrate copies by default, so the source library stays where it is. Optional move mode relocates the originals after preview and removes source folders that become empty. The tool previews the full plan first: where each file goes, what it could not place, and how much space is needed at the destination. Nothing is copied or moved until you confirm. Files it cannot confidently place are left alone and listed.
 
-Two CSVs land at the destination: a `migration-manifest-*.csv` recording the full plan (including everything left behind and why) and a `migration-results-*.csv` recording what the run copied, moved, skipped, or failed on. Each file gets a unique timestamped name, so repeated runs never overwrite an earlier record; the preview and the finished run both report the exact filename they wrote.
+An approved migration writes two CSVs at the destination: a `migration-manifest-*.csv` recording the full plan (including everything left behind and why) and a `migration-results-*.csv` recording what the run copied, moved, skipped, or failed on. Each file gets a unique timestamped name, so repeated runs never overwrite an earlier record; the approved plan and the finished run both report the exact filename they wrote. A `--dry-run` prints the preview without writing either file or otherwise changing the destination.
 
 Mount the source library and destination folder into the container, then set `MIGRATE_SRC` and `MIGRATE_DEST` to those container paths. Keep the source mount read-only if you only plan to copy; move mode needs the source to be writable.
 

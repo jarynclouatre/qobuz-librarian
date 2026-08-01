@@ -63,6 +63,8 @@ def verify_and_recover(qobuz_album, staged_dirs, *, redownload_at_max,
         "n_unknown": sf["n_unknown"],
         "served": sf["worst"],
         "target": sf["target"],
+        "source": album_max_quality(qobuz_album, tier=4),
+        "effective_tier": effective_tier,
         "staged_dirs": staged_dirs,
     }
 
@@ -92,7 +94,7 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
                                     collect_staged_dirs, collect_retry_files,
                                     retry_preserves_original):
     """Retry without losing the first usable staged rip if retry lands nothing
-    — or lands less of the album than the first rip did.
+    or lands less of the album than the first rip did.
 
     Returns ``(staged_dirs, retry_kept)``.
     """

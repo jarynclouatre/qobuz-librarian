@@ -23,7 +23,8 @@ A short issue describing the workflow you want is preferred. The project is focu
 2. Install dev deps: `pip install -e ".[test]"`.
 3. Add or update tests. They run with `python -m pytest -q` and do not touch the network, beets, or streamrip; external services are mocked.
 4. Run `ruff check src tests --fix` before pushing. The `[test]` extras bundle it.
-5. CI (`.github/workflows/test.yml`) runs the same checks on push/PR.
+5. If templates or styles changed, run `npm ci && npm run build` and commit the rebuilt `src/qobuz_librarian/web/static/dist/app.css`.
+6. CI (`.github/workflows/test.yml`) runs the same checks on push/PR.
 
 ## Dev notes
 
@@ -55,4 +56,4 @@ If your change touches how albums are matched, how upgrades are gated, or how fi
 
 ## Releases
 
-Publishing a GitHub release triggers the Docker workflow. Versioning is plain SemVer.
+Publishing a GitHub release triggers the Docker workflow. Versioning is plain SemVer. Before publishing, refresh the README screenshots with synthetic content when the visible version or navigation has changed.

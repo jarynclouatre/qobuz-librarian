@@ -2,11 +2,12 @@
 {% set group_selected = items | selectattr('selected') | list | length %}
 
 {# The dismiss button must stay tappable while the group is COLLAPSED, and a
-   <details> hides every non-summary child when closed — so the button lives
+   <details> hides every non-summary child when closed, so the button lives
    beside the details in a positioning shell, not inside it. #}
 <div class="ql-review-group-shell">
 <details class="ql-review-group{% if triage %} ql-review-group--triage{% endif %}" data-artist="{{ artist }}"
-         data-group-total="{{ items | length }}" data-group-selected="{{ group_selected }}"{% if open %} open{% endif %}>
+         data-group-total="{{ items | length }}" data-group-selected="{{ group_selected }}"
+         data-cids="{{ items | map(attribute='cid') | join(',') }}"{% if open %} open{% endif %}>
   <summary class="ql-review-summary">
     <span class="ql-review-chevron" aria-hidden="true"></span>
     {% if triage %}

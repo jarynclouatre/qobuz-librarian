@@ -1,4 +1,4 @@
-"""CLI new-release check — surface what's been added to Qobuz since the last
+"""CLI new-release check for additions to Qobuz since the last
 check across all library artists.
 
 Uses the same engine as the web dashboard's auto-check (the cheap one-call-per-
@@ -37,8 +37,8 @@ def run_check_new_releases_mode(args):
 
     Mirrors the engine the web auto-check uses, so a run advances the same
     'seen' baseline and the dashboard's age line picks it up. First run on a
-    library records the baseline and surfaces nothing — same first-touch
-    contract as the web.
+    library records the baseline and surfaces nothing, matching the web's
+    first-touch contract.
     """
     try:
         _user_id, token = load_qobuz_token()
@@ -64,7 +64,7 @@ def run_check_new_releases_mode(args):
     state = new_releases_mod.load()
     seen = state.get("seen") or {}
     hidden = hidden_mod.load()
-    # Single-track marks only suppress artists when the setting is on — the
+    # Single-track marks only suppress artists when the setting is on. The
     # same gate the web check applies, so the two report the same artists.
     single_store = hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None
     # A grown catalog cap means the old baseline is missing everything past
@@ -75,10 +75,10 @@ def run_check_new_releases_mode(args):
     rebaseline = prev_limit is None or cur_limit > int(prev_limit)
     opts = DiscoveryOpts(prefer_hires=cfg.PREFER_HIRES)
 
-    section(f"New-release check — {plural(len(artists), 'artist')}")
+    section(f"New-release check: {plural(len(artists), 'artist')}")
     if not seen:
         log.info(fmt(C.GRAY,
-            "  First check on this library — the current catalogue is the "
+            "  First check on this library: the current catalogue is the "
             "starting baseline, so nothing surfaces until a later check."))
 
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
@@ -87,7 +87,7 @@ def run_check_new_releases_mode(args):
     artists_with_news = 0
     failed_count = 0
 
-    # Managed explicitly rather than via `with ...
+    # A context manager would wait for running calls after cancellation.
     ex = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel")
     try:
         futures = {ex.submit(find_new_releases_for_artist, ad.name,
@@ -112,7 +112,7 @@ def run_check_new_releases_mode(args):
             if result.new_gaps:
                 artists_with_news += 1
                 log.info(fmt(C.GREEN,
-                    f"  {result.artist_name} — "
+                    f"  {result.artist_name}: "
                     f"{plural(len(result.new_gaps), 'new release')}"))
                 for gap in result.new_gaps:
                     a = gap.qobuz_album
@@ -122,7 +122,7 @@ def run_check_new_releases_mode(args):
                     log.info(fmt(C.WHITE, f"    • {title} ({year})"))
                 total_new += len(result.new_gaps)
     except KeyboardInterrupt:
-        log.info(fmt(C.YELLOW, "\n  ⚠  Cancelled — not recording this run."))
+        log.info(fmt(C.YELLOW, "\n  ⚠  Cancelled; not recording this run."))
         raise
     finally:
         # wait=False: never block on in-flight calls.
@@ -131,7 +131,7 @@ def run_check_new_releases_mode(args):
     saved = None
     if not args.dry_run:
         # UNION each reached artist's snapshot into the prior baseline rather
-        # than replacing it — an over-cap catalog comes back as a different
+        # than replacing it. An over-cap catalogue comes back as a different
         # slice each run, so a replace would let rotated-out ids re-surface as
         # "new" (the same merge the web flow does).
         merged = dict(seen)
@@ -150,7 +150,7 @@ def run_check_new_releases_mode(args):
         if args.dry_run:
             text = "  · Catalogue rebaseline previewed; no changes saved."
             if failed_count:
-                text = ("  · Catalogue rebaseline preview incomplete — "
+                text = ("  · Catalogue rebaseline preview incomplete; "
                         f"{plural(failed_count, 'artist')} couldn't be checked; "
                         "no changes saved.")
             log.info(fmt(C.YELLOW if failed_count else C.GRAY, text))
@@ -162,12 +162,12 @@ def run_check_new_releases_mode(args):
             log.info(fmt(C.YELLOW, text + " Run the check again."))
         elif failed_count:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Catalogue rebaseline incomplete — "
+                f"  ⚠  Catalogue rebaseline incomplete; "
                 f"{plural(failed_count, 'artist')} couldn't be checked; "
                 "run the check again."))
         else:
             log.info(fmt(C.GRAY,
-                "  · Catalogue limit changed — recorded a fresh baseline; "
+                "  · Catalogue limit changed; recorded a fresh baseline; "
                 "future checks diff against it."))
     elif total_new:
         log.info(fmt(C.BOLD + C.WHITE,
@@ -180,7 +180,7 @@ def run_check_new_releases_mode(args):
                 f"  ⚠  {plural(failed_count, 'artist')} couldn't be checked; "
                 "run the check again for a complete result."))
         if args.dry_run:
-            log.info(fmt(C.GRAY, "  Dry run — no changes saved."))
+            log.info(fmt(C.GRAY, "  Dry run; no changes saved."))
         elif saved is False:
             log.info(fmt(C.YELLOW,
                 "  ⚠  The updated baseline couldn't be saved; these releases "
@@ -190,7 +190,7 @@ def run_check_new_releases_mode(args):
             "  · No new releases from the artists that could be checked. "
             f"{plural(failed_count, 'artist')} couldn't be checked; run again."))
         if args.dry_run:
-            log.info(fmt(C.GRAY, "  Dry run — no changes saved."))
+            log.info(fmt(C.GRAY, "  Dry run; no changes saved."))
         elif saved is False:
             log.info(fmt(C.YELLOW,
                 "  ⚠  The partial baseline update couldn't be saved."))

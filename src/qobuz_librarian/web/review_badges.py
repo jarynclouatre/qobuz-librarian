@@ -108,7 +108,10 @@ def mark_ready(surface: str, *, now=None) -> None:
         state = load()
         entry = state["surfaces"][surface]
         seen_at = float(entry.get("seen_at") or 0.0)
-        entry["ready_at"] = max(_ts(now), seen_at + 0.000001)
+        ready_at = float(entry.get("ready_at") or 0.0)
+        entry["ready_at"] = max(
+            _ts(now), seen_at + 0.000001, ready_at + 0.000001
+        )
         _save(state)
 
 
@@ -123,6 +126,22 @@ def clear_ready(surface: str) -> None:
         _save(state)
 
 
+def clear_ready_if_generation(surface: str, generation: float) -> bool:
+    """Clear only the badge generation the caller actually observed."""
+    if surface not in SURFACES or generation <= 0:
+        return False
+    with _mutation_lock() as locked:
+        if not locked:
+            return False
+        state = load()
+        entry = state["surfaces"][surface]
+        if float(entry.get("ready_at") or 0.0) != generation:
+            return False
+        entry["ready_at"] = 0.0
+        _save(state)
+        return True
+
+
 def set_ready(surface: str, ready: bool, *, now=None) -> None:
     if ready:
         mark_ready(surface, now=now)
@@ -130,15 +149,29 @@ def set_ready(surface: str, ready: bool, *, now=None) -> None:
         clear_ready(surface)
 
 
-def mark_seen(surface: str, *, now=None) -> None:
+def ready_generation(surface: str) -> float:
     if surface not in SURFACES:
+        return 0.0
+    entry = load()["surfaces"][surface]
+    ready_at = float(entry.get("ready_at") or 0.0)
+    seen_at = float(entry.get("seen_at") or 0.0)
+    return ready_at if ready_at > seen_at else 0.0
+
+
+def mark_seen(surface: str, generation: float) -> None:
+    if surface not in SURFACES or generation <= 0:
         return
     with _mutation_lock() as locked:
         if not locked:
             return
         state = load()
         entry = state["surfaces"][surface]
-        entry["seen_at"] = max(_ts(now), float(entry.get("ready_at") or 0.0))
+        ready_at = float(entry.get("ready_at") or 0.0)
+        if ready_at != generation:
+            return
+        entry["seen_at"] = max(
+            generation, float(entry.get("seen_at") or 0.0)
+        )
         _save(state)
 
 

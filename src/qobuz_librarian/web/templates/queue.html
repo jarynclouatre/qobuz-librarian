@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Queue — Qobuz Librarian{% endblock %}
+{% block title %}Queue - Qobuz Librarian{% endblock %}
 {% block content %}
 {% import "_job_labels.html" as labels %}
 <div id="queue-body" class="ql-list-page ql-activity-page">
@@ -19,11 +19,11 @@
 
   <div class="ql-activity-main">
     <p class="ql-row-title">
-      <a href="{{ '/repair' if job.execute_kind == 'repair' else ('/library' if job.execute_kind == 'library' else '/jobs/' ~ job.id) }}" class="ql-row-link">
+      <a href="/jobs/{{ job.id }}" class="ql-row-link">
         {% if job.status.value == 'awaiting_review' %}
           {{ labels.review_title(job) }}{% if job.artist %} · {{ job.artist }}{% endif %}
         {% else %}
-          {% if job.artist %}{{ job.artist }} — {% endif %}{{ job.title }}
+          {% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}
         {% endif %}
       </a>
     </p>
@@ -73,9 +73,10 @@
   {% set _thing = labels.discard_review_label(job) %}
   {% set _discard_confirm = labels.discard_confirm(job) | trim %}
   <div class="ql-activity-actions">
-    <a href="{{ '/repair' if job.execute_kind == 'repair' else ('/library' if job.execute_kind == 'library' else '/jobs/' ~ job.id) }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Review</a>
+    <a href="/jobs/{{ job.id }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Review</a>
     <form action="/jobs/{{ job.id }}/cancel" method="post">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="return_to" value="/queue">
       <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
               title="Discard {{ _thing }}" aria-label="Discard {{ _thing }}"
               data-confirm="{{ _discard_confirm }}"
@@ -83,8 +84,15 @@
     </form>
   </div>
   {% elif job.status.value in ('pending', 'running', 'scanning') %}
+  {% if job.id == cancel_protected_job_id %}
+  <div class="ql-activity-actions">
+    <span class="ql-status-chip is-warning"
+          title="This interrupted-download recovery stays active until its saved step settles.">Recovery protected</span>
+  </div>
+  {% else %}
   <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-activity-actions">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <input type="hidden" name="return_to" value="/queue">
     {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
     <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-ghost-danger{% endif %}"
             title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
@@ -92,6 +100,7 @@
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
             data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-confirm-danger{% endif %}>{{ _act }}</button>
   </form>
+  {% endif %}
   {% endif %}
 </article>
 {%- endmacro %}
@@ -135,14 +144,17 @@
 </div>
 {% if (active_jobs | length) + (waiting_jobs | length) > 1 %}
 <div class="ql-activity-maintenance">
-  <p class="ql-row-meta">Removes waiting jobs. Running jobs stop after the current safe step.</p>
+  <p class="ql-row-meta">Removes waiting jobs. Other running jobs stop after the current safe step.{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %}</p>
   <form action="/queue/cancel-pending" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-danger w-full sm:w-auto"
-            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step. Completed work and parked reviews are untouched."
+            data-confirm="Clear the queue? Waiting jobs are removed and other running jobs stop after their current step.{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %} Completed work and parked reviews are untouched."
             data-confirm-action="Clear queue" data-confirm-danger>Clear the queue</button>
   </form>
 </div>
+{% endif %}
+{% if notice %}
+<div class="ql-notice ql-notice-warning" data-flash><span>{{ notice }}</span></div>
 {% endif %}
 {% else %}
 <div class="ql-empty-state ql-empty-state--activity">

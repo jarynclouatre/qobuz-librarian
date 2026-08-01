@@ -1,5 +1,4 @@
-"""Tests for integrations/rip.py, integrations/beets.py, integrations/lyrics.py
-— the streamrip/beets seams where most real bugs live."""
+"""Tests for rip, beets, lyrics, and the seams between them."""
 
 import os
 import shutil
@@ -47,7 +46,7 @@ def test_is_flac_rejects_truncated_keeps_complete(tmp_path, _need_ffmpeg, _need_
             check=True,
         )
 
-    # A short but complete track is real audio — keep it even though it sits
+    # A short but complete track is real audio. Keep it even though it sits
     # well under the size heuristic the no-flac fallback uses.
     short = tmp_path / "interlude.flac"
     _sine(short, 1.2)
@@ -170,7 +169,7 @@ def test_write_lyrics_saves_atomically_and_clears_legacy_tag(tmp_path):
 
     assert f.tags["lyrics"] == ["[00:01.00]hello"]
     assert "unsyncedlyrics" not in f.tags
-    # The live file must never be written in place — mutagen saves into a temp
+    # The live file must never be written in place. Mutagen saves into a temp
     # copy that is then atomically swapped in, so a crash can't truncate it.
     assert f.save_targets and all(t != f.filename for t in f.save_targets)
     assert real.read_bytes() == b"new-audio+tags"
@@ -327,7 +326,7 @@ def test_beets_direct_detects_silent_skip_by_unmoved_audio(monkeypatch, tmp_path
     ]
     assert captured_env.get("BEETSDIR") == str(cfg.BEETS_CONFIG_DIR)
 
-    # beets exits 0 but moves nothing out of staging — the real silent skip.
+    # beets exits 0 but moves nothing out of staging: the real silent skip.
     track.write_bytes(b"flac-bytes")
     monkeypatch.setattr(subprocess, "Popen", _popen_returning(_Proc()))
     ok, kind = beets._beets_direct(
@@ -400,7 +399,7 @@ def test_beets_pruning_stays_bound_to_the_captured_staging_roots(monkeypatch, tm
 
 def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeypatch, _need_ffmpeg):
     # A cancelled/crashed rip leaves untagged FLACs beets would file under
-    # '/_/'. They're moved out of the import set — but set aside, never deleted.
+    # '/_/'. They're moved out of the import set, but set aside and never deleted.
     from mutagen.flac import FLAC
 
     from qobuz_librarian import config as cfg
@@ -550,14 +549,15 @@ def test_import_override_pins_duplicate_action_merge(monkeypatch):
     monkeypatch.setattr(cfg, "BEETS_PATH_DEFAULT", "")
     monkeypatch.setattr(cfg, "BEETS_PATH_SINGLETON", "")
     monkeypatch.setattr(cfg, "BEETS_PATH_COMP", "")
-    monkeypatch.setattr(cfg, "BEETS_PLUGINS", [])
+    monkeypatch.setattr(cfg, "BEETS_PLUGINS", ["lastgenre"])
     monkeypatch.setattr(cfg, "ARTWORK", "sidecar")
     conf = yaml.safe_load(beets._build_import_override_yaml())
     assert conf["import"]["duplicate_action"] == "merge"
+    assert conf["plugins"].count("inline") == 1
     assert conf["plugins"][-1] == "qobuz_art_guard"
     assert conf["pluginpath"][0] == str(Path(beets.__file__).parent / "beets_plugins")
     # Streamrip already wrote authoritative Qobuz tags, so autotag must be pinned
-    # off — otherwise a user's autotag:yes pushes downloads through MusicBrainz
+    # off. Otherwise a user's autotag:yes pushes downloads through MusicBrainz
     # matching and strands unmatched albums in staging under quiet mode.
     assert conf["import"]["autotag"] is False
 
@@ -1006,7 +1006,7 @@ def test_multidisc_artwork_moves_where_beets_can_see_it(tmp_path):
 
     assert relocate_disc_album_artwork(album) is True
     # Beets gives the import task the disc directories, and fetchart searches
-    # only those — a cover left in the album root is never filed, and the
+    # only those. A cover left in the album root is never filed, and the
     # leftover reads to the durable completion proof as an unfinished download.
     assert not (album / "cover.jpg").exists()
     assert (album / "Disc 1" / "cover.jpg").read_bytes() == b"art"

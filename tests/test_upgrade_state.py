@@ -125,6 +125,7 @@ def test_refresh_for_artists_reuses_unchanged_upgrade_artist(
     from qobuz_librarian.quality import upgrade_state
 
     monkeypatch.setattr(cfg, "UPGRADE_STATE_FILE", tmp_path / "upgrade.json")
+    monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
     artist_dir = tmp_path / "Artist"
     artist_dir.mkdir()
     monkeypatch.setattr(upgrade_state, "artist_fingerprint",
@@ -156,6 +157,20 @@ def test_refresh_for_artists_reuses_unchanged_upgrade_artist(
 
     assert calls == ["scan"]
     assert [c["title"] for c in second.candidates] == ["Album"]
+
+    monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 2)
+    third = upgrade_state.refresh_for_artists(
+        [artist_dir],
+        token="tok",
+        args=SimpleNamespace(),
+        capped={},
+        hidden=None,
+        scan_artist=lambda _ad: calls.append("rescan") or [],
+        skip_unchanged=True,
+    )
+
+    assert calls == ["scan", "rescan"]
+    assert third.candidates == []
 
 
 def test_full_save_preserves_newer_targeted_upgrade_refresh_with_same_fingerprint(

@@ -19,36 +19,66 @@ def _candidate(album_dir: Path):
     )
 
 
-def test_downsample_scan_uses_shared_refresh_state(tmp_path, monkeypatch):
+def test_downsample_scan_reports_incomplete_shared_refresh(tmp_path, monkeypatch):
     from qobuz_librarian.library import downsample_state
     from qobuz_librarian.web import flows
 
     artist_dir = tmp_path / "Artist"
+    denied_dir = tmp_path / "Denied"
     album_dir = artist_dir / "Album (2024)"
     album_dir.mkdir(parents=True)
+    denied_dir.mkdir()
     calls = []
 
     def fake_refresh(artists, **kwargs):
         artist_list = list(artists)
         calls.append([a.name for a in artist_list])
-        kwargs["on_artist"](artist_list[0], [_candidate(album_dir)], None, 1, 1)
+        kwargs["on_artist"](artist_list[0], [_candidate(album_dir)], None, 1, 2)
+        kwargs["on_artist"](
+            artist_list[1], [], PermissionError("no access"), 2, 2)
         return downsample_state.RefreshResult(
             candidates=[_candidate(album_dir)],
-            artists_scanned=["Artist"],
-            errors={},
-            complete=True,
+            artists_scanned=["Artist", "Denied"],
+            errors={"Denied": "no access"},
+            complete=False,
         )
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(
+        flows, "list_library_artists", lambda: [artist_dir, denied_dir])
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_refresh)
     job = jm.Job(title="downsample")
 
     flows.scan_downsamples(job)
 
-    assert calls == [["Artist"]]
+    assert calls == [["Artist", "Denied"]]
     assert len(job.candidates) == 1
     assert job.candidates[0]["kind"] == "downsample"
     assert job.summary.startswith("1 album stored above CD rate")
+    assert "1 artist couldn't be checked" in job.summary
+    assert job.execute_args["_unchecked_artists"] == 1
+
+    def all_error_refresh(artists, **kwargs):
+        artist_list = list(artists)
+        for index, artist in enumerate(artist_list, 1):
+            kwargs["on_artist"](
+                artist, [], PermissionError("no access"), index, 2)
+        return downsample_state.RefreshResult(
+            candidates=[],
+            artists_scanned=["Artist", "Denied"],
+            errors={"Artist": "no access", "Denied": "no access"},
+            complete=False,
+        )
+
+    monkeypatch.setattr(
+        flows.downsample_state, "refresh_for_artists", all_error_refresh)
+    failed = jm.Job(title="downsample")
+
+    flows.scan_downsamples(failed)
+
+    assert failed.status == jm.JobStatus.FAILED
+    assert failed.error == "The Downsample scan did not complete."
+    assert "2 artists couldn't be checked" in failed.summary
+    assert "every album is already at CD rate" not in failed.summary
 
 
 def test_downsample_scan_rechecks_hidden_before_adding_active_candidates(
@@ -213,6 +243,47 @@ def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypat
     assert refreshed == ["Artist"]
 
 
+def test_cancelled_downsample_summary_counts_the_interrupted_album(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.web import flows
+
+    albums = [tmp_path / "Artist" / name for name in ("One", "Two")]
+    for album in albums:
+        album.mkdir(parents=True)
+    job = jm.Job(title="downsample")
+    calls = 0
+
+    def fake_downsample(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"resampled": 1, "saved_bytes": 100, "errors": 0}
+        job.cancel_requested = True
+        return {"resampled": 0, "saved_bytes": 0, "errors": 0,
+                "cancelled": True}
+
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.downsample_engine.downsample_dir",
+        fake_downsample)
+    monkeypatch.setattr(
+        "qobuz_librarian.quality.decision.mark_local_album_capped",
+        lambda *_args: None)
+    monkeypatch.setattr(flows, "_refresh_downsample_artist_state",
+                        lambda *_args: None)
+
+    flows.execute_downsamples(job, [
+        {"artist": "Artist", "title": album.name,
+         "payload": {"album_dir": str(album)}}
+        for album in albums
+    ])
+
+    assert "Downsampled 1 album (100B smaller)" in job.summary
+    assert "1 album interrupted (remaining files left unchanged)" in job.summary
+    assert "0 albums not started" in job.summary
+
+
 def test_targeted_upgrade_refresh_respects_upgrade_scan_disabled(
         tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
@@ -262,7 +333,24 @@ def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
                         or SimpleNamespace(complete=True, candidates=[]))
     monkeypatch.setattr(flows.review_badges, "set_ready", lambda *a, **k: None)
     monkeypatch.setattr(flows.time, "sleep", lambda *_: None)
+    stale_job = jm.Job(title="upgrade")
+    stale_job.execute_args = {"quality_signature": "old-policy"}
+
+    flows.execute_upgrades(stale_job, [{
+        "artist": "Artist",
+        "title": "Album",
+        "payload": {"album_id": "alb-1"},
+    }], "tok")
+
+    assert stale_job.status == jm.JobStatus.FAILED
+    assert "before any albums were changed" in stale_job.summary
+    assert refreshed_upgrade == []
+    assert refreshed_downsample == []
+
     job = jm.Job(title="upgrade")
+    job.execute_args = {
+        "quality_signature": flows.upgrade_state.quality_signature(),
+    }
 
     flows.execute_upgrades(job, [{
         "artist": "Artist",
@@ -325,6 +413,9 @@ def test_execute_upgrades_marks_partial_cap_before_refresh(
     monkeypatch.setattr(flows.review_badges, "set_ready", lambda *a, **k: None)
     monkeypatch.setattr(flows.time, "sleep", lambda *_: None)
     job = jm.Job(title="upgrade")
+    job.execute_args = {
+        "quality_signature": flows.upgrade_state.quality_signature(),
+    }
 
     flows.execute_upgrades(job, [{
         "artist": "Artist",
@@ -381,6 +472,9 @@ def test_execute_upgrades_does_not_mark_cap_when_staging_verdict_passed(
     monkeypatch.setattr(flows.review_badges, "set_ready", lambda *a, **k: None)
     monkeypatch.setattr(flows.time, "sleep", lambda *_: None)
     job = jm.Job(title="upgrade")
+    job.execute_args = {
+        "quality_signature": flows.upgrade_state.quality_signature(),
+    }
 
     flows.execute_upgrades(job, [{
         "artist": "Artist",
@@ -1061,14 +1155,14 @@ def test_incomplete_baseline_scan_summary_reports_unchecked_artists(
     job = jm.Job(title="baseline")
     flows.scan_library(job, "tok")
 
-    # One artist errored, so the checkpoint stays and the crawl was partial —
+    # One artist errored, so the checkpoint stays and the crawl was partial.
     # the summary must say so instead of a clean-sounding definitive total.
     assert "1 artist" in job.summary
     assert "resume" in job.summary.lower()
 
 
 def test_scan_signature_covers_candidate_shaping_settings(monkeypatch):
-    """The cheap refresh reuses saved candidates while the signature matches —
+    """The cheap refresh reuses saved candidates while the signature matches;
     so every setting that changes WHICH candidates a scan yields has to be in
     it, or Settings changes leave stale gap/missing lists."""
     from qobuz_librarian import config as cfg
