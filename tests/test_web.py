@@ -4431,3 +4431,49 @@ def test_connection_badge_reports_only_what_qobuz_has_confirmed(client, monkeypa
     body = client.get("/settings").text
     assert "Token not authenticating" in body
     assert "Connected" not in body
+
+
+def test_blank_login_does_not_spend_a_strike(client, monkeypatch):
+    # Five blank taps used to lock the owner out of his own app for an hour.
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setenv("WEB_AUTH", "on")
+    # The auth middleware reads the credential file itself, so a configured box
+    # has to be faked there as well as at the route.
+    monkeypatch.setattr(web_auth, "_read", lambda: {
+        "username": "dink", "password_hash": "x", "session_secret": "s"})
+    monkeypatch.setattr(web_auth, "credentials_configured", lambda: True)
+    calls = []
+    monkeypatch.setattr(web_auth, "record_login_failure",
+                        lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(web_auth, "verify_login",
+                        lambda *a, **k: calls.append("verified") or False)
+
+    r = client.post("/login", data={"username": "", "password": ""},
+                    follow_redirects=False)
+
+    assert r.status_code == 400
+    assert "Enter your username and password." in r.text
+    assert calls == [], "a blank submit must not reach the throttle or the KDF"
+
+
+def test_lockout_says_how_long_is_left_and_keeps_the_username(client, monkeypatch):
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setenv("WEB_AUTH", "on")
+    # The auth middleware reads the credential file itself, so a configured box
+    # has to be faked there as well as at the route.
+    monkeypatch.setattr(web_auth, "_read", lambda: {
+        "username": "dink", "password_hash": "x", "session_secret": "s"})
+    monkeypatch.setattr(web_auth, "credentials_configured", lambda: True)
+    monkeypatch.setattr(web_auth, "check_login_rate_limit", lambda *a, **k: False)
+    monkeypatch.setattr(web_auth, "login_lockout_remaining", lambda *a, **k: 903)
+
+    r = client.post("/login", data={"username": "dink", "password": "x"},
+                    follow_redirects=False)
+
+    assert r.status_code == 429
+    assert "Try again in 16 minutes" in r.text
+    assert "restart Qobuz Librarian to clear it" in r.text
+    assert "Wait an hour" not in r.text
+    assert 'value="dink"' in r.text

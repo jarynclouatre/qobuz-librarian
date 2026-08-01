@@ -430,6 +430,29 @@ def check_login_rate_limit(ip: str, username: str = "") -> bool:
         return True
 
 
+def login_lockout_remaining(ip: str, username: str = "") -> int:
+    """Seconds until this IP or account may try again; 0 when not locked.
+
+    The throttle is deliberately checked before the password is verified, so a
+    correct password cannot clear it — that is what stops an attacker learning
+    they have found it. The user therefore has to be told how long it is, and
+    the message that says "wait an hour" is wrong for all but the first second.
+    """
+    now = time.monotonic()
+    uname = _norm_user(username)
+    with _login_lock:
+        waits = []
+        times = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
+        if len(times) >= _LOGIN_MAX:
+            waits.append(_LOGIN_WINDOW - (now - min(times)))
+        if uname:
+            utimes = [t for t in _user_failures.get(uname, [])
+                      if now - t < _LOGIN_WINDOW]
+            if len(utimes) >= _USER_LOGIN_MAX:
+                waits.append(_LOGIN_WINDOW - (now - min(utimes)))
+    return int(max(0, max(waits))) if waits else 0
+
+
 def record_login_failure(ip: str, username: str = "") -> None:
     now = time.monotonic()
     uname = _norm_user(username)

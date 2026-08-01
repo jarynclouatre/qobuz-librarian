@@ -1776,11 +1776,29 @@ async def login_submit(request: Request, username: str = Form(""),
     cookie = request.cookies.get(web_auth.SESSION_COOKIE)
     has_session = bool(cookie) and web_auth.verify_session(cookie)
     if not has_session and not web_auth.check_login_rate_limit(ip, username):
+        # The throttle is checked before the password is verified on purpose, so
+        # a correct password can't clear it. Say how long is actually left, and
+        # name the way out — the counters live in memory, so a restart clears
+        # them and the owner of the box can always do that.
+        left = web_auth.login_lockout_remaining(ip, username)
+        mins = max(1, (left + 59) // 60)
         return templates.TemplateResponse(
             request=request, name="login.html",
-            context={"error": "Too many failed attempts. Wait an hour and try again.",
+            context={"error": f"Too many failed attempts. Try again in "
+                              f"{mins} minute{'s' if mins != 1 else ''}, or "
+                              f"restart Qobuz Librarian to clear it.",
+                     "username": username.strip(),
                      "next_path": next_path},
             status_code=429)
+    # A submission that could never succeed shouldn't cost a strike: an empty
+    # field is a slip, not an attempt, and five of them locked the owner out.
+    if not username.strip() or not password:
+        return templates.TemplateResponse(
+            request=request, name="login.html",
+            context={"error": "Enter your username and password.",
+                     "username": username.strip(),
+                     "next_path": next_path},
+            status_code=400)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
@@ -1792,6 +1810,8 @@ async def login_submit(request: Request, username: str = Form(""),
         return templates.TemplateResponse(
             request=request, name="login.html",
             context={"error": "Incorrect username or password.",
+                     # Keep what they typed — the setup screen already does.
+                     "username": username.strip(),
                      "next_path": next_path},
             status_code=401)
     web_auth.clear_login_failures(ip, username)
