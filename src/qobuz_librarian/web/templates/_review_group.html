@@ -31,11 +31,25 @@
   {% endif %}
 </details>
 {% if triage %}
+{# The noun follows the tab the button is sitting on, because the action does:
+   dismissing on Missing Albums never touches Gap Fill and vice versa. #}
+{% set _who = artist or 'this artist' %}
+{% set _rest = (items | length) - group_selected %}
+{% set _noun = 'Gap Fill candidate' if review_tab|default('') == 'gaps'
+               else 'upgrade' if job.execute_kind == 'upgrade'
+               else 'missing album' if review_tab|default('') == 'missing'
+               else 'album' %}
+{% set _nouns = _noun ~ 's' %}
 <button type="button" data-hide data-artist="{{ artist }}"
         title="{{ 'Keep unselected hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }}"
-        aria-label="{% if job.execute_kind == 'downsample' %}Keep unselected albums by {{ artist or 'this artist' }} hi-res{% elif job.execute_kind == 'upgrade' %}Dismiss unselected upgrades by {{ artist or 'this artist' }}{% elif job.execute_kind == 'library' %}Dismiss unselected albums and Gap Fill candidates by {{ artist or 'this artist' }}{% else %}Dismiss unselected albums by {{ artist or 'this artist' }}{% endif %}"
+        aria-label="{% if job.execute_kind == 'downsample' %}Keep unselected albums by {{ _who }} hi-res{% else %}Dismiss unselected {{ _nouns }} by {{ _who }}{% endif %}"
+        {% if _rest > 0 %}
+        data-confirm="{% if job.execute_kind == 'downsample' %}Keep the {{ _rest }} unselected {{ 'album' if _rest == 1 else 'albums' }} by {{ _who }} hi-res? You can downsample them later.{% else %}Dismiss the {{ _rest }} unselected {{ _noun if _rest == 1 else _nouns }} by {{ _who }}? You can bring them back from Dismissed.{% endif %}"
+        data-confirm-action="{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss' }}"
+        data-confirm-danger
+        {% endif %}
         hx-post="/jobs/{{ job.id }}/hide"
-        hx-vals='{{ {"artist": artist, "tab": review_tab|default("")}|tojson }}'
+        hx-vals='{{ {"artist": artist, "tab": review_tab|default(""), "q": review_query|default("")}|tojson }}'
         hx-target="closest .ql-review-group-shell"
         hx-swap="outerHTML swap:280ms"
         hx-disabled-elt="this"

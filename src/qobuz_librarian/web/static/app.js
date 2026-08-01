@@ -914,7 +914,9 @@
       if (isDownsampleReview) {
         return "Keep " + countLabel(rest, "unselected album", "unselected albums") + " hi-res? You can downsample later.";
       }
-      return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular, "unselected " + dismissItemPlural) + "? You can show them again later.";
+      var other = cont.dataset.reviewOtherTab;
+      return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular, "unselected " + dismissItemPlural) + "?"
+        + (other ? " " + other : "") + " You can bring them back from Dismissed.";
     }
     function dismissBusyLabel() { return isDownsampleReview ? "Keeping…" : "Dismissing…"; }
     function dismissToast(count) {
@@ -984,14 +986,16 @@
       }
       cont.dataset.reviewTotal = c.total;
       cont.dataset.reviewSelected = c.selected;
-      var master = cont.querySelector("[data-select-master]");
-      if (master) {
-        master.checked = tc.total > 0 && tc.selected >= tc.total;
-        master.indeterminate = tc.selected > 0 && tc.selected < tc.total;
-      }
+      syncMaster();
       // A library review's tabs carry per-tab totals; keep the tab count
       // chips honest as hides and dismissals shrink the sets.
       if (c.missing_total !== undefined) {
+        // Keep the seed attributes current too, or a later re-init reads the
+        // counts the page was first rendered with.
+        cont.dataset.reviewMissingTotal = c.missing_total;
+        cont.dataset.reviewMissingSelected = c.missing_selected;
+        cont.dataset.reviewGapTotal = c.gap_total;
+        cont.dataset.reviewGapSelected = c.gap_selected;
         var mc = cont.querySelector('[data-tab-count="missing"]');
         var gc = cont.querySelector('[data-tab-count="gaps"]');
         if (mc) mc.textContent = c.missing_total;
@@ -1009,12 +1013,32 @@
       updateDismissRest();
     }
 
+    // What the button will actually take. Under a filter the action is scoped
+    // to the rows on screen, so the tab-wide total would name a number it is
+    // not going to honour.
+    function restCount() {
+      if (curQuery()) {
+        var box = pageBox();
+        var n = box ? parseInt(box.dataset.filteredRest || "0", 10) : 0;
+        return isNaN(n) ? 0 : n;
+      }
+      var tc = tabCounts(lastCounts);
+      return tc.total - tc.selected;
+    }
+
     function updateDismissRest() {
       if (!dismissRest) return;
-      var tc = tabCounts(lastCounts);
-      var rest = tc.total - tc.selected;
+      var rest = restCount();
       dismissRest.classList.toggle("hidden", rest <= 0);
       dismissRest.textContent = dismissRestLabel(rest);
+    }
+
+    function syncMaster() {
+      var master = cont.querySelector("[data-select-master]");
+      if (!master) return;
+      var tc = tabCounts(lastCounts);
+      master.checked = tc.total > 0 && tc.selected >= tc.total;
+      master.indeterminate = tc.selected > 0 && tc.selected < tc.total;
     }
 
     function post(url, body) {
@@ -1319,6 +1343,7 @@
             if (window.htmx) window.htmx.process(host);
             updateHideLabels();
             updateArtistChecks();
+            updateDismissRest();
           }
         })
         .catch(function () { if (gen === loadGen) showToast("Couldn't load those results. Check your connection.", "error"); });
@@ -1385,15 +1410,14 @@
     });
     if (dismissRest) {
       dismissRest.addEventListener("click", function () {
-        var tc = tabCounts(lastCounts);
-        var rest = tc.total - tc.selected;
+        var rest = restCount();
         if (rest <= 0) return;
-        // With a filter typed the action only touches the rows it shows, so
-        // the tab-wide number would overstate — ask without one.
+        // The number is the filtered one when a filter is on, so the question
+        // and the button agree with what will actually happen.
         var confirmMsg = curQuery()
           ? (isDownsampleReview
-              ? "Keep the unselected albums matching your filter hi-res? You can downsample later."
-              : "Dismiss the unselected " + dismissItemPlural + " matching your filter? You can show them again later.")
+              ? "Keep the " + countLabel(rest, "unselected album", "unselected albums") + " matching your filter hi-res? You can downsample them later."
+              : "Dismiss the " + countLabel(rest, "unselected " + dismissItemSingular, "unselected " + dismissItemPlural) + " matching your filter? You can bring them back from Dismissed.")
           : dismissConfirm(rest);
         window.qlConfirm(confirmMsg, {
           action: isDownsampleReview ? "Keep hi-res" : "Dismiss",
@@ -1411,7 +1435,9 @@
               dismissRest.disabled = false;
               applyCounts(c);
               loadPage(1, curQuery());
-              if (c.hidden) showToast(dismissToast(c.hidden), "success");
+              showToast(c.hidden ? dismissToast(c.hidden)
+                                 : "Nothing to dismiss on this filter.",
+                        c.hidden ? "success" : "info");
             })
             .catch(function () {
               dismissRest.disabled = false;
@@ -1428,6 +1454,12 @@
       filterInput.addEventListener("input", function () {
         if (filterTimer) clearTimeout(filterTimer);
         filterTimer = setTimeout(function () { loadPage(1, curQuery()); }, 250);
+      });
+      // A search input's Escape-clear and its native ✕ change the value
+      // without firing `input`, which left the box empty and the list filtered.
+      filterInput.addEventListener("search", function () {
+        if (filterTimer) clearTimeout(filterTimer);
+        loadPage(1, curQuery());
       });
       // Enter should filter, not submit the review form.
       filterInput.addEventListener("keydown", function (e) {
@@ -1451,6 +1483,7 @@
 
     updateHideLabels();
     updateArtistChecks();
+    syncMaster();
 
     // Keep review pages in sync across tabs.
     var rsrc = new EventSource("/api/jobs/" + id + "/review-stream");

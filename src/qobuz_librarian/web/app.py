@@ -6505,6 +6505,12 @@ def _review_context(job, page=1, query="", tab=""):
         "review_page": page,
         "review_pages": n_pages,
         "review_query": query,
+        # What "Dismiss unselected" would actually take under this filter. The
+        # button used to quote the tab total while acting on the filtered set.
+        "review_filtered_rest": sum(
+            1 for _artist, rows in groups
+            for row in rows if not row.get("selected")
+        ),
         "review_tab": tab,
         "review_tab_counts": tab_counts,
         "review_hidden_count": hidden_mod.count(_hide_scope(job.execute_kind)),
@@ -7055,6 +7061,10 @@ async def job_hide(request: Request, job_id: str):
         if job.execute_kind != "library" or tab not in ("missing", "gaps"):
             tab = ""
         gap_only = (tab == "gaps") if tab else None
+        # The filter narrows what the button sits next to, so it has to narrow
+        # what the button takes; without it, one tap on a filtered row dismisses
+        # every album by that artist, including the ones the filter is hiding.
+        q = (form.get("q") or "").strip()
         # Selection is server-backed, so hide keeps this artist's ticked albums
         # and drops the rest — no form keep-set, which under pagination would
         # only carry the visible page and clobber other pages' selections.
@@ -7062,7 +7072,8 @@ async def job_hide(request: Request, job_id: str):
             with _SAVED_REVIEW_LOCK:
                 n = flows.dismiss_albums(job, artist,
                                          scope=_hide_scope(job.execute_kind),
-                                         gap_only=gap_only)
+                                         gap_only=gap_only,
+                                         query=q)
         except OSError as e:
             # Nothing changed server-side; the non-2xx keeps htmx from
             # swapping the rows away and the error toast reads this body.
@@ -7082,14 +7093,15 @@ async def job_hide(request: Request, job_id: str):
         # empty "awaiting review". HX-Refresh reloads to the finished view.
         if job_mgr.finalize_review_if_empty(job):
             return HTMLResponse("", headers={"HX-Refresh": "true"})
-        with job._lock:
-            remaining = [c for c in job.candidates if c.get("artist") == artist
-                         and (gap_only is None
-                              or flows.is_gap_candidate(c) == gap_only)]
+        # Re-render what the filter shows, not the whole artist, so the group
+        # that swaps in matches the list the user is looking at.
+        groups = _review_artist_groups(job, query=q, tab=tab)
+        remaining = next((rows for name, rows in groups if name == artist), [])
         if remaining:
             resp = _tr(request, "_review_group.html",
                        {"job": job, "artist": artist, "items": remaining,
-                        "triage": True, "open": True, "review_tab": tab})
+                        "triage": True, "open": True, "review_tab": tab,
+                        "review_query": q})
         else:
             resp = HTMLResponse("")  # whole artist hidden — outerHTML drops it
         if n:

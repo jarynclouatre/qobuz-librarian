@@ -362,7 +362,10 @@
         } else if (e.key === 'Escape') {
           if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
           if (window.qlCloseDropdowns) window.qlCloseDropdowns();
-          if (inField) document.activeElement.blur();
+          // A search box has already used Escape to clear itself; blurring on
+          // top of that costs a tap to get back in and carry on typing.
+          const isSearchBox = tag === 'INPUT' && document.activeElement.type === 'search';
+          if (inField && !isSearchBox) document.activeElement.blur();
         } else if (e.key === 'g' && !inField) {
           gPending = true;
           clearTimeout(gTimer);

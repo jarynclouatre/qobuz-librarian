@@ -1,5 +1,6 @@
 {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
-<div id="review-groups" class="ql-review-groups" data-page="{{ review_page }}">
+<div id="review-groups" class="ql-review-groups" data-page="{{ review_page }}"
+     data-filtered-rest="{{ review_filtered_rest | default(0) }}">
   {% for artist, items in review_groups %}
   {% with open = (review_groups | length == 1), lazy = (review_groups | length != 1) %}{% include "_review_group.html" %}{% endwith %}
   {% endfor %}
