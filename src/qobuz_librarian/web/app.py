@@ -2585,7 +2585,8 @@ def _maybe_resume_library_scan():
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request, q: str = "", kind: str = "artist"):
+async def dashboard(request: Request, q: str = "", kind: str = "artist",
+                    artist_id: str = "", artist_name: str = ""):
     from qobuz_librarian import config as _cfg
     active_jobs = [j for j in job_mgr.registry.pending_and_running()
                    if j.status.value in ('running', 'scanning')]
@@ -2633,8 +2634,10 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist"):
     if search_kind not in ("artist", "album", "track"):
         search_kind = "artist"
     search_q = str(q or "").strip()[:200]
+    search_artist_id = str(artist_id or "").strip()[:64]
+    search_artist_name = str(artist_name or "").strip()[:200]
     initial_search_results = ""
-    if search_kind == "artist" and search_q:
+    if search_kind == "artist" and search_q and not search_artist_id:
         initial_search_results = await _initial_artist_search_html(request, search_q)
     return _tr(request, "index.html", {
         "active_jobs": active_jobs,
@@ -2644,10 +2647,14 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist"):
         "lock_busy_pid": _LOCK_BUSY_PID,
         "search_q": search_q,
         "search_kind": search_kind,
+        "search_artist_id": search_artist_id,
+        "search_artist_name": search_artist_name,
         # Album/track deep links can't be pre-rendered the way artist ones are
         # (their pipeline lives in POST /search), so the form submits itself on
-        # load instead of sitting prefilled and inert.
-        "auto_search": bool(search_q) and search_kind in ("album", "track"),
+        # load instead of sitting prefilled and inert. An artist's album list is
+        # the same case: it needs the artist id, which only that pipeline reads.
+        "auto_search": bool(search_q) and (
+            search_kind in ("album", "track") or bool(search_artist_id)),
         "initial_search_results": initial_search_results,
         "page": "dashboard",
         **disk,
@@ -3062,7 +3069,18 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
            "error": error, "kind": kind,
            "creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(), "page": "search"}
     if _is_htmx(request):
-        return _tr(request, "_search_results.html", ctx)
+        resp = _tr(request, "_search_results.html", ctx)
+        # Put the search in the address bar. Without it a reload, or Back after
+        # a look at the Queue, landed on the empty state with the query, the
+        # album list and every tick gone. GET / rehydrates from these.
+        if query:
+            params = {"kind": kind, "q": query}
+            if artist_id:
+                params["artist_id"] = artist_id
+                if artist_name:
+                    params["artist_name"] = artist_name
+            resp.headers["HX-Push-Url"] = "/?" + urllib.parse.urlencode(params)
+        return resp
     return RedirectResponse(url="/", status_code=303)
 
 

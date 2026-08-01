@@ -450,7 +450,30 @@
     document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
       if (root.dataset.searchWired === "1") return;
       root.dataset.searchWired = "1";
+      // Ticks and scroll offset survive a reload or a trip to the Queue, keyed
+      // by the search that produced them. Picking twenty albums out of five
+      // hundred is twenty minutes of scrolling; losing it to a pull-to-refresh
+      // was the worst thing this screen did.
+      var stateKey = "ql-search-sel:" + location.pathname + location.search;
+      function loadSelection() {
+        try { return JSON.parse(sessionStorage.getItem(stateKey) || "{}") || {}; }
+        catch (e) { return {}; }
+      }
+      function saveSelection() {
+        try {
+          var live = {};
+          Object.keys(selected).forEach(function (k) { if (selected[k]) live[k] = 1; });
+          if (Object.keys(live).length) {
+            sessionStorage.setItem(stateKey, JSON.stringify(
+              { picks: live, scrollY: Math.round(window.scrollY) }));
+          } else {
+            sessionStorage.removeItem(stateKey);
+          }
+        } catch (e) { /* private mode */ }
+      }
+      var restored = loadSelection();
       var selected = {};
+      Object.keys(restored.picks || {}).forEach(function (k) { selected[k] = true; });
       var bulkBar = root.querySelector("[data-search-bulk-bar]");
       var selectedCount = root.querySelector("[data-search-selected-count]");
       var selectAll = root.querySelector("[data-search-select-all]");
@@ -487,6 +510,7 @@
           selectAll.checked = allKeys.length > 0 && picked === allKeys.length;
           selectAll.indeterminate = picked > 0 && picked < allKeys.length;
         }
+        saveSelection();
       }
       function setView(name) {
         root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
@@ -621,6 +645,11 @@
       }
       setView(savedSearchView());
       syncBoxes();
+      // Put them back where they were, once the restored rows are laid out.
+      if (restored.scrollY && selectedKeys().length) {
+        requestAnimationFrame(function () { window.scrollTo(0, restored.scrollY); });
+      }
+      window.addEventListener("beforeunload", saveSelection);
     });
   }
 
@@ -1537,6 +1566,13 @@
 
   // Re-scan swapped content for flashes and streams.
   document.addEventListener("htmx:afterSwap", initAll);
+  // A restored artist deep-link replays itself once on load; drop the artist it
+  // carried afterwards so the next search the user types is its own.
+  document.addEventListener("htmx:afterRequest", function (e) {
+    var form = e.target && e.target.closest && e.target.closest(".ql-search-form");
+    if (!form) return;
+    form.querySelectorAll("[data-deep-link]").forEach(function (el) { el.remove(); });
+  });
   cleanFlashUrl();
   // "Load more artists" clicks itself as it approaches the viewport, so a
   // long review reads as one continuous scrolling list. Deferred to DOM-ready:

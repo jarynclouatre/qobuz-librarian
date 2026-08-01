@@ -190,6 +190,13 @@
             {% if auto_search %}hx-trigger="submit, load"{% endif %}
             class="ql-search-form">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        {# Restoring /?kind=artist&q=…&artist_id=… — the artist's album list only
+           exists behind POST /search, so the form replays it once on load and
+           then drops these so the next search the user types is its own. #}
+        {% if search_artist_id %}
+        <input type="hidden" name="artist_id" value="{{ search_artist_id }}" data-deep-link>
+        <input type="hidden" name="artist_name" value="{{ search_artist_name }}" data-deep-link>
+        {% endif %}
         <div class="ql-segmented" role="group" aria-label="Search for">
           <label>
             <input type="radio" name="kind" value="artist" class="sr-only" {% if search_kind == 'artist' %}checked{% endif %}>
