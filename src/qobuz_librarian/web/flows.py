@@ -707,29 +707,30 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
             job_mgr.JobStatus.SCANNING,
         ):
             return None
-        to_hide = [c for c in job.candidates
-                   if c.get("artist") == artist and not c.get("selected")
-                   and (gap_only is None or is_gap_candidate(c) == gap_only)
-                   and (not query or candidate_matches_query(c, query))]
-        if not to_hide:
-            return 0
         # The store's key deliberately ignores parentheticals so editions of one
         # album stay dismissed together, but that also collapses genuinely
         # different records — "The Asylum Albums (1972-1975)" and "(1976-1980)"
-        # share a key. Writing an unticked row's key would then hide the ticked
-        # one it collides with, for good and under the other album's title. A
-        # kept album wins: its twin stays out of the store and comes back on the
-        # next scan instead.
+        # share a key. Writing an unticked row's key would hide the ticked one
+        # it collides with, for good and under the other album's title. A ticked
+        # album wins: its twin is left in the review rather than dismissed into
+        # a key that cannot tell them apart, so nothing the user kept disappears
+        # and the count that leaves matches the count recorded.
         kept = set()
         for c in job.candidates:
             if c.get("artist") == artist and c.get("selected"):
                 fp = hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
                 if fp:
                     kept.add(fp)
+        to_hide = [c for c in job.candidates
+                   if c.get("artist") == artist and not c.get("selected")
+                   and (gap_only is None or is_gap_candidate(c) == gap_only)
+                   and (not query or candidate_matches_query(c, query))
+                   and hidden_mod.album_fingerprint(
+                       c.get("artist"), c.get("title")) not in kept]
+        if not to_hide:
+            return 0
         specs = [(c.get("artist"), c.get("title"),
-                  (c.get("payload") or {}).get("year")) for c in to_hide
-                 if hidden_mod.album_fingerprint(
-                     c.get("artist"), c.get("title")) not in kept]
+                  (c.get("payload") or {}).get("year")) for c in to_hide]
     # Record the dismissals durably FIRST, outside the lock (disk I/O mustn't
     # stall the scan thread's next add_candidate).
     hidden_mod.hide(scope, specs)

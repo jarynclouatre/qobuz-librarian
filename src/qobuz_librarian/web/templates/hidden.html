@@ -30,7 +30,7 @@
     <summary class="ql-hidden-summary">
       <span class="ql-hidden-summary-copy">
         <span class="ql-hidden-artist">{{ g.artist }}</span>
-        <span class="ql-hidden-count">{{ g.albums | length }} {{ noun }}{% if g.albums | length != 1 %}s{% endif %}</span>
+        <span class="ql-hidden-count">{{ g.rows }} {{ noun }}{% if g.rows != 1 %}s{% endif %}</span>
       </span>
       <svg class="ql-hidden-chevron" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12h14"/>
@@ -54,12 +54,13 @@
       <ul class="ql-hidden-list">
       {% for a in g.albums %}
       <li class="ql-hidden-item">
-        <span class="ql-hidden-title">{{ a.title }}{% if a.year %} <span>({{ a.year }})</span>{% endif %}</span>
+        <span class="ql-hidden-title">{{ a.title }}{% if a.year %} <span>({{ a.year }})</span>{% endif %}{% if a.others %}
+          <span class="ql-hidden-also">with {{ a.others | join(', ') }}</span>{% endif %}</span>
         <form action="{{ restore_action }}" method="post" class="ql-hidden-restore">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="fingerprint" value="{{ a.fp }}">
           <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
-                  aria-label="Restore {{ a.title }} by {{ g.artist }}">Restore</button>
+                  aria-label="Restore {{ a.title }}{% if a.others %} and {{ a.others | length }} more edition{{ 's' if a.others | length != 1 }}{% endif %} by {{ g.artist }}">Restore</button>
         </form>
       </li>
       {% endfor %}

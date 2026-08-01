@@ -3838,6 +3838,16 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The other editions this one row brings back with it. Scoped under the title
+   because the bare `.ql-hidden-title span` rule below would otherwise own its
+   colour. */
+.ql-hidden-title .ql-hidden-also {
+  display: block;
+  overflow: hidden;
+  color: var(--ql-text-3);
+  font-size: 0.78125rem;
+  text-overflow: ellipsis;
+}
 .ql-hidden-title span {
   color: color-mix(in oklab, var(--ql-text-2) 68%, transparent);
 }

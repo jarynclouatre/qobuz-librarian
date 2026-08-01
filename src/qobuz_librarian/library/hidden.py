@@ -91,6 +91,22 @@ def album_fingerprint(artist, title):
     return f"{a}|{t}"
 
 
+def _entry_rows(entry):
+    """The review rows recorded under one fingerprint.
+
+    One key can cover several rows: the fingerprint deliberately ties every
+    edition of an album together, and Qobuz lists editions as separate
+    releases. Entries written before rows were kept carry only the first one at
+    the top level, so derive a single row from those — the counts on screen
+    have to mean the same thing for an old store as a new one.
+    """
+    rows = entry.get("rows")
+    if isinstance(rows, list) and rows:
+        return [r for r in rows if isinstance(r, dict)]
+    return [{"title": entry.get("title") or "", "year": entry.get("year") or "",
+             "ts": entry.get("ts") or ""}]
+
+
 def _preserve_corrupt_store(reason):
     """Move a corrupt hidden-store aside (….corrupt) and warn, instead of letting
     the next save() silently overwrite it. A dismissed-album list is curated over
@@ -176,7 +192,12 @@ def is_hidden(scope, artist, title, store):
 
 def hide(scope, items):
     """Record dismissals. `items` is an iterable of (artist, title, year).
-    Returns the number newly hidden; an already-hidden album is a no-op."""
+
+    Returns the number of ROWS newly recorded, which is what left the user's
+    review — not the number of fingerprints, which is smaller whenever two
+    editions of one album were both on the list. The two used to be reported
+    side by side as if they were the same number.
+    """
     with _store_lock():
         store = load()
         bucket = store.setdefault(scope, {})
@@ -184,10 +205,20 @@ def hide(scope, items):
         added = 0
         for artist, title, year in items:
             fp = album_fingerprint(artist, title)
-            if fp is None or fp in bucket:
+            if fp is None:
                 continue
-            bucket[fp] = {"artist": artist or "", "title": title or "",
-                          "year": str(year or ""), "ts": now}
+            row = {"title": title or "", "year": str(year or ""), "ts": now}
+            entry = bucket.get(fp)
+            if entry is None:
+                bucket[fp] = {"artist": artist or "", "title": title or "",
+                              "year": str(year or ""), "ts": now, "rows": [row]}
+                added += 1
+                continue
+            rows = _entry_rows(entry)
+            if any(r.get("title") == row["title"] and r.get("year") == row["year"]
+                   for r in rows):
+                continue
+            entry["rows"] = rows + [row]
             added += 1
         if added and not save(store):
             raise OSError(_SAVE_FAILED_MSG)
@@ -208,13 +239,14 @@ def restore(scope, artists):
         targets = {normalize(a) for a in artists if normalize(a)}
         drop = [fp for fp, e in bucket.items()
                 if normalize(e.get("artist") or "") in targets]
+        rows = sum(len(_entry_rows(bucket[fp])) for fp in drop)
         for fp in drop:
             bucket.pop(fp, None)
         if drop:
             store[scope] = bucket
             if not save(store):
                 raise OSError(_SAVE_FAILED_MSG)
-    return len(drop)
+    return rows
 
 
 def restore_all(scope):
@@ -223,8 +255,8 @@ def restore_all(scope):
     with _store_lock():
         store = load()
         bucket = store.get(scope) or {}
-        n = len(bucket)
-        if n:
+        n = sum(len(_entry_rows(e)) for e in bucket.values())
+        if bucket:
             store[scope] = {}
             if not save(store):
                 raise OSError(_SAVE_FAILED_MSG)
@@ -241,39 +273,53 @@ def restore_albums(scope, fingerprints):
         store = load()
         bucket = store.get(scope) or {}
         drop = [fp for fp in fingerprints if fp in bucket]
+        rows = sum(len(_entry_rows(bucket[fp])) for fp in drop)
         for fp in drop:
             bucket.pop(fp, None)
         if drop:
             store[scope] = bucket
             if not save(store):
                 raise OSError(_SAVE_FAILED_MSG)
-    return len(drop)
+    return rows
 
 
 def hidden_by_artist(scope, store=None):
-    """[{artist, albums: [{title, year, ts, fp}]}], sorted for the Hidden view.
+    """[{artist, rows, albums: [{title, year, ts, fp, others}]}] for the Hidden view.
 
-    `fp` is the fingerprint key, exposed so the per-album Restore button on the
-    page can target one row directly via restore_albums()."""
+    One entry per fingerprint, because that is the unit Restore can act on —
+    every edition under a key was dismissed together and comes back together.
+    ``others`` lists the further titles the key covers so the page can say so
+    instead of appearing to have lost them, and ``rows`` is how many review rows
+    the artist's entries account for.
+    """
     bucket = (store if store is not None else load()).get(scope) or {}
     groups = {}
     for fp, e in bucket.items():
         artist = e.get("artist") or "Unknown artist"
+        rows = _entry_rows(e)
+        first = rows[0]
         groups.setdefault(artist, []).append({
-            "title": e.get("title") or "?",
-            "year": e.get("year") or "",
-            "ts": e.get("ts") or "",
+            "title": first.get("title") or e.get("title") or "?",
+            "year": first.get("year") or "",
+            "ts": first.get("ts") or e.get("ts") or "",
             "fp": fp,
+            "others": [r.get("title") or "?" for r in rows[1:]],
         })
     out = []
     for artist in sorted(groups, key=str.lower):
         albums = sorted(groups[artist], key=lambda a: (a["title"].lower(), a["year"]))
-        out.append({"artist": artist, "albums": albums})
+        out.append({
+            "artist": artist,
+            "albums": albums,
+            "rows": sum(1 + len(a["others"]) for a in albums),
+        })
     return out
 
 
 def count(scope, store=None):
-    return len((store if store is not None else load()).get(scope) or {})
+    """Review rows dismissed in this scope — the same unit the review counts."""
+    bucket = (store if store is not None else load()).get(scope) or {}
+    return sum(len(_entry_rows(e)) for e in bucket.values())
 
 
 # ── Singles — a deliberately downloaded track, not a gap ───────────────────────
