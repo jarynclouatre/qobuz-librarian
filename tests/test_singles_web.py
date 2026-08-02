@@ -87,6 +87,17 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
     cover = album / "cover.jpg"
     track.write_bytes(b"audio with embedded lyrics")
     cover.write_bytes(b"artwork")
+    # File timestamps come off the kernel's coarse clock (~1ms ticks) and a
+    # new dirent doesn't grow a small directory, so when the sidecar lands in
+    # the same tick as the setup writes above, the parent's before/after
+    # identities are byte-identical and there is legitimately no change to
+    # record (stored identity still matches disk either way — the flake this
+    # cures, measured 99% same-tick on this machine). Backdate the album dir
+    # BEFORE the manifest captures its identity, so the sidecar write provably
+    # crosses a tick and the recorded change chains from the manifest's own
+    # starting point.
+    past = album.stat().st_mtime_ns - 5_000_000_000
+    os.utime(album, ns=(past, past))
     manifest = _ownership_manifest(music_root, track, created=[album])
     manifest["items"][0]["companions"] = [{
         "kind": "artwork",
