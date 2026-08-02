@@ -1377,19 +1377,9 @@ def write_sidecar(
 
 
 def write_output(
-        path: Path, f, content: str, fmt: str, *, binding=None):
+        path: Path, f, content: str, fmt: str, *, binding):
     """Persist lyrics per fmt: 'embed' (FLAC tag), 'sidecar' (.lrc), 'both'."""
     fmt = _normalise_lyrics_format(fmt)
-    if binding is None:
-        if fmt in ("embed", "both"):
-            write_lyrics(f, content)
-        if fmt in ("sidecar", "both"):
-            write_sidecar(path, content)
-        try:
-            return _regular_identity(path.stat())
-        except OSError:
-            return None
-
     if not binding.exact_track_is_named():
         raise OSError(f"{path.name}: track changed before lyric write")
 

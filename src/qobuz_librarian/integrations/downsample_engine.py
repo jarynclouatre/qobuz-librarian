@@ -52,22 +52,6 @@ def _discard_unused_stash(kept_dir, log):
         log("  ⚠ downsample: couldn't clear the unused safety copy; "
             "it will expire on its own.")
 
-def _fsync_quiet(path):
-    """Best-effort fsync of a file or directory. The downsample swap overwrites
-    the only lossless master in place, so the encoded replacement (and its
-    directory entry) must reach stable storage before the swap and unlink — a
-    crash between the lazy writeback and the delete would otherwise strand a
-    half-written file in the master's place. No-op on a mount that can't
-    fsync."""
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        pass
-
 # Downsampling needs ffmpeg to resample AND flac to verify the result. The
 # overwrite is in-place and irreversible, so without the verifier there's no
 # way to confirm a good encode replaced the only hi-res copy — treat the
@@ -891,16 +875,6 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     finally:
                         if binding is not None:
                             binding.close()
-
-
-def sweep_stale_encodes(directory):
-    """Compatibility no-op: a filename pattern is not proof of ownership.
-
-    Live operations remove their exact held temporary file. Residue left by a
-    hard kill is preserved for manual inspection because it has no durable
-    receipt that distinguishes it from a user-owned dotfile.
-    """
-    return 0
 
 
 def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,

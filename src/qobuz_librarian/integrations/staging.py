@@ -1664,17 +1664,6 @@ def _file_plan_from_json(value):
     return planned, original_receipt
 
 
-def _file_from_json(value):
-    plan = _file_plan_from_json(value)
-    if plan is None:
-        return None
-    planned, original = plan
-    retained = capture_file(planned.path)
-    if retained is None or not _same_file_after_move(planned.identity, retained.identity):
-        return None
-    return retained, original
-
-
 def _write_manifest_payload(group, value):
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(payload) > _MAX_MANIFEST_BYTES:
