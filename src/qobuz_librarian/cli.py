@@ -528,6 +528,15 @@ def parse_args():
     p.add_argument("query", nargs="*", help="search query or Qobuz album URL")
     p.add_argument("--artist",       metavar="NAME",
                    help="Run artist mode on NAME (skips interactive menu)")
+    p.add_argument("--library-walk", action="store_true",
+                   help="Walk every artist: fill gaps, then offer albums you're "
+                        "missing; queue as you go (same as menu Library walk).")
+    p.add_argument("--album-gaps", action="store_true",
+                   help="Fill missing tracks in every incomplete album you own; "
+                        "never suggests albums you don't have.")
+    p.add_argument("--repair", action="store_true",
+                   help="Re-download damaged (truncated) tracks you own. '*' at "
+                        "the artist prompt sweeps the whole library.")
     p.add_argument("--upgrade-walk", action="store_true",
                    help="Review saved Library upgrade candidates. Per-artist "
                         "confirm (enter=skip), auto-advance.")
@@ -919,20 +928,37 @@ def main():
     except Exception as e:
         vlog(f"repair-cache prune error: {e}")
     # ── Decide the entry mode ─────────────────────────────────────────────────
-    # Four entry paths:
-    #   1. CLI positional args / URL  → album mode, single shot, no menu loop
-    #   2. --artist NAME              → artist mode, single shot, no menu loop
-    #   3. --upgrade-walk             → upgrade walk, single shot, no menu loop
-    #   4. (no args)                  → interactive menu loop
-    #
-    # The single-shot paths still respect AuthLost / KeyboardInterrupt cleanly —
-    # all caught at the bottom by main()'s wrapper.
+    # Single-shot flag paths first (each skips the menu loop), then positional
+    # args / URL → album mode, then the interactive menu. The single-shot paths
+    # still respect AuthLost / KeyboardInterrupt cleanly — all caught at the
+    # bottom by main()'s wrapper.
     if args.artist:
         from qobuz_librarian.modes.artist import run_artist_mode
         run_artist_mode(args.artist, args, download_token())
         return
 
+    if args.library_walk:
+        from qobuz_librarian.modes.walk import run_walk_queued_mode
+        run_walk_queued_mode(args, download_token())
+        return
+
+    if args.album_gaps:
+        from qobuz_librarian.modes.walk import run_album_walk_mode
+        run_album_walk_mode(args, download_token())
+        return
+
+    if args.repair:
+        from qobuz_librarian.modes.repair import run_album_repair_mode
+        run_album_repair_mode(args, download_token())
+        return
+
     if args.upgrade_walk:
+        if args.consolidate:
+            # The walk switches this off (per-album prompts are unbearable at
+            # scale) — say so instead of accepting the flag silently.
+            log.info(fmt(C.GRAY,
+                "  · The upgrade walk always skips sibling-folder "
+                "consolidation; ignoring --consolidate."))
         # AUTO_UPGRADE_ENABLED must stay False as the global default — it
         # controls passive upgrades during ordinary gap-fill walks.
         args.auto_upgrade = True
