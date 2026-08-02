@@ -11,7 +11,16 @@ actually happened, screens that keep your place, and a CLI that can be scripted.
   store (dismissed albums, upgrade caps, saved scans, settings, lyrics
   bookkeeping) now sets the unreadable copy aside as `….corrupt` and says what
   may have been reset, so one bad write can't erase weeks of curation with no
-  trace.
+  trace. And the app stopped manufacturing that corruption in the first place:
+  every store now writes through one crash-safe path — synced to disk before
+  it replaces the old copy, with proper locking where the web app and CLI
+  write the same file.
+- Dismissing an album can no longer bury a different album that shares its
+  name: the identity key kept "Alone" and "Alone (Again)" — or Rancid's two
+  self-titled records — under one fingerprint, so dismissing one hid both.
+  Distinct titles now stay distinct while remasters, deluxe editions and
+  hi-res variants still fold onto their album; an existing dismissed list
+  re-keys itself automatically.
 - A lyrics run during a provider outage no longer records "no lyrics found" —
   a verdict that suppressed those tracks for 30 days. Tracks whose every query
   died on a connection failure stay retryable, and the summary now counts the
@@ -51,9 +60,11 @@ actually happened, screens that keep your place, and a CLI that can be scripted.
   previously report a neighbouring project's version from a stray
   pyproject.toml.
 - Release safety: every push and pull request now proves the Docker image
-  still builds (previously nothing did until a release was already public),
-  and dependabot no longer proposes single-line edits to the generated image
-  lock, which only regenerates as a whole.
+  still builds (previously nothing did until a release was already public)
+  and runs the destructive-operation checks — the suite that proves
+  downsample, repair and the gap-fill backup can't eat files, which nothing
+  ran automatically before. Dependabot no longer proposes single-line edits
+  to the generated image lock, which only regenerates as a whole.
 
 ## [0.11.3] - 2026-07-22
 
