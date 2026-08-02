@@ -1243,10 +1243,9 @@ def _review_job_from_library_state():
                 selected=False,
             )
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
-        n = len(job.candidates)
-        job.summary = (
-            f"{n:,} to review across Missing Albums and Gap Fill, "
-            "from your last library scan.")
+        from qobuz_librarian.web import flows
+        job.summary = (flows.library_review_summary(job.candidates)
+                       + ", from your last library scan.")
         job_mgr.registry.add(job)
         return job
 
@@ -1634,6 +1633,21 @@ templates.env.globals["ds_originals_chosen"] = lambda: cfg.DOWNSAMPLE_KEEP_ORIGI
 templates.env.globals["backup_retention_days"] = cfg.UPGRADE_BACKUP_RETENTION_DAYS
 
 
+def _recovery_on_disk(recovery) -> bool:
+    """Whether a Repair job's kept-originals folder is still where its record
+    says. Drives the job page's pointer honesty: Settings → Diagnostics only
+    lists folders it can see, so a job must not send the user there for one
+    that is gone. When the check itself fails, err towards "present" — a
+    folder we can't stat (unmounted volume) is not a folder that's gone."""
+    try:
+        return Path(str((recovery or {}).get("location") or "")).is_dir()
+    except OSError:
+        return True
+
+
+templates.env.globals["recovery_on_disk"] = _recovery_on_disk
+
+
 def _fmt_clock(ts):
     from datetime import datetime
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
@@ -1980,13 +1994,9 @@ async def _initial_artist_search_html(request: Request, query: str) -> str:
             cover = ""
             if isinstance(img, dict):
                 cover = img.get("small") or img.get("thumbnail") or ""
-            albums_count = a.get("albums_count")
-            if isinstance(albums_count, dict):
-                albums_count = albums_count.get("total")
             artist_results.append({
                 "id": a.get("id"),
                 "name": a.get("name") or "?",
-                "albums_count": albums_count,
                 "cover": cover if str(cover).startswith(
                     "https://static.qobuz.com/") else "",
             })
@@ -2908,13 +2918,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         cover = ""
                         if isinstance(img, dict):
                             cover = img.get("small") or img.get("thumbnail") or ""
-                        albums_count = a.get("albums_count")
-                        if isinstance(albums_count, dict):
-                            albums_count = albums_count.get("total")
                         artist_results.append({
                             "id": a.get("id"),
                             "name": a.get("name") or "?",
-                            "albums_count": albums_count,
                             "cover": cover if str(cover).startswith(
                                 "https://static.qobuz.com/") else "",
                         })
@@ -3147,6 +3153,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "skipped_already_higher_quality": "Skipped: the library already has higher quality.",
     "skipped_has_extras": "Skipped: the library copy includes extra tracks.",
     "upgrade_only_no_op": "Already at or above the target quality.",
+    "upgrade_no_local_tracks": "This album isn't in your library any more.",
     "dry_run": "Dry run. Nothing downloaded.",
     "user_skipped": "Skipped at confirmation.",
     "lossy_only": "Qobuz only had lossy versions. Nothing downloaded.",
@@ -7360,6 +7367,32 @@ async def job_dismiss_rest(request: Request, job_id: str):
     payload["hidden_total"] = hidden_mod.count(scope)
     payload["review_done"] = job_mgr.finalize_review_if_empty(job)
     return JSONResponse(payload)
+
+
+@app.post("/jobs/{job_id}/acknowledge-recovery")
+async def job_acknowledge_recovery(request: Request, job_id: str):
+    """The one exit for a recovery alarm whose kept files are gone from disk.
+    Diagnostics can only clear an alarm for a folder it can still see, so a
+    job whose backup was removed outside the app kept its attention flag
+    forever. Only the display flag is cleared — the durable recovery records
+    stay untouched — and only when nothing is left on disk, so a live backup
+    keeps its alarm."""
+    from qobuz_librarian.web import job_persistence
+    job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
+    if not job:
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(
+                "That job is no longer in the record."),
+            status_code=303)
+    with job._lock:
+        clear = (job.attention == "recovery" and job.recoveries
+                 and not any(_recovery_on_disk(r) for r in job.recoveries))
+        if clear:
+            job.attention = ""
+    # persist() takes the job lock itself, so it must run outside ours.
+    if clear:
+        job_persistence.persist(job)
+    return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 
 @app.post("/jobs/{job_id}/retry")

@@ -841,6 +841,15 @@ def process_album(album, args, *, allow_force=True, label=None,
     # extras blocked it, etc.), bail rather than silently fall through to
     # gap-fill — the user explicitly asked NOT to fill missing tracks.
     if upgrade_only and not auto_upgrade_active:
+        if not present:
+            # A different fact than "no upgrade applies": the album isn't in
+            # the library at all any more (moved, renamed, deleted since the
+            # scan that produced this candidate).
+            log.info(fmt(C.YELLOW,
+                "  ⚠  None of this album's tracks are in your library any "
+                "more; skipping."))
+            return {"result": "upgrade_no_local_tracks",
+                    "n_total": len(qobuz_tracks)}
         log.info(fmt(C.YELLOW,
             "  ⚠  Upgrade-only requested but no upgrade applies here; skipping."))
         return {"result": "upgrade_only_no_op", "n_total": len(qobuz_tracks)}

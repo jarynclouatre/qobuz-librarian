@@ -67,6 +67,19 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW, "  No FLAC files found in the library."))
         return
 
+    # `total` is every FLAC in the library; the pass only opens tracks the
+    # saved state says still need checking. Report the pass's own work.
+    processed = max(0, int(res.get("processed", 0)))
+    skipped = max(0, total - processed)
+    print()
+    if not processed:
+        log.info(fmt(C.GREEN, "  ✓  Lyrics pass complete."))
+        log.info(fmt(C.GRAY,
+            f"     Nothing needed checking — all {plural(total, 'track')} "
+            "have lyrics or were checked before (--lyrics-rescan redoes "
+            "them)."))
+        return
+
     wrote_synced = res.get("wrote-synced", 0) + res.get("dry:wrote-synced", 0)
     wrote_plain  = res.get("wrote-plain", 0) + res.get("dry:wrote-plain", 0)
     already      = (res.get("already-synced", 0) + res.get("already-plain", 0)
@@ -76,13 +89,14 @@ def _report_summary(res, *, dry_run):
     errors       = (res.get("write-error", 0) + res.get("exception", 0)
                     + res.get("error", 0))
 
-    print()
     log.info(fmt(C.GREEN, "  ✓  Lyrics pass complete."))
     verb = "Would write" if dry_run else "Wrote"
+    skipped_part = (f" · {skipped} skipped (already checked)" if skipped else "")
     log.info(fmt(C.GRAY,
-        f"     {plural(total, 'track')} scanned · {verb.lower()} "
+        f"     {plural(processed, 'track')} checked · {verb.lower()} "
         f"{wrote_synced} synced + {wrote_plain} plain · "
-        f"{already} already had lyrics · {not_found} not found."))
+        f"{already} already had lyrics · {not_found} no lyrics found"
+        f"{skipped_part}."))
     if unavailable:
         log.info(fmt(C.YELLOW,
             f"     {plural(unavailable, 'track')} couldn't reach a provider "

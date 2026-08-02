@@ -1543,16 +1543,22 @@ def lrc_duration_sane(lyrics: str, track_seconds: float) -> tuple[bool, str]:
 
 
 # ── Provider query (with circuit breaker) ────────────────────────────────────
-def _query_provider(query: str, prov: str, log: logging.Logger, **kwargs) -> Optional[str]:
+def _query_provider(query: str, prov: str, log: logging.Logger,
+                    **kwargs) -> tuple[Optional[str], bool]:
     """
     Wrap syncedlyrics.search() for a single provider. Provider errors come
     through Python's logging module; _ChatterCapture buffers them per-thread
     so the circuit-breaker regex can scan them. After PROVIDER_FAIL_THRESHOLD
     strikes the provider is skipped for the rest of this run; any successful
     result clears strikes.
+
+    Returns (result, failed_hard). failed_hard means the provider raised or
+    logged a connection-style error — the query never got an answer, which is
+    not the same fact as a clean "no lyrics here" and must not be recorded as
+    one.
     """
     if _is_provider_dead(prov, log):
-        return None
+        return None, False
     _ChatterCapture.begin()
     raised = False
     try:
@@ -1581,7 +1587,7 @@ def _query_provider(query: str, prov: str, log: logging.Logger, **kwargs) -> Opt
                          "failures (will retry after cooldown)",
                          prov, PROVIDER_COOLDOWN_SECONDS,
                          PROVIDER_FAIL_THRESHOLD)
-        return None
+        return None, True
     if result:
         with _breaker_lock:
             _provider_fails[prov] = 0
@@ -1589,42 +1595,47 @@ def _query_provider(query: str, prov: str, log: logging.Logger, **kwargs) -> Opt
         # Clean "not found" — not a connection failure, reset any stale fail count.
         with _breaker_lock:
             _provider_fails[prov] = 0
-    return result
+    return result, False
 
 
 def search_lyrics(
     query: str, providers: list[str], duration: float, log: logging.Logger,
     skip_plain: bool = False,
-) -> tuple[Optional[str], Optional[str], str, int]:
+) -> tuple[Optional[str], Optional[str], str, int, int]:
     """
-    Returns (lyrics, provider_name, kind, providers_tried) where kind is
-    'synced' or 'plain' and providers_tried counts queries actually attempted
-    (skipping providers already disabled by the circuit breaker). The caller
-    uses providers_tried==0 to distinguish 'no provider has it' from 'no
-    provider was reachable', so a breaker-tripped run doesn't poison state.
+    Returns (lyrics, provider_name, kind, providers_tried, failed_hard) where
+    kind is 'synced' or 'plain' and providers_tried counts queries actually
+    attempted (skipping providers already disabled by the circuit breaker).
+    failed_hard counts the attempts that never got an answer (raised, or a
+    connection-style error). The caller uses providers_tried==0 and
+    failed_hard==providers_tried to distinguish 'no provider has it' from 'no
+    provider was reachable', so an outage doesn't poison state.
     """
     tried = 0
+    hard = 0
     for prov in providers:
         if _is_provider_dead(prov, log):
             continue
         tried += 1
-        result = _query_provider(query, prov, log, synced_only=True)
+        result, failed = _query_provider(query, prov, log, synced_only=True)
+        hard += failed
         if result and SYNCED_RE.search(result):
             ok, reason = lrc_duration_sane(result, duration)
             if not ok:
                 log.info("rejected %s synced result: %s", prov, reason)
                 continue
-            return result, prov, "synced", tried
+            return result, prov, "synced", tried, hard
     if skip_plain:
-        return None, None, "", tried
+        return None, None, "", tried, hard
     for prov in providers:
         if _is_provider_dead(prov, log):
             continue
         tried += 1
-        result = _query_provider(query, prov, log, plain_only=True)
+        result, failed = _query_provider(query, prov, log, plain_only=True)
+        hard += failed
         if result and result.strip():
-            return result, prov, "plain", tried
-    return None, None, "", tried
+            return result, prov, "plain", tried, hard
+    return None, None, "", tried, hard
 
 
 # ── Per-file processing & state-aware filter ─────────────────────────────────
@@ -1884,16 +1895,19 @@ def _process_bound_file(
         # waste: any plain result would be discarded below. The same shortcut
         # applies when the caller asked for synced-only.
         skip_plain = synced_only or existing_kind == "plain"
-        lyrics, source, kind, providers_tried = search_lyrics(
+        lyrics, source, kind, providers_tried, failed_hard = search_lyrics(
             query, providers, duration, log, skip_plain=skip_plain,
         )
         st.last_seen = time.time()
 
         if not lyrics:
             st.representations = _representation_state(present)
-            if providers_tried == 0:
-                # The circuit breaker had killed every provider before this
-                # file's turn. Keep it immediately retryable.
+            if providers_tried == 0 or failed_hard == providers_tried:
+                # Either the circuit breaker had killed every provider before
+                # this file's turn, or every attempt this file made died on a
+                # connection-style failure. Neither is a verdict about the
+                # track — "not found" here would suppress it for
+                # RECHECK_AFTER_DAYS. Keep it immediately retryable.
                 st.status = "transient"
                 st.source = "providers-unavailable"
                 commit(state, key, st)

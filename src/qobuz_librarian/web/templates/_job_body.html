@@ -60,15 +60,27 @@
   {% endif %}
 
   {% if job.recoveries %}
+  {% set kept = namespace(on_disk=false) %}
+  {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
   <div class="ql-notice ql-notice-warning ql-job-error" role="alert">
     <div class="ql-notice-copy">
-      <strong>Original files kept safely</strong>
+      <strong>{% if kept.on_disk %}Original files kept safely{% else %}Original files were kept while Repair stopped{% endif %}</strong>
       {% for recovery in job.recoveries %}
       <div>
         {{ recovery.backed_up }} of {{ recovery.requested }} original file{% if recovery.requested != 1 %}s{% endif %} kept while Repair stopped.
       </div>
       {% endfor %}
+      {% if kept.on_disk %}
       <span>Review or restore {% if job.recoveries|length == 1 %}it{% else %}them{% endif %} under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</span>
+      {% else %}
+      <span>The kept cop{% if job.recoveries|length == 1 %}y is{% else %}ies are{% endif %} no longer on disk — restored or cleaned up outside this job, so there's nothing left to review.</span>
+      {% if job.attention == 'recovery' %}
+      <form action="/jobs/{{ job.id }}/acknowledge-recovery" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Acknowledge</button>
+      </form>
+      {% endif %}
+      {% endif %}
     </div>
   </div>
   {% endif %}

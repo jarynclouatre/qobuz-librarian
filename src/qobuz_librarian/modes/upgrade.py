@@ -1,5 +1,6 @@
 """Upgrade walk mode — review saved baseline quality upgrade candidates."""
 import time
+from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost
@@ -108,6 +109,33 @@ def run_upgrade_walk_mode(args, token):
     if not saved:
         log.info(fmt(C.YELLOW,
             "  No saved upgrade candidates. Run a Library refresh first."))
+        return 0
+
+    # A saved candidate is a record of a past scan, not a fact about the
+    # library now — set aside anything whose album folder has gone since,
+    # instead of presenting it (and calling it high-confidence) as if it were
+    # still there. Candidates from older scans don't carry the folder, and a
+    # missing music root proves nothing about any of them; both present as
+    # before.
+    n_gone = 0
+    if Path(cfg.MUSIC_ROOT).is_dir():
+        still = []
+        for c in saved:
+            d = (c.get("payload") or {}).get("album_dir")
+            if d and not Path(d).is_dir():
+                n_gone += 1
+                vlog(f"  gone from disk: {c.get('artist') or '?'} — "
+                     f"{c.get('title') or '?'}")
+            else:
+                still.append(c)
+        saved = still
+    if n_gone:
+        log.info(fmt(C.YELLOW,
+            f"  {plural(n_gone, 'saved candidate')} no longer in the library "
+            "— run a Library refresh to clear them."))
+    if not saved:
+        log.info(fmt(C.YELLOW,
+            "  Nothing left to review. Run a Library refresh first."))
         return 0
 
     by_artist: dict[str, list[dict]] = {}
@@ -236,6 +264,15 @@ def run_upgrade_walk_mode(args, token):
                     return EXIT_GENERAL
 
                 _pr_result = (_proc_result or {}).get("result", "")
+                if _pr_result == "upgrade_no_local_tracks":
+                    # The album left the library after the scan (an older
+                    # saved state without folder records, or the folder is
+                    # there but its tracks are not). Not benign: it must show
+                    # in the closing summary, and the saved state is left for
+                    # a Library refresh to clear.
+                    n_gone += 1
+                    time.sleep(cfg.ARTIST_API_DELAY)
+                    continue
                 if _pr_result in BENIGN_UPGRADE_RESULTS:
                     if _pr_result not in {"cancelled", "dry_run"}:
                         _refresh_saved_state_after_upgrade(
@@ -275,10 +312,21 @@ def run_upgrade_walk_mode(args, token):
         args.consolidate = saved_consolidate
 
     log.info("")
-    log.info(fmt(C.GREEN, "  ✓  Upgrade walk complete."))
+    if n_upgraded_albums or not (n_failed_albums or n_unverified_albums
+                                 or n_gone):
+        log.info(fmt(C.GREEN, "  ✓  Upgrade walk complete."))
+    else:
+        # Every candidate failed, went unverified or was gone from disk — a
+        # green tick would misreport the run.
+        log.info(fmt(C.YELLOW, "  ⚠  Upgrade walk finished — nothing was "
+                               "upgraded."))
     log.info(fmt(C.GRAY,
         f"     Reviewed {plural(n_reviewed, 'artist')} — upgraded tracks in "
         f"{plural(n_upgraded_albums, 'album')}."))
+    if n_gone:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  {plural(n_gone, 'candidate')} no longer in the library "
+            "— run a Library refresh to clear them."))
     if n_unverified_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_unverified_albums, 'album')} kept the original "

@@ -295,6 +295,18 @@ def is_gap_candidate(c):
     return "gap-fill:" in (c.get("detail") or "")
 
 
+def library_review_summary(candidates):
+    """The parked library review's one-line summary, without the trailing
+    period. Every writer of that summary — the scan when it parks, the
+    restart rebuild — goes through here, so the History card cannot call Gap
+    Fill candidates "missing albums" or disagree with the tabs it describes.
+    Splits with the same predicate the tabs use."""
+    gaps = sum(1 for c in candidates if is_gap_candidate(c))
+    missing = len(candidates) - gaps
+    return (f"{len(candidates):,} to review across Missing Albums "
+            f"({missing:,}) and Gap Fill ({gaps:,})")
+
+
 def fold_key(c):
     """A candidate's merge identity: Qobuz album id, falling back to
     artist+title for keyless carry-overs. Shared by the fold and its caller's
@@ -1113,12 +1125,10 @@ def scan_library(job, token, partial_only=False, force_full=False):
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
                        if total else "Stopped before anything turned up.")
     elif partial_only:
-        job.summary = (f"{plural(total, 'album')} with Gap Fill candidates across the library."
-                       + _cap_note(job)
+        job.summary = (library_review_summary(job.candidates) + "." + _cap_note(job)
                        if total else "No Gap Fill candidates found in your owned albums.")
     else:
-        job.summary = (f"{plural(total, 'missing album')} across the library."
-                       + _cap_note(job)
+        job.summary = (library_review_summary(job.candidates) + "." + _cap_note(job)
                        if total else
                        "No missing albums found for artists in your library.")
     # Artists that errored or came back with a short catalog page aren't in
@@ -2564,15 +2574,29 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         log.info(job.summary)
         return
 
+    # `total` is every FLAC in the library; the run only opens the tracks the
+    # saved state says still need checking. Summarise what the run did, not
+    # the size of the library it did it in.
+    processed = max(0, int(res.get("processed", 0)))
+    skipped = max(0, total - processed)
+    if not processed:
+        job.summary = (
+            f"Nothing needed checking — all {plural(total, 'track')} have "
+            "lyrics or were checked before. Tick “Re-check everything” to "
+            "redo them.")
+        log.info(job.summary)
+        return
     wrote = (res.get("wrote-synced", 0) + res.get("wrote-plain", 0)
              + res.get("dry:wrote-synced", 0) + res.get("dry:wrote-plain", 0))
     not_found = res.get("not-found", 0)
     unavailable = res.get("providers-unavailable", 0)
-    parts = [f"{plural(total, 'track')} scanned", f"{wrote} got lyrics"]
+    parts = [f"{plural(processed, 'track')} checked", f"{wrote} got lyrics"]
     if not_found:
-        parts.append(f"{not_found} not found")
+        parts.append(f"{not_found} no lyrics found")
     if unavailable:
         parts.append(f"{unavailable} couldn't reach a provider (re-run later)")
+    if skipped:
+        parts.append(f"{skipped} skipped (already checked)")
     job.summary = " · ".join(parts) + "."
     log.info(job.summary)
 

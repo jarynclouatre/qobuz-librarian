@@ -63,6 +63,9 @@ def _candidate_spec(artist_name: str, candidate: dict):
                    f"{candidate.get('target_quality_label', '?')}{part}"),
         "payload": {
             "album_id": album.get("id"),
+            # Where the scan found the album locally, so a later walk can tell
+            # a candidate that's still there from one whose folder has gone.
+            "album_dir": str(candidate.get("album_dir") or ""),
             "year": album_year(album),
             "cover": _album_cover(album),
             "needed_edition_swap": bool(candidate.get("_needed_edition_swap")),
