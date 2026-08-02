@@ -45,6 +45,7 @@ from qobuz_librarian.completion import (
     RecoveryOwner,
 )
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
+from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.library.sqlite_atomic import (
     AtomicSQLiteWrite,
@@ -3401,33 +3402,9 @@ def _prefer_managed_cleanup_error(current, candidate):
 
 def _run_managed_sigint_deferred(callback):
     """Run one raw-descriptor ownership handoff before delivering Ctrl-C."""
-    if threading.current_thread() is not threading.main_thread():
-        return callback()
-
-    pending = False
-    interrupted_frame = None
-
-    def defer_sigint(_signum, frame):
-        nonlocal pending, interrupted_frame
-        pending = True
-        interrupted_frame = frame
-
-    try:
-        previous_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, defer_sigint)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ManagedEvidenceUnavailable(
-            "interrupt-safe managed completion access is unavailable"
-        ) from exc
-    try:
-        return callback()
-    finally:
-        signal.signal(signal.SIGINT, previous_handler)
-        if pending and previous_handler is not signal.SIG_IGN:
-            if callable(previous_handler):
-                previous_handler(signal.SIGINT, interrupted_frame)
-            else:
-                signal.raise_signal(signal.SIGINT)
+    return run_sigint_deferred(
+        callback, unavailable=ManagedEvidenceUnavailable,
+        detail="interrupt-safe managed completion access is unavailable")
 
 
 class _ManagedEvidenceLifetime:

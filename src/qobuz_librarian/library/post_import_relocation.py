@@ -17,7 +17,6 @@ import json
 import math
 import os
 import secrets
-import signal
 import sqlite3
 import stat
 import threading
@@ -30,6 +29,7 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import normalise_album_id
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
+from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library.catalog import (
     _close_migration_database_anchor,
     _migration_database_anchor_matches,
@@ -238,33 +238,8 @@ def _name_missing(parent_fd, name) -> bool:
 
 def _run_descriptor_sigint_deferred(callback):
     """Finish one descriptor ownership transition before delivering Ctrl-C."""
-    if threading.current_thread() is not threading.main_thread():
-        return callback()
-
-    pending = False
-    interrupted_frame = None
-
-    def defer_sigint(_signum, frame):
-        nonlocal pending, interrupted_frame
-        pending = True
-        interrupted_frame = frame
-
-    try:
-        previous_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, defer_sigint)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise OSError(
-            "interrupt-safe relocation descriptor access is unavailable"
-        ) from exc
-    try:
-        return callback()
-    finally:
-        signal.signal(signal.SIGINT, previous_handler)
-        if pending and previous_handler is not signal.SIG_IGN:
-            if callable(previous_handler):
-                previous_handler(signal.SIGINT, interrupted_frame)
-            else:
-                signal.raise_signal(signal.SIGINT)
+    return run_sigint_deferred(
+        callback, detail="interrupt-safe relocation descriptor access is unavailable")
 
 
 def _close_descriptor_state(descriptors) -> None:

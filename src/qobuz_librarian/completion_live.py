@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import signal
 import stat
 import subprocess
 import threading
@@ -26,6 +25,8 @@ from qobuz_librarian.completion import (
     RecoveryOwner,
     StagedBinding,
     TrackQuality,
+    _valid_absolute_path,
+    _valid_identity,
     assess_completion,
     authoritative_slot,
     authoritative_slots,
@@ -36,6 +37,7 @@ from qobuz_librarian.integrations.downsample_engine import (
     parse_flac_info,
 )
 from qobuz_librarian.integrations.rip import flac_audio_ok
+from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library.backup import (
     _backup_source_is_public,
     _exact_tree_snapshot,
@@ -68,33 +70,9 @@ def _prefer_cleanup_error(current, candidate):
 
 def _run_sigint_deferred(callback):
     """Finish one raw-descriptor handoff before delivering Ctrl-C."""
-    if threading.current_thread() is not threading.main_thread():
-        return callback()
-
-    pending = False
-    interrupted_frame = None
-
-    def defer_sigint(_signum, frame):
-        nonlocal pending, interrupted_frame
-        pending = True
-        interrupted_frame = frame
-
-    try:
-        previous_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, defer_sigint)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise LiveCompletionUnavailable(
-            "interrupt-safe completion access is unavailable"
-        ) from exc
-    try:
-        return callback()
-    finally:
-        signal.signal(signal.SIGINT, previous_handler)
-        if pending and previous_handler is not signal.SIG_IGN:
-            if callable(previous_handler):
-                previous_handler(signal.SIGINT, interrupted_frame)
-            else:
-                signal.raise_signal(signal.SIGINT)
+    return run_sigint_deferred(
+        callback, unavailable=LiveCompletionUnavailable,
+        detail="interrupt-safe completion access is unavailable")
 
 
 class _LiveCompletionLifetime:
@@ -168,24 +146,6 @@ def _identity(value):
 
 
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
-
-
-def _valid_identity(value, length):
-    return (
-        type(value) is tuple
-        and len(value) == length
-        and all(type(part) is int and part >= 0 for part in value)
-    )
-
-
-def _valid_absolute_path(value):
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and "\x00" not in value
-        and os.path.isabs(value)
-        and os.path.abspath(value) == value
-    )
 
 
 def _strict_relative_parts(value):

@@ -8,7 +8,6 @@ import os
 import re
 import secrets
 import shutil
-import signal
 import stat
 import sys
 import tempfile
@@ -21,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
+from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
 from qobuz_librarian.recovery import (
     decode_recovery_json,
@@ -2079,31 +2079,8 @@ def _receipt_matches_ignoring_ctime(current, expected) -> bool:
 
 def _run_backup_sigint_deferred(callback):
     """Defer Ctrl-C only across one raw-resource adoption."""
-    if threading.current_thread() is not threading.main_thread():
-        return callback()
-
-    pending = False
-    interrupted_frame = None
-
-    def defer_sigint(_signum, frame):
-        nonlocal pending, interrupted_frame
-        pending = True
-        interrupted_frame = frame
-
-    try:
-        previous_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, defer_sigint)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise OSError("interrupt-safe snapshot access is unavailable") from exc
-    try:
-        return callback()
-    finally:
-        signal.signal(signal.SIGINT, previous_handler)
-        if pending and previous_handler is not signal.SIG_IGN:
-            if callable(previous_handler):
-                previous_handler(signal.SIGINT, interrupted_frame)
-            else:
-                signal.raise_signal(signal.SIGINT)
+    return run_sigint_deferred(
+        callback, detail="interrupt-safe snapshot access is unavailable")
 
 
 def _hold_snapshot_files(root_fd, snapshot, held):
