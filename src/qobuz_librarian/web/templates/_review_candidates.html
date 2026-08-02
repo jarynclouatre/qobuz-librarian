@@ -9,8 +9,8 @@
      data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"{% endif %}
      data-review-item-singular="{{ labels.review_item_singular(job) }}"
      data-review-item-plural="{{ labels.review_item_plural(job) }}"
-     data-review-dismiss-singular="{% if review_tab == 'gaps' %}Gap Fill candidate{% elif review_tab == 'missing' %}missing album{% elif job.execute_kind == 'upgrade' %}upgrade{% else %}album{% endif %}"
-     data-review-dismiss-plural="{% if review_tab == 'gaps' %}Gap Fill candidates{% elif review_tab == 'missing' %}missing albums{% elif job.execute_kind == 'upgrade' %}upgrades{% else %}albums{% endif %}"
+     data-review-dismiss-singular="{% if review_tab == 'gaps' %}Gap Fill candidate{% elif review_tab == 'missing' %}missing album{% else %}album{% endif %}"
+     data-review-dismiss-plural="{% if review_tab == 'gaps' %}Gap Fill candidates{% elif review_tab == 'missing' %}missing albums{% else %}albums{% endif %}"
      data-review-other-tab="{% if review_tab == 'gaps' %}Your missing albums are untouched.{% elif review_tab == 'missing' %}Your Gap Fill list is untouched.{% endif %}">
   {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
   {% set _hidden_url = '/upgrade/hidden' if job.execute_kind == 'upgrade'

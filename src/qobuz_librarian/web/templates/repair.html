@@ -16,7 +16,12 @@
     {% include "_connect_cta.html" %}
   {% endwith %}
 </section>
-{% elif not repair_job %}
+{% elif not repair_job or repair_job.status.value in ('failed', 'canceled') %}
+{# A failed or cancelled run stays on the page — but with the launcher under
+   it, or the surface owned by a dead job had no way to start another scan. #}
+{% if repair_job and qobuz_ready %}
+{% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
+{% endif %}
 <div class="ql-work-status">
   <span class="ql-status-chip {% if repair_resume %}is-warning{% else %}is-neutral{% endif %}">
     {% if repair_resume %}Resume available{% else %}Ready to scan{% endif %}

@@ -488,6 +488,14 @@
     });
   }
 
+  var searchExitSave = null;
+  window.addEventListener("pagehide", function () {
+    if (searchExitSave) searchExitSave();
+  });
+  window.addEventListener("beforeunload", function () {
+    if (searchExitSave) searchExitSave();
+  });
+
   function initSearchResults() {
     document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
       if (root.dataset.searchWired === "1") return;
@@ -496,7 +504,11 @@
       // by the search that produced them. Picking twenty albums out of five
       // hundred is twenty minutes of scrolling; losing it to a pull-to-refresh
       // was the worst thing this screen did.
-      var stateKey = "ql-search-sel:" + location.pathname + location.search;
+      // Keyed by the search itself, not the URL: results arrive by htmx swap,
+      // so the URL reads "/" for every query and one search's picks would
+      // haunt the next (ghost "3 selected" bars, phantom scroll jumps).
+      var stateKey = "ql-search-sel:" +
+        (root.dataset.searchState || location.pathname + location.search);
       function loadSelection() {
         try { return JSON.parse(sessionStorage.getItem(stateKey) || "{}") || {}; }
         catch (e) { return {}; }
@@ -683,7 +695,7 @@
       }
       function itemTitle(form) {
         var item = form.closest && form.closest("[data-search-item]");
-        var el = item && item.querySelector(".ql-table-title, .ql-grid-title, .ql-result-title");
+        var el = item && item.querySelector(".ql-table-title, .ql-grid-title, .ql-result-title, .ql-subtitle");
         return el ? el.textContent.replace(/\s+/g, " ").trim() : "";
       }
       function runBulkDownload(forms) {
@@ -691,6 +703,7 @@
         bulkButton.disabled = true;
         bulkButton.textContent = "Queueing...";
         var queued = 0;
+        var queuedTracks = 0;
         var skipped = 0;
         var failed = 0;
         var firstTitle = "";
@@ -704,6 +717,7 @@
                 markSearchDownloadQueued(form);
               } else {
                 queued += 1;
+                if (form.querySelector('input[name="track_id"]')) queuedTracks += 1;
                 if (!firstTitle) firstTitle = itemTitle(form);
                 markSearchDownloadQueued(form);
               }
@@ -719,10 +733,15 @@
           // and link where it went, instead of a bare count.
           var parts = [];
           if (queued) {
+            var queuedAlbums = queued - queuedTracks;
+            var what = !queuedAlbums ? cnt(queued, "track", "tracks")
+              : !queuedTracks ? cnt(queued, "album", "albums")
+              : queuedAlbums + " albums and " + cnt(queuedTracks, "track", "tracks");
             parts.push(queued === 1 && firstTitle
               ? "“" + firstTitle + "” queued"
-              : queued + " albums queued");
+              : what + " queued");
           }
+          function cnt(n, one, many) { return n + " " + (n === 1 ? one : many); }
           if (skipped) parts.push(skipped + " already queued");
           if (failed) parts.push(failed + " failed");
           var receipt = document.createElement("span");
@@ -751,7 +770,10 @@
       if (restored.scrollY && selectedKeys().length) {
         requestAnimationFrame(function () { window.scrollTo(0, restored.scrollY); });
       }
-      window.addEventListener("beforeunload", saveSelection);
+      // Hand the shared exit hook to this (the live) results root. The old
+      // per-root beforeunload listeners piled up across searches and iOS
+      // never fires beforeunload at all — pagehide does.
+      searchExitSave = saveSelection;
     });
   }
 
@@ -1030,8 +1052,28 @@
     var isDownsampleReview = reviewKind === "downsample";
     var reviewItemSingular = cont.dataset.reviewItemSingular || "album";
     var reviewItemPlural = cont.dataset.reviewItemPlural || "albums";
-    var dismissItemSingular = cont.dataset.reviewDismissSingular || "album";
-    var dismissItemPlural = cont.dataset.reviewDismissPlural || "albums";
+    // Live, not baked: on a library review the dismiss vocabulary follows
+    // whichever tab is active NOW — the data attributes only know the tab the
+    // page was first rendered with.
+    function dismissItemSingular() {
+      if (reviewKind === "library" && curTab()) {
+        return curTab() === "gaps" ? "Gap Fill candidate" : "missing album";
+      }
+      return cont.dataset.reviewDismissSingular || "album";
+    }
+    function dismissItemPlural() {
+      if (reviewKind === "library" && curTab()) {
+        return curTab() === "gaps" ? "Gap Fill candidates" : "missing albums";
+      }
+      return cont.dataset.reviewDismissPlural || "albums";
+    }
+    function otherTabNote() {
+      if (reviewKind !== "library" || !curTab()) {
+        return cont.dataset.reviewOtherTab || "";
+      }
+      return curTab() === "gaps" ? "Your missing albums are untouched."
+                                 : "Your Gap Fill list is untouched.";
+    }
 
     function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
     function countLabel(n, one, many) { return n + " " + (n === 1 ? one : many); }
@@ -1046,15 +1088,15 @@
       if (isDownsampleReview) {
         return "Keep " + countLabel(rest, "unselected album", "unselected albums") + " hi-res? You can downsample later.";
       }
-      var other = cont.dataset.reviewOtherTab;
-      return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular, "unselected " + dismissItemPlural) + "?"
+      var other = otherTabNote();
+      return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular(), "unselected " + dismissItemPlural()) + "?"
         + (other ? " " + other : "") + " You can bring them back from Dismissed.";
     }
     function dismissBusyLabel() { return isDownsampleReview ? "Keeping…" : "Dismissing…"; }
     function dismissToast(count) {
       return isDownsampleReview
         ? "Kept " + plural(count, "album") + " hi-res."
-        : "Dismissed " + countLabel(count, dismissItemSingular, dismissItemPlural) + ".";
+        : "Dismissed " + countLabel(count, dismissItemSingular(), dismissItemPlural()) + ".";
     }
     function csrf() {
       var m = document.querySelector('meta[name="csrf-token"]');
@@ -1097,6 +1139,10 @@
     function applyCounts(c) {
       if (!c) return;
       lastCounts = c;
+      if (typeof c.filtered_rest === "number") {
+        var fb = pageBox();
+        if (fb) fb.dataset.filteredRest = String(c.filtered_rest);
+      }
       var tc = tabCounts(c);
       if (submit) {
         submit.disabled = tc.selected === 0;
@@ -1195,6 +1241,12 @@
     // Save one checkbox to the server, then refresh counts from its response.
     function saveTick(cb) {
       var previous = !cb.checked;
+      // Under a filter the response also recounts what Dismiss unselected
+      // would take, so the button can't quote the number from render time.
+      var scopeQ = curQuery()
+        ? "&q=" + encodeURIComponent(curQuery()) +
+          "&tab=" + encodeURIComponent(curTab())
+        : "";
       var det = cb.closest("details[data-artist]");
       function revert() {
         cb.checked = previous;
@@ -1206,14 +1258,19 @@
       // <body>, and re-enabling never gives it back, so a keyboard user had to
       // Tab from the top of the page again for every single tick. A busy flag
       // does the same job and leaves focus where the user put it.
-      if (cb.dataset.saving === "1") return;
+      if (cb.dataset.saving === "1") {
+        // The box already flipped visually; putting it back beats letting the
+        // screen contradict the server with nothing to heal it.
+        cb.checked = previous;
+        return;
+      }
       cb.dataset.saving = "1";
       cb.setAttribute("aria-busy", "true");
       function done() {
         delete cb.dataset.saving;
         cb.removeAttribute("aria-busy");
       }
-      var body = "cid=" + encodeURIComponent(cb.value) + "&checked=" + (cb.checked ? "1" : "0");
+      var body = "cid=" + encodeURIComponent(cb.value) + "&checked=" + (cb.checked ? "1" : "0") + scopeQ;
       post("/jobs/" + id + "/select", body)
         .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
         .then(function (c) {
@@ -1341,6 +1398,16 @@
     }
 
     // Label each artist action for what it will drop or keep.
+    function artistDismissConfirm(who, rest) {
+      if (isDownsampleReview) {
+        return "Keep the " + rest + " unselected " +
+          (rest === 1 ? "album" : "albums") + " by " + who +
+          " hi-res? You can downsample them later.";
+      }
+      return "Dismiss the " + rest + " unselected " +
+        (rest === 1 ? dismissItemSingular() : dismissItemPlural()) +
+        " by " + who + "? You can bring them back from Dismissed.";
+    }
     function updateHideLabels() {
       var box = pageBox();
       if (!box) return;
@@ -1360,6 +1427,20 @@
           : det.querySelectorAll(".cb:checked").length;
         btn.classList.toggle("hidden", total > 0 && picked === total);
         lbl.textContent = artistDismissLabel(picked);
+        // The rendered confirm counts the moment the page was built; ticks
+        // since then change what the button will take. Rewrite it live — and
+        // give the button a confirm at all when it reappears on a group that
+        // rendered fully selected (the template omits one at rest == 0).
+        var rest = total - picked;
+        if (rest > 0) {
+          btn.setAttribute("data-confirm",
+            artistDismissConfirm(det.dataset.artist || "this artist", rest));
+          btn.setAttribute("data-confirm-action",
+            isDownsampleReview ? "Keep hi-res" : "Dismiss");
+          btn.setAttribute("data-confirm-danger", "");
+        } else {
+          btn.removeAttribute("data-confirm");
+        }
       });
     }
 
@@ -1573,7 +1654,7 @@
         var confirmMsg = curQuery()
           ? (isDownsampleReview
               ? "Keep the " + countLabel(rest, "unselected album", "unselected albums") + " matching your filter hi-res? You can downsample them later."
-              : "Dismiss the " + countLabel(rest, "unselected " + dismissItemSingular, "unselected " + dismissItemPlural) + " matching your filter? You can bring them back from Dismissed.")
+              : "Dismiss the " + countLabel(rest, "unselected " + dismissItemSingular(), "unselected " + dismissItemPlural()) + " matching your filter? You can bring them back from Dismissed.")
           : dismissConfirm(rest);
         window.qlConfirm(confirmMsg, {
           action: isDownsampleReview ? "Keep hi-res" : "Dismiss",
@@ -1670,13 +1751,13 @@
       if (!raw) return;
       var place;
       try { place = JSON.parse(raw); } catch (e) { return; }
-      if (!place || !place.open || !place.open.length) return;
+      if (!place || (!(place.open || []).length && !(place.y > 0))) return;
       var moved = false;
       function noteMove() { moved = true; }
       window.addEventListener("wheel", noteMove, { passive: true });
       window.addEventListener("touchmove", noteMove, { passive: true });
       var waits = [];
-      place.open.forEach(function (name) {
+      (place.open || []).forEach(function (name) {
         var esc = window.CSS && CSS.escape ? CSS.escape(name)
                                            : name.replace(/"/g, '\\"');
         var d = cont.querySelector('details[data-artist="' + esc + '"]');
@@ -1757,6 +1838,7 @@
   document.addEventListener("htmx:afterRequest", function (e) {
     var form = e.target && e.target.closest && e.target.closest(".ql-search-form");
     if (!form) return;
+    if (e.detail && e.detail.successful === false) return;
     form.querySelectorAll("[data-deep-link]").forEach(function (el) { el.remove(); });
   });
   cleanFlashUrl();

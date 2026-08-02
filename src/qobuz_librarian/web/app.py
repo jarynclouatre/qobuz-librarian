@@ -547,7 +547,11 @@ def _durable_recovery_response(request, message: str):
             _ql_notice_html("error", html.escape(message)),
             status_code=200,
         )
-    return _tr(request, "lock_busy.html", {"msg": message}, status_code=503)
+    # can_retry: these messages end in "restart Qobuz Librarian", and after a
+    # restart a reload is exactly the next step — without it the page offered
+    # no way forward at all.
+    return _tr(request, "lock_busy.html", {"msg": message, "can_retry": True},
+               status_code=503)
 
 
 def _ql_notice_html(kind: str, body: str) -> str:
@@ -1637,10 +1641,15 @@ def _recovery_on_disk(recovery) -> bool:
     """Whether a Repair job's kept-originals folder is still where its record
     says. Drives the job page's pointer honesty: Settings → Diagnostics only
     lists folders it can see, so a job must not send the user there for one
-    that is gone. When the check itself fails, err towards "present" — a
-    folder we can't stat (unmounted volume) is not a folder that's gone."""
+    that is gone. Only a folder whose PARENT is present but which itself
+    isn't counts as gone — an unmounted volume makes the whole tree
+    disappear without any OSError, and that must read as "can't tell", not
+    as licence to clear the alarm."""
     try:
-        return Path(str((recovery or {}).get("location") or "")).is_dir()
+        p = Path(str((recovery or {}).get("location") or ""))
+        if p.is_dir():
+            return True
+        return not p.parent.is_dir()
     except OSError:
         return True
 
@@ -6311,14 +6320,9 @@ async def library_hidden_restore_all(request: Request):
     from qobuz_librarian.web import flows
     loop = asyncio.get_running_loop()
 
-    def _restore():
-        artists = [g["artist"]
-                   for g in hidden_mod.hidden_by_artist(hidden_mod.SCOPE_MISSING)]
-        hidden_mod.restore_all(hidden_mod.SCOPE_MISSING)
-        return artists
-
     try:
-        artists = await loop.run_in_executor(None, _restore)
+        artists = await loop.run_in_executor(
+            None, lambda: hidden_mod.take_all(hidden_mod.SCOPE_MISSING))
     except OSError as e:
         return RedirectResponse(
             url="/library/hidden?notice=" + urllib.parse.quote(str(e)),
@@ -6802,10 +6806,7 @@ def _review_context(job, page=1, query="", tab=""):
         "review_query": query,
         # What "Dismiss unselected" would actually take under this filter. The
         # button used to quote the tab total while acting on the filtered set.
-        "review_filtered_rest": sum(
-            1 for _artist, rows in groups
-            for row in rows if not row.get("selected")
-        ),
+        "review_filtered_rest": _filtered_rest_of(groups),
         "review_tab": tab,
         "review_tab_counts": tab_counts,
         "review_hidden_count": hidden_mod.count(_hide_scope(job.execute_kind)),
@@ -7219,6 +7220,18 @@ def _selection_payload(job, *, persist_failed=False):
     return payload
 
 
+def _filtered_rest_of(groups):
+    return sum(1 for _artist, rows in groups
+               for row in rows if not row.get("selected"))
+
+
+def _filtered_rest(job, query, tab):
+    """Unselected candidates under a review filter — what Dismiss unselected
+    will take. The tick endpoints re-answer this so the button can't keep
+    quoting the number from render time."""
+    return _filtered_rest_of(_review_artist_groups(job, query, tab))
+
+
 def _review_tab_totals(job):
     """Whole-set totals and selected counts behind a library review's Missing
     Albums / Gap Fill tabs, ignoring the page filter so the tab labels stay
@@ -7260,7 +7273,12 @@ async def job_select(request: Request, job_id: str):
         # the tap must not wait for (or even schedule) a full serialize+write.
         job_mgr.persist_soon(job)
         job.notify_review_changed(_review_origin(request))
-    return JSONResponse(_selection_payload(job))
+    payload = _selection_payload(job)
+    q = (form.get("q") or "").strip()
+    if q:
+        payload["filtered_rest"] = _filtered_rest(
+            job, q, (form.get("tab") or "").strip())
+    return JSONResponse(payload)
 
 
 @app.post("/jobs/{job_id}/select-all")
@@ -7311,8 +7329,10 @@ async def job_select_all(request: Request, job_id: str):
             None, lambda: job_persistence.persist(job))
         persist_failed = not saved
         job.notify_review_changed(_review_origin(request))
-    return JSONResponse(
-        _selection_payload(job, persist_failed=persist_failed))
+    payload = _selection_payload(job, persist_failed=persist_failed)
+    if q:
+        payload["filtered_rest"] = _filtered_rest(job, q, tab)
+    return JSONResponse(payload)
 
 
 @app.get("/jobs/{job_id}/review-group-items", response_class=HTMLResponse)
@@ -8575,11 +8595,14 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    if verdict == "unreachable" and new_token and _TOKEN_VALID:
+    if (verdict == "unreachable" and new_token and _TOKEN_VALID
+            and new_token != existing.get("auth_token", "")):
         # Couldn't check it, and the token already saved is one that has
         # authenticated. Overwriting a known-good credential with an unproven
         # one — and then reporting "Connected" — is how a working install
-        # became a broken one during a network blip.
+        # became a broken one during a network blip. A save that keeps the
+        # same token (blank field, or a user-id-only edit) overwrites
+        # nothing and passes.
         return _settings_response(request, error="unreachable",
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),

@@ -294,10 +294,32 @@ def clear_local_album_cap(album_dir):
         return 0
     path = Path(album_dir)
     capped = load_capped()
+
+    def _direct(k, v):
+        return (k == key
+                or (isinstance(v, dict) and v.get("scope") == "local_album"
+                    and str(v.get("album_dir") or "") == str(path)))
+
+    # is_local_album_capped also matches path-independently, by Qobuz id and
+    # by artist+title fingerprint — so the undo has to clear by the same
+    # identities, or an entry re-marked under a moved folder keeps
+    # suppressing the album after the originals come back.
+    ids, fps = set(), set()
+    for k, v in capped.items():
+        if not (_direct(k, v) and isinstance(v, dict)):
+            continue
+        if v.get("qobuz_album_id"):
+            ids.add(str(v["qobuz_album_id"]))
+        fp = hidden_mod.album_fingerprint(
+            v.get("artist") or "", v.get("title") or "")
+        if fp:
+            fps.add(fp)
     drop = [k for k, v in capped.items()
-            if k == key
+            if _direct(k, v)
             or (isinstance(v, dict) and v.get("scope") == "local_album"
-                and str(v.get("album_dir") or "") == str(path))]
+                and (str(v.get("qobuz_album_id") or "") in ids
+                     or hidden_mod.album_fingerprint(
+                         v.get("artist") or "", v.get("title") or "") in fps))]
     for k in drop:
         capped.pop(k, None)
     if drop:

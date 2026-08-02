@@ -6132,6 +6132,9 @@ details[data-artist].htmx-swapping {
     z-index: 25;
   }
   .ql-search-results:has(.ql-bulk-bar:not(.hidden)) {
-    padding-bottom: 4.5rem;
+    /* Must clear the bar even after it wraps to two rows (≤760px stacks
+       the Download button full-width): the one-row height left the last
+       result permanently behind it. */
+    padding-bottom: 6rem;
   }
 }

@@ -100,7 +100,12 @@ def _entry_rows(entry):
     """
     rows = entry.get("rows")
     if isinstance(rows, list) and rows:
-        return [r for r in rows if isinstance(r, dict)]
+        kept = [r for r in rows if isinstance(r, dict)]
+        # A rows list holding no dicts (hand edit, partial old write) must
+        # degrade to the top-level fallback like a missing list, not return
+        # [] and crash every page that indexes rows[0].
+        if kept:
+            return kept
     return [{"title": entry.get("title") or "", "year": entry.get("year") or "",
              "ts": entry.get("ts") or ""}]
 
@@ -222,15 +227,29 @@ def restore(scope, artists):
 def restore_all(scope):
     """Un-hide every album dismissed in a scope at once (the Library page's
     'Bring all back'). Returns the count removed."""
+    return _restore_all(scope)[0]
+
+
+def take_all(scope):
+    """Clear a scope and return the artist names it held, in one lock hold.
+    The Dismissed page's Bring-all-back needs the names for the refold; read
+    outside the lock, a dismissal landing in between would be cleared but
+    never refolded — gone from both lists."""
+    return _restore_all(scope)[1]
+
+
+def _restore_all(scope):
     with _store_lock():
         store = load()
         bucket = store.get(scope) or {}
         n = sum(len(_entry_rows(e)) for e in bucket.values())
+        artists = sorted({(e.get("artist") or "Unknown artist")
+                          for e in bucket.values()})
         if bucket:
             store[scope] = {}
             if not save(store):
                 raise OSError(_SAVE_FAILED_MSG)
-    return n
+    return n, artists
 
 
 def restore_albums(scope, fingerprints):

@@ -7,6 +7,7 @@ import argparse
 import re
 import shutil
 import subprocess
+import sys
 
 from qobuz_librarian import __version__, run_lock
 from qobuz_librarian import config as cfg
@@ -24,7 +25,7 @@ from qobuz_librarian.queue.persistence import (
     offer_resume_pending_queue,
     offer_resume_startup_recovery,
 )
-from qobuz_librarian.ui_cli.colors import C, banner, fmt, set_color_enabled
+from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, set_color_enabled
 from qobuz_librarian.ui_cli.errors import (
     EXIT_AUTH,
     EXIT_CONFIG,
@@ -345,19 +346,26 @@ def _die_unsettled_startup_recovery(
         )
 
         relocation = result.post_import_relocation
-        # One path per line: joined onto one line they get split by the
-        # terminal wrap and can't be copied out of the message.
-        paths = "".join(f"\n     {path}" for path in relocation.paths)
-        message = (
+        # The prose reflows to the terminal; the paths do not. A path is only
+        # copyable if every character survives to the screen — reflow would
+        # collapse doubled spaces and wrap long ones at inner spaces.
+        intro = (
             "\n✗  An interrupted library-folder move could not be verified safely.\n"
             f"   Recovery reason: {relocation.reason or 'reason not reported'}\n"
-            f"   Paths needing attention:{paths or ' none reported'}\n"
+            "   Paths needing attention:"
+            + ("" if relocation.paths else " none reported")
+        )
+        outro = (
             "   Library changes are paused so the files remain unchanged. See "
             f"the “{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the application "
             "log for the same details. Resolve the reported recovery problem, "
             "then restart Qobuz Librarian.\n"
         )
-        color = C.RED
+        print(fmt(C.RED, block(intro)), file=sys.stderr)
+        for path in relocation.paths:
+            print(fmt(C.RED, f"     {path}"), file=sys.stderr)
+        print(fmt(C.RED, block(outro)), file=sys.stderr)
+        raise SystemExit(EXIT_GENERAL)
     else:
         message = (
             "\n✗  An interrupted download could not be verified safely.\n"
@@ -444,7 +452,10 @@ def check_rip():
         if r.returncode != 0:
             # rip is on PATH (no FileNotFoundError) but exited nonzero — it's
             # installed and broken, not missing.
-            detail = (r.stderr or r.stdout or "").strip()
+            # streamrip colours its errors; foreign escapes mid-message
+            # would make block() give up wrapping the whole thing.
+            detail = re.sub(r"\x1b\[[0-9;]*m",
+                            "", (r.stderr or r.stdout or "")).strip()
             die(fmt(C.RED,
                 f"\n✗  `rip --version` exited {r.returncode} — streamrip is "
                 f"installed but not working"
@@ -632,7 +643,8 @@ def parse_args():
     # flags alongside them would silently drop it.
     other_run_mode = (args.upgrade_walk or args.downsample_walk
                       or args.lyrics_walk or args.migrate or args.reset_walk_seen
-                      or args.check_new_releases)
+                      or args.check_new_releases or args.library_walk
+                      or args.album_gaps or args.repair)
     # Reject flag/mode combinations that would otherwise be silently dropped
     # or accepted.
     if args.force and (args.artist or other_run_mode):
@@ -643,12 +655,16 @@ def parse_args():
             and not args.migrate:
         p.error("--in-place / --acoustid / --migrate-src / --migrate-dest only "
                 "apply with --migrate")
-    # --include-singles only affects artist mode's missing-albums step.
-    if args.include_singles and not args.artist and (args.query or other_run_mode):
-        p.error("--include-singles only applies to artist mode")
-    # --no-catalog skips artist mode's missing-albums step.
-    if args.no_catalog and not args.artist and (args.query or other_run_mode):
-        p.error("--no-catalog only applies to artist mode")
+    # --include-singles only affects the missing-albums step of artist mode —
+    # which the library walk runs per artist, so it applies there too.
+    if (args.include_singles and not (args.artist or args.library_walk)
+            and (args.query or other_run_mode)):
+        p.error("--include-singles only applies to artist mode and "
+                "--library-walk")
+    # --no-catalog skips that same missing-albums step.
+    if (args.no_catalog and not (args.artist or args.library_walk)
+            and (args.query or other_run_mode)):
+        p.error("--no-catalog only applies to artist mode and --library-walk")
     # The upgrade walk reviews saved Library candidates; a query would be
     # silently ignored, so reject it instead of surprising the user.
     if args.upgrade_walk and args.query:
@@ -664,6 +680,9 @@ def parse_args():
     requested = [name for name, on in (
         ("a query (album mode)", bool(args.query)),
         ("--artist", args.artist is not None),
+        ("--library-walk", args.library_walk),
+        ("--album-gaps", args.album_gaps),
+        ("--repair", args.repair),
         ("--upgrade-walk", args.upgrade_walk),
         ("--downsample-walk", args.downsample_walk),
         ("--lyrics-walk", args.lyrics_walk),
@@ -679,9 +698,12 @@ def parse_args():
         p.error("--quiet is for unattended runs and silences the interactive "
                 "menu — name a mode (a query, --artist, --upgrade-walk, …) "
                 "or drop --quiet")
-    # --include-comps controls compilation filtering in artist mode.
-    if args.include_comps and not args.artist and (args.query or other_run_mode):
-        p.error("--include-comps only applies to artist mode")
+    # --include-comps controls compilation filtering in artist mode (and the
+    # library walk's per-artist pass).
+    if (args.include_comps and not (args.artist or args.library_walk)
+            and (args.query or other_run_mode)):
+        p.error("--include-comps only applies to artist mode and "
+                "--library-walk")
     # --no-upgrade with --upgrade-walk is contradictory.
     if args.no_upgrade and args.upgrade_walk:
         p.error("--no-upgrade conflicts with --upgrade-walk")
@@ -750,6 +772,9 @@ def main():
         args.check_new_releases,
         args.downsample_walk,
         args.artist,
+        args.library_walk,
+        args.album_gaps,
+        args.repair,
         args.upgrade_walk,
         args.query,
     )):

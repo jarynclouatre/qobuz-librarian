@@ -16,6 +16,20 @@ Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing 
 docker compose run --rm -it qobuz-librarian cli
 ```
 
+Three menu modes also have flags that jump straight to them — still
+interactive (they confirm per artist or prompt for one), so keep `-it`:
+
+```bash
+# The artist walk over every artist, queueing as you go
+docker compose run --rm -it qobuz-librarian cli --library-walk
+
+# Fill missing tracks in incomplete albums you own, nothing else
+docker compose run --rm -it qobuz-librarian cli --album-gaps
+
+# Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)
+docker compose run --rm -it qobuz-librarian cli --repair
+```
+
 ## Common unattended forms
 
 ```bash
@@ -25,15 +39,6 @@ docker compose run --rm qobuz-librarian cli https://open.qobuz.com/album/abcd123
 # Work through one artist's catalogue (--include-singles and/or
 # --include-comps to also offer singles and compilation appearances)
 docker compose run --rm qobuz-librarian cli --artist "Paysage d'Hiver"
-
-# The same walk over every artist, queueing as you go
-docker compose run --rm -it qobuz-librarian cli --library-walk
-
-# Fill missing tracks in incomplete albums you own, nothing else
-docker compose run --rm -it qobuz-librarian cli --album-gaps
-
-# Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)
-docker compose run --rm -it qobuz-librarian cli --repair
 
 # Sweep every artist for quality upgrades, auto-confirming upgrades the scanner can classify safely
 docker compose run --rm qobuz-librarian cli --upgrade-walk --auto-safe

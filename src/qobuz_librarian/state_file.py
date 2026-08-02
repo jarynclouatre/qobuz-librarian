@@ -23,6 +23,13 @@ def preserve_corrupt(path, what, reason, lost):
     can't happen (read-only volume) still warns."""
     path = Path(path)
     dest = path.with_name(path.name + ".corrupt")
+    # Never overwrite an earlier kept copy: the first preservation is the one
+    # holding the real store, and a later corruption of the near-empty
+    # replacement must not clobber it.
+    n = 2
+    while dest.exists():
+        dest = path.with_name(f"{path.name}.corrupt.{n}")
+        n += 1
     try:
         path.replace(dest)
         where = (f"the unreadable copy is kept at {dest.name} — recover from "

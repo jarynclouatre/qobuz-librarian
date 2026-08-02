@@ -126,7 +126,8 @@
   </div>
 
   {% elif kind == 'track' %}
-  <div class="ql-search-root" data-search-results-root>
+  <div class="ql-search-root" data-search-results-root
+       data-search-state="{{ kind }}|{{ q }}{% if selected_artist %}|artist:{{ selected_artist.id }}{% endif %}">
     <div class="ql-search-context">
       <div class="ql-search-context-main">
         <span class="ql-search-context-meta">{{ results | length }} track{{ 's' if results | length != 1 else '' }}</span>
@@ -197,7 +198,8 @@
 
   {% else %}
   {% set n_albums = album_groups | length %}
-  <div class="ql-search-root" data-search-results-root>
+  <div class="ql-search-root" data-search-results-root
+       data-search-state="{{ kind }}|{{ q }}{% if selected_artist %}|artist:{{ selected_artist.id }}{% endif %}">
     <div class="ql-search-context">
       <div class="ql-search-context-main">
         {% if selected_artist %}

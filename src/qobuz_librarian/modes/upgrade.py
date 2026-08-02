@@ -17,7 +17,7 @@ from qobuz_librarian.quality.decision import (
     load_capped,
     mark_album_capped,
 )
-from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
+from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
@@ -152,6 +152,7 @@ def run_upgrade_walk_mode(args, token):
     n_upgraded_albums = 0
     n_unverified_albums = 0
     n_failed_albums = 0
+    no_answer = False
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
 
     log.info(fmt(C.GRAY,
@@ -229,9 +230,17 @@ def run_upgrade_walk_mode(args, token):
                     f"  ✓  --auto-safe: all {n_albums} candidate(s) high-confidence."))
             else:
                 _flush_stdin()
-                if not confirm(f"  Upgrade {plural(n_albums, 'album')}?",
-                               default_yes=False,
-                               auto_yes=args.yes or auto_accept_all):
+                # on_eof=None so a closed stdin is distinguishable from a No:
+                # the walk would otherwise skip every artist and call that a
+                # success — the same lie the downsample walk told.
+                answer = confirm(f"  Upgrade {plural(n_albums, 'album')}?",
+                                 default_yes=False,
+                                 auto_yes=args.yes or auto_accept_all,
+                                 on_eof=None)
+                if answer is None:
+                    no_answer = True
+                    break
+                if not answer:
                     log.info(fmt(C.GRAY, "  Skipped."))
                     log.info("")
                     continue
@@ -312,8 +321,13 @@ def run_upgrade_walk_mode(args, token):
         args.consolidate = saved_consolidate
 
     log.info("")
-    if n_upgraded_albums or not (n_failed_albums or n_unverified_albums
-                                 or n_gone):
+    if no_answer:
+        log.warning(block(fmt(C.YELLOW,
+            "  ✗  The walk stopped: each artist needs a confirmation and "
+            "there is no terminal to give one. Re-run with --yes (or "
+            "--auto-safe) to accept unattended.")))
+    elif n_upgraded_albums or not (n_failed_albums or n_unverified_albums
+                                   or n_gone):
         log.info(fmt(C.GREEN, "  ✓  Upgrade walk complete."))
     else:
         # Every candidate failed, went unverified or was gone from disk — a
@@ -346,4 +360,4 @@ def run_upgrade_walk_mode(args, token):
                     f"       · {truncate(_t, 50)}  —  {'; '.join(_rs)}"))
         log.info(fmt(C.GRAY,
             "     Re-run without --auto-safe to review these interactively."))
-    return 0
+    return EXIT_GENERAL if no_answer else 0

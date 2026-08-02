@@ -200,10 +200,15 @@ def run_downsample_walk_mode(args):
 
     log.info("")
     if no_answer:
+        # Input can also run dry mid-walk (a piped "y\n"), so only claim
+        # nothing happened when nothing did.
+        done_part = ("Nothing was downsampled" if not n_albums_done else
+                     "The walk stopped early")
         log.warning(block(fmt(C.YELLOW,
-            "  ✗  Nothing was downsampled: each artist needs a confirmation and "
-            "there is no terminal to give one. Re-run with --yes to accept all "
-            f"{plural(len(candidates_by_artist), 'artist')} unattended.")))
+            f"  ✗  {done_part}: each artist needs a confirmation and "
+            "there is no terminal left to give one. Re-run with --yes to "
+            f"accept all {plural(len(candidates_by_artist), 'artist')} "
+            "unattended.")))
     elif interrupted:
         log.info(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
     else:

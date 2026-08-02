@@ -54,7 +54,9 @@
     <summary class="ql-hidden-summary">
       <span class="ql-hidden-summary-copy">
         <span class="ql-hidden-artist">{{ g.artist }}</span>
-        <span class="ql-hidden-count">{{ g.rows }} album{% if g.rows != 1 %}s{% endif %}</span>
+        {# The list shows one row per entry (editions fold into it), so the
+           count uses the same unit as the rows and the page-level button. #}
+        <span class="ql-hidden-count">{{ g.albums | length }} album{% if g.albums | length != 1 %}s{% endif %}</span>
       </span>
       <svg class="ql-hidden-chevron" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12h14"/>

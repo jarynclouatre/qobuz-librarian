@@ -92,7 +92,8 @@ def _isolate_data_dir():
     # reverting to the real HOME paths and a live auto-check for the rest of the
     # session.
     prior_env = {k: os.environ.get(k) for k in
-                 ("WEB_AUTH", "DATA_DIR", "NEW_RELEASE_CHECK_INTERVAL",
+                 ("COLUMNS",
+                  "WEB_AUTH", "DATA_DIR", "NEW_RELEASE_CHECK_INTERVAL",
                   "AUTO_LIBRARY_SCAN", "ALBUM_CACHE_ENABLED", "FLAC_CACHE_ENABLED",
                   "REPAIR_CACHE_ENABLED",
                   "UPGRADE_SCAN_ENABLED",
