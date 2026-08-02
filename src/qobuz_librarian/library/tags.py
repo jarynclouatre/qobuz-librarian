@@ -386,6 +386,58 @@ def strip_album_decorations(name):
     return s or name
 
 
+# The affirmative-decoration gate for the strict variant below: a bare year,
+# or edition vocabulary. Two things that LOOK like decorations are identity
+# and must not match — a year span ("1972-1975" names which albums a box
+# holds) and a possessive version ("Taylor's Version" is a re-recording, not
+# a format; "Collector's Edition" is covered by its own keyword).
+_DECOR_PAREN_KEYWORD_RE = re.compile(
+    r"\b(?:(?:re)?master(?:ed)?|deluxe|edition|expanded|anniversary|"
+    r"reissue|hi-?res|hd|version|explicit|clean|mono|stereo|legacy|"
+    r"special|collector'?s|limited|bonus|digital)\b",
+    re.IGNORECASE,
+)
+_YEAR_SPAN_RE = re.compile(r"\d{4}\s*[-–—/]\s*\d{4}")
+_POSSESSIVE_VERSION_RE = re.compile(r"\b(?!collector)\w+'s\s+version\b",
+                                    re.IGNORECASE)
+
+
+def _paren_tag_is_decoration(tag):
+    tag = tag.strip()
+    if re.fullmatch(r"\d{4}", tag):
+        return True
+    if _YEAR_SPAN_RE.search(tag) or _POSSESSIVE_VERSION_RE.search(tag):
+        return False
+    return bool(_DECOR_PAREN_KEYWORD_RE.search(tag))
+
+
+@lru_cache(maxsize=2048)
+def strip_album_decorations_strict(name):
+    """strip_album_decorations for identity keys: a trailing parenthesized
+    tag is removed only when it affirmatively reads as a decoration (a bare
+    year, or edition vocabulary), never merely because it is parenthesized.
+
+    The loose variant's catch-all is right for fuzzy owned-matching, which
+    backs it with similarity scores and confirmations — but as a store key it
+    collapsed distinct albums: 'Alone' with 'Alone (Again)', 'Rancid' with
+    'Rancid (5)', 'The Asylum Albums (1972-1975)' with '(1976-1980)'. Those
+    keep their parentheses here; 'Revolver (2009 Remaster)' still folds."""
+    s = name
+    for _ in range(8):
+        new = _LEADING_YEAR_RE.sub("", s).strip()
+        if new == s:
+            m = _TRAILING_PAREN_CAPTURE_RE.search(s)
+            if (m and not _ALBUM_VARIANT_RE.search(m.group(1))
+                    and _paren_tag_is_decoration(m.group(1))):
+                new = s[: m.start()].strip()
+        if new == s:
+            new = _EDITION_TAIL_RE.sub("", s).strip()
+        if new == s or not new:
+            break
+        s = new
+    return s or name
+
+
 def strip_year_decoration(name):
     """Remove only a leading or trailing year tag from an album folder name.
 

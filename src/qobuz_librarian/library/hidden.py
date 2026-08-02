@@ -22,17 +22,13 @@ Explicit single-artist scans do NOT consult this store — typing a name is a
 conscious request to see everything by that artist. Only the bulk walks filter
 on it.
 """
-import fcntl
-import json
-import os
-import tempfile
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.library.tags import normalize, strip_album_decorations
+from qobuz_librarian.library.tags import normalize, strip_album_decorations_strict
 
 SCOPE_MISSING = "missing"
 SCOPE_UPGRADE = "upgrade"
@@ -53,25 +49,8 @@ def _store_lock():
     run-lock (so a review row can still be dismissed while a scan holds it, or
     after the web app hands the run-lock to the terminal).
     """
-    with _LOCK:
-        lock_path = cfg.HIDDEN_FILE.parent / (cfg.HIDDEN_FILE.name + ".lock")
-        fh = None
-        try:
-            cfg.HIDDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(lock_path, "w", encoding="utf-8")
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            if fh is not None:
-                fh.close()
-                fh = None
-        try:
-            yield
-        finally:
-            if fh is not None:
-                try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                finally:
-                    fh.close()
+    with _LOCK, state_file.store_lock(cfg.HIDDEN_FILE):
+        yield
 
 
 def album_fingerprint(artist, title):
@@ -83,7 +62,10 @@ def album_fingerprint(artist, title):
     wrongly hidden.
     """
     a = normalize(artist or "")
-    t = normalize(strip_album_decorations(title or ""))
+    # The strict strip: the loose one collapsed distinct albums into one key
+    # ('Alone' with 'Alone (Again)'), so dismissing one buried the other and
+    # a kept album could vanish under a dismissed sibling's fingerprint.
+    t = normalize(strip_album_decorations_strict(title or ""))
     if not a or not t:
         return None
     return f"{a}|{t}"
@@ -124,8 +106,48 @@ def load():
     for scope in _SCOPES:
         bucket = data.get(scope)
         if isinstance(bucket, dict):
-            base[scope] = {k: v for k, v in bucket.items() if isinstance(v, dict)}
+            base[scope] = _rekeyed(
+                {k: v for k, v in bucket.items() if isinstance(v, dict)})
     return base
+
+
+def _rekeyed(bucket):
+    """Entries under the fingerprint the current key function produces.
+
+    A store written before the strict title key computed its keys with the
+    loose one, which merged distinct albums — one entry can therefore cover
+    rows that now belong under several keys. Rebuild each entry's key(s) from
+    the full titles its rows kept; entries whose rows don't recompute (no
+    titles recorded, artist lost) stay under their stored key. In-memory
+    only — the next save persists the re-keyed form."""
+    out = {}
+    for old_key, entry in bucket.items():
+        rows = _entry_rows(entry)
+        artist = entry.get("artist") or ""
+        split = {}
+        for row in rows:
+            fp = album_fingerprint(artist, row.get("title") or "")
+            if fp is None:
+                split = None
+                break
+            split.setdefault(fp, []).append(row)
+        if not split:
+            out[old_key] = entry
+            continue
+        for fp, fp_rows in split.items():
+            if fp in out:
+                have = {(r.get("title"), r.get("year"))
+                        for r in out[fp].get("rows") or []}
+                out[fp]["rows"] = (out[fp].get("rows") or []) + [
+                    r for r in fp_rows if (r.get("title"), r.get("year"))
+                    not in have]
+                continue
+            head = dict(entry)
+            head["title"] = fp_rows[0].get("title") or entry.get("title") or ""
+            head["year"] = fp_rows[0].get("year") or ""
+            head["rows"] = fp_rows
+            out[fp] = head
+    return out
 
 
 _SAVE_FAILED_MSG = ("Couldn't save that — the data folder looks full or "
@@ -136,19 +158,7 @@ def save(store):
     # Callers hold _store_lock() across load()+save(), so this writer never
     # races a second writer of the same store.
     try:
-        cfg.HIDDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(cfg.HIDDEN_FILE.parent),
-                                   prefix=cfg.HIDDEN_FILE.name + ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(store, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, cfg.HIDDEN_FILE)
-        finally:
-            if os.path.exists(tmp):
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+        state_file.write_json(cfg.HIDDEN_FILE, store, ensure_ascii=False)
         return True
     except OSError as e:
         from qobuz_librarian.ui_cli.logging import vlog
