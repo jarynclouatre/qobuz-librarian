@@ -270,7 +270,9 @@ def find_album_dir_filesystem(qobuz_album):
                 _parent_kid_names[p_str] = {
                     k.name for k in _list_artist_subdirs_cached(c.parent)
                 }
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
+                # A predicted artist dir can be a stray regular FILE with that
+                # name; that's "no albums here", not a scan-stopping error.
                 _parent_kid_names[p_str] = set()
         if c.name in _parent_kid_names[p_str]:
             vlog(f"exact match: {c}")
@@ -302,7 +304,9 @@ def find_album_dir_filesystem(qobuz_album):
 
     for av in artist_variants:
         ad = config.MUSIC_ROOT / beets_sanitize(av)
-        if ad.exists():
+        # is_dir, not exists: a stray regular file with an artist's name would
+        # blow up the subdir listing below with NotADirectoryError.
+        if ad.is_dir():
             _push(ad)
         for ma in _find_multi_artist_dirs(av):
             _push(ma)

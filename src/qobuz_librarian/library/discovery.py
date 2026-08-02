@@ -369,7 +369,8 @@ def _materialize_tracks(album, token):
 @dataclass
 class DirMatch:
     """How one owned folder matched the catalog. status is one of: partial,
-    complete, false_match, predicted_path_mismatch, no_tracks, no_match."""
+    complete, false_match, low_overlap, predicted_path_mismatch, no_tracks,
+    no_match."""
     status: str
     album_dir: Path
     qobuz_album: dict | None = None
