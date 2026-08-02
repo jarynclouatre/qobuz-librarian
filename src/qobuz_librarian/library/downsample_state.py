@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.downsample import DownsampleCandidate
@@ -85,13 +86,12 @@ def _hidden_signature(hidden):
 
 
 def load():
-    if not cfg.DOWNSAMPLE_STATE_FILE.exists():
-        return _empty_state()
-    try:
-        data = json.loads(cfg.DOWNSAMPLE_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _empty_state()
-    if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+    data = state_file.load_json_object(
+        cfg.DOWNSAMPLE_STATE_FILE, "the saved downsample scan",
+        "the Downsample candidates from your last Library refresh")
+    # A version the build doesn't know is a deliberate schema signal, not
+    # corruption: leave the file alone and rebuild from a fresh scan.
+    if data is None or data.get("version") != STATE_VERSION:
         return _empty_state()
     base = _empty_state()
     base.update({

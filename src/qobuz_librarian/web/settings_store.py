@@ -12,6 +12,7 @@ import threading
 from typing import Optional
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.ui_cli.errors import plural
 
 log = logging.getLogger("qobuz_librarian")
@@ -284,24 +285,26 @@ def _apply(values: dict):
             setattr(cfg, key, str(raw or "").strip())
 
 
+def _read_settings():
+    """The persisted settings, or None when there are none to read. A corrupt
+    file is kept aside instead of being flattened by the next save — every
+    behaviour setting would otherwise revert to its env default silently."""
+    return state_file.load_json_object(
+        SETTINGS_FILE, "the settings file", "your saved Settings")
+
+
 def load():
     """Apply the persisted settings file over env defaults, if present."""
-    try:
-        if SETTINGS_FILE.exists():
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _apply(data)
-                # _apply coerces a persisted lossy STREAMRIP_QUALITY (0/1) to
-                # 2 in cfg; normalise it on disk too so the stale value
-                # doesn't linger and get re-coerced on every load.
-                if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
-                    data["STREAMRIP_QUALITY"] = "2"
-                    _atomic_write_settings(data)
-    except (OSError, ValueError) as exc:
-        # A corrupt or unreadable file would otherwise revert every behaviour
-        # setting to its env default with no hint why — say so once.
-        log.warning("Ignoring unreadable settings file %s: %s",
-                    SETTINGS_FILE, exc)
+    data = _read_settings()
+    if data is None:
+        return
+    _apply(data)
+    # _apply coerces a persisted lossy STREAMRIP_QUALITY (0/1) to 2 in cfg;
+    # normalise it on disk too so the stale value doesn't linger and get
+    # re-coerced on every load.
+    if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
+        data["STREAMRIP_QUALITY"] = "2"
+        _atomic_write_settings(data)
 
 
 def _any_active_job() -> bool:
@@ -402,14 +405,7 @@ def _save_locked(values: dict):
             # read as a change and pin the field.
             clean[key] = str(values[key] or "").strip()
 
-    persisted = {}
-    try:
-        if SETTINGS_FILE.exists():
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                persisted = data
-    except (OSError, ValueError):
-        pass  # unreadable file — start over, the same way load() does
+    persisted = _read_settings() or {}
     for k, v in clean.items():
         if k in persisted or v != baseline.get(k):
             persisted[k] = v

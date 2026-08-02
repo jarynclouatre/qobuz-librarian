@@ -35,6 +35,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from qobuz_librarian import state_file
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 
 # mutagen and syncedlyrics are decoupled on purpose: tag-only operations
@@ -219,20 +220,16 @@ class TrackState:
 
 
 def load_state(path: Path = DEFAULT_STATE_FILE) -> dict[str, TrackState]:
-    if not path.exists():
+    raw = state_file.load_json_object(
+        path, "the lyrics state file",
+        "the record of which tracks have already been checked for lyrics")
+    if raw is None:
         return {}
-    try:
-        raw = json.loads(path.read_text())
-        # Strip legacy keys (e.g. 'attempts', removed in schema cleanup) so
-        # existing state files load cleanly instead of raising TypeError.
-        _known = TrackState.__dataclass_fields__
-        return {k: TrackState(**{fk: fv for fk, fv in v.items() if fk in _known})
-                for k, v in raw.items()}
-    except Exception as e:
-        logging.getLogger("lyric_fetch").warning(
-            "State file unreadable (%s), starting fresh: %s", path, e
-        )
-        return {}
+    # Strip legacy keys (e.g. 'attempts', removed in schema cleanup) so
+    # existing state files load cleanly instead of raising TypeError.
+    _known = TrackState.__dataclass_fields__
+    return {k: TrackState(**{fk: fv for fk, fv in v.items() if fk in _known})
+            for k, v in raw.items() if isinstance(v, dict)}
 
 
 @contextmanager

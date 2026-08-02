@@ -7,6 +7,7 @@ import threading
 import time
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 
 STATE_VERSION = 1
 
@@ -67,13 +68,12 @@ def hidden_signature(store, scope: str) -> str:
 
 
 def load():
-    if not cfg.LIBRARY_SCAN_STATE_FILE.exists():
-        return _empty_state()
-    try:
-        data = json.loads(cfg.LIBRARY_SCAN_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _empty_state()
-    if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+    data = state_file.load_json_object(
+        cfg.LIBRARY_SCAN_STATE_FILE, "the saved library scan",
+        "your parked Library review (it would need a full rescan)")
+    # A version the build doesn't know is a deliberate schema signal, not
+    # corruption: leave the file alone and rebuild from a fresh scan.
+    if data is None or data.get("version") != STATE_VERSION:
         return _empty_state()
     base = _empty_state()
     kinds = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}

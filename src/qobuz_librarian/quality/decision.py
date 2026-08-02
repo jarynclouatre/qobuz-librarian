@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError
 from qobuz_librarian.api.search import get_artist_albums, search_artists
 from qobuz_librarian.library import hidden as hidden_mod
@@ -182,16 +183,13 @@ def quality_change_summary(overlap):
 # ── Upgrade-cap persistence ───────────────────────────────────────────────────
 
 def load_capped():
-    if not cfg.CAPPED_FILE.exists():
-        return {}
-    try:
-        with open(cfg.CAPPED_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        # A malformed file that parses as a list/string would otherwise reach
-        # is_album_capped's `.get` and crash the upgrade scan.
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    # A malformed file that parses as a list/string would otherwise reach
+    # is_album_capped's `.get` and crash the upgrade scan.
+    data = state_file.load_json_object(
+        cfg.CAPPED_FILE, "the upgrade-cap store",
+        "the record of albums already at their best quality, and the ones you "
+        "chose to keep downsampled")
+    return data if data is not None else {}
 
 
 def _capped_ts(entry):

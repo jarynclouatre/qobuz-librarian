@@ -11,6 +11,7 @@ import threading
 import time
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 
 # The mutators below are load-modify-save sequences; a library scan seeds the
 # baseline from a worker thread while the dashboard's auto-check touches the run
@@ -25,11 +26,11 @@ def load() -> dict:
     missing or corrupt file with an empty baseline."""
     base = {"last_run": None, "seen": {}, "baseline_complete": False,
             "auto_scan_attempted": False, "baseline_limit": None}
-    try:
-        data = json.loads(cfg.NEW_RELEASE_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return base
-    if not isinstance(data, dict):
+    data = state_file.load_json_object(
+        cfg.NEW_RELEASE_STATE_FILE, "the new-release baseline",
+        "the per-artist snapshot of what Qobuz already had (without it every "
+        "artist's back catalogue reads as new)")
+    if data is None:
         return base
     seen = data.get("seen")
     if isinstance(seen, dict):

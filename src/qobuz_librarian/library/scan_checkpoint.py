@@ -19,6 +19,7 @@ import threading
 import time
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 
 # The library gap-scan kinds pending() surfaces for the dashboard resume
 # prompt.
@@ -30,11 +31,11 @@ _lock = threading.Lock()
 
 
 def _read() -> dict:
-    try:
-        data = json.loads(cfg.SCAN_CHECKPOINT_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    data = state_file.load_json_object(
+        cfg.SCAN_CHECKPOINT_FILE, "the scan checkpoint",
+        "an interrupted scan's saved progress (it would restart from the "
+        "beginning)")
+    return data if data is not None else {}
 
 
 def _write(data) -> None:
