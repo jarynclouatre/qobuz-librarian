@@ -2,6 +2,59 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [0.12.0] - 2026-08-02
+
+A truth-and-polish pass from a full audit of 0.11.3: summaries that report what
+actually happened, screens that keep your place, and a CLI that can be scripted.
+
+- A corrupt state file is no longer silently replaced with an empty one. Every
+  store (dismissed albums, upgrade caps, saved scans, settings, lyrics
+  bookkeeping) now sets the unreadable copy aside as `….corrupt` and says what
+  may have been reset, so one bad write can't erase weeks of curation with no
+  trace.
+- A lyrics run during a provider outage no longer records "no lyrics found" —
+  a verdict that suppressed those tracks for 30 days. Tracks whose every query
+  died on a connection failure stay retryable, and the summary now counts the
+  run's own work ("7 checked · 12 skipped (already checked)") instead of
+  claiming the whole library was scanned.
+- The Library review keeps your place: refresh or Back reopens the artist you
+  were inside and returns to the same scroll position. The sticky header and
+  footer no longer slice album rows on every scroll — their offsets are
+  measured from the real elements instead of guessed.
+- The Dismissed pages paginate, filter, and gained "Bring all back", which
+  returns everything to a live review in one tap; undoing a big dismissal no
+  longer means confirming each artist separately against one enormous page.
+- Dismissing speaks one language everywhere: Dismiss / Bring back, a Dismissed
+  page, and a minus icon instead of a crossed-out eye (Downsample keeps its
+  own "Keep hi-res" wording and a bookmark icon, because that action keeps).
+- The offline screen matches the app — its own look, fonts, and your chosen
+  theme — and Retry returns to the page you were on instead of Search.
+- A bulk download's receipt names the album, links the queue, and surfaces the
+  Background-work strip immediately, matching the single-download receipt.
+- The upgrade walk no longer presents albums that left your library since the
+  scan, calls them high-confidence, and finishes with a green tick; they're
+  set aside and counted, and the summary owns up when nothing was upgraded.
+- Repair jobs whose kept-originals folder is gone from disk stop pointing at
+  an empty Diagnostics page; the job says what happened and offers Acknowledge
+  so the alarm has an exit.
+- The CLI grew flags for the three menu-only modes (`--library-walk`,
+  `--album-gaps`, `--repair`), honours `--yes` on an unattended downsample
+  walk instead of declining every artist and reporting success, exits nonzero
+  when a walk fails or is cut short (matching its documented exit codes), and
+  lays its menus and messages out for the terminal actually in front of you —
+  a phone screen included.
+- The CLI also rejects mode combinations it would silently half-run
+  (`--library-walk --migrate` used to start a migration and drop the walk),
+  and the artist-mode modifiers (`--include-singles`, `--include-comps`,
+  `--no-catalog`) work with `--library-walk`, which honours them.
+- The web UI and CLI report the same version from one source; the web UI could
+  previously report a neighbouring project's version from a stray
+  pyproject.toml.
+- Release safety: every push and pull request now proves the Docker image
+  still builds (previously nothing did until a release was already public),
+  and dependabot no longer proposes single-line edits to the generated image
+  lock, which only regenerates as a whole.
+
 ## [0.11.3] - 2026-07-22
 
 A migration fix for filesystems that don't track file access time.
