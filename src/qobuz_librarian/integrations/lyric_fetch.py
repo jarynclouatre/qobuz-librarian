@@ -17,15 +17,12 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import fcntl
-import json
 import logging
 import os
 import re
 import secrets
 import shutil
 import stat
-import tempfile
 import threading
 import time
 from collections import Counter
@@ -239,47 +236,18 @@ def _state_file_lock(path: Path):
     worker (separate processes), so a threading.Lock can't serialise them; an
     flock on a sidecar lock file does. Best-effort — if the lock file can't be
     opened we proceed unlocked rather than block a lyric save."""
-    lock_path = path.parent / (path.name + ".lock")
-    fh = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "w", encoding="utf-8")
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-    except OSError:
-        if fh is not None:
-            fh.close()
-            fh = None
-    try:
+    with state_file.store_lock(path):
         yield
-    finally:
-        if fh is not None:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            finally:
-                fh.close()
 
 
 def _write_state_unlocked(state: dict[str, TrackState], path: Path) -> None:
     # Unique temp + atomic replace: a shared ".tmp" name let two concurrent
     # checkpoints (a web lyrics pass alongside a CLI import hook) clobber each
     # other's write, and a failed write left the temp orphaned beside the state.
-    data = json.dumps(
-        {k: v.__dict__ for k, v in state.items()},
+    state_file.write_json(
+        path, {k: v.__dict__ for k, v in state.items()},
         indent=0, separators=(",", ":"),
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".",
-                               suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def save_state(state: dict[str, TrackState], path: Path = DEFAULT_STATE_FILE) -> None:

@@ -1,6 +1,6 @@
 """Quality comparison helpers and upgrade detection."""
 import hashlib
-import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -211,6 +211,13 @@ def _capped_is_fresh(ts):
     return ts >= cutoff
 
 
+# The cap store is load-modify-save from web worker threads (each finished
+# upgrade/downsample marks its album) and, in terminal mode, the CLI walks —
+# so mutations hold both a thread lock and the cross-process store lock.
+# Readers stay lockless; a snapshot is fine for them.
+_capped_lock = threading.Lock()
+
+
 def save_capped(data):
     # Prune stale entries before writing. is_album_capped treats them as "not
     # capped" but never removes them, so the file would otherwise accumulate
@@ -222,10 +229,7 @@ def save_capped(data):
         or _capped_is_fresh(_capped_ts(v))
     }
     try:
-        tmp = cfg.CAPPED_FILE.with_suffix(cfg.CAPPED_FILE.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(fresh, f, indent=2, ensure_ascii=False)
-        tmp.replace(cfg.CAPPED_FILE)
+        state_file.write_json(cfg.CAPPED_FILE, fresh, ensure_ascii=False)
     except OSError:
         pass
 
@@ -292,6 +296,11 @@ def clear_local_album_cap(album_dir):
     key = _local_album_cap_key(album_dir)
     if not key:
         return 0
+    with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
+        return _clear_local_album_cap_locked(key, album_dir)
+
+
+def _clear_local_album_cap_locked(key, album_dir):
     path = Path(album_dir)
     capped = load_capped()
 
@@ -330,6 +339,11 @@ def clear_local_album_cap(album_dir):
 def mark_album_capped(album_id, qobuz_album, post_qual):
     if not album_id:
         return
+    with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
+        _mark_album_capped_locked(album_id, qobuz_album, post_qual)
+
+
+def _mark_album_capped_locked(album_id, qobuz_album, post_qual):
     capped = load_capped()
     capped[str(album_id)] = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -347,6 +361,11 @@ def mark_local_album_capped(album_dir, qobuz_album=None, post_qual=None):
     key = _local_album_cap_key(album_dir)
     if not key:
         return
+    with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
+        _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual)
+
+
+def _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual):
     album_path = Path(album_dir)
     post_qual = post_qual or {}
     entry = {

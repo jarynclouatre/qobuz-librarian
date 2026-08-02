@@ -14,7 +14,6 @@ of the repair scan rather than the dashboard, so ``pending()`` leaves it out. A
 clean finish or a deliberate cancel clears that kind's entry; a kind's presence
 means "an unfinished scan of that kind is waiting to resume."
 """
-import json
 import threading
 import time
 
@@ -40,11 +39,7 @@ def _read() -> dict:
 
 def _write(data) -> None:
     try:
-        cfg.SCAN_CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cfg.SCAN_CHECKPOINT_FILE.with_suffix(
-            cfg.SCAN_CHECKPOINT_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        tmp.replace(cfg.SCAN_CHECKPOINT_FILE)
+        state_file.write_json(cfg.SCAN_CHECKPOINT_FILE, data, indent=None)
     except OSError as e:
         # Surface (verbose) rather than fail completely silent — on a full or
         # read-only data volume an hours-long scan would otherwise save no

@@ -1,7 +1,5 @@
 """Shared upgrade scan state."""
 import json
-import os
-import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -112,19 +110,7 @@ def load():
 
 def _write_state(data):
     try:
-        cfg.UPGRADE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            dir=str(cfg.UPGRADE_STATE_FILE.parent),
-            prefix=".qobuz_upgrade_state.",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, cfg.UPGRADE_STATE_FILE)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        state_file.write_json(cfg.UPGRADE_STATE_FILE, data)
     except OSError as e:
         # The Upgrade view reads this snapshot; a failed write means it shows
         # stale candidates until the next scan. Surface it (verbose) instead

@@ -4,10 +4,7 @@ Values are applied to the config module so flows read cfg.* at call time.
 During a running job the in-memory apply is deferred until the worker idles
 to avoid mid-job quality or config changes; disk write still happens immediately.
 """
-import json
 import logging
-import os
-import tempfile
 import threading
 from typing import Optional
 
@@ -301,10 +298,14 @@ def load():
     _apply(data)
     # _apply coerces a persisted lossy STREAMRIP_QUALITY (0/1) to 2 in cfg;
     # normalise it on disk too so the stale value doesn't linger and get
-    # re-coerced on every load.
+    # re-coerced on every load. Under the store lock: this is a boot-time
+    # read-modify-write and the other process may be mid-save.
     if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
-        data["STREAMRIP_QUALITY"] = "2"
-        _atomic_write_settings(data)
+        with state_file.store_lock(SETTINGS_FILE):
+            data = _read_settings() or data
+            if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
+                data["STREAMRIP_QUALITY"] = "2"
+                _atomic_write_settings(data)
 
 
 def _any_active_job() -> bool:
@@ -345,16 +346,7 @@ def _atomic_write_settings(data: dict) -> bool:
     """Persist the settings dict to SETTINGS_FILE atomically (temp + os.replace).
     Returns True on success, False on any OSError."""
     try:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(SETTINGS_FILE.parent),
-                                   prefix=".qobuz_settings.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, SETTINGS_FILE)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        state_file.write_json(SETTINGS_FILE, data)
         return True
     except OSError:
         return False
@@ -367,7 +359,10 @@ def save(values: dict):
     keeps tracking its env var / default instead of being silently pinned
     forever by an unrelated Settings save.
     """
-    with _save_lock:
+    # The CLI writes this store too (the downsample walk saves the
+    # keep-originals choice while the web stays browsable in terminal mode),
+    # so the thread lock alone can't serialise the read-merge-write.
+    with _save_lock, state_file.store_lock(SETTINGS_FILE):
         return _save_locked(values)
 
 

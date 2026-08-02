@@ -5,8 +5,6 @@ the baseline Library scan can refresh the same candidate state without mixing
 downsample items into the Library review list.
 """
 import json
-import os
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -113,19 +111,7 @@ def load():
 
 def _write_state(data):
     try:
-        cfg.DOWNSAMPLE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            dir=str(cfg.DOWNSAMPLE_STATE_FILE.parent),
-            prefix=".qobuz_downsample_state.",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, cfg.DOWNSAMPLE_STATE_FILE)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        state_file.write_json(cfg.DOWNSAMPLE_STATE_FILE, data)
     except OSError as e:
         # The Downsample view reads this snapshot; a failed write means it
         # shows stale candidates until the next scan.

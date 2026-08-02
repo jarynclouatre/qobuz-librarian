@@ -1,8 +1,6 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
 import hashlib
 import json
-import os
-import tempfile
 import threading
 import time
 
@@ -105,19 +103,7 @@ def kind_state(kind: str):
 
 def _write_state(data):
     try:
-        cfg.LIBRARY_SCAN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            dir=str(cfg.LIBRARY_SCAN_STATE_FILE.parent),
-            prefix=".qobuz_library_scan_state.",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, cfg.LIBRARY_SCAN_STATE_FILE)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        state_file.write_json(cfg.LIBRARY_SCAN_STATE_FILE, data)
     except OSError as e:
         # Losing this file only costs a slower next scan, but say so (verbose)
         # rather than going stale with zero signal on a full/read-only volume.

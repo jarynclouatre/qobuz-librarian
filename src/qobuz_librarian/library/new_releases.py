@@ -6,7 +6,6 @@ and hasn't hidden is a new release. The first check of an artist records only a
 baseline (so the back catalogue isn't dumped as "new") — later checks surface
 the difference. ``last_run`` lets the dashboard throttle the automatic check.
 """
-import json
 import threading
 import time
 
@@ -52,23 +51,11 @@ def load() -> dict:
 
 
 def save(state) -> bool:
-    tmp = None
     try:
-        cfg.NEW_RELEASE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cfg.NEW_RELEASE_STATE_FILE.with_suffix(
-            cfg.NEW_RELEASE_STATE_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        tmp.replace(cfg.NEW_RELEASE_STATE_FILE)
-        tmp = None
+        state_file.write_json(cfg.NEW_RELEASE_STATE_FILE, state, indent=None)
         return True
     except OSError:
         return False
-    finally:
-        if tmp is not None:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
 
 
 def last_run() -> float | None:
@@ -86,7 +73,7 @@ def mark_run(seen, when=None, complete=False, baseline_limit=None) -> bool:
     the other fields (load-update-save, not a fresh dict). complete=True also
     marks the baseline ready (a full check crawls every artist, like a library
     scan); baseline_limit records the catalog cap this snapshot was taken at."""
-    with _lock:
+    with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
         state = load()
         state["seen"] = seen
         state["last_run"] = when if when is not None else time.time()
@@ -108,7 +95,7 @@ def seed_baseline(seen) -> bool:
     """Record the per-artist catalog snapshot from a cleanly-completed library
     scan and mark the baseline ready. The scan already fetched every discography,
     so this captures "what exists now" for free; the daily check diffs against it."""
-    with _lock:
+    with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
         state = load()
         state["seen"] = {str(k): list(v) for k, v in (seen or {}).items()}
         state["baseline_complete"] = True
@@ -126,7 +113,7 @@ def note_auto_scan_attempted() -> bool:
     """Remember that the first-run library scan was auto-started, so a fresh one
     isn't relaunched on every load if the user cancels it. (An interrupted scan
     leaves a checkpoint and is auto-resumed regardless of this flag.)"""
-    with _lock:
+    with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
         state = load()
         state["auto_scan_attempted"] = True
         return save(state)
@@ -137,7 +124,7 @@ def touch_run(when=None) -> bool:
     baseline). Called when the auto-check submits, so a run that fails or is
     cancelled doesn't re-fire on every dashboard load until one happens to
     succeed."""
-    with _lock:
+    with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
         state = load()
         state["last_run"] = float(when) if when is not None else time.time()
         return save(state)
