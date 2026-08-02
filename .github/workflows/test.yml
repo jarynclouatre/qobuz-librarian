@@ -80,3 +80,27 @@ jobs:
       # behind it. Build only, so this needs no registry credentials.
       - name: Build the runtime image (no push)
         run: docker build .
+
+  destructive-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install the app and the audio tools the gate drives
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg flac
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      # Proves downsample, repair and the gap-fill backup can't eat files,
+      # against real ffmpeg/flac. It lives outside pytest on purpose — and
+      # nothing ran it automatically before, which is exactly how the harness
+      # itself once went stale with a check that couldn't fail.
+      - name: Run the destructive-op checks
+        run: python scripts/e2e_destructive_check.py
