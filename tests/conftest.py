@@ -26,6 +26,11 @@ def _isolate_data_dir():
     """
     from qobuz_librarian import config as cfg
 
+    # CLI output wraps to the terminal, so pin a width: otherwise tests that
+    # assert on a message pass or fail depending on how wide the window running
+    # pytest happens to be.
+    os.environ["COLUMNS"] = "100"
+
     tmp_root = Path(tempfile.mkdtemp(prefix="qobuz-librarian-tests-"))
     cfg.DATA_DIR = tmp_root
 

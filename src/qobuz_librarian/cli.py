@@ -345,11 +345,13 @@ def _die_unsettled_startup_recovery(
         )
 
         relocation = result.post_import_relocation
-        paths = "; ".join(str(path) for path in relocation.paths)
+        # One path per line: joined onto one line they get split by the
+        # terminal wrap and can't be copied out of the message.
+        paths = "".join(f"\n     {path}" for path in relocation.paths)
         message = (
             "\n✗  An interrupted library-folder move could not be verified safely.\n"
             f"   Recovery reason: {relocation.reason or 'reason not reported'}\n"
-            f"   Paths needing attention: {paths or 'none reported'}\n"
+            f"   Paths needing attention:{paths or ' none reported'}\n"
             "   Library changes are paused so the files remain unchanged. See "
             f"the “{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the application "
             "log for the same details. Resolve the reported recovery problem, "

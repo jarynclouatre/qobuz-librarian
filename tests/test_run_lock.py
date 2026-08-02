@@ -156,13 +156,16 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
         cli.acquire_run_lock()
 
     message = capsys.readouterr().err
+    # die() reflows to the terminal now, so a phrase can land across a line
+    # break; compare against the message with the wrapping folded back out.
+    flat = " ".join(message.split())
     assert stopped.value.code == 1
     assert lease.closed is True
-    assert "interrupted library-folder move" in message
-    assert "exact relocation evidence changed" in message
-    assert "Paths needing attention" in message
-    assert all(str(path) in message for path in affected_paths)
-    assert "Post-import folder-move recovery needs attention" in message
-    assert "interrupted download" not in message
+    assert "interrupted library-folder move" in flat
+    assert "exact relocation evidence changed" in flat
+    assert "Paths needing attention" in flat
+    assert all(str(path) in flat for path in affected_paths)
+    assert "Post-import folder-move recovery needs attention" in flat
+    assert "interrupted download" not in flat
 
 

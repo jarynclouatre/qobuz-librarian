@@ -2,6 +2,8 @@
 import errno
 import sys
 
+from qobuz_librarian.ui_cli.colors import block
+
 # Exit-code contract for the CLI.
 EXIT_GENERAL    = 1   # unspecified failure (default for crashes/unknown)
 EXIT_AUTH       = 2   # token invalid / expired
@@ -11,8 +13,8 @@ EXIT_CONFIG     = 64  # config missing / unreadable / tool absent
 
 
 def die(msg: str, code: int = EXIT_GENERAL):
-    """Print msg to stderr and exit with the given code."""
-    print(msg, file=sys.stderr)
+    """Print msg to stderr, wrapped to the terminal, and exit with the code."""
+    print(block(msg), file=sys.stderr)
     sys.exit(code)
 
 
