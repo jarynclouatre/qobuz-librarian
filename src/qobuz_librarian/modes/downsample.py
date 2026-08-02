@@ -13,8 +13,8 @@ from qobuz_librarian.library import downsample_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
 from qobuz_librarian.quality.decision import mark_local_album_capped
-from qobuz_librarian.ui_cli.colors import C, banner, fmt, format_size, truncate
-from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, format_size, truncate
+from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 from qobuz_librarian.web import review_badges
@@ -26,7 +26,12 @@ def run_downsample_walk_mode(args):
 
     Artists with nothing to shrink are skipped silently (a \\r progress line
     overwrites itself while scanning). Each artist confirms separately, default
-    NO; --dry-run lists what would shrink and changes nothing.
+    NO; --yes accepts every one and --dry-run lists what would shrink and
+    changes nothing.
+
+    Returns the exit code: 0 when the walk finished, non-zero when it was cut
+    short or couldn't ask. The interactive menu ignores it; --downsample-walk
+    exits with it.
     """
     clear_scan_caches()
     banner("Downsample — bring hi-res library files down to CD rate")
@@ -34,12 +39,12 @@ def run_downsample_walk_mode(args):
     if not HAVE_DOWNSAMPLE:
         log.info(fmt(C.YELLOW,
             "  ⚠  Downsampling isn't available (needs ffmpeg and flac)."))
-        return
+        return EXIT_CONFIG
 
     all_artists = list_library_artists()
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found."))
-        return
+        return 0
 
     if cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep":
         log.info(fmt(C.YELLOW,
@@ -104,9 +109,10 @@ def run_downsample_walk_mode(args):
                 "change this any time in Settings."))
         log.info("")
 
-    # Auto-accept gate.
+    # Auto-accept gate. Skipped under --yes, which has already answered it —
+    # otherwise an unattended run stalls here and then declines every artist.
     auto_accept_all = False
-    if refresh.candidates and not args.dry_run:
+    if refresh.candidates and not args.dry_run and not args.yes:
         try:
             _r = input(fmt(C.CYAN,
                 "\n  Auto-accept every artist and run unattended? [y/N]: "
@@ -123,6 +129,8 @@ def run_downsample_walk_mode(args):
     total_saved = 0
     total_errors = 0
     total_flush_warns = 0
+    interrupted = False
+    no_answer = False
 
     try:
         for artist_dir in all_artists:
@@ -149,8 +157,15 @@ def run_downsample_walk_mode(args):
                 continue
 
             _flush_stdin()
-            if not confirm(f"  Downsample {plural(n_albums, 'album')}?",
-                           default_yes=False, auto_yes=auto_accept_all):
+            # on_eof=None so a closed stdin is distinguishable from a No: the
+            # walk would otherwise skip every artist and call that a success.
+            answer = confirm(f"  Downsample {plural(n_albums, 'album')}?",
+                             default_yes=False,
+                             auto_yes=args.yes or auto_accept_all, on_eof=None)
+            if answer is None:
+                no_answer = True
+                break
+            if not answer:
                 log.info(fmt(C.GRAY, "  Skipped."))
                 log.info("")
                 continue
@@ -181,9 +196,18 @@ def run_downsample_walk_mode(args):
     except KeyboardInterrupt:
         log.info("")
         log.info(fmt(C.GRAY, "  Interrupted."))
+        interrupted = True
 
     log.info("")
-    log.info(fmt(C.GREEN, "  ✓  Downsample walk complete."))
+    if no_answer:
+        log.warning(block(fmt(C.YELLOW,
+            "  ✗  Nothing was downsampled: each artist needs a confirmation and "
+            "there is no terminal to give one. Re-run with --yes to accept all "
+            f"{plural(len(candidates_by_artist), 'artist')} unattended.")))
+    elif interrupted:
+        log.info(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Downsample walk complete."))
     log.info(fmt(C.GRAY,
         f"     Scanned {plural(n_scanned, 'artist')} — downsampled "
         f"{plural(n_albums_done, 'album')}, reclaimed {format_size(total_saved)}."))
@@ -196,3 +220,4 @@ def run_downsample_walk_mode(args):
             f"     {plural(total_flush_warns, 'file')} resampled but couldn't "
             f"be flushed to disk — the swap may not survive a power loss; "
             f"check the drive."))
+    return EXIT_GENERAL if (no_answer or interrupted) else 0

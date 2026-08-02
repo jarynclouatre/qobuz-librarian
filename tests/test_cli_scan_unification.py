@@ -296,7 +296,7 @@ def test_downsample_walk_updates_only_affected_artist_after_success(monkeypatch)
     from qobuz_librarian.library.downsample import DownsampleCandidate
     from qobuz_librarian.modes import downsample
 
-    args = SimpleNamespace(dry_run=False)
+    args = SimpleNamespace(dry_run=False, yes=False)
     artist_dir = Path("/music/Artist")
     candidate = DownsampleCandidate(
         album_dir=artist_dir / "Album",
@@ -354,7 +354,7 @@ def test_downsample_walk_marks_successful_album_locally_capped(
 
     monkeypatch.setattr(cfg, "CAPPED_FILE", tmp_path / "capped.json")
     monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
-    args = SimpleNamespace(dry_run=False)
+    args = SimpleNamespace(dry_run=False, yes=False)
     artist_dir = tmp_path / "Artist"
     album_dir = artist_dir / "Album"
     album_dir.mkdir(parents=True)
