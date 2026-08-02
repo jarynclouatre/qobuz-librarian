@@ -627,7 +627,7 @@ def _require_delete_journal_mode(connection):
 
 
 
-def _beets_database_connection_path(anchor, *, through_descriptor=False):
+def _beets_database_connection_path(anchor):
     """Keep SQLite recovery beside the exact canonical public database."""
     return f"/proc/self/fd/{anchor['parent_chain'][-1]}/{anchor['name']}"
 
@@ -1553,32 +1553,6 @@ def _managed_root_namespace_matches(capture):
             and _merge_chain_is_named(chain, names)
         )
     except (AttributeError, KeyError, OSError, TypeError, ValueError):
-        return False
-
-
-def _unlink_managed_override(capture):
-    """Remove only the exact held override through its retained parent."""
-    try:
-        descriptor = capture["_override_fd"]
-        path = Path(os.path.abspath(os.fspath(capture["_override_path"])))
-        held = os.fstat(descriptor)
-        if (
-            path.parent != Path(capture["parent"])
-            or not stat.S_ISREG(held.st_mode)
-            or _ownership_identity(held) != capture["_override_identity"]
-            or not _managed_parent_namespace_matches(capture)
-            or not _merge_name_matches(
-                capture["_parent_chain"][-1],
-                path.name,
-                descriptor,
-                regular=True,
-            )
-        ):
-            return False
-        os.unlink(path.name, dir_fd=capture["_parent_chain"][-1])
-        os.fsync(capture["_parent_chain"][-1])
-        return True
-    except (KeyError, OSError, TypeError, ValueError):
         return False
 
 
@@ -5005,14 +4979,6 @@ def _read_ownership_payload(capture):
         ):
             return payload
     return None
-
-
-def _read_ownership_manifest(capture):
-    """Return a sealed manifest from our exact one-run nonce, or None."""
-    payload = _read_ownership_payload(capture)
-    if payload is None or payload.get("sealed") is not True:
-        return None
-    return payload
 
 
 def _reclaim_ownership_capture(capture, payload=None):
