@@ -91,6 +91,9 @@
 .ql-tabbar-count.hidden,
 .ql-queue-badge.hidden,
 .ql-review-tool.hidden,
+.ql-active-strip.hidden {
+  display: none;
+}
 .ql-btn.hidden {
   display: none !important;
 }
@@ -517,7 +520,7 @@ h1, h2, h3 {
   position: fixed;
   left: 0.625rem;
   right: 0.625rem;
-  bottom: calc(3.6rem + env(safe-area-inset-bottom));
+  bottom: var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom)));
   z-index: 70;
   display: flex;
   flex-direction: column;
@@ -573,15 +576,16 @@ h1, h2, h3 {
   min-height: 3.25rem;
   align-items: center;
   gap: 0.625rem;
-  /* Paired with viewport-fit=cover in the head: the page now extends into the
-     display cutout, so the bar has to hold itself clear of the status bar. On
-     a device without a cutout this resolves to 0 and nothing moves. */
-  padding-top: calc(0.55rem + env(safe-area-inset-top));
   border-bottom: 1px solid var(--ql-line);
   background:
     linear-gradient(180deg, color-mix(in oklab, var(--ql-surface-2) 62%, var(--ql-bg)) 0%,
     color-mix(in oklab, var(--ql-surface) 82%, var(--ql-bg)) 100%);
   padding: 0.55rem 0.7rem;
+  /* Paired with viewport-fit=cover in the head: the page extends into the
+     display cutout, so the bar holds itself clear of the status bar. Must
+     stay after the padding shorthand or the shorthand resets it. On a device
+     without a cutout this resolves to the same 0.55rem. */
+  padding-top: calc(0.55rem + env(safe-area-inset-top));
   box-shadow: 0 1px 0 color-mix(in oklab, var(--ql-gold) 9%, transparent);
 }
 @media (min-width: 1024px) {
@@ -3489,7 +3493,9 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 @media (max-width: 1023.98px) {
   .ql-review-summary-row {
-    top: 4rem;
+    /* The real header height, measured by app.js — a hard-coded guess here
+       left a see-through band that sliced album rows on every scroll. */
+    top: var(--ql-mobilebar-h, 4rem);
   }
 }
 @media (min-width: 640px) {
@@ -3833,6 +3839,28 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   display: grid;
   gap: 0.8rem;
   padding: 0.85rem 0.95rem 1rem;
+}
+.ql-hidden-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.625rem;
+  margin-bottom: 0.75rem;
+}
+.ql-hidden-filter {
+  flex: 1 1 14rem;
+}
+.ql-hidden-pagenav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+.ql-hidden-pagenav-label {
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
 }
 .ql-hidden-actions {
   display: flex;
@@ -5462,6 +5490,16 @@ details[open] > .ql-disclosure-summary::after {
   margin-top: 1rem;
   padding: 0.5rem 0;
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  /* The band around the card is part of the sticky chrome: left transparent,
+     album rows read through it on every scroll. Same treatment as
+     .ql-review-summary-row. */
+  background-color: color-mix(in oklab, var(--ql-surface) 96%, var(--ql-bg));
+}
+@supports (backdrop-filter: blur(10px)) {
+  .ql-review-footer {
+    background-color: color-mix(in oklab, var(--ql-surface) 78%, transparent);
+    backdrop-filter: blur(12px);
+  }
 }
 .ql-review-footer-actions {
   display: flex;
@@ -5552,11 +5590,16 @@ details[open] > .ql-disclosure-summary::after {
 @media (max-width: 639.98px) {
   .ql-review-footer-secondary-group {
     justify-content: center;
-    gap: 1.25rem;
+    gap: 0.5rem 1.25rem;
+    /* The widest label pair ("Back to Downsample" + "Discard downsample
+       review") outgrows a 360px screen; a centred row with no wrap spills
+       off both edges. */
+    flex-wrap: wrap;
   }
   .ql-review-footer-secondary-group .ql-btn {
     flex: none;
     width: auto;
+    min-width: 0;
     border-color: transparent;
     background: transparent;
     box-shadow: none;
@@ -6067,10 +6110,10 @@ details[data-artist].htmx-swapping {
    earlier they win the cascade and the nav covers the review actions. */
 @media (max-width: 1023.98px) {
   .ql-review-footer {
-    bottom: calc(3.6rem + env(safe-area-inset-bottom));
+    bottom: var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom)));
   }
   .ql-toast-host {
-    bottom: calc(4.4rem + env(safe-area-inset-bottom));
+    bottom: calc(var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom))) + 0.8rem);
   }
 }
 
@@ -6085,7 +6128,7 @@ details[data-artist].htmx-swapping {
     position: fixed;
     left: 0.625rem;
     right: 0.625rem;
-    bottom: calc(3.6rem + env(safe-area-inset-bottom));
+    bottom: var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom)));
     z-index: 25;
   }
   .ql-search-results:has(.ql-bulk-bar:not(.hidden)) {

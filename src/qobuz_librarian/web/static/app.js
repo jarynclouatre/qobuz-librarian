@@ -451,6 +451,9 @@
   };
 
   // Programmatic toast for async failures and review actions.
+  // `message` is a string (rendered as text, never markup) or a prebuilt
+  // node — the node form is what lets a receipt carry a real link, which a
+  // textContent-only toast structurally couldn't.
   function showToast(message, kind) {
     var host = document.getElementById("download-toast");
     if (!host) return;
@@ -460,9 +463,13 @@
     el.setAttribute("data-flash", "");
     el.setAttribute("data-flash-kind", noticeKind);
     el.setAttribute("role", "status");
-    var span = document.createElement("span");
-    span.textContent = message;
-    el.appendChild(span);
+    if (message && message.nodeType) {
+      el.appendChild(message);
+    } else {
+      var span = document.createElement("span");
+      span.textContent = message;
+      el.appendChild(span);
+    }
     host.appendChild(el);
     setTimeout(function () { fade(el); }, 8000);
   }
@@ -674,6 +681,11 @@
           if (ok) runBulkDownload(forms);
         });
       }
+      function itemTitle(form) {
+        var item = form.closest && form.closest("[data-search-item]");
+        var el = item && item.querySelector(".ql-table-title, .ql-grid-title, .ql-result-title");
+        return el ? el.textContent.replace(/\s+/g, " ").trim() : "";
+      }
       function runBulkDownload(forms) {
         var original = bulkButton.textContent;
         bulkButton.disabled = true;
@@ -681,6 +693,7 @@
         var queued = 0;
         var skipped = 0;
         var failed = 0;
+        var firstTitle = "";
         var chain = Promise.resolve();
         forms.forEach(function (form) {
           chain = chain.then(function () {
@@ -691,6 +704,7 @@
                 markSearchDownloadQueued(form);
               } else {
                 queued += 1;
+                if (!firstTitle) firstTitle = itemTitle(form);
                 markSearchDownloadQueued(form);
               }
             }).catch(function () { failed += 1; });
@@ -701,11 +715,34 @@
           bulkButton.textContent = original;
           selected = {};
           syncBoxes();
+          // The same receipt the single-row path gives: name what was queued
+          // and link where it went, instead of a bare count.
           var parts = [];
-          if (queued) parts.push(queued + " queued");
+          if (queued) {
+            parts.push(queued === 1 && firstTitle
+              ? "“" + firstTitle + "” queued"
+              : queued + " albums queued");
+          }
           if (skipped) parts.push(skipped + " already queued");
           if (failed) parts.push(failed + " failed");
-          showToast(parts.length ? parts.join(", ") + "." : "Nothing queued.", failed ? "error" : "success");
+          var receipt = document.createElement("span");
+          receipt.appendChild(document.createTextNode(
+            (parts.length ? parts.join(", ") + ". " : "Nothing queued. ")));
+          if (queued || skipped) {
+            var link = document.createElement("a");
+            link.href = "/queue";
+            link.className = "ql-inline-link";
+            link.textContent = "View queue";
+            receipt.appendChild(link);
+          }
+          showToast(receipt, failed ? "error" : "success");
+          // Surface the Background-work strip without a reload — it's the
+          // page's persistent signal that something is now running.
+          if (queued && window.htmx && document.getElementById("dashboard-active")) {
+            window.htmx.ajax("GET", "/",
+              { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
+          }
+          if (queued && window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
         });
       }
       setView(savedSearchView());
@@ -1354,10 +1391,13 @@
     function loadGroupItems(det, force) {
       var boxEl = det.querySelector("[data-lazy-items]");
       if (!boxEl || (boxEl.dataset.loaded && !force)) return Promise.resolve(true);
+      // One in-flight fetch per box: the restore path and the toggle handler
+      // both ask for the same rows in the same tick.
+      if (boxEl._loadPromise && !force) return boxEl._loadPromise;
       var generation = (boxEl._loadGeneration || 0) + 1;
       boxEl._loadGeneration = generation;
       boxEl.dataset.loading = "1";
-      return fetch(boxEl.dataset.itemsUrl, { headers: { "HX-Request": "true" } })
+      var p = fetch(boxEl.dataset.itemsUrl, { headers: { "HX-Request": "true" } })
         .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
         .then(function (txt) {
           if (boxEl._loadGeneration !== generation) return false;
@@ -1377,6 +1417,11 @@
           showToast("Couldn't load this artist's albums. Try opening it again.", "error");
           return false;
         });
+      boxEl._loadPromise = p.then(function (ok) {
+        boxEl._loadPromise = null;
+        return ok;
+      }, function () { boxEl._loadPromise = null; return false; });
+      return boxEl._loadPromise;
     }
 
     // Append the next page in place.
@@ -1592,6 +1637,63 @@
     }
     document.body.addEventListener("qlHidden", onQlHidden);
 
+    // A refresh or Back rebuilds the page collapsed, so the browser's own
+    // scroll restore lands past the end of a list fifteen times shorter and
+    // the artist being worked through is closed. Record which groups are open
+    // and where the user stood — per job and tab, this browser tab only —
+    // reopen the groups, wait for their lazy rows, then put the scroll back.
+    function placeKey() { return "ql-review-place:" + id + ":" + curTab(); }
+    var placeTimer = null;
+    function recordPlace() {
+      var open = [];
+      cont.querySelectorAll("details[data-artist][open]").forEach(function (d) {
+        if (d.dataset.artist) open.push(d.dataset.artist);
+      });
+      try {
+        sessionStorage.setItem(placeKey(),
+          JSON.stringify({ open: open, y: window.scrollY }));
+      } catch (e) {}
+    }
+    function savePlace() {
+      if (placeTimer) clearTimeout(placeTimer);
+      placeTimer = setTimeout(recordPlace, 250);
+    }
+    cont.addEventListener("toggle", savePlace, true);
+    window.addEventListener("scroll", savePlace, { passive: true });
+    window.addEventListener("pagehide", recordPlace);
+    // The browser's restore would fight ours with an offset measured on the
+    // taller pre-reload page; ours waits for the rows to exist.
+    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+    (function restorePlace() {
+      var raw = null;
+      try { raw = sessionStorage.getItem(placeKey()); } catch (e) {}
+      if (!raw) return;
+      var place;
+      try { place = JSON.parse(raw); } catch (e) { return; }
+      if (!place || !place.open || !place.open.length) return;
+      var moved = false;
+      function noteMove() { moved = true; }
+      window.addEventListener("wheel", noteMove, { passive: true });
+      window.addEventListener("touchmove", noteMove, { passive: true });
+      var waits = [];
+      place.open.forEach(function (name) {
+        var esc = window.CSS && CSS.escape ? CSS.escape(name)
+                                           : name.replace(/"/g, '\\"');
+        var d = cont.querySelector('details[data-artist="' + esc + '"]');
+        if (d && !d.open) {
+          d.open = true;
+          waits.push(loadGroupItems(d, false));
+        }
+      });
+      Promise.all(waits).then(function () {
+        window.removeEventListener("wheel", noteMove);
+        window.removeEventListener("touchmove", noteMove);
+        // The user got there first — don't yank the page out from under them.
+        if (moved || !(place.y > 0)) return;
+        requestAnimationFrame(function () { window.scrollTo(0, place.y); });
+      });
+    })();
+
     updateHideLabels();
     updateArtistChecks();
     syncMaster();
@@ -1602,6 +1704,9 @@
       try { rsrc.close(); } catch (e) {}
       document.body.removeEventListener("qlHidden", onQlHidden);
       document.removeEventListener("htmx:beforeSwap", onReviewSwap);
+      window.removeEventListener("scroll", savePlace);
+      window.removeEventListener("pagehide", recordPlace);
+      if (placeTimer) clearTimeout(placeTimer);
     }
     function onReviewSwap(e) {
       if (e.detail && e.detail.target && e.detail.target.id === "job-content") shutReview();
@@ -1655,6 +1760,32 @@
     form.querySelectorAll("[data-deep-link]").forEach(function (el) { el.remove(); });
   });
   cleanFlashUrl();
+  // The sticky chrome (review summary row, review footer, toasts, search bar)
+  // offsets itself by the header and tab-bar heights. Those vary with the
+  // safe-area insets and the font, so hard-coded rem guesses left see-through
+  // bands that sliced rows. Measure the real elements and let the CSS read
+  // the result; the stylesheet keeps the old guesses as fallbacks for the
+  // moment before this runs.
+  (function () {
+    function apply() {
+      var root = document.documentElement;
+      var bar = document.querySelector(".ql-mobilebar");
+      var tabs = document.querySelector(".ql-tabbar");
+      if (bar && bar.offsetHeight) {
+        root.style.setProperty("--ql-mobilebar-h", bar.offsetHeight + "px");
+      }
+      if (tabs && tabs.offsetHeight) {
+        root.style.setProperty("--ql-tabbar-h", tabs.offsetHeight + "px");
+      }
+    }
+    window.addEventListener("resize", apply);
+    window.addEventListener("load", apply);
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", apply);
+    } else {
+      apply();
+    }
+  })();
   // "Load more artists" clicks itself as it approaches the viewport, so a
   // long review reads as one continuous scrolling list. Deferred to DOM-ready:
   // this script loads in <head>, where document.body doesn't exist yet.

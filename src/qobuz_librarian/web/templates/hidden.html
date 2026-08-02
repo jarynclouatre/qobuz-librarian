@@ -1,11 +1,13 @@
 {% extends "base.html" %}
 {% set is_upgrade = scope == 'upgrade' %}
 {% set is_downsample = scope == 'downsample' %}
-{% set noun = 'upgrade' if is_upgrade else ('album' if is_downsample else 'result') %}
-{% set heading = 'Dismissed upgrades' if is_upgrade else ('Kept hi-res' if is_downsample else 'Dismissed results') %}
-{% set kept_label = 'albums kept hi-res' if is_downsample else ('dismissed upgrades' if is_upgrade else 'dismissed results') %}
-{% set restore_all_label = 'album kept hi-res' if is_downsample else noun %}
-{% set restore_all_label_plural = 'albums kept hi-res' if is_downsample else noun ~ 's' %}
+{# One vocabulary: the thing is an album, the action pair is Dismiss / Bring
+   back. Downsample keeps its own words ("kept hi-res") because that action
+   really is different. #}
+{% set heading = 'Kept hi-res' if is_downsample else 'Dismissed' %}
+{% set kept_label = 'albums kept hi-res' if is_downsample else 'dismissed albums' %}
+{% set restore_all_label = 'album kept hi-res' if is_downsample else 'album' %}
+{% set restore_all_label_plural = 'albums kept hi-res' if is_downsample else 'albums' %}
 {% set back_label = 'Upgrade' if is_upgrade else ('Downsample' if is_downsample else 'Library') %}
 {% block title %}{{ heading }} — Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-4xl{% endblock %}
@@ -18,19 +20,41 @@
 
 {% if notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ notice }}</span></div>{% endif %}
 
-{% if groups %}
+{% if groups or hidden_q %}
 <div class="ql-work-status">
-  <span>{{ groups | length }} artist{% if groups | length != 1 %}s{% endif %} with {{ kept_label }}.</span>
+  <span>{% if hidden_q %}{{ hidden_total_artists }} artist{% if hidden_total_artists != 1 %}s{% endif %} match{% if hidden_total_artists == 1 %}es{% endif %} &ldquo;{{ hidden_q }}&rdquo;.{% else %}{{ hidden_total_artists }} artist{% if hidden_total_artists != 1 %}s{% endif %} with {{ kept_label }}.{% endif %}</span>
   <a href="{{ back_url }}">Back to {{ back_label }}</a>
 </div>
 
+<div class="ql-hidden-tools">
+  {% if hidden_q or hidden_pages > 1 or hidden_total_artists >= 4 %}
+  {# Server-side filter, plain GET: works without JS and covers the whole
+     set, not just the page on screen. #}
+  <form method="get" class="ql-hidden-filter" role="search">
+    <input type="search" name="q" value="{{ hidden_q }}" autocomplete="off"
+           placeholder="Filter by artist or album"
+           aria-label="Filter by artist or album"
+           class="ql-input ql-review-filter-input">
+  </form>
+  {% endif %}
+  {% if restore_all_action and restore_all_count %}
+  <form action="{{ restore_all_action }}" method="post" class="ql-hidden-restore-all">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+            data-confirm="{% if is_downsample %}Bring every album kept hi-res back to Downsample?{% else %}Bring every dismissed album back to the review?{% endif %}"
+            data-confirm-action="Bring all back">Bring all back ({{ restore_all_count }})</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if groups %}
 <div class="ql-hidden-groups">
   {% for g in groups %}
   <details class="ql-review-group ql-hidden-group"{% if groups | length == 1 %} open{% endif %}>
     <summary class="ql-hidden-summary">
       <span class="ql-hidden-summary-copy">
         <span class="ql-hidden-artist">{{ g.artist }}</span>
-        <span class="ql-hidden-count">{{ g.rows }} {{ noun }}{% if g.rows != 1 %}s{% endif %}</span>
+        <span class="ql-hidden-count">{{ g.rows }} album{% if g.rows != 1 %}s{% endif %}</span>
       </span>
       <svg class="ql-hidden-chevron" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12h14"/>
@@ -46,9 +70,9 @@
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="artist" value="{{ g.artist }}">
           <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
-                  data-confirm="Restore every {{ restore_all_label }} by {{ g.artist }}?"
-                  data-confirm-action="Restore"
-                  aria-label="Restore all {{ restore_all_label_plural }} by {{ g.artist }}">Restore all</button>
+                  data-confirm="Bring every {{ restore_all_label }} by {{ g.artist }} back?"
+                  data-confirm-action="Bring back"
+                  aria-label="Bring all {{ restore_all_label_plural }} by {{ g.artist }} back">Bring all back</button>
         </form>
       </div>
       <ul class="ql-hidden-list">
@@ -60,7 +84,7 @@
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="fingerprint" value="{{ a.fp }}">
           <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
-                  aria-label="Restore {{ a.title }}{% if a.others %} and {{ a.others | length }} more edition{{ 's' if a.others | length != 1 }}{% endif %} by {{ g.artist }}">Restore</button>
+                  aria-label="Bring back {{ a.title }}{% if a.others %} and {{ a.others | length }} more edition{{ 's' if a.others | length != 1 }}{% endif %} by {{ g.artist }}">Bring back</button>
         </form>
       </li>
       {% endfor %}
@@ -69,6 +93,21 @@
   </details>
   {% endfor %}
 </div>
+
+{% if hidden_pages > 1 %}
+<nav class="ql-hidden-pagenav" aria-label="Pages">
+  {% if hidden_page > 1 %}<a class="ql-btn ql-btn-secondary ql-btn-sm" href="?p={{ hidden_page - 1 }}{% if hidden_q %}&amp;q={{ hidden_q | urlencode }}{% endif %}">Previous</a>{% endif %}
+  <span class="ql-hidden-pagenav-label">Page {{ hidden_page }} of {{ hidden_pages }}</span>
+  {% if hidden_page < hidden_pages %}<a class="ql-btn ql-btn-secondary ql-btn-sm" href="?p={{ hidden_page + 1 }}{% if hidden_q %}&amp;q={{ hidden_q | urlencode }}{% endif %}">Next</a>{% endif %}
+</nav>
+{% endif %}
+
+{% else %}
+{# A filter with no matches must say so — the generic empty text would claim
+   there is nothing dismissed while the filter is what's hiding it. #}
+<p class="ql-review-page-empty">Nothing matches &ldquo;{{ hidden_q }}&rdquo;. <a href="?" class="ql-inline-link">Clear the filter</a>.</p>
+{% endif %}
+
 {% else %}
 <div class="ql-empty-state ql-empty-state--hidden">
   <span class="ql-state-icon" aria-hidden="true">
@@ -78,8 +117,8 @@
       <path d="M9.5 17.5h5"/>
     </svg>
   </span>
-  <p class="ql-empty-title">{% if is_downsample %}No hi-res albums kept.{% elif is_upgrade %}No dismissed upgrades.{% else %}No dismissed results.{% endif %}</p>
-  <p class="ql-empty-text">{% if is_downsample %}Albums you keep hi-res appear here so you can downsample them later.{% elif is_upgrade %}Dismissed upgrades appear here so you can restore them.{% else %}Results you dismiss from the Library review appear here so you can restore them.{% endif %}</p>
+  <p class="ql-empty-title">{% if is_downsample %}No hi-res albums kept.{% else %}Nothing dismissed.{% endif %}</p>
+  <p class="ql-empty-text">{% if is_downsample %}Albums you keep hi-res appear here so you can downsample them later.{% elif is_upgrade %}Albums you dismiss from the Upgrade review appear here so you can bring them back.{% else %}Albums you dismiss from the Library review appear here so you can bring them back.{% endif %}</p>
   <a href="{{ back_url }}" class="ql-btn ql-btn-primary w-full sm:w-auto mt-4">Go to {{ back_label }}</a>
 </div>
 {% endif %}

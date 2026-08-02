@@ -8,6 +8,10 @@ const PRECACHE = [
   '/static/vendor/htmx-2.0.4.min.js',
   '/static/vendor/inter/inter-latin.woff2',
   '/static/vendor/inter/inter-latin-ext.woff2',
+  // The offline page's heading face and theme script — everything it names
+  // must be in this list or it renders half-styled at the one moment it runs.
+  '/static/vendor/fraunces/fraunces-latin-600.woff2',
+  '/static/offline.js',
   '/static/icon.png',
   '/static/icon-192.png',
   '/static/manifest.json',

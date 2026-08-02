@@ -264,8 +264,11 @@
       {% endif %}
     </div>
 
+    {# Always in the DOM (hidden when idle): the strip is the htmx target
+       that lets a queued download surface Background work without a reload —
+       a target that only renders once jobs exist can never appear. #}
+    <section id="dashboard-active" class="ql-active-strip{% if not (active_jobs or queued_jobs) %} hidden{% endif %}">
     {% if active_jobs or queued_jobs %}
-    <section id="dashboard-active" class="ql-active-strip">
       <div class="ql-active-strip-header">
         <h2>Background work</h2>
         <a href="/queue" class="ql-btn ql-btn-secondary ql-btn-sm">Open queue</a>
@@ -313,8 +316,8 @@
         </div>
         {% endif %}
       </div>
-    </section>
     {% endif %}
+    </section>
   </div>
 </div>
 

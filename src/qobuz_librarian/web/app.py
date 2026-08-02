@@ -6159,13 +6159,81 @@ async def skip_baseline_setup(request: Request):
     return RedirectResponse(url="/", status_code=303)
 
 
-def _hidden_view(request, scope, *, page, restore_action, back_url):
+def _hidden_view(request, scope, *, page, restore_action, back_url,
+                 restore_all_action=None):
     from qobuz_librarian.library import hidden as hidden_mod
+    groups = hidden_mod.hidden_by_artist(scope)
+    total_entries = sum(len(g["albums"]) for g in groups)
+
+    q = (request.query_params.get("q") or "").strip()[:200]
+    if q:
+        needle = q.lower()
+        matched = []
+        for g in groups:
+            if needle in g["artist"].lower():
+                matched.append(g)
+                continue
+            albums = [a for a in g["albums"]
+                      if needle in a["title"].lower()
+                      or any(needle in t.lower() for t in a["others"])]
+            if albums:
+                matched.append({
+                    "artist": g["artist"], "albums": albums,
+                    "rows": sum(1 + len(a["others"]) for a in albums)})
+        groups = matched
+
+    # Whole artists per page, same budgets as the review pages — this page
+    # once shipped its entire set as one 639 KB document.
+    pages = []
+    cur, cur_rows = [], 0
+    for g in groups:
+        if cur and (len(cur) >= REVIEW_PAGE_ARTISTS
+                    or cur_rows + g["rows"] > REVIEW_PAGE_CANDIDATES):
+            pages.append(cur)
+            cur, cur_rows = [], 0
+        cur.append(g)
+        cur_rows += g["rows"]
+    if cur:
+        pages.append(cur)
+    n_pages = max(1, len(pages))
+    try:
+        pg = int(request.query_params.get("p") or 1)
+    except ValueError:
+        pg = 1
+    pg = max(1, min(pg, n_pages))
+
     return _tr(request, "hidden.html", {
         "page": page, "scope": scope, "back_url": back_url,
         "restore_action": restore_action,
+        "restore_all_action": restore_all_action,
+        "restore_all_count": total_entries,
         "notice": request.query_params.get("notice", ""),
-        "groups": hidden_mod.hidden_by_artist(scope)})
+        "hidden_q": q,
+        "hidden_total_artists": len(groups),
+        "hidden_page": pg, "hidden_pages": n_pages,
+        "groups": pages[pg - 1] if pages else []})
+
+
+async def _restore_hidden_all(request, scope, dest, what):
+    """Scope-wide Bring all back for the Dismissed pages. The library scope
+    has its own richer endpoint (it also lifts a retired review); this covers
+    the Upgrade and Downsample scopes, whose reviews re-derive from saved
+    state at read time."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    from qobuz_librarian.library import hidden as hidden_mod
+    loop = asyncio.get_running_loop()
+    try:
+        changed = await loop.run_in_executor(
+            None, lambda: hidden_mod.restore_all(scope))
+    except OSError as e:
+        return RedirectResponse(
+            url=dest + "?notice=" + urllib.parse.quote(str(e)),
+            status_code=303)
+    msg = f"Brought every {what} back." if changed else "Nothing to bring back."
+    return RedirectResponse(
+        url=dest + "?notice=" + urllib.parse.quote(msg), status_code=303)
 
 
 async def _restore_hidden(request, scope, redirect):
@@ -6218,13 +6286,63 @@ async def _restore_hidden(request, scope, redirect):
 async def library_hidden(request: Request):
     from qobuz_librarian.library import hidden as hidden_mod
     return _hidden_view(request, hidden_mod.SCOPE_MISSING, page="library",
-                        restore_action="/library/hidden/restore", back_url="/library")
+                        restore_action="/library/hidden/restore", back_url="/library",
+                        restore_all_action="/library/hidden/restore-all")
 
 
 @app.post("/library/hidden/restore")
 async def library_hidden_restore(request: Request):
     from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden(request, hidden_mod.SCOPE_MISSING, "/library/hidden")
+
+
+@app.post("/library/hidden/restore-all")
+async def library_hidden_restore_all(request: Request):
+    """Bring the whole dismissed set back from the Dismissed page. Unlike the
+    finished-state /library/bring-back-all this can run with a live review
+    parked, so the restored candidates are folded back into it — clearing the
+    store alone would leave them invisible until a future scan most users
+    never run."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    from qobuz_librarian.library import hidden as hidden_mod
+    from qobuz_librarian.library import library_scan_state
+    from qobuz_librarian.web import flows
+    loop = asyncio.get_running_loop()
+
+    def _restore():
+        artists = [g["artist"]
+                   for g in hidden_mod.hidden_by_artist(hidden_mod.SCOPE_MISSING)]
+        hidden_mod.restore_all(hidden_mod.SCOPE_MISSING)
+        return artists
+
+    try:
+        artists = await loop.run_in_executor(None, _restore)
+    except OSError as e:
+        return RedirectResponse(
+            url="/library/hidden?notice=" + urllib.parse.quote(str(e)),
+            status_code=303)
+    if not artists:
+        return RedirectResponse(
+            url="/library/hidden?notice=" + urllib.parse.quote(
+                "Nothing to bring back."), status_code=303)
+    rejoined = await loop.run_in_executor(
+        None, lambda: flows.refold_restored_missing(artists, []))
+    if rejoined is None:
+        lifted = await loop.run_in_executor(
+            None, library_scan_state.clear_review_retired)
+        msg = ("Brought everything back to the Library review." if lifted
+               else "Brought everything back. It returns the next time the "
+                    "library scans.")
+    elif rejoined:
+        msg = "Brought everything back to the Library review."
+    else:
+        msg = ("Brought everything back. It returns the next time the "
+               "library scans.")
+    return RedirectResponse(
+        url="/library/hidden?notice=" + urllib.parse.quote(msg),
+        status_code=303)
 
 
 @app.post("/library/bring-back-all")
@@ -6280,7 +6398,8 @@ async def upgrade_hidden(request: Request):
         return _upgrade_unavailable_response()
     from qobuz_librarian.library import hidden as hidden_mod
     return _hidden_view(request, hidden_mod.SCOPE_UPGRADE, page="upgrade",
-                        restore_action="/upgrade/hidden/restore", back_url="/upgrade")
+                        restore_action="/upgrade/hidden/restore", back_url="/upgrade",
+                        restore_all_action="/upgrade/hidden/restore-all")
 
 
 @app.post("/upgrade/hidden/restore")
@@ -6289,6 +6408,16 @@ async def upgrade_hidden_restore(request: Request):
         return _upgrade_unavailable_response()
     from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden(request, hidden_mod.SCOPE_UPGRADE, "/upgrade/hidden")
+
+
+@app.post("/upgrade/hidden/restore-all")
+async def upgrade_hidden_restore_all(request: Request):
+    if not _upgrade_available():
+        return _upgrade_unavailable_response()
+    from qobuz_librarian.library import hidden as hidden_mod
+    return await _restore_hidden_all(
+        request, hidden_mod.SCOPE_UPGRADE, "/upgrade/hidden",
+        "dismissed album")
 
 
 @app.post("/upgrade/review")
@@ -6340,7 +6469,8 @@ async def downsample_hidden(request: Request):
     from qobuz_librarian.library import hidden as hidden_mod
     return _hidden_view(request, hidden_mod.SCOPE_DOWNSAMPLE, page="downsample",
                         restore_action="/downsample/hidden/restore",
-                        back_url="/downsample")
+                        back_url="/downsample",
+                        restore_all_action="/downsample/hidden/restore-all")
 
 
 @app.post("/downsample/hidden/restore")
@@ -6348,6 +6478,14 @@ async def downsample_hidden_restore(request: Request):
     from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden(request, hidden_mod.SCOPE_DOWNSAMPLE,
                                  "/downsample/hidden")
+
+
+@app.post("/downsample/hidden/restore-all")
+async def downsample_hidden_restore_all(request: Request):
+    from qobuz_librarian.library import hidden as hidden_mod
+    return await _restore_hidden_all(
+        request, hidden_mod.SCOPE_DOWNSAMPLE, "/downsample/hidden",
+        "album kept hi-res")
 
 
 @app.post("/downsample/review")

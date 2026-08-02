@@ -38,7 +38,6 @@
 {% set _who = artist or 'this artist' %}
 {% set _rest = (items | length) - group_selected %}
 {% set _noun = 'Gap Fill candidate' if review_tab|default('') == 'gaps'
-               else 'upgrade' if job.execute_kind == 'upgrade'
                else 'missing album' if review_tab|default('') == 'missing'
                else 'album' %}
 {% set _nouns = _noun ~ 's' %}
@@ -55,6 +54,6 @@
         hx-target="closest .ql-review-group-shell"
         hx-swap="outerHTML swap:280ms"
         hx-disabled-elt="this"
-        class="ql-group-dismiss"><svg class="ql-group-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12s3.2-6 8.5-6c1.30 0 2.47.36 3.5.9M20.5 12s-3.2 6-8.5 6c-1.30 0-2.47-.36-3.5-.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4.5 19.5 19.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span class="sr-only" data-hide-label>{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }}</span></button>
+        class="ql-group-dismiss">{% if job.execute_kind == 'downsample' %}{# A bookmark: these albums are being kept, not hidden. #}<svg class="ql-group-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10v15l-5-3.4-5 3.4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>{% else %}{# A circled minus: the crossed-out eye this replaces read as "hide", and hiding is not what Dismiss does. #}<svg class="ql-group-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 12h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>{% endif %}<span class="sr-only" data-hide-label>{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }}</span></button>
 {% endif %}
 </div>
