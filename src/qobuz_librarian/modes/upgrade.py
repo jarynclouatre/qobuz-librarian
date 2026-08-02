@@ -17,7 +17,7 @@ from qobuz_librarian.quality.decision import (
     mark_album_capped,
 )
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
-from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 from qobuz_librarian.web import review_badges
@@ -85,10 +85,13 @@ def run_upgrade_walk_mode(args, token):
     The Library refresh is the source of truth for upgrade discovery. The CLI
     keeps its walk value by grouping saved candidates by artist, but it no
     longer performs a separate live upgrade scan.
+
+    Returns the exit code: 0 when the walk finished, non-zero when it was cut
+    short. The interactive menu ignores it; --upgrade-walk exits with it.
     """
     if not cfg.UPGRADE_SCAN_ENABLED:
         log.info(fmt(C.YELLOW, "  Upgrade scanning is turned off."))
-        return
+        return 0
     clear_scan_caches()
     banner("Upgrade walk — saved Library candidates")
 
@@ -96,7 +99,7 @@ def run_upgrade_walk_mode(args, token):
     if not saved_state.get("complete"):
         log.info(fmt(C.YELLOW,
             "  No complete saved upgrade candidates. Run a Library refresh first."))
-        return
+        return 0
     saved = [
         c for c in upgrade_state.visible_candidates(
             saved_state, hidden_mod.load())
@@ -105,7 +108,7 @@ def run_upgrade_walk_mode(args, token):
     if not saved:
         log.info(fmt(C.YELLOW,
             "  No saved upgrade candidates. Run a Library refresh first."))
-        return
+        return 0
 
     by_artist: dict[str, list[dict]] = {}
     for cand in saved:
@@ -230,7 +233,7 @@ def run_upgrade_walk_mode(args, token):
                 except KeyboardInterrupt:
                     log.info("")
                     log.info(fmt(C.GRAY, "  Interrupted. Stopping upgrade walk."))
-                    return
+                    return EXIT_GENERAL
 
                 _pr_result = (_proc_result or {}).get("result", "")
                 if _pr_result in BENIGN_UPGRADE_RESULTS:
@@ -295,3 +298,4 @@ def run_upgrade_walk_mode(args, token):
                     f"       · {truncate(_t, 50)}  —  {'; '.join(_rs)}"))
         log.info(fmt(C.GRAY,
             "     Re-run without --auto-safe to review these interactively."))
+    return 0

@@ -11,6 +11,7 @@ from qobuz_librarian import config
 from qobuz_librarian.library import migrate as engine
 from qobuz_librarian.library.scanner import HAVE_MUTAGEN
 from qobuz_librarian.ui_cli.colors import C, fmt, format_size, section, truncate
+from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import confirm
 
@@ -113,6 +114,9 @@ def _print_preview(plan, verbose: bool, in_place: bool,
 
 
 def run_migrate_mode(args):
+    """Returns the exit code: 0 when the migration ran (or the user declined
+    it), non-zero when it could not start or did not finish cleanly. The
+    interactive menu ignores it; the --migrate flag exits with it."""
     section("Library migration — organise an existing collection")
 
     if not HAVE_MUTAGEN:
@@ -120,11 +124,11 @@ def run_migrate_mode(args):
             "  ✗  mutagen isn't available, so tags can't be read and every file "
             "would be unidentifiable.\n     Use the bundled image (it includes "
             "mutagen) or `pip install mutagen`."))
-        return
+        return EXIT_CONFIG
 
     src, dest = _resolve_paths(args)
     if src is None:
-        return
+        return EXIT_CONFIG
 
     in_place = bool(getattr(args, "in_place", False))
     use_acoustid = bool(getattr(args, "acoustid", False))
@@ -161,14 +165,14 @@ def run_migrate_mode(args):
         log.info(fmt(C.RED,
             "  ✗  Couldn't record the migration preview safely, so nothing "
             f"was approved or copied ({e})."))
-        return
+        return EXIT_GENERAL
 
     if getattr(args, "dry_run", False):
         log.info(fmt(C.CYAN, "  Dry run — nothing was copied."))
-        return
+        return 0
     if not plan.placed and not resume_entries:
         log.info(fmt(C.GRAY, "  Nothing to place. Stopping."))
-        return
+        return 0
 
     verb = "Move" if in_place else "Copy"
     need, free = engine.space_estimate(
@@ -179,7 +183,7 @@ def run_migrate_mode(args):
             "  ✗  Not enough free space at the destination; refusing to start an "
             "unattended (--yes) migration that would run out mid-move and scatter "
             "the library. Free up space or pick another destination."))
-        return
+        return EXIT_GENERAL
     if short:
         log.info(fmt(C.YELLOW,
             f"  ⚠  The destination is short on space (needs ~{format_size(need)}, "
@@ -191,7 +195,7 @@ def run_migrate_mode(args):
             ack = ""
         if ack != "yes":
             log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
-            return
+            return 0
     elif resume_entries:
         action = (f"{verb} {len(plan.placed)} new file(s) and finish "
                   f"{len(resume_entries)} verified existing file(s)"
@@ -200,18 +204,18 @@ def run_migrate_mode(args):
         if not confirm(f"  {action} in {dest}?", default_yes=False,
                        auto_yes=bool(getattr(args, "yes", False))):
             log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
-            return
+            return 0
     elif not confirm(f"  {verb} {len(plan.placed)} file(s) into {dest}?",
                      default_yes=False,
                      auto_yes=bool(getattr(args, "yes", False))):
         log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
-        return
+        return 0
 
     if not engine.verify_audit_artifact(plan, manifest_artifact):
         log.info(fmt(C.RED,
             "  ✗  The reviewed migration record changed or can no longer be "
             "proved. Nothing was copied; scan again before approving it."))
-        return
+        return EXIT_GENERAL
 
     execution_abort = None
     try:
@@ -241,7 +245,7 @@ def run_migrate_mode(args):
                 execution_abort.reraise(publication_error=e)
         if not isinstance(e, Exception):
             raise
-        return
+        return EXIT_GENERAL
 
     if execution_abort is not None:
         execution_abort.reraise()
@@ -298,3 +302,10 @@ def run_migrate_mode(args):
         f"  Plan:        {manifest}\n"
         f"  Results:     {results_manifest}\n"
         "  Spot-check it before pointing the tool at it as your main library."))
+    # A run that lost files, stopped early, or left a recovery behind is not a
+    # success, however much of it landed — a script chaining off this must see
+    # the difference.
+    if (result.failed or companion_failed or result.cancelled
+            or getattr(result, "recoveries", ())):
+        return EXIT_GENERAL
+    return 0

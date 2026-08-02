@@ -8,11 +8,13 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.library.lyrics import HAVE_LYRICS, run_library_lyrics
 from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.ui_cli.colors import C, banner, fmt
-from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, die, plural
+from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, die, plural
 from qobuz_librarian.ui_cli.logging import log
 
 
 def run_library_lyrics_mode(args):
+    """Returns the exit code: 0 when the pass finished, non-zero when it was
+    cut short. The interactive menu ignores it; --lyrics-walk exits with it."""
     clear_scan_caches()
     banner("Lyrics — fetch lyrics for tracks already in your library")
 
@@ -53,9 +55,10 @@ def run_library_lyrics_mode(args):
     except KeyboardInterrupt:
         print()
         log.info(fmt(C.GRAY, "  Interrupted — what was done is saved; re-run to continue."))
-        return
+        return EXIT_GENERAL
 
     _report_summary(res, dry_run=args.dry_run)
+    return 0
 
 
 def _report_summary(res, *, dry_run):

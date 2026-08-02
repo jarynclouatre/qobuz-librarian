@@ -776,16 +776,14 @@ def main():
     # touches Qobuz.
     if args.migrate:
         from qobuz_librarian.modes.migrate import run_migrate_mode
-        run_migrate_mode(args)
-        return
+        raise SystemExit(run_migrate_mode(args))
 
     # Lyrics backfill reads/writes library files and fetches from lyric
     # providers — no streamrip, ffmpeg or Qobuz token involved.
     if args.lyrics_walk:
         require_music_root()
         from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
-        run_library_lyrics_mode(args)
-        return
+        raise SystemExit(run_library_lyrics_mode(args))
 
     # The new-release check hits the Qobuz API but doesn't need streamrip,
     # ffmpeg or the FLAC tools (one catalog call per artist, no track
@@ -804,8 +802,7 @@ def main():
         check_media_tools()
         require_music_root()
         from qobuz_librarian.modes.downsample import run_downsample_walk_mode
-        run_downsample_walk_mode(args)
-        return
+        raise SystemExit(run_downsample_walk_mode(args))
 
     # Keep the interactive menu and saved-work choices available on a local-
     # only box.
@@ -940,8 +937,7 @@ def main():
         # controls passive upgrades during ordinary gap-fill walks.
         args.auto_upgrade = True
         from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
-        run_upgrade_walk_mode(args, download_token())
-        return
+        raise SystemExit(run_upgrade_walk_mode(args, download_token()))
 
     if args.query:
         from qobuz_librarian.modes.album import run_album_mode
