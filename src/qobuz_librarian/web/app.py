@@ -3610,9 +3610,6 @@ def _bind_owned_path(
                 pass
 
 
-_OWNED_PATH_MISSING = object()
-
-
 def _directory_cleanup_records(owned, expected_count):
     cleanup = owned.get("directory_cleanup")
     if (not isinstance(cleanup, dict)
@@ -8062,7 +8059,7 @@ async def job_undo(request: Request, job_id: str):
             progress=_persist_progress,
             outcome_out=undo_outcome,
         )
-        if removed is not None and removed is not _OWNED_PATH_MISSING:
+        if removed is not None:
             forget_beets_entries([removed])
             if info.get("marked"):
                 hidden_mod.unmark_single(info.get("artist") or "", info.get("album") or "")
@@ -8098,7 +8095,7 @@ async def job_undo(request: Request, job_id: str):
         finally:
             lock.release()
             lock_held = False
-        if removed is not None and removed is not _OWNED_PATH_MISSING:
+        if removed is not None:
             await loop.run_in_executor(None, _refresh_after_undo)
             job.single = {**info, "removed": True}
             job.summary = f"Removed “{info.get('title')}” and undid the single."
@@ -8110,7 +8107,7 @@ async def job_undo(request: Request, job_id: str):
                 info.get("owned_root") is None
                 and not _Path(info["dir"]).exists()
             )
-            if removed is _OWNED_PATH_MISSING or dir_gone:
+            if dir_gone:
                 if info.get("marked"):
                     from qobuz_librarian.library import hidden as hidden_mod
                     hidden_mod.unmark_single(
