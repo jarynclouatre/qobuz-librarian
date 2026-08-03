@@ -1910,6 +1910,72 @@ def test_retry_keeps_the_new_edition_override(client, monkeypatch):
     _remove_job(new_job)
 
 
+def test_retry_finishes_a_download_whose_settlement_refused_after_clearing_it(
+    client, monkeypatch,
+):
+    """A download that imported and then stranded a file in staging is not a
+    pre-launch abort, so the blocked-item settler refuses it — but it parks the
+    staging on the way out, which is the whole of what the recovery was waiting
+    on. Retry used to report that refusal and leave the job Failed until it was
+    pressed a second time.
+    """
+    from qobuz_librarian.queue.startup_recovery import (
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+
+    job = jm.Job(title="Anvil Vapre", artist="Autechre", album_id="al-anvil")
+    job.status = jm.JobStatus.FAILED
+    job.attention = "recovery"
+    job.finished_at = time.time() - 5
+    jm.registry.add(job)
+    job_persistence.persist(job)
+
+    settled = {"done": False}
+
+    def _record(_authority):
+        status = (
+            StartupRecoveryStatus.CLEAR
+            if settled["done"]
+            else StartupRecoveryStatus.ATTENTION_REQUIRED
+        )
+        result = StartupRecoveryResult(status)
+        webapp._STARTUP_RECOVERY_RESULT = result
+        return result
+
+    def _settle(_job, _action):
+        settled["done"] = True
+        return False, ("Beets may have started or changed the library, so this "
+                       "item remains blocked.")
+
+    monkeypatch.setattr(webapp, "_record_startup_recovery", _record)
+    monkeypatch.setattr(webapp, "_settle_durable_web_recovery", _settle)
+    monkeypatch.setattr(webapp, "_durable_recovery_matches_job", lambda j: True)
+    monkeypatch.setattr(webapp, "_recovery_submission_matches",
+                        lambda j, op, item: True)
+    monkeypatch.setattr(webapp, "_durable_completion_status",
+                        lambda j: settled["done"])
+
+    r = client.post(
+        f"/jobs/{job.id}/retry",
+        data={"recovery_operation_id": "op-1", "recovery_item_id": "item-1"},
+        follow_redirects=False,
+    )
+
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/jobs/{job.id}"
+    assert job.status is jm.JobStatus.DONE
+    assert job.attention == ""
+    assert "restart" not in job.summary
+    _remove_job(job)
+
+
 def test_undo_burns_the_one_shot_in_the_archive(client, monkeypatch, tmp_path):
     from qobuz_librarian.web import job_persistence
 

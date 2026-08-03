@@ -253,6 +253,17 @@ def _cli_discard_settlement_matches(result, target) -> bool:
     )
 
 
+def _cli_settlement_cleared_recovery(result, target) -> bool:
+    """True when a refused settlement left nothing for this item to settle."""
+    from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
+
+    return result.status is StartupRecoveryStatus.CLEAR and all(
+        item.operation_id != target.operation_id
+        or item.item_id != target.item_id
+        for item in getattr(result, "items", ())
+    )
+
+
 def _offer_blocked_cli_settlement(authority, result):
     """Offer an explicit decision for one exact pre-launch CLI abort."""
     from qobuz_librarian.queue.startup_recovery import (
@@ -310,6 +321,12 @@ def _offer_blocked_cli_settlement(authority, result):
     except Exception:
         return result, False
     if settled.status is not expected:
+        # A refusal still parks the item's stranded staging, and for a download
+        # that already imported that is the whole of what was outstanding.
+        # Reporting the refusal over a recovery it just cleared would strand the
+        # run behind a stale verdict.
+        if _cli_settlement_cleared_recovery(fresh, item):
+            return fresh, False
         log.info(fmt(C.YELLOW, f"  {settled.reason}"))
         return result, False
     verified = (

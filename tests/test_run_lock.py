@@ -170,3 +170,65 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
     assert "interrupted download" not in flat
 
 
+
+
+def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
+        monkeypatch, capsys):
+    """Retrying a blocked item that already imported gets refused — the item is
+    no longer a pre-launch abort — but the refusal still parks its stranded
+    staging, which clears the recovery. Dying on the stale verdict made the run
+    abort for nothing.
+    """
+    from types import SimpleNamespace
+
+    from qobuz_librarian import cli, run_lock
+    from qobuz_librarian.queue import startup_recovery
+    from qobuz_librarian.queue.startup_recovery import (
+        BlockedItemSettlementResult,
+        BlockedItemSettlementStatus,
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+
+    class Lease:
+        closed = False
+
+        def intact(self):
+            return not self.closed
+
+        def close(self):
+            self.closed = True
+
+    lease = Lease()
+    item = SimpleNamespace(operation_id="op-1", item_id="item-1")
+    settled = {"done": False}
+
+    def _recover(_authority):
+        if settled["done"]:
+            return StartupRecoveryResult(StartupRecoveryStatus.CLEAR)
+        return StartupRecoveryResult(
+            StartupRecoveryStatus.ATTENTION_REQUIRED,
+            reason="queue-item-blocked",
+        )
+
+    def _settle(**_kwargs):
+        settled["done"] = True
+        return BlockedItemSettlementResult(
+            BlockedItemSettlementStatus.BLOCKED,
+            "Beets may have started or changed the library, so this item "
+            "remains blocked.",
+        )
+
+    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
+    monkeypatch.setattr(
+        cli,
+        "_cli_blocked_settlement_binding",
+        lambda result: (item, "Autechre — Anvil Vapre"),
+    )
+    monkeypatch.setattr(startup_recovery, "settle_blocked_item", _settle)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "r")
+
+    assert cli.acquire_run_lock() is lease
+    assert lease.closed is False
+    assert "remains blocked" not in capsys.readouterr().out

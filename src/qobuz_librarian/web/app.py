@@ -530,7 +530,7 @@ def _durable_completion_status(job) -> bool | None:
     )
 
 
-def _reconcile_acknowledged_job(job) -> bool:
+def _reconcile_acknowledged_job(job, summary: str | None = None) -> bool:
     """Make an externally completed exact job terminal and non-retryable."""
     from qobuz_librarian.web import job_persistence
 
@@ -538,11 +538,50 @@ def _reconcile_acknowledged_job(job) -> bool:
         job.status = job_mgr.JobStatus.DONE
         job.phase = ""
         job.error = None
-        job.summary = job.summary or "Download completed before the restart."
+        job.summary = job.summary or summary or (
+            "Download completed before the restart."
+        )
         job.attention = ""
         job.cancel_requested = False
         job.finished_at = job.finished_at or time.time()
     return job_persistence.persist(job)
+
+
+def _settled_completion_response(request, job):
+    """Take the completed-download lane when a refused settlement has already
+    cleared the recovery it refused over.
+
+    `settle_blocked_item` only settles a pre-launch abort, so it refuses a
+    download that imported and then stranded a file in staging — but it parks
+    that staging first, which is the one thing the recovery was waiting on.
+    Re-read the recovery and the completion record it just moved, or the reply
+    describes a state this request has already left behind.
+    """
+    if not _run_lock_intact():
+        return None
+    try:
+        recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
+    except Exception:
+        return None
+    if (
+        _recovery_status_value(recovery) != "clear"
+        or _durable_completion_status(job) is not True
+    ):
+        return None
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    if not _reconcile_acknowledged_job(
+        job,
+        "Download completed. Retry cleared the leftover that was blocking it.",
+    ):
+        return _durable_recovery_response(
+            request,
+            "The completed download could not be saved to History. No "
+            "download was started. Check the data-folder permissions, then "
+            "restart Qobuz Librarian.",
+        )
+    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
 def _durable_recovery_response(request, message: str):
@@ -7707,6 +7746,9 @@ async def job_retry(request: Request, job_id: str):
             BlockedItemSettlementAction.RETRY,
         )
         if not settled:
+            reconciled = _settled_completion_response(request, job)
+            if reconciled is not None:
+                return reconciled
             return _durable_recovery_response(
                 request,
                 reason or "The interrupted download remains blocked.",
