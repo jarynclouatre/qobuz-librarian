@@ -345,6 +345,13 @@ class Job:
 
     _LOG_SLACK = 1000
     _TRUNCATION_MARKER = "[… earlier output truncated to bound memory …]"
+    # LOG_CAP bounds memory; this one bounds the archive. A finished job's log
+    # is kept on disk so a restart stops replacing it with "no log output was
+    # retained", and PERSIST_KEEP holds 1000 finished rows — storing LOG_CAP
+    # lines each would put hundreds of MB in jobs.db to answer a question the
+    # tail of the log almost always answers.
+    LOG_PERSIST_CAP = 500
+    _PERSIST_TRUNCATION_MARKER = "[… earlier output not kept on disk …]"
     # Strip C0 control bytes except \t (\x09) and \n (\x0a) — a stray NUL or
     # ESC byte from streamrip/beets truncates some browsers' SSE display and
     # garbles the JSON status endpoint.
@@ -362,6 +369,19 @@ class Job:
                 del self.log_lines[:len(self.log_lines) - self.LOG_CAP]
                 self.log_lines[0] = self._TRUNCATION_MARKER
         self._fan_out(line)
+
+    def persisted_log_lines_locked(self) -> list:
+        """The tail of the log to keep on disk, marked if anything was cut.
+
+        The caller holds ``self._lock`` — persist() takes it around the whole
+        snapshot, and push_line mutates log_lines under the same one, so
+        re-entering here would deadlock the writer against itself.
+        """
+        if len(self.log_lines) <= self.LOG_PERSIST_CAP:
+            return list(self.log_lines)
+        kept = list(self.log_lines[-self.LOG_PERSIST_CAP:])
+        kept[0] = self._PERSIST_TRUNCATION_MARKER
+        return kept
 
     def end_stream(self):
         """Close the current phase's live stream without storing a marker."""
@@ -1466,6 +1486,7 @@ def restore_jobs(
     execute_registry: dict,
     *,
     durable_recovery_clear: bool = False,
+    durable_recovery_job_id: str | None = None,
 ) -> None:
     """Rehydrate the registry from the on-disk job table at app startup.
 
@@ -1525,6 +1546,7 @@ def restore_jobs(
             single=row.get("single") or {},
             attention=row.get("attention") or "",
             recoveries=row.get("recoveries") or [],
+            log_lines=list(row.get("log_lines") or []),
             created_at=(
                 row.get("created_at")
                 if type(row.get("created_at")) in (int, float)
@@ -1542,7 +1564,17 @@ def restore_jobs(
                 )
                 is True
             )
-        if completion_acknowledged and durable_recovery_clear is True:
+        # `durable_recovery_clear` is process-wide, and a terminal-started
+        # recovery owns no job id at all. A job whose own completion is
+        # acknowledged is finished while some other download's recovery is
+        # outstanding; the completion proof is only read, never redefined.
+        recovery_is_this_job = (
+            durable_recovery_job_id is not None
+            and job.id == durable_recovery_job_id
+        )
+        if completion_acknowledged and (
+            durable_recovery_clear is True or not recovery_is_this_job
+        ):
             # Startup recovery proved and acknowledged this exact job
             # incarnation before retiring the queue journal.
             job.status = JobStatus.DONE
@@ -1555,15 +1587,16 @@ def restore_jobs(
             historical += 1
             job_persistence.persist(job)
         elif completion_acknowledged:
-            # The acknowledgement says the library mutation crossed its
-            # durable boundary, but only a fresh CLEAR startup inspection may
-            # retire the Web job.
+            # This job's own recovery is the outstanding one, so the
+            # acknowledgement is not enough to retire it here.
             job.status = JobStatus.FAILED
             job.phase = ""
+            # This state survives a restart, so the route out is left to the
+            # pause notice rather than prescribed here.
             job.error = (
-                "This download is recorded as complete, but startup recovery "
-                "still needs attention. Restart Qobuz Librarian after "
-                "checking the log."
+                "This download is recorded as complete, but its own "
+                "interrupted recovery is still outstanding, so downloads and "
+                "scans stay paused. The application log names the reason."
             )
             job.attention = "recovery"
             job.cancel_requested = False

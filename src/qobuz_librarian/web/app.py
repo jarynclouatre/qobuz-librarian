@@ -3444,14 +3444,10 @@ def _make_download_run(
                     r = result or {}
                     durable_failure = True
                     completion_acknowledged = _durable_completion_status(j)
-                    # `recovery_status` is process-wide, not this job's, so a
-                    # download whose OWN completion is durably acknowledged was
-                    # written up as Failed because some other item's recovery
-                    # was outstanding — one started from the terminal did it to
-                    # every finished download at once. It only came right
-                    # because this sweep re-runs at restore time, which is why
-                    # clearing it took a restart. Asking whose recovery it is
-                    # reads the completion proof; it does not redefine one.
+                    # `recovery_status` is process-wide, so on its own it fails
+                    # a download whose own completion is acknowledged because
+                    # some other item's recovery is outstanding. Whose recovery
+                    # it is decides; the completion proof is only read.
                     recovery_is_this_job = _startup_recovery_web_job_id() == j.id
                     if (
                         completion_acknowledged is True
