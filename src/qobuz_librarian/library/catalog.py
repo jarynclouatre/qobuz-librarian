@@ -1913,7 +1913,13 @@ def _open_or_publish_migration_directory_at(
                     parent_fd, reserved_name, directory_fd):
                 raise OSError(
                     "temporary migration directory could not be reclaimed")
-            os.close(directory_fd)
+            # Drop the reference before the close: if the re-open below raises,
+            # the handler must not close this number again. The kernel hands a
+            # freed number straight back, so the retry would land on whatever
+            # was opened in between.
+            closing = directory_fd
+            directory_fd = None
+            os.close(closing)
             return _open_migration_directory(name, dir_fd=parent_fd), False
         if not _migration_named_directory_matches(
                 parent_fd, name, directory_fd):
@@ -1941,15 +1947,16 @@ def _open_or_publish_migration_directory_at(
                 raise
         return directory_fd, True
     except BaseException:
-        if _migration_named_directory_matches(
-                parent_fd, name, directory_fd):
-            _remove_reserved_migration_directory_at(
-                parent_fd, name, directory_fd)
-        elif _migration_named_directory_matches(
-                parent_fd, reserved_name, directory_fd):
-            _remove_reserved_migration_directory_at(
-                parent_fd, reserved_name, directory_fd)
-        os.close(directory_fd)
+        if directory_fd is not None:
+            if _migration_named_directory_matches(
+                    parent_fd, name, directory_fd):
+                _remove_reserved_migration_directory_at(
+                    parent_fd, name, directory_fd)
+            elif _migration_named_directory_matches(
+                    parent_fd, reserved_name, directory_fd):
+                _remove_reserved_migration_directory_at(
+                    parent_fd, reserved_name, directory_fd)
+            os.close(directory_fd)
         raise
 
 def _open_migration_entry(parent_fd, name):

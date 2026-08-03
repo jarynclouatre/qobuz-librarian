@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -336,3 +337,50 @@ def test_folder_completeness_requires_a_full_tree_walk(monkeypatch, tmp_path):
     assert cat.folder_holds_all_tracks(folder, qobuz) is True
 
 
+
+
+def test_publishing_a_migration_directory_never_closes_a_reused_number(
+        tmp_path, monkeypatch):
+    """The FileExistsError reclaim closes the reserved descriptor and then
+    re-opens the published name. When that re-open fails, the outer handler
+    must not close the same raw number a second time — the kernel hands it
+    straight back, so the retry lands on whatever was opened in between."""
+    canary_path = tmp_path / "canary"
+    canary_path.write_bytes(b"canary")
+    parent_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    real_open = catalog._open_migration_directory
+    real_reserve = catalog._reserve_migration_directory_at
+    seen = {"reserved_fd": None, "canary_fd": None}
+
+    def reserve(parent, *, prefix, mode=0o700):
+        name, descriptor = real_reserve(parent, prefix=prefix, mode=mode)
+        seen["reserved_fd"] = descriptor
+        return name, descriptor
+
+    def open_directory(path, *, dir_fd=None):
+        if path != "Album":
+            return real_open(path, dir_fd=dir_fd)
+        if seen["reserved_fd"] is None:
+            raise FileNotFoundError(path)
+        seen["canary_fd"] = os.open(str(canary_path), os.O_RDONLY)
+        raise NotADirectoryError(path)
+
+    monkeypatch.setattr(catalog, "_reserve_migration_directory_at", reserve)
+    monkeypatch.setattr(catalog, "_open_migration_directory", open_directory)
+    monkeypatch.setattr(
+        catalog, "_rename_noreplace_at",
+        lambda *_a, **_kw: (_ for _ in ()).throw(FileExistsError("Album")))
+
+    try:
+        with pytest.raises(NotADirectoryError):
+            catalog._open_or_publish_migration_directory_at(parent_fd, "Album")
+        # Vacuous unless the kernel really recycled the number.
+        assert seen["canary_fd"] == seen["reserved_fd"]
+        assert os.fstat(seen["canary_fd"]).st_size == len(b"canary")
+    finally:
+        for descriptor in (seen["canary_fd"], parent_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
