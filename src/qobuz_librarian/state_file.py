@@ -15,6 +15,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -107,6 +108,29 @@ def preserve_corrupt(path, what, reason, lost):
         where = "the unreadable copy could not be moved aside"
     log.warning("%s was corrupt (%s); %s may have been reset and %s.",
                 what, reason, lost, where)
+
+
+_CORRUPT_SUFFIX_RE = re.compile(r"\.corrupt(\.\d+)?$")
+
+
+def preserved_corrupt_stores():
+    """The names of the `….corrupt` copies preserve_corrupt kept in DATA_DIR.
+
+    Preserving the file and warning satisfies half this module's promise; the
+    warning goes to the log, which a web user never reads, so the store silently
+    reverts to defaults instead. Listing the kept copies lets the UI say so —
+    and deleting them clears it, since the list is the whole state.
+    """
+    from qobuz_librarian import config as cfg
+
+    try:
+        return sorted(
+            entry.name
+            for entry in Path(cfg.DATA_DIR).iterdir()
+            if entry.is_file() and _CORRUPT_SUFFIX_RE.search(entry.name)
+        )
+    except OSError:
+        return []
 
 
 def load_json_object(path, what, lost):

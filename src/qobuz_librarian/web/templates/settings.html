@@ -36,6 +36,20 @@
 </div>
 {% endif %}
 
+{% if corrupt_stores %}
+<div class="ql-notice ql-notice-warning mb-6">
+  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
+  </svg>
+  <span>A saved file couldn't be read, so anything it held is showing its default
+    here rather than what you chose — check download quality and downsampling
+    below before saving, or this page will write the defaults back. The
+    unreadable copy is kept in your data folder as
+    {% for name in corrupt_stores %}<code>{{ name }}</code>{{ ', ' if not loop.last }}{% endfor %};
+    delete {{ 'it' if corrupt_stores | length == 1 else 'them' }} to clear this notice.</span>
+</div>
+{% endif %}
+
 {% if quality_note %}
 <div class="ql-notice ql-notice-info mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">

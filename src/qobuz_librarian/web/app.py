@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from qobuz_librarian import __version__
+from qobuz_librarian import __version__, state_file
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import NoCredsError
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
@@ -2680,6 +2680,9 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             "lyric_retry_count":
                 len(load_lyric_retry()) if _cfg.LYRIC_RETRY_FILE.exists() else 0,
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
+            # A store that couldn't be read was kept aside and the run fell back
+            # to defaults — only the container log said so, which nobody reads.
+            "corrupt_stores": state_file.preserved_corrupt_stores(),
         }
 
     loop = asyncio.get_running_loop()
@@ -8513,6 +8516,10 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "text_fields": settings_store.TEXT_FIELDS,
         "option_labels": settings_store.ENUM_OPTION_LABELS,
         "behavior": values,
+        # The worst store to lose without being told: quality tier and
+        # downsample policy revert to the env defaults and this page then shows
+        # them as if they were chosen.
+        "corrupt_stores": state_file.preserved_corrupt_stores(),
         "diagnostics_html": _diagnostics_fragment(request, diagnostics),
     })
 
