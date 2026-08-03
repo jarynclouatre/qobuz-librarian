@@ -2006,17 +2006,25 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         landed_post = qi.get("_resolved_post_dir") or find_album_dir_filesystem(album)
         landed_post_path = Path(landed_post) if landed_post else None
         relocation_ok = True
+        # When every refill failed to download there is no import receipt to
+        # read, and asking for one reports the honest failure as "the final
+        # location could not be proven" with a placement-stage recovery record.
+        # Nothing landed, so nothing needs placing.
+        nothing_landed = (
+            qi.get("n_ok", 0) <= 0 and qi.get("_import_ownership") is None
+        )
         try:
-            _relocate_refilled_into_album_dir(
-                album_dir,
-                landed_post_path,
-                wanted_isrcs,
-                before_names,
-                ownership_receipt=qi.get("_import_ownership"),
-                expected_refills=qi.get("n_ok", 0),
-                held_root=held_root,
-                held_album=held_album,
-            )
+            if not nothing_landed:
+                _relocate_refilled_into_album_dir(
+                    album_dir,
+                    landed_post_path,
+                    wanted_isrcs,
+                    before_names,
+                    ownership_receipt=qi.get("_import_ownership"),
+                    expected_refills=qi.get("n_ok", 0),
+                    held_root=held_root,
+                    held_album=held_album,
+                )
         except _RepairRelocationUncertain as exc:
             pin_repair_recovery(
                 "repair backup kept — refill location could not be proven")
@@ -2299,7 +2307,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     no_isrc_tag        = scan["no_isrc_tag"]
 
     if quiet and not verified_truncated and not any(
-            x.get("diagnostic") for x in no_isrc_tag):
+            x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag)):
         return "clean"
     if quiet:
         # Commit the caller's \r progress line and head the report.
@@ -2318,9 +2326,15 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             "\n  Skipped (ISRC tag present but no Qobuz match — "
             "Apple Music import or removed from Qobuz?):"))
         for x in isrc_no_match[:10]:
-            log.info(fmt(C.GRAY,
-                f"    • {truncate(x['title'], 50)}  "
-                f"[isrc={x['isrc']}]"))
+            diag = x.get("diagnostic")
+            if diag:
+                log.info(fmt(C.YELLOW,
+                    f"    • {truncate(x['title'], 50)}  "
+                    f"[isrc={x['isrc']}] — {diag}"))
+            else:
+                log.info(fmt(C.GRAY,
+                    f"    • {truncate(x['title'], 50)}  "
+                    f"[isrc={x['isrc']}]"))
         if len(isrc_no_match) > 10:
             log.info(fmt(C.GRAY,
                 f"    ... and {len(isrc_no_match) - 10} more"))

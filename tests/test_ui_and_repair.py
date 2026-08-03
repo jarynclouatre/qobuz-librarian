@@ -887,3 +887,25 @@ def test_strict_confirm_reasks_on_a_typo(monkeypatch):
 
     monkeypatch.setattr("builtins.input", lambda _p: "maybe")
     assert prompts.confirm("Keep?", default_yes=True) is False
+
+
+def test_repair_with_no_successful_refill_reports_the_download_failure(
+        tmp_path, monkeypatch):
+    """A repair whose downloads all fail has no import receipt to read, so
+    asking placement to prove itself turned the honest failure into "the final
+    location could not be proven" with a placement-stage recovery record. The
+    truthful branch was unreachable for a total failure."""
+    import qobuz_librarian.modes.repair as repair_mod
+
+    recoveries = []
+    result, _root = _call_repair_album_dir(
+        tmp_path, monkeypatch,
+        n_ok=0, n_fail=1, imported=False, present=False, intact=False,
+        relocation_error=repair_mod._RepairRelocationUncertain(
+            "repair import receipt has an invalid root"),
+        recovery_checkpoint=lambda recovery: recoveries.append(recovery) or True,
+    )
+
+    assert result["n_ok"] == 0 and result["n_fail"] == 1
+    assert [r.stage for r in recoveries][-1] == "refill"
+    assert not any("could not be proven" in r.reason for r in recoveries)

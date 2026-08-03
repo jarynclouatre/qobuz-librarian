@@ -242,3 +242,26 @@ def test_scan_downgrades_a_file_that_changes_mid_check(tmp_path, _need_tools):
     assert r["unverified"] == 1, f"a mid-check change must downgrade (got {r})"
     assert r["verified_ok"] == 0
     assert r["verified_truncated"] == []
+
+
+def test_shallow_scan_files_corrupt_unmatched_isrc_under_no_match(
+        tmp_path, _need_tools):
+    """A file that has an ISRC Qobuz doesn't know AND won't decode belongs
+    under the no-match heading carrying its diagnostic. It used to be appended
+    to no_isrc_tag, so the report told the user it had no ISRC tag while
+    printing the tag's own diagnostic beside it."""
+    album = tmp_path / "Artist" / "Album (2020)"
+    album.mkdir(parents=True)
+    p = album / "01.flac"
+    _make_flac(p)
+    _frame_corrupt(p)
+    assert not _decodes(p)
+
+    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
+               return_value=None):
+        r = scan_dir_for_isrc_repairs(album, "token", deep=False)
+
+    assert not r["no_isrc_tag"], f"tagged file must not land there (got {r})"
+    diagnosed = [e for e in r["isrc_no_match"] if e.get("diagnostic")]
+    assert [Path(e["path"]).name for e in diagnosed] == ["01.flac"], (
+        f"corrupt unmatched-ISRC file must carry its diagnostic (got {r})")

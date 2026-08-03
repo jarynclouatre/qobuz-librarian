@@ -443,16 +443,15 @@ def _scan_held_repair_source(
         report["unverified"] += 1
         return
     if qt is None:
+        # These files have an ISRC — it just matched nothing at Qobuz. A broken
+        # one belongs in the same bucket carrying a diagnostic, not under
+        # "no ISRC tag", which is where the report files them by name.
         entry = {"path": path, "title": title, "isrc": isrc}
         if not _flac_decode_ok(path, descriptor=source.descriptor):
             entry["diagnostic"] = (
                 "won't decode (frame-CRC or mid-file damage); "
                 "re-download or replace from another source")
-            if source.intact():
-                report["no_isrc_tag"].append(entry)
-            else:
-                report["unverified"] += 1
-        elif source.intact():
+        if source.intact():
             report["isrc_no_match"].append(entry)
         else:
             report["unverified"] += 1

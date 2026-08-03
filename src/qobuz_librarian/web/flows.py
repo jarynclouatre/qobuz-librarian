@@ -1878,9 +1878,16 @@ def _repair_album_outcome(album_dir, name, token):
             "detail": f"{plural(len(truncated), 'truncated track')}",
             "payload": {"album_dir": str(album_dir), "artist_name": name,
                         "verified_truncated": truncated}})
-    # Damaged files with no readable ISRC can't be surgically refilled — offer a
-    # whole-album re-download instead (the user confirms it in review).
-    suspicious = [e for e in scan.get("no_isrc_tag", []) if e.get("diagnostic")]
+    # Damaged files that can't be matched to a Qobuz recording can't be
+    # surgically refilled — offer a whole-album re-download instead (the user
+    # confirms it in review). Both no-match buckets carry them: no ISRC at all,
+    # or an ISRC Qobuz doesn't know.
+    suspicious = [
+        entry
+        for bucket in ("isrc_no_match", "no_isrc_tag")
+        for entry in scan.get(bucket, [])
+        if entry.get("diagnostic")
+    ]
     if suspicious:
         matched = find_qobuz_album_for_dir(album_dir, name, token)
         if matched and matched.get("id"):
