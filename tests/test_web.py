@@ -1605,7 +1605,7 @@ def test_first_downsample_keep_choice_applies_while_a_job_is_running(
         "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
     monkeypatch.setattr(job_mgr._scan_queue, "put", lambda item: None)
     # A job is running in the other lane, so save() takes its deferral branch —
-    # the exact condition that used to strand the choice at its unset default.
+    # the exact condition that can strand the choice at its unset default.
     monkeypatch.setattr(ss, "_any_active_job", lambda: True)
     state = {
         "updated_at": time.time(), "complete": True,
@@ -4238,10 +4238,10 @@ def test_post_baseline_library_scan_control_recedes(client, monkeypatch):
 
 
 def test_volume_gate_reopens_without_a_restart(tmp_path, monkeypatch):
-    # The writability verdict used to be sealed at startup, so fixing the
-    # ownership of a root-created music folder left downloads refusing while
-    # Diagnostics — which re-checks live — showed green. The gate probes live
-    # now and has to agree with Diagnostics.
+    # A writability verdict sealed at startup leaves downloads refusing after
+    # the ownership of a root-created music folder is fixed, while Diagnostics
+    # — which re-checks live — shows green. The gate probes live and has to
+    # agree with Diagnostics.
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import app as webapp
 
@@ -4265,9 +4265,8 @@ def test_volume_gate_reopens_without_a_restart(tmp_path, monkeypatch):
 
 def test_new_release_check_stays_reachable_while_a_review_is_parked(
         client, monkeypatch):
-    # A parked review can live for months, and it hides the baseline-ready
-    # strip — the manual check used to live only there, so it was
-    # unreachable the whole time.
+    # A parked review can live for months and it hides the baseline-ready
+    # strip, so the manual check cannot live only there.
     from qobuz_librarian.web import app as webapp
 
     monkeypatch.setattr(webapp, "_read_creds",
@@ -4571,8 +4570,8 @@ def test_approve_rechecks_the_write_pause_after_awaits(client, monkeypatch):
 
 
 def test_settings_storage_separates_the_library_from_the_drive(client, monkeypatch):
-    # The one line used to read "Music folder: 3.31 TB used", which is the whole
-    # filesystem — on an instance holding 1.6 MB of music.
+    # One line reading "Music folder: 3.31 TB used" is the whole filesystem,
+    # on an instance holding 1.6 MB of music.
     import shutil
 
     import qobuz_librarian.web.app as app_mod
@@ -4623,8 +4622,8 @@ def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
 
 
 def test_connection_badge_reports_only_what_qobuz_has_confirmed(client, monkeypatch):
-    # "Connected" used to show for any saved token, including one that had never
-    # authenticated — and a token Qobuz had rejected.
+    # "Connected" must not show for any saved token — one that has never
+    # authenticated, or one Qobuz has rejected.
     import qobuz_librarian.web.app as app_mod
     monkeypatch.setattr(app_mod, "_read_creds",
                         lambda: {"user_id": "u", "auth_token": "t"})
@@ -4643,7 +4642,7 @@ def test_connection_badge_reports_only_what_qobuz_has_confirmed(client, monkeypa
 
 
 def test_blank_login_does_not_spend_a_strike(client, monkeypatch):
-    # Five blank taps used to lock the owner out of his own app for an hour.
+    # Five blank taps must not lock the owner out of his own app for an hour.
     from qobuz_librarian.web import auth as web_auth
 
     monkeypatch.setenv("WEB_AUTH", "on")

@@ -576,8 +576,8 @@ def run_walk_queued_mode(args, token):
                             "\n  Artist scan interrupted — stopping the walk. "
                             f"Queue saved to {cfg.PENDING_QUEUE_FILE.name}."))
                         decided = False
-                        # Stop, like the album walk's Ctrl-C does. This used to
-                        # advance to the next artist while saying it wouldn't.
+                        # Stop, like the album walk's Ctrl-C does — the message
+                        # above promises the walk ends here.
                         break
 
                     n_scanned += 1

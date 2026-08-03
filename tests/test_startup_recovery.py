@@ -911,9 +911,9 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
     monkeypatch,
 ):
     # A crashed or failed terminal-mode download leaves a .qobuz-run-* with no
-    # journal item behind it. Boot recovery used to stop on it with attention
-    # required — pausing every download — and nothing in the app could settle
-    # it. Park the leftover for review instead and let the boot come up clean.
+    # journal item behind it. Stopping on it with attention required would pause
+    # every download with nothing in the app able to settle it, so the leftover
+    # is parked for review and the boot comes up clean.
     monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")

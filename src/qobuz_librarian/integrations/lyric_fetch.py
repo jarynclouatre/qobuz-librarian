@@ -1535,10 +1535,10 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
             _provider_fails[prov] = n
             first_line = chatter.splitlines()[0] if chatter else ""
             log.debug("provider %s soft-fail #%d: %s", prov, n, first_line)
-            # Announce the disable once, on the strike that trips it. The
-            # workers already past the _is_provider_dead check keep arriving
-            # with a higher count, and each used to repeat the line with a
-            # number that no longer matched the threshold being applied.
+            # Announce the disable once, on the strike that trips it. Workers
+            # already past the _is_provider_dead check keep arriving with a
+            # higher count, which would repeat the line under a number that no
+            # longer matches the threshold being applied.
             if n >= PROVIDER_FAIL_THRESHOLD and prov not in _dead_providers:
                 _dead_providers[prov] = time.time()
                 log.info("disabling provider %s for %ds after %d consecutive "

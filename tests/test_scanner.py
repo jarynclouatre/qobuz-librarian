@@ -116,8 +116,8 @@ def test_scan_checkpoint_load_coerces_wrong_types(tmp_path, monkeypatch):
 
 def test_dir_caches_survive_a_concurrent_clear(monkeypatch, tmp_path):
     # clear_scan_caches() (a concurrent download) can empty a scan cache between
-    # the `in` check and the lookup; that KeyError used to escape the OSError
-    # guard and silently drop the artist. Both cached lookups must be atomic.
+    # the `in` check and the lookup, and that KeyError escapes the OSError guard
+    # and silently drops the artist. Both cached lookups must be atomic.
     from qobuz_librarian.library import scanner
 
     class _LyingCache(dict):

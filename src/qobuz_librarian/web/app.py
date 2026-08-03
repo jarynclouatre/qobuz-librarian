@@ -3121,9 +3121,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 def _annotate_owned():
                     # Same filesystem resolver the download and scan paths use.
                     # "Owned" means COMPLETE, not "a folder with a file in it":
-                    # a part-finished album used to read "In library" and lose
-                    # both its checkbox and its download button, which is the
-                    # gap-fill case this app exists for.
+                    # a part-finished album reading "In library" loses both its
+                    # checkbox and its download button, which is the gap-fill
+                    # case this app exists for.
                     from qobuz_librarian.library.catalog import _count_audio_files_in, _dir_year
                     for res, alb in zip(results, _album_raws):
                         try:
@@ -6934,8 +6934,8 @@ def _review_context(job, page=1, query="", tab=""):
         "review_page": page,
         "review_pages": n_pages,
         "review_query": query,
-        # What "Dismiss unselected" would actually take under this filter. The
-        # button used to quote the tab total while acting on the filtered set.
+        # What "Dismiss unselected" would actually take under this filter, so
+        # the button cannot quote the tab total while acting on a subset.
         "review_filtered_rest": _filtered_rest_of(groups),
         "review_tab": tab,
         "review_tab_counts": tab_counts,
@@ -7103,11 +7103,10 @@ async def job_approve(request: Request, job_id: str):
         if not has_pick:
             return RedirectResponse(url=f"{dest}?noselection=1{_skip_q}",
                                     status_code=303)
-        # Only now that the run is going to happen: the keep-vs-delete answer
-        # is a standing policy saved to Settings, and it used to be asked and
-        # saved before anything checked there was a single album ticked — so an
-        # approve that turned out to be a no-op still changed what every future
-        # downsample does with your originals.
+        # Only now that the run is going to happen: the keep-vs-delete answer is
+        # a standing policy saved to Settings, so asking and saving it before
+        # anything checks that an album is ticked lets a no-op approve change
+        # what every future downsample does with your originals.
         if (job.execute_kind == "downsample"
                 and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
             choice = (form.get("keep_choice") or "").strip().lower()

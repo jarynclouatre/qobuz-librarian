@@ -185,10 +185,10 @@ def test_duration_gate_ignores_unreadable_length_tag(monkeypatch, tmp_path):
 
 def test_scan_diagnoses_a_file_it_cannot_lease(tmp_path, _need_tools):
     # A write lease needs file ownership (or CAP_LEASE), so on a
-    # mixed-ownership library the scan used to give up on every non-owned
-    # file as "unverified" — a genuinely broken one was never flagged. The
-    # sealed receipt already proves the file held still, so diagnosis must
-    # carry on without the lease.
+    # mixed-ownership library every non-owned file would be given up as
+    # "unverified" and a genuinely broken one never flagged. The sealed receipt
+    # already proves the file held still, so diagnosis carries on without the
+    # lease.
     album = tmp_path / "Artist" / "Album (2020)"
     album.mkdir(parents=True)
     good = album / "01.flac"

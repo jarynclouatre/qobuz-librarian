@@ -3090,8 +3090,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     # A durable stop leaves the journal holding blocked or retired work on
     # purpose, and rewriting it as pending is what the journal refuses. Every
     # album that finished already persisted through _drop, so the saved state is
-    # current without this — and the refusal used to surface as a traceback in
-    # the walk at the exact moment an album had been correctly parked.
+    # current without this — and the refusal surfaces as a traceback in the walk
+    # at the exact moment an album has been correctly parked.
     if not recovery_persist_blocked and not durable_stopped:
         _persist()
     if auth_lost_exc is not None:

@@ -1027,9 +1027,9 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     if verbose and resampled:
         log(f"  ✓ downsample: {resampled} resampled, "
             f"saved {human(saved_total)}")
-    # The stash is taken up front, before a single file is encoded, so "we kept
-    # your originals" used to be claimed on the intent to rewrite. Say it — and
-    # keep it — only once something actually was rewritten.
+    # The stash is taken up front, before a single file is encoded, so the
+    # intent to rewrite is not proof of one. Claim the kept originals — and
+    # keep them — only once something actually was rewritten.
     if kept_dir is not None:
         if resampled:
             if verbose:
