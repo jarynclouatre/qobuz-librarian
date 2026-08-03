@@ -345,11 +345,9 @@ class Job:
 
     _LOG_SLACK = 1000
     _TRUNCATION_MARKER = "[… earlier output truncated to bound memory …]"
-    # LOG_CAP bounds memory; this one bounds the archive. A finished job's log
-    # is kept on disk so a restart stops replacing it with "no log output was
-    # retained", and PERSIST_KEEP holds 1000 finished rows — storing LOG_CAP
-    # lines each would put hundreds of MB in jobs.db to answer a question the
-    # tail of the log almost always answers.
+    # LOG_CAP bounds memory; this one bounds the archive. PERSIST_KEEP holds
+    # 1000 finished rows, so keeping LOG_CAP lines each would put hundreds of
+    # MB in jobs.db to answer what the tail almost always answers.
     LOG_PERSIST_CAP = 500
     _PERSIST_TRUNCATION_MARKER = "[… earlier output not kept on disk …]"
     # Strip C0 control bytes except \t (\x09) and \n (\x0a) — a stray NUL or
@@ -373,9 +371,9 @@ class Job:
     def persisted_log_lines_locked(self) -> list:
         """The tail of the log to keep on disk, marked if anything was cut.
 
-        The caller holds ``self._lock`` — persist() takes it around the whole
-        snapshot, and push_line mutates log_lines under the same one, so
-        re-entering here would deadlock the writer against itself.
+        The caller holds ``self._lock``: persist() takes it around the whole
+        snapshot and push_line mutates log_lines under the same one, so
+        re-entering it here would deadlock the writer against itself.
         """
         if len(self.log_lines) <= self.LOG_PERSIST_CAP:
             return list(self.log_lines)

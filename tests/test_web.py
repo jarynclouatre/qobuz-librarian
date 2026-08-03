@@ -2539,6 +2539,143 @@ def test_sse_done_event_carries_final_status(client):
         _remove_job(job)
 
 
+def test_a_finished_download_is_not_failed_by_another_items_recovery(
+        monkeypatch):
+    """Startup recovery is process-wide. A download whose own completion is
+    durably acknowledged was written up as "Failed / Recovery attention"
+    because some other item's recovery was outstanding — one blocked in the
+    terminal owns no web job id at all and relabelled every finished download
+    in History at once.
+    """
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    saved = jm.Job(title="Burial — Distant Lights", artist="Burial")
+    saved.kind = "download"
+    saved.album_id = "abc123"
+    saved.status = jm.JobStatus.RUNNING
+    job_persistence.persist(saved)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    monkeypatch.setattr(job_persistence, "durable_completion_acknowledged",
+                        lambda job_id, **_kw: True)
+
+    jm.restore_jobs({}, durable_recovery_clear=False,
+                    durable_recovery_job_id=None)
+
+    restored = jm.registry.get(saved.id)
+    assert restored.status == jm.JobStatus.DONE
+    assert restored.attention == ""
+
+
+def test_a_download_holding_the_outstanding_recovery_still_says_so(monkeypatch):
+    """The other half of the same call: when the outstanding recovery IS this
+    job's, its acknowledged completion is not enough to retire it here.
+    """
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    saved = jm.Job(title="Agalloch — The White EP", artist="Agalloch")
+    saved.kind = "download"
+    saved.album_id = "def456"
+    saved.status = jm.JobStatus.RUNNING
+    job_persistence.persist(saved)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    monkeypatch.setattr(job_persistence, "durable_completion_acknowledged",
+                        lambda job_id, **_kw: True)
+
+    jm.restore_jobs({}, durable_recovery_clear=False,
+                    durable_recovery_job_id=saved.id)
+
+    restored = jm.registry.get(saved.id)
+    assert restored.status == jm.JobStatus.FAILED
+    assert restored.attention == "recovery"
+    # This state survives a restart, so the error must not prescribe one.
+    assert "estart" not in (restored.error or "")
+
+
+def test_a_finished_job_keeps_its_log_across_a_restart(monkeypatch):
+    """A finished job's log is the record of what a download actually did, so
+    it has to outlive the process that wrote it.
+    """
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    saved = jm.Job(title="Agalloch — The White EP", artist="Agalloch")
+    saved.kind = "download"
+    saved.push_line("  ✓  Download succeeded.")
+    saved.push_line("  ✓  beets import succeeded.")
+    saved.status = jm.JobStatus.DONE
+    job_persistence.persist(saved)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs({})
+
+    restored = jm.registry.get(saved.id)
+    assert restored is not None
+    assert restored.log_lines == [
+        "  ✓  Download succeeded.",
+        "  ✓  beets import succeeded.",
+    ]
+
+
+def test_a_long_finished_log_is_stored_as_a_marked_tail(monkeypatch):
+    """1000 finished rows are kept on disk, so a whole LOG_CAP-sized log each
+    would put hundreds of MB in jobs.db. Keep the tail and say so, rather than
+    letting the archive claim it is the whole log.
+    """
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    saved = jm.Job(title="Library scan")
+    saved.kind = "scan"
+    for n in range(jm.Job.LOG_PERSIST_CAP + 40):
+        saved.push_line(f"line {n}")
+    saved.status = jm.JobStatus.DONE
+    job_persistence.persist(saved)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs({})
+
+    restored = jm.registry.get(saved.id)
+    assert len(restored.log_lines) == jm.Job.LOG_PERSIST_CAP
+    assert restored.log_lines[0] == jm.Job._PERSIST_TRUNCATION_MARKER
+    assert restored.log_lines[-1] == f"line {jm.Job.LOG_PERSIST_CAP + 39}"
+
+
+def test_a_running_job_does_not_rewrite_its_log_on_every_snapshot(monkeypatch):
+    """A running job's log is on screen live, and persist() is debounced but
+    still frequent — re-serialising a growing blob each time would rewrite the
+    whole log over and over on a NAS.
+    """
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    running = jm.Job(title="Burial — Untrue", artist="Burial")
+    running.kind = "download"
+    running.status = jm.JobStatus.RUNNING
+    running.push_line("  ── Downloading full album ──")
+    job_persistence.persist(running)
+
+    assert job_persistence.load_one(running.id)["log_lines"] == []
+
+
 def test_persistence_restores_awaiting_review_with_candidates(monkeypatch):
     """The headline reliability win: a completed scan's candidates survive a
     container restart — the user can still approve them instead of re-scanning
@@ -3445,9 +3582,11 @@ def test_resuming_web_mode_restores_saved_jobs_before_unpausing(
     lease = Lease()
     restored_under = []
 
-    def restore_jobs(factories, *, durable_recovery_clear):
+    def restore_jobs(factories, *, durable_recovery_clear,
+                     durable_recovery_job_id):
         assert factories is app_mod._RESUME_EXECUTE
         assert durable_recovery_clear is True
+        assert durable_recovery_job_id is None
         restored_under.append((app_mod._CLI_MODE, app_mod._RUN_LOCK_HANDLE))
 
     monkeypatch.setattr(run_lock, "acquire", lambda: lease)
@@ -4547,3 +4686,39 @@ def test_lockout_says_how_long_is_left_and_keeps_the_username(client, monkeypatc
     assert "restart Qobuz Librarian to clear it" in r.text
     assert "Wait an hour" not in r.text
     assert 'value="dink"' in r.text
+
+
+def test_a_missing_column_is_added_whatever_the_version_stamp_says(
+        monkeypatch, tmp_path):
+    """A database can carry the current version stamp and still be missing a
+    column, and every persist() against it then fails silently behind
+    _note_write_failure, so the stamp cannot gate the check.
+    """
+    import sqlite3
+
+    from qobuz_librarian.web import job_persistence
+
+    db = tmp_path / "jobs.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT NOT NULL "
+        "DEFAULT '', artist TEXT NOT NULL DEFAULT '', album_id TEXT NOT NULL "
+        "DEFAULT '', kind TEXT NOT NULL DEFAULT 'download', status TEXT NOT "
+        "NULL, phase TEXT NOT NULL DEFAULT '', candidates TEXT NOT NULL "
+        "DEFAULT '[]', error TEXT, summary TEXT NOT NULL DEFAULT '', "
+        "review_verb TEXT NOT NULL DEFAULT 'Download', execute_kind TEXT NOT "
+        "NULL DEFAULT '', execute_args TEXT NOT NULL DEFAULT '{}', created_at "
+        "REAL, finished_at REAL)")
+    con.execute(f"PRAGMA user_version = {job_persistence._SCHEMA_VERSION}")
+    con.commit()
+    con.close()
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    monkeypatch.setattr("qobuz_librarian.config.DATA_DIR", tmp_path)
+    job_persistence.init()
+
+    con = sqlite3.connect(db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
+    con.close()
+    assert {"single", "attention", "recoveries", "log_lines"} <= cols

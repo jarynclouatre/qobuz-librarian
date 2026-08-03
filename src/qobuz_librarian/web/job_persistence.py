@@ -161,7 +161,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at   REAL,
     single        TEXT NOT NULL DEFAULT '{}',
     attention     TEXT NOT NULL DEFAULT '',
-    recoveries    TEXT NOT NULL DEFAULT '[]'
+    recoveries    TEXT NOT NULL DEFAULT '[]',
+    log_lines     TEXT NOT NULL DEFAULT '[]'
 )
 """
 
@@ -190,7 +191,7 @@ CREATE TABLE IF NOT EXISTS post_import_relocation_handoffs (
 """
 
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 def init() -> None:
@@ -213,29 +214,28 @@ def init() -> None:
                 "CREATE INDEX IF NOT EXISTS idx_jobs_terminal "
                 "ON jobs(status, finished_at, created_at)"
             )
-            # Schema versioning so a FUTURE column addition can ALTER TABLE
-            # instead of silently failing every persist() against an old
-            # jobs.db — that failure is swallowed by _note_write_failure,
-            # leaving the archive non-durable with no visible sign.
+            # Ask the table what it has; user_version is only a stamp. Gating
+            # these on the number leaves a db already carrying it unable to
+            # gain a missing column, and every persist() then fails into
+            # _note_write_failure, which swallows it — a silent dead archive.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+            for column, definition in (
+                # Single-track download undo info, so a restart keeps the Undo
+                # affordance on a finished one-track download.
+                ("single", "TEXT NOT NULL DEFAULT '{}'"),
+                # The finished-job needs-review marker, so the History chip and
+                # nav dot survive a restart.
+                ("attention", "TEXT NOT NULL DEFAULT ''"),
+                # Exact retained Repair-backup state.
+                ("recoveries", "TEXT NOT NULL DEFAULT '[]'"),
+                # A finished job's activity log.
+                ("log_lines", "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                if column not in cols:
+                    conn.execute(
+                        f"ALTER TABLE jobs ADD COLUMN {column} {definition}")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version < _SCHEMA_VERSION:
-                # v2: persist Job.single (single-track download undo info) so
-                # a restart doesn't drop the Undo affordance on a completed
-                # one-track download.
-                cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
-                if "single" not in cols:
-                    conn.execute(
-                        "ALTER TABLE jobs ADD COLUMN single TEXT NOT NULL DEFAULT '{}'")
-                # v3: persist Job.attention (finished-job needs-review marker,
-                # e.g. a download that stayed under the quality target) so the
-                # History chip and nav dot survive a restart.
-                if "attention" not in cols:
-                    conn.execute(
-                        "ALTER TABLE jobs ADD COLUMN attention TEXT NOT NULL DEFAULT ''")
-                # v4: exact retained Repair-backup state.
-                if "recoveries" not in cols:
-                    conn.execute(
-                        "ALTER TABLE jobs ADD COLUMN recoveries TEXT NOT NULL DEFAULT '[]'")
+            if version != _SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
         except sqlite3.Error as e:
@@ -253,10 +253,13 @@ _PERSIST_SQL = (
     "INSERT OR REPLACE INTO jobs "
     "(id, title, artist, album_id, kind, status, phase, candidates, "
     " error, summary, review_verb, execute_kind, execute_args, "
-    " created_at, finished_at, single, attention, recoveries) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " created_at, finished_at, single, attention, recoveries, log_lines) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 _CURRENT_JOB_SINGLE = object()
+# jobs.py imports this module, so the names live here rather than reaching
+# back for its TERMINAL set; _TERMINAL_SQL is built from the same tuple.
+_TERMINAL_STATUSES = ("done", "failed", "canceled")
 
 
 def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
@@ -273,6 +276,16 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
+        )
+        # Only a finished job's log is stored: a running one is on screen live,
+        # and re-serialising a growing blob on every snapshot is waste.
+        status_value = (
+            job.status.value if hasattr(job.status, "value") else str(job.status)
+        )
+        log_json = json.dumps(
+            job.persisted_log_lines_locked()
+            if status_value in _TERMINAL_STATUSES else [],
+            default=str,
         )
     except (TypeError, ValueError) as e:
         _note_write_failure(f"serialize recoveries for {job.id}", e)
@@ -293,6 +306,7 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
         single_json,
         getattr(job, "attention", "") or "",
         recoveries_json,
+        log_json,
     )
 
 
@@ -987,7 +1001,7 @@ def load_one(job_id: str) -> Optional[dict]:
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 "candidates, error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
-                "recoveries "
+                "recoveries, log_lines "
                 "FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
@@ -1008,6 +1022,7 @@ def load_one(job_id: str) -> Optional[dict]:
             "single": json.loads(row[15] or "{}"),
             "attention": row[16] or "",
             "recoveries": json.loads(row[17] or "[]"),
+            "log_lines": json.loads(row[18] or "[]"),
         }
     except (ValueError, TypeError):
         return None
@@ -1056,7 +1071,8 @@ def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
             _log.debug("prune_finished(%d) failed: %s", keep, e)
 
 
-_TERMINAL_SQL = "status IN ('done', 'failed', 'canceled')"
+_TERMINAL_SQL = "status IN ({})".format(
+    ", ".join(f"'{name}'" for name in _TERMINAL_STATUSES))
 # The History view also lists parked reviews (with an Open link back to their
 # surface) — but clearing and pruning must never touch them.
 _HISTORY_SQL = "status IN ('done', 'failed', 'canceled', 'awaiting_review')"
@@ -1266,7 +1282,7 @@ def load_all() -> list[dict]:
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 "candidates, error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
-                "recoveries "
+                "recoveries, log_lines "
                 "FROM jobs ORDER BY created_at"
             ).fetchall()
         except sqlite3.Error as e:
@@ -1293,6 +1309,7 @@ def load_all() -> list[dict]:
                 "single": json.loads(r[15] or "{}"),
                 "attention": r[16] or "",
                 "recoveries": recoveries,
+                "log_lines": json.loads(r[18] or "[]"),
             })
         except (ValueError, TypeError) as e:
             _log.info("skipping unreadable jobs.db row %s: %s", r[0], e)
