@@ -476,6 +476,15 @@
   }
   window.qlShowToast = showToast;
 
+  // A stale or missing CSRF token is refused and answered with a fresh cookie,
+  // so nothing was written and a retry can't succeed until the page reloads
+  // carrying the token that matches it. htmx handles this on its own; the raw
+  // fetch() paths have to say so and reload.
+  function pageWentStale() {
+    showToast("That page went stale — reloading.", "error");
+    setTimeout(function () { window.location.reload(); }, 900);
+  }
+
   function initCoverFallbacks() {
     document.querySelectorAll("img.ql-cover, img.ql-grid-cover, img.ql-result-art").forEach(function (img) {
       if (img.dataset.coverFallbackWired === "1") return;
@@ -673,7 +682,15 @@
           body: new FormData(form),
         }).then(function (r) {
           return r.text().then(function (text) {
-            return { ok: r.ok, text: text };
+            // A stale token answers an HX request with 200, an empty body and
+            // HX-Refresh. htmx reloads on that header; fetch ignores it, so
+            // without this check an empty success reads as "queued" and the
+            // page reports downloads the server refused.
+            return {
+              ok: r.ok,
+              stale: r.ok && r.headers.get("HX-Refresh") === "true",
+              text: text,
+            };
           });
         });
       }
@@ -707,12 +724,14 @@
         var queuedTracks = 0;
         var skipped = 0;
         var failed = 0;
+        var stale = false;
         var firstTitle = "";
         var chain = Promise.resolve();
         forms.forEach(function (form) {
           chain = chain.then(function () {
             return postForm(form).then(function (res) {
-              if (!res.ok || res.text.indexOf("ql-notice-error") >= 0) failed += 1;
+              if (res.stale) { stale = true; failed += 1; }
+              else if (!res.ok || res.text.indexOf("ql-notice-error") >= 0) failed += 1;
               else if (res.text.indexOf("ql-notice-warning") >= 0) {
                 skipped += 1;
                 markSearchDownloadQueued(form);
@@ -728,6 +747,7 @@
         chain.then(function () {
           bulkButton.disabled = false;
           bulkButton.textContent = original;
+          if (stale) { pageWentStale(); return; }
           selected = {};
           syncBoxes();
           // The same receipt the single-row path gives: name what was queued
@@ -1273,7 +1293,10 @@
       }
       var body = "cid=" + encodeURIComponent(cb.value) + "&checked=" + (cb.checked ? "1" : "0") + scopeQ;
       post("/jobs/" + id + "/select", body)
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+        .then(function (r) {
+          if (r.status === 403) return Promise.reject("stale");
+          return r.ok ? r.json() : Promise.reject();
+        })
         .then(function (c) {
           done();
           if (det) delete det.dataset.selectionOverride;
@@ -1281,9 +1304,10 @@
           updateHideLabels();
           updateArtistChecks();
         })
-        .catch(function () {
+        .catch(function (why) {
           done();
           revert();
+          if (why === "stale") { pageWentStale(); return; }
           showToast("Couldn't save that choice. Try again.", "error");
         });
     }
@@ -1667,7 +1691,10 @@
           post("/jobs/" + id + "/dismiss-rest",
                "tab=" + encodeURIComponent(curTab()) +
                "&q=" + encodeURIComponent(curQuery()))
-            .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+            .then(function (r) {
+              if (r.status === 403) return Promise.reject("stale");
+              return r.ok ? r.json() : Promise.reject();
+            })
             .then(function (c) {
               if (c.review_done) { location.reload(); return; }
               dismissRest.disabled = false;
@@ -1677,9 +1704,10 @@
                                  : "Nothing to dismiss on this filter.",
                         c.hidden ? "success" : "info");
             })
-            .catch(function () {
+            .catch(function (why) {
               dismissRest.disabled = false;
               dismissRest.textContent = prev;
+              if (why === "stale") { pageWentStale(); return; }
               flashSelectError();
             });
         });
