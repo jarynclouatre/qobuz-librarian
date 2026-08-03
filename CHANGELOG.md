@@ -2,69 +2,44 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [0.12.1] - 2026-08-03
+
+Fixes from driving 0.12.0 rather than reading it, led by a multi-disc download that imported perfectly and stopped the queue anyway.
+
+- A multi-disc album no longer fails after a clean import. Its cover sits in the album root, which beets never searches, so the cover was left behind in staging — and a leftover reads as a download that never finished, which paused every download after it. The cover now goes where beets files it.
+- A download that finished but left something behind now settles on the first Retry instead of the second, and says what it did rather than blaming a restart that never happened. The equivalent stall on the CLI is gone too: it no longer aborts a run over a leftover it just cleared.
+- A download stopped for recovery points at the Retry button it actually has, instead of sending you to a Diagnostics page with no control for it.
+- Multi-disc albums are recorded against the album folder, not the first disc folder. That mis-scoping flattened repaired refills into the album root, named the disc folder as the album in a single track's Undo record, and pushed a phantom artist into the Downsample review.
+- A queued album the exact-recovery lane can't plan for — a small gap fill, an expanded-edition switch — now downloads instead of failing before a single track starts, and failing the same way at every launch after that.
+- The album walk survives an album parking for recovery: it keeps the saved queue as it stands and says so, instead of ending in a traceback at the moment the app correctly paused.
+- Ctrl-C during an artist scan stops the walk, which is what it already said it would do.
+- Retrying a single-track download no longer inherits the first job's Undo record, which left two jobs offering to undo the same file.
+- A repair whose refills all failed to download reports that, instead of reporting it as a file that couldn't be placed.
+- A saved file the app couldn't read now says so on the dashboard and in Settings, with where the unreadable copy was kept. Until now only the container log mentioned it, so quality and downsample settings could quietly revert to defaults.
+- Keyboard shortcuts run from one place. Ctrl+/ and Alt+/ are no longer swallowed into the search box, and the info notices on Dismissed pages are tinted instead of grey.
+- Bulk downloads and dismissals notice a page that went stale and reload, instead of reporting work the server actually refused.
+- A stray file sharing an artist folder's name no longer stops a scan, and a queued receipt says "1 album" rather than "1 albums".
+- Library migration can't act on a directory number it already released if reserving one fails partway.
+- Dependencies and CI actions updated.
+
 ## [0.12.0] - 2026-08-02
 
-A truth-and-polish pass from a full audit of 0.11.3: summaries that report what
-actually happened, screens that keep your place, and a CLI that can be scripted.
+A truth-and-polish pass from a full audit of 0.11.3: summaries that report what actually happened, screens that keep your place, and a CLI that can be scripted.
 
-- A corrupt state file is no longer silently replaced with an empty one. Every
-  store (dismissed albums, upgrade caps, saved scans, settings, lyrics
-  bookkeeping) now sets the unreadable copy aside as `….corrupt` and says what
-  may have been reset, so one bad write can't erase weeks of curation with no
-  trace. And the app stopped manufacturing that corruption in the first place:
-  every store now writes through one crash-safe path — synced to disk before
-  it replaces the old copy, with proper locking where the web app and CLI
-  write the same file.
-- Dismissing an album can no longer bury a different album that shares its
-  name: the identity key kept "Alone" and "Alone (Again)" — or Rancid's two
-  self-titled records — under one fingerprint, so dismissing one hid both.
-  Distinct titles now stay distinct while remasters, deluxe editions and
-  hi-res variants still fold onto their album; an existing dismissed list
-  re-keys itself automatically.
-- A lyrics run during a provider outage no longer records "no lyrics found" —
-  a verdict that suppressed those tracks for 30 days. Tracks whose every query
-  died on a connection failure stay retryable, and the summary now counts the
-  run's own work ("7 checked · 12 skipped (already checked)") instead of
-  claiming the whole library was scanned.
-- The Library review keeps your place: refresh or Back reopens the artist you
-  were inside and returns to the same scroll position. The sticky header and
-  footer no longer slice album rows on every scroll — their offsets are
-  measured from the real elements instead of guessed.
-- The Dismissed pages paginate, filter, and gained "Bring all back", which
-  returns everything to a live review in one tap; undoing a big dismissal no
-  longer means confirming each artist separately against one enormous page.
-- Dismissing speaks one language everywhere: Dismiss / Bring back, a Dismissed
-  page, and a minus icon instead of a crossed-out eye (Downsample keeps its
-  own "Keep hi-res" wording and a bookmark icon, because that action keeps).
-- The offline screen matches the app — its own look, fonts, and your chosen
-  theme — and Retry returns to the page you were on instead of Search.
-- A bulk download's receipt names the album, links the queue, and surfaces the
-  Background-work strip immediately, matching the single-download receipt.
-- The upgrade walk no longer presents albums that left your library since the
-  scan, calls them high-confidence, and finishes with a green tick; they're
-  set aside and counted, and the summary owns up when nothing was upgraded.
-- Repair jobs whose kept-originals folder is gone from disk stop pointing at
-  an empty Diagnostics page; the job says what happened and offers Acknowledge
-  so the alarm has an exit.
-- The CLI grew flags for the three menu-only modes (`--library-walk`,
-  `--album-gaps`, `--repair`), honours `--yes` on an unattended downsample
-  walk instead of declining every artist and reporting success, exits nonzero
-  when a walk fails or is cut short (matching its documented exit codes), and
-  lays its menus and messages out for the terminal actually in front of you —
-  a phone screen included.
-- The CLI also rejects mode combinations it would silently half-run
-  (`--library-walk --migrate` used to start a migration and drop the walk),
-  and the artist-mode modifiers (`--include-singles`, `--include-comps`,
-  `--no-catalog`) work with `--library-walk`, which honours them.
-- The web UI and CLI report the same version from one source; the web UI could
-  previously report a neighbouring project's version from a stray
-  pyproject.toml.
-- Release safety: every push and pull request now proves the Docker image
-  still builds (previously nothing did until a release was already public)
-  and runs the destructive-operation checks — the suite that proves
-  downsample, repair and the gap-fill backup can't eat files, which nothing
-  ran automatically before. Dependabot no longer proposes single-line edits
-  to the generated image lock, which only regenerates as a whole.
+- A corrupt state file is no longer silently replaced with an empty one. Every store (dismissed albums, upgrade caps, saved scans, settings, lyrics bookkeeping) now sets the unreadable copy aside as `….corrupt` and says what may have been reset, so one bad write can't erase weeks of curation with no trace. And the app stopped manufacturing that corruption in the first place: every store now writes through one crash-safe path — synced to disk before it replaces the old copy, with proper locking where the web app and CLI write the same file.
+- Dismissing an album can no longer bury a different album that shares its name: the identity key kept "Alone" and "Alone (Again)" — or Rancid's two self-titled records — under one fingerprint, so dismissing one hid both. Distinct titles now stay distinct while remasters, deluxe editions and hi-res variants still fold onto their album; an existing dismissed list re-keys itself automatically.
+- A lyrics run during a provider outage no longer records "no lyrics found" — a verdict that suppressed those tracks for 30 days. Tracks whose every query died on a connection failure stay retryable, and the summary now counts the run's own work ("7 checked · 12 skipped (already checked)") instead of claiming the whole library was scanned.
+- The Library review keeps your place: refresh or Back reopens the artist you were inside and returns to the same scroll position. The sticky header and footer no longer slice album rows on every scroll — their offsets are measured from the real elements instead of guessed.
+- The Dismissed pages paginate, filter, and gained "Bring all back", which returns everything to a live review in one tap; undoing a big dismissal no longer means confirming each artist separately against one enormous page.
+- Dismissing speaks one language everywhere: Dismiss / Bring back, a Dismissed page, and a minus icon instead of a crossed-out eye (Downsample keeps its own "Keep hi-res" wording and a bookmark icon, because that action keeps).
+- The offline screen matches the app — its own look, fonts, and your chosen theme — and Retry returns to the page you were on instead of Search.
+- A bulk download's receipt names the album, links the queue, and surfaces the Background-work strip immediately, matching the single-download receipt.
+- The upgrade walk no longer presents albums that left your library since the scan, calls them high-confidence, and finishes with a green tick; they're set aside and counted, and the summary owns up when nothing was upgraded.
+- Repair jobs whose kept-originals folder is gone from disk stop pointing at an empty Diagnostics page; the job says what happened and offers Acknowledge so the alarm has an exit.
+- The CLI grew flags for the three menu-only modes (`--library-walk`, `--album-gaps`, `--repair`), honours `--yes` on an unattended downsample walk instead of declining every artist and reporting success, exits nonzero when a walk fails or is cut short (matching its documented exit codes), and lays its menus and messages out for the terminal actually in front of you — a phone screen included.
+- The CLI also rejects mode combinations it would silently half-run (`--library-walk --migrate` used to start a migration and drop the walk), and the artist-mode modifiers (`--include-singles`, `--include-comps`, `--no-catalog`) work with `--library-walk`, which honours them.
+- The web UI and CLI report the same version from one source; the web UI could previously report a neighbouring project's version from a stray pyproject.toml.
+- Release safety: every push and pull request now proves the Docker image still builds (previously nothing did until a release was already public) and runs the destructive-operation checks — the suite that proves downsample, repair and the gap-fill backup can't eat files, which nothing ran automatically before. Dependabot no longer proposes single-line edits to the generated image lock, which only regenerates as a whole.
 
 ## [0.11.3] - 2026-07-22
 

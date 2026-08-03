@@ -16,8 +16,7 @@ Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing 
 docker compose run --rm -it qobuz-librarian cli
 ```
 
-Three menu modes also have flags that jump straight to them — still
-interactive (they confirm per artist or prompt for one), so keep `-it`:
+Three menu modes also have flags that jump straight to them — still interactive (they confirm per artist or prompt for one), so keep `-it`:
 
 ```bash
 # The artist walk over every artist, queueing as you go
