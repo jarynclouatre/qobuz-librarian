@@ -2272,6 +2272,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             # queue.  Continuing after an I/O/CAS failure lets memory claim an
             # item is finished while the saved journal still says it is
             # pending, so stop before another album can mutate the library.
+            #
+            # Callers rewrite the journal as pending, which it refuses while it
+            # holds blocked or retired work. Every mid-batch call is safe only
+            # because a durable stop breaks the loop before the next one: an
+            # album parked for attention stays blocked, and the batch-end call
+            # below stands down for exactly that reason.
             on_progress()
 
     def _ensure_preflight():
@@ -3057,7 +3063,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
         f"{n_total_fail} failed"))
 
-    if not recovery_persist_blocked:
+    # A durable stop leaves the journal holding blocked or retired work on
+    # purpose, and rewriting it as pending is what the journal refuses. Every
+    # album that finished already persisted through _drop, so the saved state is
+    # current without this — and the refusal used to surface as a traceback in
+    # the walk at the exact moment an album had been correctly parked.
+    if not recovery_persist_blocked and not durable_stopped:
         _persist()
     if auth_lost_exc is not None:
         raise auth_lost_exc

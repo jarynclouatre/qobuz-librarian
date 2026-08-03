@@ -189,3 +189,50 @@ def test_unstarted_durable_claim_returns_to_pending_when_it_cannot_replan(
     assert stub_download == ["new"]
     reloaded = queue_state.load_queue_journal(journal.operation_id)
     assert reloaded.journal.items[0].phase is queue_state.QueuePhase.PENDING
+
+
+def test_durable_attention_stop_leaves_the_flush_returning(lease, stub_download):
+    """A durable item that stops for attention stays blocked in the journal on
+    purpose. Rewriting that journal as pending is exactly what must not happen,
+    so the batch-end persist has to stand down — it used to raise
+    QueueJournalBlocked straight through the walk at the moment the app had
+    correctly parked an album."""
+    from qobuz_librarian.queue.durable_runner import (
+        DurableAlbumResult,
+        DurableAlbumStatus,
+    )
+
+    album = _album()
+    tracks = album["tracks"]["items"]
+    parked = _build_queue_item(
+        album=album, album_dir=None, label="parked",
+        missing=tracks, present=[], upgrade_only=False, auto_upgrade=False)
+    waiting = _build_queue_item(
+        album=_album() | {"id": "album-2", "title": "Second"},
+        album_dir=None, label="waiting",
+        missing=tracks, present=[], upgrade_only=False, auto_upgrade=False)
+    queue = [parked, waiting]
+    queue_state.save_pending_queue(queue, mode="album_walk")
+
+    def block_and_park(_queue, _item, _args, *, resume_owner, **_kw):
+        loaded = queue_state.load_queue_journal(resume_owner.operation_id)
+        queue_state.transition_journal_item(
+            loaded.journal, resume_owner.item_id,
+            queue_state.QueuePhase.BLOCKED, block_reason="import-attention")
+        return DurableAlbumResult(
+            status=DurableAlbumStatus.ATTENTION, reason="import-attention")
+
+    executor.execute_durable_new_album = block_and_park
+    try:
+        results, drained = executor._execute_download_queue(
+            queue, _args(), "token",
+            on_progress=lambda: queue_state.save_pending_queue(
+                queue, mode="album_walk"))
+    finally:
+        del executor.execute_durable_new_album
+
+    assert drained is False
+    assert [r["result"] for r in results] == ["attention"]
+    assert queue == [parked, waiting]
+    loaded = queue_state.load_queue_journal()
+    assert loaded.journal.items[0].phase is queue_state.QueuePhase.BLOCKED

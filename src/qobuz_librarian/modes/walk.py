@@ -17,11 +17,37 @@ from qobuz_librarian.modes.artist import (
     run_artist_missing_albums,
 )
 from qobuz_librarian.queue.executor import _execute_download_queue
+from qobuz_librarian.queue.journal import QueueJournalBlocked
 from qobuz_librarian.queue.persistence import clear_pending_queue, save_pending_queue
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
+
+
+def _queue_saver(mode):
+    """Persist the walk's queue, tolerating a journal that recovery holds.
+
+    A durable item that stops for attention stays blocked in the journal on
+    purpose, and while that stands the journal refuses to be rewritten as
+    pending. The walk can't settle it — that happens at the next launch — so it
+    says so once and carries on rather than dying on the refusal.
+    """
+    told = []
+
+    def save(items):
+        try:
+            save_pending_queue(items, mode=mode)
+        except QueueJournalBlocked:
+            if not told:
+                told.append(True)
+                log.info(fmt(C.YELLOW,
+                    "  ⚠  An album is parked for recovery, so the saved queue "
+                    "is being kept exactly as it stands until the next "
+                    "launch."))
+
+    return save
+
 
 # ── Artist walk seen file ─────────────────────────────────────────────────────
 
@@ -243,15 +269,17 @@ def run_album_walk_mode(args, token):
     n_albums_filled = 0
     interrupted = False
 
+    _save_queue = _queue_saver("album_walk")
+
     def _save_now():
-        save_pending_queue(shared_queue, mode="album_walk")
+        _save_queue(shared_queue)
 
     def _flush_queue():
         nonlocal n_albums_filled
         if not shared_queue:
             log.info(fmt(C.GRAY, "    Queue is empty — nothing to flush."))
             return
-        save_pending_queue(shared_queue, mode="album_walk")
+        _save_queue(shared_queue)
         log.info(fmt(C.CYAN,
             f"\n  ⟳  Flushing queue ({len(shared_queue)} album(s))…"))
         results, drained = _execute_download_queue(
@@ -338,7 +366,7 @@ def run_album_walk_mode(args, token):
                 # shared_queue (appended as decided) but save_callback only fired
                 # for completed artists, so without this the in-progress artist's
                 # approvals wouldn't actually reach disk despite the message.
-                save_pending_queue(shared_queue, mode="album_walk")
+                _save_queue(shared_queue)
                 log.info(fmt(C.GRAY,
                     "\n  Walk interrupted — queue is persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name}; resume next launch."))
@@ -370,7 +398,7 @@ def run_album_walk_mode(args, token):
                     "\n  ⚠  Final flush interrupted; queue persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name} for resume."))
         else:
-            save_pending_queue(shared_queue, mode="album_walk")
+            _save_queue(shared_queue)
             log.info(fmt(C.GRAY,
                 f"  Queue retained ({len(shared_queue)} album(s)) — "
                 f"persisted to {cfg.PENDING_QUEUE_FILE.name} for next launch."))
@@ -438,14 +466,16 @@ def run_walk_queued_mode(args, token):
     saved_consolidate = args.consolidate
     args.consolidate = False
 
+    _save_queue = _queue_saver("walk_queue")
+
     def _save_now():
-        save_pending_queue(shared_queue, mode="walk_queue")
+        _save_queue(shared_queue)
 
     def _flush_queue():
         if not shared_queue:
             log.info(fmt(C.GRAY, "  Queue is empty — nothing to process."))
             return 0
-        save_pending_queue(shared_queue, mode="walk_queue")
+        _save_queue(shared_queue)
         log.info(fmt(C.CYAN,
             f"\n  ⟳  Flushing queue ({len(shared_queue)} album(s))…"))
         results, drained = _execute_download_queue(
@@ -541,7 +571,7 @@ def run_walk_queued_mode(args, token):
                         # Persist the in-memory queue now — the current artist's
                         # approvals are in shared_queue but save_callback hadn't
                         # fired for this in-progress artist yet.
-                        save_pending_queue(shared_queue, mode="walk_queue")
+                        _save_queue(shared_queue)
                         log.info(fmt(C.GRAY,
                             "\n  Artist scan interrupted — queue persisted to "
                             f"{cfg.PENDING_QUEUE_FILE.name}; resume next launch."))
@@ -574,7 +604,7 @@ def run_walk_queued_mode(args, token):
         if shared_queue and isinstance(sys.exc_info()[1], (AuthLost, QobuzUnavailable)):
             # Unwinding on a lost token or an unreachable API: a flush would only
             # fail again over the original error, so keep the queue for next launch.
-            save_pending_queue(shared_queue, mode="walk_queue")
+            _save_queue(shared_queue)
             log.info(fmt(C.GRAY,
                 f"  Queue retained — persisted to "
                 f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
@@ -592,12 +622,12 @@ def run_walk_queued_mode(args, token):
                             "\n  ⚠  Final flush interrupted; queue persisted "
                             f"to {cfg.PENDING_QUEUE_FILE.name} for resume."))
                 else:
-                    save_pending_queue(shared_queue, mode="walk_queue")
+                    _save_queue(shared_queue)
                     log.info(fmt(C.GRAY,
                         f"  Queue retained — persisted to "
                         f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
             except KeyboardInterrupt:
-                save_pending_queue(shared_queue, mode="walk_queue")
+                _save_queue(shared_queue)
                 log.info(fmt(C.GRAY,
                     f"\n  Interrupted — queue persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))

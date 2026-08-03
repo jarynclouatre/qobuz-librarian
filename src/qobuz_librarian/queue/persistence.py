@@ -253,15 +253,22 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                         "  ✓ Resume complete; saved queue cleared.",
                     ))
                 else:
-                    if recovery_bearing:
-                        log.info(fmt(C.YELLOW,
-                            "  ⚠  The saved queue is not fully settled; its "
-                            "durable recovery was kept for next launch."))
-                    else:
-                        save_pending_queue(items, mode=mode)
+                    settled = not recovery_bearing
+                    if settled:
+                        # The flush itself can park an album, so a queue that
+                        # loaded purely pending may be recovery-bearing by now.
+                        try:
+                            save_pending_queue(items, mode=mode)
+                        except QueueJournalBlocked:
+                            settled = False
+                    if settled:
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  {len(items)} album(s) couldn't be "
                             "downloaded — saved queue kept for next launch."))
+                    else:
+                        log.info(fmt(C.YELLOW,
+                            "  ⚠  The saved queue is not fully settled; its "
+                            "durable recovery was kept for next launch."))
             except KeyboardInterrupt:
                 log.info(fmt(C.YELLOW,
                     "\n  ⚠  Resume interrupted; saved queue kept for next launch."))
@@ -354,10 +361,17 @@ def offer_resume_pending_queue(args, token_source):
                     clear_pending_queue()
                     log.info(fmt(C.GREEN, "  ✓ Resume complete; saved queue cleared."))
                 else:
-                    save_pending_queue(items, mode=mode)
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  {len(items)} album(s) couldn't be downloaded — "
-                        f"saved queue kept for next launch."))
+                    try:
+                        save_pending_queue(items, mode=mode)
+                        log.info(fmt(C.YELLOW,
+                            f"  ⚠  {len(items)} album(s) couldn't be "
+                            "downloaded — saved queue kept for next launch."))
+                    except QueueJournalBlocked:
+                        # An album parked for attention during the flush; the
+                        # journal holds it and must not be rewritten as pending.
+                        log.info(fmt(C.YELLOW,
+                            "  ⚠  The saved queue is not fully settled; its "
+                            "durable recovery was kept for next launch."))
             except KeyboardInterrupt:
                 log.info(fmt(C.YELLOW,
                     "\n  ⚠  Resume interrupted; saved queue kept for next launch."))
