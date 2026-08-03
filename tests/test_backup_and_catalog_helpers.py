@@ -744,18 +744,34 @@ def _bind_consolidation_summary(summary, tmp_path, monkeypatch):
     return primary_seal, sibling_seal, summary["_binding"]
 
 
-def test_find_sibling_album_dirs_does_not_group_distinct_years(tmp_path, monkeypatch):
+def test_sibling_grouping_does_not_group_distinct_years(tmp_path, monkeypatch):
+    """Two folders that BOTH carry a year and don't share one are distinct
+    works with a similar name, and consolidation deletes "duplicate" tracks —
+    grouping them would feed a real recording to the deleter. A one-sided year
+    still groups: that's the same release re-tagged."""
+    import qobuz_librarian.config as cfg
     from qobuz_librarian.modes import consolidate as c
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", tmp_path / "beets.db")
     artist = tmp_path / "Queen"
     primary = artist / "Live at Wembley 1990"
     other = artist / "Live at Wembley 1992"
     same = artist / "Live at Wembley"
     for d in (primary, other, same):
         d.mkdir(parents=True)
-    album = {"title": "Live at Wembley 1990"}
-    sibs = {d.name for d, _ in c.find_sibling_album_dirs(album, primary)}
-    assert "Live at Wembley 1992" not in sibs
-    assert "Live at Wembley" in sibs
+
+    sealed = c._seal_album(primary)
+    found = []
+    try:
+        found = c._sealed_sibling_albums({"title": "Live at Wembley 1990"}, sealed)
+        names = {sibling.path.name for sibling, _score in found}
+    finally:
+        for sibling, _score in found:
+            sibling.close()
+        sealed.close()
+    assert "Live at Wembley 1992" not in names
+    assert "Live at Wembley" in names
 
 
 def test_execute_consolidation_moves_overlap_to_recoverable_backup(tmp_path, monkeypatch):

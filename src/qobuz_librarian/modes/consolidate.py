@@ -1116,52 +1116,6 @@ def _years_in(name: str) -> set:
     return set(_YEAR_RE.findall(name or ""))
 
 
-def find_sibling_album_dirs(album, primary_dir):
-    """Find other album dirs by the same artist with similar bare names.
-
-    Threshold: CONSOLIDATE_THRESH (0.70). 'Revolver' ↔ 'Revolver
-    (2009 Remaster)' = 1.0 after stripping; 'Revolver' ↔ 'Greatest Hits'
-    = ~0.15. Returns list of (Path, score) sorted desc.
-
-    Folders that BOTH carry a year and whose years don't overlap are never
-    grouped: 'Live at Wembley 1990' / '… 1992', 'Live 1971' / '1972', or an
-    original vs a differently-dated reissue are distinct works that happen to
-    share a name, and consolidation deletes "duplicate" tracks — grouping them
-    would feed a distinct recording to the deleter. A one-sided year ('Album'
-    vs 'Album (2020)') still groups, since that's the same release re-tagged.
-    """
-    if primary_dir is None or not primary_dir.parent.exists():
-        return []
-    artist_dir = primary_dir.parent
-    primary_bare = strip_album_decorations(primary_dir.name)
-    primary_years = _years_in(primary_dir.name) or _years_in(album.get("title") or "")
-
-    api_title = album.get("title") or ""
-    api_bare = strip_album_decorations(api_title)
-
-    siblings = []
-    try:
-        subdirs = [d for d in artist_dir.iterdir() if d.is_dir()]
-    except OSError:
-        return []
-    for d in subdirs:
-        try:
-            if d.resolve() == primary_dir.resolve():
-                continue
-        except OSError:
-            continue
-        d_years = _years_in(d.name)
-        if primary_years and d_years and primary_years.isdisjoint(d_years):
-            continue
-        d_bare = strip_album_decorations(d.name)
-        s1 = similarity(d_bare, primary_bare)
-        s2 = similarity(d_bare, api_bare) if api_bare else 0.0
-        score = max(s1, s2)
-        if score >= config.CONSOLIDATE_THRESH:
-            siblings.append((d, score))
-    return sorted(siblings, key=lambda x: -x[1])
-
-
 def _same_recording_signal(a, b):
     """Positive 'same recording' evidence for two tracks that share a title but
     have no ISRC/MBID to confirm identity: their durations must agree within ~2s.
