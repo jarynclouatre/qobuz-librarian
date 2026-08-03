@@ -557,30 +557,44 @@ def _settled_completion_response(request, job):
     Re-read the recovery and the completion record it just moved, or the reply
     describes a state this request has already left behind.
     """
+    _log = logging.getLogger("qobuz_librarian")
     if not _run_lock_intact():
+        _log.info("Retry %s: no completed-download lane — run lock not held.",
+                  job.id)
         return None
     try:
         recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
     except Exception:
+        _log.warning("Retry %s: no completed-download lane — the recovery "
+                     "record could not be re-read.", job.id, exc_info=True)
         return None
-    if (
-        _recovery_status_value(recovery) != "clear"
-        or _durable_completion_status(job) is not True
-    ):
+    status = _recovery_status_value(recovery)
+    completed = _durable_completion_status(job)
+    if status != "clear" or completed is not True:
+        _log.info("Retry %s: no completed-download lane — recovery is %s and "
+                  "the download's completion record reads %s.",
+                  job.id, status, completed)
         return None
+    _log.info("Retry %s: the refused settlement had already cleared the "
+              "recovery, so taking the completed-download lane.", job.id)
     busy = _lock_busy_response(request)
     if busy is not None:
+        _log.info("Retry %s: the completed-download lane stopped — another "
+                  "process holds the run lock.", job.id)
         return busy
     if not _reconcile_acknowledged_job(
         job,
         "Download completed. Retry cleared the leftover that was blocking it.",
     ):
+        _log.warning("Retry %s: the completed download could not be written "
+                     "to History.", job.id)
         return _durable_recovery_response(
             request,
             "The completed download could not be saved to History. No "
             "download was started. Check the data-folder permissions, then "
             "restart Qobuz Librarian.",
         )
+    _log.info("Retry %s: settled as a completed download.", job.id)
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
@@ -7745,6 +7759,10 @@ async def job_retry(request: Request, job_id: str):
             job,
             BlockedItemSettlementAction.RETRY,
         )
+        logging.getLogger("qobuz_librarian").info(
+            "Retry %s: settling the blocked download %s.", job.id,
+            "succeeded" if settled
+            else f"was refused — {(reason or 'no reason given').rstrip('.')}")
         if not settled:
             reconciled = _settled_completion_response(request, job)
             if reconciled is not None:

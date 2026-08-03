@@ -326,6 +326,8 @@ def _offer_blocked_cli_settlement(authority, result):
         # Reporting the refusal over a recovery it just cleared would strand the
         # run behind a stale verdict.
         if _cli_settlement_cleared_recovery(fresh, item):
+            log.info(fmt(C.GREEN,
+                "  ✓ Cleared the leftover that was blocking this download."))
             return fresh, False
         log.info(fmt(C.YELLOW, f"  {settled.reason}"))
         return result, False
