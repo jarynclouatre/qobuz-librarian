@@ -109,22 +109,57 @@
     }, 360);
   });
 
+  // Every global shortcut lives here. base.html used to bind "/" and Escape as
+  // well, without the modifier guards — so Ctrl+/ and friends were swallowed
+  // into the search box, and both layers ran on every keypress.
+  //
   // "/" jumps to the search box from anywhere, unless you're already typing
   // in a field (so slashes in queries and paths still land). Pages without a
-  // search box go to Search, carrying a hash so it lands focused.
+  // search box go to Search, carrying a hash so it lands focused. Escape
+  // dismisses flashes, closes dropdowns and leaves the field. "g" then s/q/h
+  // navigates.
+  var gPending = false;
+  var gTimer = null;
   document.addEventListener("keydown", function (evt) {
-    if (evt.key !== "/" || evt.ctrlKey || evt.metaKey || evt.altKey) return;
+    if (evt.ctrlKey || evt.metaKey || evt.altKey) return;
     var t = evt.target;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
-              t.tagName === "SELECT" || t.isContentEditable)) return;
-    evt.preventDefault();
-    var box = document.querySelector('input[name="q"]');
-    if (!box) {
-      window.location.href = "/#search";
+    var inField = !!(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
+                           t.tagName === "SELECT" || t.isContentEditable));
+    if (evt.key === "Escape") {
+      if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
+      if (window.qlCloseDropdowns) window.qlCloseDropdowns();
+      // A search box has already used Escape to clear itself; blurring on top
+      // of that costs a tap to get back in and carry on typing.
+      var isSearchBox = !!(t && t.tagName === "INPUT" && t.type === "search");
+      if (inField && !isSearchBox && t.blur) t.blur();
       return;
     }
-    box.focus();
-    box.select();
+    if (inField) return;
+    if (evt.key === "/") {
+      evt.preventDefault();
+      var box = document.querySelector('input[name="q"]');
+      if (!box) {
+        window.location.href = "/#search";
+        return;
+      }
+      box.focus();
+      box.select();
+      return;
+    }
+    if (gPending) {
+      var map = { s: "/settings", q: "/queue", h: "/" };
+      gPending = false;
+      if (map[evt.key]) {
+        evt.preventDefault();
+        window.location.href = map[evt.key];
+      }
+      return;
+    }
+    if (evt.key === "g") {
+      gPending = true;
+      clearTimeout(gTimer);
+      gTimer = setTimeout(function () { gPending = false; }, 800);
+    }
   });
   function focusSearchFromHash() {
     if (window.location.hash !== "#search") return;
@@ -416,10 +451,6 @@
     var dd = btn.closest(".ql-mobile-drawer");
     if (dd) closeDrawer(dd);
   });
-  document.addEventListener("keydown", function (evt) {
-    if (evt.key === "Escape") window.qlCloseDropdowns();
-  });
-
   // One-shot flash flags should not stay in the URL after first paint.
   var FLASH_PARAMS = ["approved", "stale", "saved", "queued", "connected",
                       "unverified", "mode", "error", "noselection", "skipped",

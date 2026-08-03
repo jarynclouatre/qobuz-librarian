@@ -5205,6 +5205,10 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   border-color: color-mix(in oklab, var(--ql-warning) 36%, var(--ql-line));
   background-color: color-mix(in oklab, var(--ql-warning) 10%, transparent);
 }
+.ql-flash-info {
+  border-color: color-mix(in oklab, var(--ql-info) 36%, var(--ql-line));
+  background-color: color-mix(in oklab, var(--ql-info) 10%, transparent);
+}
 
 .ql-disclosure-summary {
   display: flex;

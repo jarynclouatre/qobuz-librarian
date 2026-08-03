@@ -352,35 +352,6 @@
       // page it points at had gone empty.
       window.qlRefreshQueueBadge = refresh;
     })();
-    // Global keyboard shortcuts. "/" focuses the search box; Esc dismisses
-    // any visible alert and blurs the focused input; "g s/q/h" navigate.
-    (function() {
-      let gPending = false;
-      let gTimer = null;
-      document.addEventListener('keydown', e => {
-        const tag = (document.activeElement && document.activeElement.tagName) || '';
-        const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
-        if (e.key === '/' && !inField) {
-          const q = document.querySelector('input[name="q"]');
-          if (q) { e.preventDefault(); q.focus(); q.select && q.select(); }
-        } else if (e.key === 'Escape') {
-          if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
-          if (window.qlCloseDropdowns) window.qlCloseDropdowns();
-          // A search box has already used Escape to clear itself; blurring on
-          // top of that costs a tap to get back in and carry on typing.
-          const isSearchBox = tag === 'INPUT' && document.activeElement.type === 'search';
-          if (inField && !isSearchBox) document.activeElement.blur();
-        } else if (e.key === 'g' && !inField) {
-          gPending = true;
-          clearTimeout(gTimer);
-          gTimer = setTimeout(() => { gPending = false; }, 800);
-        } else if (gPending && !inField) {
-          const map = { 's': '/settings', 'q': '/queue', 'h': '/' };
-          if (map[e.key]) { e.preventDefault(); location.href = map[e.key]; }
-          gPending = false;
-        }
-      });
-    })();
   </script>
 </body>
 </html>
