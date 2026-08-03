@@ -106,8 +106,21 @@ def _album_scope_parts(item, destination_parts):
             leaf = os.fsdecode(parents[-1]).casefold()
         except (TypeError, UnicodeError, ValueError):
             return None
-        if leaf in (f"disc {disc}", f"cd {disc}"):
-            parents = parents[:-1]
+        # Beets types $disc as PaddedInt(2), so the bundled template files this
+        # disc as "Disc 01" — comparing against an unpadded "disc 1" matched
+        # nothing and bound the scope to the disc folder on every stock
+        # multi-disc import. Still strip only THIS item's disc.
+        for prefix in ("disc", "cd"):
+            if not leaf.startswith(prefix):
+                continue
+            number = leaf[len(prefix):].strip()
+            if (
+                number.isascii()
+                and number.isdigit()
+                and int(number) == disc
+            ):
+                parents = parents[:-1]
+            break
     return parents or None
 
 
