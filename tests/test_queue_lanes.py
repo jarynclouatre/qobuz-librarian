@@ -236,3 +236,24 @@ def test_durable_attention_stop_leaves_the_flush_returning(lease, stub_download)
     assert queue == [parked, waiting]
     loaded = queue_state.load_queue_journal()
     assert loaded.journal.items[0].phase is queue_state.QueuePhase.BLOCKED
+
+
+def test_parked_album_is_not_reported_as_a_clean_run():
+    """A parked album downloads every track before it stops, so the track tally
+    reads zero failures and only the album tally can tell the run apart from a
+    clean one."""
+    from qobuz_librarian.ui_cli.colors import C
+
+    colour, text = executor._queue_done_line(
+        [{"result": "attention", "n_ok": 14, "n_fail": 0}], 1)
+
+    assert colour == C.YELLOW
+    assert "✓" not in text
+    assert "1 album unfinished" in text
+
+    colour, text = executor._queue_done_line(
+        [{"result": "downloaded", "n_ok": 14, "n_fail": 0}], 1)
+
+    assert colour == C.GREEN
+    assert text.startswith("  ✓ Queue done: 1/1 albums OK")
+    assert "unfinished" not in text

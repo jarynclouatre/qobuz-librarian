@@ -2212,6 +2212,29 @@ def _durable_completed_result(item, post_dir):
     }
 
 
+def _queue_done_line(results, n_items):
+    """Colour and text for the closing queue summary.
+
+    A parked album — blocked, cancelled, interrupted — downloads its tracks
+    without one of them failing, so the verdict reads the album tally as well
+    as the track tally.
+    """
+    n_success = sum(1 for r in results
+                    if r.get("result") in ("downloaded", "partial"))
+    n_total_ok = sum(r.get("n_ok", 0) for r in results)
+    n_total_fail = sum(r.get("n_fail", 0) for r in results)
+    n_unfinished = max(0, n_items - n_success)
+    clear = n_total_fail == 0 and n_unfinished == 0
+    text = (f"  {'✓' if clear else '⚠'} Queue done: "
+            f"{n_success}/{n_items} albums OK · "
+            f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
+            f"{n_total_fail} track{'s' if n_total_fail != 1 else ''} failed")
+    if n_unfinished:
+        text += (f" · {n_unfinished} album"
+                 f"{'s' if n_unfinished != 1 else ''} unfinished")
+    return (C.GREEN if clear else C.YELLOW), text
+
+
 def _execute_download_queue(queue, args, token, *, on_progress=None,
                             refresh_review=False,
                             consolidate_duplicates=True):
@@ -3062,14 +3085,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 for item in items:
                     item.pop("_import_ownership_directory_changes", None)
 
-    n_success = sum(1 for r in results
-                    if r.get("result") in ("downloaded", "partial"))
-    n_total_ok = sum(r.get("n_ok", 0) for r in results)
-    n_total_fail = sum(r.get("n_fail", 0) for r in results)
-    log.info(fmt(C.GREEN if n_total_fail == 0 else C.YELLOW,
-        f"  ✓ Queue done: {n_success}/{n_items} albums OK · "
-        f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
-        f"{n_total_fail} failed"))
+    log.info(fmt(*_queue_done_line(results, n_items)))
 
     # A durable stop leaves the journal holding blocked or retired work on
     # purpose, and rewriting it as pending is what the journal refuses. Every
