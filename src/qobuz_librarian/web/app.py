@@ -632,9 +632,15 @@ def _job_admission_response(request):
     )
 
 
-def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
-    """Return a 503 response if the run-lock is busy OR a critical volume
-    was unwritable at startup, else None."""
+def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
+                          log_details: bool = False):
+    """Why downloads and scans are paused, in the user's words — or None.
+
+    One source for both the 503 a blocked request gets and the notice the
+    dashboard shows, so the two cannot drift into naming different causes.
+    ``log_details`` is for the request path only: the dashboard reads this on
+    every load and must not write a log line each time.
+    """
     reason = ""
     action = None
     if _CLI_MODE:
@@ -679,10 +685,11 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
             # internal diagnostic, not an explanation. It belongs in the log,
             # which this message points at; the user gets what happened to
             # their music and what to do.
-            logging.getLogger("qobuz_librarian").warning(
-                "post-import relocation recovery: %s (paths: %s)",
-                relocation.reason or "reason not reported",
-                paths or "none reported")
+            if log_details:
+                logging.getLogger("qobuz_librarian").warning(
+                    "post-import relocation recovery: %s (paths: %s)",
+                    relocation.reason or "reason not reported",
+                    paths or "none reported")
             reason = "A move of album folders inside your library was interrupted."
             msg = (
                 "Qobuz Librarian can't confirm that move finished, so downloads "
@@ -695,11 +702,27 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
             )
         else:
             reason = "An interrupted download couldn't be verified."
-            msg = ("An interrupted download could not be verified safely. Downloads "
-                   "and scans are paused, and its saved queue and staged files were "
-                   "left unchanged. Open that download from Queue or History and "
-                   "use Retry to settle it; if it stays blocked, check the "
-                   "application log.")
+            # A terminal download never became a web job, so it has no History
+            # row and no Retry button. Point each origin at the surface that
+            # can settle it, the way the resume_required branch below does.
+            origin = _startup_recovery_origin_value()
+            paused = ("Downloads and scans are paused, and its saved queue and "
+                      "staged files were left unchanged. ")
+            if origin == "cli":
+                action = {"href": "/settings#mode", "label": "Open Settings"}
+                msg = ("An interrupted terminal download could not be verified "
+                       "safely. " + paused + "Switch to terminal mode in "
+                       "Settings and run Qobuz Librarian there — it offers to "
+                       "settle this.")
+            elif origin == "web-job":
+                msg = ("An interrupted download could not be verified safely. "
+                       + paused + "Open that download from Queue or History "
+                       "and use Retry to settle it; if it stays blocked, check "
+                       "the application log.")
+            else:
+                msg = ("An interrupted download could not be verified safely. "
+                       + paused + "Settle it from the interface it was started "
+                       "in; if it stays blocked, check the application log.")
     elif (
         _startup_recovery_status_value() == "resume_required"
         and not _durable_resume_allowed(durable_resume_job_id or "")
@@ -721,13 +744,25 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
                    "resumed from the interface where it started.")
     else:
         return None
+    return {"reason": reason, "msg": msg, "action": action}
+
+
+def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
+    """Return a 503 response if web writes are paused, else None."""
+    notice = _writes_paused_notice(
+        durable_resume_job_id=durable_resume_job_id,
+        log_details=True,
+    )
+    if notice is None:
+        return None
     unwritable_now = _unwritable_volumes()
     if _is_htmx(request):
         return HTMLResponse(
-            _ql_notice_html("error", html.escape(msg)),
+            _ql_notice_html("error", html.escape(notice["msg"])),
             status_code=200)
     return _tr(request, "lock_busy.html",
-               {"msg": msg, "reason": reason, "action": action,
+               {"msg": notice["msg"], "reason": notice["reason"],
+                "action": notice["action"],
                 # "Try again" only helps where retrying can succeed; the rest
                 # need something fixed first and the button was false comfort.
                 "can_retry": _LOCK_BUSY_PID is not None or bool(unwritable_now)},
@@ -1334,6 +1369,7 @@ def _restore_jobs_once() -> None:
                 durable_recovery_clear=(
                     _startup_recovery_status_value() == "clear"
                 ),
+                durable_recovery_job_id=_startup_recovery_web_job_id(),
             )
         except Exception as exc:
             logging.getLogger("qobuz_librarian").warning(
@@ -1988,6 +2024,13 @@ def _tr(request, name, context, *, status_code=200):
     # Every tool page offered its Start button while writes were paused and let
     # the POST bounce the user onto a 503. Refuse at offer time, not submit time.
     context.setdefault("writes_paused", _web_writes_paused())
+    # Terminal mode is one of eight causes, so carry the true one rather than
+    # letting each gated control name the same guess.
+    if context["writes_paused"] and "writes_paused_reason" not in context:
+        paused = _writes_paused_notice()
+        context["writes_paused_reason"] = (
+            paused["reason"] if paused else "Downloads and scans are paused."
+        )
     # Error/utility renders (e.g. the 404 page) don't name a nav section; an
     # explicit empty page just leaves every nav link inactive instead of
     # relying on Jinja's undefined-is-falsey behaviour.
@@ -2740,6 +2783,9 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # A store that couldn't be read was kept aside and the run fell back
             # to defaults — only the container log said so, which nobody reads.
             "corrupt_stores": state_file.preserved_corrupt_stores(),
+            # Says the pause here rather than leaving it to the 503 a press
+            # earns. It probes the volumes, so it belongs off the event loop.
+            "writes_paused_notice": _writes_paused_notice(),
         }
 
     loop = asyncio.get_running_loop()
@@ -3398,9 +3444,19 @@ def _make_download_run(
                     r = result or {}
                     durable_failure = True
                     completion_acknowledged = _durable_completion_status(j)
+                    # `recovery_status` is process-wide, not this job's, so a
+                    # download whose OWN completion is durably acknowledged was
+                    # written up as Failed because some other item's recovery
+                    # was outstanding — one started from the terminal did it to
+                    # every finished download at once. It only came right
+                    # because this sweep re-runs at restore time, which is why
+                    # clearing it took a restart. Asking whose recovery it is
+                    # reads the completion proof; it does not redefine one.
+                    recovery_is_this_job = _startup_recovery_web_job_id() == j.id
                     if (
                         completion_acknowledged is True
-                        and recovery_status == "clear"
+                        and (recovery_status == "clear"
+                             or not recovery_is_this_job)
                         and _run_lock_intact()
                         and _reconcile_acknowledged_job(j)
                     ):

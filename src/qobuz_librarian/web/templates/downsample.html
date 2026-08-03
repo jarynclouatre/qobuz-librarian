@@ -50,12 +50,12 @@
       <div class="ql-work-card-actions">
         <form action="/downsample/review" method="post" data-busy-submit>
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="Paused while terminal mode is active" aria-disabled="true"{% endif %}
+          <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
 >Review candidates</button>
         </form>
         <form action="/downsample" method="post" data-busy-submit>
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <button type="submit" class="ql-btn ql-btn-secondary ql-secondary-action w-full sm:w-auto"{% if writes_paused %} disabled title="Paused while terminal mode is active" aria-disabled="true"{% endif %}
+          <button type="submit" class="ql-btn ql-btn-secondary ql-secondary-action w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                   data-confirm="{{ refresh_confirm }}" data-confirm-action="Refresh">Refresh candidates</button>
         </form>
       </div>
@@ -69,7 +69,7 @@
       <div class="ql-work-card-actions">
         <form action="/downsample" method="post" data-busy-submit>
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="Paused while terminal mode is active" aria-disabled="true"{% endif %}
+          <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                   data-confirm="{{ refresh_confirm }}" data-confirm-action="Refresh">Refresh candidates</button>
         </form>
       </div>

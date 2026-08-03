@@ -41,9 +41,12 @@
     <input type="hidden" name="album_id" value="{{ album_id }}">
     {% if track_id %}<input type="hidden" name="track_id" value="{{ track_id }}">{% endif %}
     {% if as_new_edition %}<input type="hidden" name="as_new_edition" value="1">{% endif %}
+    {# Refuse at offer time, like every other tool page, rather than taking the
+       press and answering with a 503. #}
     <button type="submit"
             class="{% if icon %}ql-icon-button ql-download-icon-button{% else %}ql-btn ql-btn-primary ql-btn-sm{% if small %} ql-btn-compact{% endif %}{% endif %}"
-            aria-label="Download {{ title }} by {{ artist }}" title="Download">
+            aria-label="Download {{ title }} by {{ artist }}"
+            {% if writes_paused %}disabled aria-disabled="true" title="{{ writes_paused_reason }}"{% else %}title="Download"{% endif %}>
       {% if icon %}{{ download_icon() }}{% else %}Download{% endif %}
     </button>
   </form>

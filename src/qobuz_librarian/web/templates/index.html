@@ -33,18 +33,23 @@
     </div>
     {% endif %}
 
-    {% if lock_busy_pid %}
-    <div class="ql-notice ql-notice-warning flex items-start gap-3 p-4">
+    {# Any of the eight pause causes, in the same wording the 503 gives and
+       from the same place. #}
+    {% if writes_paused_notice %}
+    <div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-warning" fill="none"
            viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M12 9v2m0 4h.01M5 19h14a2 2 0 0 0 1.84-2.75L13.74 4a2 2 0 0 0-3.5 0L3.18 16.25A2 2 0 0 0 5 19z"/>
       </svg>
       <span class="min-w-0 break-words text-sm">
-        <strong>Another Qobuz Librarian run is active.</strong>
-        Downloads and scans are paused so only one process writes to the library at a time.
-        Stop the other run first, then restart this one.
+        {# No headline: each message already opens by naming its cause and says
+           downloads and scans are paused, so anything above it stutters. #}
+        {{ writes_paused_notice.msg }}
       </span>
+      {% if writes_paused_notice.action %}
+      <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
+      {% endif %}
     </div>
     {% endif %}
 
