@@ -2140,8 +2140,8 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
 
 
 def test_history_job_cards_reach_past_the_first_page(client, monkeypatch):
-    """The job cards are capped per page, so without a pager everything past
-    the cap is advertised in the count and reachable nowhere.
+    """The job cards are capped per page while the count above them reports the
+    whole archive, so every page past the first has to be reachable.
     """
     from qobuz_librarian.web import app as webapp
     from qobuz_librarian.web import job_persistence

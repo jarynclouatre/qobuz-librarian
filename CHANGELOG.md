@@ -2,6 +2,11 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [Unreleased]
+
+- The Library review stays on the tab you were reading. Switching to Gap Fill put nothing in the address, so a reload — or a phone restoring the page after you'd been elsewhere — dropped you back into Missing Albums, and a Gap Fill link couldn't be bookmarked or shared.
+- History can reach the jobs it counts. The job cards stopped at the most recent 40 with no way further back, so the total above them advertised work the page couldn't show, and the gap grew with every scan.
+
 ## [0.12.1] - 2026-08-03
 
 Fixes from driving 0.12.0 rather than reading it, led by a multi-disc download that imported perfectly and stopped the queue anyway.

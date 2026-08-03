@@ -8356,11 +8356,8 @@ _HISTORY_BULK_CAP = 40
 async def queue_history(request: Request, p: int = 1, jp: int = 1):
     """The History tab: every finished job, newest first, paged from jobs.db so
     the record outlives the in-memory cap (which only the Queue/SSE views use).
-
-    Two layers, two pagers: ``p`` walks the downloads table, ``jp`` the job
-    cards above it. Each link carries the other's page so moving through one
-    layer doesn't reset the other.
-    """
+    ``p`` walks the downloads table, ``jp`` the job cards above it, and each
+    pager's links carry the other's page."""
     from qobuz_librarian.web import job_persistence
     p = max(1, p)
     jp = max(1, jp)

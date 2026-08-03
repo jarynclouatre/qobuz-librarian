@@ -74,8 +74,8 @@
     <h2 id="history-jobs-heading">Jobs</h2>
     <span class="ql-activity-count">{{ bulk_total }}</span>
   </header>
-  {% if bulk_total > bulk_shown %}
-  <p class="ql-mono-meta ql-history-truncated">Showing the {{ bulk_shown }} most recent of {{ bulk_total }}.</p>
+  {% if bulk_pages > 1 %}
+  <p class="ql-mono-meta ql-history-truncated">Page {{ bulk_page }} of {{ bulk_pages }} · {{ bulk_total }} in total.</p>
   {% endif %}
   <div class="ql-history-cards">
     <div class="ql-activity-list ql-panelize">
@@ -100,6 +100,21 @@
       {% endfor %}
     </div>
   </div>
+  {% if bulk_pages > 1 %}
+  <nav class="ql-activity-pagination" aria-label="Job pages">
+    {% if bulk_page > 1 %}
+    <a href="/queue/history?jp={{ bulk_page - 1 }}&amp;p={{ cur_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
+    {% else %}
+    <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Newer</span>
+    {% endif %}
+    <span class="ql-activity-page-count tabular-nums">Page {{ bulk_page }} of {{ bulk_pages }}</span>
+    {% if bulk_page < bulk_pages %}
+    <a href="/queue/history?jp={{ bulk_page + 1 }}&amp;p={{ cur_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
+    {% else %}
+    <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
+    {% endif %}
+  </nav>
+  {% endif %}
 </section>
 {% endif %}
 
@@ -130,15 +145,15 @@
 {% endif %}
 
 {% if pages > 1 %}
-<nav class="ql-activity-pagination" aria-label="History pages">
+<nav class="ql-activity-pagination" aria-label="Download pages">
   {% if cur_page > 1 %}
-  <a href="/queue/history?p={{ cur_page - 1 }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
+  <a href="/queue/history?p={{ cur_page - 1 }}&amp;jp={{ bulk_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
   {% else %}
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Newer</span>
   {% endif %}
   <span class="ql-activity-page-count tabular-nums">Page {{ cur_page }} of {{ pages }}</span>
   {% if cur_page < pages %}
-  <a href="/queue/history?p={{ cur_page + 1 }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
+  <a href="/queue/history?p={{ cur_page + 1 }}&amp;jp={{ bulk_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
   {% else %}
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
   {% endif %}
