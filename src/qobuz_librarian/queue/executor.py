@@ -2061,9 +2061,13 @@ def _recovered_owner_settled(owner):
 
 
 def _exact_resume_owner(recovery, item, *, execution_mode):
-    """Match one returned startup identity to this exact planned item."""
+    """Match one returned startup identity to this exact planned item.
+
+    Returns the recovered action alongside the owner: a merely PENDING entry is
+    a persisted decision the caller can hand back, an in-flight one is not.
+    """
     if recovery.status is StartupRecoveryStatus.CLEAR:
-        return None, execution_mode
+        return None, execution_mode, None
     if recovery.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
         raise DurableAlbumUnavailable(
             recovery.reason or "saved queue recovery needs attention"
@@ -2122,7 +2126,39 @@ def _exact_resume_owner(recovery, item, *, execution_mode):
     return (
         RecoveryOwner(recovered.operation_id, recovered.item_id),
         recovered.mode,
+        recovered.action,
     )
+
+
+def _release_unplannable_claim(owner, action, *, authority):
+    """Hand a saved entry the durable lane can't plan back to the legacy lane.
+
+    A PENDING entry holds no recovery references and no frozen completion input
+    — that is exactly why startup recovery classifies it PENDING — so there is
+    nothing to resume and the entry can simply stay pending until the shrinking
+    queue drops it. An ACTIVE claim that never reached a mutation gate goes back
+    through the journal's own reset, which refuses the moment anything moved.
+    """
+    if action is StartupRecoveryAction.PENDING:
+        return True
+    if action is not StartupRecoveryAction.RESUME_DOWNLOAD:
+        return False
+    loaded = queue_state.load_queue_journal(owner.operation_id)
+    if (
+        loaded.status is not queue_state.QueueLoadStatus.READY
+        or loaded.journal is None
+    ):
+        return False
+    _require_executor_authority(authority)
+    try:
+        queue_state.reset_unstarted_item_to_pending(
+            loaded.journal,
+            owner.item_id,
+        )
+    except (KeyError, OSError, queue_state.QueueJournalError):
+        return False
+    _require_executor_authority(authority)
+    return True
 
 
 def _durable_completed_result(item, post_dir):
@@ -2465,7 +2501,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             )
             continue
         try:
-            resume_owner, durable_mode = _exact_resume_owner(
+            resume_owner, durable_mode, resume_action = _exact_resume_owner(
                 startup,
                 item,
                 execution_mode=execution_mode,
@@ -2481,7 +2517,20 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 break
             raise
         if resume_owner is not None and plan is None:
-            if any_imported:
+            # Every walk saves its queue before flushing it, so during an
+            # ordinary flush each item resolves an owner for its own pending
+            # entry. Treating that as unrecoverable refused the whole flush and
+            # left the saved queue failing the same way on every launch — a
+            # pending entry is a persisted decision, not recovery state, so give
+            # it back and let the legacy lane run the album.
+            if _release_unplannable_claim(
+                resume_owner,
+                resume_action,
+                authority=authority,
+            ):
+                resume_owner = None
+                durable_mode = execution_mode
+            elif any_imported:
                 durable_stopped = True
                 log.info(fmt(
                     C.YELLOW,
@@ -2489,14 +2538,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     "by safe recovery; stopping this batch.",
                 ))
                 break
-            raise DurableAlbumUnavailable(
-                "the saved queue item is not yet supported by safe recovery"
-            )
-        if requires_library_backup and plan is None:
-            raise DurableAlbumUnavailable(
-                "this library-changing queue item is not yet supported by "
-                "crash-safe recovery"
-            )
+            else:
+                raise DurableAlbumUnavailable(
+                    "the saved queue item is not yet supported by safe recovery"
+                )
         if resume_owner is None:
             _ensure_preflight()
 
@@ -2530,6 +2575,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         print()
         log.info(fmt(C.BOLD + C.WHITE,
             f"  [Q {idx}/{n_items}] {truncate(title, 55)}"))
+        if requires_library_backup and plan is None:
+            # The exact-recovery lane only covers a handful of shapes (no
+            # sibling replacement, no downsampling, whole-album requests). The
+            # rest still run, on the path that backs up before it replaces.
+            log.info(fmt(C.GRAY,
+                "    Crash-safe recovery doesn't cover this album — using the "
+                "standard path, which backs up anything it replaces."))
 
         if plan is not None:
             def _prepare_staged(album_dirs, checkpoint_sources):
