@@ -487,11 +487,6 @@ def detect_sibling_album_groups(album_dirs):
     return [(k, v) for k, v in groups.items() if len(v) >= 2]
 
 
-def sweep_staging_artwork():
-    """Keep legacy artwork for preflight when no ownership receipt exists."""
-    return
-
-
 def pick_canonical_sibling(dirs):
     """Most audio files wins; tiebreak on longest name (more decoration =
     usually the more comprehensive edition like Deluxe / Expanded)."""
@@ -1380,10 +1375,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                     log.info(fmt(C.RED,
                         f"  ✗  Restored {_n_back} track(s); remaining originals "
                         f"preserved at {gap_fill_backup_path} — reconcile by hand."))
-
-        # `beet import` only moves audio.
-        if imported and not args.no_import:
-            sweep_staging_artwork()
 
     # ── Consolidation ────────────────────────────────────────────────────────
     n_consolidated = 0

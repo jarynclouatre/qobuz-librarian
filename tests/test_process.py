@@ -187,7 +187,6 @@ def test_treat_as_new_downloads_an_owned_album_as_a_separate_edition(monkeypatch
     monkeypatch.setattr(
         proc, "_pre_import_staging_hooks", lambda _a, _dirs=None: ([], 0))
     monkeypatch.setattr(proc, "write_post_import_sidecars", lambda _ds: None)
-    monkeypatch.setattr(proc, "sweep_staging_artwork", lambda: None)
     monkeypatch.setattr(proc, "print_album_summary", lambda *a, **k: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _e: None)
 
@@ -244,7 +243,6 @@ def test_auto_downsample_marks_imported_folder_when_album_resolver_misses(
         proc, "_pre_import_staging_hooks", lambda _a, _dirs=None: ([], 1))
     monkeypatch.setattr(proc, "beets_import_paths", lambda *a, **k: True)
     monkeypatch.setattr(proc, "write_post_import_sidecars", lambda _ds: None)
-    monkeypatch.setattr(proc, "sweep_staging_artwork", lambda: None)
     monkeypatch.setattr(proc, "print_album_summary", lambda *a, **k: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _e: None)
     monkeypatch.setattr(proc, "warn_if_download_truncated", lambda *a, **k: None)
@@ -307,7 +305,6 @@ def test_self_heal_retry_signatures_use_fresh_staged_dirs(monkeypatch, tmp_path)
         proc, "_pre_import_staging_hooks", lambda _a, _dirs=None: ([], 1))
     monkeypatch.setattr(proc, "beets_import_paths", lambda *a, **k: True)
     monkeypatch.setattr(proc, "write_post_import_sidecars", lambda _ds: None)
-    monkeypatch.setattr(proc, "sweep_staging_artwork", lambda: None)
     monkeypatch.setattr(proc, "print_album_summary", lambda *a, **k: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _e: None)
     monkeypatch.setattr(proc, "warn_if_download_truncated", lambda *a, **k: None)
@@ -368,7 +365,6 @@ def test_self_heal_retry_no_files_imports_first_staged_rip(
     monkeypatch.setattr(
         proc, "_pre_import_staging_hooks", lambda _a, _dirs=None: ([], 0))
     monkeypatch.setattr(proc, "write_post_import_sidecars", lambda _ds: None)
-    monkeypatch.setattr(proc, "sweep_staging_artwork", lambda: None)
     monkeypatch.setattr(proc, "print_album_summary", lambda *a, **k: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _e: None)
     monkeypatch.setattr(proc, "warn_if_download_truncated", lambda *a, **k: None)
@@ -453,7 +449,6 @@ def test_gap_fill_backup_restored_when_track_returns_lossy(monkeypatch, tmp_path
         proc, "_pre_import_staging_hooks", lambda _a, _dirs=None: ([], 0))
     monkeypatch.setattr(proc, "beets_import_paths", lambda *a, **k: True)
     monkeypatch.setattr(proc, "write_post_import_sidecars", lambda _ds: None)
-    monkeypatch.setattr(proc, "sweep_staging_artwork", lambda: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _e: None)
     monkeypatch.setattr(proc, "print_album_summary", lambda *a, **k: None)
     monkeypatch.setattr(proc, "validated_staged_album_dirs",
@@ -772,7 +767,6 @@ def test_gap_fill_partial_import_restores_backup_despite_extra_track(
         proc, "_pre_import_staging_hooks", lambda _a, _dirs=None: ([], 0))
     monkeypatch.setattr(proc, "beets_import_paths", lambda *a, **k: True)
     monkeypatch.setattr(proc, "write_post_import_sidecars", lambda _ds: None)
-    monkeypatch.setattr(proc, "sweep_staging_artwork", lambda: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _e: None)
     monkeypatch.setattr(proc, "print_album_summary", lambda *a, **k: None)
 

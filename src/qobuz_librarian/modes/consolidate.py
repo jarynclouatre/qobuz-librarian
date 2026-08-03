@@ -12,7 +12,7 @@ from qobuz_librarian import config
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import beets as beets_integration
 from qobuz_librarian.library import scanner
-from qobuz_librarian.library.scanner import parse_track_num, read_album_dir
+from qobuz_librarian.library.scanner import parse_track_num
 from qobuz_librarian.library.sqlite_atomic import (
     AtomicSQLiteWrite,
     inspect_sqlite_source,
@@ -1256,29 +1256,6 @@ def match_sibling_track(sibling_track, primary_tracks):
                 matches.append(pt)
         return matches[0] if len(matches) == 1 else None
     return None
-
-
-def consolidation_summary(siblings, primary_tracks):
-    """For each sibling: classify each track as overlap or unique."""
-    summaries = []
-    for sib_dir, score in siblings:
-        sib_tracks = read_album_dir(sib_dir)
-        overlap, unique = [], []
-        # Each primary track is one recording: at most one sibling track may
-        # claim it as a duplicate.
-        claimed = set()
-        for st in sib_tracks:
-            match = match_sibling_track(st, primary_tracks)
-            if match is not None and id(match) not in claimed:
-                claimed.add(id(match))
-                overlap.append((st, match))
-            else:
-                unique.append(st)
-        summaries.append({
-            "dir": sib_dir, "score": score, "all_tracks": sib_tracks,
-            "overlap": overlap, "unique": unique,
-        })
-    return summaries
 
 
 def _summary_from_tracks(sibling, score, sibling_tracks, primary_tracks):
