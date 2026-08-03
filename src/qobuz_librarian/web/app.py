@@ -6125,7 +6125,7 @@ def _census_view():
 
 
 @app.get("/library", response_class=HTMLResponse)
-async def library_page(request: Request, page: int = 1):
+async def library_page(request: Request, page: int = 1, tab: str = ""):
     from qobuz_librarian.library import hidden as hidden_mod
     from qobuz_librarian.library import scan_checkpoint
     creds_ok = bool(_read_creds().get("auth_token"))
@@ -6178,7 +6178,9 @@ async def library_page(request: Request, page: int = 1):
     ctx["census"] = None
     if ljob is not None:
         ctx["queue_wait"] = _queue_wait(ljob)
-        ctx.update(_review_context(ljob, page))
+        # A full load has to be able to land on either tab: the address is the
+        # only thing a reload or a bookmark still carries.
+        ctx.update(_review_context(ljob, page, tab=tab))
         ctx["library_resume"] = None
     else:
         # Resume hint: only when an interrupted baseline checkpoint exists and
@@ -8347,16 +8349,21 @@ async def queue_page(request: Request, error: str = ""):
 
 
 _HISTORY_PER_PAGE = 30
-# The card layer scrolls instead of paginating; enough for weeks of scans.
 _HISTORY_BULK_CAP = 40
 
 
 @app.get("/queue/history", response_class=HTMLResponse)
-async def queue_history(request: Request, p: int = 1):
+async def queue_history(request: Request, p: int = 1, jp: int = 1):
     """The History tab: every finished job, newest first, paged from jobs.db so
-    the record outlives the in-memory cap (which only the Queue/SSE views use)."""
+    the record outlives the in-memory cap (which only the Queue/SSE views use).
+
+    Two layers, two pagers: ``p`` walks the downloads table, ``jp`` the job
+    cards above it. Each link carries the other's page so moving through one
+    layer doesn't reset the other.
+    """
     from qobuz_librarian.web import job_persistence
     p = max(1, p)
+    jp = max(1, jp)
 
     def _stamp(rows):
         for r in rows:
@@ -8364,23 +8371,30 @@ async def queue_history(request: Request, p: int = 1):
             r["when"], r["when_exact"] = _when_label(ts)
         return rows
 
-    def _load_page(page):
-        # Two layers: meaningful jobs as a scrollable card region, plain
-        # downloads as the paginated table underneath.
+    def _load_page(page, bulk_page):
+        # Two layers: meaningful jobs as cards, plain downloads as the table
+        # underneath. Both walk the archive a page at a time.
         recoveries = _stamp(job_persistence.recovery_history())
-        bulk = recoveries + _stamp(job_persistence.history_page(
-            _HISTORY_BULK_CAP,
-            0,
-            bulk=True,
-            exclude_recoveries=True,
-        ))
+        bulk_rest = job_persistence.history_count(
+            bulk=True, exclude_recoveries=True)
+        bulk_pages = max(
+            1, (bulk_rest + _HISTORY_BULK_CAP - 1) // _HISTORY_BULK_CAP)
+        bulk_page = min(max(1, bulk_page), bulk_pages)
+        # A retained recovery is asking for a decision, so it stays pinned to
+        # the first page rather than repeating under every one.
+        bulk = (recoveries if bulk_page == 1 else []) + _stamp(
+            job_persistence.history_page(
+                _HISTORY_BULK_CAP,
+                (bulk_page - 1) * _HISTORY_BULK_CAP,
+                bulk=True,
+                exclude_recoveries=True,
+            ))
         total = job_persistence.history_count(
             bulk=False, exclude_recoveries=True)
         # Count the archive, not the cards that happened to render: the card
         # layer is capped, so a headline built from it under-reported the
         # history by however much it had dropped.
-        bulk_total = len(recoveries) + job_persistence.history_count(
-            bulk=True, exclude_recoveries=True)
+        bulk_total = len(recoveries) + bulk_rest
         pages = max(1, (total + _HISTORY_PER_PAGE - 1) // _HISTORY_PER_PAGE)
         page = min(max(1, page), pages)
         rows = _stamp(job_persistence.history_page(
@@ -8389,15 +8403,18 @@ async def queue_history(request: Request, p: int = 1):
             bulk=False,
             exclude_recoveries=True,
         ))
-        return bulk, bulk_total, total, pages, page, rows
+        return (bulk, bulk_total, bulk_page, bulk_pages,
+                total, pages, page, rows)
 
     loop = asyncio.get_running_loop()
-    bulk_jobs, bulk_total, total, pages, p, rows = await loop.run_in_executor(
-        None, lambda: _load_page(p))
+    (bulk_jobs, bulk_total, jp, bulk_pages,
+     total, pages, p, rows) = await loop.run_in_executor(
+        None, lambda: _load_page(p, jp))
     return _tr(request, "history.html", {
         "page": "queue", "active_tab": "history",
         "bulk_jobs": bulk_jobs, "jobs": rows,
         "bulk_total": bulk_total, "bulk_shown": len(bulk_jobs),
+        "bulk_page": jp, "bulk_pages": bulk_pages,
         "cur_page": p, "pages": pages, "total": total,
     })
 

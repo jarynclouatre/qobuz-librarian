@@ -2139,6 +2139,64 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
         _remove_job(job)
 
 
+def test_history_job_cards_reach_past_the_first_page(client, monkeypatch):
+    """The job cards are capped per page, so without a pager everything past
+    the cap is advertised in the count and reachable nowhere.
+    """
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    cap = webapp._HISTORY_BULK_CAP
+    made = [{"id": f"j{i:03d}", "title": f"Scan {i}", "artist": "",
+             "status": "done", "kind": "scan", "execute_kind": "repair",
+             "summary": "", "error": None, "album_id": "", "attention": "",
+             "recoveries": [], "when": "", "when_exact": "",
+             "created_at": float(i), "finished_at": float(i)}
+            for i in range(cap + 5)]
+    monkeypatch.setattr(job_persistence, "recovery_history", lambda: [])
+    monkeypatch.setattr(job_persistence, "history_count",
+                        lambda **kw: len(made) if kw.get("bulk") else 0)
+    monkeypatch.setattr(
+        job_persistence, "history_page",
+        lambda limit, offset, **kw: made[offset:offset + limit] if kw.get("bulk") else [])
+
+    first = client.get("/queue/history")
+    assert first.status_code == 200
+    assert 'aria-label="Job pages"' in first.text
+    assert "Scan 0" in first.text and f"Scan {cap + 4}" not in first.text
+
+    second = client.get("/queue/history", params={"jp": 2})
+    assert second.status_code == 200
+    assert f"Scan {cap + 4}" in second.text
+
+
+def test_library_review_tab_is_addressable(client, monkeypatch, tmp_path):
+    """The tab lives in the address, so a reload or a bookmark lands on the one
+    that was open rather than the default.
+    """
+    from qobuz_librarian.web import app as webapp
+
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    job.add_candidate(kind="album", title="Third", artist="Portishead",
+                      payload={"year": "2008"}, selected=False)
+    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
+                      detail="1994 · CD 16-bit/44.1kHz · gap-fill: 2 missing of 11",
+                      payload={"year": "1994", "gap_fill": 2}, selected=False)
+    monkeypatch.setattr(webapp, "_review_job_from_library_state", lambda: job)
+    try:
+        r = client.get("/library", params={"tab": "gaps"})
+        assert r.status_code == 200
+        assert "Dummy" in r.text and "Third" not in r.text
+        r = client.get("/library")
+        assert "Third" in r.text and "Dummy" not in r.text
+        # An unusable value falls back rather than rendering an empty review.
+        r = client.get("/library", params={"tab": "nonsense"})
+        assert r.status_code == 200 and "Third" in r.text
+    finally:
+        _remove_job(job)
+
+
 def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch):
     """Downloading from one tab must consume only that tab: the other tab's
     candidates (and their saved ticks) split into their own parked review

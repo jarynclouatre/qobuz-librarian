@@ -1680,6 +1680,13 @@
         if (tabField) tabField.value = curTab();
         applyCounts(lastCounts);  // re-scope the bulk bar to the new tab
         loadPage(1, curQuery());
+        // Record the switch in the address so a reload comes back to it, and
+        // the tab can be linked to.
+        try {
+          var url = new URL(window.location.href);
+          url.searchParams.set("tab", curTab());
+          window.history.replaceState({}, "", url);
+        } catch (e) { /* no URL support: the in-page switch still works */ }
         return;
       }
       var expBtn = t.closest("[data-expand-all]");
