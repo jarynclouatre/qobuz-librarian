@@ -422,7 +422,8 @@
 
   // One-shot flash flags should not stay in the URL after first paint.
   var FLASH_PARAMS = ["approved", "stale", "saved", "queued", "connected",
-                      "unverified", "mode", "error"];
+                      "unverified", "mode", "error", "noselection", "skipped",
+                      "notice", "quality_note"];
   function cleanFlashUrl() {
     if (typeof URL !== "function" || !history.replaceState) return;
     try {
@@ -736,7 +737,7 @@
             var queuedAlbums = queued - queuedTracks;
             var what = !queuedAlbums ? cnt(queued, "track", "tracks")
               : !queuedTracks ? cnt(queued, "album", "albums")
-              : queuedAlbums + " albums and " + cnt(queuedTracks, "track", "tracks");
+              : cnt(queuedAlbums, "album", "albums") + " and " + cnt(queuedTracks, "track", "tracks");
             parts.push(queued === 1 && firstTitle
               ? "“" + firstTitle + "” queued"
               : what + " queued");

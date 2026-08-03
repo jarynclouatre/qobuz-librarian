@@ -86,7 +86,7 @@ Stop Qobuz Librarian completely before running this or any other manual `beet` c
 
 A library-wide scan makes roughly one Qobuz call per artist directory (cached on re-scans, so repeated scans mostly use cached data), fanned across a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). There is no artificial delay between calls (`ARTIST_API_DELAY`, default 0); Qobuz's rate limit is handled by automatic retry and back-off, so raise it only if you get throttled. It is scan-then-review, not a daemon. After the baseline, use the Library refresh for music added outside the app. Singles and very short EPs are hidden from the missing-albums step by default; lower `MISSING_ALBUMS_MIN_TRACKS` (e.g. to 1) to surface them. (A single-artist run can also pass `--include-singles`.)
 
-Review choices are remembered, so a large library can be handled over several sessions. Library dismissals hide missing-album suggestions, Upgrade dismissals hide skipped upgrades, and Downsample remembers albums you keep hi-res. Restore them from the **Hidden** view. Saved choices are per album, so a new release by an already-reviewed artist still surfaces. Explicit single-artist CLI scans do not use the hidden list.
+Review choices are remembered, so a large library can be handled over several sessions. Library dismissals hide missing-album suggestions, Upgrade dismissals hide skipped upgrades, and Downsample remembers albums you keep hi-res. Restore them from each page's **Dismissed** view (Downsample calls it **Kept hi-res**). Saved choices are per album, so a new release by an already-reviewed artist still surfaces. Explicit single-artist CLI scans do not use the hidden list.
 
 ## After the baseline
 

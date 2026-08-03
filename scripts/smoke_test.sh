@@ -90,8 +90,7 @@ for bin in rip beet ffmpeg flac metaflac fpcalc; do
 done
 
 echo "==> Checking branding"
-# Host-side curl (the slim runtime image ships no curl of its own — the bundled
-# tools above are checked with `command -v`, not curl).
+# Host-side curl, same as the route checks above.
 if curl -fsS "${BASE}/" 2>/dev/null | grep -q "Qobuz Librarian"; then
     echo "  ok  page shows 'Qobuz Librarian'"
 else

@@ -7,8 +7,8 @@ silent loss. NOT a unit test: it exercises the real engine functions on real
 ffmpeg/flac/mutagen, the cases the all-CD-rate test library can't cover.
 
 Run inside the container:  python3 scripts/e2e_destructive_check.py
-Exit 0 = all checks passed; non-zero = a real integrity failure (details to
-/tmp/e2e_destructive_out.txt and stdout).
+Exit 0 = all checks passed; non-zero = a real integrity failure (details on
+stdout).
 """
 import shutil
 import subprocess
