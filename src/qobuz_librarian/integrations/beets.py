@@ -5018,6 +5018,70 @@ def _reclaim_ownership_capture(capture, payload=None):
                 pass
 
 
+# What fetchart will accept, from its own CONTENT_TYPES.
+_ART_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def relocate_disc_album_artwork(album_dir) -> bool:
+    """Move a staged album's root artwork beside the first disc's tracks.
+
+    Beets gives a multi-disc album's import task the DISC directories as its
+    source paths, and fetchart searches only those, so a cover sitting in the
+    album root is never offered as a candidate. `beet import` moves only audio,
+    so the cover is then left behind in staging — and any leftover keeps the
+    download's staging run present, which the durable completion proof reads as
+    a download that never finished. That stops the queue and reports the album
+    as failed even though every track imported.
+
+    The first disc folder is where Beets files this layout's album art anyway
+    (Album.item_dir() is the directory of the album's first item), so moving it
+    there keeps the art with the album without widening what the art guard is
+    willing to publish. Single-disc albums are left alone: their album root is
+    the item directory, so fetchart already sees the cover.
+    """
+    root = Path(album_dir)
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return False
+    if any(p.suffix.lower() in cfg.AUDIO_EXTS and p.is_file() for p in entries):
+        return False
+    covers = sorted(
+        p for p in entries if p.suffix.lower() in _ART_EXTS and p.is_file()
+    )
+    if not covers:
+        return False
+    disc_dirs = []
+    for entry in sorted(entries):
+        if not entry.is_dir():
+            continue
+        try:
+            has_audio = any(
+                child.suffix.lower() in cfg.AUDIO_EXTS and child.is_file()
+                for child in entry.iterdir()
+            )
+        except OSError:
+            continue
+        if has_audio:
+            disc_dirs.append(entry)
+    if not disc_dirs:
+        return False
+    target = disc_dirs[0]
+    moved = False
+    for cover in covers:
+        destination = target / cover.name
+        if destination.exists():
+            continue
+        try:
+            os.rename(cover, destination)
+        except OSError as e:
+            vlog(f"couldn't move {cover.name} beside the first disc: {e}")
+            continue
+        vlog(f"moved {cover.name} into {target.name} so beets can file it")
+        moved = True
+    return moved
+
+
 def beets_import_paths(consolidate=True, *, source_files_out=None, album_dirs=None):
     """Run beets on explicit staged albums and return a success bool.
 

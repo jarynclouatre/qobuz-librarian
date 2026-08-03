@@ -29,6 +29,7 @@ from qobuz_librarian.download import (
 from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
     beets_import_albums,
+    relocate_disc_album_artwork,
     staging_preflight,
 )
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
@@ -953,6 +954,14 @@ def _run_pre_import_hooks_for_dirs(
     """
     sigs = []
     resampled_total = 0
+    # Before anything else looks at these directories: a multi-disc album's
+    # cover sits in the album root, where beets' import task never searches.
+    # Left there it strands in staging and reads as an unfinished download.
+    for d in album_dirs:
+        try:
+            relocate_disc_album_artwork(d)
+        except Exception as _ae:
+            vlog(f"artwork relocation raised: {_ae}")
     if (cfg.DOWNSAMPLE_HIRES_ENABLED and HAVE_DOWNSAMPLE
             and not getattr(args, "no_downsample", False)):
         for d in album_dirs:

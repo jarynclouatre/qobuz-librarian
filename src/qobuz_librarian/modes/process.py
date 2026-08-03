@@ -12,7 +12,11 @@ from qobuz_librarian.download import (
     run_album_download,
     validated_staged_album_dirs,
 )
-from qobuz_librarian.integrations.beets import beets_import_paths, staging_preflight
+from qobuz_librarian.integrations.beets import (
+    beets_import_paths,
+    relocate_disc_album_artwork,
+    staging_preflight,
+)
 from qobuz_librarian.integrations.lyrics import (
     _record_post_import_lyric_retry,
     _resolve_signatures_to_paths,
@@ -1123,6 +1127,14 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.YELLOW, "\n  Skipping beets import — nothing succeeded."))
         else:
             log.info("")
+            # A multi-disc cover sits in the album root, which beets' import
+            # task never searches; left there it strands in staging. The queue
+            # lanes do this in their pre-import hooks, which this path skips.
+            for _staged in (staged_dirs_for_import or []):
+                try:
+                    relocate_disc_album_artwork(_staged)
+                except Exception as _ae:
+                    vlog(f"artwork relocation raised: {_ae}")
             # A brand-new album (no folder found on disk) lands in a fresh
             # directory, so it can't split an existing beets album into
             # duplicate rows — skip the full-library de-dup scan for it.

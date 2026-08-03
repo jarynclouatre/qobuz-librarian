@@ -983,3 +983,50 @@ def test_import_override_yaml_round_trips_through_parser(monkeypatch):
     relative = yaml.safe_load(beets._build_import_override_yaml())
     assert relative["library"] == str(Path("beets/musiclibrary.db").absolute())
     assert relative["directory"] == str(Path("music").absolute())
+
+
+# ── beets: staged artwork a multi-disc import would leave behind ──────────
+
+
+def _staged_album(root, discs):
+    album = root / "Artist" / "Album (2001)"
+    album.mkdir(parents=True)
+    (album / "cover.jpg").write_bytes(b"art")
+    for disc in range(1, discs + 1):
+        parent = album / f"Disc {disc}" if discs > 1 else album
+        parent.mkdir(exist_ok=True)
+        (parent / f"{disc:02d}. Track.flac").write_bytes(b"audio")
+    return album
+
+
+def test_multidisc_artwork_moves_where_beets_can_see_it(tmp_path):
+    from qobuz_librarian.integrations.beets import relocate_disc_album_artwork
+
+    album = _staged_album(tmp_path, 2)
+
+    assert relocate_disc_album_artwork(album) is True
+    # Beets gives the import task the disc directories, and fetchart searches
+    # only those — a cover left in the album root is never filed, and the
+    # leftover reads to the durable completion proof as an unfinished download.
+    assert not (album / "cover.jpg").exists()
+    assert (album / "Disc 1" / "cover.jpg").read_bytes() == b"art"
+    assert not (album / "Disc 2" / "cover.jpg").exists()
+
+
+def test_single_disc_artwork_is_left_where_fetchart_already_looks(tmp_path):
+    from qobuz_librarian.integrations.beets import relocate_disc_album_artwork
+
+    album = _staged_album(tmp_path, 1)
+
+    assert relocate_disc_album_artwork(album) is False
+    assert (album / "cover.jpg").exists()
+
+
+def test_artwork_relocation_never_overwrites_a_disc_that_has_its_own(tmp_path):
+    from qobuz_librarian.integrations.beets import relocate_disc_album_artwork
+
+    album = _staged_album(tmp_path, 2)
+    (album / "Disc 1" / "cover.jpg").write_bytes(b"the disc's own")
+
+    assert relocate_disc_album_artwork(album) is False
+    assert (album / "Disc 1" / "cover.jpg").read_bytes() == b"the disc's own"
