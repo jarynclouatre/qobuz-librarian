@@ -573,9 +573,12 @@ def run_walk_queued_mode(args, token):
                         # fired for this in-progress artist yet.
                         _save_queue(shared_queue)
                         log.info(fmt(C.GRAY,
-                            "\n  Artist scan interrupted — queue persisted to "
-                            f"{cfg.PENDING_QUEUE_FILE.name}; resume next launch."))
+                            "\n  Artist scan interrupted — stopping the walk. "
+                            f"Queue saved to {cfg.PENDING_QUEUE_FILE.name}."))
                         decided = False
+                        # Stop, like the album walk's Ctrl-C does. This used to
+                        # advance to the next artist while saying it wouldn't.
+                        break
 
                     n_scanned += 1
 
