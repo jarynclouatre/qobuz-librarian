@@ -3358,6 +3358,15 @@ def _make_download_run(
                         and recovery_status == "resume_required"
                         and _durable_recovery_matches_job(j)
                     )
+                    # History and the job page render Retry for whichever job
+                    # HOLDS the durable recovery control, which is wider than
+                    # `retryable`: an attention stop holds it too. Choosing the
+                    # copy on the narrower test printed "cleared under Settings
+                    # > Diagnostics" directly beside a working Retry button, and
+                    # Diagnostics has no control for this — it only checks
+                    # volumes, binaries and upgrade backups.
+                    control = _durable_recovery_control()
+                    holds_control = bool(control and control["job_id"] == j.id)
                     j.status = job_mgr.JobStatus.FAILED
                     if retryable:
                         j.attention = ""
@@ -3366,18 +3375,22 @@ def _make_download_run(
                             "importing. Everything it had was saved, so Retry "
                             "picks up where it left off."
                         )
-                    else:
-                        # No Retry is rendered in this state — only the one job
-                        # holding the durable recovery can be retried, and by
-                        # definition that isn't this one. Naming Retry here sent
-                        # people looking for a button that isn't on the page.
+                    elif holds_control:
                         j.attention = "recovery"
                         j.error = (
-                            "This download stopped part-way and couldn't be "
-                            "confirmed as finished cleanly. Nothing was added "
-                            "to your library and the part-finished files were "
-                            "left alone. Downloads stay paused until this is "
-                            "cleared under Settings > Diagnostics."
+                            "This download couldn't be confirmed as finished "
+                            "cleanly, so downloads are paused. Use Retry on "
+                            "this job to settle it."
+                        )
+                    else:
+                        # The recovery is held by a different job, so no Retry
+                        # is rendered here; send them to the one that has it.
+                        j.attention = "recovery"
+                        j.error = (
+                            "This download couldn't be confirmed as finished "
+                            "cleanly, so downloads are paused. Open the "
+                            "download holding the recovery from Queue or "
+                            "History and use Retry to settle it."
                         )
         benign = {"already_complete", "skipped_already_higher_quality",
                   "skipped_has_extras", "dry_run", "user_skipped",
