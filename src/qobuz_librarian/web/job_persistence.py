@@ -288,7 +288,7 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
             default=str,
         )
     except (TypeError, ValueError) as e:
-        _note_write_failure(f"serialize recoveries for {job.id}", e)
+        _note_write_failure(f"serialize {job.id}", e)
         return None
     return (
         job.id, job.title or "", job.artist or "",
