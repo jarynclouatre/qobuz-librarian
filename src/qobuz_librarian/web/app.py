@@ -2125,6 +2125,11 @@ async def _initial_artist_search_html(request: Request, query: str) -> str:
         logging.getLogger("qobuz_librarian").exception(
             "initial artist search failed for %r", query)
         error = "Search failed. Try again."
+    # This render bypasses _tr, and an absent writes_paused is falsey — which
+    # would offer a live Download control on a paused app the moment this path
+    # grows album results.
+    paused = _web_writes_paused()
+    notice = _writes_paused_notice() if paused else None
     return templates.env.get_template("_search_results.html").render(
         request=request,
         q=query,
@@ -2137,6 +2142,10 @@ async def _initial_artist_search_html(request: Request, query: str) -> str:
         creds_ok=bool(_read_creds().get("auth_token")),
         qobuz_ready=_qobuz_ready(),
         page="search",
+        writes_paused=paused,
+        writes_paused_reason=(
+            notice["reason"] if notice else "Downloads and scans are paused."
+        ),
     )
 
 
@@ -2804,7 +2813,6 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         "pending": job_mgr.registry.pending_and_running(),
         "review": job_mgr.registry.awaiting_review(),
         "creds_token_valid": _TOKEN_VALID,
-        "lock_busy_pid": _LOCK_BUSY_PID,
         "search_q": search_q,
         "search_kind": search_kind,
         "search_artist_id": search_artist_id,
