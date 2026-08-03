@@ -7,7 +7,13 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 Fixes from driving 0.12.0 rather than reading it, led by a multi-disc download that imported perfectly and stopped the queue anyway.
 
 - A multi-disc album no longer fails after a clean import. Its cover sits in the album root, which beets never searches, so the cover was left behind in staging — and a leftover reads as a download that never finished, which paused every download after it. The cover now goes where beets files it.
-- A download that finished but left something behind now settles on the first Retry instead of the second, and says what it did rather than blaming a restart that never happened. The equivalent stall on the CLI is gone too: it no longer aborts a run over a leftover it just cleared.
+- A download that finished but left something behind now settles on the first Retry instead of the second, and says what it did rather than blaming a restart that never happened.
+- A download blocked from the terminal no longer strands the whole app. It offered no way to settle it, told you to correct a path or permission problem that didn't exist, and survived the restart it recommended, while the web pointed at a Retry button that only exists for downloads started in the web app — so nothing could download or scan until a folder was deleted by hand on the server. The terminal now offers to clear it, and every message points at the surface that can.
+- The dashboard says when downloads and scans are paused, and what to do about it. Only a second running copy of the app ever announced itself; the other seven reasons left the screen looking perfectly normal until you pressed something and were bounced.
+- A button that's paused no longer blames terminal mode when terminal mode isn't the reason. It names the real one.
+- A finished download stops being marked as failed because a different download's recovery is outstanding. It was reading one app-wide flag instead of its own, so one blocked item relabelled everything in History at once and only a restart put it back.
+- A finished job keeps its log. It was held in memory only, so any restart replaced the record of what a download actually did with "No log output was retained for this job".
+- A run that stopped and paused the queue no longer signs off with a green tick and "0 failed". A parked album downloads its tracks without one of them failing, so the summary judged the whole run on track counts and contradicted its own "0/1 albums OK" in the same breath; it now says how many albums were left unfinished.
 - A download stopped for recovery points at the Retry button it actually has, instead of sending you to a Diagnostics page with no control for it.
 - Multi-disc albums are recorded against the album folder, not the first disc folder. That mis-scoping flattened repaired refills into the album root, named the disc folder as the album in a single track's Undo record, and pushed a phantom artist into the Downsample review.
 - A queued album the exact-recovery lane can't plan for — a small gap fill, an expanded-edition switch — now downloads instead of failing before a single track starts, and failing the same way at every launch after that.
@@ -20,6 +26,10 @@ Fixes from driving 0.12.0 rather than reading it, led by a multi-disc download t
 - Bulk downloads and dismissals notice a page that went stale and reload, instead of reporting work the server actually refused.
 - A stray file sharing an artist folder's name no longer stops a scan, and a queued receipt says "1 album" rather than "1 albums".
 - Library migration can't act on a directory number it already released if reserving one fails partway.
+- On a phone, a stopped download's Retry button is no longer sliced off by the edge of its card — the row's chips, time and buttons wrap instead of being held on one line.
+- History stops calling everything on the page "jobs" directly above a section named Jobs holding a different number.
+- A Retry that won't settle can be diagnosed: the log now records what the attempt decided instead of nothing at all.
+- A job that can't be written to History names the job in the log rather than blaming one particular field of it.
 - Dependencies and CI actions updated.
 
 ## [0.12.0] - 2026-08-02
