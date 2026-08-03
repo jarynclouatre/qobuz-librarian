@@ -999,8 +999,9 @@ def _discard_parked_item_staging(authority, journal, item):
             # A crash leaves the run root itself behind, never parked. Park
             # it the way a deliberate stop would — the park refuses while any
             # writer still holds a descriptor — then discard the parked copy.
-            # The park checkpoint needs the item active; a crash between the
-            # transition and the reconcile just re-blocks on the next pass.
+            # The item stays BLOCKED throughout: that is the phase a settlement
+            # runs in, and a crash mid-park leaves it in the state the next
+            # recovery pass already looks for.
             run = staging_run_from_record(reference.data)
             if run is None:
                 return None
@@ -1013,12 +1014,6 @@ def _discard_parked_item_staging(authority, journal, item):
                     record,
                 )
 
-            _require_authority(authority)
-            journal = queue_state.transition_journal_item(
-                journal,
-                item.item_id,
-                queue_state.QueuePhase.ACTIVE,
-            )
             _require_authority(authority)
             retained = retain_staging_run(
                 run,

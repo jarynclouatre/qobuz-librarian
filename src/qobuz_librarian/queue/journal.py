@@ -2532,10 +2532,16 @@ def _append_staging_reference(
     target = previous.items[target_index]
     allowed_phases = {QueuePhase.ACTIVE}
     if kind == _STAGING_GROUP_REFERENCE_KIND:
-        allowed_phases.add(QueuePhase.RESOLVING)
+        # Parking a group is also how an authorised recovery throws away a
+        # blocked item's leftovers, and reconcile_staging_references already
+        # treats BLOCKED as recovery-bearing work. Refusing it here left the
+        # settle path bouncing the item through ACTIVE, which the resolved-state
+        # rule above rightly refuses once a library mutation has landed — so an
+        # item that imported and then stranded a file could never be settled.
+        allowed_phases |= {QueuePhase.RESOLVING, QueuePhase.BLOCKED}
     if target.phase not in allowed_phases:
         raise QueueJournalBlocked(
-            f"{kind} recovery can be checkpointed only while work is active"
+            f"{kind} recovery cannot be checkpointed from {target.phase.value}"
         )
     canonical = _canonical_staging_reference(
         record,

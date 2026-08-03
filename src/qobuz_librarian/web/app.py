@@ -430,6 +430,10 @@ def _settle_durable_web_recovery(job, action):
                 action=action,
             )
         except Exception:
+            logging.getLogger("qobuz_librarian").exception(
+                "settling the blocked recovery for job %s raised",
+                getattr(job, "id", "?"),
+            )
             return False, "The blocked recovery could not be settled safely."
         expected = (
             BlockedItemSettlementStatus.RETRYABLE

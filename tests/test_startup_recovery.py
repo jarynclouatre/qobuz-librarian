@@ -880,6 +880,32 @@ def test_user_discard_clears_the_blocked_download_operation(tmp_path, monkeypatc
     assert journal.load_queue_journal(operation_id).status is journal.QueueLoadStatus.ABSENT
 
 
+def test_a_blocked_item_can_park_its_staging_group(tmp_path, monkeypatch):
+    # Settling a blocked download parks its run before discarding it, and that
+    # park is a staging-group checkpoint. Refusing the checkpoint from BLOCKED
+    # left the settle path transitioning to ACTIVE to earn it, which the
+    # resolved-state rule refuses once an import has landed — so a download that
+    # imported and then stranded a file could never be settled from the UI.
+    from qobuz_librarian.integrations.staging import retain_staging_run
+
+    operation_id, item_id, run = _blocked_download_journal(
+        tmp_path, monkeypatch, label="Stranded Album", parked=False
+    )
+    current = journal.load_queue_journal(operation_id).journal
+    assert current.items[0].phase is journal.QueuePhase.BLOCKED
+
+    intents = []
+    retained = retain_staging_run(run, label="discarded", on_intent=intents.append)
+    assert retained is not None
+
+    current = journal.append_staging_group_intent(current, item_id, intents[0])
+    saved_item = journal.load_queue_journal(operation_id).journal.items[0]
+    assert saved_item.phase is journal.QueuePhase.BLOCKED
+    assert any(
+        reference.kind == "staging-group" for reference in saved_item.recovery_references
+    )
+
+
 def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
     tmp_path,
     monkeypatch,
