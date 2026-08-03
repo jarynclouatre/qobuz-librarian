@@ -7948,7 +7948,16 @@ async def job_retry(request: Request, job_id: str):
                     album_id=album_id,
                 )
                 if track is not None:
-                    new_job.single = dict(single)
+                    # Seed the same two keys /download does at submit and let
+                    # the run fill in the rest. Copying the whole dict carried
+                    # the old job's Undo record onto a job that may download
+                    # nothing (the "you already have this" early return never
+                    # touches j.single), so two jobs offered Undo of one file
+                    # and one of them claimed it downloaded nothing.
+                    new_job.single = {
+                        "album_id": album_id,
+                        "track_id": str(single.get("track_id")),
+                    }
                 if as_new:
                     new_job.execute_args = {"new_edition": True}
                 if job_mgr.submit(new_job, run) is None:

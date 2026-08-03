@@ -1418,16 +1418,21 @@ def execute_albums(job, chosen, token):
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
     if job.cancel_requested:
-        # The picks this run never started aren't lost: fold them back into
-        # the living review, ticked, so a cancel mid-batch doesn't strand them
-        # in this dead job.
+        # Nothing this run leaves behind is lost: the picks it never started
+        # AND the ones that failed along the way fold back into the living
+        # review, ticked, so a cancel mid-batch doesn't strand them in this
+        # dead job. When the whole review was ticked at approval there is no
+        # living review to fold into, so park a fresh one — the finish path
+        # and the new-release side both already do that.
         unrun = chosen[processed:]
         if cancelled_cand is not None:
             unrun = [cancelled_cand] + unrun
-        if unrun and is_library_run:
-            refold_into_living_review(unrun)
-        elif unrun and is_nr_run:
-            _return_new_release_picks(unrun)
+        leftovers = failed_cands + unrun
+        if leftovers and is_library_run:
+            if refold_into_living_review(leftovers) is None:
+                _park_library_failures(leftovers)
+        elif leftovers and is_nr_run:
+            _return_new_release_picks(leftovers)
         job.summary = (f"Stopped early. {ok} downloaded, "
                        f"{len(chosen) - processed} not started.")
         log.info(job.summary)
