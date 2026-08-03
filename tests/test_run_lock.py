@@ -224,7 +224,11 @@ def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
     monkeypatch.setattr(
         cli,
         "_cli_blocked_settlement_binding",
-        lambda result: (item, "Autechre — Anvil Vapre"),
+        lambda result: (
+            item,
+            "Autechre — Anvil Vapre",
+            startup_recovery.SETTLEABLE_PRELAUNCH,
+        ),
     )
     monkeypatch.setattr(startup_recovery, "settle_blocked_item", _settle)
     monkeypatch.setattr("builtins.input", lambda _prompt: "r")
@@ -232,3 +236,162 @@ def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
     assert cli.acquire_run_lock() is lease
     assert lease.closed is False
     assert "remains blocked" not in capsys.readouterr().out
+
+
+def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
+        monkeypatch, caplog):
+    """A download that imported and stranded a file in staging pauses every
+    download and scan, and a restart does not clear it, so the terminal has to
+    offer the decision itself.
+    """
+    from types import SimpleNamespace
+
+    from qobuz_librarian import cli, run_lock
+    from qobuz_librarian.queue import startup_recovery
+    from qobuz_librarian.queue.startup_recovery import (
+        BlockedItemSettlementResult,
+        BlockedItemSettlementStatus,
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+
+    class Lease:
+        closed = False
+
+        def intact(self):
+            return not self.closed
+
+        def close(self):
+            self.closed = True
+
+    lease = Lease()
+    item = SimpleNamespace(operation_id="op-9", item_id="item-9")
+    settled = {"done": False}
+
+    def _recover(_authority):
+        if settled["done"]:
+            return StartupRecoveryResult(StartupRecoveryStatus.CLEAR)
+        return StartupRecoveryResult(
+            StartupRecoveryStatus.ATTENTION_REQUIRED,
+            reason="queue-item-blocked",
+        )
+
+    def _settle(**_kwargs):
+        settled["done"] = True
+        return BlockedItemSettlementResult(
+            BlockedItemSettlementStatus.BLOCKED,
+            "This item has no exact pre-launch Beets state to settle.",
+        )
+
+    prompts = []
+
+    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
+    monkeypatch.setattr(
+        cli,
+        "_cli_blocked_settlement_binding",
+        lambda result: (
+            item,
+            "Agalloch — The White EP",
+            startup_recovery.SETTLEABLE_STAGED_LEFTOVER,
+        ),
+    )
+    monkeypatch.setattr(startup_recovery, "settle_blocked_item", _settle)
+
+    def _input(prompt):
+        prompts.append(prompt)
+        return "c"
+
+    monkeypatch.setattr("builtins.input", _input)
+
+    with caplog.at_level("INFO", logger="qobuz_librarian"):
+        assert cli.acquire_run_lock() is lease
+    assert lease.closed is False
+    asked = " ".join(" ".join(prompts).split())
+    assert "left something behind in the staging folder" in asked
+    # Nothing can be re-run and the saved entry is not what is holding things
+    # up, so naming a retry or a discard would offer the same thing twice.
+    assert "discard" not in asked.lower()
+    assert "retry" not in asked.lower()
+    assert "Cleared the leftover" in caplog.text
+
+
+def test_clearing_a_leftover_is_not_reported_as_a_failure(monkeypatch, capsys):
+    """Clearing a staged leftover can leave the rest of the recovery to
+    reconcile on the next pass. Judging that by the process-wide status printed
+    "could not be verified safely" over a decision that had just succeeded, and
+    sent the user hunting a path or permission problem that did not exist.
+    """
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+
+    from qobuz_librarian import cli, run_lock
+    from qobuz_librarian.queue import journal as queue_state
+    from qobuz_librarian.queue import startup_recovery
+    from qobuz_librarian.queue.startup_recovery import (
+        BlockedItemSettlementResult,
+        BlockedItemSettlementStatus,
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+
+    class Lease:
+        closed = False
+
+        def intact(self):
+            return not self.closed
+
+        def close(self):
+            self.closed = True
+
+    lease = Lease()
+    item = SimpleNamespace(operation_id="op-7", item_id="item-7")
+    settled = {"done": False}
+
+    def _entry(phase):
+        return SimpleNamespace(
+            operation_id="op-7", item_id="item-7", phase=phase, mode="cli",
+        )
+
+    def _recover(_authority):
+        # Still attention_required either way — but after the settlement this
+        # item is no longer the blocked one.
+        return StartupRecoveryResult(
+            StartupRecoveryStatus.ATTENTION_REQUIRED,
+            items=(_entry(
+                queue_state.QueuePhase.RESOLVING if settled["done"]
+                else queue_state.QueuePhase.BLOCKED),),
+            reason="queue-item-blocked",
+        )
+
+    def _settle(**_kwargs):
+        settled["done"] = True
+        return BlockedItemSettlementResult(
+            BlockedItemSettlementStatus.BLOCKED,
+            "Beets may have started or changed the library, so this item "
+            "remains blocked.",
+        )
+
+    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
+    monkeypatch.setattr(
+        cli,
+        "_cli_blocked_settlement_binding",
+        lambda result: (
+            item,
+            "Agalloch — The Serpent & The Sphere",
+            startup_recovery.SETTLEABLE_STAGED_LEFTOVER,
+        ),
+    )
+    monkeypatch.setattr(startup_recovery, "settle_blocked_item", _settle)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "c")
+
+    with _pytest.raises(SystemExit) as stopped:
+        cli.acquire_run_lock()
+
+    said = " ".join(capsys.readouterr().err.split())
+    assert stopped.value.code == 1
+    assert "Cleared the leftover" in said
+    assert "Restart Qobuz Librarian to finish settling it" in said
+    assert "could not be verified safely" not in said

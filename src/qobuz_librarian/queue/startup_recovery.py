@@ -1083,6 +1083,42 @@ def _settle_unstarted_download(authority, journal, item, action):
     return _settled_result(action)
 
 
+SETTLEABLE_PRELAUNCH = "prelaunch"
+SETTLEABLE_STAGED_LEFTOVER = "staged-leftover"
+
+_PRELAUNCH_SETTLEMENT_BLOCKS = frozenset({
+    (_MANAGED_RESERVATION_KIND, "managed-reservation-absent"),
+    (_MANAGED_RESERVATION_KIND, "managed-reservation-origin"),
+    (_MANAGED_CARRIER_KIND, "managed-carrier-unsealed-origin"),
+})
+
+
+def settleable_block_kind(item) -> str | None:
+    """Which decision a blocked queue item can be offered, or None for neither.
+
+    A pre-launch abort never reached Beets, so settling it re-runs the
+    download; a staged leftover is the opposite, and parking the file is the
+    whole of what its recovery waits on. The staged case is read off
+    ``block_reason``, not the reference list — an import that stranded a file
+    keeps its Beets carrier listed beside the staging record.
+    """
+    references = tuple(item.recovery_references or ())
+    if not references:
+        return None
+    if (
+        len(references) == 1
+        and (references[0].kind, item.block_reason)
+        in _PRELAUNCH_SETTLEMENT_BLOCKS
+    ):
+        return SETTLEABLE_PRELAUNCH
+    if (
+        item.block_reason in _STAGING_BLOCK_REASONS
+        and any(reference.kind in _STAGING_KINDS for reference in references)
+    ):
+        return SETTLEABLE_STAGED_LEFTOVER
+    return None
+
+
 def settle_blocked_item(
     *,
     authority: RunLockLease,

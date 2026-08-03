@@ -965,3 +965,39 @@ def test_boot_still_stops_when_an_unclaimed_run_has_a_live_writer(
         startup_recovery.StartupRecoveryStatus.ATTENTION_REQUIRED)
     assert result.reason == "unclaimed-staging-run"
     assert track.read_bytes() == b"partial audio"
+
+
+def test_a_staged_leftover_is_settleable_beside_its_beets_carrier():
+    """A download that imported and stranded a file keeps its Beets carrier
+    listed next to the staging record, so reading the class off the reference
+    list instead of off what is blocking matched nothing real and left the
+    terminal with no way out.
+    """
+    from types import SimpleNamespace
+
+    from qobuz_librarian.queue.startup_recovery import (
+        SETTLEABLE_PRELAUNCH,
+        SETTLEABLE_STAGED_LEFTOVER,
+        settleable_block_kind,
+    )
+
+    def _item(kinds, reason):
+        return SimpleNamespace(
+            recovery_references=[SimpleNamespace(kind=k) for k in kinds],
+            block_reason=reason,
+        )
+
+    stranded = _item(
+        ["download-staging-run", "managed-beets"],
+        "download-staging-run-present",
+    )
+    assert settleable_block_kind(stranded) is SETTLEABLE_STAGED_LEFTOVER
+
+    prelaunch = _item(
+        ["managed-beets-reservation"], "managed-reservation-absent")
+    assert settleable_block_kind(prelaunch) is SETTLEABLE_PRELAUNCH
+
+    # A Beets state that is neither of those is not a decision to offer.
+    assert settleable_block_kind(
+        _item(["managed-beets"], "managed-carrier-sealed-origin")) is None
+    assert settleable_block_kind(_item([], None)) is None

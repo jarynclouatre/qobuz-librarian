@@ -78,7 +78,7 @@ def _startup_recovery_status():
 
 
 def _cli_blocked_settlement_binding(result):
-    """Bind one safe pre-launch abort to its frozen CLI completion owner."""
+    """Bind one settleable block to its frozen CLI completion owner."""
     from qobuz_librarian.completion import (
         CompletionOriginKind,
         RecoveryOwner,
@@ -89,6 +89,7 @@ def _cli_blocked_settlement_binding(result):
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryAction,
         StartupRecoveryStatus,
+        settleable_block_kind,
     )
 
     items = tuple(getattr(result, "items", ()))
@@ -149,20 +150,10 @@ def _cli_blocked_settlement_binding(result):
         (item for item in journal.items if item.item_id == target.item_id),
         None,
     )
-    allowed_blocks = {
-        ("managed-beets-reservation", "managed-reservation-absent"),
-        ("managed-beets-reservation", "managed-reservation-origin"),
-        ("managed-beets", "managed-carrier-unsealed-origin"),
-    }
-    if (
-        queued is None
-        or len(queued.recovery_references) != 1
-        or (
-            queued.recovery_references[0].kind,
-            queued.block_reason,
-        )
-        not in allowed_blocks
-    ):
+    if queued is None:
+        return None
+    settleable = settleable_block_kind(queued)
+    if settleable is None:
         return None
     completion_input = parse_completion_input_record(
         queued.completion_input,
@@ -179,7 +170,7 @@ def _cli_blocked_settlement_binding(result):
     ):
         return None
     label = planned_album.get("title") or queued.planned.get("label") or "download"
-    return target, str(label)
+    return target, str(label), settleable
 
 
 def _cli_retry_settlement_matches(result, target) -> bool:
@@ -264,9 +255,26 @@ def _cli_settlement_cleared_recovery(result, target) -> bool:
     )
 
 
+def _cli_blocked_item_settled(result, target) -> bool:
+    """True when this exact item is no longer blocked, whatever else is.
+
+    Clearing a staged leftover can leave the rest of the recovery to reconcile
+    on the next pass, so the whole-recovery answer is not this item's answer.
+    """
+    from qobuz_librarian.queue import journal as queue_state
+
+    return all(
+        item.operation_id != target.operation_id
+        or item.item_id != target.item_id
+        or item.phase is not queue_state.QueuePhase.BLOCKED
+        for item in getattr(result, "items", ())
+    )
+
+
 def _offer_blocked_cli_settlement(authority, result):
-    """Offer an explicit decision for one exact pre-launch CLI abort."""
+    """Offer an explicit decision for one settleable blocked download."""
     from qobuz_librarian.queue.startup_recovery import (
+        SETTLEABLE_STAGED_LEFTOVER,
         BlockedItemSettlementAction,
         BlockedItemSettlementStatus,
         settle_blocked_item,
@@ -274,28 +282,44 @@ def _offer_blocked_cli_settlement(authority, result):
 
     binding = _cli_blocked_settlement_binding(result)
     if binding is None:
-        return result, False
-    item, label = binding
+        return result, False, None
+    item, label, settleable = binding
+    leftover = settleable == SETTLEABLE_STAGED_LEFTOVER
 
-    prompt = (
-        f"\n  The interrupted download “{label}” stopped before Beets changed "
-        "the library.\n"
-        "  Retry it, keep it blocked for later, or discard its saved queue "
-        "entry?\n"
-        "  Choice [r=retry, Enter=keep, d=discard]: "
-    )
+    if leftover:
+        # The file in staging holds the queue, not the saved entry, so a retry
+        # and a discard would both name the same act. Two choices, not three.
+        prompt = (
+            f"\n  “{label}” left something behind in the staging folder, and "
+            "downloads and scans\n"
+            "  stay paused until it is cleared.\n"
+            "  Clear it now, or keep it for later?\n"
+            "  Choice [c=clear now, Enter=keep]: "
+        )
+        retry_words = {"c", "clear", "r", "retry"}
+        again = "  Enter c to clear it, or press Enter to keep it: "
+    else:
+        prompt = (
+            f"\n  The interrupted download “{label}” stopped before Beets "
+            "changed the library.\n"
+            "  Retry it, keep it blocked for later, or discard its saved queue "
+            "entry?\n"
+            "  Choice [r=retry, Enter=keep, d=discard]: "
+        )
+        retry_words = {"r", "retry"}
+        again = "  Enter r to retry, d to discard, or press Enter to keep it: "
     while True:
         try:
             choice = input(fmt(C.CYAN, prompt)).strip().lower()
         except (EOFError, KeyboardInterrupt):
             choice = ""
         if choice in {"", "k", "keep"}:
-            return result, True
-        if choice in {"r", "retry"}:
+            return result, True, None
+        if choice in retry_words:
             action = BlockedItemSettlementAction.RETRY
             expected = BlockedItemSettlementStatus.RETRYABLE
             break
-        if choice in {"d", "discard"}:
+        if not leftover and choice in {"d", "discard"}:
             try:
                 confirmed = input(fmt(
                     C.RED,
@@ -304,12 +328,14 @@ def _offer_blocked_cli_settlement(authority, result):
             except (EOFError, KeyboardInterrupt):
                 confirmed = ""
             if confirmed != "DISCARD":
-                return result, True
+                return result, True, None
             action = BlockedItemSettlementAction.DISCARD
             expected = BlockedItemSettlementStatus.DISCARDED
             break
-        prompt = "  Enter r to retry, d to discard, or press Enter to keep it: "
+        prompt = again
 
+    cleared = fmt(C.GREEN,
+                  "  ✓ Cleared the leftover that was blocking this download.")
     try:
         settled = settle_blocked_item(
             authority=authority,
@@ -319,24 +345,35 @@ def _offer_blocked_cli_settlement(authority, result):
         )
         fresh = _record_startup_recovery(authority)
     except Exception:
-        return result, False
+        return result, False, None
     if settled.status is not expected:
         # A refusal still parks the item's stranded staging, and for a download
         # that already imported that is the whole of what was outstanding.
         # Reporting the refusal over a recovery it just cleared would strand the
         # run behind a stale verdict.
         if _cli_settlement_cleared_recovery(fresh, item):
-            log.info(fmt(C.GREEN,
-                "  ✓ Cleared the leftover that was blocking this download."))
-            return fresh, False
+            log.info(cleared)
+            return fresh, False, None
+        if _cli_blocked_item_settled(fresh, item):
+            # The blocker is gone but the rest of the recovery reconciles on
+            # the next pass, so one more read can still come back clear.
+            rechecked = _record_startup_recovery(authority)
+            if _cli_settlement_cleared_recovery(rechecked, item):
+                log.info(cleared)
+                return rechecked, False, None
+            return rechecked, False, (
+                f"\n✓  Cleared the leftover that was blocking “{label}”.\n"
+                "   Restart Qobuz Librarian to finish settling it. Nothing "
+                "else was started.\n"
+            )
         log.info(fmt(C.YELLOW, f"  {settled.reason}"))
-        return result, False
+        return result, False, None
     verified = (
         _cli_retry_settlement_matches(fresh, item)
         if action is BlockedItemSettlementAction.RETRY
         else _cli_discard_settlement_matches(fresh, item)
     )
-    return (fresh, False) if verified else (result, False)
+    return (fresh, False, None) if verified else (result, False, None)
 
 
 def _die_unsettled_startup_recovery(
@@ -344,11 +381,16 @@ def _die_unsettled_startup_recovery(
     result=None,
     *,
     kept: bool = False,
+    note: str | None = None,
 ) -> None:
     try:
         authority.close()
     except OSError:
         pass
+    if note is not None:
+        # The decision landed but the run still cannot carry on, so the stop
+        # reports what succeeded rather than the generic failure below.
+        die(fmt(C.YELLOW, note), EXIT_GENERAL)
     if kept:
         message = (
             "\n  The interrupted download was kept for later.\n"
@@ -386,12 +428,14 @@ def _die_unsettled_startup_recovery(
         print(fmt(C.RED, block(outro)), file=sys.stderr)
         raise SystemExit(EXIT_GENERAL)
     else:
+        # A state this stop is reached in survives a restart, so the message
+        # names where the outstanding work is instead of prescribing one.
         message = (
             "\n✗  An interrupted download could not be verified safely.\n"
-            "   The saved queue and staged files were left unchanged. Check "
-            "the application log for the blocked recovery reason, correct the "
-            "reported path or permission problem, then restart Qobuz "
-            "Librarian.\n"
+            "   The saved queue and staged files were left unchanged, and no "
+            "other work was started.\n"
+            f"   What is still outstanding is under {cfg.STAGING_DIR}, and the "
+            "application log names the exact blocked recovery reason.\n"
         )
         color = C.RED
     die(fmt(color, message), EXIT_GENERAL)
@@ -433,10 +477,11 @@ def acquire_run_lock():
         result = _record_startup_recovery(lease)
         from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
         kept = False
+        note = None
         if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
-            result, kept = _offer_blocked_cli_settlement(lease, result)
+            result, kept, note = _offer_blocked_cli_settlement(lease, result)
         if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
-            _die_unsettled_startup_recovery(lease, result, kept=kept)
+            _die_unsettled_startup_recovery(lease, result, kept=kept, note=note)
         return lease
     if lease is not None:
         lease.close()
