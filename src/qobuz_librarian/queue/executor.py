@@ -2535,7 +2535,6 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 authority=authority,
             ):
                 resume_owner = None
-                durable_mode = execution_mode
             elif any_imported:
                 durable_stopped = True
                 log.info(fmt(
