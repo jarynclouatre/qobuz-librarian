@@ -1836,9 +1836,11 @@ def test_upgrade_saved_review_respects_hidden_candidates(
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import hidden
     from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
     from qobuz_librarian.web import jobs as job_mgr
 
     monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
     monkeypatch.setattr(webapp, "_read_creds",
                         lambda: {"auth_token": "dummy", "user_id": "dummy"})
@@ -2767,6 +2769,18 @@ def _remove_job(job):
             pass
 
 
+def test_job_status_includes_terminal_summary(client):
+    job = _inject_job(jm.JobStatus.DONE)
+    job.summary = "Checked 4 albums; 1 was repaired."
+    try:
+        response = client.get(f"/api/jobs/{job.id}/status")
+
+        assert response.status_code == 200
+        assert response.json()["summary"] == job.summary
+    finally:
+        _remove_job(job)
+
+
 def test_queue_cancel_stays_on_queue_without_accepting_other_targets(client):
     running = _inject_job(jm.JobStatus.RUNNING, "Running library scan")
     running.execute_kind = "library"
@@ -2811,7 +2825,10 @@ def test_library_hide_then_restore_round_trip(client, monkeypatch, tmp_path):
     """Dismissing an artist from a library review writes the durable store and
     drops those candidates; the Dismissed albums and Gap Fill view then restores them."""
     from qobuz_librarian.library import hidden
+    from qobuz_librarian.web import job_persistence
+
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     job.execute_kind = "library"
@@ -2856,7 +2873,10 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
     and dismissing an artist's unselected rows from one tab must not silently
     drop that artist's candidates on the other tab."""
     from qobuz_librarian.library import hidden
+    from qobuz_librarian.web import job_persistence
+
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     job.execute_kind = "library"
@@ -3108,8 +3128,14 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
     whose folder appeared while the review sat parked is dropped (and counted
     in the redirect note) instead of downloaded again. Gap Fill candidates are
     exempt: their folder exists by definition."""
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import (
+        app as webapp,
+    )
+    from qobuz_librarian.web import (
+        flows,
+        job_persistence,
+    )
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     monkeypatch.setattr(webapp, "_read_creds",
                         lambda: {"auth_token": "t", "user_id": "u"})
     monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
@@ -3223,7 +3249,9 @@ def test_library_approve_when_everything_is_already_on_disk(client, monkeypatch)
 def test_drop_owned_requires_every_expected_track(
         tmp_path, monkeypatch):
     """Empty and partial folders stay actionable; an exact complete one drops."""
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     shell = tmp_path / "Runnin' Wild (2019)"
     shell.mkdir()
@@ -3345,7 +3373,9 @@ def test_select_page_returns_the_candidate_ids_it_accepted(client):
         _remove_job(job)
 
 
-def test_dismiss_rest_scoped_to_the_active_filter(client):
+def test_dismiss_rest_scoped_to_the_active_filter(client, monkeypatch):
+    from qobuz_librarian.web import job_persistence
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     job.execute_kind = "library"
     job._execute_fn = lambda j, chosen: None
@@ -3453,7 +3483,10 @@ def test_review_hides_page_select_when_everything_is_on_one_page(client):
 
 def test_library_dismiss_rest_hides_everything_unselected(client, monkeypatch, tmp_path):
     from qobuz_librarian.library import hidden
+    from qobuz_librarian.web import job_persistence
+
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     job.execute_kind = "library"
@@ -3898,9 +3931,11 @@ def test_bring_back_lifts_a_retired_library_review():
         lss._write_state(original)
 
 
-def test_cancel_folds_unrun_picks_back_into_the_review():
+def test_cancel_folds_unrun_picks_back_into_the_review(monkeypatch):
     """Cancellation returns unstarted picks to the living review."""
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
     parked.execute_kind = "library"
@@ -4117,7 +4152,9 @@ def test_partial_run_failure_folds_back_into_the_living_review(monkeypatch, tmp_
     fold back into it, ticked, to retry (matching the whole-review re-park),
     instead of surviving only as the job's error line until a manual refresh."""
     from qobuz_librarian.modes import process as process_mod
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
     parked.execute_kind = "library"
@@ -4252,7 +4289,9 @@ def test_auth_death_mid_batch_folds_unfinished_picks_back(monkeypatch, tmp_path)
     would offer the same picks twice."""
     from qobuz_librarian.api.auth import AuthLost
     from qobuz_librarian.modes import process as process_mod
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
     parked.execute_kind = "library"
@@ -5358,11 +5397,13 @@ def test_migrate_post_submits_a_creds_free_job(client, monkeypatch, tmp_path):
     job = jm.registry.get(job_id)
     assert job is not None
     assert job.review_verb == "Move"                  # in-place toggle carried through
+    assert job.execute_args["allow_low_space"] is False
     _remove_job(job)
 
 
 def test_migrate_offers_a_preview(client, monkeypatch, tmp_path):
     import qobuz_librarian.config as cfg
+    from qobuz_librarian.web import app as app_mod
 
     src = tmp_path / "src"
     src.mkdir()
@@ -5372,7 +5413,128 @@ def test_migrate_offers_a_preview(client, monkeypatch, tmp_path):
     r = client.get("/migrate")
 
     assert r.status_code == 200
-    assert ">Preview migration</button>" in r.text
+    assert 'id="migrate-preview"' in r.text
+    assert 'name="allow_low_space"' not in r.text
+
+    monkeypatch.setattr(app_mod, "_CLI_MODE", True)
+    paused = client.get("/migrate")
+    preview = paused.text.split('id="migrate-preview"', 1)[1].split(
+        "</button>", 1
+    )[0]
+    assert " disabled " in preview
+    assert 'title="Terminal mode is holding the library."' in preview
+
+
+def test_migration_low_space_ack_is_required_and_saved_before_approval(
+    client, monkeypatch
+):
+    import queue
+
+    from qobuz_librarian.web import job_persistence
+
+    job = jm.Job(title="Library migration")
+    job.execute_kind = "migration"
+    job.review_verb = "Move"
+    job.status = jm.JobStatus.AWAITING_REVIEW
+    job.execute_args = {
+        "dest": "/disposable/dest",
+        "in_place": True,
+        "src": "/disposable/src",
+        "allow_low_space": False,
+        "requires_low_space_override": True,
+    }
+    job._execute_fn = lambda _job, _chosen: None
+    job.summary = "Not enough free space for this preview."
+    job.add_candidate("migrate", "Album", "Artist", payload={})
+    job.candidates[0]["selected"] = True
+    jm.registry.add(job)
+    try:
+        rendered = client.get(f"/jobs/{job.id}")
+        assert 'name="allow_low_space"' in rendered.text
+        assert 'name="allow_low_space" class="ql-checkbox" required' in rendered.text
+
+        unchecked = client.post(
+            f"/jobs/{job.id}/approve", follow_redirects=False
+        )
+        assert unchecked.status_code == 303
+        assert "Confirm%20the%20low-space%20risk" in unchecked.headers["location"]
+        assert job.status == jm.JobStatus.AWAITING_REVIEW
+        assert job.execute_args["allow_low_space"] is False
+
+        admitted = []
+
+        def _admit(approved_job, _parked=()):
+            admitted.append(dict(approved_job.execute_args))
+            return len(admitted) > 1
+
+        monkeypatch.setattr(
+            job_persistence, "admit_review_transition", _admit
+        )
+        work = queue.Queue()
+        monkeypatch.setattr(jm, "_scan_queue", work)
+
+        failed_save = client.post(
+            f"/jobs/{job.id}/approve",
+            data={"allow_low_space": "on"},
+            follow_redirects=False,
+        )
+        assert failed_save.status_code == 303
+        assert job.status == jm.JobStatus.AWAITING_REVIEW
+        assert job.execute_args["allow_low_space"] is False
+        assert work.empty()
+
+        checked = client.post(
+            f"/jobs/{job.id}/approve",
+            data={"allow_low_space": "on"},
+            follow_redirects=False,
+        )
+        assert checked.status_code == 303
+        assert job.status == jm.JobStatus.PENDING
+        assert job.execute_args["allow_low_space"] is True
+        assert admitted[-1]["allow_low_space"] is True
+        assert not work.empty()
+    finally:
+        _remove_job(job)
+
+
+def test_migration_ignores_a_legacy_launcher_low_space_flag(client, monkeypatch):
+    import queue
+
+    from qobuz_librarian.web import job_persistence
+
+    job = jm.Job(title="Legacy migration review")
+    job.execute_kind = "migration"
+    job.status = jm.JobStatus.AWAITING_REVIEW
+    job.execute_args = {
+        "dest": "/disposable/dest",
+        "in_place": True,
+        "src": "/disposable/src",
+        "allow_low_space": True,
+    }
+    job._execute_fn = lambda _job, _chosen: None
+    job.add_candidate("migrate", "Album", "Artist", payload={})
+    job.candidates[0]["selected"] = True
+    jm.registry.add(job)
+    admitted = []
+    try:
+        monkeypatch.setattr(
+            job_persistence,
+            "admit_review_transition",
+            lambda approved, _parked=(): (
+                admitted.append(dict(approved.execute_args)) or True
+            ),
+        )
+        monkeypatch.setattr(jm, "_scan_queue", queue.Queue())
+
+        response = client.post(
+            f"/jobs/{job.id}/approve", follow_redirects=False
+        )
+
+        assert response.status_code == 303
+        assert admitted[-1]["allow_low_space"] is False
+        assert job.execute_args["allow_low_space"] is False
+    finally:
+        _remove_job(job)
 
 
 def test_settings_path_resolver_maps_container_paths_to_host_bind_mounts(
@@ -5444,9 +5606,17 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(
     job.status = jm.JobStatus.FAILED
     job.finished_at = time.time()
     job.attention = "recovery"
+    job.summary = "Checked 4 albums; 1 was repaired."
+    job.error = "1 album couldn't be repaired."
     job.recoveries = [_repair_recovery_record(backup)]
     jm.registry.add(job)
     try:
+        assert job_persistence.persist(job)
+        history = client.get("/queue/history").text
+        assert "Original files are being kept safely" in history
+        assert job.summary in history
+        assert "1 album couldn&#39;t be repaired." in history
+
         client.post(f"/jobs/{job.id}/acknowledge-recovery")
         assert job.recoveries
 
@@ -5573,7 +5743,7 @@ def test_auth_loss_fires_the_hook_once_per_transition(monkeypatch):
 
 def test_refresh_folds_into_parked_library_review(monkeypatch):
     from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import review_badges
+    from qobuz_librarian.web import job_persistence, review_badges
 
     badge_calls = []
     monkeypatch.setattr(
@@ -5581,6 +5751,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         "mark_ready",
         lambda surface: badge_calls.append(surface),
     )
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = jm.Job(title="Library scan")
     parked.execute_kind = "library"
@@ -5675,12 +5846,59 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
             _remove_job(changed_scan)
 
 
+def test_refresh_fold_refuses_to_publish_an_unsaved_review(monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+
+    parked = jm.Job(title="Library scan")
+    parked.execute_kind = "library"
+    parked.add_candidate(kind="album", title="Existing pick", artist="X",
+                         payload={"album_id": "old"}, selected=True)
+    parked.status = jm.JobStatus.AWAITING_REVIEW
+    jm.registry.add(parked)
+
+    scan = jm.Job(title="Library scan")
+    scan.execute_kind = "library"
+    scan.status = jm.JobStatus.SCANNING
+    scan.add_candidate(kind="album", title="New find", artist="X",
+                       payload={"album_id": "new"}, selected=False)
+    jm.registry.add(scan)
+    persist_locked = job_persistence._persist_locked
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: False)
+    webapp._fold_into_parked_library_review(scan)
+
+    assert [c["title"] for c in parked.candidates] == ["Existing pick"]
+    assert parked.candidates[0]["selected"] is True
+    assert [c["title"] for c in scan.candidates] == ["New find"]
+    assert scan.status == jm.JobStatus.FAILED
+    assert "couldn't be saved" in (scan.error or "")
+
+    _remove_job(parked)
+    _remove_job(scan)
+    monkeypatch.setattr(job_persistence, "_persist_locked", persist_locked)
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs({"library": lambda _job, _args: lambda _j, _chosen: None})
+    restored = jm.registry.get(parked.id)
+    assert restored is not None
+    assert [c["title"] for c in restored.candidates] == ["Existing pick"]
+    assert restored.candidates[0]["selected"] is True
+
+
 def test_fold_swaps_candidate_class_and_keeps_the_tick(monkeypatch):
     """An album that changed on disk while the review sat parked (missing →
     partially added, or a gapped album deleted by hand) must swap to the fresh
     candidate class instead of being silently swallowed as a duplicate key,
     and the user's tick must survive the swap."""
     from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = jm.Job(title="Library scan")
     parked.execute_kind = "library"
@@ -5812,7 +6030,9 @@ def test_fold_skips_a_review_approved_mid_refresh(monkeypatch):
 
 def test_restore_refolds_into_the_parked_library_review(monkeypatch, tmp_path):
     from qobuz_librarian.library import catalog, library_scan_state
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     album_dir = tmp_path / "Agalloch" / "Pale Folklore"
     album_dir.mkdir(parents=True)
@@ -6155,11 +6375,13 @@ def test_failed_new_release_pick_returns_to_a_new_release_review():
         _remove_job(library)
 
 
-def test_partial_import_folds_an_instant_gap_fill_candidate():
+def test_partial_import_folds_an_instant_gap_fill_candidate(monkeypatch):
     """An album that lands with some tracks failed becomes a Gap Fill
     candidate in the living Library review immediately, unticked, with honest
     detail, instead of waiting for the next manual refresh."""
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = jm.Job(title="Library scan")
     parked.kind = "scan"
@@ -6481,6 +6703,7 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
 
     failed = job_mgr.Job(title="Repair scan")
     failed.execute_kind = "repair"
+    failed.phase = "scan"
     failed.status = job_mgr.JobStatus.FAILED
     monkeypatch.setattr(webapp, "_repair_current_job", lambda: failed)
     monkeypatch.setattr(webapp, "_tool_last_run_age", lambda _kind: "2 days ago")
@@ -6494,6 +6717,10 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
         "the page was showing a scan while denying one had finished")
     assert "Last repair scan 2 days ago" in page.text
     assert "Resume" in page.text, "an interrupted sweep must still offer resume"
+    assert 'aria-label="Repair phase: scan failed"' in page.text
+    phase = page.text.split('class="ql-repair-phase"', 1)[1].split("</div>", 1)[0]
+    assert 'ql-repair-phase-label is-current is-error">Scan' in phase
+    assert 'ql-repair-phase-label is-done">Review' not in phase
 
 
 def test_repair_sweep_logs_the_albums_it_sends_for_re_download(monkeypatch):

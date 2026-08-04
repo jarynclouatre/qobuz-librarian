@@ -259,7 +259,7 @@ def test_cancelled_downsample_summary_counts_the_interrupted_album(
         if calls == 1:
             return {"resampled": 1, "saved_bytes": 100, "errors": 0}
         job.cancel_requested = True
-        return {"resampled": 0, "saved_bytes": 0, "errors": 0,
+        return {"resampled": 1, "saved_bytes": 50, "errors": 0,
                 "cancelled": True}
 
     monkeypatch.setattr(
@@ -280,8 +280,43 @@ def test_cancelled_downsample_summary_counts_the_interrupted_album(
     ])
 
     assert "Downsampled 1 album (100B smaller)" in job.summary
-    assert "1 album interrupted (remaining files left unchanged)" in job.summary
+    assert (
+        "1 album interrupted (50B smaller so far; remaining files left unchanged)"
+        in job.summary
+    )
     assert "0 albums not started" in job.summary
+
+
+def test_downsample_summary_distinguishes_each_skipped_album(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.web import flows
+
+    artist_dir = tmp_path / "Artist"
+    unchanged_dir = artist_dir / "Unchanged"
+    unchanged_dir.mkdir(parents=True)
+    missing_dir = artist_dir / "Missing"
+
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.downsample_engine.downsample_dir",
+        lambda *_a, **_k: {"resampled": 0, "saved_bytes": 0, "errors": 0},
+    )
+    monkeypatch.setattr(flows, "_refresh_downsample_artist_state",
+                        lambda *_args: None)
+    job = jm.Job(title="downsample")
+
+    flows.execute_downsamples(job, [
+        {"artist": "Artist", "title": "No details", "payload": {}},
+        {"artist": "Artist", "title": "Missing",
+         "payload": {"album_dir": str(missing_dir)}},
+        {"artist": "Artist", "title": "Unchanged",
+         "payload": {"album_dir": str(unchanged_dir)}},
+    ])
+
+    assert "1 album skipped (saved folder details missing)" in job.summary
+    assert "1 album skipped (no longer on disk)" in job.summary
+    assert "1 album skipped (nothing needed changing)" in job.summary
 
 
 def test_targeted_upgrade_refresh_respects_upgrade_scan_disabled(
@@ -1109,6 +1144,44 @@ def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
 
     assert "couldn't be saved" in job.summary
 
+
+def test_cancelled_new_release_scan_keeps_failed_artist_count(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows
+
+    artists = [tmp_path / name for name in ("Broken", "Stopped")]
+    for artist in artists:
+        artist.mkdir()
+
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
+        "seen": {"existing": []},
+        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
+    })
+
+    def fake_find(name, **_kwargs):
+        if name == "Broken":
+            raise RuntimeError("temporary failure")
+        return SimpleNamespace(
+            artist_id=name,
+            fetch_failed=False,
+            current_ids=[],
+            new_gaps=[],
+            artist_name=name,
+        )
+
+    monkeypatch.setattr(flows, "find_new_releases_for_artist", fake_find)
+    job = jm.Job(title="new releases")
+    job.push_progress = lambda *_a, **_k: setattr(
+        job, "cancel_requested", True)
+
+    flows.scan_new_releases(job, "tok")
+
+    assert "1 artist couldn't be checked before the stop" in job.summary
+    assert job.execute_args["_unchecked_artists"] == 1
+
 def test_incomplete_baseline_scan_summary_reports_unchecked_artists(
         tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
@@ -1159,6 +1232,7 @@ def test_incomplete_baseline_scan_summary_reports_unchecked_artists(
     # the summary must say so instead of a clean-sounding definitive total.
     assert "1 artist" in job.summary
     assert "resume" in job.summary.lower()
+    assert "Upgrade and Downsample results were not updated" in job.summary
 
 
 def test_scan_signature_covers_candidate_shaping_settings(monkeypatch):
@@ -1177,3 +1251,36 @@ def test_scan_signature_covers_candidate_shaping_settings(monkeypatch):
         with monkeypatch.context() as mctx:
             mctx.setattr(cfg, name, int(getattr(cfg, name)) + 1)
             assert lss.quality_signature() != base, name
+
+
+def test_web_lyric_retry_marks_write_errors_failed(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyrics
+    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import jobs as jm
+
+    tracks = [tmp_path / f"{index}.flac" for index in range(3)]
+    for track in tracks:
+        track.write_bytes(b"synthetic")
+    monkeypatch.setattr(cfg, "LYRIC_RETRY_FILE", tmp_path / "retry.json")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(lyrics.lyric_fetch, "AVAILABLE", True)
+    monkeypatch.setattr(
+        lyrics.lyric_fetch,
+        "fetch_for_paths",
+        lambda *_args, **_kwargs: {"write-error": 3},
+    )
+    monkeypatch.setattr(
+        lyrics,
+        "_refresh_lyric_retry",
+        lambda _paths: lyrics.save_lyric_retry([]),
+    )
+    lyrics.save_lyric_retry([str(track) for track in tracks])
+    job = jm.Job(title="lyrics retry")
+
+    flows.run_lyric_retry(job)
+
+    assert job.status == jm.JobStatus.FAILED
+    assert "3 failed" in job.summary
+    assert "All 3 retried tracks resolved" not in job.summary

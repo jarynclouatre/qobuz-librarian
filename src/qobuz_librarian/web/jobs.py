@@ -1379,61 +1379,77 @@ def submit_scan(job: Job, scan_fn, execute_fn):
     return job
 
 
-def finalize_review_if_empty(job: Job) -> bool:
+def finalize_review_if_empty(job: Job) -> Optional[bool]:
     """Complete a triage review once dismissal has emptied its candidate list.
 
     Dismissing the last album leaves nothing to act on, so the job must not stay
     in AWAITING_REVIEW. Otherwise the dashboard keeps showing the "N new
     releases" banner (now zero) and the job page stays badged "awaiting review"
     over an empty list. Mirror submit_scan's found-nothing path and mark it DONE.
-    Returns True if it finalized the job (so callers can refresh the view).
+    Returns True if it finalized the job, False when it was not empty, or None
+    when the terminal state could not be saved.
     """
-    with job._lock:
-        if job.status != JobStatus.AWAITING_REVIEW or job.candidates:
-            return False
-        job.status = JobStatus.DONE
-        job.finished_at = time.time()
-        unchecked = job.unchecked_artists
-        if job.candidate_cap_hit or unchecked:
-            parts = ["All listed albums reviewed."]
-            if job.candidate_cap_hit:
-                parts.append("The scan hit the result cap, so some finds may "
-                             "not have been listed.")
-            if unchecked:
-                parts.append(
-                    f"{unchecked} artist{'s' if unchecked != 1 else ''} "
-                    "couldn't be checked; scan again to finish.")
-            if job.execute_kind == "downsample":
-                parts.append("Albums kept hi-res can be restored later.")
+    with job._review_action_lock:
+        with job._lock:
+            if job.status != JobStatus.AWAITING_REVIEW or job.candidates:
+                return False
+            previous = (job.status, job.finished_at, job.summary)
+            job.status = JobStatus.DONE
+            job.finished_at = time.time()
+            unchecked = job.unchecked_artists
+            if job.candidate_cap_hit or unchecked:
+                parts = ["All listed albums reviewed."]
+                if job.candidate_cap_hit:
+                    parts.append("The scan hit the result cap, so some finds may "
+                                 "not have been listed.")
+                if unchecked:
+                    parts.append(
+                        f"{unchecked} artist{'s' if unchecked != 1 else ''} "
+                        "couldn't be checked; scan again to finish.")
+                if job.execute_kind == "downsample":
+                    parts.append("Albums kept hi-res can be restored later.")
+                else:
+                    parts.append("Dismissed items can be restored later.")
+                job.summary = " ".join(parts)
+            elif job.execute_kind == "downsample":
+                job.summary = ("All albums reviewed. Albums kept hi-res can be "
+                               "restored later.")
             else:
-                parts.append("Dismissed items can be restored later.")
-            job.summary = " ".join(parts)
-        elif job.execute_kind == "downsample":
-            job.summary = ("All albums reviewed. Albums kept hi-res can be "
-                           "restored later.")
-        else:
-            job.summary = "All albums reviewed. Dismissed items can be restored later."
-    job_persistence.persist(job)
-    if job.execute_kind == "library":
-        # Worked through to empty. Retire the baseline's review so the
-        # saved-state reconstruction doesn't rebuild it from stale scan state.
-        from qobuz_librarian.library import library_scan_state
-        library_scan_state.mark_review_retired(reason="worked_through")
-        badge_generation = review_badges.ready_generation("library")
-        other_candidates = False
-        for other in registry.awaiting_review():
-            if other.execute_kind != "library":
-                continue
-            with other._lock:
-                if other.status == JobStatus.AWAITING_REVIEW and other.candidates:
-                    other_candidates = True
-                    break
-        if not other_candidates:
-            # A newer scan may light the badge between the snapshot and this
-            # clear. Only retire the generation that belonged to the review
-            # we just emptied.
-            review_badges.clear_ready_if_generation(
-                "library", badge_generation)
+                job.summary = (
+                    "All albums reviewed. Dismissed items can be restored later."
+                )
+        if not job_persistence.persist(job):
+            with job._lock:
+                job.status, job.finished_at, job.summary = previous
+            job.notify_review_changed("save_failed")
+            return None
+        if job.execute_kind == "library":
+            # Worked through to empty. Retire the baseline's review so the
+            # saved-state reconstruction doesn't rebuild it from stale scan state.
+            from qobuz_librarian.library import library_scan_state
+            if not library_scan_state.mark_review_retired(
+                    reason="worked_through"):
+                with job._lock:
+                    job.status, job.finished_at, job.summary = previous
+                job_persistence.persist(job)
+                job.notify_review_changed("save_failed")
+                return None
+            badge_generation = review_badges.ready_generation("library")
+            other_candidates = False
+            for other in registry.awaiting_review():
+                if other.execute_kind != "library":
+                    continue
+                with other._lock:
+                    if (other.status == JobStatus.AWAITING_REVIEW
+                            and other.candidates):
+                        other_candidates = True
+                        break
+            if not other_candidates:
+                # A newer scan may light the badge between the snapshot and
+                # this clear. Only retire the generation that belonged to the
+                # review we just emptied.
+                review_badges.clear_ready_if_generation(
+                    "library", badge_generation)
     return True
 
 
@@ -1599,7 +1615,12 @@ def cancel_review(job: Job) -> Optional[bool]:
             # Discarded. Retire the baseline's review so the saved-state
             # reconstruction doesn't immediately rebuild what was discarded.
             from qobuz_librarian.library import library_scan_state
-            library_scan_state.mark_review_retired(reason="discarded")
+            if not library_scan_state.mark_review_retired(reason="discarded"):
+                with job._lock:
+                    job.status = JobStatus.AWAITING_REVIEW
+                    job.finished_at = previous_finished_at
+                job_persistence.persist(job)
+                return None
         job.end_stream()
         return True
 

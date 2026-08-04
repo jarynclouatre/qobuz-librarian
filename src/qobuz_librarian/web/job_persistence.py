@@ -28,6 +28,7 @@ history updates degrade to a no-op.  Job admission is stricter: work that can
 change the library is not allowed to enter a worker unless its owner row is
 durable first.
 """
+import copy
 import hashlib
 import json
 import logging
@@ -360,6 +361,39 @@ def persist(job) -> bool:
         if getattr(job, "_preserve_persisted_single", False) is True:
             return _persist_preserving_single_locked(job)
         return _persist_locked(job)
+
+
+def persist_review_mutation(job, mutation) -> tuple[bool, object]:
+    """Save one candidate-list mutation or restore its exact prior state."""
+    with job._review_action_lock, job._lock:
+        previous = (
+            copy.deepcopy(job.candidates),
+            job._cand_seq,
+            job._candidate_cap_noted,
+            copy.deepcopy(job.execute_args),
+        )
+
+        def _restore():
+            (job.candidates, job._cand_seq, job._candidate_cap_noted,
+             job.execute_args) = previous
+
+        try:
+            result = mutation()
+        except BaseException:
+            _restore()
+            raise
+        current = (
+            job.candidates,
+            job._cand_seq,
+            job._candidate_cap_noted,
+            job.execute_args,
+        )
+        if current == previous:
+            return True, result
+        if _persist_locked(job):
+            return True, result
+        _restore()
+        return False, result
 
 
 def acknowledge_attention(job_id: str, expected_attention: str) -> bool:

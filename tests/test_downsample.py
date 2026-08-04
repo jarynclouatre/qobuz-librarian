@@ -147,7 +147,7 @@ def test_resample_keeps_truncated_source_untouched(tmp_path, _need_ffmpeg, _need
     _hires_flac(full, 3.0)
     data = full.read_bytes()
     src = tmp_path / "track.flac"
-    src.write_bytes(data[: len(data) * 2 // 5])        # 40% — header lies full
+    src.write_bytes(data[: len(data) * 2 // 5])        # 40%, header lies full
     before = src.read_bytes()
     af, _ = detect_resampler_filter()
 
@@ -256,6 +256,7 @@ def test_downsample_dir_stops_between_tracks_on_cancel(tmp_path, monkeypatch):
     import time as _time
 
     calls = []
+    logs = []
 
     def fake_resample(rel, sr, rate, af, base_dir=None):
         calls.append(rel)
@@ -269,14 +270,23 @@ def test_downsample_dir_stops_between_tracks_on_cancel(tmp_path, monkeypatch):
     for n in range(4):
         (tmp_path / f"{n}.flac").write_bytes(b"x")
 
-    res = de.downsample_dir(tmp_path, verbose=False, base_dir=tmp_path,
-                            cancel_check=lambda: len(calls) > 0)
+    res = de.downsample_dir(
+        tmp_path,
+        verbose=True,
+        base_dir=tmp_path,
+        log=logs.append,
+        cancel_check=lambda: len(calls) > 0,
+    )
 
     assert res["cancelled"] is True
     assert res["resampled"] <= 2 and len(calls) <= 2   # rest were discarded
+    assert any("⚠ downsample needs attention" in line for line in logs)
+    assert not any("✓ downsample:" in line for line in logs)
 
 
 def test_flush_failed_rewrite_counts_as_resampled_with_a_warning(tmp_path, monkeypatch):
+    logs = []
+
     def fake_resample(rel, sr, rate, af, base_dir=None):
         return (rel, sr, rate, 10,
                 "resampled, but the folder couldn't be flushed to disk")
@@ -287,9 +297,62 @@ def test_flush_failed_rewrite_counts_as_resampled_with_a_warning(tmp_path, monke
     monkeypatch.setattr(de, "detect_resampler_filter", lambda: ("soxr", "x"))
     (tmp_path / "0.flac").write_bytes(b"x")
 
-    res = de.downsample_dir(tmp_path, verbose=False, base_dir=tmp_path)
+    res = de.downsample_dir(
+        tmp_path, verbose=True, base_dir=tmp_path, log=logs.append
+    )
 
     assert res["resampled"] == 1
     assert res["errors"] == 0
     assert res["flush_warnings"] == 1
     assert res["saved_bytes"] == 10
+    assert any("1 flush warning" in line for line in logs)
+    assert not any("✓ downsample:" in line for line in logs)
+
+
+def test_downsample_mixed_result_closes_with_attention(tmp_path, monkeypatch):
+    logs = []
+
+    def fake_resample(rel, sr, rate, af, base_dir=None):
+        if rel == "bad.flac":
+            return (rel, sr, rate, None, "synthetic encode failure")
+        return (rel, sr, rate, 10, None)
+
+    monkeypatch.setattr(de, "RESAMPLE_WORKERS", 1)
+    monkeypatch.setattr(de, "resample_one", fake_resample)
+    monkeypatch.setattr(de, "read_sample_rate", lambda p: 96000)
+    monkeypatch.setattr(de, "detect_resampler_filter", lambda: ("soxr", "x"))
+    (tmp_path / "bad.flac").write_bytes(b"x")
+    (tmp_path / "good.flac").write_bytes(b"x")
+
+    result = de.downsample_dir(
+        tmp_path, verbose=True, base_dir=tmp_path, log=logs.append
+    )
+
+    assert result["resampled"] == 1
+    assert result["errors"] == 1
+    assert any("1 failed" in line for line in logs)
+    assert not any("✓ downsample:" in line for line in logs)
+
+
+def test_downsample_clean_result_keeps_the_success_line(tmp_path, monkeypatch):
+    logs = []
+    monkeypatch.setattr(de, "RESAMPLE_WORKERS", 1)
+    monkeypatch.setattr(
+        de,
+        "resample_one",
+        lambda rel, sr, rate, af, base_dir=None: (rel, sr, rate, 10, None),
+    )
+    monkeypatch.setattr(de, "read_sample_rate", lambda _p: 96000)
+    monkeypatch.setattr(de, "detect_resampler_filter", lambda: ("soxr", "x"))
+    (tmp_path / "good.flac").write_bytes(b"x")
+
+    result = de.downsample_dir(
+        tmp_path, verbose=True, base_dir=tmp_path, log=logs.append
+    )
+
+    assert result["resampled"] == 1
+    assert result["errors"] == 0
+    assert result["flush_warnings"] == 0
+    assert result["cancelled"] is False
+    assert any("✓ downsample: 1 resampled" in line for line in logs)
+    assert not any("needs attention" in line for line in logs)

@@ -1,4 +1,6 @@
 
+from pathlib import Path
+
 import pytest
 
 from qobuz_librarian import config as cfg
@@ -9,6 +11,7 @@ from qobuz_librarian.integrations.staging import (
     StagingReferenceStatus,
     capture_file,
     inspect_staging_group_reference,
+    load_file_group,
     park_trees,
     quarantine_file,
 )
@@ -66,6 +69,8 @@ def test_owned_staging_group_reference_requires_exact_manifested_contents(
         on_intent=file_records.append,
     )
     assert file_group is not None
+    assert file_group.durable is True
+    assert Path(file_group) == file_group.path
     file_match = inspect_staging_group_reference(file_records[0], owner)
     assert file_match.status is StagingReferenceStatus.MATCH
     assert isinstance(file_match.evidence, FileGroup)
@@ -107,3 +112,61 @@ def test_quarantine_restores_a_public_replacement_raced_into_private_staging(
     assert not list(retry_root.rglob(source.name))
 
 
+def test_quarantine_reports_a_retained_file_when_directory_sync_is_uncertain(
+        staging, monkeypatch):
+    source = staging / "run" / "song.flac"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"sealed audio")
+    receipt = capture_file(source)
+
+    def fail_directory_sync(_path):
+        raise OSError("injected directory sync failure")
+
+    monkeypatch.setattr(
+        staging_module, "_fsync_staging_directory", fail_directory_sync)
+
+    result = quarantine_file(receipt)
+
+    assert result is not None
+    assert result.durable is False
+    assert result.path.read_bytes() == b"sealed audio"
+    assert not source.exists()
+    assert load_file_group(result.path.parent) is not None
+
+
+def test_restore_group_raises_when_an_incomplete_restore_cannot_roll_back(
+        staging, monkeypatch):
+    first = staging / "Artist" / "First"
+    second = staging / "Artist" / "Second"
+    first.mkdir(parents=True)
+    second.mkdir()
+    (first / "01.flac").write_bytes(b"first")
+    (second / "01.flac").write_bytes(b"second")
+    group = park_trees([first, second], "quality", kind="quality")
+    assert group is not None
+
+    real_move = staging_module._move_tree
+    calls = 0
+
+    def fail_second_move_and_rollback(receipt, destination, destination_name):
+        nonlocal calls
+        calls += 1
+        if calls in {2, 3}:
+            return None
+        return real_move(receipt, destination, destination_name)
+
+    monkeypatch.setattr(
+        staging_module, "_move_tree", fail_second_move_and_rollback)
+
+    with pytest.raises(OSError, match="partially restored"):
+        staging_module.restore_group(group)
+
+    public_tracks = [first / "01.flac", second / "01.flac"]
+    private_tracks = [tree.path / "01.flac" for tree in group.trees]
+    assert sum(path.exists() for path in public_tracks) == 1
+    assert sum(path.exists() for path in private_tracks) == 1
+    assert {
+        path.read_bytes()
+        for path in public_tracks + private_tracks
+        if path.exists()
+    } == {b"first", b"second"}

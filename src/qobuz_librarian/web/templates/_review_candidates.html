@@ -18,17 +18,18 @@
                        else '/library/hidden' %}
   {% set _hidden_label = 'Kept hi-res' if job.execute_kind == 'downsample' else 'Dismissed' %}
 
+  <div class="ql-review-sticky">
   {% if review_tab %}
   <nav class="ql-page-tabs ql-review-tabs" aria-label="Result type" data-review-tabs>
     <button type="button" data-review-tab="missing"
             class="{% if review_tab == 'missing' %}is-active{% endif %}"
             {% if review_tab == 'missing' %}aria-current="true"{% endif %}>
-      Missing Albums <span class="ql-tab-count" data-tab-count="missing">{{ review_tab_counts.missing }}</span>
+      Missing Albums <span class="ql-tab-count" data-tab-count="missing">{{ labels.format_count(review_tab_counts.missing) }}</span>
     </button>
     <button type="button" data-review-tab="gaps"
             class="{% if review_tab == 'gaps' %}is-active{% endif %}"
             {% if review_tab == 'gaps' %}aria-current="true"{% endif %}>
-      Gap Fill <span class="ql-tab-count" data-tab-count="gaps">{{ review_tab_counts.gaps }}</span>
+      Gap Fill <span class="ql-tab-count" data-tab-count="gaps">{{ labels.format_count(review_tab_counts.gaps) }}</span>
     </button>
   </nav>
   {% endif %}
@@ -43,7 +44,7 @@
     </div>
     {% if not review_tab %}
     <p class="ql-review-count">
-      <span data-summary-count>{{ labels.review_summary_count(job, review_counts.total, review_counts.artists) }}</span>{% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %} · ~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
+      <span data-summary-count>{{ labels.review_summary_count(job, review_counts.total, review_counts.artists) }}</span>{% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %} · selected: ~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
     </p>
     {% endif %}
     <div class="ql-review-summary-actions">
@@ -66,25 +67,23 @@
       <button type="button" class="ql-review-tool" aria-label="Select every {{ labels.review_item_singular(job) }} on this page only"
               data-select-page="1">Select page</button>
       {% endif %}
-      <span class="ql-review-tool-sep" aria-hidden="true"></span>
       <button type="button" class="ql-review-tool" data-expand-all="1">Expand all</button>
       {% if job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
-      <span class="ql-review-tool-sep" aria-hidden="true"></span>
       {# Lives up here with the other whole-list tools: the sticky footer keeps
-         a single job — the download button. Scope the count to the active tab
+         a single job: the download button. Scope the count to the active tab
          on a tabbed library review (the JS re-scopes it after a tab switch;
-         this keeps the FIRST render honest too — the action is already
+         this keeps the FIRST render honest too: the action is already
          tab-scoped server-side). #}
       {% set _rest_total = review_tab_counts.missing if review_tab == 'missing' else review_tab_counts.gaps if review_tab == 'gaps' else review_counts.total %}
       {% set _rest_selected = review_tab_counts.missing_selected if review_tab == 'missing' else review_tab_counts.gaps_selected if review_tab == 'gaps' else review_counts.selected %}
       <button type="button" id="review-dismiss-rest"
-              class="ql-review-tool{% if _rest_selected >= _rest_total %} hidden{% endif %}">{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }} ({{ _rest_total - _rest_selected }})</button>
+              class="ql-review-tool{% if _rest_selected >= _rest_total %} hidden{% endif %}">{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }} ({{ labels.format_count(_rest_total - _rest_selected) }})</button>
       {% endif %}
       {% if triage %}
-      <span class="ql-review-tool-sep" aria-hidden="true"></span>
-      <a href="{{ _hidden_url }}" class="ql-inline-link ql-review-dismissed-link" data-hidden-label="{{ _hidden_label }}">{{ _hidden_label }} ({{ review_hidden_count }})</a>
+      <a href="{{ _hidden_url }}" class="ql-inline-link ql-review-dismissed-link" data-hidden-label="{{ _hidden_label }}">{{ _hidden_label }} ({{ labels.format_count(review_hidden_count) }})</a>
       {% endif %}
     </div>
+  </div>
   </div>
 
   {% if job.execute_kind == 'downsample' %}

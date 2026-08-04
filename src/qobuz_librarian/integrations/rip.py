@@ -535,9 +535,16 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None):
 def _quarantine_reject(path, *, owner=None, on_intent=None):
     """Move an exact reject to private staging recovery so beets skips it."""
     if owner is None:
-        return quarantine_file(path, ".rejected") is not None
-    return quarantine_file(
-        path, ".rejected", owner=owner, on_intent=on_intent) is not None
+        result = quarantine_file(path, ".rejected")
+    else:
+        result = quarantine_file(
+            path, ".rejected", owner=owner, on_intent=on_intent)
+    if result is not None and not result.durable:
+        vlog(
+            f"set aside {Path(path).name}, but its recovery directory sync "
+            "could not be confirmed"
+        )
+    return result is not None
 
 
 def cleanup_staging_residue():

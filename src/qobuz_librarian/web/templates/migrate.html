@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Library migration — Qobuz Librarian{% endblock %}
+{% block title %}Library migration - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
 
@@ -51,17 +51,10 @@
             </span>
           </span>
         </label>
-        <label class="ql-option-row">
-          <input type="checkbox" name="allow_low_space" class="ql-checkbox">
-          <span>
-            <span class="ql-option-title">Continue despite low-space warning</span>
-            <span class="ql-option-help ql-option-help-warning">
-              Use only after confirming the destination has enough room.
-            </span>
-          </span>
-        </label>
       </div>
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Preview migration</button>
+      <button type="submit" id="migrate-preview"
+              class="ql-btn ql-btn-primary w-full sm:w-auto"
+              {% if writes_paused %}disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Preview migration</button>
       <p class="ql-form-note">
         Preview writes a manifest only. Copy or move happens after review.
       </p>

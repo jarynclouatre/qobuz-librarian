@@ -1170,8 +1170,9 @@ class QobuzOwnershipPlugin(BeetsPlugin):
         try:
             for part in parts:
                 child = _open_ownership_dir(part, dir_fd=current)
-                os.close(current)
+                closing = current
                 current = child
+                os.close(closing)
             return os.fstat(current)
         finally:
             os.close(current)

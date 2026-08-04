@@ -136,3 +136,42 @@ def test_cancelled_refresh_keeps_last_complete_downsample_state(
     assert [c["title"] for c in state["candidates"]] == ["Album"]
 
 
+def test_fingerprint_failure_is_recorded_without_aborting_other_artists(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import downsample_state
+
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_STATE_FILE", tmp_path / "downsample.json")
+    denied = tmp_path / "Denied"
+    readable = tmp_path / "Readable"
+    album = readable / "Album"
+    denied.mkdir()
+    album.mkdir(parents=True)
+    candidate = _candidate(album, artist="Readable")
+
+    def fingerprint(path):
+        if path == denied:
+            raise PermissionError("cannot read album folder")
+        return "readable-fingerprint"
+
+    monkeypatch.setattr(downsample_state, "artist_fingerprint", fingerprint)
+    result = downsample_state.refresh_for_artists(
+        [denied, readable],
+        scan_artist=lambda path: [candidate] if path == readable else [],
+        persist=False,
+    )
+
+    assert result.complete is False
+    assert result.artists_scanned == ["Denied", "Readable"]
+    assert result.errors == {"Denied": "cannot read album folder"}
+    assert result.candidates == [candidate]
+    assert result.fingerprints == {"Readable": "readable-fingerprint"}
+
+    targeted = downsample_state.update_artist(
+        denied,
+        scan_artist=lambda _path: (_ for _ in ()).throw(
+            AssertionError("fingerprint failure must stop this artist scan")),
+    )
+    assert targeted.complete is False
+    assert targeted.errors == {"Denied": "cannot read album folder"}
+

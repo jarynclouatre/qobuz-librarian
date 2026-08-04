@@ -2,7 +2,7 @@
 
 A full-library scan can take a while; if it's interrupted (the container stops,
 the box loses power) the work shouldn't be thrown away. As the scan finishes each
-artist it records progress here — which artists are done, the albums found so far,
+artist it records progress here: which artists are done, the albums found so far,
 and the per-artist catalog snapshot for the new-release baseline. The next start
 reads this and continues from where it left off rather than re-crawling.
 
@@ -41,7 +41,7 @@ def _write(data) -> None:
     try:
         state_file.write_json(cfg.SCAN_CHECKPOINT_FILE, data, indent=None)
     except OSError as e:
-        # Surface (verbose) rather than fail completely silent — on a full or
+        # Surface (verbose) rather than fail completely silent. On a full or
         # read-only data volume an hours-long scan would otherwise save no
         # resumable checkpoint with zero signal.
         from qobuz_librarian.ui_cli.logging import vlog
@@ -52,8 +52,9 @@ def load(kind) -> dict | None:
     """This kind's checkpoint, or None.
 
     Shape: ``{"scanned": [folder_name, ...], "candidates": [candidate_dict, ...],
-    "seen": {artist_id: [album_id, ...]}, "artists": {folder_name: snapshot}}``.
-    ``artists`` is optional for older checkpoints.
+    "seen": {artist_id: [album_id, ...]}, "artists": {folder_name: snapshot},
+    "meta": {...}}``. ``artists`` and ``meta`` are optional for older
+    checkpoints.
     """
     cp = _read().get(kind)
     if not isinstance(cp, dict):
@@ -68,10 +69,12 @@ def load(kind) -> dict | None:
         cp["seen"] = {}
     if not isinstance(cp.get("artists"), dict):
         cp["artists"] = {}
+    if not isinstance(cp.get("meta"), dict):
+        cp["meta"] = {}
     return cp
 
 
-def save(kind, scanned, candidates, seen, artists=None) -> None:
+def save(kind, scanned, candidates, seen, artists=None, meta=None) -> None:
     with _lock:
         data = _read()
         data[kind] = {
@@ -79,6 +82,7 @@ def save(kind, scanned, candidates, seen, artists=None) -> None:
             "candidates": candidates,
             "seen": seen,
             "artists": artists or {},
+            "meta": meta or {},
             "ts": time.time(),
         }
         _write(data)
@@ -102,7 +106,7 @@ def clear(kind) -> None:
 
 
 def pending() -> dict | None:
-    """A summary of any unfinished scan for the dashboard, or None — missing
+    """A summary of any unfinished scan for the dashboard, or None. Missing
     takes precedence (it's the kind the first-run auto-scan runs). Returns
     ``{"kind", "done"}`` where done is how many artists are already scanned."""
     data = _read()

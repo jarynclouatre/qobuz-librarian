@@ -1087,7 +1087,9 @@
     var waitNote = document.getElementById("queue-wait-note");
     function clearQueuedState() {
       if (waitNote) { waitNote.classList.add("hidden"); waitNote = null; }
-      if (activity && activity.textContent === "Queued") activity.textContent = "Scanning";
+      if (activity && activity.textContent === "Queued") {
+        activity.textContent = jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning";
+      }
     }
     var src = new EventSource("/api/jobs/" + id + "/stream");
     var opened = false;
@@ -1133,7 +1135,9 @@
       var p; try { p = JSON.parse(e.data); } catch (_) { return; }
       clearQueuedState();
       if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
-      if (activity && p.phase && activity.textContent !== p.phase) activity.textContent = p.phase;
+      if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== p.phase) {
+        activity.textContent = p.phase;
+      }
       if (card) card.classList.remove("hidden");
       if (label) label.textContent = p.phase || (activity && activity.textContent !== "Queued" ? activity.textContent : "Running");
       var ct = p.total > 0 ? p.current + " / " + p.total + unitSuffix(p) : (p.current ? String(p.current) : "");
@@ -1202,10 +1206,12 @@
                                  : "Your Gap Fill list is untouched.";
     }
 
-    function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
-    function countLabel(n, one, many) { return n + " " + (n === 1 ? one : many); }
+    var countFormatter = new Intl.NumberFormat();
+    function formatCount(n) { return countFormatter.format(n); }
+    function plural(n, w) { return formatCount(n) + " " + w + (n === 1 ? "" : "s"); }
+    function countLabel(n, one, many) { return formatCount(n) + " " + (n === 1 ? one : many); }
     function dismissRestLabel(rest) {
-      return (isDownsampleReview ? "Keep hi-res" : "Dismiss unselected") + " (" + rest + ")";
+      return (isDownsampleReview ? "Keep hi-res" : "Dismiss unselected") + " (" + formatCount(rest) + ")";
     }
     function artistDismissLabel(picked) {
       if (isDownsampleReview) return "Keep hi-res";
@@ -1294,7 +1300,7 @@
       if (submit) {
         submit.disabled = tc.selected === 0;
         submit.textContent = tc.selected
-          ? (submit.dataset.reviewVerb || "Download") + " " + tc.selected + " selected"
+          ? (submit.dataset.reviewVerb || "Download") + " " + formatCount(tc.selected) + " selected"
           : (submit.dataset.emptyLabel || "Select " + reviewItemPlural);
       }
       if (summaryCount) {
@@ -1309,7 +1315,7 @@
         // "smaller", not "reclaimed": with originals kept, the run costs more
         // disk than it saves until the backups expire.
         dsTotal.textContent = c.reclaimable_label
-          ? " · ~" + c.reclaimable_label + " smaller" : "";
+          ? " · selected: ~" + c.reclaimable_label + " smaller" : "";
       }
       cont.dataset.reviewTotal = c.total;
       cont.dataset.reviewSelected = c.selected;
@@ -1325,8 +1331,8 @@
         cont.dataset.reviewGapSelected = c.gap_selected;
         var mc = cont.querySelector('[data-tab-count="missing"]');
         var gc = cont.querySelector('[data-tab-count="gaps"]');
-        if (mc) mc.textContent = c.missing_total;
-        if (gc) gc.textContent = c.gap_total;
+        if (mc) mc.textContent = formatCount(c.missing_total);
+        if (gc) gc.textContent = formatCount(c.gap_total);
       }
       // Only hide/dismiss responses carry hidden_total; a plain tick doesn't
       // change it, so its absence means "leave the link alone".
@@ -1334,7 +1340,7 @@
         var dl = cont.querySelector(".ql-review-dismissed-link");
         if (dl) {
           dl.textContent = (dl.getAttribute("data-hidden-label") || "Dismissed")
-            + " (" + c.hidden_total + ")";
+            + " (" + formatCount(c.hidden_total) + ")";
         }
       }
       updateDismissRest();
@@ -1857,9 +1863,13 @@
               dismissRest.disabled = false;
               applyCounts(c);
               loadPage(1, curQuery());
-              showToast(c.hidden ? dismissToast(c.hidden)
-                                 : "Nothing to dismiss on this filter.",
-                        c.hidden ? "success" : "info");
+              if (c.finalize_failed) {
+                showToast("The albums were dismissed, but the finished review couldn't be saved. Check the data folder and reload.", "error");
+              } else {
+                showToast(c.hidden ? dismissToast(c.hidden)
+                                   : "Nothing to dismiss on this filter.",
+                          c.hidden ? "success" : "info");
+              }
             })
             .catch(function (why) {
               dismissRest.disabled = false;

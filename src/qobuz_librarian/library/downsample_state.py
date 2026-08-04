@@ -223,12 +223,13 @@ def update_artist(
         scan_artist = scan_artist_for_downsample
 
     name = artist_dir.name
-    fingerprint = artist_fingerprint(artist_dir)
+    fingerprints: dict[str, str] = {}
     try:
+        fingerprint = artist_fingerprint(artist_dir)
+        fingerprints[name] = fingerprint
         filtered = _scan_artist(artist_dir, scan_artist, hidden)
     except Exception as exc:
-        return RefreshResult(
-            [], [name], {name: str(exc)}, False, {name: fingerprint})
+        return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
 
     with _STATE_LOCK:
         state = load()
@@ -326,20 +327,20 @@ def refresh_for_artists(
             break
         error = None
         filtered: list[DownsampleCandidate] = []
-        fingerprint = artist_fingerprint(artist_dir)
-        fingerprints[artist_dir.name] = fingerprint
-        if can_reuse and (previous.get("fingerprints") or {}).get(artist_dir.name) == fingerprint:
-            filtered = [
-                _candidate_from_dict(c)
-                for c in previous.get("candidates", [])
-                if c.get("artist") == artist_dir.name
-            ]
-            candidates.extend(filtered)
-            artists_scanned.append(artist_dir.name)
-            if on_artist is not None:
-                on_artist(artist_dir, filtered, error, idx, total)
-            continue
         try:
+            fingerprint = artist_fingerprint(artist_dir)
+            fingerprints[artist_dir.name] = fingerprint
+            if can_reuse and (previous.get("fingerprints") or {}).get(artist_dir.name) == fingerprint:
+                filtered = [
+                    _candidate_from_dict(c)
+                    for c in previous.get("candidates", [])
+                    if c.get("artist") == artist_dir.name
+                ]
+                candidates.extend(filtered)
+                artists_scanned.append(artist_dir.name)
+                if on_artist is not None:
+                    on_artist(artist_dir, filtered, error, idx, total)
+                continue
             filtered = _scan_artist(artist_dir, scan_artist, hidden)
             candidates.extend(filtered)
             artists_scanned.append(artist_dir.name)

@@ -9739,22 +9739,23 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                 # rewrite ON PURPOSE — the redundancy proof below can never
                 # pass for it, and age alone is its whole contract.
                 candidate = load_backup_result(entry)
-                if (
-                    candidate is not None
-                    and _dispose_retention_candidate(
-                        candidate, allow_smaller_audio=True)
-                ):
+                if candidate is None:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  Keeping undo backup {entry.name!r}: its "
+                        "app-owned recovery record was unavailable."))
+                elif _dispose_retention_candidate(
+                        candidate, allow_smaller_audio=True):
                     n_removed += 1
                 else:
                     log.info(fmt(C.YELLOW,
-                        f"  ⚠  Keeping undo backup {entry.name!r}: its "
-                        "exact ownership receipt could not be verified."))
+                        f"  ⚠  Keeping undo backup {entry.name!r}: safe "
+                        "disposal could not be completed."))
                 continue
             candidate = load_backup_result(entry)
             if candidate is None:
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Keeping redundant backup {entry.name!r}: its "
-                    "exact ownership receipt could not be verified."))
+                    "app-owned recovery record was unavailable."))
                 continue
             if not _backup_safe_to_reap(entry):
                 # We can't PROVE this backup is redundant (origin gone, a track
@@ -9770,8 +9771,8 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                 n_removed += 1
             else:
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Keeping redundant backup {entry.name!r}: its "
-                    "exact ownership receipt could not be verified."))
+                    f"  ⚠  Keeping redundant backup {entry.name!r}: safe "
+                    "disposal could not be completed."))
     try:
         sweep_stamp.parent.mkdir(parents=True, exist_ok=True)
         sweep_stamp.touch()

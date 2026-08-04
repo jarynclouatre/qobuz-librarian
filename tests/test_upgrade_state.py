@@ -294,3 +294,52 @@ def test_artist_error_keeps_last_complete_upgrade_state(
     assert result.errors == {"Artist": "boom"}
     assert state["complete"] is True
     assert [c["title"] for c in state["candidates"]] == ["Album"]
+
+
+def test_fingerprint_failure_is_recorded_without_aborting_upgrade_refresh(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.quality import upgrade_state
+
+    monkeypatch.setattr(cfg, "UPGRADE_STATE_FILE", tmp_path / "upgrade.json")
+    denied = tmp_path / "Denied"
+    readable = tmp_path / "Readable"
+    denied.mkdir()
+    readable.mkdir()
+
+    def fingerprint(path):
+        if path == denied:
+            raise PermissionError("cannot read album folder")
+        return "readable-fingerprint"
+
+    monkeypatch.setattr(upgrade_state, "artist_fingerprint", fingerprint)
+    result = upgrade_state.refresh_for_artists(
+        [denied, readable],
+        token="tok",
+        args=SimpleNamespace(),
+        capped={},
+        scan_artist=lambda path: (
+            [_upgrade_candidate(title="Readable Album")]
+            if path == readable else []
+        ),
+        persist=False,
+    )
+
+    assert result.complete is False
+    assert sorted(result.artists_scanned) == ["Denied", "Readable"]
+    assert result.errors == {"Denied": "cannot read album folder"}
+    assert [candidate["title"] for candidate in result.candidates] == [
+        "Readable Album",
+    ]
+    assert result.fingerprints == {"Readable": "readable-fingerprint"}
+
+    targeted = upgrade_state.update_artist(
+        denied,
+        token="tok",
+        args=SimpleNamespace(),
+        capped={},
+        scan_artist=lambda _path: (_ for _ in ()).throw(
+            AssertionError("fingerprint failure must stop this artist scan")),
+    )
+    assert targeted.complete is False
+    assert targeted.errors == {"Denied": "cannot read album folder"}

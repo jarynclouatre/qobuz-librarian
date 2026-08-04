@@ -14,12 +14,12 @@
     <label class="ql-review-artist-hit">
       <input type="checkbox" class="ql-checkbox ql-review-artist-check" data-artist-select value="{{ artist }}"
              {% if items and group_selected == (items | length) %}checked{% endif %}
-             aria-label="Select shown {{ labels.review_item_plural(job) }} by {{ artist or 'this artist' }} to {{ job.review_verb | lower }}">
+             aria-label="Select shown {{ labels.review_item_plural(job) }} by {{ artist or 'this artist' }}">
     </label>
     {% endif %}
     <span class="ql-review-title">
       <span class="ql-review-title-main">{{ artist or 'Artist not recorded' }}</span>
-      <span class="ql-review-title-meta">{% if review_tab|default('') == 'gaps' %}{{ items | length }} Gap Fill candidate{{ 's' if (items | length) != 1 }}{% elif review_tab|default('') == 'missing' %}{{ items | length }} missing album{{ 's' if (items | length) != 1 }}{% else %}{{ labels.review_count(job, items | length) }}{% endif %}</span>
+      <span class="ql-review-title-meta">{% if review_tab|default('') == 'gaps' %}{{ labels.format_count(items | length) }} Gap Fill candidate{{ 's' if (items | length) != 1 }}{% elif review_tab|default('') == 'missing' %}{{ labels.format_count(items | length) }} missing album{{ 's' if (items | length) != 1 }}{% else %}{{ labels.review_count(job, items | length) }}{% endif %}</span>
     </span>
   </summary>
   {% if lazy | default(false) %}

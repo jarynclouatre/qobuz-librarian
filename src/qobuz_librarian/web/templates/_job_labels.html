@@ -1,10 +1,14 @@
+{% macro format_count(n) -%}
+  {{- "{:,}".format(n | int) -}}
+{%- endmacro %}
+
 {% macro review_title(job) -%}
   {%- if job.execute_kind == 'new_releases' -%}
     New-release check
   {%- elif job.execute_kind == 'upgrade' -%}
     Upgrade candidates
   {%- elif job.execute_kind == 'downsample' -%}
-    Downsample scan
+    Downsample candidates
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
     Gap Fill scan
   {%- elif job.execute_kind == 'repair' -%}
@@ -20,21 +24,21 @@
 
 {% macro review_detail(job, n) -%}
   {%- if job.execute_kind == 'new_releases' -%}
-    {{ n }} new release{{ 's' if n != 1 }} found
+    {{ format_count(n) }} new release{{ 's' if n != 1 }} found
   {%- elif job.execute_kind == 'upgrade' -%}
-    {{ n }} quality upgrade{{ 's' if n != 1 }} found
+    {{ format_count(n) }} quality upgrade{{ 's' if n != 1 }} found
   {%- elif job.execute_kind == 'downsample' -%}
-    {{ n }} album{{ 's' if n != 1 }} can be downsampled
+    {{ format_count(n) }} album{{ 's' if n != 1 }} can be downsampled
   {%- elif job.execute_kind == 'repair' -%}
-    {{ n }} repair option{{ 's' if n != 1 }} found
+    {{ format_count(n) }} repair option{{ 's' if n != 1 }} found
   {%- elif job.execute_kind == 'migration' -%}
     Migration preview ready
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
-    {{ n }} Gap Fill candidate{{ 's' if n != 1 }} found
+    {{ format_count(n) }} Gap Fill candidate{{ 's' if n != 1 }} found
   {%- elif job.execute_kind == 'library' -%}
-    {{ n }} candidate{{ 's' if n != 1 }} found
+    {{ format_count(n) }} candidate{{ 's' if n != 1 }} found
   {%- else -%}
-    {{ n }} result{{ 's' if n != 1 }} found
+    {{ format_count(n) }} result{{ 's' if n != 1 }} found
   {%- endif -%}
 {%- endmacro %}
 
@@ -79,11 +83,11 @@
 {%- endmacro %}
 
 {% macro review_count(job, n) -%}
-  {{ n }} {{ review_item_singular(job) if n == 1 else review_item_plural(job) }}
+  {{ format_count(n) }} {{ review_item_singular(job) if n == 1 else review_item_plural(job) }}
 {%- endmacro %}
 
 {% macro review_summary_count(job, total, artists) -%}
-  {{ review_count(job, total) }} across {{ artists }} artist{{ 's' if artists != 1 }}
+  {{ review_count(job, total) }} across {{ format_count(artists) }} artist{{ 's' if artists != 1 }}
 {%- endmacro %}
 
 {% macro review_empty_label(job) -%}

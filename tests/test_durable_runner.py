@@ -535,6 +535,16 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         ),
     )
 
+    class Prepared:
+        errors = 2
+        saved_bytes = 512
+        flush_warnings = 1
+        cancelled = True
+
+        def __iter__(self):
+            yield []
+            yield 1
+
     result = durable_runner.execute_durable_new_album(
         queue,
         item,
@@ -543,6 +553,7 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         origin=CompletionOrigin(CompletionOriginKind.CLI, "album queue"),
         mode="album",
         authority=authority,
+        prepare_staged=lambda _dirs, _checkpoint: Prepared(),
     )
 
     assert result.status is durable_runner.DurableAlbumStatus.COMPLETE
@@ -550,3 +561,8 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     assert observed["live_queue"] and observed["live_queue"][0] is True
     assert queue == []
     assert queue_state.list_queue_journals() == ()
+    assert item["resampled_n"] == 1
+    assert item["downsample_errors"] == 2
+    assert item["downsample_saved_bytes"] == 512
+    assert item["downsample_flush_warnings"] == 1
+    assert item["downsample_cancelled"] is True

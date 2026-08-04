@@ -36,7 +36,7 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import (
@@ -816,7 +816,7 @@ def _prepare_staging_tags(
     Unreadable or untagged files move by exact identity to private staging
     recovery, never to an inferred public pathname. The rest get whitespace
     and quotes trimmed from the tags Beets uses to build library paths.
-    Returns the list of recovery paths.
+    Returns the list of original paths that were set aside.
 
     Without mutagen every read fails; rather than quarantine the whole download
     as "untagged" and hand beets an empty dir, leave the files untouched.
@@ -860,7 +860,7 @@ def _prepare_staging_tags(
         flacs = [f for f in flacs if not _under_retry_dir(f)]
     except OSError:
         return moved
-    quarantine = None
+    uncertain_quarantines = 0
     for f in flacs:
         if authority_check is not None:
             authority_check()
@@ -926,8 +926,9 @@ def _prepare_staging_tags(
             try:
                 dest = quarantine_file(receipt, ".untagged")
                 if dest is not None:
-                    quarantine = dest.parent
                     moved.append(f)
+                    if not dest.durable:
+                        uncertain_quarantines += 1
                 else:
                     vlog(f"couldn't safely quarantine {f.name}: it changed")
             except OSError as e:
@@ -994,11 +995,21 @@ def _prepare_staging_tags(
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Set aside {len(moved)} untagged file(s) → {quarantine}\n"
-                "     (cancelled-rip leftovers, or files needing a manual retag; "
-                "not deleted).",
+                f"  ⚠  Set aside {len(moved)} untagged file(s) in private "
+                "staging recovery.\n"
+                "     (each file has its own recovery record; cancelled-rip "
+                "leftovers and files needing a manual retag were not deleted).",
             )
         )
+        if uncertain_quarantines:
+            log.info(
+                fmt(
+                    C.YELLOW,
+                    f"  ⚠  Directory sync could not be confirmed for "
+                    f"{uncertain_quarantines} recovery file(s); their current "
+                    "private locations remain recorded.",
+                )
+            )
     if managed_by_path is not None:
         for record in managed_by_path.values():
             if Path(record["path"]).suffix.lower() == ".flac":
@@ -3956,8 +3967,9 @@ def _open_ownership_parent(root_fd, parts):
     try:
         for part in parts[:-1]:
             child = _open_ownership_dir(part, dir_fd=current)
-            os.close(current)
+            closing = current
             current = child
+            os.close(closing)
         return current
     except Exception:
         os.close(current)
@@ -6435,8 +6447,8 @@ def _beets_direct_guarded(
             log.info(
                 fmt(
                     C.GRAY,
-                    f"     {audio_after} staged track(s) weren't imported "
-                    "(likely duplicates or unreadable); left in staging.",
+                    f"     {audio_after} staged track(s) were not imported "
+                    "and remain in staging.",
                 )
             )
         return True, "ok"
@@ -7063,6 +7075,216 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
         _close_beets_database_anchor(database_anchor)
 
 
+def _receipt_audio_paths(receipt, root):
+    """Resolve the audio paths sealed by one backup or replacement receipt."""
+    if not isinstance(receipt, dict):
+        return None
+    try:
+        files = receipt["tree"]["files"]
+        if not isinstance(files, dict):
+            return None
+        root = _catalogue_item_path(Path(root) / "placeholder").parent
+        paths = []
+        for relative_text in files:
+            if type(relative_text) is not str:
+                return None
+            relative = PurePosixPath(relative_text)
+            if (
+                not relative_text
+                or relative.is_absolute()
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or relative.suffix.lower() not in cfg.AUDIO_EXTS
+            ):
+                continue
+            path = _catalogue_item_path(
+                root.joinpath(*relative.parts)
+            )
+            if path == root or root not in path.parents:
+                return None
+            paths.append(path)
+        paths = tuple(sorted(set(paths)))
+        return paths if paths else None
+    except (OSError, TypeError, ValueError, KeyError):
+        return None
+
+
+def _backup_receipt(value):
+    if isinstance(value, dict):
+        return value.get("receipt")
+    return getattr(value, "receipt", None)
+
+
+def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
+    """Retire exact old rows before disposing a moved-aside backup."""
+    backup_receipt = _backup_receipt(backup)
+    try:
+        old_root = backup_receipt["origin"]
+        old_paths = _receipt_audio_paths(backup_receipt, old_root)
+        replacement_paths = _receipt_audio_paths(
+            replacement_receipt, replacement_dir
+        )
+        if old_paths is None or replacement_paths is None:
+            return False
+        old_paths = frozenset(old_paths)
+        replacement_paths = frozenset(replacement_paths)
+        if (
+            len(old_paths) > 4096
+            or len(replacement_paths) > 4096
+            or old_paths & replacement_paths
+        ):
+            return False
+        if any(os.path.lexists(path) for path in old_paths):
+            return False
+        if any(
+            path.is_symlink() or not path.is_file()
+            for path in replacement_paths
+        ):
+            return False
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+
+    database_anchor = None
+    transaction = None
+    try:
+        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
+        timeout = float(timeout) if timeout and timeout > 0 else 5.0
+        database_anchor = _open_beets_database_anchor()
+        if database_anchor is None or database_anchor["descriptor"] is None:
+            return False
+        transaction = AtomicSQLiteWrite(
+            database_anchor,
+            _beets_database_anchor_matches,
+            connect=sqlite3.connect,
+            timeout=timeout,
+        )
+        connection = transaction.open()
+        connection.execute("BEGIN IMMEDIATE")
+        (
+            album_columns,
+            item_columns,
+            album_attribute_columns,
+            item_attribute_columns,
+        ) = _replacement_catalogue_columns(connection)
+        item_id_index = item_columns.index("id")
+        item_album_index = item_columns.index("album_id")
+        item_path_index = item_columns.index("path")
+        retiring_ids = []
+        retiring_album_ids = set()
+        replacement_rows = {path: [] for path in replacement_paths}
+        for row in connection.execute(
+            f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
+            "FROM items ORDER BY id"
+        ):
+            item_id = row[item_id_index]
+            path = _catalogue_item_path(row[item_path_index])
+            if path in old_paths:
+                if type(item_id) is not int or item_id <= 0:
+                    raise sqlite3.DatabaseError("invalid beets item identity")
+                retiring_ids.append(item_id)
+                album_id = row[item_album_index]
+                if album_id is not None:
+                    if type(album_id) is not int or album_id <= 0:
+                        raise sqlite3.DatabaseError("invalid beets album identity")
+                    retiring_album_ids.add(album_id)
+            if path in replacement_rows:
+                replacement_rows[path].append(item_id)
+        if len(retiring_ids) > 4096 or any(
+            len(item_ids) != 1 for item_ids in replacement_rows.values()
+        ):
+            raise sqlite3.IntegrityError("exact Beets replacement proof failed")
+        if not retiring_ids:
+            connection.rollback()
+            return True
+
+        placeholders = ",".join("?" for _ in retiring_ids)
+        expected_item_attributes = _consolidation_rows_for_ids(
+            connection,
+            "item_attributes",
+            item_attribute_columns,
+            "entity_id",
+            retiring_ids,
+        )
+        deleted_attributes = connection.execute(
+            f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
+            retiring_ids,
+        )
+        if deleted_attributes.rowcount != len(expected_item_attributes):
+            raise sqlite3.IntegrityError("Beets item metadata changed")
+        deleted_items = connection.execute(
+            f"DELETE FROM items WHERE id IN ({placeholders})",
+            retiring_ids,
+        )
+        if deleted_items.rowcount != len(retiring_ids):
+            raise sqlite3.IntegrityError("Beets items changed")
+
+        empty_album_ids = []
+        for album_id in sorted(retiring_album_ids):
+            if connection.execute(
+                "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
+            ).fetchone() is None:
+                empty_album_ids.append(album_id)
+        if empty_album_ids:
+            placeholders = ",".join("?" for _ in empty_album_ids)
+            expected_album_attributes = _consolidation_rows_for_ids(
+                connection,
+                "album_attributes",
+                album_attribute_columns,
+                "entity_id",
+                empty_album_ids,
+            )
+            deleted_attributes = connection.execute(
+                f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})",
+                empty_album_ids,
+            )
+            if deleted_attributes.rowcount != len(expected_album_attributes):
+                raise sqlite3.IntegrityError("Beets album metadata changed")
+            deleted_albums = connection.execute(
+                f"DELETE FROM albums WHERE id IN ({placeholders})",
+                empty_album_ids,
+            )
+            if deleted_albums.rowcount != len(empty_album_ids):
+                raise sqlite3.IntegrityError("Beets albums changed")
+
+        def validate(current):
+            if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                return False
+            for raw_path, in current.execute("SELECT path FROM items"):
+                if _catalogue_item_path(raw_path) in old_paths:
+                    return False
+            counts = {path: 0 for path in replacement_paths}
+            for raw_path, in current.execute("SELECT path FROM items"):
+                path = _catalogue_item_path(raw_path)
+                if path in counts:
+                    counts[path] += 1
+            return all(count == 1 for count in counts.values())
+
+        transaction.commit_and_publish(
+            lambda: _beets_database_anchor_matches(database_anchor), validate
+        )
+        clear_scan_caches()
+        return True
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            raise
+        outcome = (
+            "the committed catalogue change may already be visible"
+            if transaction is not None and transaction.published
+            else "leaving the catalogue unchanged"
+        )
+        log.info(
+            fmt(
+                C.YELLOW,
+                f"  ⚠  Couldn't safely retire the backup's Beets entries ({exc}); "
+                f"{outcome}.",
+            )
+        )
+        return False
+    finally:
+        if transaction is not None:
+            transaction.close()
+        _close_beets_database_anchor(database_anchor)
+
+
 def _fold_duplicate_album_group(
     connection,
     album_ids,
@@ -7678,11 +7900,15 @@ def staging_preflight(args):
         )
 
         quarantined = 0
+        uncertain_quarantines = 0
         for receipt in sealed_sources:
             if capture_file(receipt.path, expected=receipt.identity) is None:
                 continue
-            if quarantine_file(receipt, ".unimported") is not None:
+            result = quarantine_file(receipt, ".unimported")
+            if result is not None:
                 quarantined += 1
+                if not result.durable:
+                    uncertain_quarantines += 1
         leftover = [
             f for f in cfg.STAGING_DIR.rglob("*") if f.is_file() and not _under_retry_dir(f)
         ]
@@ -7692,6 +7918,15 @@ def staging_preflight(args):
                     C.YELLOW,
                     f"  ⚠  Set aside {quarantined} exact unimported file(s) under "
                     f"{cfg.BEETS_RETRY_DIR}/.",
+                )
+            )
+        if uncertain_quarantines:
+            log.info(
+                fmt(
+                    C.YELLOW,
+                    f"  ⚠  Directory sync could not be confirmed for "
+                    f"{uncertain_quarantines} recovery file(s); their current "
+                    "private locations remain recorded.",
                 )
             )
         if leftover:

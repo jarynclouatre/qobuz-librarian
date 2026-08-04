@@ -2,6 +2,7 @@
 import os
 import shutil
 import time
+from pathlib import Path
 
 import pytest
 
@@ -628,6 +629,45 @@ def test_cleanup_old_upgrade_backups_respects_dates_and_throttle(tmp_path, monke
     assert cleanup_old_upgrade_backups(retention_days=1) == 0
     assert old.exists()
     assert cleanup_old_upgrade_backups(retention_days=1, force=True) == 1
+
+
+def test_backup_retention_names_the_actual_refusal_stage(tmp_path, monkeypatch):
+    import qobuz_librarian.library.backup as bk
+
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    unreadable = backup_root / "20200101_000000_unreadable"
+    disposal_failed = backup_root / "20200101_000001_disposal_failed"
+    unreadable.mkdir()
+    disposal_failed.mkdir()
+    (unreadable / "01.flac").write_bytes(b"unreadable record")
+    (disposal_failed / "01.flac").write_bytes(b"retained audio")
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", backup_root)
+    monkeypatch.setattr(bk.cfg, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(
+        bk,
+        "load_backup_result",
+        lambda path: object() if Path(path) == disposal_failed else None,
+    )
+    monkeypatch.setattr(bk, "_backup_safe_to_reap", lambda _path: True)
+    monkeypatch.setattr(bk, "_dispose_retention_candidate", lambda _candidate: False)
+    messages = []
+    monkeypatch.setattr(bk.log, "info", messages.append)
+
+    assert bk.cleanup_old_upgrade_backups(retention_days=1, force=True) == 0
+
+    assert unreadable.exists() and disposal_failed.exists()
+    assert any(
+        "unreadable" in message
+        and "app-owned recovery record was unavailable" in message
+        for message in messages
+    )
+    assert any(
+        "disposal_failed" in message
+        and "safe disposal could not be completed" in message
+        for message in messages
+    )
+    assert not any("ownership receipt could not be verified" in message for message in messages)
 
 
 

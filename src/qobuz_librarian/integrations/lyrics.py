@@ -23,6 +23,54 @@ from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
 HAVE_LYRIC_FETCH = lyric_fetch.FLAC is not None
 
 
+_LYRIC_RESOLVED_OUTCOMES = {
+    "wrote-synced",
+    "wrote-plain",
+    "dry:wrote-synced",
+    "dry:wrote-plain",
+    "already-synced",
+    "already-plain",
+    "kept-existing-plain",
+    "not-found",
+}
+_LYRIC_QUEUED_OUTCOMES = {"providers-unavailable", "unsafe-path"}
+
+
+def _fetch_outcome_summary(counts, *, expected=None):
+    """Split fetch tallies into resolved, queued, and failed outcomes."""
+    values = {
+        str(outcome): max(0, int(count))
+        for outcome, count in (counts or {}).items()
+        if outcome not in {"stopped", "stop-total"}
+    }
+    resolved = sum(values.get(outcome, 0) for outcome in _LYRIC_RESOLVED_OUTCOMES)
+    queued = sum(values.get(outcome, 0) for outcome in _LYRIC_QUEUED_OUTCOMES)
+    processed = sum(values.values())
+    failed = max(0, processed - resolved - queued)
+    if expected is not None:
+        failed = max(failed, max(0, int(expected) - resolved - queued))
+    return {
+        "resolved": resolved,
+        "queued": queued,
+        "failed": failed,
+    }
+
+
+def summarize_lyric_retry(counts, *, attempted, remaining):
+    """Reconcile retry outcomes without treating dropped errors as success."""
+    outcomes = _fetch_outcome_summary(counts)
+    attempted = max(0, int(attempted))
+    remaining = min(attempted, max(0, int(remaining)))
+    removed = attempted - remaining
+    resolved = min(removed, outcomes["resolved"])
+    failed = max(outcomes["failed"], removed - resolved)
+    return {
+        "resolved": resolved,
+        "failed": failed,
+        "remaining": remaining,
+    }
+
+
 # ── Lyric hook ────────────────────────────────────────────────────────────────
 
 
@@ -78,21 +126,32 @@ def _run_lyric_hook(album_dir):
     synced = counts.get("wrote-synced", 0)
     plain = counts.get("wrote-plain", 0)
     nofnd = counts.get("not-found", 0)
-    already = counts.get("already-synced", 0)
+    already = sum(
+        counts.get(outcome, 0)
+        for outcome in (
+            "already-synced", "already-plain", "kept-existing-plain"
+        )
+    )
     # Files where every provider was unavailable when their turn came up. The
     # fetcher tallies these under "providers-unavailable" and marks the file
     # status="transient" in its state file; we surface the count and queue them
     # for retry on next launch.
     unavailable = counts.get("providers-unavailable", 0)
 
-    if synced or plain or nofnd or unavailable:
-        msg = (
-            f"  ✓  lyrics: {synced} synced, {plain} plain, "
-            f"{already} already-synced, {nofnd} not found"
-        )
-        if unavailable:
-            msg += fmt(C.YELLOW, f"  ({unavailable} provider-unavail → queued for retry)")
-        log.info(fmt(C.GREEN, msg))
+    outcomes = _fetch_outcome_summary(counts, expected=len(flacs))
+    failed = outcomes["failed"]
+    msg = (
+        f"lyrics: {synced} synced, {plain} plain, "
+        f"{already} already, {nofnd} not found"
+    )
+    if unavailable:
+        msg += f"; {unavailable} provider-unavailable and queued for retry"
+    if failed:
+        msg += f"; {failed} failed"
+    if failed or unavailable:
+        log.info(fmt(C.YELLOW, f"  ⚠  {msg}."))
+    else:
+        log.info(fmt(C.GREEN, f"  ✓  {msg}."))
 
     # Capture tag signatures for transient files. The state lookup uses
     # staging paths (matches what lyric_fetch just wrote); the caller
@@ -608,6 +667,8 @@ def write_post_import_sidecars(
     written = 0
     kept = 0
     stripped = 0
+    failed = 0
+    strip_failed = 0
     for fp, parent_fd, parent_guard, expected_track in _iter_post_import_flacs(
         album_dirs, owned_tracks, seen
     ):
@@ -618,6 +679,7 @@ def write_post_import_sidecars(
         directory = getattr(os, "O_DIRECTORY", None)
         if nofollow is None or directory is None:
             vlog("sidecar: safe no-follow file operations unavailable")
+            failed += 1
             continue
         try:
             parent_identity = _directory_identity(os.fstat(parent_fd))
@@ -652,6 +714,7 @@ def write_post_import_sidecars(
             f = lyric_fetch.FLAC(f"/proc/self/fd/{track_fd}")
         except Exception as e:
             vlog(f"sidecar: FLAC open failed {fp}: {e}")
+            failed += 1
             if track_fd is not None:
                 os.close(track_fd)
             continue
@@ -661,6 +724,7 @@ def write_post_import_sidecars(
                 continue
             if not _held_track_is_named(fp, parent_fd, track_fd, track_identity, parent_guard):
                 vlog(f"sidecar: track changed before write {fp}")
+                failed += 1
                 continue
             creation = {}
             sidecar_identity_receipt = {}
@@ -705,9 +769,11 @@ def write_post_import_sidecars(
                     directory_mutated = True
             if sidecar_error is not None:
                 vlog(f"sidecar: write failed {fp}: {sidecar_error}")
+                failed += 1
                 continue
             if not track_unchanged:
                 vlog(f"sidecar: track changed during write {fp}")
+                failed += 1
                 continue
             if sidecar_written:
                 written += 1
@@ -803,6 +869,7 @@ def write_post_import_sidecars(
                             )
                         stripped += 1
                 except Exception as e:
+                    strip_failed += 1
                     action = "wrote" if sidecar_written else "kept"
                     log.info(
                         fmt(
@@ -853,20 +920,29 @@ def write_post_import_sidecars(
                     pass
             os.close(track_fd)
     ready = written + kept
-    if ready:
+    if ready or failed:
         actions = []
         if written:
             actions.append(f"wrote {written} .lrc sidecar(s)")
         if kept:
             actions.append(f"kept {kept} better existing .lrc sidecar(s)")
+        if failed:
+            noun = "sidecar" if failed == 1 else "sidecars"
+            actions.append(f"{failed} {noun} failed")
         suffix = ""
-        if strip_tag:
+        if strip_tag and ready:
             suffix = (
                 " (embedded tags removed)"
                 if stripped == ready
                 else f" (embedded tag removal confirmed for {stripped} of {ready})"
             )
-        log.info(fmt(C.GREEN, f"  ✓  lyrics: {'; '.join(actions)}{suffix}."))
+            if strip_failed:
+                noun = "removal" if strip_failed == 1 else "removals"
+                suffix += f"; {strip_failed} tag {noun} failed"
+        warning = bool(failed or strip_failed)
+        marker = "⚠" if warning else "✓"
+        colour = C.YELLOW if warning else C.GREEN
+        log.info(fmt(colour, f"  {marker}  lyrics: {'; '.join(actions)}{suffix}."))
 
 
 def _record_post_import_lyric_retry(post_paths):
@@ -1120,9 +1196,10 @@ def offer_resume_lyric_retry(args):
             ans = ""
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN, f"\n  ⟳  Retrying lyrics on {len(existing)} file(s)…"))
+            counts = {}
             try:
                 paths_obj = [Path(p) for p in existing]
-                lyric_fetch.fetch_for_paths(
+                counts = lyric_fetch.fetch_for_paths(
                     paths_obj,
                     owned_root=cfg.MUSIC_ROOT,
                     log=log,
@@ -1144,7 +1221,25 @@ def offer_resume_lyric_retry(args):
             # still-transient stay.
             _refresh_lyric_retry(paths_obj)
             remaining = load_lyric_retry()
-            if remaining:
+            attempted_paths = {str(path) for path in paths_obj}
+            attempted_remaining = sum(
+                1 for path in remaining if path in attempted_paths
+            )
+            outcome = summarize_lyric_retry(
+                counts,
+                attempted=len(existing),
+                remaining=attempted_remaining,
+            )
+            if outcome["failed"]:
+                log.info(
+                    fmt(
+                        C.YELLOW,
+                        f"  ⚠  Retry finished: {outcome['resolved']} resolved; "
+                        f"{outcome['failed']} failed and need review; "
+                        f"{outcome['remaining']} still queued for retry.",
+                    )
+                )
+            elif remaining:
                 log.info(
                     fmt(
                         C.YELLOW,

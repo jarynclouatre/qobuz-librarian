@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 
 from qobuz_librarian.completion import RecoveryOwner
+from qobuz_librarian.integrations.beets import retire_backup_beets_entries
 from qobuz_librarian.library.backup import (
     capture_album_source_receipt,
     carry_backup_companions,
@@ -171,7 +172,7 @@ def prepare_library_backup_settlement(
             _pin(
                 legacy_backup,
                 owner_data,
-                "queue backup kept — legacy disposal state could not be sealed",
+                "queue backup kept; legacy disposal state could not be sealed",
                 authority_check,
             )
             return _attention(
@@ -209,7 +210,7 @@ def prepare_library_backup_settlement(
         _pin(
             backup,
             owner_data,
-            "queue backup kept — source retirement did not finish exactly",
+            "queue backup kept; source retirement did not finish exactly",
             authority_check,
         )
         return _attention(journal, "library-backup-incomplete")
@@ -220,7 +221,7 @@ def prepare_library_backup_settlement(
         _pin(
             backup,
             owner_data,
-            "queue backup kept — replacement path was unavailable",
+            "queue backup kept; replacement path was unavailable",
             authority_check,
         )
         return _attention(journal, "library-backup-replacement-unavailable")
@@ -229,7 +230,7 @@ def prepare_library_backup_settlement(
         _pin(
             backup,
             owner_data,
-            "queue backup kept — replacement scope could not be verified",
+            "queue backup kept; replacement scope could not be verified",
             authority_check,
         )
         return _attention(journal, "library-backup-replacement-unverified")
@@ -240,7 +241,7 @@ def prepare_library_backup_settlement(
         _pin(
             backup,
             owner_data,
-            "queue backup kept — replacement did not prove the original safe",
+            "queue backup kept; replacement did not prove the original safe",
             authority_check,
         )
         return _attention(journal, "library-backup-replacement-unverified")
@@ -251,7 +252,7 @@ def prepare_library_backup_settlement(
         _pin(
             backup,
             owner_data,
-            "queue backup kept — replacement could not be held exactly",
+            "queue backup kept; replacement could not be held exactly",
             authority_check,
         )
         return _attention(journal, "library-backup-replacement-unavailable")
@@ -269,7 +270,7 @@ def prepare_library_backup_settlement(
             _pin(
                 backup,
                 owner_data,
-                "queue backup kept — companion files could not be carried exactly",
+                "queue backup kept; companion files could not be carried exactly",
                 authority_check,
             )
             return _attention(journal, "library-backup-companions-unsettled")
@@ -278,7 +279,7 @@ def prepare_library_backup_settlement(
             _pin(
                 backup,
                 owner_data,
-                "queue backup kept — replacement changed during companion carry",
+                "queue backup kept; replacement changed during companion carry",
                 authority_check,
             )
             return _attention(journal, "library-backup-replacement-unverified")
@@ -294,7 +295,7 @@ def prepare_library_backup_settlement(
         _pin(
             backup,
             owner_data,
-            "queue backup kept — exact disposal state could not be sealed",
+            "queue backup kept; exact disposal state could not be sealed",
             authority_check,
         )
         return _attention(journal, "library-backup-disposal-unsettled")
@@ -351,6 +352,42 @@ def finish_library_backup_settlement(
         return _attention(journal, "library-backup-replacement-unverified")
 
     authority_check()
+    current_receipt = capture_album_source_receipt(replacement)
+    authority_check()
+    if current_receipt != data["replacement_receipt"]:
+        backup = load_library_backup_record(
+            data["carrier"],
+            expected_owner=owner_data,
+        )
+        _pin(
+            backup,
+            owner_data,
+            "queue backup kept; replacement changed before final disposal",
+            authority_check,
+        )
+        return _attention(journal, "library-backup-replacement-changed")
+
+    backup = load_library_backup_record(
+        data["carrier"],
+        expected_owner=owner_data,
+    )
+    authority_check()
+    if not retire_backup_beets_entries(
+        data["carrier"],
+        replacement,
+        data["replacement_receipt"],
+    ):
+        authority_check()
+        _pin(
+            backup,
+            owner_data,
+            "queue backup kept; the replaced Beets entries could not be "
+            "retired safely",
+            authority_check,
+        )
+        return _attention(journal, "library-backup-catalogue-unsettled")
+    authority_check()
+
     disposal_reconciliation = reconcile_library_backup_disposal(
         data["carrier"],
         data["disposal"],
@@ -366,27 +403,6 @@ def finish_library_backup_settlement(
             reason = f"{reason}:{location}"
         return _attention(journal, reason)
 
-    authority_check()
-    current_receipt = capture_album_source_receipt(replacement)
-    authority_check()
-    if current_receipt != data["replacement_receipt"]:
-        backup = load_library_backup_record(
-            data["carrier"],
-            expected_owner=owner_data,
-        )
-        _pin(
-            backup,
-            owner_data,
-            "queue backup kept — replacement changed before final disposal",
-            authority_check,
-        )
-        return _attention(journal, "library-backup-replacement-changed")
-
-    backup = load_library_backup_record(
-        data["carrier"],
-        expected_owner=owner_data,
-    )
-    authority_check()
     if backup is None:
         if not library_backup_record_absent(
             data["carrier"],
@@ -413,7 +429,7 @@ def finish_library_backup_settlement(
             _pin(
                 backup,
                 owner_data,
-                "queue backup kept — source retirement did not finish exactly",
+                "queue backup kept; source retirement did not finish exactly",
                 authority_check,
             )
             return _attention(journal, "library-backup-incomplete")
@@ -431,7 +447,7 @@ def finish_library_backup_settlement(
             _pin(
                 backup,
                 owner_data,
-                "queue backup kept — final exact replacement proof did not hold",
+                "queue backup kept; final exact replacement proof did not hold",
                 authority_check,
             )
             return _attention(journal, "library-backup-disposal-unsettled")

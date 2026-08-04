@@ -252,16 +252,6 @@ def run_migrate_mode(args):
         execution_abort.reraise()
 
     pruned = getattr(result, "pruned", 0)
-
-    log.info("")
-    log.info(fmt(C.GREEN,
-        f"  ✓  {result.copied} file(s) {'moved' if in_place else 'copied'}."))
-    if result.skipped:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  {result.skipped} skipped (destination already existed)."))
-    if getattr(result, "companions", 0):
-        log.info(fmt(C.GREEN,
-            f"  ✓  {result.companions} cover/sidecar file(s) carried."))
     companion_outcomes = getattr(result, "companion_outcomes", ())
     companion_skipped = sum(
         status == engine.SKIPPED
@@ -269,6 +259,33 @@ def run_migrate_mode(args):
     companion_failed = sum(
         status == engine.FAILED
         for _source, _destination, status, _reason in companion_outcomes)
+    recoveries = tuple(getattr(result, "recoveries", ()))
+    has_problem = bool(result.failed or companion_failed or recoveries)
+
+    log.info("")
+    if has_problem:
+        outcome = (
+            "Migration stopped with problems."
+            if result.cancelled else "Migration needs attention."
+        )
+        log.info(fmt(C.RED, f"  ✗  {outcome}"))
+    elif result.cancelled:
+        log.info(fmt(C.YELLOW,
+            "  ⚠  Migration stopped early; the destination is incomplete."))
+    else:
+        log.info(fmt(C.GREEN,
+            f"  ✓  {result.copied} file(s) "
+            f"{'moved' if in_place else 'copied'}."))
+    if has_problem or result.cancelled:
+        log.info(fmt(C.GRAY,
+            f"     {result.copied} file(s) "
+            f"{'moved' if in_place else 'copied'} before the run ended."))
+    if result.skipped:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  {result.skipped} skipped (destination already existed)."))
+    if getattr(result, "companions", 0):
+        log.info(fmt(C.GREEN,
+            f"  ✓  {result.companions} cover/sidecar file(s) carried."))
     if companion_skipped:
         log.info(fmt(C.YELLOW,
             f"  ⚠  {companion_skipped} cover/sidecar file(s) already existed."))
@@ -293,7 +310,7 @@ def run_migrate_mode(args):
     if result.cancelled:
         log.info(fmt(C.YELLOW,
             "  ⚠  Stopped early; the destination holds a partial copy."))
-    for recovery in getattr(result, "recoveries", ()):
+    for recovery in recoveries:
         log.info(fmt(C.RED,
             "  ⚠  Recovery retained at "
             f"{recovery.get('location', 'an unknown location')}. "
@@ -306,7 +323,6 @@ def run_migrate_mode(args):
     # A run that lost files, stopped early, or left a recovery behind is not a
     # success, however much of it landed. A script chaining off this must see
     # the difference.
-    if (result.failed or companion_failed or result.cancelled
-            or getattr(result, "recoveries", ())):
+    if result.failed or companion_failed or result.cancelled or recoveries:
         return EXIT_GENERAL
     return 0

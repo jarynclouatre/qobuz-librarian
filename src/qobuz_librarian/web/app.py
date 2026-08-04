@@ -2919,23 +2919,27 @@ def _fold_into_parked_library_review(job):
             parked = other
     if parked is None:
         return
-    from qobuz_librarian.web import flows, job_persistence, review_badges
+    from qobuz_librarian.web import flows, review_badges
     with job._lock:
         cands = list(job.candidates)
-    with parked._lock:
-        before = {flows.fold_key(c) for c in parked.candidates}
     folded = flows.fold_new_candidates(parked, cands)
+    if folded is False:
+        job.status = job_mgr.JobStatus.FAILED
+        job.error = (
+            "The refreshed Library review couldn't be saved to the data "
+            "folder. Its existing picks are untouched. Check the data "
+            "volume, then refresh again."
+        )
+        job.summary = "Library refresh stopped because its results could not be saved."
+        job.push_line(job.error)
+        return
     if folded is None:
         # The review was approved or discarded while the refresh ran, so leave
         # the scan's candidates alone so they park as their own review.
         return
-    _, updated = folded
-    # Count what the user's review actually gained. Complete ownership is
+    # Use the counts from the locked mutation itself. Complete ownership is
     # reconciled at approval, when exact edition tracks can be compared safely.
-    with parked._lock:
-        after = {flows.fold_key(c) for c in parked.candidates}
-    added = len(after - before)
-    job_persistence.persist(parked)
+    added, updated = folded
     # Open review pages re-fetch on this nudge; without it the fold is
     # invisible until a manual reload (and "Refreshing…" never resolves).
     parked.notify_review_changed()
@@ -6790,7 +6794,10 @@ async def _restore_hidden(request, scope, redirect):
         loop = asyncio.get_running_loop()
         rejoined = await loop.run_in_executor(
             None, lambda: flows.refold_restored_missing(artists, fingerprints))
-        if rejoined is None:
+        if rejoined is False:
+            msg = ("Restored, but the open Library review couldn't be saved. "
+                   "Check the data folder, then refresh the review.")
+        elif rejoined is None:
             # No live parked review to fold into.
             lifted = await loop.run_in_executor(
                 None, library_scan_state.clear_review_retired)
@@ -6849,7 +6856,10 @@ async def library_hidden_restore_all(request: Request):
                 "Nothing to bring back."), status_code=303)
     rejoined = await loop.run_in_executor(
         None, lambda: flows.refold_restored_missing(artists, []))
-    if rejoined is None:
+    if rejoined is False:
+        msg = ("Brought everything back, but the open Library review couldn't "
+               "be saved. Check the data folder, then refresh the review.")
+    elif rejoined is None:
         lifted = await loop.run_in_executor(
             None, library_scan_state.clear_review_retired)
         msg = ("Brought everything back to the Library review." if lifted
@@ -7251,7 +7261,6 @@ async def migrate_scan(request: Request):
     form = await request.form()
     use_acoustid = form.get("acoustid") == "on"
     in_place = form.get("in_place") == "on"
-    allow_low_space = form.get("allow_low_space") == "on"
     if not src or not dest:
         err = ("Set MIGRATE_SRC and MIGRATE_DEST: the source library and "
                "the destination for the organised copy, then try again.")
@@ -7269,14 +7278,14 @@ async def migrate_scan(request: Request):
     # src is persisted so a resume after restart can still prune the emptied
     # source folders on an in-place move (the live execute below gets it too).
     job.execute_args = {"dest": str(dest), "in_place": bool(in_place),
-                        "src": str(src), "allow_low_space": bool(allow_low_space)}
+                        "src": str(src), "allow_low_space": False}
     job = await _submit_scan_deduped_async(
         job,
         lambda j: flows.scan_migration(j, src, dest, use_acoustid=use_acoustid,
                                        in_place=in_place),
         lambda j, chosen: flows.execute_migration(j, chosen, dest,
                                                   in_place=in_place, src=src,
-                                                  allow_low_space=allow_low_space),
+                                                  allow_low_space=False),
         "migration")
     if job is None:
         return _scan_submission_failure_response(request, "/migrate")
@@ -7528,6 +7537,24 @@ async def job_approve(request: Request, job_id: str):
     # A library review approves per tab: the button acts on the tab the user
     # is looking at, and only that tab.
     form = await request.form()
+    migration_low_space_required = bool(
+        job.execute_kind == "migration"
+        and (job.execute_args or {}).get("in_place")
+        and (job.execute_args or {}).get("requires_low_space_override")
+    )
+    migration_low_space_accepted = form.get("allow_low_space") == "on"
+    if (
+        job.status == job_mgr.JobStatus.AWAITING_REVIEW
+        and migration_low_space_required
+        and not migration_low_space_accepted
+    ):
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(
+                "Confirm the low-space risk before approving this in-place "
+                "move. Your review is untouched."
+            ),
+            status_code=303,
+        )
     tab = (form.get("tab") or "").strip()
     if job.execute_kind != "library" or tab not in ("missing", "gaps"):
         tab = ""
@@ -7542,9 +7569,20 @@ async def job_approve(request: Request, job_id: str):
         token = _read_creds().get("auth_token")
         skipped = await loop.run_in_executor(
             None, lambda: flows.drop_owned_missing_candidates(job, token))
-        if skipped and job_mgr.finalize_review_if_empty(job):
-            return RedirectResponse(url=f"{dest}?skipped={skipped}",
-                                    status_code=303)
+        if skipped:
+            finalized = job_mgr.finalize_review_if_empty(job)
+            if finalized is None:
+                return RedirectResponse(
+                    url=dest + "?error=" + urllib.parse.quote(
+                        "The review change was saved, but the finished state "
+                        "could not be recorded. Check the data folder and "
+                        "reload before continuing."
+                    ),
+                    status_code=303,
+                )
+            if finalized:
+                return RedirectResponse(url=f"{dest}?skipped={skipped}",
+                                        status_code=303)
     _skip_q = f"&skipped={skipped}" if skipped else ""
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
         from qobuz_librarian.web import flows
@@ -7594,7 +7632,12 @@ async def job_approve(request: Request, job_id: str):
         # that window, this not-yet-approved review is invisible to its
         # active-job check, so approving after the handoff would start
         # destructive work with the single-writer guard off.
-        with _SAVED_REVIEW_LOCK, _auto_check_lock, _DOWNLOAD_SUBMIT_LOCK:
+        with (
+            _SAVED_REVIEW_LOCK,
+            _auto_check_lock,
+            _DOWNLOAD_SUBMIT_LOCK,
+            job._review_action_lock,
+        ):
             if _web_writes_paused():
                 return "paused"
             # A library or new-release download consumes only the ticked
@@ -7644,12 +7687,41 @@ async def job_approve(request: Request, job_id: str):
                         review_job._consumed_whole_review = remnant is None
                     return remnant
 
-            return job_mgr.approve(
-                job,
-                None,
-                split_review=split_review,
-                selection_filter=selection_filter,
-            )
+            previous_migration_args = None
+            previous_migration_execute = None
+            if job.execute_kind == "migration":
+                execute_args = dict(job.execute_args or {})
+                # Old parked reviews may still carry the former launcher
+                # checkbox. Only an acknowledgement submitted beside the
+                # measured short-space review can enable the override now.
+                execute_args["allow_low_space"] = bool(
+                    migration_low_space_required
+                    and migration_low_space_accepted
+                )
+                execute_fn = _resume_migration(job, execute_args)
+                with job._lock:
+                    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+                        previous_migration_args = job.execute_args
+                        previous_migration_execute = job._execute_fn
+                        job.execute_args = execute_args
+                        job._execute_fn = execute_fn
+            approved = None
+            try:
+                approved = job_mgr.approve(
+                    job,
+                    None,
+                    split_review=split_review,
+                    selection_filter=selection_filter,
+                )
+                return approved
+            finally:
+                if (
+                    previous_migration_args is not None
+                    and approved is not True
+                ):
+                    with job._lock:
+                        job.execute_args = previous_migration_args
+                        job._execute_fn = previous_migration_execute
 
     approved = await loop.run_in_executor(None, _split_and_approve)
     if approved == "paused":
@@ -8002,6 +8074,12 @@ async def job_hide(request: Request, job_id: str):
             # Nothing changed server-side; the non-2xx keeps htmx from
             # swapping the rows away and the error toast reads this body.
             return HTMLResponse(str(e), status_code=500)
+        if n is False:
+            return HTMLResponse(
+                "The dismissal could not be saved to the Library review. "
+                "Nothing was dismissed. Check the data folder and try again.",
+                status_code=503,
+            )
         if n is None:
             return HTMLResponse(
                 "That review changed before the dismissal was saved. Reload "
@@ -8015,7 +8093,14 @@ async def job_hide(request: Request, job_id: str):
         # Dismissing the last album completes the review, so drop AWAITING_REVIEW
         # the dashboard "new releases" banner clears and this page stops showing an
         # empty "awaiting review". HX-Refresh reloads to the finished view.
-        if job_mgr.finalize_review_if_empty(job):
+        finalized = job_mgr.finalize_review_if_empty(job)
+        if finalized is None:
+            return HTMLResponse(
+                "The dismissal was saved, but the finished review could not "
+                "be recorded. Check the data folder and reload.",
+                status_code=503,
+            )
+        if finalized:
             return HTMLResponse("", headers={"HX-Refresh": "true"})
         # Re-render what the filter shows, not the whole artist, so the group
         # that swaps in matches the list the user is looking at.
@@ -8085,7 +8170,7 @@ async def job_dismiss_rest(request: Request, job_id: str):
     # plus a persist), which would block the event loop and stall every SSE
     # stream for a large scan.
     loop = asyncio.get_running_loop()
-    done = {"n": 0, "stale": False}
+    done = {"n": 0, "stale": False, "save_failed": False}
 
     def _dismiss_all():
         with _SAVED_REVIEW_LOCK, job._review_action_lock:
@@ -8099,6 +8184,9 @@ async def job_dismiss_rest(request: Request, job_id: str):
                 )
                 if hidden is None:
                     done["stale"] = True
+                    break
+                if hidden is False:
+                    done["save_failed"] = True
                     break
                 done["n"] += hidden
 
@@ -8122,13 +8210,26 @@ async def job_dismiss_rest(request: Request, job_id: str):
             },
             status_code=409,
         )
+    if done["save_failed"]:
+        if done["n"]:
+            job.notify_review_changed()
+        return JSONResponse(
+            {
+                "error": "The Library review could not be saved.",
+                "hidden": done["n"],
+            },
+            status_code=503,
+        )
     if hidden_count:
         job.notify_review_changed(_review_origin(request))
     from qobuz_librarian.library import hidden as hidden_mod
     payload = _selection_payload(job)
     payload["hidden"] = hidden_count
     payload["hidden_total"] = hidden_mod.count(scope)
-    payload["review_done"] = job_mgr.finalize_review_if_empty(job)
+    finalized = job_mgr.finalize_review_if_empty(job)
+    payload["review_done"] = finalized is True
+    if finalized is None:
+        payload["finalize_failed"] = True
     return JSONResponse(payload)
 
 
@@ -9978,6 +10079,7 @@ def _job_to_dict(job, *, log_tail: int = 50):
         "display_title": job.display_title,
         "artist": job.artist,
         "album_id": getattr(job, "album_id", None),
+        "summary": job.summary,
         "error": job.error,
         "quality_shortfall": getattr(job, "quality_shortfall", {}),
         "created_at": getattr(job, "created_at", None),

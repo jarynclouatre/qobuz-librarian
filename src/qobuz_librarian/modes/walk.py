@@ -396,6 +396,7 @@ def run_album_walk_mode(args, token):
             try:
                 _flush_queue()
             except KeyboardInterrupt:
+                interrupted = True
                 log.info(fmt(C.YELLOW,
                     "\n  ⚠  Final flush interrupted; queue persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name} for resume."))
@@ -406,11 +407,18 @@ def run_album_walk_mode(args, token):
                 f"persisted to {cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    log.info(fmt(C.GREEN,
-        f"  ✓ Album walk complete. "
-        f"Artists scanned: {n_artists_scanned} · "
-        f"Already complete: {n_albums_complete} · "
-        f"Filled: {n_albums_filled}"))
+    if interrupted:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠ Album walk stopped early. "
+            f"Artists scanned: {n_artists_scanned} · "
+            f"Already complete: {n_albums_complete} · "
+            f"Filled: {n_albums_filled}"))
+    else:
+        log.info(fmt(C.GREEN,
+            f"  ✓ Album walk complete. "
+            f"Artists scanned: {n_artists_scanned} · "
+            f"Already complete: {n_albums_complete} · "
+            f"Filled: {n_albums_filled}"))
     leftovers = []
     if n_albums_skipped:
         leftovers.append(f"skipped by you: {n_albums_skipped}")
@@ -496,6 +504,7 @@ def run_walk_queued_mode(args, token):
 
     n_scanned = 0
     n_skipped = 0
+    interrupted = False
     i = 0
 
     try:
@@ -578,6 +587,7 @@ def run_walk_queued_mode(args, token):
                         log.info(fmt(C.GRAY,
                             "\n  Artist scan interrupted; stopping the walk. "
                             f"Queue saved to {cfg.PENDING_QUEUE_FILE.name}."))
+                        interrupted = True
                         decided = False
                         # Stop, like the album walk's Ctrl-C does; the message
                         # above promises the walk ends here.
@@ -624,6 +634,7 @@ def run_walk_queued_mode(args, token):
                     try:
                         _flush_queue()
                     except KeyboardInterrupt:
+                        interrupted = True
                         log.info(fmt(C.YELLOW,
                             "\n  ⚠  Final flush interrupted; queue persisted "
                             f"to {cfg.PENDING_QUEUE_FILE.name} for resume."))
@@ -633,11 +644,17 @@ def run_walk_queued_mode(args, token):
                         f"  Queue retained; persisted to "
                         f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
             except KeyboardInterrupt:
+                interrupted = True
                 _save_queue(shared_queue)
                 log.info(fmt(C.GRAY,
                     f"\n  Interrupted; queue persisted to "
                     f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    log.info(fmt(C.GREEN,
-        f"  ✓ Walk done. Scanned {n_scanned}, skipped {n_skipped}."))
+    if interrupted:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠ Walk stopped early. Scanned {n_scanned}, "
+            f"skipped {n_skipped}."))
+    else:
+        log.info(fmt(C.GREEN,
+            f"  ✓ Walk done. Scanned {n_scanned}, skipped {n_skipped}."))

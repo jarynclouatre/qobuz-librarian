@@ -98,10 +98,9 @@
           <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% elif job.recoveries %}
           <p class="ql-row-meta ql-row-meta--error">Original files are being kept safely. Review or restore them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-          {% else %}
+          {% endif %}
           {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
           {% if job.error %}<p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>{% endif %}
-          {% endif %}
         </div>
         {{ job_side(job) }}
       </article>

@@ -13,7 +13,7 @@ Quality settings:
     filter_size=512, phase_shift=20 (very high quality).
   - Triangular high-pass dither (decorrelates quantization noise).
   - Source bit depth preserved (16-bit stays 16-bit, 24-bit stays 24-bit).
-  - FLAC compression level 5 (default — lossless, fast encode).
+  - FLAC compression level 5 (default, lossless, fast encode).
 """
 import hashlib
 import os
@@ -54,7 +54,7 @@ def _discard_unused_stash(kept_dir, log):
 
 # Downsampling needs ffmpeg to resample AND flac to verify the result. The
 # overwrite is in-place and irreversible, so without the verifier there's no
-# way to confirm a good encode replaced the only hi-res copy — treat the
+# way to confirm a good encode replaced the only hi-res copy. Treat the
 # feature as unavailable rather than overwrite unverified.
 HAVE_DOWNSAMPLE = (shutil.which("ffmpeg") is not None
                    and shutil.which("flac") is not None)
@@ -111,7 +111,7 @@ def detect_resampler_filter():
     """Pick the best resampler this ffmpeg has, as (-af filter, name).
 
     soxr at precision 28 when libsoxr is present, else swresample's wide
-    polyphase filter. Cached after the first probe — ffmpeg's capabilities
+    polyphase filter. Cached after the first probe; ffmpeg's capabilities
     don't change within a run, and the per-album hook would otherwise probe
     once per album in a batch."""
     global _RESAMPLER_FILTER
@@ -124,7 +124,7 @@ def detect_resampler_filter():
 def parse_flac_info(data: bytes):
     """Return (sample_rate, bits_per_sample) from FLAC header bytes, or (0, 0)."""
     # STREAMINFO is always the first metadata block right after the fLaC marker
-    # at offset 0 — anchor there instead of scanning. A leading ID3v2 tag (or any
+    # at offset 0, so anchor there instead of scanning. A leading ID3v2 tag (or any
     # bytes) that happens to contain "fLaC" would otherwise be read as the header
     # and yield a wrong rate/depth the metaflac backstop (which only fires on a 0)
     # never catches. A real leading-ID3 FLAC fails this and defers to metaflac.
@@ -264,7 +264,7 @@ def target_rate(sr):
 
 def scan_dir_for_hires(directory):
     """List the high-sample-rate FLACs under `directory` (recursive) that the
-    resampler would shrink — without touching anything.
+    resampler would shrink, without touching anything.
 
     Returns ``{"hires": [{"path", "sr", "target", "size", "audio_size"}],
     "n_flac": int}``. ``audio_size`` is the file minus its metadata/art (which
@@ -304,9 +304,9 @@ def _decode_ok(path, *, pass_fds=()):
     decode).
 
     The downsample overwrites the source in place with no re-download to fall
-    back on, so anything that leaves the encode unverified — a decode failure, a
+    back on, so anything that leaves the encode unverified, including a decode failure, a
     timeout, or a missing/unusable flac binary (HAVE_DOWNSAMPLE already requires
-    one, but it could vanish mid-run on a network mount) — returns False, and the
+    one, but it could vanish mid-run on a network mount), returns False, and the
     encode is discarded rather than allowed to replace the original."""
     try:
         r = subprocess.run(["flac", "-t", "-s", str(path)],
@@ -641,8 +641,8 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "left the original untouched")
 
         bps = read_local_bit_depth(source_path, pass_fds=source_fds)
-        # An unreadable source bit depth (bps == 0) can't be pinned — the
-        # encode would default to 32-bit and inflate a 24-bit master — and
+        # An unreadable source bit depth (bps == 0) can't be pinned. The
+        # encode would default to 32-bit and inflate a 24-bit master, and
         # can't be re-verified afterward, so refuse rather than overwrite the
         # master in place. A downsample has no re-download to fall back on; an
         # un-shrunk file is far cheaper than a silently altered master.
@@ -655,7 +655,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # would hard-clip into audible distortion. Measure the resampled peak;
         # if it would exceed full scale, attenuate the source by just enough
         # to land it at _TARGET_PEAK_DBFS (inaudible, and only on files that
-        # would clip — everything else stays bit-untouched).
+        # would clip; everything else stays bit-untouched).
         enc_af = af
         _peak = _resampled_peak_dbfs(
             source_path, af_filter, rate, pass_fds=source_fds)
@@ -674,7 +674,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
                 "-i", str(source_path),
                 # Map every input stream so all embedded PICTURE blocks
-                # (front+back cover) survive — ffmpeg's default selection keeps
+                # (front+back cover) survive; ffmpeg's default selection keeps
                 # only one video stream and would drop the rest.
                 "-map", "0",
                 "-af", enc_af,
@@ -723,7 +723,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # must never replace a good original.
         if not _decode_ok(temp_path, pass_fds=(temp_fd,)):
             return (rel, sr, rate, None, "resampled file failed verification")
-        # Never let a resample silently change the bit depth — a 24-bit master
+        # Never let a resample silently change the bit depth. A 24-bit master
         # must not come back 32-bit, nor an 8-bit file get padded to 24. The
         # source depth is known here (an unreadable one was refused above), so
         # this always runs. Original untouched on a mismatch.
@@ -734,7 +734,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "left the original untouched")
         # Verify the resample kept the whole stream. ffmpeg exits 0 on a
         # truncated or mid-file-corrupt source, emitting only the decodable
-        # prefix, and flac -t then passes on that short output — so a damaged
+        # prefix, and flac -t then passes on that short output, so a damaged
         # hi-res master (the exact file class the repair feature exists to
         # catch) could be silently replaced by a shortened encode, laundering
         # the damage out of every later integrity probe.
@@ -752,7 +752,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         expected = in_samples * rate / sr
         # Cap the relative term at ~1s of output. expected*0.005 alone scales
         # with length (~21s on a 70-min master), which would let a long source
-        # lose many seconds and still pass — the opposite of this gate's job.
+        # lose many seconds and still pass, the opposite of this gate's job.
         tol = max(rate // 10, min(expected * 0.005, rate))
         if abs(out_samples - expected) > tol:
             return (rel, sr, rate, None,
@@ -786,7 +786,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "source or resampled output changed before replacement; "
                     "left the current file untouched")
         # The swap overwrites the only lossless master, so a flush that
-        # genuinely fails (ENOSPC/EIO — not a mount that can't fsync) must
+        # genuinely fails (ENOSPC/EIO, not a mount that can't fsync) must
         # refuse the replace: the encode may exist only in the page cache.
         from qobuz_librarian.library.backup import _fsync
         if not _fsync(temp_path):
@@ -820,13 +820,13 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             post_exchange_guard=binding.chain_is_named,
         )
         # The encode itself was flushed above, so rename atomicity leaves a
-        # valid file either way — but a directory flush that genuinely fails
+        # valid file either way, but a directory flush that genuinely fails
         # means the swap may quietly revert on a crash while the run reports
         # it done. Nothing here can be undone; say so instead of staying quiet.
         from qobuz_librarian.library.backup import _fsync
         if not _fsync(_descriptor_path(binding.parent_fd)):
             return (rel, sr, rate, in_size - out_size,
-                    "resampled, but the folder couldn't be flushed to disk — "
+                    "resampled, but the folder couldn't be flushed to disk; "
                     "the swap may not survive a power loss; check the drive")
         return (rel, sr, rate, in_size - out_size, None)
     except subprocess.TimeoutExpired:
@@ -899,7 +899,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         try:
             rel = str(p.relative_to(_bd))
         except ValueError:
-            # outside _bd — resample_one assumes _bd/rel
+            # outside _bd; resample_one assumes _bd/rel
             continue
         sr = read_sample_rate(p)
         rate = target_rate(sr)
@@ -915,7 +915,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     # A Stop can land while this album waits its turn for the staging lock;
     # the poll below only runs as encodes finish, so without an entry check
     # the album would start rewriting the moment the lock arrives. Nothing
-    # has been touched yet — report a clean cancel before even stashing.
+    # has been touched yet. Report a clean cancel before even stashing.
     if cancel_check is not None and cancel_check():
         return {"resampled": 0, "errors": 0, "saved_bytes": 0,
                 "cancelled": True}
@@ -941,11 +941,11 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         }
         n_uncopied = len(candidates) - len(protected)
         if n_uncopied:
-            log(f"  ⚠ downsample: {n_uncopied} file(s) have no safety copy — "
+            log(f"  ⚠ downsample: {n_uncopied} file(s) have no safety copy; "
                 "left untouched.")
         candidates = protected
         if not candidates:
-            # Nothing to rewrite after all — the copies we just took are not a
+            # Nothing to rewrite after all. The copies we just took are not a
             # safety net for anything, so don't leave them parked as a 7-day
             # "undo" for a run that changed nothing.
             _discard_unused_stash(kept_dir, log)
@@ -964,7 +964,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         tallied.add(fut)
         rel, _sr, _rate, saved, err = fut.result()
         if err is not None and saved is not None:
-            # The rewrite finished — only the directory flush failed, so the
+            # The rewrite finished; only the directory flush failed, so the
             # file on disk IS the resampled copy. Counting it as untouched
             # would leave the album unmarked as capped and the tally claiming
             # nothing changed while the lossless master is already gone.
@@ -1004,7 +1004,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                     cancelled = True
                     ex.shutdown(wait=False, cancel_futures=True)
                     if verbose:
-                        log("  ⏹ downsample: stop requested — finishing the "
+                        log("  ⏹ downsample: stop requested; finishing the "
                             "in-flight track(s), discarding the rest")
                     break
         except KeyboardInterrupt:
@@ -1017,19 +1017,34 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             if fut not in tallied and fut.done() and not fut.cancelled():
                 _tally(fut)
         if all(f.done() and not f.cancelled() for f in futs):
-            # The stop arrived after the final track had already finished —
+            # The stop arrived after the final track had already finished;
             # every candidate was processed and tallied, nothing was cut
             # short. Reporting "cancelled" here would leave the album
             # uncounted and uncapped, so a fully-downsampled album would be
             # offered all over again.
             cancelled = False
 
-    if verbose and resampled:
-        log(f"  ✓ downsample: {resampled} resampled, "
-            f"saved {human(saved_total)}")
+    errors_total = errors + n_uncopied
+    needs_attention = bool(errors_total or flush_warnings or cancelled)
+    if verbose and (resampled or needs_attention):
+        if needs_attention:
+            caveats = []
+            if errors_total:
+                caveats.append(f"{errors_total} failed")
+            if flush_warnings:
+                caveats.append(f"{flush_warnings} flush warning")
+            if cancelled:
+                caveats.append("stopped early")
+            log(
+                f"  ⚠ downsample needs attention: {resampled} resampled, "
+                f"saved {human(saved_total)}; {'; '.join(caveats)}"
+            )
+        else:
+            log(f"  ✓ downsample: {resampled} resampled, "
+                f"saved {human(saved_total)}")
     # The stash is taken up front, before a single file is encoded, so the
-    # intent to rewrite is not proof of one. Claim the kept originals — and
-    # keep them — only once something actually was rewritten.
+    # intent to rewrite is not proof of one. Claim the kept originals, and
+    # keep them, only once something actually was rewritten.
     if kept_dir is not None:
         if resampled:
             if verbose:
@@ -1039,7 +1054,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             _discard_unused_stash(kept_dir, log)
 
     return {"resampled": resampled,
-            "errors": errors + n_uncopied,
+            "errors": errors_total,
             "saved_bytes": saved_total,
             "flush_warnings": flush_warnings,
             "cancelled": cancelled}

@@ -2310,7 +2310,7 @@ def _report_repair_recovery(backup, *, reason=""):
 def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                         quiet=False):
     """Scan one album dir by ISRC, report, confirm, and repair. Returns
-    "repaired" | "clean" | "skipped" | "failed" | "recovery".
+    "repaired" | "clean" | "attention" | "skipped" | "failed" | "recovery".
     """
     if not quiet:
         section(f"Repair scan, {truncate(album_dir.name, 60)}")
@@ -2379,6 +2379,10 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     # dealing with and just can't be refilled a track at a time.
     mismatch_damaged = [x for x in isrc_mismatch if x.get("diagnostic")]
     mismatch_short = [x for x in isrc_mismatch if not x.get("diagnostic")]
+    unresolved_damage = bool(
+        mismatch_damaged
+        or any(x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag))
+    )
 
     def _mismatch_row(x, colour):
         log.info(
@@ -2411,10 +2415,16 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 f"    ... and {len(mismatch_short) - 10} more"))
 
     if not verified_truncated:
-        if not quiet:
+        if unresolved_damage:
+            log.info(fmt(
+                C.YELLOW,
+                "\n  ⚠  Damage was found, but no affected track was safe "
+                "to refill automatically. Follow the guidance above.",
+            ))
+        elif not quiet:
             log.info(fmt(C.GREEN,
                 "\n  ✓  No verified-truncated tracks. Nothing to repair."))
-        return "clean"
+        return "attention" if unresolved_damage else "clean"
 
     log.info(fmt(C.YELLOW + C.BOLD,
         f"\n  ⚠  {len(verified_truncated)} truncated file(s) "
@@ -2472,7 +2482,11 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         raise exc.cause
     if result and _report_repair_recovery(result.get("backup")):
         return "recovery"
-    if result and result.get("n_ok", 0) > 0 and result.get("imported"):
+    if (result
+            and result.get("n_ok", 0) > 0
+            and result.get("n_fail", 0) == 0
+            and result.get("imported")
+            and not result.get("repair_unverified")):
         return "repaired"
     return "failed"
 
@@ -2521,6 +2535,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                 tally = {
                     "repaired": 0,
                     "clean": 0,
+                    "attention": 0,
                     "skipped": 0,
                     "failed": 0,
                     "recovery": 0,
@@ -2558,6 +2573,8 @@ def run_album_repair_mode(args, token, *, loop=False):
                 _summary = (f"  repaired: {tally['repaired']}  ·  "
                             f"clean: {tally['clean']}  ·  "
                             f"skipped: {tally['skipped']}")
+                if tally["attention"]:
+                    _summary += f"  ·  needs attention: {tally['attention']}"
                 if tally["failed"]:
                     _summary += f"  ·  failed: {tally['failed']}"
                 if tally["recovery"]:

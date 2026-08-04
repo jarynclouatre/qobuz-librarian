@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -31,6 +32,7 @@ from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
     beets_import_albums,
     relocate_disc_album_artwork,
+    retire_backup_beets_entries,
     staging_preflight,
 )
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
@@ -107,6 +109,21 @@ from qobuz_librarian.ui_cli.prompts import log_fetch
 # under the quality target after the recovery attempt, so the owning job can
 # carry an attention marker. The CLI leaves it unset.
 on_quality_shortfall = None
+
+
+@dataclass(frozen=True, slots=True)
+class PreImportHooksResult:
+    lyric_sigs: list
+    resampled: int
+    errors: int = 0
+    saved_bytes: int = 0
+    flush_warnings: int = 0
+    cancelled: bool = False
+
+    def __iter__(self):
+        """Keep the established two-value unpacking contract."""
+        yield self.lyric_sigs
+        yield self.resampled
 
 
 def _seal_queue_item_siblings(item):
@@ -949,12 +966,15 @@ def _run_pre_import_hooks_for_dirs(
 ):
     """Run downsample + lyric hooks scoped to ``album_dirs``.
 
-    Returns ``(lyric_sigs, resampled_total)`` so post-import code can map
-    transient lyric signatures and mark albums the downsample hook truly
-    resampled.
+    The result retains two-value unpacking for older callers while exposing the
+    complete downsample outcome for truthful album and Job summaries.
     """
     sigs = []
     resampled_total = 0
+    downsample_errors = 0
+    downsample_saved_bytes = 0
+    downsample_flush_warnings = 0
+    downsample_cancelled = False
     # Before anything else looks at these directories: a multi-disc album's
     # cover sits in the album root, where beets' import task never searches.
     # Left there it strands in staging and reads as an unfinished download.
@@ -969,10 +989,20 @@ def _run_pre_import_hooks_for_dirs(
             try:
                 res = downsample_dir(d, verbose=True, base_dir=d, log=log.info)
                 resampled_total += (res or {}).get("resampled", 0)
+                downsample_errors += (res or {}).get("errors", 0)
+                downsample_saved_bytes += (res or {}).get("saved_bytes", 0)
+                downsample_flush_warnings += (
+                    (res or {}).get("flush_warnings", 0)
+                )
+                downsample_cancelled = (
+                    downsample_cancelled
+                    or bool((res or {}).get("cancelled", False))
+                )
             except KeyboardInterrupt:
                 log.info(fmt(C.YELLOW, "  ⚠  downsample hook interrupted"))
                 raise
             except Exception as _ce:
+                downsample_errors += 1
                 log.info(fmt(C.YELLOW, f"  ⚠  downsample hook failed: {_ce}"))
         if on_sources_changed is not None:
             on_sources_changed(SourceTransitionKind.DOWNSAMPLE)
@@ -1000,7 +1030,14 @@ def _run_pre_import_hooks_for_dirs(
             sigs.extend(lh_result[1])
     if on_sources_changed is not None:
         on_sources_changed(SourceTransitionKind.LYRICS_TAG)
-    return sigs, resampled_total
+    return PreImportHooksResult(
+        lyric_sigs=sigs,
+        resampled=resampled_total,
+        errors=downsample_errors,
+        saved_bytes=downsample_saved_bytes,
+        flush_warnings=downsample_flush_warnings,
+        cancelled=downsample_cancelled,
+    )
 
 
 def _pre_import_staging_hooks(args, album_dirs=None):
@@ -1011,6 +1048,23 @@ def _pre_import_staging_hooks(args, album_dirs=None):
     """
     return _run_pre_import_hooks_for_dirs(
         album_dirs or [cfg.STAGING_DIR], args)
+
+
+def _pre_import_outcome_fields(prepared):
+    return {
+        "downsample_errors": getattr(prepared, "errors", 0),
+        "downsample_saved_bytes": getattr(prepared, "saved_bytes", 0),
+        "downsample_flush_warnings": getattr(prepared, "flush_warnings", 0),
+        "downsample_cancelled": bool(getattr(prepared, "cancelled", False)),
+    }
+
+
+def _downsample_outcome_needs_attention(item):
+    return bool(
+        item.get("downsample_errors", 0)
+        or item.get("downsample_flush_warnings", 0)
+        or item.get("downsample_cancelled", False)
+    )
 
 
 def _import_album_with_retry(
@@ -1502,6 +1556,23 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                         ))
                         break
                     replacement_receipt = carried_receipt
+                    if not retire_backup_beets_entries(
+                        sibling_backup,
+                        post_dir,
+                        replacement_receipt,
+                    ):
+                        if not pin_unverified_upgrade_backup(
+                                sibling_backup,
+                                "sibling backup kept; the replaced Beets "
+                                "entries could not be retired safely"):
+                            warn_pin_failed(sibling_backup)
+                        log.info(fmt(
+                            C.YELLOW,
+                            f"  ⚠  Kept sibling recovery for {name} at "
+                            f"{sibling_backup.path}; its Beets catalogue "
+                            "couldn't be reconciled safely.",
+                        ))
+                        break
                     retired = dispose_backup(
                         sibling_backup,
                         replacement_path=post_dir,
@@ -1581,7 +1652,21 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                         replacement_dir=post_dir)
                 if carried is not None:
                     replacement_path, replacement_receipt = carried
-                    if not dispose_backup(
+                    if not retire_backup_beets_entries(
+                        bp,
+                        replacement_path,
+                        replacement_receipt,
+                    ):
+                        if not pin_unverified_upgrade_backup(
+                                bp,
+                                "upgrade kept; the replaced Beets entries "
+                                "could not be retired safely"):
+                            warn_pin_failed(bp)
+                        log.info(fmt(C.YELLOW,
+                            f"  ⚠  Couldn't safely reconcile the Beets "
+                            f"catalogue for {truncate(album_dir.name, 40)}; "
+                            "keeping the exact backup."))
+                    elif not dispose_backup(
                         bp,
                         replacement_path=replacement_path,
                         expected_replacement_receipt=replacement_receipt,
@@ -1680,7 +1765,20 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
             if _item_strict_success and _filled_whole else None
         )
         if _item_strict_success and _filled_whole and _filled_receipt is not None:
-            if not dispose_backup(
+            if not retire_backup_beets_entries(
+                gfb,
+                post_dir,
+                _filled_receipt,
+            ):
+                if not pin_unverified_upgrade_backup(
+                        gfb,
+                        "gap-fill backup kept; the replaced Beets entries "
+                        "could not be retired safely"):
+                    warn_pin_failed(gfb)
+                log.info(fmt(C.YELLOW,
+                    "  ⚠  Gap-fill complete but its Beets catalogue "
+                    "couldn't be reconciled safely; keeping the exact backup."))
+            elif not dispose_backup(
                 gfb,
                 replacement_path=post_dir,
                 expected_replacement_receipt=_filled_receipt,
@@ -1772,6 +1870,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
     n_ok = item.get("n_ok", 0)
     n_fail = item.get("n_fail", 0)
     n_retryable, n_lossy_only = incomplete_track_counts(item)
+    downsample_attention = _downsample_outcome_needs_attention(item)
     if item.get("result") == "interrupted":
         return {"dir": album_dir, "result": "interrupted"}
     if item.get("result") == "upgrade_aborted_backup_failed":
@@ -1786,7 +1885,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
             "cancelled", "disk_full", "io_error", "auth_lost",
             "import_failed"):
         status = _stop
-    elif n_ok and (n_retryable or n_lossy_only):
+    elif n_ok and (n_retryable or n_lossy_only or downsample_attention):
         status = "partial"
     elif n_ok:
         status = "downloaded"
@@ -1808,6 +1907,12 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
         "failed_titles": item.get("failed_tracks", []),
         "lossy_titles": item.get("lossy_tracks", []),
         "broken_titles": item.get("broken_tracks", []),
+        "downsample_errors": item.get("downsample_errors", 0),
+        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
+        "downsample_flush_warnings": item.get(
+            "downsample_flush_warnings", 0
+        ),
+        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
         "siblings_preserved": item.get("_siblings_preserved", []),
         "imported": imported_globally,
         "auto_upgrade": item["auto_upgrade"],
@@ -1825,6 +1930,12 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
         "failed_tracks": item.get("failed_tracks", []),
         "lossy_tracks": item.get("lossy_tracks", []),
         "broken_tracks": item.get("broken_tracks", []),
+        "downsample_errors": item.get("downsample_errors", 0),
+        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
+        "downsample_flush_warnings": item.get(
+            "downsample_flush_warnings", 0
+        ),
+        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
         "siblings_preserved": item.get("_siblings_preserved", []),
         "imported": imported_globally,
         "auto_upgrade": item["auto_upgrade"],
@@ -2186,7 +2297,8 @@ def _durable_completed_result(item, post_dir):
     n_ok = item.get("n_ok", 0)
     n_fail = item.get("n_fail", 0)
     n_retryable, n_lossy_only = incomplete_track_counts(item)
-    if n_ok and (n_retryable or n_lossy_only):
+    downsample_attention = _downsample_outcome_needs_attention(item)
+    if n_ok and (n_retryable or n_lossy_only or downsample_attention):
         status = "partial"
     elif n_retryable or n_lossy_only:
         status = "failed"
@@ -2207,6 +2319,12 @@ def _durable_completed_result(item, post_dir):
         "failed_titles": item.get("failed_tracks", []),
         "lossy_titles": item.get("lossy_tracks", []),
         "broken_titles": item.get("broken_tracks", []),
+        "downsample_errors": item.get("downsample_errors", 0),
+        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
+        "downsample_flush_warnings": item.get(
+            "downsample_flush_warnings", 0
+        ),
+        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
         "siblings_preserved": [],
         "imported": True,
         "auto_upgrade": bool(item.get("auto_upgrade")),
@@ -2224,6 +2342,12 @@ def _durable_completed_result(item, post_dir):
         "failed_tracks": item.get("failed_tracks", []),
         "lossy_tracks": item.get("lossy_tracks", []),
         "broken_tracks": item.get("broken_tracks", []),
+        "downsample_errors": item.get("downsample_errors", 0),
+        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
+        "downsample_flush_warnings": item.get(
+            "downsample_flush_warnings", 0
+        ),
+        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
         "siblings_preserved": [],
         "imported": True,
         "auto_upgrade": bool(item.get("auto_upgrade")),
@@ -2250,6 +2374,29 @@ def _queue_done_line(results, n_items):
         text += (f" · {n_unfinished} album"
                  f"{'s' if n_unfinished != 1 else ''} unfinished")
     return (C.GREEN if clear else C.YELLOW), text
+
+
+def _durable_completion_line(result, elapsed):
+    n_ok = result.get("n_ok", 0)
+    if result.get("result") == "downloaded":
+        return C.GREEN, f"    ✓ {n_ok} track(s) · {int(elapsed)}s"
+
+    details = []
+    unresolved = sum(incomplete_track_counts(result))
+    if unresolved:
+        details.append(f"{unresolved} unresolved")
+    errors = result.get("downsample_errors", 0)
+    if errors:
+        details.append(f"{errors} downsample failed")
+    flush_warnings = result.get("downsample_flush_warnings", 0)
+    if flush_warnings:
+        details.append(f"{flush_warnings} flush warning")
+    if result.get("downsample_cancelled", False):
+        details.append("downsample stopped")
+    detail = " · ".join(details) or "needs attention"
+    colour = C.YELLOW if n_ok else C.RED
+    symbol = "⚠" if n_ok else "✗"
+    return colour, f"    {symbol} {n_ok} track(s) · {detail} · {int(elapsed)}s"
 
 
 def _execute_download_queue(queue, args, token, *, on_progress=None,
@@ -2414,12 +2561,11 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         lyric_sigs = item.get("_durable_lyric_sigs")
         if isinstance(lyric_sigs, (list, tuple)):
             queue_transient_lyric_sigs.extend(lyric_sigs)
-        results.append(_durable_completed_result(item, post_dir))
-        log.info(fmt(
-            C.GREEN,
-            f"    ✓ {item.get('n_ok', 0)} track(s) · "
-            f"{int(item.get('elapsed', 0))}s",
-        ))
+        result = _durable_completed_result(item, post_dir)
+        results.append(result)
+        log.info(fmt(*_durable_completion_line(
+            result, item.get("elapsed", 0)
+        )))
         if token and item.get("n_ok", 0) > 0:
             try:
                 warn_if_download_truncated(
@@ -2620,6 +2766,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         item["result"] = None
         item["quality_verdict"] = None
         item["resampled_n"] = 0
+        item.update(
+            downsample_errors=0,
+            downsample_saved_bytes=0,
+            downsample_flush_warnings=0,
+            downsample_cancelled=False,
+        )
         item["post_import_signatures"] = []
 
         album = item["album"]
@@ -2846,9 +2998,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  repair retag step failed: {_e_rt}"))
                 try:
-                    sigs, resampled_n = _run_pre_import_hooks_for_dirs(
-                        album_dirs, args)
+                    prepared = _run_pre_import_hooks_for_dirs(album_dirs, args)
+                    sigs, resampled_n = prepared
                     item["resampled_n"] = resampled_n
+                    item.update(_pre_import_outcome_fields(prepared))
                     item["post_import_signatures"] = (
                         track_signatures_for_album_dirs(album_dirs))
                     queue_transient_lyric_sigs.extend(sigs)

@@ -627,6 +627,106 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     return n_done
 
 
+def _report_gap_fill_summary(results):
+    """Report each gap-fill outcome in one primary summary bucket."""
+    counts = {
+        "already_complete": 0,
+        "filled": 0,
+        "upgraded": 0,
+        "partial": 0,
+        "skipped": 0,
+        "no_match": 0,
+        "path_mismatch": 0,
+        "false_match": 0,
+        "nothing_available": 0,
+        "held": 0,
+        "dry_run": 0,
+        "not_imported": 0,
+        "stopped": 0,
+        "failed": 0,
+        "other": 0,
+    }
+    hard_failures = {
+        "failed", "nothing_landed", "not_imported", "import_failed",
+        "upgrade_aborted_backup_failed",
+        "replacement_aborted_catalogue_failed",
+    }
+    stopped_results = {
+        "interrupted", "cancelled", "disk_full", "io_error", "auth_lost",
+    }
+    partial_fields = {
+        "n_fail", "n_lossy", "n_broken", "downsample_errors",
+        "downsample_flush_warnings",
+    }
+
+    for result in results:
+        status = result.get("result", "")
+        imported = bool(result.get("imported", False))
+        downloaded = result.get("n_ok", 0) > 0
+        has_partial_attention = (
+            status == "partial"
+            or any(result.get(field, 0) for field in partial_fields)
+            or result.get("downsample_cancelled", False)
+            or result.get("consolidation_interrupted", False)
+            or result.get("upgrade_unverified", False)
+            or result.get("catalogue_unverified", False)
+        )
+
+        if status == "already_complete":
+            bucket = "already_complete"
+        elif status in {"user_skipped", "user_stopped"}:
+            bucket = "skipped"
+        elif status == "no_qobuz_match":
+            bucket = "no_match"
+        elif status == "predicted_path_mismatch":
+            bucket = "path_mismatch"
+        elif status == "false_match":
+            bucket = "false_match"
+        elif status == "dry_run":
+            bucket = "dry_run"
+        elif status in {"no_tracks", "lossy_only"}:
+            bucket = "nothing_available"
+        elif status in {"low_overlap", "sibling_skipped"}:
+            bucket = "held"
+        elif status in stopped_results:
+            bucket = "stopped"
+        elif status in hard_failures:
+            bucket = "failed"
+        elif downloaded and not imported:
+            bucket = "not_imported"
+        elif imported and has_partial_attention:
+            bucket = "partial"
+        elif imported and downloaded and result.get("auto_upgrade", False):
+            bucket = "upgraded"
+        elif imported and downloaded:
+            bucket = "filled"
+        else:
+            bucket = "other"
+        counts[bucket] += 1
+
+    labels = (
+        ("already_complete", C.GREEN, "✓ already complete:"),
+        ("filled", C.GREEN, "✓ tracks filled:"),
+        ("upgraded", C.MAGENTA, "↑ auto-upgraded:"),
+        ("partial", C.YELLOW, "⚠ partly filled:"),
+        ("skipped", C.YELLOW, "skipped by user:"),
+        ("no_match", C.YELLOW, "no Qobuz match:"),
+        ("path_mismatch", C.YELLOW, "path mismatch:"),
+        ("false_match", C.YELLOW, "false match (0 overlap):"),
+        ("nothing_available", C.YELLOW, "nothing available on Qobuz:"),
+        ("held", C.YELLOW, "held for review:"),
+        ("dry_run", C.GRAY, "dry run, not fetched:"),
+        ("not_imported", C.YELLOW, "downloaded, not imported:"),
+        ("stopped", C.YELLOW, "stopped, still queued:"),
+        ("failed", C.RED, "✗ failed:"),
+        ("other", C.YELLOW, "other outcomes:"),
+    )
+    for bucket, colour, label in labels:
+        if counts[bucket]:
+            padded_label = f"{label:<30}"
+            log.info(f"  {fmt(colour, padded_label)}{counts[bucket]}")
+
+
 def run_artist_mode(artist_name, args, token):
     """Top-level artist mode entry point. Runs both phases."""
     clear_scan_caches()
@@ -662,34 +762,13 @@ def run_artist_mode(artist_name, args, token):
          artist_id, catalog) = run_artist_gap_fill(artist_name, artist_dir, args, token,
                                                    fresh=True)
 
-        n_complete   = sum(1 for r in gap_fill_results if r.get("result") == "already_complete")
-        n_filled     = sum(1 for r in gap_fill_results
-                           if r.get("n_ok", 0) > 0 and r.get("imported", False))
-        n_upgraded   = sum(1 for r in gap_fill_results
-                           if r.get("n_ok", 0) > 0 and r.get("imported", False)
-                           and r.get("auto_upgrade"))
-        n_skipped    = sum(1 for r in gap_fill_results
-                           if r.get("result") in ("user_skipped", "user_stopped"))
         no_match     = [r for r in gap_fill_results if r.get("result") == "no_qobuz_match"]
         path_mis     = [r for r in gap_fill_results if r.get("result") == "predicted_path_mismatch"]
         false_match  = [r for r in gap_fill_results if r.get("result") == "false_match"]
 
         section("Step 1: Gap-fill summary")
         print()
-        if n_complete:
-            log.info(f"  {fmt(C.GREEN,   '✓ already complete:')}    {n_complete}")
-        if n_filled:
-            log.info(f"  {fmt(C.GREEN,   '✓ tracks filled:')}       {n_filled}")
-        if n_upgraded:
-            log.info(f"  {fmt(C.MAGENTA, '↑ auto-upgraded:')}        {n_upgraded}")
-        if n_skipped:
-            log.info(f"  {fmt(C.YELLOW,  'skipped by user:')}      {n_skipped}")
-        if no_match:
-            log.info(f"  {fmt(C.YELLOW,  'no Qobuz match:')}       {len(no_match)}")
-        if path_mis:
-            log.info(f"  {fmt(C.YELLOW,  'path mismatch:')}        {len(path_mis)}")
-        if false_match:
-            log.info(f"  {fmt(C.YELLOW,  'false match (0 overlap):')}{len(false_match)}")
+        _report_gap_fill_summary(gap_fill_results)
 
         if no_match:
             print()

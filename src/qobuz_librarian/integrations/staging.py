@@ -342,6 +342,37 @@ class FileGroup:
     owner: dict | None = None
 
 
+@dataclass(frozen=True, eq=False)
+class QuarantineResult(os.PathLike):
+    """Current location and durability of one quarantined staging file."""
+
+    path: Path
+    durable: bool
+
+    def __fspath__(self):
+        return os.fspath(self.path)
+
+    def __str__(self):
+        return str(self.path)
+
+    def __truediv__(self, value):
+        return self.path / value
+
+    def __getattr__(self, name):
+        return getattr(self.path, name)
+
+    def __eq__(self, other):
+        if isinstance(other, QuarantineResult):
+            return self.path == other.path
+        try:
+            return self.path == Path(other)
+        except (TypeError, ValueError):
+            return False
+
+    def __hash__(self):
+        return hash(self.path)
+
+
 @dataclass(frozen=True)
 class RetryGroupInspection:
     """Read-only status for one private retry child."""
@@ -1371,7 +1402,7 @@ def _file_group_kind(label):
 
 
 def quarantine_file(receipt, label="rejected", *, owner=None, on_intent=None):
-    """Retain one exact file in a durable, discoverable recovery group."""
+    """Retain one exact file and report its location and final sync state."""
     owner = normalise_recovery_owner(owner)
     if (owner is None) != (on_intent is None):
         raise ValueError("owned file retention requires an intent checkpoint")
@@ -1436,7 +1467,7 @@ def quarantine_file(receipt, label="rejected", *, owner=None, on_intent=None):
     if moved is None:
         recovered = load_file_group(private, kind=kind, expected_owner=owner)
         if recovered is not None:
-            return recovered.retained.path if move_is_durable() else None
+            return QuarantineResult(recovered.retained.path, move_is_durable())
         # Do not erase uncertain private state. The manifest is removed only
         # after proving the exact source was restored to its original name.
         if capture_file(receipt.path, expected=receipt.identity) is None:
@@ -1451,7 +1482,7 @@ def quarantine_file(receipt, label="rejected", *, owner=None, on_intent=None):
         return None
     # The manifest was durable before the rename. Flush both names' parents so
     # a successful return also makes the private retention durable.
-    return moved if move_is_durable() else None
+    return QuarantineResult(moved, move_is_durable())
 
 
 def _move_tree(receipt, destination, destination_name):
@@ -2551,11 +2582,14 @@ def restore_group(group, *, expected_owner=None):
                 complete = False
         return complete
 
+    partial_restore = False
     try:
         for tree, destination in zip(group.trees, destinations):
             moved = _move_tree(tree, destination.parent, destination.name)
             if moved is None:
-                rollback()
+                if not rollback():
+                    partial_restore = True
+                    break
                 return None
             restored.append((tree, moved))
     except BaseException as exc:
@@ -2565,6 +2599,12 @@ def restore_group(group, *, expected_owner=None):
                 "its last proved public or private name"
             )
         raise
+    if partial_restore:
+        raise OSError(
+            "staging group was partially restored and could not be rolled "
+            "back; every exact tree remains at its last proved public or "
+            "private name"
+        )
     marker = capture_file(group.path / _MANIFEST)
     if marker is not None:
         remove_file(marker)

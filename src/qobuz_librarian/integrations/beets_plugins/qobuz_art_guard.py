@@ -80,8 +80,9 @@ def _open_relative_directory(root_fd, parts):
     try:
         for part in parts:
             child = _open_ownership_dir(part, dir_fd=current)
-            os.close(current)
+            closing = current
             current = child
+            os.close(closing)
         return current
     except BaseException:
         os.close(current)
@@ -607,8 +608,9 @@ def _remove_candidate_source(task, candidate, held_fd):
         parent_fd = _open_ownership_dir(top)
         for part in parts[:-1]:
             child = _open_ownership_dir(part, dir_fd=parent_fd)
-            os.close(parent_fd)
+            closing = parent_fd
             parent_fd = child
+            os.close(closing)
         return _remove_exact_file(parent_fd, parts[-1], held_fd)
     except OSError:
         return False

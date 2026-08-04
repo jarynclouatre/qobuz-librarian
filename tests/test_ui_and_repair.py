@@ -63,7 +63,19 @@ def test_repair_scan_resumes_from_checkpoint(tmp_path, monkeypatch):
                "payload": {"album_dir": str(tmp_path / "Artist A" / "Old Album"),
                            "artist_name": "Artist A",
                            "verified_truncated": [{"path": "x.flac"}]}}
-    scan_checkpoint.save("repair", {"Artist A"}, [flagged], {})
+    scan_checkpoint.save(
+        "repair",
+        {"Artist A"},
+        [flagged],
+        {},
+        meta={
+            "repair_counts": {
+                "verified_ok": 4,
+                "unverified": 2,
+                "failed_albums": 1,
+            }
+        },
+    )
 
     (tmp_path / "Artist A").mkdir()
     (tmp_path / "Artist B" / "New Album").mkdir(parents=True)
@@ -93,6 +105,9 @@ def test_repair_scan_resumes_from_checkpoint(tmp_path, monkeypatch):
 
     assert checked == ["New Album"]                                  # Artist A skipped
     assert any(c["title"] == "Old Album" for c in job.candidates)    # prior flag restored
+    assert "5 tracks decode-verified clean" in job.summary
+    assert "2 tracks couldn't be decode-checked" in job.summary
+    assert "1 album couldn't be scanned" in job.summary
     assert scan_checkpoint.load("repair") is None                    # cleared on clean finish
 
 
@@ -113,6 +128,10 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.backup.backup_album_dir", lambda d: backup)
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.beets.capture_beets_album_entries",
+        lambda _directory: object(),
+    )
     monkeypatch.setattr("qobuz_librarian.modes.process.process_album",
                         lambda *a, **k: {"imported": False, "n_ok": 0})
     monkeypatch.setattr("qobuz_librarian.library.backup.restore_upgrade_backup",
@@ -148,6 +167,14 @@ def test_no_isrc_redownload_keeps_an_unprovable_backup(
     monkeypatch.setattr(
         "qobuz_librarian.library.backup.backup_album_dir",
         lambda _directory: backup,
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.beets.capture_beets_album_entries",
+        lambda _directory: object(),
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.beets.retire_replaced_beets_entries",
+        lambda *args: True,
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.backup.dispose_backup",
@@ -186,6 +213,99 @@ def test_no_isrc_redownload_keeps_an_unprovable_backup(
     assert backup_dir.is_dir()
     assert recoveries[-1].retained is True
     assert recoveries[-1].backup is backup
+
+
+def test_no_isrc_redownload_retires_replaced_beets_rows(
+        tmp_path, monkeypatch):
+    """A fresh whole-album Repair must settle old catalogue rows too."""
+    import sqlite3
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library.backup import BackupResult
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    replacement = album_dir / "01.flac"
+    replacement.write_bytes(b"replacement")
+    backup_dir = tmp_path / "backups" / "original"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "01.flac").write_bytes(b"original")
+    backup = BackupResult(
+        backup_dir,
+        complete=True,
+        receipt={
+            "origin": str(album_dir),
+            "tree": {"files": {"01.flac": {}}},
+        },
+        requested=1,
+        backed_up=1,
+    )
+    database = tmp_path / "beets.db"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+    monkeypatch.setattr(cfg, "BEETS_TIMEOUT", 5)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT)")
+        connection.execute(
+            "CREATE TABLE items ("
+            "id INTEGER PRIMARY KEY, path BLOB NOT NULL, album_id INTEGER, title TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE album_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, key TEXT, value TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE item_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, key TEXT, value TEXT)"
+        )
+        connection.execute("INSERT INTO albums VALUES (10, 'Original')")
+        connection.execute(
+            "INSERT INTO items VALUES (1, ?, 10, 'Original track')",
+            (os.fsencode(album_dir / "01.flac"),),
+        )
+    connection.close()
+
+    monkeypatch.setattr(flows, "get_album", lambda *args: {"id": "x"})
+    monkeypatch.setattr(
+        "qobuz_librarian.library.backup.backup_album_dir",
+        lambda _directory: backup,
+    )
+    def fake_process(*args, **kwargs):
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("INSERT INTO albums VALUES (20, 'Replacement')")
+            connection.execute(
+                "INSERT INTO items VALUES (2, ?, 20, 'Replacement track')",
+                (os.fsencode(replacement),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return {"imported": True, "n_ok": 1}
+
+    monkeypatch.setattr("qobuz_librarian.modes.process.process_album", fake_process)
+    monkeypatch.setattr(
+        "qobuz_librarian.modes.process._upgrade_replacement_verified",
+        lambda *args: True,
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.modes.process._carry_non_audio_from_backup",
+        lambda *args: (album_dir, {"tree": {"files": {"01.flac": {}}}}),
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.backup.retire_verified_repair_backup",
+        lambda _backup: True,
+    )
+
+    result = flows._redownload_damaged_album(
+        {"album_dir": str(album_dir), "album_id": "x"}, "token")
+
+    assert result["imported"] is True
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT id FROM items ORDER BY id").fetchall() == [(2,)]
+        assert connection.execute("SELECT id FROM albums ORDER BY id").fetchall() == [(20,)]
 
 
 # ── Repair: relocate refilled tracks back to the album folder ─────────
@@ -627,7 +747,8 @@ def test_walk_seen_records_idempotently_and_survives_a_crashed_rename(tmp_path, 
 # ── Scan-report-repair classifications ──────────────────────────────────
 
 def _call_scan_report(tmp_path, monkeypatch, *, repair_result=None,
-                     verified_truncated=None, yes=True, input_return="y"):
+                     verified_truncated=None, scan_overrides=None,
+                     yes=True, input_return="y"):
     import qobuz_librarian.modes.repair as repair_mod
     from qobuz_librarian.modes.repair import _scan_report_repair
     album_dir = tmp_path / "Artist" / "Album (2022)"
@@ -639,9 +760,18 @@ def _call_scan_report(tmp_path, monkeypatch, *, repair_result=None,
                                 "track_number": 1, "file_length": 5.0,
                                 "qobuz_duration": 180.0,
                                 "qobuz_track": {"id": 1, "title": "Track 01", "album": {"id": "A1"}}}]
-    monkeypatch.setattr(repair_mod, "scan_dir_for_isrc_repairs",
-                        lambda *a, **k: {"verified_truncated": verified_truncated,
-                                         "verified_ok": 0, "isrc_no_match": [], "no_isrc_tag": []})
+    scan = {
+        "verified_truncated": verified_truncated,
+        "verified_ok": 0,
+        "isrc_no_match": [],
+        "no_isrc_tag": [],
+    }
+    scan.update(scan_overrides or {})
+    monkeypatch.setattr(
+        repair_mod,
+        "scan_dir_for_isrc_repairs",
+        lambda *a, **k: scan,
+    )
     if repair_result is not None:
         monkeypatch.setattr(repair_mod, "repair_album_dir", lambda *a, **k: repair_result)
     monkeypatch.setattr(repair_mod, "section", lambda *a: None)
@@ -656,6 +786,17 @@ def test_scan_report_classifies_repair_outcomes(tmp_path, monkeypatch):
     # Repair succeeds → "repaired".
     assert _call_scan_report(tmp_path / "ok", monkeypatch,
                              repair_result={"n_ok": 1, "n_fail": 0, "imported": True, "backup": None}) == "repaired"
+    # A partial refill is not a repaired album even if the import ran.
+    assert _call_scan_report(
+        tmp_path / "partial",
+        monkeypatch,
+        repair_result={
+            "n_ok": 1,
+            "n_fail": 1,
+            "imported": True,
+            "backup": None,
+        },
+    ) == "failed"
     # Downloads succeeded but beets failed silently → classified as failure.
     assert _call_scan_report(tmp_path / "silent", monkeypatch,
                              repair_result={"n_ok": 1, "n_fail": 0, "imported": False, "backup": None}) == "failed"
@@ -678,9 +819,33 @@ def test_scan_report_classifies_repair_outcomes(tmp_path, monkeypatch):
     ) == "recovery"
     # Nothing truncated → "clean".
     assert _call_scan_report(tmp_path / "clean", monkeypatch, verified_truncated=[]) == "clean"
+    # Diagnostic damage that cannot be refilled safely still needs attention.
+    assert _call_scan_report(
+        tmp_path / "attention",
+        monkeypatch,
+        verified_truncated=[],
+        scan_overrides={
+            "isrc_no_match": [{
+                "diagnostic": "could not decode",
+                "isrc": "USRC12345678",
+                "title": "Damaged track",
+            }]
+        },
+    ) == "attention"
     # User declines the prompt → "skipped".
     assert _call_scan_report(tmp_path / "skip", monkeypatch,
                              yes=False, input_return="n") == "skipped"
+
+
+def test_repair_scan_caveats_separate_album_and_artist_failures(monkeypatch):
+    from qobuz_librarian.web import flows
+
+    monkeypatch.setattr(flows.shutil, "which", lambda _name: "/usr/bin/flac")
+    caveats = flows._repair_scan_caveats(3, 2, 1)
+
+    assert "3 tracks couldn't be decode-checked" in caveats
+    assert "2 albums couldn't be scanned" in caveats
+    assert "1 artist couldn't be scanned" in caveats
 
 
 def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(monkeypatch):

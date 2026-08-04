@@ -14,7 +14,7 @@
       <span class="ql-review-candidate-title">{{ c.title }}</span>{% if c.payload.is_new %}
       <span class="ql-badge ql-badge-new ql-badge-xs">new</span>{% endif %}
     </span>
-    <span class="ql-review-candidate-detail">{% if review_tab|default('') == 'gaps' %}{{ c.detail | replace('gap-fill: ', '') }}{% else %}{{ c.detail }}{% endif %}</span>
+    <span class="ql-review-candidate-detail">{% if job.execute_kind == 'upgrade' and c.payload.year %}{{ c.payload.year }} · {% endif %}{% if review_tab|default('') == 'gaps' %}{{ c.detail | replace('gap-fill: ', '') }}{% else %}{{ c.detail }}{% endif %}</span>
     {% if c.payload.verified_truncated %}
     <span class="ql-review-truncated">
       {% for t in c.payload.verified_truncated[:12] %}

@@ -18,6 +18,7 @@ from qobuz_librarian.integrations.beets import (
     beets_import_paths,
     capture_beets_album_entries,
     relocate_disc_album_artwork,
+    retire_backup_beets_entries,
     retire_replaced_beets_entries,
     staging_preflight,
 )
@@ -81,6 +82,7 @@ from qobuz_librarian.quality.verify import (
     verify_and_recover,
 )
 from qobuz_librarian.queue.executor import (
+    _pre_import_outcome_fields,
     _pre_import_staging_hooks,
 )
 from qobuz_librarian.repair_log import warn_if_download_truncated
@@ -1005,6 +1007,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     download_phase_completed = False
     transient_lyric_sigs = []
     resampled_n = 0
+    downsample_outcome = _pre_import_outcome_fields(([], 0))
     post_import_signatures = []
     staged_dirs_for_import = []
     download_result = {}
@@ -1155,8 +1158,9 @@ def process_album(album, args, *, allow_force=True, label=None,
             if not staged_dirs_for_import:
                 staged_dirs_for_import = validated_staged_album_dirs(
                     download_result)
-            transient_lyric_sigs, resampled_n = _pre_import_staging_hooks(
-                args, staged_dirs_for_import)
+            prepared = _pre_import_staging_hooks(args, staged_dirs_for_import)
+            transient_lyric_sigs, resampled_n = prepared
+            downsample_outcome = _pre_import_outcome_fields(prepared)
             post_import_signatures = track_signatures_for_album_dirs(
                 staged_dirs_for_import)
 
@@ -1381,7 +1385,22 @@ def process_album(album, args, *, allow_force=True, label=None,
                     if _filled_ok else None
                 )
                 if _filled_ok and _filled_receipt is not None:
-                    if not dispose_backup(
+                    if not retire_backup_beets_entries(
+                        gap_fill_backup_path,
+                        _filled,
+                        _filled_receipt,
+                    ):
+                        _gap_fill_not_located = True
+                        if not pin_unverified_upgrade_backup(
+                                gap_fill_backup_path,
+                                "gap-fill backup kept; the replaced Beets "
+                                "entries could not be retired safely"):
+                            warn_pin_failed(gap_fill_backup_path)
+                        log.info(fmt(C.YELLOW,
+                            "  ⚠  Gap-fill landed, but its Beets catalogue "
+                            "couldn't be reconciled safely; keeping the exact "
+                            "backup."))
+                    elif not dispose_backup(
                         gap_fill_backup_path,
                         replacement_path=_filled,
                         expected_replacement_receipt=_filled_receipt,
@@ -1455,6 +1474,7 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     # ── Consolidation ────────────────────────────────────────────────────────
     n_consolidated = 0
+    consolidation_interrupted = False
     # treat_as_new keeps this download as its own edition; consolidation folds
     # editions together by deleting overlapping sibling tracks, so the two are
     # mutually exclusive. Never consolidate a deliberately separate edition.
@@ -1463,6 +1483,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             try:
                 n_consolidated = consolidate_albums(album, args)
             except KeyboardInterrupt:
+                consolidation_interrupted = True
                 log.info(fmt(C.GRAY, "\n  Consolidation interrupted."))
         else:
             log.info(fmt(C.YELLOW,
@@ -1580,9 +1601,22 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     # ── Summary ──────────────────────────────────────────────────────────────
     n_retryable, n_truly_lossy = incomplete_track_counts(download_result)
+    downsample_attention = bool(
+        downsample_outcome["downsample_errors"]
+        or downsample_outcome["downsample_flush_warnings"]
+        or downsample_outcome["downsample_cancelled"]
+    )
     _broken = set(broken_tracks)
     truly_lossy = [t for t in lossy_tracks if t not in _broken]
-    if already_confirmed and not n_fail and not n_lossy and imported and not _gap_fill_not_located:
+    if (
+        already_confirmed
+        and not n_fail
+        and not n_lossy
+        and imported
+        and not _gap_fill_not_located
+        and not downsample_attention
+        and not consolidation_interrupted
+    ):
         if auto_upgrade_active and not upgrade_unverified:
             log.info(fmt(C.MAGENTA + C.BOLD,
                 f"  ↑ upgraded · {n_ok} track(s) · {int(elapsed)}s · imported"))
@@ -1601,10 +1635,25 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(f"  {fmt(C.YELLOW, '⚠ incomplete:')}    {len(broken_tracks)}")
         if n_fail:
             log.info(f"  {fmt(C.RED, '✗ failed:')}        {n_fail}")
+        if downsample_outcome["downsample_errors"]:
+            log.info(
+                f"  {fmt(C.RED, '✗ downsample failed:')} "
+                f"{downsample_outcome['downsample_errors']}"
+            )
+        if downsample_outcome["downsample_flush_warnings"]:
+            log.info(
+                f"  {fmt(C.YELLOW, '⚠ flush warning:')}  "
+                f"{downsample_outcome['downsample_flush_warnings']}"
+            )
+        if downsample_outcome["downsample_cancelled"]:
+            log.info(f"  {fmt(C.YELLOW, '⚠ downsample:')}     stopped early")
         log.info(f"  {fmt(C.GRAY, '  runtime:')}        {int(elapsed)}s")
         log.info(f"  {fmt(C.GRAY, '  beets:')}          {'imported' if imported else 'skipped/failed'}")
         if args.consolidate:
-            log.info(f"  {fmt(C.GRAY, '  consolidated:')}   {plural(n_consolidated, 'sibling track')} removed")
+            if consolidation_interrupted:
+                log.info(f"  {fmt(C.YELLOW, '⚠ consolidated:')} stopped early")
+            else:
+                log.info(f"  {fmt(C.GRAY, '  consolidated:')}   {plural(n_consolidated, 'sibling track')} removed")
         if failed_tracks:
             log.info(fmt(C.RED, "\n  failed tracks:"))
             for t in failed_tracks[:10]:
@@ -1621,7 +1670,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(f"     {truncate(t, 60)}")
         log.info("")
 
-    if n_ok and (n_retryable or n_truly_lossy):
+    if n_ok and (
+        n_retryable or n_truly_lossy or downsample_attention
+        or consolidation_interrupted
+    ):
         result_status = "partial"
     elif n_ok and not imported and not args.no_import:
         # Tracks ripped but didn't make it into the library (a beets failure, or
@@ -1650,13 +1702,16 @@ def process_album(album, args, *, allow_force=True, label=None,
         "failed_titles": failed_tracks,
         "lossy_titles": lossy_tracks,
         "broken_titles": broken_tracks,
+        **downsample_outcome,
         "imported": imported,
         "force": bool(use_force),
         "auto_upgrade": bool(auto_upgrade_active),
         "upgrade_backup_path": str(upgrade_backup_path) if upgrade_backup_path else None,
         "upgrade_restored": upgrade_restored,
         "catalogue_unverified": catalogue_unverified,
-        "consolidated": bool(args.consolidate and imported),
+        "consolidated": bool(
+            args.consolidate and imported and not consolidation_interrupted),
+        "consolidation_interrupted": consolidation_interrupted,
         "consolidated_tracks_removed": n_consolidated,
         "elapsed_s": int(elapsed),
     })
@@ -1684,4 +1739,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "catalogue_unverified": catalogue_unverified,
         "auto_upgrade": bool(auto_upgrade_active),
         "quality_verdict": quality_verdict,
+        "consolidation_interrupted": consolidation_interrupted,
+        "consolidated_tracks_removed": n_consolidated,
+        **downsample_outcome,
     }

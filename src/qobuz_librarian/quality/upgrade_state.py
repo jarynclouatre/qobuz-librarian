@@ -253,12 +253,13 @@ def update_artist(
 
     name = artist_dir.name
     scan_quality_signature = quality_signature()
-    fingerprint = artist_fingerprint(artist_dir)
+    fingerprints: dict[str, str] = {}
     try:
+        fingerprint = artist_fingerprint(artist_dir)
+        fingerprints[name] = fingerprint
         specs = _candidate_specs(artist_dir, scan_artist(artist_dir), hidden)
     except Exception as exc:
-        return RefreshResult(
-            [], [name], {name: str(exc)}, False, {name: fingerprint})
+        return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
 
     with _STATE_LOCK:
         state = load()
@@ -337,9 +338,14 @@ def refresh_for_artists(
     )
     to_scan: list[Path] = []
     reused: list[tuple[Path, list[dict]]] = []
+    fingerprint_failures: list[tuple[Path, Exception]] = []
 
     for artist_dir in artist_list:
-        fingerprint = artist_fingerprint(artist_dir)
+        try:
+            fingerprint = artist_fingerprint(artist_dir)
+        except Exception as exc:
+            fingerprint_failures.append((artist_dir, exc))
+            continue
         fingerprints[artist_dir.name] = fingerprint
         if can_reuse and (previous.get("fingerprints") or {}).get(artist_dir.name) == fingerprint:
             reused.append((
@@ -367,6 +373,9 @@ def refresh_for_artists(
             on_artist(artist_dir, filtered, error, done, total)
 
     done_count = 0
+    for artist_dir, error in fingerprint_failures:
+        done_count += 1
+        _handle_result(artist_dir, [], error, done_count)
     for artist_dir, existing in reused:
         done_count += 1
         _handle_result(artist_dir, existing, None, done_count, prefiltered=True)

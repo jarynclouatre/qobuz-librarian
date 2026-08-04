@@ -157,6 +157,105 @@ def test_lyric_retry_round_trips_and_clears(tmp_path, monkeypatch):
     assert not rfile.exists()
 
 
+def test_cli_lyric_retry_does_not_report_write_errors_as_resolved(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyrics
+
+    tracks = [tmp_path / f"{index}.flac" for index in range(2)]
+    for track in tracks:
+        track.write_bytes(b"synthetic")
+    monkeypatch.setattr(cfg, "LYRIC_RETRY_FILE", tmp_path / "retry.json")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(lyrics.lyric_fetch, "AVAILABLE", True)
+    monkeypatch.setattr(
+        lyrics.lyric_fetch,
+        "fetch_for_paths",
+        lambda *_args, **_kwargs: {"write-error": 2},
+    )
+    monkeypatch.setattr(
+        lyrics,
+        "_refresh_lyric_retry",
+        lambda _paths: lyrics.save_lyric_retry([]),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    lyrics.save_lyric_retry([str(track) for track in tracks])
+
+    lyrics.offer_resume_lyric_retry(object())
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "2 failed" in messages
+    assert "All retried files resolved" not in messages
+
+
+def test_lyric_retry_summary_does_not_invent_missing_successes():
+    from qobuz_librarian.integrations.lyrics import summarize_lyric_retry
+
+    assert summarize_lyric_retry(
+        {"wrote-synced": 1}, attempted=3, remaining=0
+    ) == {"resolved": 1, "failed": 2, "remaining": 0}
+    assert summarize_lyric_retry(
+        {"wrote-synced": 1, "write-error": 1, "providers-unavailable": 1},
+        attempted=3,
+        remaining=1,
+    ) == {"resolved": 1, "failed": 1, "remaining": 1}
+
+
+def test_import_lyric_hook_reports_an_all_error_run(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyrics
+
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "track.flac").write_bytes(b"synthetic")
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "LYRIC_FETCH_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(lyrics.lyric_fetch, "AVAILABLE", True)
+    monkeypatch.setattr(
+        lyrics.lyric_fetch,
+        "fetch_for_paths",
+        lambda *_args, **_kwargs: {"write-error": 1},
+    )
+
+    counts, _signatures = lyrics._run_lyric_hook(album)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert counts == {"write-error": 1}
+    assert "1 failed" in messages
+
+
+def test_post_import_sidecar_write_failure_gets_a_terminal_warning(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyrics
+
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    track = album / "track.flac"
+    track.write_bytes(b"synthetic")
+
+    class FakeFLAC:
+        tags = {"lyrics": ["[00:01.00]line"]}
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(cfg, "LYRICS_FORMAT", "sidecar")
+    monkeypatch.setattr(lyrics, "HAVE_LYRIC_FETCH", True)
+    monkeypatch.setattr(lyrics.lyric_fetch, "FLAC", lambda _path: FakeFLAC())
+    monkeypatch.setattr(
+        lyrics.lyric_fetch,
+        "write_sidecar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic failure")),
+    )
+
+    lyrics.write_post_import_sidecars([album])
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "1 sidecar failed" in messages
+
+
 def test_write_lyrics_saves_atomically_and_clears_legacy_tag(tmp_path):
     from qobuz_librarian.integrations import lyric_fetch
 
@@ -277,6 +376,7 @@ def test_beets_direct_detects_silent_skip_by_unmoved_audio(monkeypatch, tmp_path
 
     captured_env = {}
     captured_args = []
+    messages = []
 
     class _Proc:
         def __init__(self, lines=(), on_wait=None):
@@ -301,6 +401,7 @@ def test_beets_direct_detects_silent_skip_by_unmoved_audio(monkeypatch, tmp_path
         return _popen
 
     monkeypatch.setattr(beets, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(beets.log, "info", messages.append)
     album = tmp_path / "Artist - Album"
     album.mkdir()
     track = album / "01.flac"
@@ -325,6 +426,30 @@ def test_beets_direct_detects_silent_skip_by_unmoved_audio(monkeypatch, tmp_path
         "--run-beets",
     ]
     assert captured_env.get("BEETSDIR") == str(cfg.BEETS_CONFIG_DIR)
+
+    # A partial exit-0 import reports only what is known about the remnant.
+    track.write_bytes(b"flac-bytes")
+    leftover = album / "02.flac"
+    leftover.write_bytes(b"leftover")
+    messages.clear()
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _popen_returning(_Proc(on_wait=track.unlink)),
+    )
+    ok, kind = beets._beets_direct(
+        None,
+        lambda: None,
+        [str(album)],
+        beets_runtime=runtime,
+    )
+    assert ok is True and kind == "ok"
+    assert any(
+        "1 staged track(s) were not imported and remain in staging" in message
+        for message in messages
+    )
+    assert not any("likely duplicates or unreadable" in message for message in messages)
+    leftover.unlink()
 
     # beets exits 0 but moves nothing out of staging: the real silent skip.
     track.write_bytes(b"flac-bytes")
@@ -412,6 +537,8 @@ def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeyp
     data.mkdir()
     monkeypatch.setattr("qobuz_librarian.config.STAGING_DIR", staging)
     monkeypatch.setattr("qobuz_librarian.config.DATA_DIR", data)
+    messages = []
+    monkeypatch.setattr(beets.log, "info", messages.append)
 
     tagged = staging / "Real Artist" / "Real Album" / "01 - Good.flac"
     untagged = staging / "Partial" / "00 -.flac"
@@ -429,6 +556,10 @@ def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeyp
     assert not untagged.exists() and untagged in moved
     assert not broken.exists() and broken in moved
     assert len(list((staging / cfg.BEETS_RETRY_DIR).rglob("*.flac"))) == 2
+    summary = next(message for message in messages if "Set aside 2 untagged" in message)
+    assert "private staging recovery" in summary
+    assert "each file has its own recovery record" in summary
+    assert str(staging / cfg.BEETS_RETRY_DIR) not in summary
 
     clean = capture_file(tagged)
     assert clean is not None
@@ -773,6 +904,111 @@ def _load_art_guard_for_test(monkeypatch, loaded_plugins):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_ownership_for_test(monkeypatch):
+    import importlib.util
+
+    _load_art_guard_for_test(monkeypatch, [])
+    from qobuz_librarian.integrations import beets
+
+    plugin_path = Path(beets.__file__).parent / "beets_plugins" / "qobuz_ownership.py"
+    spec = importlib.util.spec_from_file_location("_qobuz_ownership_test", plugin_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_close_failure_preserves_reused_descriptor(tmp_path, operation, *, escapes=True):
+    root = tmp_path / "walk-root"
+    (root / "A").mkdir(parents=True)
+    canary_path = root / "canary"
+    canary_path.write_bytes(b"canary")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    real_close = os.close
+    real_open = os.open
+    state = {"fired": False, "canary_fd": None}
+
+    def faulting_close(descriptor):
+        if not state["fired"]:
+            state["fired"] = True
+            real_close(descriptor)
+            state["canary_fd"] = real_open(canary_path, os.O_RDONLY)
+            assert state["canary_fd"] == descriptor
+            raise OSError("synthetic close failure after release")
+        real_close(descriptor)
+
+    os.close = faulting_close
+    try:
+        if escapes:
+            with pytest.raises(OSError, match="synthetic close failure"):
+                operation(root, root_fd)
+        else:
+            assert operation(root, root_fd) is False
+    finally:
+        os.close = real_close
+
+    canary_fd = state["canary_fd"]
+    assert canary_fd is not None
+    try:
+        assert os.fstat(canary_fd).st_size == len(b"canary")
+    finally:
+        for descriptor in (canary_fd, root_fd):
+            try:
+                real_close(descriptor)
+            except OSError:
+                pass
+
+
+def test_beets_parent_walk_never_retries_a_released_descriptor(tmp_path):
+    from qobuz_librarian.integrations import beets
+
+    _assert_close_failure_preserves_reused_descriptor(
+        tmp_path,
+        lambda _root, root_fd: beets._open_ownership_parent(
+            root_fd, (b"A", b"leaf")
+        ),
+    )
+
+
+def test_art_guard_parent_walk_never_retries_a_released_descriptor(
+        tmp_path, monkeypatch):
+    module = _load_art_guard_for_test(monkeypatch, [])
+    _assert_close_failure_preserves_reused_descriptor(
+        tmp_path,
+        lambda _root, root_fd: module._open_relative_directory(root_fd, (b"A",)),
+    )
+
+
+def test_art_guard_candidate_walk_never_retries_a_released_descriptor(
+        tmp_path, monkeypatch):
+    module = _load_art_guard_for_test(monkeypatch, [])
+
+    def operation(root, _root_fd):
+        monkeypatch.setattr(
+            module,
+            "_candidate_within_task",
+            lambda _task, _path: (os.fsencode(root), (b"A", b"leaf")),
+        )
+        candidate = type("Candidate", (), {"path": b"candidate"})()
+        return module._remove_candidate_source(object(), candidate, -1)
+
+    _assert_close_failure_preserves_reused_descriptor(
+        tmp_path, operation, escapes=False
+    )
+
+
+def test_ownership_created_walk_never_retries_a_released_descriptor(
+        tmp_path, monkeypatch):
+    module = _load_ownership_for_test(monkeypatch)
+
+    def operation(_root, root_fd):
+        plugin = object.__new__(module.QobuzOwnershipPlugin)
+        plugin._root_fd = root_fd
+        return plugin._open_created_locked((b"A",))
+
+    _assert_close_failure_preserves_reused_descriptor(tmp_path, operation)
 
 
 def _art_guard_task(root, staging, album_name):

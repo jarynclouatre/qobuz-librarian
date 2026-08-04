@@ -640,3 +640,158 @@ def test_cli_new_release_summary_matches_persistence(
 
     assert expected in caplog.text
     assert bool(saved) is not dry_run
+
+
+def test_upgrade_interrupt_reaches_the_partial_tally(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import upgrade
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "missing")
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", True)
+    candidates = [
+        {
+            "artist": "Artist",
+            "title": title,
+            "payload": {"album_id": album_id},
+        }
+        for title, album_id in (("First", "one"), ("Second", "two"))
+    ]
+    monkeypatch.setattr(
+        upgrade.upgrade_state,
+        "load",
+        lambda: {"complete": True, "candidates": candidates},
+    )
+    monkeypatch.setattr(
+        upgrade.upgrade_state,
+        "visible_candidates",
+        lambda state, _hidden: state["candidates"],
+    )
+    monkeypatch.setattr(upgrade.hidden_mod, "load", lambda: {})
+    monkeypatch.setattr(
+        upgrade, "get_album", lambda album_id, _token: {"id": album_id})
+    outcomes = iter([{"imported": True}, KeyboardInterrupt()])
+
+    def process(*_args, **_kwargs):
+        outcome = next(outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(upgrade, "process_album", process)
+    monkeypatch.setattr(upgrade, "_refresh_saved_state_after_upgrade",
+                        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(upgrade.time, "sleep", lambda *_args: None)
+    args = SimpleNamespace(
+        yes=True,
+        auto_safe=False,
+        dry_run=False,
+        consolidate=True,
+    )
+
+    result = upgrade.run_upgrade_walk_mode(args, "tok")
+
+    assert result == upgrade.EXIT_GENERAL
+    assert "Upgrade walk stopped early." in caplog.text
+    assert "Reviewed 1 artist; upgraded tracks in 1 album." in caplog.text
+    assert "Upgrade walk complete." not in caplog.text
+    assert args.consolidate is True
+
+
+def test_album_walk_interrupt_is_not_reported_as_complete(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian.modes import walk
+
+    artists = [tmp_path / "First", tmp_path / "Second"]
+    for artist in artists:
+        (artist / "Album").mkdir(parents=True)
+    monkeypatch.setattr(walk, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(walk, "list_artist_album_dirs",
+                        lambda artist: list(artist.iterdir()))
+    monkeypatch.setattr(walk, "load_album_walk_seen", lambda: set())
+    monkeypatch.setattr(walk, "_queue_saver", lambda _mode: lambda _queue: None)
+    monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr("builtins.input", lambda *_args: "")
+    calls = 0
+
+    def gap_fill(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt
+        return ([], {}, set(), set(), "artist-id", None)
+
+    monkeypatch.setattr(walk, "run_artist_gap_fill", gap_fill)
+    args = SimpleNamespace(consolidate=False, yes=True, dry_run=False)
+
+    walk.run_album_walk_mode(args, "tok")
+
+    assert "Album walk stopped early. Artists scanned: 1" in caplog.text
+    assert "Album walk complete." not in caplog.text
+
+
+def test_library_walk_interrupt_is_not_reported_as_complete(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian.modes import walk
+
+    artist = tmp_path / "Artist"
+    artist.mkdir()
+    monkeypatch.setattr(walk, "list_library_artists", lambda: [artist])
+    monkeypatch.setattr(walk, "load_walk_seen", lambda: set())
+    monkeypatch.setattr(walk, "_queue_saver", lambda _mode: lambda _queue: None)
+    monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(
+        walk,
+        "run_artist_gap_fill",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+    answers = iter(["", "y"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+    args = SimpleNamespace(
+        consolidate=False,
+        yes=False,
+        dry_run=False,
+        no_catalog=True,
+    )
+
+    walk.run_walk_queued_mode(args, "tok")
+
+    assert "Walk stopped early. Scanned 0, skipped 0." in caplog.text
+    assert "Walk done." not in caplog.text
+
+
+def test_artist_gap_fill_summary_accounts_for_nonclean_and_deliberate_outcomes(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian.modes import artist
+
+    artist_dir = tmp_path / "Artist"
+    artist_dir.mkdir()
+    outcomes = [
+        {"result": "already_complete"},
+        {"result": "partial", "n_ok": 3, "n_fail": 1, "imported": True},
+        {"result": "not_imported", "n_ok": 3, "imported": False},
+        {"result": "no_tracks"},
+        {"result": "dry_run"},
+        {"result": "downloaded", "n_ok": 3, "imported": False},
+    ]
+    monkeypatch.setattr(artist, "resolve_artist_dir", lambda _name: artist_dir)
+    monkeypatch.setattr(
+        artist,
+        "run_artist_gap_fill",
+        lambda *_args, **_kwargs: (outcomes, {}, set(), set(), "artist-id", []),
+    )
+    args = SimpleNamespace(
+        consolidate=False,
+        yes=True,
+        no_catalog=True,
+    )
+
+    artist.run_artist_mode("Artist", args, "tok")
+
+    assert "already complete:" in caplog.text
+    assert "partly filled:" in caplog.text
+    assert "failed:" in caplog.text
+    assert "nothing available on Qobuz:" in caplog.text
+    assert "dry run, not fetched:" in caplog.text
+    assert "downloaded, not imported:" in caplog.text
+    assert "tracks filled:" not in caplog.text

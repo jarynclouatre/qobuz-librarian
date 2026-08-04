@@ -13,7 +13,7 @@
   {% if not embedded_surface|default(false) %}
   <header class="ql-page-header ql-page-header--actions ql-job-header">
     <div class="ql-job-heading">
-      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }}, {% endif %}{{ job.display_title }}{% endif %}</h1>
+      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% elif job.execute_kind == 'downsample' and job.status.value == 'awaiting_review' %}{{ labels.review_title(job) }}{% else %}{% if job.artist %}{{ job.artist }}, {% endif %}{{ job.display_title }}{% endif %}</h1>
     </div>
     <span id="job-status-badge" class="ql-status-chip ql-job-status
       {%- if job.status.value == 'done' %} is-success
@@ -27,12 +27,25 @@
 
   {% if job.execute_kind == 'repair' %}
   {% set _st = job.status.value %}
-  {% set _ph = 'scan' if _st in ('pending','scanning') else ('review' if _st == 'awaiting_review' else ('repair' if _st == 'running' else ('done' if _st == 'done' else 'failed'))) %}
-  <div class="ql-repair-phase" aria-label="Repair phase: {{ _ph }}">
+  {% if _st in ('pending', 'scanning') %}
+  {% set _ph = 'scan' %}
+  {% elif _st == 'awaiting_review' %}
+  {% set _ph = 'review' %}
+  {% elif _st == 'running' %}
+  {% set _ph = 'repair' %}
+  {% elif _st == 'done' %}
+  {% set _ph = 'done' %}
+  {% else %}
+  {% set _ph = 'repair' if job.phase == 'execute' else ('review' if job.phase == 'review' else 'scan') %}
+  {% endif %}
+  {% set _phase_outcome = ' failed' if _st == 'failed' else (' cancelled' if _st == 'canceled' else '') %}
+  <div class="ql-repair-phase" aria-label="Repair phase: {{ _ph }}{{ _phase_outcome }}">
     {% for key, label in [('scan','Scan'), ('review','Review'), ('repair','Repair')] %}
-    {% set _done = (key == 'scan' and _ph in ('scan','review','repair','done','failed')) or (key == 'review' and _ph in ('review','repair','done','failed')) or (key == 'repair' and _ph in ('repair','done')) %}
-    <span{% if key == _ph %} aria-current="step"{% endif %} class="ql-repair-phase-number{% if _done %} is-done{% endif %}">{{ loop.index }}</span>
-    <span class="ql-repair-phase-label{% if _done %} is-done{% endif %}">{{ label }}</span>
+    {% set _done = (key == 'scan' and _ph in ('review','repair','done')) or (key == 'review' and _ph in ('repair','done')) or (key == 'repair' and _ph == 'done') %}
+    {% set _current = key == _ph %}
+    {% set _failed = _current and _st == 'failed' %}
+    <span{% if _current %} aria-current="step"{% endif %} class="ql-repair-phase-number{% if _done %} is-done{% endif %}{% if _current %} is-current{% endif %}{% if _failed %} is-error{% endif %}">{{ loop.index }}</span>
+    <span class="ql-repair-phase-label{% if _done %} is-done{% endif %}{% if _current %} is-current{% endif %}{% if _failed %} is-error{% endif %}">{{ label }}</span>
     {% if not loop.last %}<span class="ql-repair-phase-line{% if _done %} is-done{% endif %}"></span>{% endif %}
     {% endfor %}
   </div>
@@ -40,19 +53,18 @@
 
   {% set s = job.status.value %}
   {% set _review_thing = labels.discard_review_label(job) %}
-  {# Back points at the surface that owns the job; finished jobs came from
-     History, so they go back there. #}
+  {# Back points at the surface that owns the job. #}
   {% set _finished = s in ('done', 'failed', 'canceled') %}
   {% if job.execute_kind == 'repair' %}
   {% set _back_href, _back_label = '/repair', 'Back to Repair' %}
   {% elif job.execute_kind in ('library', 'new_releases') %}
   {% set _back_href, _back_label = '/library', 'Back to Library' %}
-  {% elif _finished %}
-  {% set _back_href, _back_label = '/queue/history', 'Back to History' %}
   {% elif job.execute_kind == 'upgrade' and not upgrade_available %}
   {% set _back_href, _back_label = '/queue/history', 'Back to History' %}
   {% elif job.execute_kind in ('upgrade', 'downsample') %}
   {% set _back_href, _back_label = '/' ~ job.execute_kind, 'Back to ' ~ job.execute_kind | capitalize %}
+  {% elif _finished %}
+  {% set _back_href, _back_label = '/queue/history', 'Back to History' %}
   {% elif job.execute_kind == 'migration' %}
   {% set _back_href, _back_label = '/migrate', 'Back to Migration' %}
   {% else %}
@@ -110,6 +122,17 @@
           data-job-id="{{ job.id }}" data-review-kind="{{ job.execute_kind }}">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       {% if review_tab %}<input type="hidden" name="tab" id="review-tab-field" value="{{ review_tab }}">{% endif %}
+      {% if job.execute_kind == 'migration' and job.execute_args.get('in_place') and job.execute_args.get('requires_low_space_override') %}
+      <label class="ql-option-row">
+        <input type="checkbox" name="allow_low_space" class="ql-checkbox" required>
+        <span>
+          <span class="ql-option-title">I understand the low-space risk</span>
+          <span class="ql-option-help ql-option-help-warning">
+            The preview above shows that this in-place move needs more free space than the destination reports. If it runs out, the library can be left partly relocated.
+          </span>
+        </span>
+      </label>
+      {% endif %}
       {% include "_review_candidates.html" %}
       <div class="ql-review-footer">
         <div class="ql-review-footer-actions">
@@ -128,7 +151,7 @@
             {%- elif job.execute_kind == 'repair' %} data-confirm-action="Repair"
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-confirm-danger
             {%- else %} data-confirm-action="Download"
-            {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ _bar_selected }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
+            {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
           {% set _result_count = review_counts.total %}
           {% set _discard_confirm = labels.discard_confirm(job) | trim %}
           <div class="ql-review-footer-secondary-group">
@@ -137,6 +160,7 @@
             {% endif %}
             <button type="submit" formaction="/jobs/{{ job.id }}/cancel"
                     class="ql-btn ql-btn-danger ql-btn-sm"
+                    formnovalidate
                     data-confirm="{{ _discard_confirm }}"
                     data-confirm-action="Discard" data-confirm-danger>Discard {{ _review_thing }}</button>
           </div>
@@ -156,7 +180,7 @@
     {% set _cancel_protected = job.id == cancel_protected_job_id %}
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
-        <span id="job-activity" aria-live="polite">{% if s == 'scanning' %}{{ job.progress_phase or 'Scanning' }}{% elif s == 'running' %}{{ job.progress_phase or labels.job_activity(job) }}{% else %}Queued{% endif %}</span>
+        <span id="job-activity" aria-live="polite">{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s == 'scanning' %}{{ job.progress_phase or 'Scanning' }}{% elif s == 'running' %}{{ job.progress_phase or labels.job_activity(job) }}{% else %}Queued{% endif %}</span>
         <span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>

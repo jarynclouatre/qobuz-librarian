@@ -254,7 +254,7 @@ def _block(
     if backup is not None:
         pinned = pin_unverified_upgrade_backup(
             backup,
-            "queue backup kept — durable work requires attention",
+            "queue backup kept; durable work requires attention",
             expected_owner=owner,
         )
         _require_authority(authority)
@@ -428,8 +428,8 @@ def _cancel_after_download(
     authority: RunLockLease,
 ) -> DurableAlbumResult | None:
     # A cancel is a deliberate stop, not a crash: throw the partial download
-    # away — the run root and any groups it parked, such as a rejected
-    # broken track — and settle the journal item so the queue never waits on
+    # away: the run root and any groups it parked, such as a rejected
+    # broken track. Settle the journal item so the queue never waits on
     # recovery. Anything that cannot be proved settled falls back to the
     # blocking path.
     try:
@@ -693,7 +693,7 @@ def execute_durable_new_album(
             _require_authority(authority)
             pinned = pin_unverified_upgrade_backup(
                 backup,
-                "queue backup kept — its exact carrier could not be reopened",
+                "queue backup kept; its exact carrier could not be reopened",
                 expected_owner=_owner_record(owner),
             )
             _require_authority(authority)
@@ -718,7 +718,7 @@ def execute_durable_new_album(
             _require_authority(authority)
             pinned = pin_unverified_upgrade_backup(
                 backup,
-                "queue backup kept — source retirement did not finish exactly",
+                "queue backup kept; source retirement did not finish exactly",
                 expected_owner=_owner_record(owner),
             )
             _require_authority(authority)
@@ -922,9 +922,22 @@ def execute_durable_new_album(
             _require_authority(authority)
             prepared = prepare_staged(album_dirs, checkpoint_sources)
             _require_authority(authority)
-            if isinstance(prepared, tuple) and len(prepared) == 2:
-                item["_durable_lyric_sigs"] = prepared[0]
-                item["resampled_n"] = prepared[1]
+            try:
+                lyric_sigs, resampled = prepared
+            except (TypeError, ValueError) as exc:
+                raise OSError("staged preparation result is malformed") from exc
+            item["_durable_lyric_sigs"] = lyric_sigs
+            item["resampled_n"] = resampled
+            item["downsample_errors"] = getattr(prepared, "errors", 0)
+            item["downsample_saved_bytes"] = getattr(
+                prepared, "saved_bytes", 0
+            )
+            item["downsample_flush_warnings"] = getattr(
+                prepared, "flush_warnings", 0
+            )
+            item["downsample_cancelled"] = bool(
+                getattr(prepared, "cancelled", False)
+            )
             if validated_staged_album_dirs(item) != album_dirs:
                 raise OSError("staged album roots changed during preparation")
             current_records = tuple(staged_track_bindings(item))

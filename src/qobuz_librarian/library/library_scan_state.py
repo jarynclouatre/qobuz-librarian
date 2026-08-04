@@ -42,7 +42,7 @@ def _empty_kind():
 def quality_signature() -> str:
     """Every setting the saved candidates were computed under. When it differs
     from the current settings, a refresh must re-derive candidates even for
-    unchanged folders — the cheap skip would otherwise carry forward promises
+    unchanged folders, the cheap skip would otherwise carry forward promises
     made under a dead policy. Not just the quality pair: single-track-gap
     suppression, the catalogue limit, the missing-album track minimum, and
     live-album exclusion all change WHICH candidates a scan yields, so leaving
@@ -104,11 +104,13 @@ def kind_state(kind: str):
 def _write_state(data):
     try:
         state_file.write_json(cfg.LIBRARY_SCAN_STATE_FILE, data)
+        return True
     except OSError as e:
         # Losing this file only costs a slower next scan, but say so (verbose)
         # rather than going stale with zero signal on a full/read-only volume.
         from qobuz_librarian.ui_cli.logging import vlog
         vlog(f"library scan state write failed ({e}); next scan re-crawls")
+        return False
 
 
 def _clean_artist_state(entry):
@@ -146,9 +148,9 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
         _write_state(data)
 
 
-def mark_review_retired(now=None, reason: str = "") -> None:
+def mark_review_retired(now=None, reason: str = "") -> bool:
     """Record that the parked Library review from the current snapshot was
-    retired — ``reason`` is "discarded" (thrown away) or "worked_through"
+    retired. ``reason`` is "discarded" (thrown away) or "worked_through"
     (dismissed/downloaded to empty), driving the Library page's copy. The
     saved-state review reconstruction won't rebuild a review from a snapshot
     whose missing kind was last saved at or before this, so a finished review
@@ -159,11 +161,11 @@ def mark_review_retired(now=None, reason: str = "") -> None:
         if reason:
             data["review_retired_reason"] = reason
         data["version"] = STATE_VERSION
-        _write_state(data)
+        return _write_state(data)
 
 
 def clear_review_retired() -> bool:
-    """Lift a review retirement so the saved-state review rebuilds again — used
+    """Lift a review retirement so the saved-state review rebuilds again, used
     when the user brings dismissed results back from the finished Library page.
     Returns True if a retirement was actually cleared (there was one to lift)."""
     with _lock:
@@ -173,5 +175,4 @@ def clear_review_retired() -> bool:
         data["review_retired_at"] = 0.0
         data["review_retired_reason"] = ""
         data["version"] = STATE_VERSION
-        _write_state(data)
-        return True
+        return _write_state(data)

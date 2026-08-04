@@ -157,6 +157,7 @@ def run_upgrade_walk_mode(args, token):
     n_failed_albums = 0
     n_gone_albums = 0
     no_answer = False
+    interrupted = False
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
 
     log.info(fmt(C.GRAY,
@@ -167,21 +168,21 @@ def run_upgrade_walk_mode(args, token):
     # Auto-accept-all gate. Skipped under --dry-run (which changes nothing), so
     # a preview run doesn't prompt to "run unattended", matching downsample.py.
     auto_accept_all = False
-    if (not args.yes and not getattr(args, "auto_safe", False)
-            and not getattr(args, "dry_run", False)):
-        try:
-            _r = input(fmt(C.CYAN,
-                "\n  Auto-accept all upgrades and run unattended? [y/N]: "
-            )).strip().lower()
-        except EOFError:
-            _r = ""
-        if _r in ("y", "yes"):
-            auto_accept_all = True
-            log.info(fmt(C.GREEN,
-                "  ✓ Auto-accepting every artist. Walk away."))
-    log.info("")
-
     try:
+        if (not args.yes and not getattr(args, "auto_safe", False)
+                and not getattr(args, "dry_run", False)):
+            try:
+                _r = input(fmt(C.CYAN,
+                    "\n  Auto-accept all upgrades and run unattended? [y/N]: "
+                )).strip().lower()
+            except EOFError:
+                _r = ""
+            if _r in ("y", "yes"):
+                auto_accept_all = True
+                log.info(fmt(C.GREEN,
+                    "  ✓ Auto-accepting every artist. Walk away."))
+        log.info("")
+
         for artist_name, candidates in by_artist.items():
             n_reviewed += 1
             log.info("")
@@ -271,10 +272,6 @@ def run_upgrade_walk_mode(args, token):
                                   token=token)
                 except AuthLost:
                     raise
-                except KeyboardInterrupt:
-                    log.info("")
-                    log.info(fmt(C.GRAY, "  Interrupted. Stopping upgrade walk."))
-                    return EXIT_GENERAL
 
                 _pr_result = (_proc_result or {}).get("result", "")
                 if _pr_result == "upgrade_no_local_tracks":
@@ -324,7 +321,10 @@ def run_upgrade_walk_mode(args, token):
                 time.sleep(cfg.ARTIST_API_DELAY)
 
             log.info("")
-
+    except KeyboardInterrupt:
+        interrupted = True
+        log.info("")
+        log.info(fmt(C.GRAY, "  Interrupted. Stopping upgrade walk."))
     finally:
         args.consolidate = saved_consolidate
 
@@ -333,7 +333,9 @@ def run_upgrade_walk_mode(args, token):
     n_gone = n_stale_candidates + n_gone_albums
 
     log.info("")
-    if no_answer:
+    if interrupted:
+        log.info(fmt(C.YELLOW, "  ⚠  Upgrade walk stopped early."))
+    elif no_answer:
         log.warning(block(fmt(C.YELLOW,
             "  ✗  The walk stopped: each artist needs a confirmation and "
             "there is no terminal to give one. Re-run with --yes (or "
@@ -375,4 +377,4 @@ def run_upgrade_walk_mode(args, token):
                     f"       · {truncate(_t, 50)}: {'; '.join(_rs)}"))
         log.info(fmt(C.GRAY,
             "     Re-run without --auto-safe to review these interactively."))
-    return EXIT_GENERAL if no_answer or n_failed_attempts else 0
+    return EXIT_GENERAL if interrupted or no_answer or n_failed_attempts else 0
