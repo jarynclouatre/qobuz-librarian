@@ -4,13 +4,13 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 
 ## [0.13.0] - Unreleased
 
-A reliability and release-safety update across downloads, library tools, and the web interface.
+A focused update for dependable library maintenance and clearer status across the CLI and web interface.
 
-- Makes interrupted, failed, retried, and cancelled work report its real outcome and survive restarts more reliably.
-- Tightens file, state, backup, import, and recovery handling so uncertain operations stop safely instead of guessing.
-- Keeps album editions, Library reviews, search results, Repair findings, and History consistent with the files and records they represent.
-- Improves login, settings, readiness checks, container defaults, responsive controls, and offline behavior.
-- Strengthens release packaging and validation while bringing the documentation in line with current behavior.
+- Preserves accurate progress, history, and recovery choices when downloads are interrupted, retried, cancelled, or resumed after a restart.
+- Keeps alternate album editions and track versions distinct in Search, with durable Library review choices and clearer Repair findings.
+- Makes Repair, Migration, Downsample, and Lyrics safer around partial work, failed writes, backups, and imports.
+- Improves Queue and History status, authentication, settings, offline use, and responsive controls across desktop and mobile.
+- Refreshes container defaults and readiness checks, with stronger packaging, release validation, and supporting documentation.
 
 ## [0.12.1] - 2026-08-03
 
