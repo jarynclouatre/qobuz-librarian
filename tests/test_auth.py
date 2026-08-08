@@ -1,4 +1,4 @@
-"""Tests for qobuz_librarian.api.auth — pattern detection, token I/O."""
+"""Tests for qobuz_librarian.api.auth - pattern detection, token I/O."""
 import tomllib
 from unittest.mock import patch
 
@@ -17,7 +17,7 @@ from qobuz_librarian.api.auth import (
 def test_detect_auth_lost_only_fires_on_http_401():
     # Real auth-lost signal.
     assert detect_auth_lost("Error: http 401 from endpoint") is True
-    # "401" appearing in track titles or counts must not trigger — that
+    # "401" appearing in track titles or counts must not trigger - that
     # would falsely tear down credentials mid-download.
     assert detect_auth_lost("Downloaded track 401 - Song Title.flac") is False
     assert detect_auth_lost("Downloading track 401 of 500") is False
@@ -36,7 +36,7 @@ def test_detect_rate_limited_catches_429_and_persistent_failures():
     # Streamrip exhausting its retries reads as throttling.
     assert detect_rate_limited(
         "Persistent error downloading track 'X', skipping") is True
-    # A single retry is normal — don't flag every transient hiccup.
+    # A single retry is normal - don't flag every transient hiccup.
     assert detect_rate_limited("Error downloading track 'X', retrying") is False
 
 
@@ -106,4 +106,29 @@ def test_write_streamrip_creds_writes_streamrip_2_2_schema(tmp_path, monkeypatch
     monkeypatch.setattr(config, "STREAMRIP_CONFIG", blocker / "sub" / "c.toml")
     assert write_streamrip_creds("u", "t") is False
 
+
+def test_failed_streamrip_credential_publish_keeps_the_prior_file(
+        tmp_path, monkeypatch):
+    import os
+
+    from qobuz_librarian import config
+
+    cfg_path = tmp_path / "streamrip" / "config.toml"
+    monkeypatch.setattr(config, "STREAMRIP_CONFIG", cfg_path)
+    monkeypatch.setattr(config, "STAGING_DIR", tmp_path / "staging")
+    assert write_streamrip_creds("prior-user", "prior-token") is True
+    prior_bytes = cfg_path.read_bytes()
+    real_replace = os.replace
+
+    def fail_target_replace(source, destination):
+        if destination == cfg_path:
+            raise OSError("injected credential publish failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_target_replace)
+
+    assert write_streamrip_creds("new-user", "new-token") is False
+    assert cfg_path.read_bytes() == prior_bytes
+    assert cfg_path.stat().st_mode & 0o777 == 0o600
+    assert not list(cfg_path.parent.glob(".streamrip.*.tmp"))
 

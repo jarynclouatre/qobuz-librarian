@@ -1,4 +1,4 @@
-"""The shared discovery engine — one answer to "what's missing for this artist"
+"""The shared discovery engine - one answer to "what's missing for this artist"
 that both the CLI artist mode and the web scans drive.
 
 These exercise the engine against a real temp library on disk (so folder
@@ -44,7 +44,7 @@ def _album(album_id, title, artist, year, tracks, bd=16, sr=44.1):
 
 
 def _catalog_entry(album):
-    """The lighter shape get_artist_albums returns — no track list."""
+    """The lighter shape get_artist_albums returns - no track list."""
     return {k: v for k, v in album.items() if k != "tracks"}
 
 
@@ -126,6 +126,7 @@ def _titles(gaps):
 
 # ── Core classification ─────────────────────────────────────────────────────────
 
+
 def test_fully_missing_album_is_a_gap_with_no_dir(monkeypatch, tmp_path, beatles_search):
     owned = _album("a1", "Revolver", "The Beatles", 1966,
                    [_qt(f"r{i}", f"ISRCR{i}") for i in range(11)])
@@ -196,7 +197,7 @@ def test_zero_overlap_match_is_skipped_as_false_match(monkeypatch, tmp_path, bea
 def test_transient_api_error_aborts_the_scan_instead_of_burying_a_folder(
         monkeypatch, tmp_path, beatles_search):
     # A transient Qobuz failure while matching an owned folder must propagate,
-    # not collapse into a "no match / nothing missing" verdict — otherwise an
+    # not collapse into a "no match / nothing missing" verdict - otherwise an
     # outage silently buries albums the next scan would never re-check.
     from qobuz_librarian.api.auth import QobuzUnavailable
 
@@ -205,7 +206,7 @@ def test_transient_api_error_aborts_the_scan_instead_of_burying_a_folder(
 
     class Flaky(FakeQobuz):
         def get_album(self, album_id, token):
-            raise QobuzUnavailable("the Qobuz API timed out — try again later")
+            raise QobuzUnavailable("the Qobuz API timed out - try again later")
 
     _library(monkeypatch, tmp_path,
              {"The Beatles": {"Abbey Road (1969)":
@@ -221,7 +222,7 @@ def test_transient_api_error_aborts_the_scan_instead_of_burying_a_folder(
 # ── New-release quickscan ─────────────────────────────────────────────────────
 
 def test_resolve_artist_does_not_cache_an_id_less_match(monkeypatch):
-    # A partial/malformed Qobuz 200 — a name match carrying no id — must not
+    # A partial/malformed Qobuz 200 - a name match carrying no id - must not
     # be cached.
     monkeypatch.setattr(discovery, "_resolve_cache", {})
     monkeypatch.setattr(discovery, "_resolve_cache_dirty", False)
@@ -256,7 +257,7 @@ def test_artist_search_failure_is_not_returned_as_a_no_match(monkeypatch):
 def test_new_releases_surface_only_what_appeared_since_the_baseline(
         monkeypatch, tmp_path):
     # resolve_artist hands back an int id (as Qobuz does) but the baseline is
-    # persisted as JSON, so it comes back string-keyed — the engine must match
+    # persisted as JSON, so it comes back string-keyed - the engine must match
     # the two or it re-baselines forever and never surfaces anything.
     owned = _album(101, "Ocean Eyes", "Billie Eilish", 2016,
                    [_qt(f"o{i}", f"ISRCO{i}") for i in range(4)])
@@ -281,7 +282,7 @@ def test_new_releases_surface_only_what_appeared_since_the_baseline(
     assert set(first.current_ids) == {"101", "202", "303"}
 
     # A later check that already knew the old catalog (string-keyed, as stored)
-    # surfaces only the unowned album that's new since — not the owned one, not
+    # surfaces only the unowned album that's new since - not the owned one, not
     # the one it had already seen.
     later = find_new_releases_for_artist(
         "Billie Eilish", token="tok", opts=opts,

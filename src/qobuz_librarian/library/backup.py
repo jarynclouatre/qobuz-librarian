@@ -99,11 +99,11 @@ class IncompleteUpgradeRestoreOutcome:
 def _list_tree(root: Path):
     """Every entry under ``root``, or None when the walk couldn't cover the
     whole tree. rglob swallows subtree listing failures, so a partial walk can
-    pass for a complete one — every caller here draws a keep-or-delete
+    pass for a complete one - every caller here draws a keep-or-delete
     conclusion from the listing, and "couldn't see it" must never count as
     "isn't there"."""
     if not root.exists():
-        # A tree that isn't there holds nothing to lose — distinct from one
+        # A tree that isn't there holds nothing to lose - distinct from one
         # that exists but can't be read (os.walk reports the latter as an
         # error, and "couldn't see it" must not read as "empty").
         return []
@@ -140,7 +140,7 @@ def _same_filesystem(a: Path, b: Path) -> bool:
     """True if a and b live on the same filesystem (same st_dev).
 
     Inside Docker, /music and /upgrade_backups are separate bind mounts
-    so they get different st_dev even when the host paths share a disk —
+    so they get different st_dev even when the host paths share a disk -
     that's what makes the cross-fs path the common case for image users.
     Walks up to the nearest existing ancestor on either side so this can
     answer before either dir actually exists.
@@ -1012,7 +1012,7 @@ def _copy_fidelity_fd(source_fd, destination_fd, *, adopt_owner=False) -> None:
     """Copy and verify ownership, permissions, times, xattrs and ACL xattrs.
 
     ``adopt_owner`` keeps the destination's own ownership instead of the
-    source's — the app can't chown a copy of a file it doesn't own, and a
+    source's - the app can't chown a copy of a file it doesn't own, and a
     backup copy the app owns is what lets the rest of that transaction hold
     ordinary leases."""
     source = _fidelity_fd(source_fd)
@@ -2492,7 +2492,7 @@ def _fsync(path: Path) -> bool:
 def _fsync_tree(root: Path) -> bool:
     """fsync every file and directory under ``root`` (and root itself) so a
     verified copytree is durable before the source it mirrors is removed.
-    Returns False when any flush genuinely failed (see _fsync) — the copy may
+    Returns False when any flush genuinely failed (see _fsync) - the copy may
     exist only in the page cache, so a caller about to delete the source must
     keep it instead."""
     entries = _list_tree(root)
@@ -2531,7 +2531,7 @@ def _tree_digest(d: Path):
     None on any stat/read error, an unexpected special file, or a symlink
     whose target points outside the tree. Content-verifies a cross-filesystem
     copy before the source is deleted: a same-size copy that differs by even
-    one byte — a transfer glitch, a partial write that got re-padded — fails
+    one byte - a transfer glitch, a partial write that got re-padded - fails
     the match, so it can't pass as a valid backup and let the original be
     removed.
     """
@@ -2550,13 +2550,13 @@ def _tree_digest(d: Path):
                 try:
                     resolved.relative_to(base)
                 except ValueError:
-                    return None  # target escapes the tree — can't verify its bytes
+                    return None  # target escapes the tree - can't verify its bytes
                 out[rel] = ("symlink", target)
                 continue
             if f.is_dir():
                 continue
             if not f.is_file():
-                return None  # socket/fifo/device — refuse rather than guess
+                return None  # socket/fifo/device - refuse rather than guess
             try:
                 out[rel] = (f.stat().st_size, _file_digest(f))
             except OSError:
@@ -2585,7 +2585,7 @@ _PARTIAL_RESTORE_SENTINEL = ".ql_partial_restore"
 # dropped). The backup is then the only fully-verified copy.
 _UNVERIFIED_UPGRADE_SENTINEL = ".ql_upgrade_unverified"
 
-# Dropped into a backup that exists only as an undo window — the downsample
+# Dropped into a backup that exists only as an undo window - the downsample
 # keep-originals copy. Its origin deliberately holds the SMALLER rewrite, so
 # the content-presence proof below can never call it redundant; without this
 # marker the sweep would keep it forever and the diagnostics would nag about
@@ -5884,7 +5884,7 @@ def carry_backup_companions(
 
 def _write_backup_origin(bp: Path, origin: Path) -> bool:
     """Write the protective origin sidecar. Returns True only if it's actually
-    on disk afterwards — the sidecar is the sole signal that keeps the age sweep
+    on disk afterwards - the sidecar is the sole signal that keeps the age sweep
     from reaping a backup that's the only surviving copy, so a caller about to
     delete the original must treat a False here as a backup failure, not ignore
     it."""
@@ -5930,7 +5930,7 @@ def backup_keep_markers_present(bp) -> bool:
 
 
 def _backup_safe_to_reap(bp: Path) -> bool:
-    """True ONLY when ``bp`` is provably redundant — every track it holds is
+    """True ONLY when ``bp`` is provably redundant - every track it holds is
     confirmed back at its origin. The age sweep reaps on this, so the burden of
     proof is on "safe to delete", not on "must keep": any uncertainty (no
     sidecar, unreadable origin, a keep marker, a track not proven back) means we
@@ -5940,18 +5940,18 @@ def _backup_safe_to_reap(bp: Path) -> bool:
     must be back at the origin under the same relative path and at least as
     large. A bare count match is fooled when restored or gap-filled files
     inflate the origin's count while one of the backup's own tracks is still
-    missing or short there — exactly the case that strands the only good copy.
+    missing or short there - exactly the case that strands the only good copy.
 
     This is deliberately the inverse of a "protect if marked" scheme. A backup
     can become the only surviving copy whenever the originals were moved into it
     and not fully put back, and the protective sidecar/sentinel writes are
-    best-effort — on the exact filesystem failures that strand a sole copy
+    best-effort - on the exact filesystem failures that strand a sole copy
     (ENOSPC, RO remount, EACCES) those writes can themselves fail. Making
     "keep" the default means no protective write has to succeed for the data to
     be safe; the worst case of a missing marker is a stranded backup the user
     clears by hand, never silent loss."""
     # Explicit keep markers: a partial restore, or an upgrade kept because it
-    # couldn't be verified complete — never reap either.
+    # couldn't be verified complete - never reap either.
     if backup_keep_markers_present(bp):
         return False
     entries = _list_tree(bp)
@@ -5982,11 +5982,11 @@ def pin_unverified_upgrade_backup(backup: BackupResult,
     """Mark a backup as never-reap: it holds something the age sweep's
     redundancy proof can't see. Content-presence reaping already keeps a
     backup whose tracks aren't all proven back at the origin, but a same-path,
-    same-or-larger file at the origin defeats the byte check — a hi-res re-rip
+    same-or-larger file at the origin defeats the byte check - a hi-res re-rip
     after an unverified upgrade, or a repair refill whose original tags/art
     survive only in the backup. For exactly those, this marker is the ONLY
     protection, so a failed or unflushed write returns False and the caller
-    must warn the user the backup is unprotected — swallowing it (ENOSPC is
+    must warn the user the backup is unprotected - swallowing it (ENOSPC is
     likeliest right after a download) leaves the sole copy one age sweep from
     deletion with no sign anything is wrong. ``note`` names the reason when
     the default upgrade wording doesn't fit."""
@@ -5995,7 +5995,7 @@ def pin_unverified_upgrade_backup(backup: BackupResult,
     return _write_receipt_marker(
         backup,
         _UNVERIFIED_UPGRADE_SENTINEL,
-        note or "upgrade kept — replacement not verified complete; "
+        note or "upgrade kept - replacement not verified complete; "
                 "the only full copy",
     )
 
@@ -6005,7 +6005,7 @@ def warn_pin_failed(bp: Path) -> None:
     backup holds a sole copy, so the message has to say the auto-clean
     protection did NOT take."""
     log.info(fmt(C.RED,
-        f"  ✗  Couldn't write the keep marker on this backup — the "
+        f"  ✗  Couldn't write the keep marker on this backup - the "
         f"scheduled auto-clean may treat it as redundant and remove it.\n"
         f"     Copy what you need out of {bp} now."))
 
@@ -6023,13 +6023,13 @@ _only_copy_lock = threading.Lock()
 
 
 def find_only_copy_backups():
-    """Backups whose recorded origin is gone or still short of them — orphaned
+    """Backups whose recorded origin is gone or still short of them - orphaned
     by a hard kill that skipped the caller's restore/delete. Retention keeps
     these; the web diagnostic surfaces them so the user can recover or clear
     them (each holds the origin path in its sidecar).
 
-    Memoized for a few seconds keyed on the backup dir's mtime — see
-    _ONLY_COPY_TTL_SEC — so repeated diagnostics don't each re-walk the tree."""
+    Memoized for a few seconds keyed on the backup dir's mtime - see
+    _ONLY_COPY_TTL_SEC - so repeated diagnostics don't each re-walk the tree."""
     global _only_copy_cache
     if not cfg.UPGRADE_BACKUP_DIR.exists():
         with _only_copy_lock:
@@ -6058,7 +6058,7 @@ def find_only_copy_backups():
                     continue
                 # A deliberate undo copy (downsample originals): its origin
                 # holds the smaller rewrite on purpose, so it always looks
-                # "not redundant" here — but it isn't orphaned, and the
+                # "not redundant" here - but it isn't orphaned, and the
                 # diagnostics list it feeds shows it separately.
                 if (entry / _REAP_AFTER_RETENTION_SENTINEL).is_file():
                     continue
@@ -7306,7 +7306,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                     raise OSError("verified source receipt changed")
                 # A file the app user doesn't own can't carry a write lease.
                 # With a sealed receipt pinning its exact content the copy
-                # route below still moves it safely — every gate re-hashes
+                # route below still moves it safely - every gate re-hashes
                 # against the receipt, and the copy the app makes is its own,
                 # so the rest of the transaction holds ordinary leases.
                 source_lease = acquire_inode_write_exclusion(source_fd)
@@ -7315,7 +7315,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                 if source_lease is None and expected is None:
                     if os.fstat(source_fd).st_uid != os.geteuid():
                         raise OSError(
-                            "the app does not own this file — check "
+                            "the app does not own this file - check "
                             "ownership and PUID")
                     raise OSError("source has an active or uncertain writer")
                 records.append({
@@ -7683,7 +7683,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
 def list_undo_copies():
     """Deliberate undo copies (downsample originals) still inside their
     retention window, as (backup_path, origin). Shown on the diagnostics list
-    with a Restore button — separate from the orphaned-backup alarm, because
+    with a Restore button - separate from the orphaned-backup alarm, because
     this state is one the user asked for, not a failure."""
     out = []
     if not cfg.UPGRADE_BACKUP_DIR.exists():
@@ -7710,7 +7710,7 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
     can bind that receipt immediately before rewriting and refuse a replaced or
     subsequently changed source. The default keeps the existing two-value API.
 
-    Copies, never moves — the originals stay put for the rewrite itself. The
+    Copies, never moves - the originals stay put for the rewrite itself. The
     caller must leave any file NOT in the returned set untouched: the whole
     point of keep-originals is that nothing is rewritten without its copy, so
     a failed copy downgrades that file to "skipped", never to "unprotected".
@@ -7964,7 +7964,7 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
             marked = _write_text_noreplace_at(
                 backup_fd,
                 _REAP_AFTER_RETENTION_SENTINEL,
-                "downsample originals — an undo copy; the age sweep clears it "
+                "downsample originals - an undo copy; the age sweep clears it "
                 "after the retention window",
             )
             if not marked:
@@ -8053,10 +8053,10 @@ def restore_gap_fill_backup(backup, album_dir: Path,
 
     keep_larger_dst (default True, the repair caller): when a file already at
     the destination is >= the backup copy in bytes, keep it and discard the
-    backup — valid for repair, where the backup is the truncated original and
+    backup - valid for repair, where the backup is the truncated original and
     a larger dst is the good refill. Gap-fill callers pass False: there the
     backup IS the good original, so a larger-but-corrupt partial re-rip at dst
-    must NOT win — always restore the backup.
+    must NOT win - always restore the backup.
 
     Crash-safe across filesystems: each file is copied into a private random
     workspace on the destination filesystem, then published without overwrite
@@ -8423,7 +8423,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
             _write_receipt_marker(
                 backup,
                 _PARTIAL_RESTORE_SENTINEL,
-                "partial restore — un-restored originals are the only copy",
+                "partial restore - un-restored originals are the only copy",
             )
             log.info(fmt(C.RED + C.BOLD,
                 f"  ✗  Some tracks could NOT be restored. Originals are "
@@ -9604,7 +9604,7 @@ def retire_verified_repair_backup(backup) -> bool:
 
     The same proof the age sweep applies: every file the backup holds must
     have, at its exact path in the album, a decode-clean track of at least
-    its duration. Size may shrink — the backup holds the damaged copies."""
+    its duration. Size may shrink - the backup holds the damaged copies."""
     if (
         not isinstance(backup, BackupResult)
         or not isinstance(backup.receipt, dict)
@@ -9638,7 +9638,7 @@ def discard_redundant_backup(path) -> bool:
     """Dispose one retained backup whose files are all byte-identical at
     its recorded origin.
 
-    The age sweep's size proof deliberately cannot override a keep pin — a
+    The age sweep's size proof deliberately cannot override a keep pin - a
     same-path, same-or-larger origin file can hide a different rendition
     whose original survives only in the backup. A user-requested removal
     gets the stronger proof instead: exact digests on both sides, so
@@ -9666,12 +9666,12 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
     Parses the timestamp prefix encoded in each backup dir's
     name (YYYYMMDD_HHMMSS_safe) instead of stat().st_mtime. shutil.move
     preserves the source's mtime, so a fresh backup of an old folder
-    inherited that old mtime — and was being auto-deleted on the very
+    inherited that old mtime - and was being auto-deleted on the very
     next run despite being just minutes old. Skips (does not delete)
     backups whose names don't parse (legacy / hand-named / hand-restored).
 
     Stamps DATA_DIR/.last_backup_sweep and skips a re-sweep within 24h
-    unless ``force=True`` — a CLI session that opens and closes ten times
+    unless ``force=True`` - a CLI session that opens and closes ten times
     in a minute shouldn't stat the whole backup dir each time.
     """
     if retention_days is None:
@@ -9736,7 +9736,7 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
         if ts < cutoff:
             if (entry / _REAP_AFTER_RETENTION_SENTINEL).is_file():
                 # A deliberate undo copy whose origin holds the smaller
-                # rewrite ON PURPOSE — the redundancy proof below can never
+                # rewrite ON PURPOSE - the redundancy proof below can never
                 # pass for it, and age alone is its whole contract.
                 candidate = load_backup_result(entry)
                 if candidate is None:
@@ -9764,7 +9764,7 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                 # never reap the last copy; keep it and let the web diagnostic
                 # surface it for the user to reconcile (restore or remove).
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Keeping backup {entry.name!r} past retention — can't "
+                    f"  ⚠  Keeping backup {entry.name!r} past retention - can't "
                     f"confirm its tracks are back in the original folder."))
                 continue
             if _dispose_retention_candidate(candidate):

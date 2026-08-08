@@ -11,8 +11,16 @@ STATE_VERSION = 1
 
 # save_kind and mark_review_retired both read-modify-write the shared file;
 # serialise them so a scan's periodic save and a review retire (discard /
-# worked-through) can't clobber each other's field.
-_lock = threading.Lock()
+# worked-through) can't clobber each other's field. Review reconstruction also
+# holds this lock through publication, so retirement and resurrection have one
+# ordering. It is reentrant because a guarded lifecycle transition calls the
+# state helpers below.
+_lock = threading.RLock()
+
+
+def review_state_lock():
+    """Return the shared review publication and retirement lock."""
+    return _lock
 
 
 def _empty_state():
@@ -145,10 +153,14 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
         }
         data["updated_at"] = now
         data["version"] = STATE_VERSION
-        _write_state(data)
+        return now if _write_state(data) else None
 
 
-def mark_review_retired(now=None, reason: str = "") -> bool:
+def mark_review_retired(
+    now=None,
+    reason: str = "",
+    generation: float | None = None,
+) -> bool:
     """Record that the parked Library review from the current snapshot was
     retired. ``reason`` is "discarded" (thrown away) or "worked_through"
     (dismissed/downloaded to empty), driving the Library page's copy. The
@@ -157,6 +169,21 @@ def mark_review_retired(now=None, reason: str = "") -> bool:
     doesn't come back; a fresh missing scan clears the block by construction."""
     with _lock:
         data = load()
+        if generation is not None:
+            try:
+                expected = float(generation)
+                current = float(
+                    ((data.get("kinds") or {}).get("missing") or {}).get(
+                        "updated_at"
+                    )
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                expected = current = 0.0
+            if not expected or current != expected:
+                # This review belongs to an older snapshot. Retiring it must
+                # not suppress results published by a newer full scan.
+                return True
         data["review_retired_at"] = float(time.time() if now is None else now)
         if reason:
             data["review_retired_reason"] = reason

@@ -484,7 +484,27 @@ def acquire_run_lock():
             f"   Only one writer can use /staging at a time.\n"),
             EXIT_LOCK_BUSY)
     if lease is not None and lease.intact() is True:
-        result = _record_startup_recovery(lease)
+        try:
+            result = _record_startup_recovery(lease)
+        except Exception as exc:
+            try:
+                lease.close()
+            except OSError as close_exc:
+                vlog(f"run-lock release after recovery failure: {close_exc}")
+            vlog(f"startup recovery check failed: {exc}")
+            die(fmt(
+                C.RED,
+                "\n✗  The saved recovery state could not be checked safely.\n"
+                "   The safety lock was released and no library work was "
+                "started. Check the data-folder permissions, then try "
+                "again.\n",
+            ), EXIT_GENERAL)
+        except BaseException:
+            try:
+                lease.close()
+            except OSError:
+                pass
+            raise
         from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
         kept = False
         note = None
@@ -541,7 +561,7 @@ def check_rip():
         die(fmt(C.RED, _missing_tool_hint(
             "rip", "Install streamrip first: `pipx install streamrip` "
             "(https://github.com/nathom/streamrip).")), EXIT_CONFIG)
-    except (PermissionError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         die(fmt(C.RED,
             f"\n✗  `rip --version` couldn't run ({e}). The streamrip binary "
             "may be broken. Reinstall it with `pipx reinstall streamrip`.\n"),
@@ -922,6 +942,14 @@ def main():
     # role="cli" → a separate log file so a `docker exec` CLI run sharing the
     # container with the long-lived web server can't race it on log rollover.
     attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL, role="cli")
+    try:
+        cfg.validate_storage_roots()
+    except ValueError as exc:
+        die(fmt(
+            C.RED,
+            f"\n✗  Invalid storage paths: {exc}\n"
+            "   Refusing to proceed.\n",
+        ), EXIT_CONFIG)
     if args.quiet:
         set_color_enabled(False)
 

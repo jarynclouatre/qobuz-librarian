@@ -13,7 +13,7 @@
 {% if unverified %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <span>Token saved. Qobuz could not be reached for verification.
-    Open the <a href="/" class="ql-link">dashboard</a> and run a search to confirm
+    Open the <a href="/" class="ql-link">Search page</a> and run a search to confirm
     access.</span>
 </div>
 {% else %}
@@ -22,7 +22,7 @@
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
   <span>Connected. Your Qobuz token was saved.
-    <a href="/" class="ql-link font-semibold">Go to dashboard</a></span>
+    <a href="/" class="ql-link font-semibold">Go to Search</a></span>
 </div>
 {% endif %}
 {% endif %}
@@ -73,6 +73,12 @@
   <span>Qobuz Librarian could not save the credentials. Give the config folder
   write access, then try again.</span>
 </div>
+{% elif error == "envcreds" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>Your Qobuz credential is supplied by environment, so it was not changed.
+  Remove the environment or secret-file setting first if you want to manage it
+  from this page.</span>
+</div>
 {% elif error == "rejected" %}
 <div class="ql-notice ql-notice-error mb-6" data-flash>
   <span>Qobuz rejected this token, so it was not saved. Get a fresh token from
@@ -95,10 +101,15 @@
   <span>Enter your Qobuz account email or user ID as well. The token cannot be
   used by itself.</span>
 </div>
+{% elif error == "invalidsettings" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>Nothing changed because one or more submitted settings were invalid.
+  Reload this page and try again.</span>
+</div>
 {% elif error == "persist" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Applied for this session, but could not be saved. Give the data folder
-  write access or the change will be lost after restart.</span>
+  <span>Nothing changed because the settings could not be saved. Give the data
+  folder write access, then try again.</span>
 </div>
 {% elif error %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash><span>{{ error }}</span></div>
@@ -179,6 +190,7 @@
         <label class="ql-field-label" for="user_id">Email or user ID <span class="ql-required" aria-hidden="true">*</span></label>
         <input type="text" name="user_id" id="user_id" value="{{ user_id or '' }}"
                placeholder="name@example.com or numeric ID"
+               {% if env_user_id_set %}disabled aria-disabled="true"{% endif %}
                class="ql-input max-w-lg">
         <p class="ql-field-help">
           Your Qobuz email or numeric user ID.
@@ -194,12 +206,13 @@
                  value="{{ auth_token_prefill | default('') }}"
                  aria-label="Qobuz auth token"
                  autocomplete="off" autocorrect="off" spellcheck="false"
+                 {% if creds_from_env %}disabled aria-disabled="true"{% endif %}
                  placeholder="{% if auth_token_set %}{% else %}Paste token{% endif %}"
                  class="ql-input pr-12 font-mono text-base sm:text-sm">
           {{ secret_toggle("auth_token", "token") }}
         </div>
         <p class="ql-field-help">
-          {% if auth_token_set %}Paste a new token here to replace it.{% else %}Use your Qobuz auth token, not your password.{% endif %}
+          {% if creds_from_env %}Managed by environment; remove it there before replacing it here.{% elif auth_token_set %}Paste a new token here to replace it.{% else %}Use your Qobuz auth token, not your password.{% endif %}
         </p>
       </div>
 
@@ -228,7 +241,9 @@
         CLI command
       </summary>
       <div class="ql-code-block">
-        <code>docker compose exec qobuz-librarian qobuz-librarian</code>
+        <code id="cli-command">docker compose exec qobuz-librarian qobuz-librarian</code>
+        <button type="button" class="ql-btn ql-btn-sm ql-btn-secondary ql-copy-button"
+                data-copy-target="#cli-command">Copy</button>
       </div>
     </details>
     {% if lock_unenforceable %}
@@ -287,16 +302,16 @@
       <input type="hidden" name="form_complete" value="1">
       <div class="ql-setting-list">
         {% for key, label, help in behavior_fields %}
-        <div class="ql-setting-row">
+        <label class="ql-setting-row">
           <div class="ql-setting-main">
-            <label for="cb-{{ key }}" class="ql-setting-title">{{ label }}</label>
+            <span class="ql-setting-title">{{ label }}</span>
             <div id="help-{{ key }}" class="ql-setting-help">{{ help }}</div>
           </div>
           <input type="checkbox" name="{{ key }}" id="cb-{{ key }}"
                  class="ql-toggle shrink-0"
                  aria-describedby="help-{{ key }}"
                  {% if behavior[key] %}checked{% endif %}>
-        </div>
+        </label>
         {% endfor %}
       </div>
 
@@ -392,7 +407,8 @@
       <div class="ql-settings-section-copy">
         <h2>Library maintenance</h2>
         <p>
-          A normal library scan already picks up changes and new releases. Use a
+          A normal library scan picks up changes in your folders. To check Qobuz
+          for new releases, use Check new releases on the Library page. Use a
           full rescan only after large manual changes to your files. It ignores
           the unchanged-folder cache and re-reads every artist, so it takes as
           long as a first scan.
@@ -422,9 +438,10 @@
               hx-swap="innerHTML"
               hx-indicator="#diag-spinner">Recheck</button>
     </div>
-    <div id="diagnostics-list" class="ql-diagnostics-list" aria-live="polite">
+    <div id="diagnostics-list" class="ql-diagnostics-list">
       {{ diagnostics_html | safe }}
     </div>
+    <p id="diagnostics-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
     <span id="diag-spinner" class="htmx-indicator ql-spinner ql-spinner-xs mt-2"></span>
   </div>
 </section>

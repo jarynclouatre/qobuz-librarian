@@ -513,7 +513,7 @@ def detect_sibling_album_groups(album_dirs):
 
 def pick_canonical_sibling(dirs):
     """Most audio files wins; tiebreak on longest name (more decoration =
-    usually the more comprehensive edition like Deluxe / Expanded)."""
+    usually the fuller edition, such as Deluxe or Expanded)."""
     def score(d):
         try:
             n = sum(1 for f in d.rglob("*")
@@ -1580,9 +1580,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                 resolved = _resolve_signatures_to_paths(
                     transient_lyric_sigs, [post_dir])
                 if resolved:
-                    _record_post_import_lyric_retry(resolved)
-                    vlog(f"lyric retry: queued {len(resolved)} "
-                         f"post-import path(s) for next-launch retry")
+                    if _record_post_import_lyric_retry(resolved):
+                        vlog(f"lyric retry: queued {len(resolved)} "
+                             f"post-import path(s) for next-launch retry")
             # Materialise .lrc sidecars next to the final renamed files
             # (no-op unless LYRICS_FORMAT is sidecar/both).
             try:
@@ -1595,9 +1595,9 @@ def process_album(album, args, *, allow_force=True, label=None,
         resolved = _resolve_signatures_to_paths(
             transient_lyric_sigs, [cfg.STAGING_DIR])
         if resolved:
-            _record_post_import_lyric_retry(resolved)
-            vlog(f"lyric retry: import unsuccessful; queued {len(resolved)} "
-                 f"staging path(s) for next-launch retry")
+            if _record_post_import_lyric_retry(resolved):
+                vlog(f"lyric retry: import unsuccessful; queued {len(resolved)} "
+                     f"staging path(s) for next-launch retry")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     n_retryable, n_truly_lossy = incomplete_track_counts(download_result)

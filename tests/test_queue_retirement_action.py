@@ -40,11 +40,19 @@ def _queue_item(*, album_dir=None):
     )
 
 
-def _completion_input(saved, item_id, staging, *, complete=False):
+def _completion_input(
+    saved,
+    item_id,
+    staging,
+    *,
+    complete=False,
+    origin_kind=CompletionOriginKind.CLI,
+    origin_reference="test-queue",
+):
     slot = "qobuz:track-1"
     return CompletionInput(
         owner=RecoveryOwner(saved.operation_id, item_id),
-        origin=CompletionOrigin(CompletionOriginKind.CLI, "test-queue"),
+        origin=CompletionOrigin(origin_kind, origin_reference),
         expectation=CompletionExpectation(
             album_id="1",
             scope=CompletionScope.ALBUM,
@@ -75,9 +83,16 @@ def _completion_evidence(
     music,
     *,
     album_path="Artist, Other/Album",
+    origin_kind=CompletionOriginKind.CLI,
+    origin_reference="test-queue",
 ):
     completion_input = _completion_input(
-        saved, item_id, staging, complete=True
+        saved,
+        item_id,
+        staging,
+        complete=True,
+        origin_kind=origin_kind,
+        origin_reference=origin_reference,
     )
     lineage = completion_input.lineages[0]
     destination_identity = (2, 111, 100, 1_000, 3_000)
@@ -168,6 +183,8 @@ def _completed_journal(
     *,
     planned_album_dir=None,
     completion_album_path="Artist, Other/Album",
+    origin_kind=CompletionOriginKind.CLI,
+    origin_reference="test-queue",
 ):
     tmp_path, music, _source, _destination, staging = queue_paths
     pending = journal.save_queue_journal(
@@ -180,7 +197,13 @@ def _completed_journal(
         pending,
         item_id,
         journal.QueuePhase.ACTIVE,
-        completion_input=_completion_input(pending, item_id, staging),
+        completion_input=_completion_input(
+            pending,
+            item_id,
+            staging,
+            origin_kind=origin_kind,
+            origin_reference=origin_reference,
+        ),
         multi_artist_filing=True,
     )
     resolving = journal.transition_journal_item(
@@ -188,7 +211,12 @@ def _completed_journal(
         item_id,
         journal.QueuePhase.RESOLVING,
         completion_input=_completion_input(
-            active, item_id, staging, complete=True
+            active,
+            item_id,
+            staging,
+            complete=True,
+            origin_kind=origin_kind,
+            origin_reference=origin_reference,
         ),
         recovery_references=(_managed_reference(active, item_id, tmp_path),),
     )
@@ -198,6 +226,8 @@ def _completed_journal(
         staging,
         music,
         album_path=completion_album_path,
+        origin_kind=origin_kind,
+        origin_reference=origin_reference,
     )
     complete = journal.transition_journal_item(
         resolving,
@@ -378,3 +408,94 @@ def test_conflicting_planned_action_settles_as_an_exact_noop(
     assert (destination / "01 Test.flac").read_bytes() == b"different audio"
 
 
+def test_completion_owner_refusal_keeps_retirement_for_exact_replay(
+    queue_paths, monkeypatch
+):
+    complete, item_id, evidence = _completed_journal(
+        queue_paths,
+        origin_kind=CompletionOriginKind.WEB_JOB,
+        origin_reference="web-job-1",
+    )
+    retired = journal.commit_recovered_completed_item_removal(
+        complete,
+        item_id=item_id,
+        live_evidence=evidence,
+        post_import_action=None,
+    )
+    carrier_calls = []
+    from qobuz_librarian.integrations import beets
+
+    outcome = beets.ManagedCarrierRetirementResult(
+        beets.ManagedCarrierRetirementOutcome.ALREADY_ABSENT
+    )
+    monkeypatch.setattr(
+        beets,
+        "retire_managed_carrier",
+        lambda *_args, **_kwargs: carrier_calls.append(item_id) or outcome,
+    )
+    acknowledgements = []
+
+    def acknowledge(
+        origin,
+        owner,
+        *,
+        album_id,
+        completion_hash,
+        planned,
+        post_dir,
+    ):
+        acknowledgements.append((
+            origin,
+            owner,
+            album_id,
+            completion_hash,
+            planned,
+            post_dir,
+        ))
+        return len(acknowledgements) > 1
+
+    authority = run_lock.acquire()
+    try:
+        with pytest.raises(
+            post_import_finalizer.PostImportFinalizationUnavailable,
+            match="did not acknowledge",
+        ):
+            post_import_finalizer.finalize_carrier_retirement(
+                retired,
+                item_id,
+                authority=authority,
+                acknowledge_completion=acknowledge,
+            )
+
+        unchanged = journal.load_queue_journal(retired.operation_id).journal
+        assert unchanged is not None
+        assert unchanged.retirements[0].completion_acknowledged is False
+        assert carrier_calls == []
+
+        settled, final_path, result = (
+            post_import_finalizer.finalize_carrier_retirement(
+                unchanged,
+                item_id,
+                authority=authority,
+                acknowledge_completion=acknowledge,
+            )
+        )
+    finally:
+        authority.close()
+
+    assert len(acknowledgements) == 2
+    assert acknowledgements[0] == acknowledgements[1]
+    assert acknowledgements[0][0] == CompletionOrigin(
+        CompletionOriginKind.WEB_JOB,
+        "web-job-1",
+    )
+    assert acknowledgements[0][1] == RecoveryOwner(
+        retired.operation_id,
+        item_id,
+    )
+    assert acknowledgements[0][2] == "1"
+    assert len(acknowledgements[0][3]) == 64
+    assert final_path is not None
+    assert result is outcome
+    assert carrier_calls == [item_id]
+    assert settled.retirements == ()

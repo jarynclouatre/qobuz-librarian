@@ -45,6 +45,100 @@ fi
 #   check_for_updates=false: streamrip is pinned into the image, so its
 #     "a new version is available" notice can't be acted on; turning it off
 #     also drops a PyPI request from every download.
+reconcile_streamrip() {
+    python3 - "$STREAMRIP_DIR/config.toml" <<'PY'
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+managed = {
+    "database": ("downloads_enabled", "false"),
+    "filepaths": ("add_singles_to_folder", "true"),
+    "qobuz": ("download_booklets", "false"),
+    "misc": ("check_for_updates", "false"),
+}
+lines = path.read_text().splitlines(keepends=True)
+found_sections = set()
+found_keys = set()
+result = []
+section = None
+
+for line in lines:
+    header = re.match(r"^\s*\[([^]]+)]\s*(?:#.*)?$", line.rstrip("\r\n"))
+    if header:
+        section = header.group(1).strip()
+        if section in managed:
+            found_sections.add(section)
+        result.append(line)
+        continue
+
+    if section in managed:
+        key, want = managed[section]
+        if re.match(rf"^\s*{re.escape(key)}\s*=", line):
+            marker = (section, key)
+            if marker not in found_keys:
+                result.append(f"{key} = {want}\n")
+                found_keys.add(marker)
+            # Drop later copies of a managed key. An older entrypoint rewrote
+            # every copy but retained duplicates, producing invalid TOML.
+            continue
+    result.append(line)
+
+for target_section in managed:
+    if target_section not in found_sections:
+        print(
+            f"[warn] streamrip config has no [{target_section}]; "
+            "managed settings could not be enforced.",
+            file=sys.stderr,
+        )
+
+# A key absent from an older config belongs inside its own existing table,
+# never at EOF under whichever table happens to be last.
+for target_section, (key, want) in managed.items():
+    marker = (target_section, key)
+    if target_section not in found_sections or marker in found_keys:
+        continue
+    for index, line in enumerate(result):
+        header = re.match(r"^\s*\[([^]]+)]\s*(?:#.*)?$", line.rstrip("\r\n"))
+        if header and header.group(1).strip() == target_section:
+            result.insert(index + 1, f"{key} = {want}\n")
+            found_keys.add(marker)
+            break
+
+rewritten = "".join(result)
+if rewritten == "".join(lines):
+    raise SystemExit(0)
+
+mode = stat.S_IMODE(path.stat().st_mode)
+tmp_name = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as tmp:
+        tmp_name = tmp.name
+        tmp.write(rewritten)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+    os.chmod(tmp_name, mode)
+    os.replace(tmp_name, path)
+finally:
+    if tmp_name is not None:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+print("[init] Reconciled managed streamrip settings.")
+PY
+}
+if ! reconcile_streamrip; then
+    echo "[warn] couldn't reconcile managed streamrip settings. Mount /config read-write." >&2
+fi
+
 enforce_streamrip() {
     local key="$1" want="$2" section="$3" cfg="$STREAMRIP_DIR/config.toml" cur
     # Match the key with flexible whitespace around '=' so a hand-edited

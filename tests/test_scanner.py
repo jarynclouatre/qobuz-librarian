@@ -1,4 +1,4 @@
-"""Tests for qobuz_librarian.library.scanner — library walking, album reads,
+"""Tests for qobuz_librarian.library.scanner - library walking, album reads,
 and the FLAC tag cache."""
 from unittest.mock import patch
 
@@ -134,8 +134,8 @@ def test_dir_caches_survive_a_concurrent_clear(monkeypatch, tmp_path):
 
 def test_transient_read_error_is_a_walk_error_not_untagged(monkeypatch, tmp_path):
     """A file mutagen can't READ (EIO/EACCES) is not a file with no tags: the
-    filename fallback would blank its ISRC and quality — undercounting the
-    censuses that gate backup deletion — and a cached negative would keep the
+    filename fallback would blank its ISRC and quality - undercounting the
+    censuses that gate backup deletion - and a cached negative would keep the
     identity blanked on every later scan until the file changes."""
     from qobuz_librarian.library import flac_cache, scanner
 

@@ -1,4 +1,4 @@
-"""Library migration — reorganise an existing collection into this tool's layout.
+"""Library migration - reorganise an existing collection into this tool's layout.
 
 The job is to take an arbitrary, possibly-untagged music folder and produce the
 two-level ``<Artist>/<Album> (<Year>)/`` tree the scanner expects, matching the
@@ -16,7 +16,7 @@ Three rules drive every decision here:
   The preview renders that plan; ``execute_plan`` carries out exactly that plan.
   The preview is the truth, not an estimate.
 * **When unsure, leave it.** A file whose tags can't place it, an ambiguous
-  fingerprint, or a destination collision is left untouched and reported — never
+  fingerprint, or a destination collision is left untouched and reported - never
   guessed into the wrong folder.
 
 Tags are the primary source of truth. Fingerprinting (AcoustID) is an opt-in
@@ -56,7 +56,7 @@ log = logging.getLogger("qobuz_librarian")
 
 # beets' chroma plugin ships this public application key and uses it for every
 # AcoustID *lookup*; a personal key is only ever needed to *submit* fingerprints
-# back. Identification is therefore keyless — reuse the same key here so the
+# back. Identification is therefore keyless - reuse the same key here so the
 # migration matches what `beet -c beets-chroma.yaml import` would resolve.
 ACOUSTID_API_KEY = "1vOwZtEn"
 
@@ -132,7 +132,7 @@ class ExecResult:
     skipped: int = 0
     failed: int = 0
     # In-place moves that reached the destination but whose source couldn't be
-    # deleted, so the original still occupies space — counted apart from clean
+    # deleted, so the original still occupies space - counted apart from clean
     # moves so the summary doesn't claim them as fully relocated.
     lingered: int = 0
     # Non-audio companion files (cover art, .cue/.log/.lrc/…) carried alongside
@@ -142,7 +142,7 @@ class ExecResult:
     # after all exact in-place file retirements have completed.
     pruned: int = 0
     cancelled: bool = False
-    # One (source, dest_rel, status, reason) per attempted file — the record of
+    # One (source, dest_rel, status, reason) per attempted file - the record of
     # what actually happened, surfaced to the user and written to the results
     # manifest. status is COPIED | SKIPPED | FAILED.
     outcomes: list = field(default_factory=list)
@@ -354,7 +354,7 @@ def is_placeable(meta: Optional[dict]) -> bool:
     return bool(meta.get("albumartist") and meta.get("album"))
 
 
-_NAME_MAX = 255  # bytes — the per-component limit on ext4/APFS/NTFS and POSIX
+_NAME_MAX = 255  # bytes - the per-component limit on ext4/APFS/NTFS and POSIX
 
 
 def _truncate_component(name: str, *, ext: str = "", limit: int = _NAME_MAX) -> str:
@@ -1783,8 +1783,8 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
 
     It seals the source and destination filesystem state used by the preview.
     Files with unusable metadata are marked
-    ``UNPLACEABLE``; two distinct sources resolving to one destination — or a
-    destination that already exists on disk — are all marked ``COLLISION`` and
+    ``UNPLACEABLE``; two distinct sources resolving to one destination - or a
+    destination that already exists on disk - are all marked ``COLLISION`` and
     skipped. Multi-disc layout is inferred per album from the disc numbers seen.
     """
     dest_root = Path(dest_root)
@@ -1945,7 +1945,7 @@ def choose_acoustid_match(candidates, min_score: float = ACOUSTID_MIN_SCORE):
     Pure decision logic, kept apart from the network call so it can be tested
     without a fingerprinter. Returns None when the best score is below
     ``min_score`` (too weak) or when two strong candidates name different
-    artists (ambiguous) — both cases mean "leave it and report"."""
+    artists (ambiguous) - both cases mean "leave it and report"."""
     strong = [c for c in candidates if (c.get("score") or 0) >= min_score]
     if not strong:
         return None
@@ -1998,7 +1998,7 @@ def identify_from_lookup(resp: dict, min_score: float, stem: str,
     Pure (no network), so the confidence/ambiguity/album-selection logic is
     testable without a fingerprinter. Returns None when no result clears
     ``min_score`` or is ambiguous, and also when a confident recording lists no
-    album — identifying a recording without a release still gives no folder to
+    album - identifying a recording without a release still gives no folder to
     build, so the file stays unplaceable rather than guessed at."""
     candidates = []
     for r in (resp.get("results") or []):
@@ -2031,7 +2031,7 @@ def fingerprint_identify(path: Path, min_score: float = ACOUSTID_MIN_SCORE,
     so the file can actually be placed. None if no confident match (or the
     fingerprinter isn't available).
 
-    Lazily imports ``acoustid`` — it and ``fpcalc`` ship only in the container,
+    Lazily imports ``acoustid`` - it and ``fpcalc`` ship only in the container,
     so this whole stage is a no-op on a host without them. The lookup asks for
     release groups + releases so a recording match yields an album and year, not
     just a title."""
@@ -2049,6 +2049,7 @@ def fingerprint_identify(path: Path, min_score: float = ACOUSTID_MIN_SCORE,
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=60,
                 pass_fds=(int(descriptor),),
             )
             payload = json.loads(completed.stdout)
@@ -2081,14 +2082,14 @@ def validate_paths(src: Path, dest: Path, *,
     if not src.is_dir():
         return f"Source isn't a readable directory: {src}"
     if in_place and not os.access(str(src), os.W_OK):
-        return (f"Source is not writable — in-place mode moves files out of "
+        return (f"Source is not writable - in-place mode moves files out of "
                 f"the source tree and requires write access: {src}")
     if dest.exists() and not dest.is_dir():
         return f"Destination exists but isn't a folder: {dest}"
     if src.resolve() == dest.resolve():
         return "Source and destination are the same folder."
     if _is_within(dest, src):
-        return ("Destination is inside the source — that would copy the new "
+        return ("Destination is inside the source - that would copy the new "
                 "library into itself. Choose a destination outside the source.")
     if _is_within(src, dest):
         return "Source is inside the destination. Choose separate folders."
@@ -2668,7 +2669,7 @@ def _collect_items(source_root: Path, *, use_acoustid: bool = False,
             cancel_check=cancel_check,
             progress=progress,
         )
-        # (path, orig_meta, receipt) — orig_meta may retain track/disc data for
+        # (path, orig_meta, receipt) - orig_meta may retain track/disc data for
         # an AcoustID result, while receipt is the exact file reviewed.
         unplaced = []
         for i, (f, meta, receipt) in enumerate(scanned, 1):
@@ -5173,10 +5174,7 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             if stop_after_item:
                 result.cancelled = True
                 break
-        if (not result.cancelled and cancel_check is not None
-                and cancel_check()):
-            result.cancelled = True
-        if not result.cancelled:
+        if not result.cancelled and plan.companion_receipts:
             _carry_companion_files(
                 plan, result, entry_map=entry_map,
                 resume_entries=resume_entries,

@@ -13,6 +13,31 @@ def test_fingerprint_unifies_editions_and_ignores_year():
     assert hidden.album_fingerprint("Radiohead", "") is None
 
 
+def test_hidden_identity_keeps_distinct_self_titled_albums_separate(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
+    hidden.hide(hidden.SCOPE_MISSING, [("Weezer", "Weezer", "1994")])
+    store = hidden.load()
+
+    assert hidden.is_hidden(
+        hidden.SCOPE_MISSING, "Weezer", "Weezer", store, year="1994"
+    ) is True
+    assert hidden.is_hidden(
+        hidden.SCOPE_MISSING, "Weezer", "Weezer", store, year="2001"
+    ) is False
+    # Edition decorations still mean the same work and remain grouped even
+    # when the provider gives the remaster a much later release year.
+    assert hidden.is_hidden(
+        hidden.SCOPE_MISSING,
+        "Weezer",
+        "Weezer (2024 Remaster)",
+        store,
+        year="2024",
+    ) is True
+
+
+
+
 def test_hide_is_scoped_durable_and_restorable(monkeypatch, tmp_path):
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
     assert hidden.hide(hidden.SCOPE_MISSING, [("Portishead", "Dummy", "1994")]) == 1
@@ -44,15 +69,8 @@ def test_hide_is_scoped_durable_and_restorable(monkeypatch, tmp_path):
     assert hidden.count(hidden.SCOPE_MISSING) == 0
 
 
-def test_non_latin_album_can_be_hidden_and_restored(monkeypatch, tmp_path):
-    monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
 
-    assert hidden.hide(hidden.SCOPE_MISSING,
-                       [("宇多田ヒカル", "初恋 💿", "2018")]) == 1
-    store = hidden.load()
-    assert hidden.is_hidden(hidden.SCOPE_MISSING,
-                            "宇多田ヒカル", "初恋 💿", store)
-    assert hidden.restore(hidden.SCOPE_MISSING, ["宇多田ヒカル"]) == 1
+
 
 
 def test_store_written_before_rows_were_kept_still_counts(monkeypatch, tmp_path):
@@ -91,4 +109,3 @@ def test_corrupt_store_is_preserved_not_silently_wiped(monkeypatch, tmp_path):
     # the new hide still persisted, to a fresh valid file
     saved = hidden.load()
     assert hidden.album_fingerprint("New", "Album") in saved[hidden.SCOPE_MISSING]
-

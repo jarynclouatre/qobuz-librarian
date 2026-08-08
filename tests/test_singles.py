@@ -42,6 +42,32 @@ def test_mark_is_unmark_single_roundtrips(store_file):
     assert hidden.unmark_single("Allie X", "Girl With No Face") is False
 
 
+
+
+def test_single_marks_keep_multiple_exact_editions_independent(store_file):
+    hidden.mark_single("Weezer", "Weezer", "1994", "blue-album")
+    hidden.mark_single("Weezer", "Weezer", "2001", "green-album")
+    store = hidden.load()
+
+    assert hidden.is_single(
+        "Weezer", "Weezer", store, year="1994", album_id="blue-album"
+    ) is True
+    assert hidden.is_single(
+        "Weezer", "Weezer", store, year="2001", album_id="green-album"
+    ) is True
+
+    assert hidden.unmark_single(
+        "Weezer", "Weezer", year="1994", album_id="blue-album"
+    ) is True
+    remaining = hidden.load()
+    assert hidden.is_single(
+        "Weezer", "Weezer", remaining, year="1994", album_id="blue-album"
+    ) is False
+    assert hidden.is_single(
+        "Weezer", "Weezer", remaining, year="2001", album_id="green-album"
+    ) is True
+
+
 # ── the discovery gates ────────────────────────────────────────────────────────
 
 def test_marked_partial_goes_to_singles_not_gaps(store_file):
@@ -76,7 +102,7 @@ def test_collecting_requires_an_album_thats_not_a_single(store_file):
 
 def test_discover_fully_missing_skips_single_catalog_album(store_file):
     """discover_fully_missing must not re-offer a catalog album the user
-    deliberately grabbed as a single — even when no owned folder exists."""
+    deliberately grabbed as a single - even when no owned folder exists."""
     from qobuz_librarian.library.discovery import DiscoveryOpts, discover_fully_missing
 
     hidden.mark_single("Allie X", "Girl With No Face", "2024", "555")
@@ -98,9 +124,13 @@ def test_discover_fully_missing_skips_single_catalog_album(store_file):
     assert gaps == [], "single-marked album must be suppressed from the catalog walk"
 
 
+
+
+
+
 def test_mark_single_matches_remaster_title_via_fingerprint(store_file):
     """album_fingerprint calls strip_album_decorations, so marking the remaster
-    edition ties to the same fingerprint as the bare title — an is_single check
+    edition ties to the same fingerprint as the bare title - an is_single check
     on either spelling returns True."""
     hidden.mark_single("Allie X", "Girl With No Face (2024 Remaster)", "2024", "555")
     store = hidden.load()

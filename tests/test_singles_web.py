@@ -1,6 +1,7 @@
 """Web path for single-track grabs: the Tracks search mode, the Get-track
 download contract, and graduation (completing the album the normal way clears
 any old single mark)."""
+
 import pytest
 from test_web import _remove_job, _wait_for, client  # noqa: F401 (fixture)
 
@@ -91,7 +92,7 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
     # new dirent doesn't grow a small directory, so when the sidecar lands in
     # the same tick as the setup writes above, the parent's before/after
     # identities are byte-identical and there is legitimately no change to
-    # record (stored identity still matches disk either way — the flake this
+    # record. The stored identity still matches disk either way. The flake this
     # cures, measured 99% same-tick on this machine). Backdate the album dir
     # BEFORE the manifest captures its identity, so the sidecar write provably
     # crosses a tick and the recorded change chains from the manifest's own
@@ -389,8 +390,6 @@ def test_undo_refuses_a_replacement_when_the_inode_is_reused(
         _remove_job(job)
 
 
-
-
 def test_undo_already_gone_clears_single_mark_and_refreshes_state(
         client, monkeypatch, fresh_singles, tmp_path):
     import qobuz_librarian.library.scanner as scanner_mod
@@ -524,5 +523,49 @@ def test_undo_with_no_isrc_or_track_number_deletes_nothing(
     try:
         client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
         assert t.exists()
+    finally:
+        _remove_job(job)
+
+
+def test_undo_stays_retryable_when_its_final_job_save_fails(
+    client, monkeypatch, fresh_singles, tmp_path
+):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets as beets_mod
+    from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import flows, job_persistence
+
+    music_root = tmp_path / "music"
+    album = music_root / "Artist" / "Album"
+    album.mkdir(parents=True)
+    track = album / "01 - Track.flac"
+    track.write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music_root)
+    monkeypatch.setattr(flows, "_refresh_after_local_album_change", lambda *args, **kwargs: None)
+    monkeypatch.setattr(beets_mod, "forget_beets_entries", lambda _paths: 1)
+
+    job = jm.Job(title="Track", artist="Artist", status=jm.JobStatus.DONE)
+    job.single = {
+        "dir": str(album),
+        "title": "Track",
+        "artist": "Artist",
+        "album": "Album",
+        "owned_root": str(music_root),
+        "owned_path": _owned_path(music_root, track),
+    }
+    jm.registry.add(job)
+
+    def save_until_final(current):
+        if current.single.get("removed") is True:
+            assert jm.staging_lock().locked()
+        return current.single.get("removed") is not True
+
+    monkeypatch.setattr(job_persistence, "persist", save_until_final)
+    try:
+        response = client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
+
+        assert not track.exists()
+        assert response.status_code == 503
+        assert "Retry Undo" in response.text
     finally:
         _remove_job(job)

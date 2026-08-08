@@ -34,7 +34,7 @@ def test_census_buckets_tiers_and_reclaims_only_true_hires(tmp_path, monkeypatch
 
 def test_walk_error_does_not_cache_dir_as_audioless(tmp_path, monkeypatch):
     # A transient scandir failure is consumed by os.walk's error callback, so
-    # the shortened walk finds nothing — that must not be cached as "contains
+    # the shortened walk finds nothing - that must not be cached as "contains
     # no audio" or the artist vanishes from the whole scan.
     from qobuz_librarian.library import scanner
 

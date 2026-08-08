@@ -1,3 +1,7 @@
+import errno
+from pathlib import Path
+
+
 def _mark_badge_in_process(state_path, surface, attempting_lock, done):
     from pathlib import Path
 
@@ -5,13 +9,16 @@ def _mark_badge_in_process(state_path, surface, attempting_lock, done):
     from qobuz_librarian.web import review_badges
 
     cfg.REVIEW_BADGE_STATE_FILE = Path(state_path)
-    real_flock = review_badges.fcntl.flock
+    from qobuz_librarian import state_file
+
+    lock_module = review_badges if hasattr(review_badges, "fcntl") else state_file
+    real_flock = lock_module.fcntl.flock
 
     def report_lock_attempt(fd, operation):
         attempting_lock.set()
         return real_flock(fd, operation)
 
-    review_badges.fcntl.flock = report_lock_attempt
+    lock_module.fcntl.flock = report_lock_attempt
     review_badges.mark_ready(surface, now=200.0)
     done.set()
 
@@ -66,6 +73,12 @@ def test_badge_write_failures_are_non_fatal(monkeypatch, tmp_path):
     review_badges.mark_ready("library")
     review_badges.mark_seen("library", review_badges.ready_generation("library"))
     review_badges.clear_ready("library")
+
+
+
+
+
+
 
 
 def test_badge_updates_wait_for_another_process(monkeypatch, tmp_path):

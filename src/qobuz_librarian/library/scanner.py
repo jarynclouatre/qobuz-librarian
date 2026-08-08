@@ -34,12 +34,12 @@ def iter_tree_no_symlinks(root: Path, errors=None):
     scanned as if it lived there. Symlinked subdirs are yielded as leaves so
     the caller still sees them; they're just never followed.
 
-    Pass ``errors`` (a list) to learn whether any subtree couldn't be read —
+    Pass ``errors`` (a list) to learn whether any subtree couldn't be read -
     the walk continues past it, so the listing is incomplete and conclusions
     like "contains no audio" must not be drawn (or cached) from it.
     """
     def _onerror(err):
-        # os.walk swallows scandir failures by default — a permission-denied
+        # os.walk swallows scandir failures by default - a permission-denied
         # or I/O-failed subdir would then silently drop its tracks from the
         # scan with no signal at all.
         vlog(f"scan: couldn't read {getattr(err, 'filename', root)}: {err}")
@@ -89,7 +89,7 @@ def read_audio_meta(path: Path):
 
     Works for any format mutagen understands (FLAC, MP3, M4A, …) through its
     uniform "easy" tag interface. Returns None when mutagen is unavailable,
-    the file can't be parsed, or it has no title tag — the caller then derives
+    the file can't be parsed, or it has no title tag - the caller then derives
     title and track number from the filename, so untagged bonus tracks still
     show up.
     """
@@ -98,7 +98,7 @@ def read_audio_meta(path: Path):
     cached = flac_cache.get(path)
     if cached is not None:
         # A cached negative result (unparseable / title-less file): return None
-        # without re-parsing — these otherwise pay a full mutagen parse on every
+        # without re-parsing - these otherwise pay a full mutagen parse on every
         # scan even though they always fall back to the filename.
         return None if cached.get("__neg__") else cached
     # Capture the file signature before parsing so a file edited mid-scan isn't
@@ -164,7 +164,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
     Multi-disc subdirectories (CD1/, CD2/) are walked; symlinks never followed.
 
     Pass ``walk_errors`` (a list) to learn whether any entry or subtree
-    couldn't be read — the returned list is then possibly INCOMPLETE, and a
+    couldn't be read - the returned list is then possibly INCOMPLETE, and a
     caller about to delete something based on these counts must treat that as
     unverifiable rather than as a smaller album.
     """
@@ -213,7 +213,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
             continue
         if tags is None:
             stem = f.stem
-            # Strip a leading track-number token in any common form — "NN - ",
+            # Strip a leading track-number token in any common form - "NN - ",
             # "NN.
             m = re.match(r"^(\d+)[\s.\-]+(.+)$", stem)
             # Derive the disc from a "Disc N" / "CD N" parent so two same-titled
@@ -261,7 +261,7 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
     Result cached per path: a single scan calls this once per artist plus
     once per album dir, but artist-walk/upgrade-walk/lyric-walk all hit
     list_artist_album_dirs for the same artists in turn, and the catalog
-    fuzzy-resolution fall-through re-asks the same dirs again — a fresh
+    fuzzy-resolution fall-through re-asks the same dirs again - a fresh
     iter_tree per call is wasted iterdir+stat on every album subtree.
     """
     key = str(d)
@@ -289,7 +289,7 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
         walk_errors.append(f"{d}: {e}")
     if walk_errors is not None and len(walk_errors) > error_count:
         # os.walk consumed a scandir failure via the error callback and walked
-        # on without that subtree — the audio may live exactly there.
+        # on without that subtree - the audio may live exactly there.
         return None
     _HAS_AUDIO_CACHE[key] = False
     return False
@@ -300,7 +300,7 @@ def list_library_artists(walk_errors=None):
 
     Skips dot-folders (startswith(".")) and the staging
     directory. Sorted by name (case-insensitive). Empty artist directories
-    (no audio files anywhere in the tree) are also skipped — they cost an
+    (no audio files anywhere in the tree) are also skipped - they cost an
     API round-trip during scans for zero gain and clutter the walk output.
     A single info line names anything skipped so the user can hand-clean.
 
@@ -423,10 +423,10 @@ def _list_artist_subdirs_cached(artist_dir: Path):
 
 def clear_scan_caches():
     """Drop per-scan caches. Pure-function lru_caches (normalize / etc.)
-    are left alone — deterministic and worth keeping warm.
+    are left alone - deterministic and worth keeping warm.
 
     Also drains the flac_cache write buffer so anything parsed mid-scan is
-    on disk before the next pass starts (the scan-end commit point — put()
+    on disk before the next pass starts (the scan-end commit point - put()
     buffers rather than committing per-file to keep a cold 200k-track scan
     out of per-file disk-sync territory)."""
     _ARTIST_SUBDIRS_CACHE.clear()
@@ -438,7 +438,7 @@ def drop_artist_subdirs_cache(artist_dir):
     """Invalidate the cached subdir listing for one artist, not the whole map.
 
     Use this when only one artist's library folder has changed on disk (a
-    beets rename of just-imported album, an in-place upgrade landing) — a
+    beets rename of just-imported album, an in-place upgrade landing) - a
     bulk-upgrade pass touches one artist at a time, so the full-cache wipe
     `clear_scan_caches()` does would cold-rebuild every OTHER artist's
     listing on the next item too. Quiet on a missing key."""

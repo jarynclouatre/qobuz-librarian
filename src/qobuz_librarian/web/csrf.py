@@ -1,4 +1,4 @@
-"""CSRF protection — double-submit cookie with SameSite=Strict."""
+"""CSRF protection - double-submit cookie with SameSite=Strict."""
 import secrets
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -9,7 +9,7 @@ CSRF_FORM_FIELD = "_csrf_token"
 CSRF_HEADER = "X-CSRF-Token"
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-_MAX_FORM_BYTES = 1 * 1024 * 1024  # 1 MB — no form on this app gets close
+_MAX_FORM_BYTES = 1 * 1024 * 1024  # 1 MB - no form on this app gets close
 
 
 def _new_token() -> str:
@@ -66,7 +66,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                                          status_code=413)
             submitted = request.headers.get(CSRF_HEADER)
             if not submitted and 0 < content_length <= _MAX_FORM_BYTES:
-                # Read the body only when its length is declared and bounded —
+                # Read the body only when its length is declared and bounded -
                 # a chunked request with no Content-Length is never read here,
                 # so a tokenless POST can't make us buffer an unbounded body.
                 try:
@@ -87,7 +87,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 # Ordinary causes: a tab left open past the cookie's 30 days, a
                 # browser that clears cookies, a privacy extension. The old
                 # reply was a bare white page reading "CSRF token missing or
-                # invalid" with no nav and no way back — and because it was
+                # invalid" with no nav and no way back - and because it was
                 # text/plain, the minting below skipped it too, so retrying
                 # failed exactly the same way. Say what happened in English and
                 # always hand back a usable token.
@@ -95,7 +95,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
         # Mint the cookie only when the client has none AND we're returning an
-        # HTML page — the page is what reads the token (from its <meta> tag)
+        # HTML page - the page is what reads the token (from its <meta> tag)
         # and then submits it, so static assets, /healthz, /sw.js and JSON
         # /api responses don't need it.
         is_html = response.headers.get("content-type", "").startswith("text/html")
@@ -118,7 +118,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
 # script-src carries a per-request nonce (set on request.state.csp_nonce
 # below) rather than 'unsafe-inline', so a reflected/injected <script> can't
-# run — only the few inline blocks we mint with this request's nonce do.
+# run - only the few inline blocks we mint with this request's nonce do.
 def _csp(nonce: str) -> str:
     return (
         "default-src 'self'; "
@@ -159,7 +159,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # reach for the camera/mic/location either.
         response.headers.setdefault(
             "Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-        # HSTS only on HTTPS — emitting it over plain HTTP is pointless and
+        # HSTS only on HTTPS - emitting it over plain HTTP is pointless and
         # would brick a user who later reaches the host via HTTP.
         is_https = (request.url.scheme == "https"
                     or request.headers.get("x-forwarded-proto") == "https")
@@ -171,7 +171,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 class StripServerHeaderMiddleware:
     """ASGI middleware that drops the Server header before it leaves the
-    process — uvicorn advertises itself by default, which is a free hint
+    process - uvicorn advertises itself by default, which is a free hint
     to anyone scanning for known framework CVEs."""
 
     def __init__(self, app):

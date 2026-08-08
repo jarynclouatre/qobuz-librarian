@@ -4470,7 +4470,8 @@ def _configured_beets_plugins(runtime=None):
 def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
     """The beets config override the import runs with, as a YAML string. Forces
     the keys the import contract depends on: library/directory, non-
-    interactive, non-incremental, autotag off, and move on. It lets
+    interactive, non-incremental, autotagging and tag writes off, and move on.
+    It lets
     everything else fall through to the user's config.yaml.
     """
     import re as _re
@@ -4484,6 +4485,7 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
         "  quiet: yes\n"
         "  incremental: no\n"
         "  autotag: no\n"
+        "  write: no\n"
         "  move: yes\n"
         # Pin duplicate_action: merge for OUR importer (separate from the
         # user's own `beet` usage, which still reads their config): a
@@ -4787,6 +4789,7 @@ class _ManagedBeetsRunCleanup:
 
 
 def _prepare_managed_beets_run(roots, bindings, owner, *, on_reservation):
+    cfg.validate_storage_roots()
     runtime = _resolve_beets_runtime()
     if runtime is None:
         return None

@@ -264,7 +264,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                     if settled:
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  {len(items)} album(s) couldn't be "
-                            "downloaded — saved queue kept for next launch."))
+                            "downloaded - saved queue kept for next launch."))
                     else:
                         log.info(fmt(C.YELLOW,
                             "  ⚠  The saved queue is not fully settled; its "
@@ -365,7 +365,7 @@ def offer_resume_pending_queue(args, token_source):
                         save_pending_queue(items, mode=mode)
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  {len(items)} album(s) couldn't be "
-                            "downloaded — saved queue kept for next launch."))
+                            "downloaded - saved queue kept for next launch."))
                     except QueueJournalBlocked:
                         # An album parked for attention during the flush; the
                         # journal holds it and must not be rewritten as pending.

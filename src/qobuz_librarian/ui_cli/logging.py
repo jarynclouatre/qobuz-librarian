@@ -14,7 +14,7 @@ log.setLevel(logging.INFO)
 _sh = logging.StreamHandler(sys.stdout)
 _sh.setFormatter(logging.Formatter("%(message)s"))
 # Pin the console to INFO so lowering the LOGGER to DEBUG for the file handler
-# (see attach_file_handler) doesn't flood the terminal — DEBUG belongs in the
+# (see attach_file_handler) doesn't flood the terminal - DEBUG belongs in the
 # log file, not on screen. set_quiet() raises this to WARNING for --quiet.
 _sh.setLevel(logging.INFO)
 if not log.handlers:
@@ -34,14 +34,14 @@ _file_handler = None
 
 
 def attach_file_handler(path, level_name: str = "INFO", role: str = ""):
-    """Attach a rotating file handler at `path`. Idempotent — safe to call
+    """Attach a rotating file handler at `path`. Idempotent - safe to call
     from both _entry() and the web _lifespan.
 
     ``role`` names the writing process (e.g. "cli"); when set, the handler
     writes to a role-suffixed file (qobuz-librarian-cli.log). The long-lived web
     server and a `docker exec` CLI run can both be attached to the SAME log at
     once, and a single shared RotatingFileHandler races on rollover at the 5 MB
-    boundary — two processes independently rename .log->.log.1 and reshuffle the
+    boundary - two processes independently rename .log->.log.1 and reshuffle the
     backup chain, losing lines and orphaning an inode. A distinct file per role
     sidesteps the race without a cross-process rollover lock."""
     global _file_handler
@@ -62,13 +62,13 @@ def attach_file_handler(path, level_name: str = "INFO", role: str = ""):
         level = getattr(logging, level_name.upper(), logging.INFO)
         h.setLevel(level)
         # The logger itself gates at INFO (line 13), which would drop DEBUG
-        # records before any handler saw them — so LOG_LEVEL=DEBUG was a no-
+        # records before any handler saw them - so LOG_LEVEL=DEBUG was a no-
         # op.
         log.setLevel(min(log.level, level))
         log.addHandler(h)
         _file_handler = h
     except OSError:
-        # Logging is best-effort — don't crash startup if the data volume
+        # Logging is best-effort - don't crash startup if the data volume
         # isn't writable.
         pass
 
@@ -116,7 +116,7 @@ def set_quiet(quiet: bool):
     """Mute info-level output on the console; warnings and errors still print.
 
     Raises the level on the stdout handler rather than on the logger, so the
-    file log keeps recording at its own level — a quiet cron run still leaves
+    file log keeps recording at its own level - a quiet cron run still leaves
     a full trail to diagnose from. Non-quiet resets to INFO (not NOTSET) so the
     console stays at INFO even when LOG_LEVEL=DEBUG lowered the logger for the
     file handler."""

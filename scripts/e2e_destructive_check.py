@@ -2,7 +2,7 @@
 
 Runs each real op (downsample, repair retag, consolidate-merge, gap-fill backup
 + restore) against synthesized edge-case files in a throwaway tree, then checks
-the files before/after — bit depth preserved, audio decodes, tags intact, no
+the files before/after - bit depth preserved, audio decodes, tags intact, no
 silent loss. NOT a unit test: it exercises the real engine functions on real
 ffmpeg/flac/mutagen, the cases the all-CD-rate test library can't cover.
 
@@ -20,7 +20,7 @@ RESULTS = []
 
 def check(name, ok, detail=""):
     RESULTS.append((name, bool(ok), detail))
-    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" - {detail}" if detail else ""))
 
 
 def bps(p):
@@ -153,7 +153,7 @@ def test_repair_retag_transplants_from_backup():
         srcmap = _backup_source_by_isrc(vt, album, t / "backup")
         check("retag found backup source by ISRC", "GBTEST1300002" in srcmap)
 
-        # The "refill" streamrip wrote — wrong album/track (compilation).
+        # The "refill" streamrip wrote - wrong album/track (compilation).
         staged = t / "staging" / "Tunes 2011-2019"
         refill = staged / "06 - Hiders.flac"
         synth(refill, ar=44100, sfmt="s16", brs=None,

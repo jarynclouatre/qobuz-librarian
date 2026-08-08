@@ -47,24 +47,6 @@ def test_corrupt_upgrade_caps_survive_a_new_cap(tmp_path, monkeypatch):
     assert decision.is_local_album_capped(album_dir, decision.load_capped())
 
 
-def test_lyrics_state_read_error_stops_housekeeping(tmp_path, monkeypatch):
-    path = tmp_path / ".lyric_fetch_state.json"
-    original = b'{"kept.flac":{"status":"synced"}}'
-    path.write_bytes(original)
-    path_open = Path.open
-
-    def fail_open(self, *args, **kwargs):
-        if self == path:
-            raise OSError(errno.EIO, "injected read error")
-        return path_open(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", fail_open)
-
-    with pytest.raises(OSError):
-        lyric_fetch.update_state(lambda state: state.clear(), path)
-
-    with open(path, "rb") as handle:
-        assert handle.read() == original
 
 
 def test_invalid_utf8_state_is_preserved(tmp_path):

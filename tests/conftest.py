@@ -52,7 +52,7 @@ def _isolate_data_dir():
     cfg.LYRIC_FETCH_STATE_FILE = tmp_root / ".lyric_fetch_state.json"
     cfg.WEB_AUTH_FILE        = tmp_root / ".qobuz_web_auth.json"
     cfg.LOCK_FILE            = tmp_root / "qobuz_librarian.lock"
-    # Isolate the Qobuz credential source too — load_qobuz_token reads from
+    # Isolate the Qobuz credential source too - load_qobuz_token reads from
     # STREAMRIP_CONFIG by default, and the dev's real ~/.config/streamrip/
     # config.toml (which may carry a live token after sync_streamrip_creds_from_env
     # ever ran) would otherwise make every "no creds → /settings" route test
@@ -64,7 +64,7 @@ def _isolate_data_dir():
     cfg.BEETS_CONFIG_DIR = tmp_root / "beets"
     cfg.BEETS_CONFIG_DIR.mkdir()
     cfg.BEETS_DB_PATH = cfg.BEETS_CONFIG_DIR / "musiclibrary.db"
-    # Keep MUSIC_ROOT off the dev's real ~/Music — tests that need a library
+    # Keep MUSIC_ROOT off the dev's real ~/Music - tests that need a library
     # build one under tmp_path and monkeypatch it, but the session default must
     # never be a real path a stray scan could walk.
     cfg.MUSIC_ROOT = tmp_root / "music"
@@ -74,15 +74,15 @@ def _isolate_data_dir():
     # real background scan. The dedicated tests flip them on with monkeypatch.
     cfg.NEW_RELEASE_CHECK_INTERVAL = 0
     cfg.AUTO_LIBRARY_SCAN = False
-    # Keep the persistent caches out of the deterministic suite — tests that
+    # Keep the persistent caches out of the deterministic suite - tests that
     # mock qobuz_get / build fixture FLACs expect a fresh read each time.
     cfg.ALBUM_CACHE_ENABLED  = False
     cfg.FLAC_CACHE_ENABLED   = False
     cfg.REPAIR_CACHE_ENABLED = False
-    # No inter-lookup pacing in the deterministic suite — the repair tests mock
+    # No inter-lookup pacing in the deterministic suite - the repair tests mock
     # the Qobuz lookup, so a real sleep between calls would only add dead time.
     cfg.REPAIR_LOOKUP_MIN_INTERVAL = 0.0
-    # Suppress write-through job persistence for the deterministic suite — a
+    # Suppress write-through job persistence for the deterministic suite - a
     # shared jobs.db would otherwise leak historical rows between tests.
     from qobuz_librarian.web import job_persistence
     job_persistence._disabled = True
@@ -142,7 +142,7 @@ def restore_config():
     """For tests that ``importlib.reload(cfg)`` under patched env vars: reload it
     once more after the test so the recomputed module globals don't leak into the
     rest of the session. Request it BEFORE ``monkeypatch`` in the test signature
-    so its teardown runs LAST — after monkeypatch has restored the env — and the
+    so its teardown runs LAST - after monkeypatch has restored the env - and the
     reload recomputes against the session's (temp-dir) values, not the test's."""
     yield
     import importlib
@@ -154,7 +154,7 @@ def restore_config():
 @pytest.fixture(autouse=True)
 def _clean_job_registry():
     """Clear any jobs a test left in the shared registry singleton so they don't
-    leak into the next test — the registry is module-level and shared across the
+    leak into the next test - the registry is module-level and shared across the
     whole session, so a job one test adds (and doesn't remove) otherwise shows up
     in another test's registry scans / _get_reviewable_job lookups."""
     yield
@@ -180,7 +180,7 @@ def _allow_in_memory_job_admission(monkeypatch):
 @pytest.fixture(autouse=True)
 def _fast_qobuz_retries(monkeypatch):
     """The client retries transient failures (429/5xx/network errors) with
-    exponential backoff. In tests that's pure dead time — patch the
+    exponential backoff. In tests that's pure dead time - patch the
     indirection to a no-op so the suite stays fast. (Don't patch
     time.sleep globally; other modules sleep too.)"""
     monkeypatch.setattr("qobuz_librarian.api.client._retry_sleep", lambda *_: None)

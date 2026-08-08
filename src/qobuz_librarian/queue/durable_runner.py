@@ -1111,6 +1111,16 @@ def execute_durable_new_album(
         _require_authority(authority)
     except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
         retired = False
+    if not retired:
+        try:
+            _require_authority(authority)
+            retired = retire_download_staging_after_import(
+                item,
+                recovery_checkpoint=checkpoint_group,
+            )
+            _require_authority(authority)
+        except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
+            retired = False
     journal = _load_exact(operation_id)
     journal = (
         _reconcile_absent_staging(

@@ -5,8 +5,8 @@ Behaviour you should not change without understanding the consequence:
 - find_album_dir_filesystem: exact-path fast path first, then fuzzy scan.
   Artist-variant expansion covers "The X" / "X" / comma-prefix forms.
   Multi-artist folder detection (_MULTI_ARTIST_SEPS) expands search dirs.
-- compute_missing: 3-layer matching chain in order —
-    1. ISRC — authoritative recording identity
+- compute_missing: 3-layer matching chain in order -
+    1. ISRC - authoritative recording identity
     2. (disc, normalized title)
     3. edition-stripped variants on BOTH sides
   A track is "present" if ANY layer matches. Order matters: ISRC is
@@ -61,7 +61,7 @@ _MULTI_ARTIST_SEPS = (
     ", ", " & ", " and ", " feat. ", " feat ",
     " ft. ", " ft ", " with ", " x ", " vs. ", " vs ",
 )
-# Migration uses comma-space ONLY — other separators appear in real band
+# Migration uses comma-space ONLY - other separators appear in real band
 # names ('Bob Marley & The Wailers') and auto-migrating those would
 # silently fold entire artists' catalogs into a lead-member folder.
 _MIGRATION_SEPS = (", ",)
@@ -141,7 +141,7 @@ def _paths_equal(a: Path, b: Path) -> bool:
 _DECORATION_YEAR_RE = re.compile(
     r"[(\[](\d{4})[)\]]\s*$"      # trailing '(2010)' / '[2010]'
     r"|^\[(\d{4})\]\s+"          # leading '[2010] Title'
-    r"|^(\d{4})\s*[-–—]\s+"      # leading '2010 - Title'
+    r"|^(\d{4})\s*[-–]\s+"      # leading '2010 - Title'
 )
 
 
@@ -149,8 +149,8 @@ def _decoration_year(name):
     """The 4-digit year a folder name uses as a decoration ('' if none).
 
     A bare year that is itself the title ('1984', '2112') is not a decoration;
-    a year in a clear slot — trailing '(2010)'/'[2010]', or a leading '[2010] '
-    or '2010 - ' prefix — is. Mirrors tags.py's year-stripping rules."""
+    a year in a clear slot - trailing '(2010)'/'[2010]', or a leading '[2010] '
+    or '2010 - ' prefix - is. Mirrors tags.py's year-stripping rules."""
     m = _DECORATION_YEAR_RE.search(name or "")
     return next((g for g in m.groups() if g), "") if m else ""
 
@@ -332,14 +332,14 @@ def find_album_dir_filesystem(qobuz_album):
         # Evaluate every subdir that clears both gates, not just the single
         # top scorer: a prefix-only high scorer that fails the coverage gate
         # (studio 'The North Borders' scoring 0.79 against the live 'The North
-        # Borders Tour — Live') must not mask a lower-scored folder in the same
+        # Borders Tour - Live') must not mask a lower-scored folder in the same
         # artist dir that is the real match.
         for d in subdirs:
             score = similarity(strip_album_decorations(d.name), stripped_title)
             if score < config.FUZZY_DIR_THRESH or score <= global_best_score:
                 continue
             # Real edition variants normalize to the same string, so require the
-            # titles to be close in length — that keeps an extra word ('Live',
+            # titles to be close in length - that keeps an extra word ('Live',
             # 'Tour') from resolving to the base album's folder on prefix alone.
             norm_dir = normalize(strip_album_decorations(d.name))
             coverage = (min(len(norm_dir), len(norm_title))
@@ -455,10 +455,10 @@ def find_album_dir_by_track_signatures(signatures):
 def find_existing_tracks(qobuz_album, *, album_dir=None):
     """Return (track_list, album_dir_or_None) by reading the filesystem.
 
-    track_list is empty when no album dir is found — surfaces as
+    track_list is empty when no album dir is found - surfaces as
     '0 of N present' so the user can spot a folder-naming mismatch.
 
-    Pass ``album_dir`` when the caller already resolved it — the artist
+    Pass ``album_dir`` when the caller already resolved it - the artist
     walk and the single-album download path both resolve once via
     ``find_album_dir_filesystem`` for a guardrail and would otherwise
     re-resolve here, doubling the cached-subdir-listing work per album.
@@ -556,8 +556,8 @@ def _disc_count(tracks, field):
 def _disc_scoped_match(qobuz_tracks, existing_tracks):
     """Scope title matching by disc only when BOTH sides span multiple discs.
 
-    If either side is entirely on disc 1 — a single-disc album, or a flat folder
-    whose tracks carry no DISCNUMBER tag and so all default to 1 — disc scoping
+    If either side is entirely on disc 1 - a single-disc album, or a flat folder
+    whose tracks carry no DISCNUMBER tag and so all default to 1 - disc scoping
     can only invent false gaps (a later-disc Qobuz track never finding its
     disc-1 file). Matching disc-agnostically then is safe: one-to-one pairing
     still keeps two same-titled tracks from collapsing onto a single file."""
@@ -581,7 +581,7 @@ def compute_missing(qobuz_tracks, existing_tracks):
     """Split qobuz_tracks into (missing, present) against existing_tracks.
 
     A Qobuz track is present when an on-disk track matches it on ISRC,
-    normalized title, or edition-stripped title — in that priority. Matching is
+    normalized title, or edition-stripped title - in that priority. Matching is
     one-to-one (see _pair_tracks), so a duplicate title surfaces as a real gap
     instead of being masked by a single file.
     """
@@ -687,7 +687,7 @@ def folder_holds_all_tracks(folder, qobuz_tracks, destructive=False):
     extras, duplicate files, or pre-existing tracks while an expected track is
     absent, and the backup being deleted holds the only copy of the tracks
     moved aside. No expected list, an unreadable folder, or a walk that
-    couldn't cover the whole tree reads as False — unverifiable means keep
+    couldn't cover the whole tree reads as False - unverifiable means keep
     the backup. Destructive callers opt into recording-authority, slot, title,
     and duration checks; ordinary discovery keeps its intentionally permissive
     edition matcher."""
@@ -744,7 +744,7 @@ def album_year(album):
     """Album release year as a string, or '' if unknown.
 
     Prefers release_date_original. Falls back to released_at parsed in UTC
-    (not local timezone — local-TZ parsing was a real bug that flipped the
+    (not local timezone - local-TZ parsing was a real bug that flipped the
     year for albums released late at night UTC).
     """
     rdo = album.get("release_date_original") or ""
@@ -791,7 +791,7 @@ def album_released_within(album, max_age_days):
 
     For surfacing genuinely-new releases: Qobuz routinely back-fills old
     catalogue titles, so "appeared in the catalog since the baseline" isn't
-    enough on its own — a 2020 album it only just listed is a back-catalogue gap,
+    enough on its own - a 2020 album it only just listed is a back-catalogue gap,
     not a new release. An album with no parseable date is treated as recent (don't
     suppress a possibly-new release over a missing date). max_age_days <= 0
     disables the window (any catalog newcomer counts, the original behaviour).
@@ -823,7 +823,7 @@ def album_quality_label(album):
 
 # ── Catalog filtering ─────────────────────────────────────────────────────────
 _MIN_ALBUM_TRACKS = 4  # below this an edition is a stray single/EP, not the
-                       # album — ignored when sizing the standard edition.
+                       # album - ignored when sizing the standard edition.
 
 
 def _standard_track_count(group):
@@ -835,7 +835,7 @@ def _standard_track_count(group):
 
     Editions below ``_MIN_ALBUM_TRACKS`` (3 tracks or fewer) are treated as
     stray singles/EPs that happen to dedup into the same group as the album
-    by title and ignored when sizing — so a same-titled 3-track EP filed
+    by title and ignored when sizing - so a same-titled 3-track EP filed
     next to a 15-track deluxe doesn't win the canonical pick. (An EP with
     4+ tracks that shares the album's normalized name is a rarer edge that
     needs Qobuz release-type metadata to distinguish reliably; until then
@@ -890,13 +890,13 @@ def _best_edition(group, prefer_hires):
 def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
     """Drop catalog entries whose bare title matches something already owned.
 
-    An exact bare-title match normally counts as owned regardless of year — a
+    An exact bare-title match normally counts as owned regardless of year - a
     far-off year is a remaster/reissue of the same work (a 2022 'Revolver' is the
     1966 one re-released, not a new album). The one exception is a *self-titled*
     release: when the bare title equals the artist name and the catalog entry is
     undecorated and its year is far from every owned copy, it's usually a
     genuinely distinct same-titled album (Weezer's colour records, Peter
-    Gabriel's four 'Peter Gabriel' LPs) rather than a reissue — so it's offered
+    Gabriel's four 'Peter Gabriel' LPs) rather than a reissue - so it's offered
     instead of silently hidden. ``artist_name`` enables that exception; without
     it the year-blind exact-own behaviour is unchanged. Falls back to a fuzzy
     match at CONSOLIDATE_THRESH for edition variants the decoration stripper
@@ -2152,7 +2152,7 @@ def _dir_year(name):
     if not m:
         return None
     # A title that simply IS a 4-digit number ('1989', '2112') is the album
-    # name, not a year decoration — don't read it as a release year.
+    # name, not a year decoration - don't read it as a release year.
     if strip_album_decorations(name).strip() == m.group(1):
         return None
     return int(m.group(1))
@@ -2194,8 +2194,8 @@ def _sort_by_match(candidates, prefer_hires):
 def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=False):
     """All catalog entries scoring above ARTIST_DIR_MATCH_THRESH for
     album_dir, sorted best-first (similarity + year-proximity bonus, lossless
-    only, artist-name guard). Returning the ranked list — not just the top
-    pick — lets find_qobuz_album_for_dir resolve the target_dir case from the
+    only, artist-name guard). Returning the ranked list - not just the top
+    pick - lets find_qobuz_album_for_dir resolve the target_dir case from the
     catalog instead of falling back to the search API."""
     if not catalog:
         return []
@@ -2215,7 +2215,7 @@ def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=Fa
         s2 = similarity(r_bare, bare_softened) if bare_softened and bare_softened != bare else 0.0
         score = max(s1, s2)
         # Coverage + variant guards, mirroring find_album_dir_filesystem: a
-        # 0.65-similar prefix match ('The North Borders' vs '… Tour — Live')
+        # 0.65-similar prefix match ('The North Borders' vs '… Tour - Live')
         # would otherwise pull a live/tour edition onto the studio-album dir.
         norm_r = normalize(r_bare)
         norm_b = normalize(bare)
@@ -2258,7 +2258,7 @@ def _pick_best_target_dir_match(scored_cands, target_dir):
     if not resolving:
         return None, 0
     if n_disk == 0:
-        # Empty folder — nothing to fit against; trust score order.
+        # Empty folder - nothing to fit against; trust score order.
         return resolving[0][1], resolving[0][0]
 
     def rank(item):
@@ -2370,7 +2370,7 @@ def find_qobuz_album_for_dir(album_dir: Path, artist_name: str, token,
     if not passing:
         top = candidates[0]
         vlog(f"    best Qobuz match {top[2].get('title')!r} scored "
-             f"{top[0]:.2f} — under threshold")
+             f"{top[0]:.2f} - under threshold")
         return None
     best_score, _best_year_bonus, best = passing[0]
 
@@ -2409,7 +2409,7 @@ def find_expanded_edition(album, album_dir, existing, token, _args=None):
 
     Returns a list of (full_album_dict, new_extras_list) tuples for editions
     that don't make the extras-blocking-upgrade situation worse. Sorted: fewest
-    new_extras first (zero is best — covers all local tracks), then by quality
+    new_extras first (zero is best - covers all local tracks), then by quality
     descending ('quality is king'), then by track count descending.
 
     Limits to 3 full get_album() calls to keep API usage sane. Returns []

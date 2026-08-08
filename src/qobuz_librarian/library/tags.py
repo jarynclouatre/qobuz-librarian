@@ -89,8 +89,8 @@ def clean_qobuz_string(s):
     all get the clean form for free.
 
     Outer quotes are deliberately NOT stripped: Qobuz returns genuinely
-    quoted titles as-is — David Bowie's ``"Heroes"`` comes back as ``'"Heroes"'``
-    with the quotes part of the title — so removing them would corrupt the name
+    quoted titles as-is - David Bowie's ``"Heroes"`` comes back as ``'"Heroes"'``
+    with the quotes part of the title - so removing them would corrupt the name
     on exactly the releases where the quotes are intentional. Qobuz's rare stray
     wrapping quote is the lesser evil to leave in place.
 
@@ -111,7 +111,7 @@ def beets_sanitize(s):
     """Sanitize a string into the path component beets would write for it.
 
     A leading or trailing dot becomes ``_`` (not dropped) and a leading dash
-    becomes ``_``, matching beets exactly — anything less mis-predicts the
+    becomes ``_``, matching beets exactly - anything less mis-predicts the
     on-disk folder for names like "...And Justice for All".
     """
     if not s:
@@ -125,7 +125,7 @@ def beets_sanitize(s):
 def normalize(s):
     """ASCII-fold and strip punctuation for fuzzy comparison.
 
-    Pure CJK / emoji titles that strip to "" return "" — callers treat
+    Pure CJK / emoji titles that strip to "" return "" - callers treat
     that as "can't compare" (similarity() returns 0.0 for such pairs).
     """
     if not s:
@@ -140,7 +140,7 @@ def similarity(a, b):
     """Normalized similarity score [0.0, 1.0] between two strings.
 
     Two empty-normalized strings (e.g. pure-CJK titles) would score 1.0
-    against each other — a false-positive waiting to bite
+    against each other - a false-positive waiting to bite
     find_qobuz_album_for_dir. Force 0.0 in that case.
     """
     na, nb = normalize(a), normalize(b)
@@ -181,10 +181,10 @@ _PERFORMANCE_VARIANT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Trailing parenthesized chunk capturer — non-greedy, anchored to end.
+# Trailing parenthesized chunk capturer - non-greedy, anchored to end.
 _TRAILING_PAREN_CAPTURE_RE = re.compile(r"\s*\(([^()]*)\)\s*$")
 
-# A parenthesized collaboration credit — "(with Beyoncé)" — names a distinct
+# A parenthesized collaboration credit - "(with Beyoncé)" - names a distinct
 # recording and stays attached.
 _LEADING_COLLAB_RE = re.compile(r"^\s*with\s+\w", re.IGNORECASE)
 
@@ -200,7 +200,7 @@ def strip_edition_suffix(title):
 
     Preserves: (Acoustic), (Live), (Demo), (Remix), (Instrumental),
     (Radio Edit), (Extended Mix), (feat. X), and other markers indicating a
-    genuinely different recording — including when an edition tag sits OUTSIDE
+    genuinely different recording - including when an edition tag sits OUTSIDE
     a performance one, so "Song (LP Version) (Remix)" → "Song (Remix)".
 
     Handles up to 4 trailing-paren groups ("Foo (Remaster) (Mono)").
@@ -226,7 +226,7 @@ def strip_edition_suffix(title):
 
 
 def strip_trailing_parens(title):
-    """A title with every trailing parenthesized group removed — both edition
+    """A title with every trailing parenthesized group removed - both edition
     AND performance-variant tags. Distinct from strip_edition_suffix (which
     keeps performance variants): this only answers "is there a non-empty core
     once the parenthesised decorations are gone", which catalog matching uses to
@@ -256,7 +256,7 @@ _YEAR_PAREN_RE = re.compile(r"\s*\([^)]*\d{4}[^)]*\)\s*$")
 # $album/` produces "[1971] Hunky Dory"; `$year - $album/` produces "1971 -
 # Hunky Dory".
 _LEADING_YEAR_RE   = re.compile(
-    r"^\s*(?:\[\s*\d{4}\s*\]\s*[-–—]?|\d{4}\s*[-–—])\s+")
+    r"^\s*(?:\[\s*\d{4}\s*\]\s*[-–]?|\d{4}\s*[-–])\s+")
 
 # Edition keywords to strip from album title suffixes.
 _EDITION_TAIL_KEYWORDS = (
@@ -272,13 +272,13 @@ _EDITION_TAIL_KEYWORDS = (
     r"reissue"
 )
 _EDITION_TAIL_RE = re.compile(
-    r"\s*[-–—:]\s*(?:" + _EDITION_TAIL_KEYWORDS + r")\s*$",
+    r"\s*[-–:]\s*(?:" + _EDITION_TAIL_KEYWORDS + r")\s*$",
     re.IGNORECASE,
 )
 
 # The same distinct-release markers, applied to the parenthesized form: a
 # trailing '(Live)' / '(Acoustic)' / '(Demos)' is a different record, not an
-# edition, so it's never stripped — mirroring the colon/dash exclusions above
+# edition, so it's never stripped - mirroring the colon/dash exclusions above
 # and strip_edition_suffix on track titles.
 _ALBUM_VARIANT_RE = re.compile(
     r"\b(?:live|unplugged|acoustic|demos?|instrumental|"
@@ -314,7 +314,7 @@ _ALBUM_VARIANT_CONTINUATIONS = (
     "tapes", "tape", "version", "versions", "tracks", "track",
     "recordings", "recording", "performance", "performances",
     "mix", "mixes", "edit", "edits", "album", "albums", "ep", "eps",
-    # Tour / concert / broadcast cluster — "Live Tour 2024", "Live in Concert",
+    # Tour / concert / broadcast cluster - "Live Tour 2024", "Live in Concert",
     # "Live Broadcast 1972", "Anniversary Live", "Live Show", "Re-recorded".
     "tour", "tours", "broadcast", "broadcasts", "concert", "concerts",
     "show", "shows", "rerecorded", "rerecording", "rerecordings",
@@ -331,7 +331,7 @@ def differs_by_album_variant(shorter, longer):
     isn't mistaken for an un-stripped edition of the studio album.
 
     The marker must land at what looks like a word boundary in the normalized
-    form — exact suffix, digits (a year), another variant token, or one of
+    form - exact suffix, digits (a year), another variant token, or one of
     the common connector words real album titles use after a variant. Without
     that guard, a normalized title that coincidentally starts with the same
     letters as a token (``songliverpool``, ``songsessional``) would falsely
@@ -346,7 +346,7 @@ def differs_by_album_variant(shorter, longer):
             continue
         rest = suffix[len(tok):]
         if not rest:
-            return True              # exact suffix — "Album (Live)" → albumlive
+            return True              # exact suffix - "Album (Live)" → albumlive
         if rest[0].isdigit():
             return True              # "(Live 2020)" → liver…digit
         if any(rest.startswith(other) for other in _ALBUM_VARIANT_TOKENS):
@@ -355,7 +355,7 @@ def differs_by_album_variant(shorter, longer):
             return True              # "(Live at Wembley)" → liveatwembley
         # else: this token matched as a prefix but the continuation looks
         # like the same word carrying on (live → liver…, session → sessional)
-        # — keep looking for a longer token that might match cleanly.
+        # - keep looking for a longer token that might match cleanly.
     return False
 
 
@@ -367,7 +367,7 @@ def strip_album_decorations(name):
     Edition' → 'Cassadaga' 'Revolver - 2022 Remaster' → 'Revolver' 'Album:
     50th Anniversary Edition' → 'Album' Deliberately NOT stripped (these are
     distinct releases), in either the parenthesized or colon/dash form:
-    'Cassadaga: A Companion' (companion EP — different recordings) 'Album:
+    'Cassadaga: A Companion' (companion EP - different recordings) 'Album:
     Live in Tokyo' / 'Album (Live)' (live album) 'Album: B-Sides' / 'Greatest
     Hits (Acoustic)' (rarities / acoustic set) Iterates up to 8 times so
     combined decorations like 'Foo: Deluxe Edition (2023)' fully strip in a
@@ -388,7 +388,7 @@ def strip_album_decorations(name):
 
 # The affirmative-decoration gate for the strict variant below: a bare year,
 # or edition vocabulary. Two things that LOOK like decorations are identity
-# and must not match — a year span ("1972-1975" names which albums a box
+# and must not match - a year span ("1972-1975" names which albums a box
 # holds) and a possessive version ("Taylor's Version" is a re-recording, not
 # a format; "Collector's Edition" is covered by its own keyword).
 _DECOR_PAREN_KEYWORD_RE = re.compile(
@@ -397,7 +397,7 @@ _DECOR_PAREN_KEYWORD_RE = re.compile(
     r"special|collector'?s|limited|bonus|digital)\b",
     re.IGNORECASE,
 )
-_YEAR_SPAN_RE = re.compile(r"\d{4}\s*[-–—/]\s*\d{4}")
+_YEAR_SPAN_RE = re.compile(r"\d{4}\s*[-–/]\s*\d{4}")
 _POSSESSIVE_VERSION_RE = re.compile(r"\b(?!collector)\w+'s\s+version\b",
                                     re.IGNORECASE)
 
@@ -418,7 +418,7 @@ def strip_album_decorations_strict(name):
     year, or edition vocabulary), never merely because it is parenthesized.
 
     The loose variant's catch-all is right for fuzzy owned-matching, which
-    backs it with similarity scores and confirmations — but as a store key it
+    backs it with similarity scores and confirmations - but as a store key it
     collapsed distinct albums: 'Alone' with 'Alone (Again)', 'Rancid' with
     'Rancid (5)', 'The Asylum Albums (1972-1975)' with '(1976-1980)'. Those
     keep their parentheses here; 'Revolver (2009 Remaster)' still folds."""
@@ -442,7 +442,7 @@ def strip_year_decoration(name):
     """Remove only a leading or trailing year tag from an album folder name.
 
     'Black Sands (2010)' and '[2010] Black Sands' both reduce to 'Black Sands',
-    but edition/live/remaster tags are left attached — so 'Album (Live)' stays
+    but edition/live/remaster tags are left attached - so 'Album (Live)' stays
     distinct from 'Album (2018)' and the two are never treated as one album.
     """
     s = _LEADING_YEAR_RE.sub("", name).strip()

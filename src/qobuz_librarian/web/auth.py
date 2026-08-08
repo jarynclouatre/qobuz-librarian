@@ -5,10 +5,11 @@ cookie conventions (HttpOnly/SameSite, secrets.compare_digest) and persists
 the credential the way the streamrip token is persisted: an atomic 0600
 file in DATA_DIR.
 
-The session cookie carries a random per-login token, not a credential-derived
-secret. Token digests are persisted to disk (an atomic 0600 file in DATA_DIR)
-with an expiry and reloaded on restart, so a restart does not sign browsers
-out; a session ends on logout, on a password change, and when it expires.
+The session cookie carries a random per-login token, not the credential secret.
+A digest bound to the current credential generation is persisted to disk (an
+atomic 0600 file in DATA_DIR) with an expiry and reloaded on restart, so an
+ordinary restart does not sign browsers out while a password rotation cannot
+revive stale sessions; a session also ends on logout or expiry.
 """
 import hashlib
 import json
@@ -132,14 +133,21 @@ _user_failures: dict[str, list[float]] = {}
 _USER_LOGIN_MAX = 10
 _MAX_TRACKED_USERS = 1024
 
-# Active session tokens: a random per-login token (the cookie value) → expiry
-# epoch seconds.
+# Active session tokens: a credential-generation-bound digest of the random
+# per-login cookie value → expiry epoch seconds. Binding the lookup to the
+# current session secret makes a stale sessions file harmless after a password
+# rotation, even if clearing that second file failed after credential publish.
 _SESSIONS_FILE = cfg.DATA_DIR / ".qobuz_web_sessions.json"
 _sessions_lock = threading.Lock()
 
 
 def _token_digest(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    # _read is defined below but resolved only when this function is called,
+    # after module initialisation. An unavailable/unconfigured credential file
+    # contributes an empty generation and still fails closed at the auth gate.
+    generation = str(_read().get("session_secret") or "")
+    material = generation.encode("utf-8") + b"\0" + token.encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
 
 
 def _load_sessions() -> dict[str, float]:
@@ -425,13 +433,24 @@ def mint_session() -> str:
     return token
 
 
-def revoke_session(token: str) -> None:
-    """Invalidate one session (log a single browser out)."""
+def revoke_session(token: str) -> bool:
+    """Durably invalidate one session (log a single browser out).
+
+    Returns False without changing the live session when its durable removal
+    cannot be published, so the caller can report that logout did not happen
+    and let the authenticated browser retry.
+    """
     if not token:
-        return
+        return True
     with _sessions_lock:
-        _sessions.pop(_token_digest(token), None)
-        _save_sessions_locked()
+        digest = _token_digest(token)
+        previous = _sessions.pop(digest, None)
+        if previous is None:
+            return True
+        if not _save_sessions_locked():
+            _sessions[digest] = previous
+            return False
+        return True
 
 
 def revoke_all_sessions() -> None:

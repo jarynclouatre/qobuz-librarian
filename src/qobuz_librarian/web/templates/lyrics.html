@@ -61,10 +61,10 @@
     <section class="ql-work-card ql-work-card-primary">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">Scan library for lyrics</p>
-        <p class="ql-work-card-text">Missing lyrics are written automatically; there is no review step.</p>
+        <p class="ql-work-card-text">Missing lyrics are written automatically to {{ lyrics_format|lower }}; there is no review step.</p>
       </div>
       <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-              data-confirm="Start a library-wide lyrics scan? This can take a while on a large library."
+              data-confirm="Start a library-wide lyrics scan? Missing lyrics will be written to {{ lyrics_format|lower }} as the scan runs. This can take a while on a large library."
               data-confirm-action="Start scan">Start lyrics scan</button>
     </section>
   </form>

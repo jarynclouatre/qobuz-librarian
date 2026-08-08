@@ -124,6 +124,27 @@ def _note_write_failure(what: str, e: Exception) -> None:
         _log.debug("%s failed: %s", what, e)
 
 
+def _rollback_failed_write(conn) -> None:
+    """End a rejected write so a later commit cannot publish it by accident.
+
+    Callers hold ``_lock``. If SQLite cannot roll the transaction back, drop
+    the poisoned connection; closing it is the final rollback boundary and a
+    later operation may reopen the database cleanly.
+    """
+    global _conn
+    try:
+        conn.rollback()
+        return
+    except sqlite3.Error:
+        pass
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+    if _conn is conn:
+        _conn = None
+
+
 def _path():
     return cfg.DATA_DIR / "jobs.db"
 
@@ -148,6 +169,13 @@ def _get_conn() -> Optional[sqlite3.Connection]:
         _conn.execute("PRAGMA journal_mode=WAL")
         return _conn
     except (OSError, sqlite3.Error) as e:
+        failed = _conn
+        _conn = None
+        if failed is not None:
+            try:
+                failed.close()
+            except sqlite3.Error:
+                pass
         _log.info("job persistence disabled (%s); jobs won't survive restart.", e)
         _disabled = True
         return None
@@ -254,6 +282,7 @@ def init() -> None:
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
         except sqlite3.Error as e:
+            _rollback_failed_write(conn)
             # A transient/locked/full/corrupt jobs.db here would otherwise
             # propagate out of restore_jobs() into the caller's broad
             # "couldn't restore prior jobs; starting fresh" handler, masking
@@ -349,6 +378,7 @@ def _persist_locked(job) -> bool:
             conn.commit()
             return True
         except sqlite3.Error as e:
+            _rollback_failed_write(conn)
             _note_write_failure(f"persist {job.id}", e)
             return False
 
@@ -366,16 +396,31 @@ def persist(job) -> bool:
 def persist_review_mutation(job, mutation) -> tuple[bool, object]:
     """Save one candidate-list mutation or restore its exact prior state."""
     with job._review_action_lock, job._lock:
+        had_saved_signature = hasattr(job, "_saved_review_signature")
         previous = (
             copy.deepcopy(job.candidates),
             job._cand_seq,
             job._candidate_cap_noted,
             copy.deepcopy(job.execute_args),
+            job.summary,
+            had_saved_signature,
+            getattr(job, "_saved_review_signature", None),
         )
 
         def _restore():
-            (job.candidates, job._cand_seq, job._candidate_cap_noted,
-             job.execute_args) = previous
+            (
+                job.candidates,
+                job._cand_seq,
+                job._candidate_cap_noted,
+                job.execute_args,
+                job.summary,
+                restore_saved_signature,
+                saved_signature,
+            ) = previous
+            if restore_saved_signature:
+                job._saved_review_signature = saved_signature
+            else:
+                job.__dict__.pop("_saved_review_signature", None)
 
         try:
             result = mutation()
@@ -387,6 +432,9 @@ def persist_review_mutation(job, mutation) -> tuple[bool, object]:
             job._cand_seq,
             job._candidate_cap_noted,
             job.execute_args,
+            job.summary,
+            hasattr(job, "_saved_review_signature"),
+            getattr(job, "_saved_review_signature", None),
         )
         if current == previous:
             return True, result
@@ -435,10 +483,7 @@ def acknowledge_attention(job_id: str, expected_attention: str) -> bool:
             conn.commit()
             return True
         except sqlite3.Error as exc:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
+            _rollback_failed_write(conn)
             _note_write_failure(f"acknowledge attention for {job_id}", exc)
             return False
 
@@ -489,10 +534,7 @@ def _persist_preserving_single_locked(job) -> bool:
                 job._single_undo_unavailable = True
             return True
         except sqlite3.Error as exc:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
+            _rollback_failed_write(conn)
             _note_write_failure(
                 f"persist {job.id} while preserving its Undo record",
                 exc,
@@ -513,7 +555,10 @@ def admit(job) -> bool:
     This named boundary distinguishes mandatory admission from later history
     updates, whose callers may still degrade to the in-memory view.
     """
-    return persist(job)
+    saved = persist(job)
+    if saved:
+        job._durability_required = True
+    return saved
 
 
 def admit_review_transition(job, parked_jobs=()) -> bool:
@@ -542,12 +587,11 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.executemany(_PERSIST_SQL, values)
                 conn.commit()
+                for other in ordered:
+                    other._durability_required = True
                 return True
             except sqlite3.Error as e:
-                try:
-                    conn.rollback()
-                except sqlite3.Error:
-                    pass
+                _rollback_failed_write(conn)
                 _note_write_failure("admit related jobs", e)
                 return False
 
@@ -595,6 +639,7 @@ def persist_recoveries(job) -> bool:
                 conn.commit()
                 return True
             except sqlite3.Error as exc:
+                _rollback_failed_write(conn)
                 _note_write_failure(
                     f"persist Repair recovery for {job_id}", exc)
                 return False
@@ -679,10 +724,7 @@ def acknowledge_missing_recoveries(job, is_missing) -> bool:
                             conn.commit()
                             saved = True
                 except (sqlite3.Error, TypeError, ValueError) as exc:
-                    try:
-                        conn.rollback()
-                    except sqlite3.Error:
-                        pass
+                    _rollback_failed_write(conn)
                     _note_write_failure(
                         f"acknowledge missing Repair recovery for {job.id}",
                         exc,
@@ -769,10 +811,7 @@ def acknowledge_durable_completion(
             conn.commit()
             return True
         except sqlite3.Error as exc:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
+            _rollback_failed_write(conn)
             _note_write_failure(
                 f"acknowledge durable completion for {job_id}",
                 exc,
@@ -973,10 +1012,7 @@ def persist_post_import_relocation_handoff(
                 job.__dict__.pop("_single_undo_unavailable", None)
                 return True
             except sqlite3.Error as exc:
-                try:
-                    conn.rollback()
-                except sqlite3.Error:
-                    pass
+                _rollback_failed_write(conn)
                 _note_write_failure(
                     f"persist relocation handoff for {consumer['job_id']}",
                     exc,
@@ -1162,10 +1198,7 @@ def resolve_recovery_resolution(
             conn.commit()
             return resolved
         except (sqlite3.Error, TypeError, ValueError) as exc:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
+            _rollback_failed_write(conn)
             _note_write_failure("resolve Repair recovery", exc)
             return None
 
@@ -1187,8 +1220,9 @@ def delete(job_id: str) -> None:
                 (job_id,),
             )
             conn.commit()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            _rollback_failed_write(conn)
+            _log.debug("delete job %s failed: %s", job_id, exc)
 
 
 def load_one(job_id: str) -> Optional[dict]:
@@ -1287,10 +1321,7 @@ def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
             )
             conn.commit()
         except sqlite3.Error as e:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
+            _rollback_failed_write(conn)
             _log.debug("prune_finished(%d) failed: %s", keep, e)
 
 
@@ -1486,12 +1517,12 @@ def has_active_single_undo(single) -> bool:
     )
 
 
-def clear_history(*, retain_job_id: str | None = None) -> None:
+def clear_history(*, retain_job_id: str | None = None) -> bool:
     """Delete ordinary finished jobs; retain recovery and Undo state."""
     with _lock:
         conn = _get_conn()
         if conn is None:
-            return
+            return False
         try:
             retained = (
                 retain_job_id
@@ -1524,8 +1555,11 @@ def clear_history(*, retain_job_id: str | None = None) -> None:
                 "WHERE jobs.id=post_import_relocation_handoffs.job_id)"
             )
             conn.commit()
+            return True
         except sqlite3.Error as e:
+            _rollback_failed_write(conn)
             _log.debug("clear_history failed: %s", e)
+            return False
 
 
 def load_all() -> list[dict]:

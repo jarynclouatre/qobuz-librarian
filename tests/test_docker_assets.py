@@ -88,6 +88,33 @@ def test_entrypoint_normalises_a_stale_config_volume(tmp_path):
     assert "failed_downloads_enabled = true" in out
 
 
+def test_entrypoint_repairs_duplicate_enforced_keys_from_an_older_volume(tmp_path):
+    cfg = _make_config(
+        tmp_path,
+        "[qobuz]\n"
+        "download_booklets = true\n"
+        "download_booklets = false\n"
+        "[database]\n"
+        "downloads_enabled = true\n"
+        "downloads_enabled = false\n"
+        "[filepaths]\n"
+        "add_singles_to_folder = false\n"
+        "add_singles_to_folder = true\n"
+        "[misc]\n"
+        "check_for_updates = true\n"
+        "check_for_updates = false\n",
+    )
+
+    _run_entrypoint_head(tmp_path, {"CONFIG_DIR": str(cfg)})
+
+    path = cfg / "streamrip" / "config.toml"
+    parsed = tomllib.load(path.open("rb"))
+    assert parsed["qobuz"]["download_booklets"] is False
+    assert parsed["database"]["downloads_enabled"] is False
+    assert parsed["filepaths"]["add_singles_to_folder"] is True
+    assert parsed["misc"]["check_for_updates"] is False
+
+
 def test_entrypoint_defaults_to_nonroot_user(tmp_path):
     # With no PUID/PGID the app must still drop to 1000:1000, not run as root.
     cfg = _make_config(tmp_path, "[database]\n")

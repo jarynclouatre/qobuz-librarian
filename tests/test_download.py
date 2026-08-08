@@ -134,7 +134,7 @@ def test_lossy_track_retried_once_and_recovers(monkeypatch, tmp_path):
     assert (r["n_ok"], r["n_lossy"], r["n_fail"]) == (2, 0, 0)
 
     records = r["_staged_track_bindings"]
-    # track_b landed first, but bindings must come out in catalogue order —
+    # track_b landed first, but bindings must come out in catalogue order -
     # the durable runner compares them against the journal's lineages, which
     # are always catalogue-ordered.
     assert [(record["slot"], record["path"]) for record in records] == [
@@ -329,7 +329,7 @@ def test_retire_download_staging_after_import_sweeps_leftover_art(monkeypatch, t
 
 
 def test_discard_download_staging_removes_partial_run(monkeypatch, tmp_path):
-    # A user cancel throws the partial rip away so the queue can move on —
+    # A user cancel throws the partial rip away so the queue can move on -
     # leftover audio must not hold the run for recovery like a crash does.
     from qobuz_librarian.integrations.staging import create_staging_run
 

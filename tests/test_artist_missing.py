@@ -19,7 +19,7 @@ def test_missing_albums_lists_partials_first_with_present_count(monkeypatch, cap
     """The missing-albums step lists a partially-present album (a collaboration
     filed under another folder) ahead of the fully-missing ones and shows how
     many tracks are already on disk. What counts as owned vs missing is the
-    engine's call — see test_discovery; this checks the terminal presentation."""
+    engine's call - see test_discovery; this checks the terminal presentation."""
     partial = AlbumGap(_qalbum("Black Sands", 11, 2010),
                        Path("/library/Black Sands"),
                        missing=[{}] * 8, present=[{}] * 3)

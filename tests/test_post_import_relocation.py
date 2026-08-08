@@ -313,14 +313,3 @@ def test_recovery_refuses_a_replaced_destination_album(tmp_path, monkeypatch):
     assert track.read_bytes() == b"audio"
     assert published.read_bytes() == b"audio"
     assert _paths(database)[0] == [str(track)]
-
-
-def _queue_consumer():
-    return {
-        "kind": "queue-completion",
-        "queue_operation_id": "1" * 64,
-        "item_id": "2" * 64,
-        "action_id": "3" * 64,
-    }
-
-

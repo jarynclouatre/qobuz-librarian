@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,30 +26,63 @@ log = logging.getLogger("qobuz_librarian")
 
 @contextmanager
 def store_lock(path):
-    """Hold an exclusive cross-process lock around one store's
-    load-modify-save. The web worker and the CLI are separate processes, so a
-    threading.Lock can't serialise them; a flock on a sidecar lock file
-    does. Best-effort; when the lock file can't even be opened, proceed
-    unlocked rather than refuse the save."""
+    """Hold an exclusive cross-process lock around one load-modify-save.
+
+    The web worker and CLI are separate processes, so a threading lock cannot
+    serialize them. The sidecar is part of the store's integrity boundary: if
+    it cannot be opened or is not the exact regular file we locked, fail before
+    the caller reads state rather than silently allowing a lost update.
+    """
     path = Path(path)
     lock_path = path.with_name(path.name + ".lock")
-    fh = None
+    descriptor = -1
+    locked = False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "w", encoding="utf-8")
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-    except OSError:
-        if fh is not None:
-            fh.close()
-            fh = None
-    try:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise OSError("safe state-lock access is unavailable")
+        descriptor = os.open(
+            lock_path,
+            os.O_CREAT
+            | os.O_RDWR
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            0o600,
+        )
+        held = os.fstat(descriptor)
+        named = os.stat(lock_path, follow_symlinks=False)
+        identity = (int(held.st_dev), int(held.st_ino))
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or held.st_nlink != 1
+            or named.st_nlink != 1
+            or identity != (int(named.st_dev), int(named.st_ino))
+        ):
+            raise OSError("state-lock namespace is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+
+        # The name may have changed while flock waited for another process.
+        held = os.fstat(descriptor)
+        named = os.stat(lock_path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+            or (int(held.st_dev), int(held.st_ino))
+            != (int(named.st_dev), int(named.st_ino))
+        ):
+            raise OSError("state-lock changed during acquisition")
         yield
     finally:
-        if fh is not None:
+        if descriptor >= 0:
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
-                fh.close()
+                os.close(descriptor)
 
 
 def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):

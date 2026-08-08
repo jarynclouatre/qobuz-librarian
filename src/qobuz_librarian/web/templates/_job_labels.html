@@ -169,7 +169,9 @@
 {%- endmacro %}
 
 {% macro job_activity(job) -%}
-  {%- if job.status.value == 'scanning' -%}
+  {%- if job.execute_kind == 'new_releases' -%}
+    Checking Qobuz
+  {%- elif job.status.value == 'scanning' -%}
     Scanning
   {%- elif job.execute_kind == 'upgrade' -%}
     Upgrading
@@ -181,7 +183,7 @@
     Fetching lyrics
   {%- elif job.execute_kind == 'migration' -%}
     Migrating
-  {%- elif job.kind == 'download' or job.execute_kind in ('library', 'new_releases') -%}
+  {%- elif job.kind == 'download' or job.execute_kind == 'library' -%}
     Downloading
   {%- else -%}
     Running

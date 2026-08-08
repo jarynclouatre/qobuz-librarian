@@ -5,7 +5,7 @@ a replacement download to the exact recording the user already had, by
 matching on ISRC rather than guessing by album/title/edition.
 
 The equality check is CASE-FOLDED and HYPHEN-STRIPPED but otherwise
-STRICT — text-search hits, substrings, and prefixes do NOT satisfy it.
+STRICT - text-search hits, substrings, and prefixes do NOT satisfy it.
 This strictness is load-bearing: a loose match would silently replace
 a user's file with the wrong recording.
 """
@@ -59,7 +59,7 @@ def _normalize_track_fields(track):
 # ── Album / artist / track search ─────────────────────────────────────────────
 def _expect_dict(data, endpoint):
     """qobuz_get returns r.json() untyped, so a malformed/error 200 body
-    (a JSON list/str/number — e.g. a CDN/proxy error page served with 200) would
+    (a JSON list/str/number - e.g. a CDN/proxy error page served with 200) would
     crash on the `.get` below and escape callers that only catch QobuzError.
     Turn it into the QobuzError they already handle, matching get_album."""
     if not isinstance(data, dict):
@@ -128,14 +128,24 @@ def search_artists(query, token, limit=10):
 def get_album(album_id, token):
     from qobuz_librarian.api import album_cache
     cached = album_cache.get(album_id)
-    if cached is not None:
+    if (
+        isinstance(cached, dict)
+        and cached.get("id") is not None
+        and str(cached.get("id")) == str(album_id)
+    ):
         return cached
     album = qobuz_get("album/get", {"album_id": album_id, "extra": "track_ids"}, token)
     album = _normalize_album_fields(album)
     if not isinstance(album, dict):
         # A malformed/error 200 body (list/str/None) would crash on `.get` below
-        # and escape every caller that only catches QobuzError — raise one here.
+        # and escape every caller that only catches QobuzError - raise one here.
         raise QobuzError(f"album/get returned a non-dict response for {album_id!r}")
+    returned_id = album.get("id")
+    if returned_id is None or str(returned_id) != str(album_id):
+        raise QobuzError(
+            "album/get returned album id "
+            f"{returned_id!r} for requested album {album_id!r}"
+        )
     # Don't cache a track-less response.
     if (album.get("tracks") or {}).get("items"):
         album_cache.put(album_id, album)
@@ -145,8 +155,8 @@ def get_album(album_id, token):
 def get_track(track_id, token):
     """Fetch one Qobuz track by id (for a pasted track URL in Tracks mode).
 
-    Returns the track dict — which carries its `album` sub-object, so the search
-    results renderer has everything it needs — or None when the id doesn't
+    Returns the track dict - which carries its `album` sub-object, so the search
+    results renderer has everything it needs - or None when the id doesn't
     resolve to a real track."""
     t = qobuz_get("track/get", {"track_id": track_id}, token)
     return t if isinstance(t, dict) and t.get("id") else None
@@ -170,7 +180,7 @@ def search_tracks(query, token, limit=10):
     return items
 
 
-# ── ISRC lookup — STRICT equality (replacing the wrong recording is silent data loss) ────
+# ── ISRC lookup - STRICT equality (replacing the wrong recording is silent data loss) ────
 def find_qobuz_track_by_isrc(isrc, token):
     """Look up a Qobuz track by exact ISRC. Returns the track dict or None. Qobuz
     indexes ISRCs in track/search, but a text query for an ISRC string can
@@ -198,7 +208,7 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     """Return (items, qobuz_total) for an artist's full discography.
     Items are search-shaped (no tracks); call get_album() for those.
 
-    fresh=True skips the catalog cache read and fetches from Qobuz — the
+    fresh=True skips the catalog cache read and fetches from Qobuz - the
     new-release check needs current data, and a complete fetch refreshes the
     cache as a side effect so later gap scans stay fast. A short or partial
     result (fewer than Qobuz's own total) is used for this run but NOT cached,
@@ -211,6 +221,7 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
         if cached is not None:
             return cached.get("items") or [], cached.get("total")
     items = []
+    seen_album_ids = set()
     offset = 0
     qobuz_total = None
     page_size = config.ARTIST_CATALOG_PAGE
@@ -241,7 +252,13 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
             break
         for a in block:
             _normalize_album_fields(a)
-        items.extend(block)
+            album_id = a.get("id")
+            album_key = str(album_id) if album_id is not None else None
+            if album_key is not None and album_key in seen_album_ids:
+                continue
+            if album_key is not None:
+                seen_album_ids.add(album_key)
+            items.append(a)
         offset += raw_len
         # Short page = end of data on Qobuz's side; stop early. Measured by the
         # raw page length so malformed entries don't truncate the walk.

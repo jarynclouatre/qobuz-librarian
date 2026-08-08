@@ -21,7 +21,7 @@ SETTINGS_FILE = cfg.DATA_DIR / ".qobuz_settings.json"
 _pending_apply: Optional[dict] = None
 _pending_lock = threading.Lock()
 
-# (key, label, help) — display order on the Settings page.
+# (key, label, help) - display order on the Settings page.
 BEHAVIOR_FIELDS = [
     ("PREFER_HIRES", "Prefer hi-res editions",
      "When several editions are available, choose the highest quality allowed "
@@ -178,8 +178,8 @@ def _normalize_list_choices(items, choices):
 
 def _available_beets_plugins():
     """Plugin names beets can actually import on this server (submodules of the
-    beetsplug namespace). Returns None when the set can't be determined — beets
-    isn't importable from here, or enumeration failed — so the caller validates
+    beetsplug namespace). Returns None when the set can't be determined - beets
+    isn't importable from here, or enumeration failed - so the caller validates
     nothing rather than dropping every plugin the user typed."""
     try:
         import pkgutil
@@ -199,7 +199,7 @@ def _validate_list(key, items):
     """Sanitise a comma-separated list setting. Returns (kept, dropped).
 
     LYRICS_PROVIDERS is matched against the providers lyric_fetch can drive;
-    BEETS_PLUGINS against the plugins beets can actually load here — a name
+    BEETS_PLUGINS against the plugins beets can actually load here - a name
     that can't load would otherwise break every import silently. Both
     normalise spelling case-insensitively, drop unknowns, and de-dupe. Fields
     with no known set (free-text lists) just de-dupe."""
@@ -234,7 +234,7 @@ def current() -> dict:
     than the still-unchanged cfg.* values. The cfg.* read happens inside
     _pending_lock so a concurrent drain_pending (which holds the lock
     across its _apply) can't slip cfg.* updates in between the cfg read
-    and the overlay read — that gap silently dropped the pending change.
+    and the overlay read - that gap silently dropped the pending change.
     """
     with _pending_lock:
         out = {k: bool(getattr(cfg, k)) for k in BEHAVIOR_KEYS}
@@ -269,7 +269,7 @@ def _apply(values: dict):
                 v = "2"
             if choices and v not in choices:
                 continue  # ignore garbage, keep current
-            # A few enums are ints on cfg (quality tier, cache seconds) — keep
+            # A few enums are ints on cfg (quality tier, cache seconds) - keep
             # the type stable so cfg.* stays int, not str, on the post-save path.
             if key in _INT_ENUM_KEYS:
                 try:
@@ -284,7 +284,7 @@ def _apply(values: dict):
 
 def _read_settings():
     """The persisted settings, or None when there are none to read. A corrupt
-    file is kept aside instead of being flattened by the next save — every
+    file is kept aside instead of being flattened by the next save - every
     behaviour setting would otherwise revert to its env default silently."""
     return state_file.load_json_object(
         SETTINGS_FILE, "the settings file", "your saved Settings")
@@ -328,7 +328,7 @@ def drain_pending():
 
     Holds _pending_lock across _apply so a concurrent save()'s `current()`
     read either sees the overlay AND blocks on the lock, or sees the
-    already-applied cfg.* values — never the gap in between, which would
+    already-applied cfg.* values - never the gap in between, which would
     silently drop the pending change.
     """
     global _pending_apply
@@ -353,9 +353,11 @@ def _atomic_write_settings(data: dict) -> bool:
 
 
 def save(values: dict):
-    """Apply settings and persist them atomically. Returns (ok, warnings). Only
+    """Apply settings and persist them atomically. Returns (ok, warnings),
+    where ok is True on success, False on persistence failure, and None when
+    the submitted settings are invalid. Only
     real changes land in the settings file: a posted value that matches what's
-    already in effect — and was never saved before — stays out, so that field
+    already in effect - and was never saved before - stays out, so that field
     keeps tracking its env var / default instead of being silently pinned
     forever by an unrelated Settings save.
     """
@@ -367,7 +369,7 @@ def save(values: dict):
 
 
 def _save_locked(values: dict):
-    # What the user currently sees (cfg overlaid with any deferred save) — the
+    # What the user currently sees (cfg overlaid with any deferred save) - the
     # baseline that decides whether a posted value is actually a change.
     baseline = current()
     clean = {}
@@ -379,14 +381,17 @@ def _save_locked(values: dict):
         if key not in values:
             continue
         # Enum/list values are validated here too (not just in _apply), so a
-        # forged POST can't persist a value the loader would reject — the
+        # forged POST can't persist a value the loader would reject - the
         # on-disk file stays consistent with cfg.
         if kind == "enum" and choices:
             v = str(values[key] or "").strip().lower()
             if key == "STREAMRIP_QUALITY" and v in ("0", "1"):
                 v = "2"  # lossy tiers the FLAC pipeline discards (see _apply)
             if v not in choices:
-                continue
+                # Reject the whole submitted change. Applying valid sibling
+                # fields while silently dropping a forged/invalid enum leaves
+                # the operator with a configuration they never submitted.
+                return None, [f"Invalid value for {key}."]
             clean[key] = v  # persist the normalised value, matching cfg
         elif kind == "list":
             raw = values[key]
@@ -406,6 +411,12 @@ def _save_locked(values: dict):
             persisted[k] = v
 
     with _pending_lock:
+        # Durable publication is the admission point for a settings change.
+        # Applying first leaves the running process (or its deferred overlay)
+        # claiming values that a restart will discard when the atomic write
+        # fails. Keep the exact previous live and pending state on failure.
+        if not _atomic_write_settings(persisted):
+            return False, warnings
         global _pending_apply
         if _any_active_job():
             # Merge onto any change still waiting, so this save can't drop an
@@ -419,4 +430,4 @@ def _save_locked(values: dict):
             _pending_apply = None
             _apply(merged)
 
-    return _atomic_write_settings(persisted), warnings
+    return True, warnings

@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-6xl{% endblock %}
-{% block footer_max %}max-w-6xl{% endblock %}
 {% block content %}
 
 {% import "_job_labels.html" as labels %}
@@ -274,7 +273,7 @@
       {% endfor %}
     </div>
 
-    <div id="search-results" class="ql-search-results" aria-live="polite" aria-busy="false" tabindex="-1">
+    <div id="search-results" class="ql-search-results" aria-busy="false" tabindex="-1">
       {{ initial_search_results | safe }}
       {% if creds_ok and creds_token_valid != False and not search_q and not initial_search_results %}
       <div class="ql-search-idle">

@@ -137,6 +137,7 @@ services:
       LYRICS_ENABLED: "${LYRICS_ENABLED:-true}"
       LYRICS_FORMAT: "${LYRICS_FORMAT:-embed}"
       LYRICS_PROVIDERS: "${LYRICS_PROVIDERS:-}"
+      LYRICS_PROVIDER_TIMEOUT: "${LYRICS_PROVIDER_TIMEOUT:-30}"
 
       # ── Behaviour (also editable on the Settings page) ────────────────────
       # Pick the hi-res master when an album has multiple versions.

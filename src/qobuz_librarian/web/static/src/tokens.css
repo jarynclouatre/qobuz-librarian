@@ -186,6 +186,15 @@
   font-size: 0.8125rem;
 }
 
+/* Phone actions share one minimum target even when their visual treatment is
+   compact. Desktop keeps the denser 40/32 px control rhythm. */
+@media (max-width: 639.98px) {
+  .ql-btn,
+  .ql-btn-sm {
+    min-height: 2.75rem;
+  }
+}
+
 .ql-input {
   width: 100%;
   min-height: 2.75rem;
@@ -309,6 +318,10 @@
 .ql-toggle:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
   outline-offset: 2px;
+}
+
+.ql-setting-row {
+  cursor: pointer;
 }
 
 .ql-mono {

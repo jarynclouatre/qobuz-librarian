@@ -230,7 +230,7 @@ def test_find_album_dir_does_not_match_a_live_release_to_the_studio_folder(tmp_p
     (tmp_path / "Bonobo" / "The North Borders (2013)").mkdir(parents=True)
     clear_scan_caches()
     live = {"id": "L", "artist": {"name": "Bonobo"},
-            "title": "The North Borders Tour. — Live.",
+            "title": "The North Borders Tour. - Live.",
             "release_date_original": "2014-01-01"}
     assert find_album_dir_filesystem(live) is None
     clear_scan_caches()
@@ -343,7 +343,7 @@ def test_publishing_a_migration_directory_never_closes_a_reused_number(
         tmp_path, monkeypatch):
     """The FileExistsError reclaim closes the reserved descriptor and then
     re-opens the published name. When that re-open fails, the outer handler
-    must not close the same raw number a second time — the kernel hands it
+    must not close the same raw number a second time - the kernel hands it
     straight back, so the retry lands on whatever was opened in between."""
     canary_path = tmp_path / "canary"
     canary_path.write_bytes(b"canary")

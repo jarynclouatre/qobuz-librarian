@@ -244,7 +244,7 @@ def _pin_library_backup_for_attention(authority, journal, item):
         return
     pinned = pin_unverified_upgrade_backup(
         backup,
-        "queue backup kept — restart recovery requires attention",
+        "queue backup kept - restart recovery requires attention",
         expected_owner=owner,
     )
     _require_authority(authority)
@@ -888,7 +888,7 @@ def _recover_active_library_backups(authority, journals):
                 _require_authority(authority)
                 pinned = pin_unverified_upgrade_backup(
                     backup,
-                    "queue backup kept — restart recovery needs exact review",
+                    "queue backup kept - restart recovery needs exact review",
                     expected_owner=owner_data,
                 )
                 _require_authority(authority)
@@ -997,8 +997,8 @@ def _discard_parked_item_staging(authority, journal, item):
             return None
         if reference.kind == _STAGING_RUN_KIND:
             # A crash leaves the run root itself behind, never parked. Park
-            # it the way a deliberate stop would — the park refuses while any
-            # writer still holds a descriptor — then discard the parked copy.
+            # it the way a deliberate stop would - the park refuses while any
+            # writer still holds a descriptor - then discard the parked copy.
             # The item stays BLOCKED throughout: that is the phase a settlement
             # runs in, and a crash mid-park leaves it in the state the next
             # recovery pass already looks for.
@@ -1099,7 +1099,7 @@ def settleable_block_kind(item) -> str | None:
     A pre-launch abort never reached Beets, so settling it re-runs the
     download; a staged leftover is the opposite, and parking the file is the
     whole of what its recovery waits on. The staged case is read off
-    ``block_reason``, not the reference list — an import that stranded a file
+    ``block_reason``, not the reference list - an import that stranded a file
     keeps its Beets carrier listed beside the staging record.
     """
     references = tuple(item.recovery_references or ())

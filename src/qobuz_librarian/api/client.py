@@ -80,7 +80,7 @@ def _remaining_budget() -> float | None:
 
 def _attempt_timeout() -> float | None:
     """Per-request timeout, shrunk to whatever the deadline still allows. None
-    means the deadline has already passed — don't even start a request. The
+    means the deadline has already passed - don't even start a request. The
     timeout is NOT floored, so a near-spent deadline yields a sub-second timeout
     (the request fails fast) rather than the old 1.0s floor overrunning it."""
     remaining = _remaining_budget()
@@ -105,7 +105,7 @@ def _retry_delay(attempt: int, suggested: float) -> float | None:
 
 
 def _retry_after(resp) -> float | None:
-    """Parse Retry-After header (seconds form only — Qobuz never sends an HTTP-date).
+    """Parse Retry-After header (seconds form only - Qobuz never sends an HTTP-date).
     Falls back to None when header is missing or malformed."""
     val = resp.headers.get("Retry-After")
     if not val:
@@ -114,7 +114,7 @@ def _retry_after(resp) -> float | None:
         v = float(val)
     except ValueError:
         return None
-    if v != v:  # NaN ('nan' parses but propagates through the clamp) — reject it
+    if v != v:  # NaN ('nan' parses but propagates through the clamp) - reject it
         return None
     return min(max(v, 0.0), 30.0)
 
@@ -144,7 +144,7 @@ def qobuz_get(endpoint, params, token):
         timeout = _attempt_timeout()
         if timeout is None:
             raise QobuzUnavailable(
-                f"the Qobuz API timed out (while calling {endpoint}) — try again later")
+                f"the Qobuz API timed out (while calling {endpoint}) - try again later")
         try:
             r = _get_session().get(url, params=params, headers=headers,
                                    timeout=timeout)
@@ -152,7 +152,7 @@ def qobuz_get(endpoint, params, token):
             wait = _retry_delay(attempt, min(2 ** (attempt - 1), 8))
             if wait is None:
                 raise QobuzUnavailable(
-                    f"{_net_reason(e)} (while calling {endpoint}) — try again later") from e
+                    f"{_net_reason(e)} (while calling {endpoint}) - try again later") from e
             vlog(f"{endpoint}: network error ({e}); retry {attempt}/{_MAX_ATTEMPTS} in {wait}s")
             _retry_sleep(wait)
             continue
@@ -167,14 +167,14 @@ def qobuz_get(endpoint, params, token):
             if wait is None:
                 raise QobuzUnavailable(
                     f"Qobuz API kept returning HTTP {r.status_code} after "
-                    f"{attempt} attempt(s) (while calling {endpoint}) — "
+                    f"{attempt} attempt(s) (while calling {endpoint}) - "
                     f"rate-limited or a temporary outage; try again later.")
             if r.status_code == 429:
                 # Surface rate-limit waits in the shared logger so the web
                 # SSE stream shows "rate-limited, waiting Ns" instead of a
                 # silent pause that looks like a hang.
                 log.info(fmt(C.YELLOW,
-                    f"  ⏳ Qobuz rate-limit — waiting {wait:.0f}s "
+                    f"  ⏳ Qobuz rate-limit - waiting {wait:.0f}s "
                     f"(retry {attempt}/{_MAX_ATTEMPTS})"))
             else:
                 vlog(f"{endpoint}: HTTP {r.status_code}; retry "
@@ -183,8 +183,8 @@ def qobuz_get(endpoint, params, token):
             continue
         if r.status_code != 200:
             # A 4xx other than the 401 handled above still means Qobuz
-            # authenticated the request before answering — "no such album", a
-            # bad query, a lapsed subscription — so the token itself is good.
+            # authenticated the request before answering - "no such album", a
+            # bad query, a lapsed subscription - so the token itself is good.
             if 400 <= r.status_code < 500:
                 notify_auth_state(True)
             raise QobuzError(f"HTTP {r.status_code} from {endpoint}: {r.text[:200]}")
@@ -194,6 +194,6 @@ def qobuz_get(endpoint, params, token):
             return r.json()
         except ValueError as e:
             # requests raises its own JSONDecodeError (a ValueError subclass,
-            # and simplejson's variant when that's installed) — catch the base
+            # and simplejson's variant when that's installed) - catch the base
             # so a junk body surfaces as a QobuzError, not an opaque traceback.
             raise QobuzError(f"bad JSON from {endpoint}: {e}") from e

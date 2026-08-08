@@ -8,7 +8,7 @@
 #
 # This file mirrors streamrip's full upstream template, which includes
 # sections for [tidal]/[deezer]/[soundcloud]/[youtube]. qobuz-librarian
-# only uses [qobuz] — the other sections are kept untouched so streamrip
+# only uses [qobuz] - the other sections are kept untouched so streamrip
 # treats this as a complete config; ignore them when editing.
 
 [downloads]
@@ -184,8 +184,8 @@ exclude = []
 #
 # Shipped `true` because gap-fill walks issue one play.qobuz.com/track URL
 # per missing track and stage them together. Without per-track folders
-# every file lands flat in /staging/, and beets — running one combined
-# import with autotag off — routes them by stage-directory, not tag, and
+# every file lands flat in /staging/, and beets - running one combined
+# import with autotag off - routes them by stage-directory, not tag, and
 # multiple albums collapse into the same on-disk folder.
 add_singles_to_folder = true
 # Available keys: "albumartist", "title", "year", "bit_depth", "sampling_rate",

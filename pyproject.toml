@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qobuz-librarian"
-version = "0.12.2"
+version = "0.13.0"
 description = "Qobuz Librarian: album/artist downloader and music-library maintenance tool"
 readme = "README.md"
 license = { file = "LICENSE" }

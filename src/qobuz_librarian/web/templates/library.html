@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Library — Qobuz Librarian{% endblock %}
+{% block title %}Library - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
 
@@ -22,11 +22,11 @@
   {% elif library_job %}
   {# Single surface: the scan's live progress and the Missing Albums / Gap
      Fill review render right here, same as /repair. A dead token banners the
-     reconnect ABOVE the review instead of replacing it — ticking and
+     reconnect ABOVE the review instead of replacing it - ticking and
      dismissing are local, only downloading needs Qobuz. #}
   {% if not qobuz_ready %}
   <section class="ql-work-card">
-    {% with connect_embedded=True, connect_note="Your parked review is below — you can keep ticking and dismissing; downloading waits for the connection." %}
+    {% with connect_embedded=True, connect_note="Your parked review is below - you can keep ticking and dismissing; downloading waits for the connection." %}
       {% include "_connect_cta.html" %}
     {% endwith %}
   </section>
@@ -78,7 +78,7 @@
   </div>
   {% endif %}
 
-  {# Tabs are the Library IA — they stay visible with zero counts once the
+  {# Tabs are the Library IA - they stay visible with zero counts once the
      review is worked through, so the page is never a bare "Baseline ready". #}
   <nav class="ql-page-tabs ql-review-tabs ql-review-tabs-static" aria-label="Result type">
     <button type="button" class="is-active" disabled>Missing Albums <span class="ql-tab-count">0</span></button>

@@ -129,7 +129,7 @@ def test_walk_flush_runs_items_the_durable_lane_cannot_plan(lease, stub_download
 def test_library_changing_item_without_a_plan_uses_the_legacy_lane(
         lease, stub_download, monkeypatch):
     """Replacing siblings and downsampled upgrades both fall outside the
-    exact-recovery lane. They still have to run — the backup-and-restore path
+    exact-recovery lane. They still have to run - the backup-and-restore path
     is what covered them before that lane existed."""
     album = _album()
     tracks = album["tracks"]["items"]
@@ -194,7 +194,7 @@ def test_unstarted_durable_claim_returns_to_pending_when_it_cannot_replan(
 def test_durable_attention_stop_leaves_the_flush_returning(lease, stub_download):
     """A durable item that stops for attention stays blocked in the journal on
     purpose. Rewriting that journal as pending is exactly what must not happen,
-    so the batch-end persist has to stand down — it used to raise
+    so the batch-end persist has to stand down - it used to raise
     QueueJournalBlocked straight through the walk at the moment the app had
     correctly parked an album."""
     from qobuz_librarian.queue.durable_runner import (

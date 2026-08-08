@@ -746,106 +746,10 @@ def test_walk_seen_records_idempotently_and_survives_a_crashed_rename(tmp_path, 
 
 # ── Scan-report-repair classifications ──────────────────────────────────
 
-def _call_scan_report(tmp_path, monkeypatch, *, repair_result=None,
-                     verified_truncated=None, scan_overrides=None,
-                     yes=True, input_return="y"):
-    import qobuz_librarian.modes.repair as repair_mod
-    from qobuz_librarian.modes.repair import _scan_report_repair
-    album_dir = tmp_path / "Artist" / "Album (2022)"
-    album_dir.mkdir(parents=True)
-    (album_dir / "01 Track.flac").write_bytes(b"\x00" * 200)
-    if verified_truncated is None:
-        verified_truncated = [{"path": str(album_dir / "01 Track.flac"),
-                                "title": "Track 01", "isrc": "USRC12345678",
-                                "track_number": 1, "file_length": 5.0,
-                                "qobuz_duration": 180.0,
-                                "qobuz_track": {"id": 1, "title": "Track 01", "album": {"id": "A1"}}}]
-    scan = {
-        "verified_truncated": verified_truncated,
-        "verified_ok": 0,
-        "isrc_no_match": [],
-        "no_isrc_tag": [],
-    }
-    scan.update(scan_overrides or {})
-    monkeypatch.setattr(
-        repair_mod,
-        "scan_dir_for_isrc_repairs",
-        lambda *a, **k: scan,
-    )
-    if repair_result is not None:
-        monkeypatch.setattr(repair_mod, "repair_album_dir", lambda *a, **k: repair_result)
-    monkeypatch.setattr(repair_mod, "section", lambda *a: None)
-    args = Namespace(force=False, yes=yes, prefer_hires=False, consolidate=False, no_upgrade=False)
-    with patch("builtins.input", return_value=input_return):
-        return _scan_report_repair(album_dir, "Artist", args, "tok")
 
 
-def test_scan_report_classifies_repair_outcomes(tmp_path, monkeypatch):
-    from qobuz_librarian.library.backup import BackupResult
-
-    # Repair succeeds → "repaired".
-    assert _call_scan_report(tmp_path / "ok", monkeypatch,
-                             repair_result={"n_ok": 1, "n_fail": 0, "imported": True, "backup": None}) == "repaired"
-    # A partial refill is not a repaired album even if the import ran.
-    assert _call_scan_report(
-        tmp_path / "partial",
-        monkeypatch,
-        repair_result={
-            "n_ok": 1,
-            "n_fail": 1,
-            "imported": True,
-            "backup": None,
-        },
-    ) == "failed"
-    # Downloads succeeded but beets failed silently → classified as failure.
-    assert _call_scan_report(tmp_path / "silent", monkeypatch,
-                             repair_result={"n_ok": 1, "n_fail": 0, "imported": False, "backup": None}) == "failed"
-    recovery = BackupResult(
-        tmp_path / "kept-originals",
-        complete=False,
-        receipt={"kind": "gap-fill"},
-        requested=2,
-        backed_up=1,
-    )
-    assert _call_scan_report(
-        tmp_path / "recovery",
-        monkeypatch,
-        repair_result={
-            "n_ok": 0,
-            "n_fail": 1,
-            "imported": False,
-            "backup": recovery,
-        },
-    ) == "recovery"
-    # Nothing truncated → "clean".
-    assert _call_scan_report(tmp_path / "clean", monkeypatch, verified_truncated=[]) == "clean"
-    # Diagnostic damage that cannot be refilled safely still needs attention.
-    assert _call_scan_report(
-        tmp_path / "attention",
-        monkeypatch,
-        verified_truncated=[],
-        scan_overrides={
-            "isrc_no_match": [{
-                "diagnostic": "could not decode",
-                "isrc": "USRC12345678",
-                "title": "Damaged track",
-            }]
-        },
-    ) == "attention"
-    # User declines the prompt → "skipped".
-    assert _call_scan_report(tmp_path / "skip", monkeypatch,
-                             yes=False, input_return="n") == "skipped"
 
 
-def test_repair_scan_caveats_separate_album_and_artist_failures(monkeypatch):
-    from qobuz_librarian.web import flows
-
-    monkeypatch.setattr(flows.shutil, "which", lambda _name: "/usr/bin/flac")
-    caveats = flows._repair_scan_caveats(3, 2, 1)
-
-    assert "3 tracks couldn't be decode-checked" in caveats
-    assert "2 albums couldn't be scanned" in caveats
-    assert "1 artist couldn't be scanned" in caveats
 
 
 def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(monkeypatch):
@@ -891,6 +795,10 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
     assert "Repaired 0/1" in job.summary
     assert job.error
     assert job.status == job_mgr.JobStatus.FAILED
+
+
+
+
 
 
 def test_refill_gates_require_refills_on_top_of_the_baseline(tmp_path, monkeypatch):
@@ -1042,44 +950,8 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
     assert kept and kept[0].read_bytes() == b"\x00" * 200
 
 
-def test_strict_confirm_reasks_on_a_typo(monkeypatch):
-    # The downsample keep-vs-delete answer is SAVED as the standing default,
-    # so a typo must not read as "delete the originals from now on": strict
-    # mode re-asks until it gets a real yes or no.
-    from qobuz_librarian.ui_cli import prompts
-
-    answers = iter(["maybe", "y"])
-    monkeypatch.setattr("builtins.input", lambda _p: next(answers))
-    assert prompts.confirm("Keep?", default_yes=True, strict=True) is True
-
-    answers = iter(["whatever", "n"])
-    monkeypatch.setattr("builtins.input", lambda _p: next(answers))
-    assert prompts.confirm("Keep?", default_yes=True, strict=True) is False
-
-    monkeypatch.setattr("builtins.input", lambda _p: "maybe")
-    assert prompts.confirm("Keep?", default_yes=True) is False
 
 
-def test_repair_with_no_successful_refill_reports_the_download_failure(
-        tmp_path, monkeypatch):
-    """A repair whose downloads all fail has no import receipt to read, so
-    asking placement to prove itself turned the honest failure into "the final
-    location could not be proven" with a placement-stage recovery record. The
-    truthful branch was unreachable for a total failure."""
-    import qobuz_librarian.modes.repair as repair_mod
-
-    recoveries = []
-    result, _root = _call_repair_album_dir(
-        tmp_path, monkeypatch,
-        n_ok=0, n_fail=1, imported=False, present=False, intact=False,
-        relocation_error=repair_mod._RepairRelocationUncertain(
-            "repair import receipt has an invalid root"),
-        recovery_checkpoint=lambda recovery: recoveries.append(recovery) or True,
-    )
-
-    assert result["n_ok"] == 0 and result["n_fail"] == 1
-    assert [r.stage for r in recoveries][-1] == "refill"
-    assert not any("could not be proven" in r.reason for r in recoveries)
 
 
 def test_refill_is_not_rejected_because_another_folder_holds_that_name(

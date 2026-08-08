@@ -1,4 +1,5 @@
 import os
+import signal
 
 import pytest
 
@@ -43,6 +44,43 @@ def test_second_acquire_while_held_raises_lockbusy_with_holder_pid(tmp_path, mon
     again = run_lock.acquire()
     assert again is not None
     again.close()
+
+
+def test_sigterm_releases_the_process_lock_for_the_next_writer(
+        tmp_path, monkeypatch):
+    lock_file = tmp_path / "run.lock"
+    monkeypatch.setattr("qobuz_librarian.config.LOCK_FILE", lock_file)
+
+    from qobuz_librarian import run_lock
+
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        lease = run_lock.acquire()
+        if lease is None:
+            os._exit(90)
+        os.write(write_fd, b"ready")
+        os.close(write_fd)
+        signal.pause()
+        os._exit(91)
+
+    os.close(write_fd)
+    try:
+        assert os.read(read_fd, 5) == b"ready"
+        os.kill(child, signal.SIGTERM)
+        _pid, status = os.waitpid(child, 0)
+        child = None
+        assert os.waitstatus_to_exitcode(status) == -signal.SIGTERM
+
+        lease = run_lock.acquire()
+        assert lease is not None
+        lease.close()
+    finally:
+        os.close(read_fd)
+        if child is not None:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
 
 
 def test_acquire_refuses_a_symlink_without_touching_its_target(
@@ -111,6 +149,8 @@ def test_cli_refuses_to_run_when_the_lock_is_unavailable(monkeypatch):
     assert stopped.value.code == 1
 
 
+
+
 def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
         monkeypatch, capsys, tmp_path):
     from qobuz_librarian import cli, run_lock
@@ -157,7 +197,7 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
 
     message = capsys.readouterr().err
     # The prose reflows to the terminal, so a phrase can land across a line
-    # break — compare prose with the wrapping folded back out. The paths print
+    # break - compare prose with the wrapping folded back out. The paths print
     # raw and must survive verbatim, doubled spaces and all.
     flat = " ".join(message.split())
     assert stopped.value.code == 1
@@ -174,8 +214,8 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
 
 def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
         monkeypatch, capsys):
-    """Retrying a blocked item that already imported gets refused — the item is
-    no longer a pre-launch abort — but the refusal still parks its stranded
+    """Retrying a blocked item that already imported gets refused - the item is
+    no longer a pre-launch abort - but the refusal still parks its stranded
     staging, which clears the recovery. Dying on the stale verdict made the run
     abort for nothing.
     """
@@ -226,7 +266,7 @@ def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
         "_cli_blocked_settlement_binding",
         lambda result: (
             item,
-            "Autechre — Anvil Vapre",
+            "Autechre - Anvil Vapre",
             startup_recovery.SETTLEABLE_PRELAUNCH,
         ),
     )
@@ -292,7 +332,7 @@ def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
         "_cli_blocked_settlement_binding",
         lambda result: (
             item,
-            "Agalloch — The White EP",
+            "Agalloch - The White EP",
             startup_recovery.SETTLEABLE_STAGED_LEFTOVER,
         ),
     )
@@ -355,7 +395,7 @@ def test_clearing_a_leftover_is_not_reported_as_a_failure(monkeypatch, capsys):
         )
 
     def _recover(_authority):
-        # Still attention_required either way — but after the settlement this
+        # Still attention_required either way - but after the settlement this
         # item is no longer the blocked one.
         return StartupRecoveryResult(
             StartupRecoveryStatus.ATTENTION_REQUIRED,
@@ -380,7 +420,7 @@ def test_clearing_a_leftover_is_not_reported_as_a_failure(monkeypatch, capsys):
         "_cli_blocked_settlement_binding",
         lambda result: (
             item,
-            "Agalloch — The Serpent & The Sphere",
+            "Agalloch - The Serpent & The Sphere",
             startup_recovery.SETTLEABLE_STAGED_LEFTOVER,
         ),
     )

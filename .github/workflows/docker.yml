@@ -4,7 +4,7 @@ on:
   release:
     types: [published]
 
-# Reads the repo, writes to Docker Hub via secrets — no GitHub Packages
+# Reads the repo, writes to Docker Hub via secrets - no GitHub Packages
 # writes here, so contents: read is enough.
 permissions:
   contents: read
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   # Release gate. docker.yml is a separate workflow from test.yml, so a
-  # cross-workflow `needs:` isn't possible — the checks live here and
+  # cross-workflow `needs:` isn't possible - the checks live here and
   # build-and-push depends on them. This closes the gap where a published
   # release built and pushed an image with no test, lint, or smoke gate, so a
   # broken build/route/missing-tool could ship straight to users.
@@ -43,17 +43,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
+      - name: Check release metadata and runtime pins
+        run: |
+          python3 scripts/check_release_version.py "${{ github.event.release.tag_name }}"
+          python3 scripts/check_image_lock.py
+
       - name: Tests
         run: python -m pytest -q
 
       - name: Lint
         run: ruff check src tests
 
+      - name: Test the exact runtime dependency set
+        run: docker build --target test .
+
       - name: Image smoke test (builds the image, boots it, checks routes + bundled tools)
         run: bash scripts/smoke_test.sh
 
       # The publish below ships linux/arm64 too, but nothing else in CI ever
-      # compiles the dependency set on arm — a pin with no arm wheel would
+      # compiles the dependency set on arm - a pin with no arm wheel would
       # surface for the first time in the middle of the release build. Build
       # (not push) the arm64 image here so it fails the gate instead.
       - name: Set up QEMU
@@ -86,7 +94,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Decide whether this release should move :latest. metadata-action's
-      # latest=auto only checks the tag has no prerelease suffix — it does NOT
+      # latest=auto only checks the tag has no prerelease suffix - it does NOT
       # compare against other tags, so backfilling an old release (publishing
       # v0.5.1 after v0.7.0) would still clobber :latest with old code. Tag
       # :latest only when this release is the highest stable semver in the repo.

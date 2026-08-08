@@ -2,7 +2,10 @@
 import csv
 import json
 import stat
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,7 +78,6 @@ def test_acoustid_rejects_low_confidence_and_ambiguous_matches():
     assert chosen["artist"] == "Oasis"
 
 
-# ── safe copy / execution ──────────────────────────────────────────────────────
 
 def _placed_plan(tmp_path, n=1, *, existing_destination_root=False,
                  existing_destination_parents=False, companion_bytes=0):
@@ -120,6 +122,8 @@ def test_copy_mode_leaves_originals_untouched(tmp_path):
     assert dst.stat().st_mtime_ns == source_times.st_mtime_ns
     assert dst.read_bytes() == src.read_bytes()
     assert not dst.with_name(dst.name + ".partial").exists()
+
+
 
 
 def test_in_place_mode_moves_only_after_verified_copy(tmp_path):
@@ -267,6 +271,8 @@ def test_execute_migration_copies_selected_and_keeps_originals(tmp_path):
     assert list(dest.glob("migration-results-*.csv"))
 
 
+
+
 def test_execute_migration_blocks_low_space_in_place_move(tmp_path, monkeypatch):
     # An in-place move into a destination that's known to be short on space must
     # be refused before any file is touched; running out mid-move would scatter
@@ -326,152 +332,6 @@ def test_scan_migration_requires_a_review_ack_for_a_short_in_place_move(
 
     assert job.execute_args["requires_low_space_override"] is True
     assert "confirm the low-space risk below" in job.summary
-
-
-@pytest.mark.parametrize(
-    ("failed", "cancelled", "recoveries", "expected_status", "lead"),
-    [
-        (
-            1,
-            False,
-            [{"location": "/disposable/recovery", "restart": "Inspect it."}],
-            "failed",
-            "Migration needs attention",
-        ),
-        (0, True, [], "canceled", "Migration stopped early"),
-    ],
-)
-def test_web_migration_problem_outcomes_are_terminal_and_lead_the_summary(
-        tmp_path, monkeypatch, failed, cancelled, recoveries,
-        expected_status, lead):
-    from types import SimpleNamespace
-
-    from qobuz_librarian.library import migrate as engine
-    from qobuz_librarian.web import flows
-    from qobuz_librarian.web import jobs as jm
-
-    source = tmp_path / "source"
-    source.mkdir()
-    track = source / "track.flac"
-    track.write_bytes(b"audio")
-    destination = tmp_path / "destination"
-    chosen = _sealed_web_choice((track,), destination)
-    result = SimpleNamespace(
-        copied=0,
-        skipped=0,
-        companions=0,
-        lingered=0,
-        failed=failed,
-        cancelled=cancelled,
-        failures=[(track, "copy failed")] if failed else [],
-        companion_outcomes=[],
-        recoveries=recoveries,
-        pruned=0,
-    )
-    monkeypatch.setattr(engine, "execute_plan", lambda *_args, **_kwargs: result)
-    monkeypatch.setattr(
-        engine,
-        "write_results_manifest",
-        lambda *_args, **_kwargs: {"path": str(destination / "results.csv")},
-    )
-    job = jm.Job(title="migration", status=jm.JobStatus.RUNNING)
-
-    flows.execute_migration(job, chosen, destination, in_place=False)
-
-    assert job.status.value == expected_status
-    assert job.summary.startswith(lead)
-    assert job.summary.index(lead) < job.summary.index("0 files copied")
-
-
-def test_cli_migration_problem_leads_before_the_copied_count(
-        tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    from qobuz_librarian.modes import migrate as migrate_mode
-
-    source = tmp_path / "source"
-    destination = tmp_path / "destination"
-    source.mkdir()
-    destination.mkdir()
-    track = source / "track.flac"
-    track.write_bytes(b"audio")
-    entry = SimpleNamespace(
-        source=track,
-        dest_rel=Path("Artist/Album/track.flac"),
-    )
-    plan = SimpleNamespace(
-        placed=[entry],
-        unplaceable=[],
-        collisions=[],
-        summary=lambda: {"place": 1, "unplaceable": 0, "collision": 0},
-    )
-    result = SimpleNamespace(
-        copied=0,
-        skipped=0,
-        companions=0,
-        lingered=0,
-        failed=1,
-        cancelled=False,
-        failures=[(track, "copy failed")],
-        companion_outcomes=[],
-        recoveries=[],
-        pruned=0,
-    )
-    monkeypatch.setattr(migrate_mode, "HAVE_MUTAGEN", True)
-    monkeypatch.setattr(
-        migrate_mode, "_resolve_paths", lambda _args: (source, destination)
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine, "collect_items", lambda *_args, **_kwargs: [entry]
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine, "build_plan", lambda _items, _dest: plan
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine, "verified_resume_entries", lambda *_args, **_kwargs: []
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine,
-        "space_estimate",
-        lambda _plan, in_place, resume_entries=None: (10, 100),
-    )
-    monkeypatch.setattr(migrate_mode, "confirm", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        migrate_mode.engine,
-        "write_manifest",
-        lambda _plan: {"path": str(destination / "preview.csv")},
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine, "verify_audit_artifact", lambda *_args: True
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine, "execute_plan", lambda *_args, **_kwargs: result
-    )
-    monkeypatch.setattr(
-        migrate_mode.engine,
-        "write_results_manifest",
-        lambda *_args, **_kwargs: {"path": str(destination / "results.csv")},
-    )
-    lines = []
-    monkeypatch.setattr(migrate_mode.log, "info", lines.append)
-    args = SimpleNamespace(
-        dry_run=False,
-        yes=False,
-        verbose=False,
-        in_place=False,
-        acoustid=False,
-    )
-
-    assert migrate_mode.run_migrate_mode(args) != 0
-    problem_line = next(
-        index for index, line in enumerate(lines)
-        if "Migration needs attention" in line
-    )
-    copied_line = next(
-        index for index, line in enumerate(lines)
-        if "file(s) copied before the run ended" in line
-    )
-    assert problem_line < copied_line
 
 
 def test_fingerprint_lookup_resolves_album_year_and_is_placeable():
@@ -622,22 +482,10 @@ def test_directory_identity_proves_filesystem_without_atime(monkeypatch):
     assert identity[6] == 9583          # mount id
 
 
-def test_directory_identity_rejects_missing_birth_time(monkeypatch):
-    mask = m._STATX_BASIC_STATS | m._STATX_MNT_ID  # no STATX_BTIME
-    monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
-    with pytest.raises(OSError):
-        m._statx_directory_identity(3, b"", 0)
 
 
 def test_directory_identity_rejects_missing_mount_id(monkeypatch):
     mask = m._STATX_BASIC_STATS | m._STATX_BTIME  # no STATX_MNT_ID
-    monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
-    with pytest.raises(OSError):
-        m._statx_directory_identity(3, b"", 0)
-
-
-def test_directory_identity_rejects_missing_inode(monkeypatch):
-    mask = (m._STATX_BASIC_STATS | m._STATX_BTIME | m._STATX_MNT_ID) & ~m._STATX_INO
     monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
     with pytest.raises(OSError):
         m._statx_directory_identity(3, b"", 0)

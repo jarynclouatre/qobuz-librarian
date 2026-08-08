@@ -1,11 +1,11 @@
-"""Tests for qobuz_librarian.api.client — status handling, retry/backoff, UA."""
+"""Tests for qobuz_librarian.api.client - status handling, retry/backoff, UA."""
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
-from qobuz_librarian.api.client import _retry_after, qobuz_get
+from qobuz_librarian.api.client import _retry_after, qobuz_get, request_deadline
 
 
 def _response(status_code=200, json_data=None, text=""):
@@ -85,3 +85,13 @@ def test_retry_after_header_parsing():
     assert _retry_after(resp("-3")) == 0.0        # clamped to the floor
     assert _retry_after(resp("999")) == 30.0      # clamped to the 30 s ceiling
     assert _retry_after(resp("12")) == 12.0
+
+
+
+
+def test_expired_request_deadline_starts_no_provider_request():
+    with patch("qobuz_librarian.api.client._get_session") as session:
+        with request_deadline(0):
+            with pytest.raises(QobuzUnavailable, match="timed out"):
+                qobuz_get("album/get", {"album_id": "1"}, "tok")
+        session.assert_not_called()

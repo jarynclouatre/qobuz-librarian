@@ -157,10 +157,17 @@ def main(args=None):
             if plugin.__class__.__module__ == _PLUGIN_MODULE
         ]
         try:
-            source = Path(sys.modules[_PLUGIN_MODULE].__file__)
+            expected_module = sys.modules[_PLUGIN_MODULE]
+            source = Path(expected_module.__file__)
             correct_source = os.path.samefile(source, expected_source)
+            correct_class = (
+                len(matches) == 1
+                and matches[0].__class__
+                is getattr(expected_module, "QobuzOwnershipPlugin", None)
+            )
         except (AttributeError, KeyError, OSError, TypeError, ValueError):
             correct_source = False
+            correct_class = False
         arm = getattr(matches[0], "arm_managed_import", None) \
             if len(matches) == 1 else None
         if (
@@ -169,6 +176,7 @@ def main(args=None):
             or not loaded
             or loaded[-1] is not matches[0]
             or not correct_source
+            or not correct_class
             or not callable(arm)
             or arm(nonce) is not True
         ):

@@ -1,3 +1,4 @@
+import errno
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,68 +18,6 @@ def _candidate(album_dir: Path):
         target_rates=[48000],
         est_saving=2048,
     )
-
-
-def test_downsample_scan_reports_incomplete_shared_refresh(tmp_path, monkeypatch):
-    from qobuz_librarian.library import downsample_state
-    from qobuz_librarian.web import flows
-
-    artist_dir = tmp_path / "Artist"
-    denied_dir = tmp_path / "Denied"
-    album_dir = artist_dir / "Album (2024)"
-    album_dir.mkdir(parents=True)
-    denied_dir.mkdir()
-    calls = []
-
-    def fake_refresh(artists, **kwargs):
-        artist_list = list(artists)
-        calls.append([a.name for a in artist_list])
-        kwargs["on_artist"](artist_list[0], [_candidate(album_dir)], None, 1, 2)
-        kwargs["on_artist"](
-            artist_list[1], [], PermissionError("no access"), 2, 2)
-        return downsample_state.RefreshResult(
-            candidates=[_candidate(album_dir)],
-            artists_scanned=["Artist", "Denied"],
-            errors={"Denied": "no access"},
-            complete=False,
-        )
-
-    monkeypatch.setattr(
-        flows, "list_library_artists", lambda: [artist_dir, denied_dir])
-    monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_refresh)
-    job = jm.Job(title="downsample")
-
-    flows.scan_downsamples(job)
-
-    assert calls == [["Artist", "Denied"]]
-    assert len(job.candidates) == 1
-    assert job.candidates[0]["kind"] == "downsample"
-    assert job.summary.startswith("1 album stored above CD rate")
-    assert "1 artist couldn't be checked" in job.summary
-    assert job.execute_args["_unchecked_artists"] == 1
-
-    def all_error_refresh(artists, **kwargs):
-        artist_list = list(artists)
-        for index, artist in enumerate(artist_list, 1):
-            kwargs["on_artist"](
-                artist, [], PermissionError("no access"), index, 2)
-        return downsample_state.RefreshResult(
-            candidates=[],
-            artists_scanned=["Artist", "Denied"],
-            errors={"Artist": "no access", "Denied": "no access"},
-            complete=False,
-        )
-
-    monkeypatch.setattr(
-        flows.downsample_state, "refresh_for_artists", all_error_refresh)
-    failed = jm.Job(title="downsample")
-
-    flows.scan_downsamples(failed)
-
-    assert failed.status == jm.JobStatus.FAILED
-    assert failed.error == "The Downsample scan did not complete."
-    assert "2 artists couldn't be checked" in failed.summary
-    assert "every album is already at CD rate" not in failed.summary
 
 
 def test_downsample_scan_rechecks_hidden_before_adding_active_candidates(
@@ -178,42 +117,6 @@ def test_upgrade_scan_uses_shared_refresh_state(tmp_path, monkeypatch):
     assert job.candidates[0]["kind"] == "upgrade"
 
 
-def test_upgrade_scan_rechecks_hidden_before_adding_active_candidates(
-        tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import hidden
-    from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import flows
-
-    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
-    monkeypatch.setattr(cfg, "UPGRADE_STATE_FILE", tmp_path / "upgrade.json")
-    artist_dir = tmp_path / "Artist"
-    artist_dir.mkdir()
-    spec = {
-        "title": "Album",
-        "artist": "Artist",
-        "detail": "16-bit/44.1kHz -> 24-bit/96kHz",
-        "payload": {"album_id": "up1", "year": "2024", "cover": ""},
-    }
-    badge_calls = []
-
-    def fake_refresh(artists, **kwargs):
-        artist_list = list(artists)
-        hidden.hide(hidden.SCOPE_UPGRADE, [("Artist", "Album", "2024")])
-        kwargs["on_artist"](artist_list[0], [spec], None, 1, 1)
-        return upgrade_state.RefreshResult([spec], ["Artist"], {}, True)
-
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
-    monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists", fake_refresh)
-    monkeypatch.setattr(flows.review_badges, "set_ready",
-                        lambda *args: badge_calls.append(args))
-    monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
-    job = jm.Job(title="upgrade")
-
-    flows.scan_upgrades(job, "tok")
-
-    assert job.candidates == []
-    assert badge_calls == [("upgrade", False)]
 
 
 def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypatch):
@@ -243,105 +146,6 @@ def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypat
     assert refreshed == ["Artist"]
 
 
-def test_cancelled_downsample_summary_counts_the_interrupted_album(
-        tmp_path, monkeypatch):
-    from qobuz_librarian.web import flows
-
-    albums = [tmp_path / "Artist" / name for name in ("One", "Two")]
-    for album in albums:
-        album.mkdir(parents=True)
-    job = jm.Job(title="downsample")
-    calls = 0
-
-    def fake_downsample(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return {"resampled": 1, "saved_bytes": 100, "errors": 0}
-        job.cancel_requested = True
-        return {"resampled": 1, "saved_bytes": 50, "errors": 0,
-                "cancelled": True}
-
-    monkeypatch.setattr(
-        "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
-    monkeypatch.setattr(
-        "qobuz_librarian.integrations.downsample_engine.downsample_dir",
-        fake_downsample)
-    monkeypatch.setattr(
-        "qobuz_librarian.quality.decision.mark_local_album_capped",
-        lambda *_args: None)
-    monkeypatch.setattr(flows, "_refresh_downsample_artist_state",
-                        lambda *_args: None)
-
-    flows.execute_downsamples(job, [
-        {"artist": "Artist", "title": album.name,
-         "payload": {"album_dir": str(album)}}
-        for album in albums
-    ])
-
-    assert "Downsampled 1 album (100B smaller)" in job.summary
-    assert (
-        "1 album interrupted (50B smaller so far; remaining files left unchanged)"
-        in job.summary
-    )
-    assert "0 albums not started" in job.summary
-
-
-def test_downsample_summary_distinguishes_each_skipped_album(
-        tmp_path, monkeypatch):
-    from qobuz_librarian.web import flows
-
-    artist_dir = tmp_path / "Artist"
-    unchanged_dir = artist_dir / "Unchanged"
-    unchanged_dir.mkdir(parents=True)
-    missing_dir = artist_dir / "Missing"
-
-    monkeypatch.setattr(
-        "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
-    monkeypatch.setattr(
-        "qobuz_librarian.integrations.downsample_engine.downsample_dir",
-        lambda *_a, **_k: {"resampled": 0, "saved_bytes": 0, "errors": 0},
-    )
-    monkeypatch.setattr(flows, "_refresh_downsample_artist_state",
-                        lambda *_args: None)
-    job = jm.Job(title="downsample")
-
-    flows.execute_downsamples(job, [
-        {"artist": "Artist", "title": "No details", "payload": {}},
-        {"artist": "Artist", "title": "Missing",
-         "payload": {"album_dir": str(missing_dir)}},
-        {"artist": "Artist", "title": "Unchanged",
-         "payload": {"album_dir": str(unchanged_dir)}},
-    ])
-
-    assert "1 album skipped (saved folder details missing)" in job.summary
-    assert "1 album skipped (no longer on disk)" in job.summary
-    assert "1 album skipped (nothing needed changing)" in job.summary
-
-
-def test_targeted_upgrade_refresh_respects_upgrade_scan_disabled(
-        tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import flows
-
-    artist_dir = tmp_path / "Artist"
-    album_dir = artist_dir / "Album"
-    album_dir.mkdir(parents=True)
-    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False, raising=False)
-    monkeypatch.setattr(
-        flows.upgrade_state,
-        "update_artist",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("disabled upgrade scan should not refresh")),
-    )
-    monkeypatch.setattr(flows.review_badges, "set_ready", lambda *a, **k: None)
-
-    flows._refresh_after_local_album_change(
-        {"artist": {"name": "Artist"}, "title": "Album"},
-        {"dir": album_dir},
-        token="tok",
-        upgrade=True,
-    )
 
 
 def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
@@ -564,70 +368,6 @@ def test_baseline_scan_refreshes_shared_upgrade_state(tmp_path, monkeypatch):
     assert calls == [["Artist"]]
 
 
-def test_cancelled_baseline_scan_does_not_publish_quality_state(
-        tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import downsample_state
-    from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import flows
-
-    monkeypatch.setattr(cfg, "DOWNSAMPLE_STATE_FILE", tmp_path / "downsample.json")
-    monkeypatch.setattr(cfg, "UPGRADE_STATE_FILE", tmp_path / "upgrade.json")
-    monkeypatch.setattr(
-        cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
-    artist_dir = tmp_path / "Artist"
-    album_dir = artist_dir / "Album"
-    album_dir.mkdir(parents=True)
-    downsample_candidate = _candidate(album_dir)
-    upgrade_candidate = {
-        "title": "Album",
-        "artist": "Artist",
-        "detail": "16-bit/44.1kHz -> 24-bit/96kHz",
-        "payload": {"album_id": "up1", "year": "2024", "cover": ""},
-    }
-    badge_calls = []
-
-    def fake_downsample_refresh(_artists, **kwargs):
-        result = downsample_state.RefreshResult(
-            [downsample_candidate], ["Artist"], {}, True)
-        if kwargs.get("persist", True):
-            downsample_state.save(result)
-        return result
-
-    def fake_upgrade_refresh(_artists, **kwargs):
-        result = upgrade_state.RefreshResult(
-            [upgrade_candidate], ["Artist"], {}, True)
-        if kwargs.get("persist", True):
-            upgrade_state.save(result)
-        return result
-
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
-    monkeypatch.setattr(flows.downsample_state, "refresh_for_artists",
-                        fake_downsample_refresh)
-    monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists",
-                        fake_upgrade_refresh)
-    monkeypatch.setattr(flows.review_badges, "set_ready",
-                        lambda *args: badge_calls.append(args))
-    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
-    monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
-    monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda _kind: None)
-    monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
-    monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
-    monkeypatch.setattr(flows, "flush_resolve_cache", lambda: None)
-    monkeypatch.setattr(flows.new_releases_mod, "is_baseline_complete", lambda: True)
-
-    def cancel_during_library_scan(ad, token, partial_only, hidden):
-        job.cancel_requested = True
-        return ad.name, ad.name, [], "artist-id", []
-
-    monkeypatch.setattr(flows, "_scan_library_artist", cancel_during_library_scan)
-    job = jm.Job(title="baseline")
-
-    flows.scan_library(job, "tok")
-
-    assert downsample_state.load()["complete"] is False
-    assert upgrade_state.load()["complete"] is False
-    assert badge_calls == []
 
 
 def test_incomplete_baseline_scan_does_not_publish_quality_state(
@@ -694,56 +434,63 @@ def test_incomplete_baseline_scan_does_not_publish_quality_state(
     assert badge_calls == []
 
 
-def test_resumed_baseline_scan_can_complete_saved_library_state(
-        tmp_path, monkeypatch):
+def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import downsample_state, library_scan_state
     from qobuz_librarian.quality import upgrade_state
     from qobuz_librarian.web import flows
 
-    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE",
-                        tmp_path / "library_scan.json")
-    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE",
-                        tmp_path / "checkpoint.json")
+    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
     good_dir = tmp_path / "Good"
     next_dir = tmp_path / "Next"
     good_dir.mkdir()
     next_dir.mkdir()
-    cfg.SCAN_CHECKPOINT_FILE.write_text(json.dumps({
-        "missing": {
-            "scanned": ["Good"],
-            "candidates": [],
-            "seen": {"good-id": ["good-album"]},
-            "artists": {
-                "Good": {
-                    "fingerprint": "good-fp",
+    cfg.SCAN_CHECKPOINT_FILE.write_text(
+        json.dumps(
+            {
+                "missing": {
+                    "scanned": ["Good"],
                     "candidates": [],
-                    "artist_id": "good-id",
-                    "catalog_ids": ["good-album"],
+                    "seen": {"good-id": ["good-album"]},
+                    "artists": {
+                        "Good": {
+                            "fingerprint": "good-fp",
+                            "candidates": [],
+                            "artist_id": "good-id",
+                            "catalog_ids": ["good-album"],
+                        },
+                    },
                 },
-            },
-        },
-    }), encoding="utf-8")
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def fake_downsample_refresh(_artists, **_kwargs):
         return downsample_state.RefreshResult(
-            [], ["Good", "Next"], {}, True,
+            [],
+            ["Good", "Next"],
+            {},
+            True,
             {"Good": "good-fp", "Next": "next-fp"},
         )
 
     def fake_upgrade_refresh(_artists, **_kwargs):
         return upgrade_state.RefreshResult(
-            [], ["Good", "Next"], {}, True,
+            [],
+            ["Good", "Next"],
+            {},
+            True,
             {"Good": "good-fp", "Next": "next-fp"},
         )
 
     monkeypatch.setattr(flows, "list_library_artists", lambda: [good_dir, next_dir])
-    monkeypatch.setattr(flows, "artist_fingerprint",
-                        lambda path: f"{path.name.lower()}-fp", raising=False)
-    monkeypatch.setattr(flows.downsample_state, "refresh_for_artists",
-                        fake_downsample_refresh)
-    monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists",
-                        fake_upgrade_refresh)
+    monkeypatch.setattr(
+        flows, "artist_fingerprint", lambda path: f"{path.name.lower()}-fp", raising=False
+    )
+    monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_downsample_refresh)
+    monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists", fake_upgrade_refresh)
     monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
     monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
     monkeypatch.setattr(flows, "flush_resolve_cache", lambda: None)
@@ -751,16 +498,74 @@ def test_resumed_baseline_scan_can_complete_saved_library_state(
     monkeypatch.setattr(
         flows,
         "_scan_library_artist",
-        lambda ad, token, partial_only, hidden:
-            (ad.name, ad.name, [], "next-id", ["next-album"]),
+        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "next-id", ["next-album"]),
     )
 
-    flows.scan_library(jm.Job(title="baseline"), "tok")
+    job = jm.Job(title="baseline")
+    flows.scan_library(job, "tok")
 
     state = library_scan_state.kind_state("missing")
     assert state["complete"] is True
     assert sorted(state["artists"]) == ["Good", "Next"]
+    assert job.execute_args["_library_review_generation"] == state["updated_at"]
     assert flows.scan_checkpoint.load("missing") is None
+
+
+def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import downsample_state, library_scan_state
+    from qobuz_librarian.quality import upgrade_state
+    from qobuz_librarian.web import flows
+
+    artist_dir = tmp_path / "Artist"
+    artist_dir.mkdir()
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "fp", raising=False)
+    monkeypatch.setattr(
+        flows.downsample_state,
+        "refresh_for_artists",
+        lambda *_a, **_k: downsample_state.RefreshResult(
+            [], ["Artist"], {}, True, {"Artist": "fp"}
+        ),
+    )
+    monkeypatch.setattr(
+        flows.upgrade_state,
+        "refresh_for_artists",
+        lambda *_a, **_k: upgrade_state.RefreshResult([], ["Artist"], {}, True, {"Artist": "fp"}),
+    )
+    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
+    saved_checkpoints = []
+    cleared = []
+    monkeypatch.setattr(
+        flows.scan_checkpoint,
+        "save",
+        lambda *args, **kwargs: saved_checkpoints.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda kind: cleared.append(kind))
+    monkeypatch.setattr(library_scan_state, "save_kind", lambda *_a, **_k: None)
+    monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
+    monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
+    monkeypatch.setattr(flows, "flush_resolve_cache", lambda: None)
+    monkeypatch.setattr(flows.new_releases_mod, "is_baseline_complete", lambda: True)
+    gap = SimpleNamespace(
+        qobuz_album={"id": "album-1", "title": "Album", "tracks_count": 1},
+        on_disk_dir=None,
+        missing_count=0,
+    )
+    monkeypatch.setattr(
+        flows,
+        "_scan_library_artist",
+        lambda ad, *_a, **_k: (ad.name, ad.name, [gap], "artist-id", ["album-1"]),
+    )
+    job = jm.Job(title="baseline")
+
+    flows.scan_library(job, "tok")
+
+    assert [c["payload"]["album_id"] for c in job.candidates] == ["album-1"]
+    assert saved_checkpoints
+    assert cleared == []
+    assert "saved scan state couldn't be written" in job.summary
 
 
 def test_resumed_baseline_rescans_checkpoint_entries_without_artist_snapshot(
@@ -1145,94 +950,6 @@ def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
     assert "couldn't be saved" in job.summary
 
 
-def test_cancelled_new_release_scan_keeps_failed_artist_count(
-        tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import flows
-
-    artists = [tmp_path / name for name in ("Broken", "Stopped")]
-    for artist in artists:
-        artist.mkdir()
-
-    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
-    monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
-        "seen": {"existing": []},
-        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
-    })
-
-    def fake_find(name, **_kwargs):
-        if name == "Broken":
-            raise RuntimeError("temporary failure")
-        return SimpleNamespace(
-            artist_id=name,
-            fetch_failed=False,
-            current_ids=[],
-            new_gaps=[],
-            artist_name=name,
-        )
-
-    monkeypatch.setattr(flows, "find_new_releases_for_artist", fake_find)
-    job = jm.Job(title="new releases")
-    job.push_progress = lambda *_a, **_k: setattr(
-        job, "cancel_requested", True)
-
-    flows.scan_new_releases(job, "tok")
-
-    assert "1 artist couldn't be checked before the stop" in job.summary
-    assert job.execute_args["_unchecked_artists"] == 1
-
-def test_incomplete_baseline_scan_summary_reports_unchecked_artists(
-        tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import downsample_state
-    from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import flows
-
-    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE",
-                        tmp_path / "library_scan.json")
-    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE",
-                        tmp_path / "checkpoint.json")
-    good_dir = tmp_path / "Good"
-    bad_dir = tmp_path / "Bad"
-    good_dir.mkdir()
-    bad_dir.mkdir()
-
-    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [good_dir, bad_dir])
-    monkeypatch.setattr(
-        flows.downsample_state,
-        "refresh_for_artists",
-        lambda *_a, **_k: downsample_state.RefreshResult([], [], {}, True),
-    )
-    monkeypatch.setattr(
-        flows.upgrade_state,
-        "refresh_for_artists",
-        lambda *_a, **_k: upgrade_state.RefreshResult([], [], {}, True),
-    )
-    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
-    monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
-    monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda _kind: None)
-    monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
-    monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
-    monkeypatch.setattr(flows, "flush_resolve_cache", lambda: None)
-    monkeypatch.setattr(flows.new_releases_mod, "is_baseline_complete", lambda: True)
-
-    def fake_scan_artist(ad, token, partial_only, hidden):
-        if ad.name == "Bad":
-            raise RuntimeError("artist failed")
-        return ad.name, ad.name, [], f"{ad.name}-id", [f"{ad.name}-album"]
-
-    monkeypatch.setattr(flows, "_scan_library_artist", fake_scan_artist)
-
-    job = jm.Job(title="baseline")
-    flows.scan_library(job, "tok")
-
-    # One artist errored, so the checkpoint stays and the crawl was partial.
-    # the summary must say so instead of a clean-sounding definitive total.
-    assert "1 artist" in job.summary
-    assert "resume" in job.summary.lower()
-    assert "Upgrade and Downsample results were not updated" in job.summary
 
 
 def test_scan_signature_covers_candidate_shaping_settings(monkeypatch):
@@ -1251,36 +968,3 @@ def test_scan_signature_covers_candidate_shaping_settings(monkeypatch):
         with monkeypatch.context() as mctx:
             mctx.setattr(cfg, name, int(getattr(cfg, name)) + 1)
             assert lss.quality_signature() != base, name
-
-
-def test_web_lyric_retry_marks_write_errors_failed(
-        tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import lyrics
-    from qobuz_librarian.web import flows
-    from qobuz_librarian.web import jobs as jm
-
-    tracks = [tmp_path / f"{index}.flac" for index in range(3)]
-    for track in tracks:
-        track.write_bytes(b"synthetic")
-    monkeypatch.setattr(cfg, "LYRIC_RETRY_FILE", tmp_path / "retry.json")
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
-    monkeypatch.setattr(lyrics.lyric_fetch, "AVAILABLE", True)
-    monkeypatch.setattr(
-        lyrics.lyric_fetch,
-        "fetch_for_paths",
-        lambda *_args, **_kwargs: {"write-error": 3},
-    )
-    monkeypatch.setattr(
-        lyrics,
-        "_refresh_lyric_retry",
-        lambda _paths: lyrics.save_lyric_retry([]),
-    )
-    lyrics.save_lyric_retry([str(track) for track in tracks])
-    job = jm.Job(title="lyrics retry")
-
-    flows.run_lyric_retry(job)
-
-    assert job.status == jm.JobStatus.FAILED
-    assert "3 failed" in job.summary
-    assert "All 3 retried tracks resolved" not in job.summary

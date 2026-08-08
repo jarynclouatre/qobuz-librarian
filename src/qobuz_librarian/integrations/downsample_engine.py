@@ -157,10 +157,13 @@ def read_local_bit_depth(path: Path, *, pass_fds=()) -> int:
     if bps:
         return bps
     try:
-        out = subprocess.run(
+        completed = subprocess.run(
             ["metaflac", "--show-bps", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds)).stdout.strip()
+            pass_fds=tuple(pass_fds))
+        if completed.returncode != 0:
+            return 0
+        out = completed.stdout.strip()
         return int(out) if out else 0
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
         return 0
@@ -203,10 +206,13 @@ def read_sample_rate(path: Path, *, pass_fds=()) -> int:
     if sr:
         return sr
     try:
-        out = subprocess.run(
+        completed = subprocess.run(
             ["metaflac", "--show-sample-rate", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds)).stdout.strip()
+            pass_fds=tuple(pass_fds))
+        if completed.returncode != 0:
+            return 0
+        out = completed.stdout.strip()
         return int(out) if out else 0
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
         return 0
@@ -245,10 +251,13 @@ def read_total_samples(path: Path, *, pass_fds=()) -> int:
     if n:
         return n
     try:
-        out = subprocess.run(
+        completed = subprocess.run(
             ["metaflac", "--show-total-samples", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds)).stdout.strip()
+            pass_fds=tuple(pass_fds))
+        if completed.returncode != 0:
+            return 0
+        out = completed.stdout.strip()
         return int(out) if out else 0
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
         return 0
@@ -337,6 +346,8 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
             capture_output=True, timeout=600, stdin=subprocess.DEVNULL,
             pass_fds=tuple(pass_fds))
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
         return None
     peaks = []
     for line in r.stderr.decode(errors="replace").splitlines():
@@ -659,6 +670,9 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         enc_af = af
         _peak = _resampled_peak_dbfs(
             source_path, af_filter, rate, pass_fds=source_fds)
+        if _peak is None:
+            return (rel, sr, rate, None,
+                    "couldn't verify the resampled peak; left the original untouched")
         if _peak is not None and _peak > 0.0:
             enc_af = f"volume={_TARGET_PEAK_DBFS - _peak:.3f}dB,{af}"
         if not exclusion.intact() or not binding.exact_track_is_named():
@@ -944,6 +958,17 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             log(f"  ⚠ downsample: {n_uncopied} file(s) have no safety copy; "
                 "left untouched.")
         candidates = protected
+        # Copying large masters can take long enough for Stop to arrive after
+        # the entry check above. The copies are only preparation, not authority
+        # to begin an irreversible rewrite after cancellation.
+        if cancel_check is not None and cancel_check():
+            _discard_unused_stash(kept_dir, log)
+            return {
+                "resampled": 0,
+                "errors": n_uncopied,
+                "saved_bytes": 0,
+                "cancelled": True,
+            }
         if not candidates:
             # Nothing to rewrite after all. The copies we just took are not a
             # safety net for anything, so don't leave them parked as a 7-day

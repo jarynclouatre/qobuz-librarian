@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Offline — Qobuz Librarian</title>
+  <title>Offline - Qobuz Librarian</title>
   <!-- Separate cached file, not an inline block: the CSP allows scripts from
        'self' but inline ones need a per-request nonce this static page can't
        mint. It only applies the saved theme; the page works without it. -->
@@ -102,14 +102,14 @@
   </style>
 </head>
 <body>
-  <!-- Retry is a plain navigation with an empty href — the current address.
+  <!-- Retry is a plain navigation with an empty href - the current address.
        The service worker serves this page UNDER the URL that failed, so an
        empty href retries that exact page instead of dumping the user on /.
        No JS needed, works offline, stays within the CSP. -->
   <div class="card">
     <img class="mark" src="/static/icon-192.png" alt="">
     <h1>Qobuz Librarian</h1>
-    <p>Can't reach Qobuz Librarian. You may be off the network — check your
+    <p>Can't reach Qobuz Librarian. You may be off the network - check your
        connection, or that the server is running.</p>
     <a href="" class="retry-btn">Retry</a>
   </div>

@@ -313,6 +313,37 @@ UPGRADE_BACKUP_DIR = _env_path(
     _sibling_of_music(".upgrade_backups"),
 )
 
+
+def validate_storage_roots() -> None:
+    """Refuse storage trees that alias or contain one another.
+
+    Library, staging, and retained-backup operations have different ownership
+    rules. Letting any of their roots overlap makes exclusions ambiguous and
+    can turn an in-progress download or backup into managed library content.
+    Resolve existing symlinks before comparing so aliases fail closed too.
+    """
+    configured = (
+        ("MUSIC_ROOT", MUSIC_ROOT),
+        ("STAGING_DIR", STAGING_DIR),
+        ("UPGRADE_BACKUP_DIR", UPGRADE_BACKUP_DIR),
+    )
+    resolved = []
+    for name, value in configured:
+        try:
+            path = Path(os.path.abspath(os.fspath(value))).resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ValueError(f"{name} cannot be resolved safely: {exc}") from None
+        resolved.append((name, path))
+
+    for index, (name, path) in enumerate(resolved):
+        for other_name, other in resolved[:index]:
+            if path == other or path in other.parents or other in path.parents:
+                raise ValueError(
+                    f"{name} and {other_name} must be separate, non-nested "
+                    "directories"
+                )
+
+
 # ── Web UI ────────────────────────────────────────────────────────────────────
 WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 WEB_PORT = _env("WEB_PORT", 8666)
@@ -353,6 +384,10 @@ LYRICS_FORMAT    = _env_choice("LYRICS_FORMAT", "embed", ("embed", "sidecar", "b
 LYRICS_PROVIDERS = [p.strip() for p in
                     os.environ.get("LYRICS_PROVIDERS", "").split(",")
                     if p.strip()]
+# A provider library must not be able to park every lyrics worker forever.
+# This is an application-level wall-clock budget around one provider lookup;
+# timed-out providers count toward the existing per-run circuit breaker.
+LYRICS_PROVIDER_TIMEOUT = _env_num_min("LYRICS_PROVIDER_TIMEOUT", 30.0, 1.0)
 
 # ── Timeouts / delays ─────────────────────────────────────────────────────────
 # Results shown on the user-facing Search page. 8 was too few for a major

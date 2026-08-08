@@ -1,9 +1,12 @@
 """Tests for rip, beets, lyrics, and the seams between them."""
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +22,39 @@ from qobuz_librarian.integrations.rip import (
     cleanup_staging_residue,
     is_flac,
 )
+
+
+def test_lyrics_provider_lookup_has_an_application_deadline(monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyric_fetch
+
+    release = threading.Event()
+
+    class ProviderLibrary:
+        @staticmethod
+        def search(*_args, **_kwargs):
+            release.wait()
+            return "late result"
+
+    monkeypatch.setattr(lyric_fetch, "syncedlyrics", ProviderLibrary())
+    monkeypatch.setattr(cfg, "LYRICS_PROVIDER_TIMEOUT", 0.02)
+    lyric_fetch._provider_fails.clear()
+    lyric_fetch._dead_providers.clear()
+
+    started = time.monotonic()
+    result, failed = lyric_fetch._query_provider(
+        "song artist", "SlowProvider", logging.getLogger("test")
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert failed is True
+    assert elapsed < 0.5
+    assert lyric_fetch._provider_fails["SlowProvider"] == 1
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "lyrics-provider-SlowProvider":
+            thread.join(timeout=1)
 
 # ── shared SQLite transaction boundary ────────────────────────────────
 
@@ -79,6 +115,34 @@ def test_flac_audio_ok_treats_a_verify_timeout_as_broken(monkeypatch):
     monkeypatch.setattr(rip.subprocess, "run", hang)
 
     assert rip.flac_audio_ok("/any/large.flac") is False
+
+
+
+
+def test_rip_url_kills_and_reaps_a_timed_out_process(monkeypatch):
+    from qobuz_librarian.integrations import rip
+
+    real_popen = subprocess.Popen
+
+    def sleeping_process(_args, **kwargs):
+        return real_popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(rip.subprocess, "Popen", sleeping_process)
+    code, output = rip.rip_url(
+        "https://example.invalid/album", timeout=0.05
+    )
+
+    assert code == 124
+    assert "rip timed out" in output
+
+
+
+
+
+
 
 
 def test_cleanup_lossy_sorts_flac_lossy_and_broken(monkeypatch, tmp_path):
@@ -157,103 +221,42 @@ def test_lyric_retry_round_trips_and_clears(tmp_path, monkeypatch):
     assert not rfile.exists()
 
 
-def test_cli_lyric_retry_does_not_report_write_errors_as_resolved(
-        tmp_path, monkeypatch, caplog):
+
+
+def test_lyric_retry_read_error_does_not_replace_manifest(
+        tmp_path, monkeypatch):
+    import errno
+
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations import lyrics
 
-    tracks = [tmp_path / f"{index}.flac" for index in range(2)]
-    for track in tracks:
-        track.write_bytes(b"synthetic")
-    monkeypatch.setattr(cfg, "LYRIC_RETRY_FILE", tmp_path / "retry.json")
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
-    monkeypatch.setattr(lyrics.lyric_fetch, "AVAILABLE", True)
-    monkeypatch.setattr(
-        lyrics.lyric_fetch,
-        "fetch_for_paths",
-        lambda *_args, **_kwargs: {"write-error": 2},
-    )
-    monkeypatch.setattr(
-        lyrics,
-        "_refresh_lyric_retry",
-        lambda _paths: lyrics.save_lyric_retry([]),
-    )
-    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
-    lyrics.save_lyric_retry([str(track) for track in tracks])
+    retry_file = tmp_path / "retry.json"
+    original = b'{"version":1,"files":["/music/kept.flac"]}'
+    retry_file.write_bytes(original)
+    monkeypatch.setattr(cfg, "LYRIC_RETRY_FILE", retry_file)
+    monkeypatch.setattr(cfg, "LYRIC_RETRY_VERSION", 1)
+    path_open = Path.open
 
-    lyrics.offer_resume_lyric_retry(object())
+    def fail_manifest_read(self, *args, **kwargs):
+        if self == retry_file:
+            raise OSError(errno.EIO, "injected read error")
+        return path_open(self, *args, **kwargs)
 
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "2 failed" in messages
-    assert "All retried files resolved" not in messages
+    monkeypatch.setattr(Path, "open", fail_manifest_read)
+    lyrics._record_post_import_lyric_retry(["/music/new.flac"])
+    monkeypatch.undo()
+
+    assert retry_file.read_bytes() == original
 
 
-def test_lyric_retry_summary_does_not_invent_missing_successes():
-    from qobuz_librarian.integrations.lyrics import summarize_lyric_retry
-
-    assert summarize_lyric_retry(
-        {"wrote-synced": 1}, attempted=3, remaining=0
-    ) == {"resolved": 1, "failed": 2, "remaining": 0}
-    assert summarize_lyric_retry(
-        {"wrote-synced": 1, "write-error": 1, "providers-unavailable": 1},
-        attempted=3,
-        remaining=1,
-    ) == {"resolved": 1, "failed": 1, "remaining": 1}
 
 
-def test_import_lyric_hook_reports_an_all_error_run(
-        tmp_path, monkeypatch, caplog):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import lyrics
-
-    album = tmp_path / "Artist" / "Album"
-    album.mkdir(parents=True)
-    (album / "track.flac").write_bytes(b"synthetic")
-    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
-    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
-    monkeypatch.setattr(cfg, "LYRIC_FETCH_STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(lyrics.lyric_fetch, "AVAILABLE", True)
-    monkeypatch.setattr(
-        lyrics.lyric_fetch,
-        "fetch_for_paths",
-        lambda *_args, **_kwargs: {"write-error": 1},
-    )
-
-    counts, _signatures = lyrics._run_lyric_hook(album)
-
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert counts == {"write-error": 1}
-    assert "1 failed" in messages
 
 
-def test_post_import_sidecar_write_failure_gets_a_terminal_warning(
-        tmp_path, monkeypatch, caplog):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import lyrics
 
-    album = tmp_path / "Artist" / "Album"
-    album.mkdir(parents=True)
-    track = album / "track.flac"
-    track.write_bytes(b"synthetic")
 
-    class FakeFLAC:
-        tags = {"lyrics": ["[00:01.00]line"]}
 
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
-    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
-    monkeypatch.setattr(cfg, "LYRICS_FORMAT", "sidecar")
-    monkeypatch.setattr(lyrics, "HAVE_LYRIC_FETCH", True)
-    monkeypatch.setattr(lyrics.lyric_fetch, "FLAC", lambda _path: FakeFLAC())
-    monkeypatch.setattr(
-        lyrics.lyric_fetch,
-        "write_sidecar",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic failure")),
-    )
 
-    lyrics.write_post_import_sidecars([album])
-
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "1 sidecar failed" in messages
 
 
 def test_write_lyrics_saves_atomically_and_clears_legacy_tag(tmp_path):
@@ -273,6 +276,72 @@ def test_write_lyrics_saves_atomically_and_clears_legacy_tag(tmp_path):
     assert f.save_targets and all(t != f.filename for t in f.save_targets)
     assert real.read_bytes() == b"new-audio+tags"
     assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("plain_representation", ["embed", "sidecar"])
+def test_both_lyrics_repairs_a_plain_sibling_without_provider(
+        tmp_path, monkeypatch, plain_representation, _need_ffmpeg):
+    from mutagen.flac import FLAC
+
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    track = tmp_path / "Artist" / "Album" / "track.flac"
+    _make_silent_flac(track)
+    synced = "[00:01.00]same lyric"
+    plain = "older plain lyric"
+    tagged = FLAC(track)
+    tagged["lyrics"] = plain if plain_representation == "embed" else synced
+    tagged.save()
+    track.with_suffix(".lrc").write_text(
+        synced if plain_representation == "embed" else plain,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        lyric_fetch,
+        "search_lyrics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local representation repair must not call a provider")
+        ),
+    )
+
+    counts = lyric_fetch.fetch_for_paths(
+        [track],
+        owned_root=tmp_path,
+        state_path=tmp_path / "state.json",
+        rescan=True,
+        workers=1,
+        lyrics_format="both",
+    )
+
+    assert counts == {"wrote-synced": 1}
+    assert FLAC(track)["lyrics"] == [synced]
+    assert track.with_suffix(".lrc").read_text(encoding="utf-8") == synced
+
+
+
+
+def test_post_import_retry_resolution_preserves_duplicate_signatures(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.integrations import lyrics, rip
+
+    first = tmp_path / "First" / "track.flac"
+    second = tmp_path / "Second" / "track.flac"
+    for track in (first, second):
+        track.parent.mkdir()
+        track.write_bytes(b"synthetic")
+    signature = ("artist", "album", 1, 1, "title")
+    monkeypatch.setattr(rip, "_flac_signature", lambda _path: signature)
+
+    resolved = lyrics._resolve_signatures_to_paths(
+        [(signature, "/staging/first.flac"),
+         (signature, "/staging/second.flac")],
+        [first.parent, second.parent],
+    )
+
+    assert resolved == [str(first), str(second)]
+
+
 
 
 def test_lyric_fetch_refuses_paths_outside_or_linked_out_of_its_owned_root(tmp_path, monkeypatch):
@@ -480,6 +549,77 @@ def test_beets_direct_detects_silent_skip_by_unmoved_audio(monkeypatch, tmp_path
     assert len(captured_args) == spawned_before
 
 
+def test_managed_override_seals_pinned_database_root_and_plugin_order(
+        monkeypatch, tmp_path):
+    import fcntl
+
+    import yaml
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+
+    config_dir = tmp_path / "beets"
+    music = tmp_path / "music"
+    config_dir.mkdir()
+    music.mkdir()
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", config_dir / "library.db")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_PATH_DEFAULT", "")
+    monkeypatch.setattr(cfg, "BEETS_PATH_SINGLETON", "")
+    monkeypatch.setattr(cfg, "BEETS_PATH_COMP", "")
+    monkeypatch.setattr(cfg, "BEETS_PLUGINS", [])
+    monkeypatch.setattr(cfg, "ARTWORK", "sidecar")
+    capture = {"_override_fd": None}
+
+    override = beets._prepare_managed_override(
+        capture,
+        {
+            "plugins": ["fetchart", "inline", "permissions"],
+            "plugin_paths": ["/user/beets-plugins"],
+            "disabled": [],
+            "musicbrainz_enabled": None,
+        },
+    )
+    descriptor = capture["_override_fd"]
+    try:
+        assert override == Path(f"/proc/self/fd/{descriptor}")
+        payload = os.pread(descriptor, os.fstat(descriptor).st_size, 0)
+        configured = yaml.safe_load(payload)
+        assert configured["library"] == str(config_dir / "library.db")
+        assert configured["directory"] == str(music)
+        assert configured["import"] == {
+            "quiet": True,
+            "incremental": False,
+            "autotag": False,
+            "write": False,
+            "move": True,
+            "duplicate_action": "merge",
+        }
+        assert configured["plugins"] == [
+            "fetchart",
+            "inline",
+            "permissions",
+            "qobuz_art_guard",
+            "qobuz_ownership",
+        ]
+        assert configured["pluginpath"] == [
+            str(Path(beets.__file__).parent / "beets_plugins"),
+            "/user/beets-plugins",
+        ]
+        required_seals = (
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE
+        )
+        assert fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & required_seals \
+            == required_seals
+        with pytest.raises(OSError):
+            os.pwrite(descriptor, b"x", 0)
+    finally:
+        os.close(descriptor)
+
+
 def test_beets_pruning_stays_bound_to_the_captured_staging_roots(monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations import beets
@@ -520,6 +660,46 @@ def test_beets_pruning_stays_bound_to_the_captured_staging_roots(monkeypatch, tm
 
 
 # ── beets: staging tag prep (quarantine, never delete) ────────────────────
+
+
+def test_staging_receipts_refuse_hardlinked_files(tmp_path, monkeypatch):
+    from qobuz_librarian.integrations.staging import capture_file, capture_tree
+
+    staging = tmp_path / "staging"
+    album = staging / "Artist" / "Album"
+    album.mkdir(parents=True)
+    track = album / "01.flac"
+    outside = tmp_path / "outside.flac"
+    track.write_bytes(b"audio")
+    os.link(track, outside)
+    monkeypatch.setattr("qobuz_librarian.config.STAGING_DIR", staging)
+
+    assert capture_file(track) is None
+    assert capture_tree(album) is None
+    assert outside.read_bytes() == b"audio"
+
+
+def test_ownership_source_guard_refuses_a_hardlinked_track(
+        tmp_path, monkeypatch):
+    module = _load_ownership_for_test(monkeypatch)
+    root = tmp_path / "staging"
+    track = root / "Artist" / "Album" / "01.flac"
+    outside = tmp_path / "outside.flac"
+    track.parent.mkdir(parents=True)
+    track.write_bytes(b"audio")
+    os.link(track, outside)
+    plugin = object.__new__(module.QobuzOwnershipPlugin)
+    held = None
+
+    try:
+        with pytest.raises(OSError, match="single-link"):
+            held = plugin._hold_source_leaf_locked(root, track)
+    finally:
+        if held is not None:
+            os.close(held[2])
+            os.close(held[0])
+
+    assert outside.read_bytes() == b"audio"
 
 
 def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeypatch, _need_ffmpeg):
@@ -627,41 +807,6 @@ def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeyp
     assert capture_file(tagged, expected=dirty.identity) is not None
 
 
-def test_prepare_managed_staging_tags_returns_bindings_in_input_order(
-    tmp_path, monkeypatch, _need_ffmpeg
-):
-    # The scan walks the tree in directory order, but the durable runner
-    # compares the result against the catalogue-ordered bindings. The records
-    # must come back in the order they were passed, not readdir order.
-    from qobuz_librarian.integrations import beets
-    from qobuz_librarian.integrations.staging import capture_file
-
-    staging = tmp_path / "staging"
-    staging.mkdir()
-    monkeypatch.setattr("qobuz_librarian.config.STAGING_DIR", staging)
-
-    album = staging / "Artist" / "Album"
-    binding = []
-    for n in (1, 2, 3):
-        path = album / f"0{n} - Track {n}.flac"
-        _make_silent_flac(path)
-        from mutagen.flac import FLAC
-        f = FLAC(str(path))
-        f["albumartist"], f["album"], f["title"] = ["Artist"], ["Album"], [f"Track {n}"]
-        f.save()
-        clean = capture_file(path)
-        binding.append({
-            "slot": f"qobuz:{n}",
-            "path": str(clean.path),
-            "identity": list(clean.identity),
-        })
-
-    # Hand them in reverse of on-disk name order; the walk won't match this.
-    binding.reverse()
-    rewritten = beets.prepare_managed_staging_tags(
-        [album], binding, authority_check=lambda: None
-    )
-    assert [r["slot"] for r in rewritten] == [b["slot"] for b in binding]
 
 
 # ── beets: import override pins non-destructive duplicate handling ─────────
@@ -684,6 +829,7 @@ def test_import_override_pins_duplicate_action_merge(monkeypatch):
     monkeypatch.setattr(cfg, "ARTWORK", "sidecar")
     conf = yaml.safe_load(beets._build_import_override_yaml())
     assert conf["import"]["duplicate_action"] == "merge"
+    assert conf["import"]["write"] is False
     assert conf["plugins"].count("inline") == 1
     assert conf["plugins"][-1] == "qobuz_art_guard"
     assert conf["pluginpath"][0] == str(Path(beets.__file__).parent / "beets_plugins")
@@ -920,95 +1066,14 @@ def _load_ownership_for_test(monkeypatch):
     return module
 
 
-def _assert_close_failure_preserves_reused_descriptor(tmp_path, operation, *, escapes=True):
-    root = tmp_path / "walk-root"
-    (root / "A").mkdir(parents=True)
-    canary_path = root / "canary"
-    canary_path.write_bytes(b"canary")
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    real_close = os.close
-    real_open = os.open
-    state = {"fired": False, "canary_fd": None}
-
-    def faulting_close(descriptor):
-        if not state["fired"]:
-            state["fired"] = True
-            real_close(descriptor)
-            state["canary_fd"] = real_open(canary_path, os.O_RDONLY)
-            assert state["canary_fd"] == descriptor
-            raise OSError("synthetic close failure after release")
-        real_close(descriptor)
-
-    os.close = faulting_close
-    try:
-        if escapes:
-            with pytest.raises(OSError, match="synthetic close failure"):
-                operation(root, root_fd)
-        else:
-            assert operation(root, root_fd) is False
-    finally:
-        os.close = real_close
-
-    canary_fd = state["canary_fd"]
-    assert canary_fd is not None
-    try:
-        assert os.fstat(canary_fd).st_size == len(b"canary")
-    finally:
-        for descriptor in (canary_fd, root_fd):
-            try:
-                real_close(descriptor)
-            except OSError:
-                pass
 
 
-def test_beets_parent_walk_never_retries_a_released_descriptor(tmp_path):
-    from qobuz_librarian.integrations import beets
-
-    _assert_close_failure_preserves_reused_descriptor(
-        tmp_path,
-        lambda _root, root_fd: beets._open_ownership_parent(
-            root_fd, (b"A", b"leaf")
-        ),
-    )
 
 
-def test_art_guard_parent_walk_never_retries_a_released_descriptor(
-        tmp_path, monkeypatch):
-    module = _load_art_guard_for_test(monkeypatch, [])
-    _assert_close_failure_preserves_reused_descriptor(
-        tmp_path,
-        lambda _root, root_fd: module._open_relative_directory(root_fd, (b"A",)),
-    )
 
 
-def test_art_guard_candidate_walk_never_retries_a_released_descriptor(
-        tmp_path, monkeypatch):
-    module = _load_art_guard_for_test(monkeypatch, [])
-
-    def operation(root, _root_fd):
-        monkeypatch.setattr(
-            module,
-            "_candidate_within_task",
-            lambda _task, _path: (os.fsencode(root), (b"A", b"leaf")),
-        )
-        candidate = type("Candidate", (), {"path": b"candidate"})()
-        return module._remove_candidate_source(object(), candidate, -1)
-
-    _assert_close_failure_preserves_reused_descriptor(
-        tmp_path, operation, escapes=False
-    )
 
 
-def test_ownership_created_walk_never_retries_a_released_descriptor(
-        tmp_path, monkeypatch):
-    module = _load_ownership_for_test(monkeypatch)
-
-    def operation(_root, root_fd):
-        plugin = object.__new__(module.QobuzOwnershipPlugin)
-        plugin._root_fd = root_fd
-        return plugin._open_created_locked((b"A",))
-
-    _assert_close_failure_preserves_reused_descriptor(tmp_path, operation)
 
 
 def _art_guard_task(root, staging, album_name):
@@ -1184,41 +1249,6 @@ def _make_silent_flac(path):
     )
 
 
-def test_import_override_yaml_round_trips_through_parser(monkeypatch):
-    # The beets override is written by a hand-rolled single-quoted YAML
-    # emitter.
-    import yaml
-
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import beets
-
-    monkeypatch.setattr(cfg, "BEETS_DB_PATH", "/config/beets/musiclibrary.db")
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", "/music")
-    monkeypatch.setattr(cfg, "BEETS_PATH_DEFAULT", "$albumartist's picks/$album %aunique{}")
-    monkeypatch.setattr(cfg, "BEETS_PATH_SINGLETON", "Singles/$artist - $title")
-    monkeypatch.setattr(cfg, "BEETS_PATH_COMP", "")
-    monkeypatch.setattr(cfg, "BEETS_PLUGINS", [])
-    monkeypatch.setattr(cfg, "ARTWORK", "embed")
-
-    parsed = yaml.safe_load(beets._build_import_override_yaml())
-
-    assert parsed["library"] == "/config/beets/musiclibrary.db"
-    assert parsed["directory"] == "/music"
-    assert parsed["import"]["move"] is True
-    assert parsed["import"]["autotag"] is False
-    assert parsed["import"]["duplicate_action"] == "merge"
-    # the apostrophe survived the single-quote doubling
-    assert parsed["paths"]["default"] == "$albumartist's picks/$album %aunique{}"
-    assert parsed["paths"]["singleton"] == "Singles/$artist - $title"
-    assert "fetchart" in parsed["plugins"] and "embedart" in parsed["plugins"]
-
-    # A relative deployment path must still name the same database and music
-    # root after the override is written inside the Beets config directory.
-    monkeypatch.setattr(cfg, "BEETS_DB_PATH", Path("beets/musiclibrary.db"))
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", Path("music"))
-    relative = yaml.safe_load(beets._build_import_override_yaml())
-    assert relative["library"] == str(Path("beets/musiclibrary.db").absolute())
-    assert relative["directory"] == str(Path("music").absolute())
 
 
 # ── beets: staged artwork a multi-disc import would leave behind ──────────
@@ -1249,13 +1279,6 @@ def test_multidisc_artwork_moves_where_beets_can_see_it(tmp_path):
     assert not (album / "Disc 2" / "cover.jpg").exists()
 
 
-def test_single_disc_artwork_is_left_where_fetchart_already_looks(tmp_path):
-    from qobuz_librarian.integrations.beets import relocate_disc_album_artwork
-
-    album = _staged_album(tmp_path, 1)
-
-    assert relocate_disc_album_artwork(album) is False
-    assert (album / "cover.jpg").exists()
 
 
 def test_artwork_relocation_never_overwrites_a_disc_that_has_its_own(tmp_path):

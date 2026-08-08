@@ -2536,7 +2536,7 @@ def _append_staging_reference(
         # blocked item's leftovers, and reconcile_staging_references already
         # treats BLOCKED as recovery-bearing work. Refusing it here left the
         # settle path bouncing the item through ACTIVE, which the resolved-state
-        # rule above rightly refuses once a library mutation has landed — so an
+        # rule above rightly refuses once a library mutation has landed - so an
         # item that imported and then stranded a file could never be settled.
         allowed_phases |= {QueuePhase.RESOLVING, QueuePhase.BLOCKED}
     if target.phase not in allowed_phases:

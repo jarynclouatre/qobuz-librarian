@@ -3,7 +3,7 @@
 #
 #   docker compose -f compose.yaml -f compose.dev.yaml up -d --build
 #
-# Regular users don't need this — plain `docker compose up -d` pulls
+# Regular users don't need this - plain `docker compose up -d` pulls
 # the published image.
 services:
   qobuz-librarian:

@@ -10,7 +10,7 @@
 # unaffected. chroma fingerprints each file and maps it to a MusicBrainz
 # release via musicbrainz (without that plugin, AcoustID matches produce no
 # candidates). AcoustID is not always right, so matches are reviewed
-# interactively — accept, skip, or pick another candidate per album.
+# interactively - accept, skip, or pick another candidate per album.
 # Tags in place: write: yes updates the files where they are; move/copy: no
 # means nothing is relocated, duplicated, or deleted. Reorganise later with
 # `beet move` if you want library-style folders.

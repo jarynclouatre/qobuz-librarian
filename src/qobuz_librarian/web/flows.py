@@ -5,7 +5,6 @@ process_album) but without any terminal prompts, a scan attaches review
 candidates to the job, and execution runs over the candidates the user kept.
 """
 import argparse
-import json
 import shutil
 import threading
 import time
@@ -13,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable, load_qobuz_token
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import incomplete_track_counts
@@ -101,6 +101,16 @@ def _mark_job_failed(job):
     """Set an explicit terminal outcome for a handled execution failure."""
     from qobuz_librarian.web import jobs as job_mgr
     job.status = job_mgr.JobStatus.FAILED
+
+
+def _close_completed_job(job):
+    """Publish exact completion under the same lock as cancellation."""
+    from qobuz_librarian.web import jobs as job_mgr
+
+    with job._lock:
+        if job.status is job_mgr.JobStatus.RUNNING:
+            job.cancel_requested = False
+            job.status = job_mgr.JobStatus.DONE
 
 
 def _record_unchecked_artists(job, count):
@@ -346,7 +356,7 @@ def _fold_row(c):
     }
 
 
-def fold_new_candidates(parked, cands):
+def fold_new_candidates(parked, cands, *, review_generation=None):
     """Merge a refresh's finds into a parked review, keyed by Qobuz album id
     (falling back to artist+title for keyless carry-overs).
 
@@ -397,7 +407,8 @@ def fold_new_candidates(parked, cands):
                 continue
             if hidden_mod.is_hidden(
                     hidden_mod.SCOPE_MISSING, c.get("artist") or "",
-                    c.get("title") or "", hidden):
+                    c.get("title") or "", hidden,
+                    year=(c.get("payload") or {}).get("year")):
                 continue
             seen.add(key)
             if len(parked.candidates) >= parked.CANDIDATE_CAP:
@@ -417,6 +428,11 @@ def fold_new_candidates(parked, cands):
                 "selected": bool(c.get("selected")),
             })
             added += 1
+        if review_generation is not None:
+            parked.execute_args = {
+                **(parked.execute_args or {}),
+                "_library_review_generation": float(review_generation),
+            }
         return added, updated
 
     saved, result = job_persistence.persist_review_mutation(parked, _fold)
@@ -799,8 +815,12 @@ def _load_scan_seen(mode):
     """Fingerprints the last completed walk of this mode surfaced, or None if
     there's no prior run to compare against (first scan badges nothing)."""
     try:
-        data = json.loads(cfg.SCAN_SEEN_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = state_file.load_json_object(
+            cfg.SCAN_SEEN_FILE,
+            "the saved new-since-scan baseline",
+            "your previous scan comparison",
+        )
+    except OSError:
         return None
     bucket = data.get(mode) if isinstance(data, dict) else None
     return set(bucket) if isinstance(bucket, list) else None
@@ -808,17 +828,14 @@ def _load_scan_seen(mode):
 
 def _save_scan_seen(mode, fingerprints):
     try:
-        data = json.loads(cfg.SCAN_SEEN_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
-        data = {}
-    data[mode] = sorted(fingerprints)
-    try:
-        cfg.SCAN_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cfg.SCAN_SEEN_FILE.with_suffix(cfg.SCAN_SEEN_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        tmp.replace(cfg.SCAN_SEEN_FILE)
+        with state_file.store_lock(cfg.SCAN_SEEN_FILE):
+            data = state_file.load_json_object(
+                cfg.SCAN_SEEN_FILE,
+                "the saved new-since-scan baseline",
+                "your previous scan comparison",
+            ) or {}
+            data[mode] = sorted(fingerprints)
+            state_file.write_json(cfg.SCAN_SEEN_FILE, data)
     except OSError:
         pass
 
@@ -922,13 +939,10 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
     # Record the dismissals durably FIRST, outside the lock (disk I/O mustn't
     # stall the scan thread's next add_candidate).
     hidden_before = hidden_mod.load()
-    new_fps = {
-        hidden_mod.album_fingerprint(artist_name, title)
-        for artist_name, title, _year in specs
-        if not hidden_mod.is_hidden(
-            scope, artist_name, title, hidden_before)
-    }
-    new_fps.discard(None)
+    new_specs = [
+        spec for spec in specs
+        if not hidden_mod.is_hidden_row(scope, *spec, hidden_before)
+    ]
     hidden_mod.hide(scope, specs)
     drop = {c["cid"] for c in to_hide}
 
@@ -948,14 +962,23 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
 
     saved, ticked_meanwhile = job_persistence.persist_review_mutation(job, _drop)
     if not saved:
-        hidden_mod.restore_albums(scope, sorted(new_fps))
+        hidden_mod.restore_rows(scope, new_specs)
         return False
     if ticked_meanwhile:
         # Their dismissals were already written durably, take them back out,
         # or the next bulk walk skips albums that are visibly ticked here.
-        fps = [hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
-               for c in ticked_meanwhile]
-        hidden_mod.restore_albums(scope, [fp for fp in fps if fp])
+        new_keys = {
+            (artist_name or "", title or "", str(year or ""))
+            for artist_name, title, year in new_specs
+        }
+        raced_specs = [
+            (c.get("artist"), c.get("title"),
+             (c.get("payload") or {}).get("year"))
+            for c in ticked_meanwhile
+            if (c.get("artist") or "", c.get("title") or "",
+                str((c.get("payload") or {}).get("year") or "")) in new_keys
+        ]
+        hidden_mod.restore_rows(scope, raced_specs)
     return len(to_hide) - len(ticked_meanwhile)
 
 
@@ -1095,7 +1118,8 @@ def scan_library(job, token, partial_only=False, force_full=False):
             if artist_key not in scanned:
                 continue
             if hidden_mod.is_hidden(hidden_mod.SCOPE_MISSING,
-                                    c.get("artist"), c.get("title"), hidden):
+                                    c.get("artist"), c.get("title"), hidden,
+                                    year=(c.get("payload") or {}).get("year")):
                 continue
             _readd_candidate(job, c)
             total += 1
@@ -1115,6 +1139,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
                     c.get("artist"),
                     c.get("title"),
                     hidden,
+                    year=(c.get("payload") or {}).get("year"),
                 )
             ]
             state_artists[name] = {
@@ -1148,6 +1173,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
                     c.get("artist"),
                     c.get("title"),
                     hidden,
+                    year=(c.get("payload") or {}).get("year"),
                 )
             ]
             for c in candidates:
@@ -1244,6 +1270,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
     # above, leaving the checkpoint for resume and not seeding the baseline).
     flush_resolve_cache()
     baseline_save_failed = False
+    scan_state_save_failed = False
     catalog_complete = False
     if job.cancel_requested:
         # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
@@ -1260,13 +1287,19 @@ def scan_library(job, token, partial_only=False, force_full=False):
             catalog_complete
             and not job.candidate_cap_hit
         )
-        library_scan_state.save_kind(
+        scan_generation = library_scan_state.save_kind(
             kind,
             artists=state_artists,
             complete=library_complete,
             hidden_signature=hidden_sig,
             quality_sig=quality_sig,
         )
+        scan_state_save_failed = scan_generation is None
+        if kind == "missing" and scan_generation is not None:
+            job.execute_args = {
+                **(job.execute_args or {}),
+                "_library_review_generation": scan_generation,
+            }
         # Publish Upgrade/Downsample from their OWN completeness, gated only
         # on a complete catalog crawl, NOT on library_complete.
         if catalog_complete:
@@ -1287,7 +1320,8 @@ def scan_library(job, token, partial_only=False, force_full=False):
                 review_badges.set_ready(
                     "upgrade", _surface_has_candidates("upgrade"))
         if catalog_complete:
-            _record_last_scan()
+            if not scan_state_save_failed:
+                _record_last_scan()
             _flag_new_since_last_scan(job, kind)
             # The crawl reached every artist cleanly, establish the new-release
             # baseline from the catalog snapshot (only the first time; the daily
@@ -1295,7 +1329,16 @@ def scan_library(job, token, partial_only=False, force_full=False):
             if not new_releases_mod.is_baseline_complete():
                 baseline_save_failed = (
                     new_releases_mod.seed_baseline(baseline_seen) is False)
-            scan_checkpoint.clear(kind)
+            if scan_state_save_failed:
+                # Keep a complete resumable copy when the optimized saved scan
+                # snapshot could not be published. If the final job write also
+                # fails (for example because the data volume filled during a
+                # long crawl), restart can rebuild the exact candidate set
+                # instead of silently losing the whole completed scan.
+                scan_checkpoint.save(
+                    kind, scanned, job.candidates, baseline_seen, state_artists)
+            else:
+                scan_checkpoint.clear(kind)
         elif scanned or job.candidates or baseline_seen:
             scan_checkpoint.save(
                 kind, scanned, job.candidates, baseline_seen, state_artists)
@@ -1332,6 +1375,9 @@ def scan_library(job, token, partial_only=False, force_full=False):
     if baseline_save_failed:
         job.summary += (" The New Releases baseline couldn't be saved; "
                         "the next complete scan will try again.")
+    if scan_state_save_failed:
+        job.summary += (" The saved scan state couldn't be written; scan again "
+                        "before restarting the app.")
     log.info(job.summary)
 
 
@@ -1739,7 +1785,11 @@ def execute_albums(job, chosen, token):
         if retry_parked:
             from qobuz_librarian.library import library_scan_state
             _remember_review_save(library_scan_state.mark_review_retired(
-                reason="worked_through"), retry=False)
+                reason="worked_through",
+                generation=(job.execute_args or {}).get(
+                    "_library_review_generation"
+                ),
+            ), retry=False)
     elif failed_cands and is_library_run:
         # Partial approve: the unticked picks stayed behind as a living split-
         # off review.
@@ -1817,7 +1867,8 @@ def scan_upgrades(job, token):
                     hidden_mod.SCOPE_UPGRADE,
                     spec.get("artist") or name,
                     spec.get("title"),
-                    current_hidden):
+                    current_hidden,
+                    year=(spec.get("payload") or {}).get("year")):
                 continue
             # Unticked by default, like the gap scan, one click shouldn't
             # re-rip hundreds of albums nobody reviewed.
@@ -2152,6 +2203,7 @@ def execute_downsamples(job, chosen, token=None, args=None):
     failed_albums = 0
     interrupted = 0
     processed = 0
+    stopped_early = False
 
     def skip_parts():
         parts = []
@@ -2174,6 +2226,7 @@ def execute_downsamples(job, chosen, token=None, args=None):
 
     for i, cand in enumerate(chosen, 1):
         if job.cancel_requested:
+            stopped_early = True
             break
         processed = i
         raw_album_dir = (cand.get("payload") or {}).get("album_dir")
@@ -2214,6 +2267,7 @@ def execute_downsamples(job, chosen, token=None, args=None):
             # refresh below re-lists that album so the run can be finished later.
             interrupted += 1
             interrupted_saved += res.get("saved_bytes", 0)
+            stopped_early = True
         elif res.get("resampled"):
             shrunk += 1
             total_saved += res.get("saved_bytes", 0)
@@ -2233,7 +2287,7 @@ def execute_downsamples(job, chosen, token=None, args=None):
         total_errors += res.get("errors", 0)
         total_flush_warns += res.get("flush_warnings", 0)
     job._progress_scope = None
-    if job.cancel_requested:
+    if stopped_early:
         parts = [
             f"Downsampled {plural(shrunk, 'album')} "
             f"({format_size(total_saved)} smaller)"
@@ -2256,6 +2310,10 @@ def execute_downsamples(job, chosen, token=None, args=None):
         job.summary = "Stopped early. " + ", ".join(parts) + "."
         job.summary += _kept_originals_note()
         log.info(job.summary)
+        from qobuz_librarian.web import jobs as job_mgr
+        with job._lock:
+            if job.status is job_mgr.JobStatus.RUNNING:
+                job.status = job_mgr.JobStatus.CANCELED
         return
     # "Reclaimed" is a claim about free space. When the originals are kept, a
     # full copy of every one of them is written to the backup folder, so the
@@ -2277,6 +2335,8 @@ def execute_downsamples(job, chosen, token=None, args=None):
         job.error = f"{job.error} {note}" if job.error else note
     if total_errors or total_flush_warns:
         _mark_job_failed(job)
+    else:
+        _close_completed_job(job)
 
 
 def _kept_originals_note():
@@ -2948,9 +3008,12 @@ def execute_repairs(job, chosen, token):
     args = build_args()
     fixed = 0
     failed = 0
+    interrupted = 0
     processed = 0
+    stopped_early = False
     for i, cand in enumerate(chosen, 1):
         if job.cancel_requested:
+            stopped_early = True
             break
         processed = i
         p = cand["payload"]
@@ -2986,6 +3049,7 @@ def execute_repairs(job, chosen, token):
             # boundary.
             _checkpoint_repair_recovery(job, exc.recovery)
             if job.cancel_requested:
+                stopped_early = True
                 break
             if isinstance(exc.cause, (AuthLost, QobuzUnavailable, SystemExit)):
                 raise exc.cause
@@ -3000,7 +3064,12 @@ def execute_repairs(job, chosen, token):
         # end up downloaded-and-imported is a real failure. A kept backup is
         # not one, a verified repair counts, and the backup is reported in
         # the summary's recovery tail.
-        if (result and result.get("n_ok", 0) > 0 and result.get("imported")
+        if result and (
+            result.get("result") == "cancelled" or result.get("cancelled")
+        ):
+            interrupted += 1
+            stopped_early = True
+        elif (result and result.get("n_ok", 0) > 0 and result.get("imported")
                 and result.get("n_fail", 0) == 0
                 and not result.get("repair_unverified")):
             fixed += 1
@@ -3016,15 +3085,24 @@ def execute_repairs(job, chosen, token):
             )
         else:
             failed += 1
+        if stopped_early:
+            break
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
     recovery_count = len(getattr(job, "recoveries", []) or [])
-    if job.cancel_requested:
-        kept = (f", {recovery_count} kept for recovery"
-                if recovery_count else "")
-        job.summary = (f"Stopped early. {fixed} repaired{kept}, "
-                       f"{len(chosen) - processed} not started.")
+    if stopped_early:
+        parts = [f"{fixed} repaired"]
+        if interrupted:
+            parts.append(f"{interrupted} interrupted")
+        if recovery_count:
+            parts.append(f"{recovery_count} kept for recovery")
+        parts.append(f"{len(chosen) - processed} not started")
+        job.summary = "Stopped early. " + ", ".join(parts) + "."
         log.info(job.summary)
+        from qobuz_librarian.web import jobs as job_mgr
+        with job._lock:
+            if job.status is job_mgr.JobStatus.RUNNING:
+                job.status = job_mgr.JobStatus.CANCELED
         return
     kept = (f" {plural(recovery_count, 'backup')} kept for recovery."
             if recovery_count else "")
@@ -3035,6 +3113,8 @@ def execute_repairs(job, chosen, token):
     if failed:
         job.error = f"{failed} of {plural(len(chosen), 'album')} couldn't be repaired; see the log."
         _mark_job_failed(job)
+    else:
+        _close_completed_job(job)
 
 
 def run_lyric_retry(job):
@@ -3051,6 +3131,7 @@ def run_lyric_retry(job):
     if not paths:
         job.summary = "No tracks were queued for lyric retry."
         log.info(job.summary)
+        _close_completed_job(job)
         return
 
     if not lyric_fetch.AVAILABLE:
@@ -3066,9 +3147,18 @@ def run_lyric_retry(job):
     if dropped:
         log.info(f"{plural(dropped, 'queued path')} no longer on disk; skipping.")
     if not existing:
-        save_lyric_retry([])
+        if not save_lyric_retry([]):
+            job.summary = (
+                "All queued files are gone from disk, but the retry manifest "
+                "couldn't be cleared and was left unchanged."
+            )
+            job.error = job.summary
+            _mark_job_failed(job)
+            log.info(job.summary)
+            return
         job.summary = "All queued files are gone from disk; manifest cleared."
         log.info(job.summary)
+        _close_completed_job(job)
         return
 
     log.info(f"Retrying lyrics on {plural(len(existing), 'track')} ...")
@@ -3096,7 +3186,7 @@ def run_lyric_retry(job):
         log.info(job.error)
         return
 
-    _refresh_lyric_retry(existing)
+    refreshed = _refresh_lyric_retry(existing)
     remaining = load_lyric_retry()
     attempted_paths = {str(path) for path in existing}
     attempted_remaining = sum(
@@ -3109,7 +3199,17 @@ def run_lyric_retry(job):
     )
     resolved = outcome["resolved"]
     failed = outcome["failed"]
-    if job.cancel_requested:
+    if not refreshed:
+        job.summary = (
+            f"Processed {plural(len(existing), 'track')}, but the saved retry "
+            "queue couldn't be updated and was left unchanged."
+        )
+        job.error = job.summary
+        _mark_job_failed(job)
+        log.info(job.summary)
+        return
+    stopped = bool(counts.get("stopped"))
+    if stopped:
         job.summary = (
             f"Stopped. Resolved {resolved}; {failed} failed; "
             f"{plural(len(remaining), 'track')} still queued for retry."
@@ -3125,9 +3225,15 @@ def run_lyric_retry(job):
     elif remaining:
         job.summary = (f"Resolved {resolved}. {plural(len(remaining), 'track')} "
                        "still unresolved, will retry next time.")
+        job.error = (
+            f"{plural(len(remaining), 'lyric retry')} remain unresolved."
+        )
+        _mark_job_failed(job)
     else:
         job.summary = f"All {plural(len(existing), 'retried track')} resolved."
     log.info(job.summary)
+    if not stopped and not failed and not remaining:
+        _close_completed_job(job)
 
 
 def run_library_lyrics(job, *, rescan=False, synced_only=False):
@@ -3165,6 +3271,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     if not total:
         job.summary = "No FLAC files found in the library."
         log.info(job.summary)
+        _close_completed_job(job)
         return
     if res.get("stopped"):
         stop_total = max(0, int(res.get("stop_total", total)))
@@ -3184,6 +3291,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
             "lyrics or were checked before. Tick “Re-check everything” to "
             "redo them.")
         log.info(job.summary)
+        _close_completed_job(job)
         return
     parts = [
         f"{plural(processed, 'track')} checked",
@@ -3233,6 +3341,8 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     if skipped:
         parts.append(f"{skipped} skipped (already checked)")
     job.summary = " · ".join(parts) + "."
+    if not counts["failures"]:
+        _close_completed_job(job)
     log.info(job.summary)
 
 
@@ -3678,3 +3788,8 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         job.status = job_mgr.JobStatus.CANCELED
     job.summary = "; ".join(parts) + "."
     log.info(job.summary)
+    if not has_problem and not result.cancelled:
+        # The exact copies, optional source retirement, and results report are
+        # all durable. Close under the cancellation lock so a Stop arriving at
+        # this final boundary cannot relabel the completed migration.
+        _close_completed_job(job)

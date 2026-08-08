@@ -216,7 +216,12 @@ def _candidate_specs(artist_dir: Path, found, hidden):
     for candidate in found:
         spec = _candidate_spec(artist_dir.name, candidate)
         if hidden is not None and hidden_mod.is_hidden(
-                hidden_mod.SCOPE_UPGRADE, artist_dir.name, spec["title"], hidden):
+                hidden_mod.SCOPE_UPGRADE,
+                artist_dir.name,
+                spec["title"],
+                hidden,
+                year=(spec.get("payload") or {}).get("year"),
+        ):
             continue
         filtered.append(spec)
     return filtered
@@ -230,7 +235,12 @@ def visible_candidates(state=None, hidden=None):
     return [
         c for c in state.get("candidates") or []
         if not hidden_mod.is_hidden(
-            hidden_mod.SCOPE_UPGRADE, c.get("artist"), c.get("title"), hidden)
+            hidden_mod.SCOPE_UPGRADE,
+            c.get("artist"),
+            c.get("title"),
+            hidden,
+            year=(c.get("payload") or {}).get("year"),
+        )
     ]
 
 

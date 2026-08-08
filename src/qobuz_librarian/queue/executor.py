@@ -3186,9 +3186,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             resolved = _resolve_signatures_to_paths(
                 queue_transient_lyric_sigs, _post_dirs + [cfg.STAGING_DIR])
             if resolved:
-                _record_post_import_lyric_retry(resolved)
-                vlog(f"lyric retry: queued {len(resolved)} "
-                     f"post-import path(s) for next-launch retry")
+                if _record_post_import_lyric_retry(resolved):
+                    vlog(f"lyric retry: queued {len(resolved)} "
+                         f"post-import path(s) for next-launch retry")
         except Exception as _e_lr:
             vlog(f"lyric retry resolution failed: {_e_lr}")
     elif (queue_transient_lyric_sigs
@@ -3201,9 +3201,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             resolved = _resolve_signatures_to_paths(
                 queue_transient_lyric_sigs, [cfg.STAGING_DIR])
             if resolved:
-                _record_post_import_lyric_retry(resolved)
-                vlog(f"lyric retry: no album imported; queued "
-                     f"{len(resolved)} staging path(s) for next-launch retry")
+                if _record_post_import_lyric_retry(resolved):
+                    vlog(f"lyric retry: no album imported; queued "
+                         f"{len(resolved)} staging path(s) for next-launch retry")
         except Exception as _e_lr:
             vlog(f"lyric retry (staging fallback) failed: {_e_lr}")
 

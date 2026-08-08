@@ -2,7 +2,7 @@
 
 Two writers into /staging at the same time corrupts both their downloads,
 so only one Qobuz Librarian "run" (CLI invocation or web worker process)
-holds the lock at any time. Uses fcntl.flock — kernel releases the lock
+holds the lock at any time. Uses fcntl.flock - kernel releases the lock
 on process exit (including SIGKILL), so there's no stale-lock cleanup.
 
 The lock file lives in DATA_DIR (a shared volume in Docker) so a

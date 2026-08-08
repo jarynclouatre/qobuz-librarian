@@ -4,8 +4,8 @@ files, retry the strays once, and reconcile the counts.
 Shared by the single-album path (`modes/process.py`) and the queue executor
 (`queue/executor.py`). Both hand it a staging snapshot and the missing/present
 split and read back the `n_ok`/`n_fail`/`n_lossy` bookkeeping. Results are
-written into a caller-owned `result` dict as the work progresses — not just
-returned — so the gap-fill backup taken mid-download can still be resolved by
+written into a caller-owned `result` dict as the work progresses - not just
+returned - so the gap-fill backup taken mid-download can still be resolved by
 the caller's finally/except when a rip raises AuthLost or hits a full disk.
 """
 
@@ -68,7 +68,7 @@ def match_key_from_stem(p):
     writes, then runs the result through the same normalize/strip_edition_suffix
     a Qobuz title goes through, so the two sides compare on equal terms."""
     s = p.stem if hasattr(p, "stem") else str(p)
-    m = re.match(r"^(?:\d+[-.])?\d+[\s\-–—.]+(.+)$", s)
+    m = re.match(r"^(?:\d+[-.])?\d+[\s\-–.]+(.+)$", s)
     t = m.group(1) if m else s
     m = re.match(r"^.+?\s+-\s+(.+)$", t)
     return normalize(strip_edition_suffix(m.group(1) if m else t))
@@ -79,7 +79,7 @@ def _bare_title(title):
 
 
 _DISC_DIR_RE = re.compile(r"^(?:disc|cd)\s*0*(\d+)\b", re.IGNORECASE)
-_NUMBERED_STEM_RE = re.compile(r"^(?:(\d+)[-.])?(\d+)(?:\s*[-–—.]\s*|\s+)(.+)$")
+_NUMBERED_STEM_RE = re.compile(r"^(?:(\d+)[-.])?(\d+)(?:\s*[-–.]\s*|\s+)(.+)$")
 
 
 def _positive_int(value):
@@ -430,7 +430,7 @@ def _staged_binding_records(pairs, keys_by_object, slot_order):
                 "identity": list(receipt.identity),
             }
         )
-    # Pairing follows the staging walk, which follows directory order — with
+    # Pairing follows the staging walk, which follows directory order - with
     # parallel track downloads that rarely matches the catalogue. Everything
     # downstream (journal lineages, the durable runner's binding compare)
     # holds bindings in catalogue-slot order, so emit that order here.
@@ -747,10 +747,10 @@ def run_album_download(
     "path") used to stash already-owned tracks before a full-album re-rip;
     pass None to have it read from ``album_dir`` only if that branch is reached.
 
-    Writes into ``result`` (created if None) as it goes — ``gap_fill_backup_path``
+    Writes into ``result`` (created if None) as it goes - ``gap_fill_backup_path``
     the moment the backup is taken, then n_ok / n_fail / n_lossy /
     failed_tracks / lossy_tracks / rate_limited / elapsed / download_full_album /
-    full_album_rc at the end — and returns it. Honours is_cancel_requested() to
+    full_album_rc at the end - and returns it. Honours is_cancel_requested() to
     stop early; raises AuthLost on auth loss and OSError(ENOSPC) on a full disk
     for the caller to handle."""
     recovery_owner = normalise_recovery_owner(recovery_owner)
@@ -817,7 +817,7 @@ def run_album_download(
 
     # Streamrip's track-URL path crashes with KeyError: 'body' on some tracks
     # (older catalog, edge metadata), so prefer the album URL when most of the
-    # album is missing — beets merges any redundant duplicate of a present
+    # album is missing - beets merges any redundant duplicate of a present
     # track on import.
     if force_track_by_track:
         download_full_album = False
@@ -859,7 +859,7 @@ def run_album_download(
                 28,
                 f"Only {free_mb} MB free at {cfg.STAGING_DIR} "
                 f"(below the {cfg.MIN_FREE_STAGING_MB} MB MIN_FREE_STAGING_MB "
-                f"floor) — refusing to start the download.",
+                f"floor) - refusing to start the download.",
             )
 
     if download_full_album:
@@ -950,7 +950,7 @@ def run_album_download(
             log.info(
                 fmt(
                     C.YELLOW,
-                    f"  ⚠  rip exit 0 but {n_errors} error(s) in output — "
+                    f"  ⚠  rip exit 0 but {n_errors} error(s) in output - "
                     f"some tracks likely skipped (see summary below).",
                 )
             )
@@ -1009,7 +1009,7 @@ def run_album_download(
                 log.info(
                     fmt(
                         C.YELLOW,
-                        f"    ⏳ Qobuz rate-limit detected — cooling down "
+                        f"    ⏳ Qobuz rate-limit detected - cooling down "
                         f"{int(cooldown)}s before the next track.",
                     )
                 )
@@ -1100,7 +1100,7 @@ def run_album_download(
                 n_ok = len(kept)
                 log.info(fmt(C.GREEN, f"  ✓  Retry recovered {recovered} track(s)"))
 
-    # A HARD failure (rip errored with no file landing at all — distinct from
+    # A HARD failure (rip errored with no file landing at all - distinct from
     # a file that landed lossy/broken, retried above) gets one more per-track
     # pull before it's given up on: a transient 5xx / momentary network blip
     # usually clears on a second attempt, and otherwise the user has to re-run
@@ -1210,14 +1210,14 @@ def run_album_download(
                 fmt(
                     C.GRAY,
                     f"  · {len(landed_despite_error)} track(s) landed despite a streamrip "
-                    f"post-processing error — counting as success.",
+                    f"post-processing error - counting as success.",
                 )
             )
 
     if download_full_album and full_album_rc is not None:
         # A full-album rip re-downloads the WHOLE album URL (all
         # n_tracks_total tracks), including the already-present ones we moved
-        # to the gap-fill backup — so n_ok (every clean FLAC that landed) is
+        # to the gap-fill backup - so n_ok (every clean FLAC that landed) is
         # counted against the total, NOT len(missing).
         if n_fail == 0 and full_album_rc != 0 and n_ok > 0:
             log.info(
@@ -1233,7 +1233,7 @@ def run_album_download(
             fmt(
                 C.YELLOW,
                 f"  ⚠  {len(lossy)} track(s) only available lossy on Qobuz "
-                f"(no lossless for your tier — another source needed):",
+                f"(no lossless for your tier - another source needed):",
             )
         )
         for d in lossy[:5]:

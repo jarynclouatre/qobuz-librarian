@@ -1,4 +1,4 @@
-"""Album consolidation — find and remove duplicate sibling folders."""
+"""Album consolidation - find and remove duplicate sibling folders."""
 import hashlib
 import math
 import os
@@ -1122,7 +1122,7 @@ def _same_recording_signal(a, b):
 
     When either side has no readable duration there is NO real evidence, so this
     returns False and the caller keeps both copies. A title (and even a track
-    slot) can coincide between two genuinely different recordings — file size is
+    slot) can coincide between two genuinely different recordings - file size is
     too weak a tiebreak to risk an irreversible delete on, so it is not used."""
     la, lb = a.get("length"), b.get("length")
     if isinstance(la, bool) or isinstance(lb, bool):
@@ -1360,12 +1360,12 @@ def execute_consolidation(summary):
 
 
 def consolidate_albums(album, args):
-    """Top-level consolidation flow. Always interactive — --yes does NOT silence it."""
+    """Top-level consolidation flow. Always interactive - --yes does NOT silence it."""
     from qobuz_librarian.library.catalog import find_album_dir_filesystem
 
     section("Consolidate similar album folders")
     # Consolidation deletes overlapping sibling tracks, so it must never run
-    # under --dry-run — including on the "already complete" album path, which
+    # under --dry-run - including on the "already complete" album path, which
     # reaches here before process_album's own dry-run stop.
     if getattr(args, "dry_run", False):
         log.info(fmt(C.GRAY,

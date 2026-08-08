@@ -507,6 +507,51 @@
     document.querySelectorAll("#download-toast [data-flash]")
       .forEach(function (el) { setTimeout(function () { fade(el); }, 8000); });
   }
+  function normalizeFlashAnnouncements() {
+    document.querySelectorAll("[data-flash]").forEach(function (el) {
+      if (el.getAttribute("role")) return;
+      var isError = el.classList.contains("ql-notice-error")
+        || el.classList.contains("ql-flash-error");
+      el.setAttribute("role", isError ? "alert" : "status");
+      if (!isError) el.setAttribute("aria-live", "polite");
+    });
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    var copied = false;
+    try { copied = document.execCommand("copy"); } catch (e) {}
+    area.remove();
+    return copied ? Promise.resolve() : Promise.reject(new Error("copy failed"));
+  }
+
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-copy-target]");
+    if (!button) return;
+    var target = document.querySelector(button.getAttribute("data-copy-target"));
+    if (!target) return;
+    var original = button.textContent;
+    button.disabled = true;
+    copyText(target.textContent.trim()).then(function () {
+      button.textContent = "Copied";
+    }).catch(function () {
+      button.textContent = "Copy failed";
+    }).then(function () {
+      setTimeout(function () {
+        button.textContent = original;
+        button.disabled = false;
+      }, 1600);
+    });
+  });
   // Clear stale flashes after a job moves on.
   window.qlDismissAllFlashes = function () {
     document.querySelectorAll("[data-flash]").forEach(fade);
@@ -1087,7 +1132,7 @@
     var waitNote = document.getElementById("queue-wait-note");
     function clearQueuedState() {
       if (waitNote) { waitNote.classList.add("hidden"); waitNote = null; }
-      if (activity && activity.textContent === "Queued") {
+      if (activity && (activity.textContent === "Queued" || activity.textContent === "Waiting to start")) {
         activity.textContent = jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning";
       }
     }
@@ -2026,6 +2071,7 @@
 
   function initAll() {
     autoDismissFlashes();
+    normalizeFlashAnnouncements();
     initCoverFallbacks();
     initSearchResults();
     initStreamCards();
@@ -2182,10 +2228,18 @@
     });
   }
 
+  function announceDiagnosticsSwap(event) {
+    var target = event.detail && event.detail.target;
+    if (!target || target.id !== "diagnostics-list") return;
+    var status = document.getElementById("diagnostics-status");
+    if (status) status.textContent = "Diagnostics refreshed.";
+  }
+
   // Re-scan swapped content for flashes and streams.
   document.addEventListener("htmx:afterSwap", initAll);
   document.addEventListener("htmx:afterSwap", restoreSearchFocus);
   document.addEventListener("htmx:afterSwap", revealSearchFeedback);
+  document.addEventListener("htmx:afterSwap", announceDiagnosticsSwap);
   // A restored artist deep-link replays itself once on load; drop the artist it
   // carried afterwards so the next search the user types is its own.
   document.addEventListener("htmx:afterRequest", function (e) {

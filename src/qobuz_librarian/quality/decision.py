@@ -12,6 +12,7 @@ from qobuz_librarian.api.search import get_artist_albums, search_artists
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.catalog import (
     album_quality_label,
+    album_year,
     compute_missing,
     find_existing_tracks,
     find_extras_in_existing,
@@ -160,8 +161,8 @@ def _track_quality_cmp(t1, t2):
 
 def quality_change_summary(overlap):
     """Count tracks that would be a downgrade if deleted. A sibling track whose
-    own quality can't be read — a FLAC with no usable STREAMINFO/title falls back
-    to (0, 0) — is counted as ``unknown``: it could be hi-res, so deleting it must
+    own quality can't be read - a FLAC with no usable STREAMINFO/title falls back
+    to (0, 0) - is counted as ``unknown``: it could be hi-res, so deleting it must
     clear the same confirmation as a known hi-res loss rather than reading as a
     safe lower-quality drop."""
     losing_hires = same = upgrading = unknown = 0
@@ -212,7 +213,7 @@ def _capped_is_fresh(ts):
 
 
 # The cap store is load-modify-save from web worker threads (each finished
-# upgrade/downsample marks its album) and, in terminal mode, the CLI walks —
+# upgrade/downsample marks its album) and, in terminal mode, the CLI walks -
 # so mutations hold both a thread lock and the cross-process store lock.
 # Readers stay lockless; a snapshot is fine for them.
 _capped_lock = threading.Lock()
@@ -264,7 +265,7 @@ def is_local_album_capped(album_dir, capped, album=None):
         return True
     # Path-independent fallback: a folder move / rename / migrate /
     # consolidate changes the path-derived key, but it's the same album the
-    # user deliberately downsampled — so match the durable local cap by Qobuz
+    # user deliberately downsampled - so match the durable local cap by Qobuz
     # album id, then by a loose artist+title fingerprint (the same identity
     # the dismiss store uses). Without this, any reorg re-opens the
     # downsample→upgrade loop the cap exists to stop.
@@ -285,7 +286,7 @@ def is_local_album_capped(album_dir, capped, album=None):
 
 
 def clear_local_album_cap(album_dir):
-    """Forget that an album was downsampled — the undo path.
+    """Forget that an album was downsampled - the undo path.
 
     The cap exists so Upgrade never re-offers an album the user deliberately
     shrank. Restoring the hi-res originals makes that no longer true, and
@@ -310,7 +311,7 @@ def _clear_local_album_cap_locked(key, album_dir):
                     and str(v.get("album_dir") or "") == str(path)))
 
     # is_local_album_capped also matches path-independently, by Qobuz id and
-    # by artist+title fingerprint — so the undo has to clear by the same
+    # by artist+title fingerprint - so the undo has to clear by the same
     # identities, or an entry re-marked under a moved folder keeps
     # suppressing the album after the originals come back.
     ids, fps = set(), set()
@@ -467,20 +468,26 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
 
         existing, _ = find_existing_tracks(qobuz_album)
         if not existing:
-            continue  # nothing on disk — not an upgrade scenario
+            continue  # nothing on disk - not an upgrade scenario
 
         # False-match guard: if no tracks overlap the Qobuz result is wrong.
         missing, present = compute_missing(qobuz_tracks, existing)
         if not present:
             continue
 
-        # Key the single check on the matched Qobuz artist name — that's what
+        # Key the single check on the matched Qobuz artist name - that's what
         # mark_single stored. The folder name (artist_name) can differ from it
         # ("Beatles" on disk vs "The Beatles" on Qobuz), which would miss the
         # mark and leak the downloaded single into the upgrade scan.
         if single_store is not None and missing:
             q_artist = (qobuz_album.get("artist") or {}).get("name") or artist_name
-            if hidden_mod.is_single(q_artist, qobuz_album.get("title"), single_store):
+            if hidden_mod.is_single(
+                q_artist,
+                qobuz_album.get("title"),
+                single_store,
+                year=album_year(qobuz_album),
+                album_id=qobuz_album.get("id"),
+            ):
                 continue
 
         if getattr(args, "no_upgrade", False):
@@ -507,7 +514,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
                 if new_extras:
                     continue
                 # A swapped-to edition has its own id, so its cap marker is
-                # separate from the one we checked above — honour it here or
+                # separate from the one we checked above - honour it here or
                 # a capped expanded edition re-flags on every scan.
                 if capped and is_album_capped(full.get("id"), capped):
                     continue
@@ -534,7 +541,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
         if len(_qcounts) > 1:
             # Mixed qualities on disk. A majority label can EQUAL the target
             # (one stray CD track in a hi-res album), which reads as a no-op
-            # upgrade — name the low end instead, since that's what the
+            # upgrade - name the low end instead, since that's what the
             # upgrade fixes.
             lo_b, lo_r = min(_qcounts)
             existing_label = f"mixed, down to {lo_b}-bit/{lo_r / 1000:g}kHz"
@@ -545,7 +552,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
             existing_label = "lower quality"
 
         # Capture confidence signals for --auto-safe.
-        # 'extras' here is the var from the bonus-track guard above —
+        # 'extras' here is the var from the bonus-track guard above -
         # truthy means an edition swap was used to cover on-disk tracks.
         _folder_bare = strip_album_decorations(album_dir.name)
         _title_bare  = strip_album_decorations(qobuz_album.get("title", "") or "")

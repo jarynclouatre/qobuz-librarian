@@ -15,4 +15,4 @@ body:
       description: Bottom of the sidebar in the web UI, or `qobuz-librarian --version`.
   - type: markdown
     attributes:
-      value: The [configuration](https://github.com/jarynclouatre/qobuz-librarian/blob/main/docs/configuration.md) and [troubleshooting](https://github.com/jarynclouatre/qobuz-librarian/blob/main/docs/troubleshooting.md) docs cover the common ones — worth a skim first.
+      value: The [configuration](https://github.com/jarynclouatre/qobuz-librarian/blob/main/docs/configuration.md) and [troubleshooting](https://github.com/jarynclouatre/qobuz-librarian/blob/main/docs/troubleshooting.md) docs cover the common ones - worth a skim first.

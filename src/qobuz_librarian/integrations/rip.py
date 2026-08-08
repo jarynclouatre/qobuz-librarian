@@ -102,11 +102,11 @@ def flac_audio_ok(path, *, descriptor=None):
 
     Returns True/False, or None when the flac tool isn't installed so the
     caller can choose its own fallback. ``flac -t`` reads only the audio
-    stream — the embedded cover art streamrip always writes (sometimes the
+    stream - the embedded cover art streamrip always writes (sometimes the
     oversized "original" Qobuz art) never enters the decode, so a track with
     intact audio but a malformed picture isn't mistaken for a broken download.
     A verify that exceeds the timeout reads as broken (False), not unverifiable
-    — FLAC checks far faster than real time, so a hang means a pathological file,
+    - FLAC checks far faster than real time, so a hang means a pathological file,
     and None is reserved for the tool being absent."""
     if shutil.which("flac") is None:
         return None
@@ -128,7 +128,7 @@ def flac_audio_ok(path, *, descriptor=None):
 
 
 def flac_audio_offset(path, *, descriptor=None):
-    """Byte offset of the first audio frame — the ``fLaC`` marker plus every
+    """Byte offset of the first audio frame - the ``fLaC`` marker plus every
     metadata block. Lets a caller weigh the audio stream apart from metadata and
     embedded art, which don't shrink on resample and survive the tail damage that
     truncates the audio. Returns 0 when the file isn't a plain FLAC or the header
@@ -152,7 +152,7 @@ def flac_audio_offset(path, *, descriptor=None):
                 is_last = bool(header[0] & 0x80)
                 offset += 4 + int.from_bytes(header[1:4], "big")
                 # A corrupt/garbage block length can push the offset past EOF;
-                # don't trust it — it would collapse a caller's audio_size to 0
+                # don't trust it - it would collapse a caller's audio_size to 0
                 # and false-flag a healthy file as truncated. Fall back to the
                 # whole-file size instead.
                 if offset > size:
@@ -169,7 +169,7 @@ def is_flac(path: Path) -> bool:
 
     An interrupted streamrip download leaves a truncated file behind whose
     header still advertises the full duration, so a metadata probe reports
-    the whole track length even though most audio frames are missing — only
+    the whole track length even though most audio frames are missing - only
     verifying the frames exposes the gap. Without catching it, partials
     inflate n_ok, beets silently skips them on import, and the upgrade flow
     declares a false success.
@@ -225,7 +225,7 @@ def _kill_process_group(proc):
     except OSError:
         pass  # child already gone, or getpgid failed → fall through
     try:
-        proc.kill()  # child pid only — never our own group
+        proc.kill()  # child pid only - never our own group
     except OSError:
         pass
 
@@ -254,7 +254,7 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
     """Run `rip url <url>`, returning (returncode, combined_output_string).
 
     live_output=True: stream rip's output to the terminal in real time via a
-    reader thread — used for full-album downloads where silence for many minutes
+    reader thread - used for full-album downloads where silence for many minutes
     is unacceptable on mobile.
 
     start_new_session=True puts rip in its own process group so that on timeout
@@ -268,8 +268,8 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
     cmd = ["rip"]
     # The librarian does its own missing-track bookkeeping (it re-rips for
     # quality upgrades, truncation repair, and broken-FLAC retries), so
-    # streamrip's downloads database — which silently skips any URL it has
-    # already logged, exiting 0 with no new file — must be off. The Docker
+    # streamrip's downloads database - which silently skips any URL it has
+    # already logged, exiting 0 with no new file - must be off. The Docker
     # entrypoint forces downloads_enabled=false in the config, but a
     # bare-metal/CLI run can fall back to the user's own
     # ~/.config/streamrip/config.toml where it defaults ON; --no-db (a global
@@ -310,7 +310,7 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
     # box on its `version_coro` post-processing bug; this filters the noise
     # out of live output.
     _box_re  = re.compile(r"^[\u2500-\u257f]")
-    # Rich's log handler appends "  module.py:LINE" columns at end of line —
+    # Rich's log handler appends "  module.py:LINE" columns at end of line -
     # anchor to EOL so a track title containing the literal "name.py:42"
     # isn't mangled.
     _src_re  = re.compile(r"\s+\w+\.py:\d+\s*$")
@@ -375,7 +375,7 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
             log.info("    " + _src_re.sub("", _lvl_re.sub("", cleaned)))
         emit_error()
 
-    # Wrap so the reader thread inherits the spawning job's context — its
+    # Wrap so the reader thread inherits the spawning job's context - its
     # streamrip progress + per-track error lines log via the shared logger and
     # would otherwise be dropped by the job-log handler's thread filter.
     reader = threading.Thread(target=wrap_thread_target(_reader), daemon=True)
@@ -403,12 +403,12 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
         # 124 (the conventional timeout exit code) so a timeout is
         # distinguishable from a generic rip failure (rc=1) in the logs.
         return 124, "".join(lines) + (
-            f"\n<<< rip timed out after {timeout}s — try a smaller batch "
+            f"\n<<< rip timed out after {timeout}s - try a smaller batch "
             "or raise RIP_TIMEOUT in compose.yaml. >>>")
     except KeyboardInterrupt:
         # Ctrl-C: with start_new_session=True the SIGINT did NOT propagate to
         # rip's group, so rip + its children would keep running after this
-        # process exits — wasted bandwidth, half-written staging files.
+        # process exits - wasted bandwidth, half-written staging files.
         _terminate(proc, reader)
         raise
 
@@ -472,10 +472,10 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None):
     kinds of reject aside. Returns Paths for all three buckets so the
     caller can retain enough identity to retry the exact rejected track:
 
-      lossy   — a non-FLAC file (.mp3/.m4a/…). Qobuz served lossy because no
+      lossy   - a non-FLAC file (.mp3/.m4a/…). Qobuz served lossy because no
                 lossless master is available for the user's tier; another
                 source would be needed.
-      broken  — a .flac that won't decode (truncated/interrupted download).
+      broken  - a .flac that won't decode (truncated/interrupted download).
                 A re-rip usually fixes it.
     """
     owner = normalise_recovery_owner(owner)
@@ -510,8 +510,8 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None):
             continue
         # Record the reject whether or not we can delete it, so the caller's
         # counts and per-track retry see it. A reject left in staging gets
-        # imported by beets (move: yes, autotag: no) — the exact lossy/truncated
-        # file this discard exists to keep out — so when the unlink fails, move
+        # imported by beets (move: yes, autotag: no) - the exact lossy/truncated
+        # file this discard exists to keep out - so when the unlink fails, move
         # it out of the import tree rather than leaving it to be picked up.
         bucket.append(receipt or f)
         if owner is None:

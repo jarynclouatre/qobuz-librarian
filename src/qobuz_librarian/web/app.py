@@ -700,6 +700,14 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                "run writing the library at the same time would go unnoticed. "
                "Downloads and scans are paused. Move the data folder to a "
                "writable filesystem that supports file locking, then restart.")
+    elif _STARTUP_RECOVERY_UNKNOWN:
+        reason = "Interrupted work could not be checked safely."
+        msg = (
+            "Qobuz Librarian acquired the safety lock but could not read its "
+            "saved recovery state. The lock was released, downloads and scans "
+            "remain paused, and the app will retry automatically. Check the "
+            "data-folder permissions if this notice remains."
+        )
     elif not _run_lock_intact():
         reason = "The safety lock that keeps one writer at a time was lost."
         msg = ("The single-writer safety lock was lost. Downloads and scans "
@@ -937,6 +945,82 @@ async def _finish_web_lifespan(ticker, lock_retry_task, maintenance_task) -> Non
     finally:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _shutdown_web_mutations)
+
+
+def _close_web_run_lock(lease) -> None:
+    """Release a candidate Web lease without hiding a close failure."""
+    try:
+        lease.close()
+    except OSError:
+        logging.getLogger("qobuz_librarian").exception(
+            "couldn't release a rejected Web run-lock lease"
+        )
+
+
+def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
+    """Publish a lease only while recovery and saved jobs are reconciled."""
+    global _RUN_LOCK_HANDLE
+    _RUN_LOCK_HANDLE = lease
+    try:
+        result = _record_startup_recovery(lease)
+        if restore_jobs:
+            _restore_jobs_once()
+        return result
+    except BaseException:
+        _RUN_LOCK_HANDLE = None
+        _close_web_run_lock(lease)
+        raise
+
+
+async def _retry_web_run_lock(run_lock, log, *, delay: float = 30) -> None:
+    """Retry a busy lock and an acquired lease whose recovery read failed."""
+    global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _LOCK_UNENFORCEABLE
+    while _LOCK_BUSY_PID is not None or _STARTUP_RECOVERY_UNKNOWN:
+        await asyncio.sleep(delay)
+        with _auto_check_lock:
+            if _CLI_MODE:
+                return
+        try:
+            lease = run_lock.acquire()
+        except run_lock.LockBusy as busy:
+            with _auto_check_lock:
+                if _CLI_MODE:
+                    return
+                _LOCK_BUSY_PID = busy.pid
+            continue
+
+        with _auto_check_lock:
+            if _CLI_MODE:
+                if lease is not None:
+                    _close_web_run_lock(lease)
+                return
+            if lease is None:
+                _RUN_LOCK_HANDLE = None
+                _LOCK_BUSY_PID = None
+                _LOCK_UNENFORCEABLE = True
+                log.error(
+                    "Run-lock became unenforceable; download/scan endpoints "
+                    "paused until a lock-capable data folder is available "
+                    "and the app is restarted."
+                )
+                return
+            try:
+                result = _recover_under_web_run_lock(lease)
+            except Exception:
+                _LOCK_BUSY_PID = None
+                _LOCK_UNENFORCEABLE = False
+                log.exception(
+                    "Lock acquired, but durable recovery could not be read; "
+                    "the lease was released and Web will retry."
+                )
+                continue
+            _LOCK_UNENFORCEABLE = False
+            _LOCK_BUSY_PID = None
+        log.info(
+            "Lock acquired; durable queue startup state: %s.",
+            result.status.value,
+        )
+        return
 
 
 def _resume_album_download(job, _args):
@@ -1228,11 +1312,12 @@ def _sync_saved_review_job(job, surface, state, signature):
     that still exist and add restored saved candidates unticked.
     """
     desired = list(state.get("candidates") or [])
-    with job._review_action_lock, job._lock:
+
+    def _sync():
         # A review that already left AWAITING_REVIEW must not be replaced
         # underneath its approval.
         if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
-            return job
+            return False
         existing_raw_by_key = {
             _saved_review_key(surface, c): c
             for c in job.candidates
@@ -1276,10 +1361,29 @@ def _sync_saved_review_job(job, surface, state, signature):
         else:
             job.summary = (
                 f"{n} upgrade candidate{'s' if n != 1 else ''} ready to review.")
+        return True
+
     from qobuz_librarian.web import job_persistence
-    job_persistence.persist(job)
+    saved, synced = job_persistence.persist_review_mutation(job, _sync)
+    if not saved:
+        job.notify_review_changed("save_failed")
+        return None
+    if not synced:
+        return job
     job.notify_review_changed()
     return job
+
+
+def _publish_saved_review(job):
+    """Admit one reconstructed review before exposing it in memory."""
+    from qobuz_librarian.web import job_persistence
+
+    if _web_writes_paused():
+        return False
+    if not job_persistence.admit(job):
+        return False
+    job_mgr.registry.add(job)
+    return True
 
 
 def _sync_saved_review_before_approve(job):
@@ -1341,7 +1445,8 @@ def _review_job_from_upgrade_state(state):
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
         n = len(job.candidates)
         job.summary = f"{n} upgrade candidate{'s' if n != 1 else ''} ready to review."
-        job_mgr.registry.add(job)
+        if not _publish_saved_review(job):
+            return None
         return job
 
 
@@ -1381,7 +1486,8 @@ def _review_job_from_downsample_state(state):
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
         n = len(job.candidates)
         job.summary = f"{n} album{'s' if n != 1 else ''} can be downsampled."
-        job_mgr.registry.add(job)
+        if not _publish_saved_review(job):
+            return None
         return job
 
 
@@ -1420,37 +1526,45 @@ def _review_job_from_library_state():
     from qobuz_librarian.library import library_scan_state
     from qobuz_librarian.web import flows
 
-    mstate = library_scan_state.kind_state("missing")
-    if not mstate.get("complete"):
-        return None
-    full = library_scan_state.load()
-    # Compare the retire marker against the MISSING kind's OWN last-save time,
-    # not the global stamp: save_kind() bumps the global updated_at for every
-    # kind it writes (a gap-fill / partial scan included), so a global compare
-    # let any unrelated save resurrect a review the user discarded.
-    missing_updated = float(mstate.get("updated_at") or 0.0)
-    retired_at = float(full.get("review_retired_at") or 0.0)
-    if retired_at and retired_at >= missing_updated:
-        return None
-    hidden = hidden_mod.load()
-    specs = []
-    for name, entry in (mstate.get("artists") or {}).items():
-        for spec in (entry or {}).get("candidates") or []:
-            artist = spec.get("artist") or name
-            title = spec.get("title") or ""
-            if hidden_mod.is_hidden(
-                    hidden_mod.SCOPE_MISSING, artist, title, hidden):
-                continue
-            specs.append(spec)
-    if not specs:
-        return None
-    with _SAVED_REVIEW_LOCK:
+    with library_scan_state.review_state_lock(), _SAVED_REVIEW_LOCK:
+        mstate = library_scan_state.kind_state("missing")
+        if not mstate.get("complete"):
+            return None
+        full = library_scan_state.load()
+        # Compare the retire marker against the MISSING kind's OWN last-save time,
+        # not the global stamp: save_kind() bumps the global updated_at for every
+        # kind it writes (a gap-fill / partial scan included), so a global compare
+        # let any unrelated save resurrect a review the user discarded.
+        missing_updated = float(mstate.get("updated_at") or 0.0)
+        retired_at = float(full.get("review_retired_at") or 0.0)
+        if retired_at and retired_at >= missing_updated:
+            return None
+        hidden = hidden_mod.load()
+        specs = []
+        for name, entry in (mstate.get("artists") or {}).items():
+            for spec in (entry or {}).get("candidates") or []:
+                artist = spec.get("artist") or name
+                title = spec.get("title") or ""
+                if hidden_mod.is_hidden(
+                        hidden_mod.SCOPE_MISSING,
+                        artist,
+                        title,
+                        hidden,
+                        year=(spec.get("payload") or {}).get("year"),
+                ):
+                    continue
+                specs.append(spec)
+        if not specs:
+            return None
         existing = _library_current_job()  # re-check under the lock
         if existing is not None:
             return existing
         job = job_mgr.Job(title="Library scan")
         job.kind = "scan"
         job.execute_kind = "library"
+        job.execute_args = {
+            "_library_review_generation": missing_updated,
+        }
         job._execute_fn = lambda j, chosen: flows.execute_albums(
             j, chosen, _get_token())
         for spec in specs:
@@ -1466,7 +1580,8 @@ def _review_job_from_library_state():
         from qobuz_librarian.web import flows
         job.summary = (flows.library_review_summary(job.candidates)
                        + ", from your last library scan.")
-        job_mgr.registry.add(job)
+        if not _publish_saved_review(job):
+            return None
         return job
 
 
@@ -1552,6 +1667,10 @@ async def _lifespan(_app: FastAPI):
     from qobuz_librarian.api.auth import sync_streamrip_creds_from_env
     from qobuz_librarian.web import settings_store
     settings_store.load()
+    try:
+        cfg.validate_storage_roots()
+    except ValueError as exc:
+        raise RuntimeError(f"invalid storage paths: {exc}") from None
     # If creds are provided via env vars, mirror them into the streamrip
     # config now so web-triggered downloads don't fail on streamrip's
     # interactive auth prompt (the env-var path doesn't otherwise reach
@@ -1586,7 +1705,10 @@ async def _lifespan(_app: FastAPI):
                     "the app.")
             else:
                 _LOCK_UNENFORCEABLE = False
-                result = _record_startup_recovery(_RUN_LOCK_HANDLE)
+                result = _recover_under_web_run_lock(
+                    _RUN_LOCK_HANDLE,
+                    restore_jobs=False,
+                )
                 _log.info(
                     "Durable queue startup state: %s.",
                     result.status.value,
@@ -1600,44 +1722,12 @@ async def _lifespan(_app: FastAPI):
                 busy.pid,
             )
 
-    async def _retry_lock():
-        global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _LOCK_UNENFORCEABLE
-        while _LOCK_BUSY_PID is not None:
-            await asyncio.sleep(30)
-            # The lock state can change during the sleep: set_mode('cli')
-            # hands the lock to the terminal (sets _CLI_MODE, clears
-            # _LOCK_BUSY_PID).
-            if _LOCK_BUSY_PID is None or _CLI_MODE:
-                return
-            try:
-                lease = run_lock.acquire()
-                if lease is None:
-                    _RUN_LOCK_HANDLE = None
-                    _LOCK_BUSY_PID = None
-                    _LOCK_UNENFORCEABLE = True
-                    _log.error(
-                        "Run-lock became unenforceable; download/scan "
-                        "endpoints paused until a lock-capable data folder is "
-                        "available and the app is restarted.")
-                else:
-                    _RUN_LOCK_HANDLE = lease
-                    result = _record_startup_recovery(lease)
-                    _restore_jobs_once()
-                    _LOCK_UNENFORCEABLE = False
-                    _LOCK_BUSY_PID = None
-                    _log.info(
-                        "Lock acquired; durable queue startup state: %s.",
-                        result.status.value,
-                    )
-                return
-            except run_lock.LockBusy as busy:
-                _LOCK_BUSY_PID = busy.pid
     lock_retry_task = None
     maintenance_task = None
     ticker = None
     try:
         lock_retry_task = (
-            asyncio.create_task(_retry_lock())
+            asyncio.create_task(_retry_web_run_lock(run_lock, _log))
             if _LOCK_BUSY_PID is not None
             else None
         )
@@ -2142,11 +2232,20 @@ async def login_submit(request: Request, username: str = Form(""),
 
 @app.post("/logout")
 async def logout(request: Request):
-    resp = RedirectResponse(url="/login", status_code=303)
-    resp.headers["Cache-Control"] = "no-store"
     # Revoke the session server-side, not just the browser cookie; otherwise a
     # captured cookie value stays valid for its full 30-day lifetime.
-    web_auth.revoke_session(request.cookies.get(web_auth.SESSION_COOKIE))
+    if not web_auth.revoke_session(
+        request.cookies.get(web_auth.SESSION_COOKIE)
+    ):
+        return render_error_page(
+            request,
+            503,
+            "Couldn't log out",
+            "The session store couldn't be saved, so nothing changed. Check "
+            "that the data volume is writable, then try logging out again.",
+        )
+    resp = RedirectResponse(url="/login", status_code=303)
+    resp.headers["Cache-Control"] = "no-store"
     web_auth.clear_session_cookie(resp)
     return resp
 
@@ -2922,7 +3021,13 @@ def _fold_into_parked_library_review(job):
     from qobuz_librarian.web import flows, review_badges
     with job._lock:
         cands = list(job.candidates)
-    folded = flows.fold_new_candidates(parked, cands)
+    folded = flows.fold_new_candidates(
+        parked,
+        cands,
+        review_generation=(job.execute_args or {}).get(
+            "_library_review_generation"
+        ),
+    )
     if folded is False:
         job.status = job_mgr.JobStatus.FAILED
         job.error = (
@@ -3702,6 +3807,7 @@ def _make_download_run(
         args = build_args()
         _note_staging_wait(j, "Downloading", 0, 1)
         durable_failure = False
+        durable_completion_settled = False
         with job_mgr.staging_lock():
             durable_item = None
             if durable_planned is not None:
@@ -3801,6 +3907,7 @@ def _make_download_run(
                 )
                 if accepted or cancelled_clean:
                     r = result
+                    durable_completion_settled = accepted
                 else:
                     r = result or {}
                     durable_failure = True
@@ -3935,7 +4042,18 @@ def _make_download_run(
             from qobuz_librarian.library import hidden as hidden_mod
             hidden_mod.unmark_single(
                 (album.get("artist") or {}).get("name") or "?",
-                album.get("title") or "?")
+                album.get("title") or "?",
+                album_id=album.get("id"),
+            )
+        if durable_completion_settled:
+            # Exact completion, external acknowledgement, carrier retirement,
+            # and journal cleanup all finished before the executor returned.
+            # Close the Web state under the same lock as request_cancel so a
+            # late click cannot relabel the completed library mutation.
+            with j._lock:
+                if j.status is job_mgr.JobStatus.RUNNING:
+                    j.cancel_requested = False
+                    j.status = job_mgr.JobStatus.DONE
     return run
 
 
@@ -6181,14 +6299,24 @@ def _make_single_track_run(album, track, token):
                 j.error = (f"{e} The rest of the album may still show "
                            "in scans.")
         elif len(missing) > 1:
-            hidden_mod.unmark_single(artist, title)
+            hidden_mod.unmark_single(
+                artist,
+                title,
+                year=album_year(album),
+                album_id=album.get("id"),
+            )
             j.summary = (f"Got “{t_title}”, filed under {artist} / {title}. "
                          "Future scans can still offer the rest of the album.")
         else:
             # This download completed the album, so it's a normal full album
             # now, so clear any single mark an earlier partial download left
             # behind.
-            hidden_mod.unmark_single(artist, title)
+            hidden_mod.unmark_single(
+                artist,
+                title,
+                year=album_year(album),
+                album_id=album.get("id"),
+            )
             j.summary = (f"Got “{t_title}”; that completed {title}, so it's "
                          "filed as a full album.")
             # Complete means any parked Gap Fill candidate for it is stale.
@@ -7522,7 +7650,17 @@ async def job_approve(request: Request, job_id: str):
     # flip the job to done over an empty set and flash success while quietly
     # discarding the whole review.
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-        job = _sync_saved_review_before_approve(job)
+        synced_job = _sync_saved_review_before_approve(job)
+        if synced_job is None:
+            return RedirectResponse(
+                url=dest + "?error=" + urllib.parse.quote(
+                    "The refreshed review could not be saved. Your existing "
+                    "choices are untouched; check the data folder and try "
+                    "again."
+                ),
+                status_code=303,
+            )
+        job = synced_job
     if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
             and job.execute_kind == "upgrade"
             and (job.execute_args or {}).get("quality_signature")
@@ -8790,14 +8928,42 @@ async def job_undo(request: Request, job_id: str):
 
     undo_outcome = {}
 
+    def _clear_deliberate_single_mark() -> bool:
+        """Return only after the exact suppression mark is durably absent."""
+        if not info.get("marked"):
+            return True
+        from qobuz_librarian.library import hidden as hidden_mod
+        try:
+            hidden_mod.unmark_single(
+                info.get("artist") or "",
+                info.get("album") or "",
+                year=info.get("year"),
+                album_id=info.get("album_id"),
+            )
+            store = hidden_mod.load()
+            return not hidden_mod.is_single(
+                info.get("artist") or "",
+                info.get("album") or "",
+                store,
+                year=info.get("year"),
+                album_id=info.get("album_id"),
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+
     def _reverse():
         from pathlib import Path
 
         from qobuz_librarian.integrations.beets import forget_beets_entries
-        from qobuz_librarian.library import hidden as hidden_mod
         from qobuz_librarian.web import job_persistence
         if cleanup_retry:
-            return None, forget_beets_entries([Path(catalog_cleanup["path"])])
+            catalog_result = forget_beets_entries(
+                [Path(catalog_cleanup["path"])]
+            )
+            undo_outcome["single_mark_complete"] = (
+                _clear_deliberate_single_mark()
+            )
+            return None, catalog_result
         owned_root = info.get("owned_root")
         if owned_root is not None:
             current_root = os.path.abspath(os.fspath(cfg.MUSIC_ROOT))
@@ -8826,10 +8992,9 @@ async def job_undo(request: Request, job_id: str):
         catalog_result = None
         if removed is not None:
             catalog_result = forget_beets_entries([removed])
-            if info.get("marked"):
-                hidden_mod.unmark_single(
-                    info.get("artist") or "", info.get("album") or ""
-                )
+            undo_outcome["single_mark_complete"] = (
+                _clear_deliberate_single_mark()
+            )
         return removed, catalog_result
 
     # Register under the same gate as the CLI handoff before taking the
@@ -8857,16 +9022,16 @@ async def job_undo(request: Request, job_id: str):
         return _tr(request, "lock_busy.html", {"msg": msg}, status_code=503)
     lock_held = True
     try:
-        try:
-            removed, catalog_result = await loop.run_in_executor(None, _reverse)
-        finally:
-            lock.release()
-            lock_held = False
+        removed, catalog_result = await loop.run_in_executor(None, _reverse)
         catalog_complete = bool(
             getattr(catalog_result, "complete", catalog_result)
         )
+        single_mark_complete = undo_outcome.get(
+            "single_mark_complete", True
+        )
+        refresh_needed = False
         if cleanup_retry:
-            if catalog_complete:
+            if catalog_complete and single_mark_complete:
                 completed = {**info, "removed": True}
                 completed.pop("catalog_cleanup", None)
                 job.single = completed
@@ -8875,6 +9040,15 @@ async def job_undo(request: Request, job_id: str):
                 job.summary = (
                     f"Removed “{info.get('title')}” and undid the single."
                 )
+            elif catalog_complete:
+                job.single = {**info, "removed": False}
+                job.single.pop("catalog_cleanup", None)
+                if job.attention == "catalog":
+                    job.attention = ""
+                job.summary = (
+                    f"Removed “{info.get('title')}”, but couldn't save the "
+                    "single mark cleanup. Retry Undo."
+                )
             else:
                 job.attention = "catalog"
                 job.summary = (
@@ -8882,11 +9056,17 @@ async def job_undo(request: Request, job_id: str):
                     "stale Beets catalogue entry. Retry catalogue cleanup."
                 )
         elif removed is not None:
-            await loop.run_in_executor(None, _refresh_after_undo)
-            if catalog_complete:
+            refresh_needed = True
+            if catalog_complete and single_mark_complete:
                 job.single = {**info, "removed": True}
                 job.summary = (
                     f"Removed “{info.get('title')}” and undid the single."
+                )
+            elif catalog_complete:
+                job.single = {**info, "removed": False}
+                job.summary = (
+                    f"Removed “{info.get('title')}”, but couldn't save the "
+                    "single mark cleanup. Retry Undo."
                 )
             else:
                 job.single = {
@@ -8911,14 +9091,22 @@ async def job_undo(request: Request, job_id: str):
                 and not _Path(info["dir"]).exists()
             )
             if dir_gone:
-                if info.get("marked"):
-                    from qobuz_librarian.library import hidden as hidden_mod
-                    hidden_mod.unmark_single(
-                        info.get("artist") or "", info.get("album") or "")
-                await loop.run_in_executor(None, _refresh_after_undo)
-                job.single = {**info, "removed": True}
-                job.summary = (f"“{info.get('title')}” was already gone; "
-                               "cleared the single mark.")
+                single_mark_complete = await loop.run_in_executor(
+                    None, _clear_deliberate_single_mark
+                )
+                refresh_needed = True
+                job.single = {
+                    **info,
+                    "removed": bool(single_mark_complete),
+                }
+                if single_mark_complete:
+                    job.summary = (f"“{info.get('title')}” was already gone; "
+                                   "cleared the single mark.")
+                else:
+                    job.summary = (
+                        f"“{info.get('title')}” was already gone, but couldn't "
+                        "save the single mark cleanup. Retry Undo."
+                    )
             else:
                 if undo_outcome.get("files_complete"):
                     job.summary = (
@@ -8946,7 +9134,29 @@ async def job_undo(request: Request, job_id: str):
         # run lock; a restart must not resurrect an Undo that already removed a
         # file or cleared its single mark.
         from qobuz_librarian.web import job_persistence
-        await loop.run_in_executor(None, lambda: job_persistence.persist(job))
+        saved = await loop.run_in_executor(
+            None, lambda: job_persistence.persist(job)
+        )
+        if not saved:
+            msg = (
+                "Undo changed the saved track state, but its final record "
+                "couldn't be saved. Retry Undo before clearing History."
+            )
+            if _is_htmx(request):
+                return HTMLResponse(
+                    f'<div id="job-content">'
+                    f'{_ql_notice_html("warning", html.escape(msg))}</div>',
+                    status_code=503,
+                )
+            return _tr(request, "lock_busy.html", {
+                "reason": "Undo needs attention",
+                "msg": msg,
+                "action": {"href": f"/jobs/{job.id}", "label": "Retry Undo"},
+            }, status_code=503)
+        lock.release()
+        lock_held = False
+        if refresh_needed:
+            await loop.run_in_executor(None, _refresh_after_undo)
         if _is_htmx(request):
             return _tr(request, "_job_body.html", {"job": job})
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
@@ -9037,7 +9247,12 @@ _HISTORY_BULK_CAP = 40
 
 
 @app.get("/queue/history", response_class=HTMLResponse)
-async def queue_history(request: Request, p: int = 1, jp: int = 1):
+async def queue_history(
+    request: Request,
+    p: int = 1,
+    jp: int = 1,
+    error: str = "",
+):
     """The History tab: every finished job, newest first, paged from jobs.db so
     the record outlives the in-memory cap (which only the Queue/SSE views use).
     ``p`` walks the downloads table, ``jp`` the job cards above it, and each
@@ -9097,6 +9312,7 @@ async def queue_history(request: Request, p: int = 1, jp: int = 1):
         "bulk_total": bulk_total, "bulk_shown": len(bulk_jobs),
         "bulk_page": jp, "bulk_pages": bulk_pages,
         "cur_page": p, "pages": pages, "total": total,
+        "error": error[:200],
     })
 
 
@@ -9113,8 +9329,16 @@ async def queue_clear(request: Request):
                 "has saved recovery state. Retry or settle that download first.",
             )
         retained_job_id = job_mgr.durable_recovery_job_id()
+        if not job_persistence.clear_history(retain_job_id=retained_job_id):
+            message = (
+                "History couldn't be cleared from the data folder. Nothing "
+                "was removed; check the data volume and try again."
+            )
+            return RedirectResponse(
+                url="/queue/history?error=" + urllib.parse.quote(message),
+                status_code=303,
+            )
         job_mgr.registry.clear_finished()
-        job_persistence.clear_history(retain_job_id=retained_job_id)
     return RedirectResponse(url="/queue/history", status_code=303)
 
 
@@ -9122,18 +9346,31 @@ async def queue_clear(request: Request):
 async def queue_cancel_pending():
     # Parked reviews are deliberately exempt: the queue page no longer shows
     # them, and a bulk clear must never take something the user can't see.
-    protected = False
+    protected = 0
+    unsaved = 0
     for j in list(job_mgr.registry.pending_and_running()):
         if j.status == job_mgr.JobStatus.AWAITING_REVIEW:
             continue
         was_protected = job_mgr.cancel_is_protected(j)
-        if not job_mgr.request_cancel(j) and was_protected:
-            protected = True
-    if protected:
-        message = (
-            "Queue cleared where safe. The interrupted-download recovery "
-            "stays in place until its saved step settles."
-        )
+        if not job_mgr.request_cancel(j):
+            if was_protected:
+                protected += 1
+            else:
+                unsaved += 1
+    if protected or unsaved:
+        parts = ["Queue cleared where safe."]
+        if protected:
+            parts.append(
+                "The interrupted-download recovery stays in place until its "
+                "saved step settles."
+            )
+        if unsaved:
+            noun = "job" if unsaved == 1 else "jobs"
+            parts.append(
+                f"{unsaved} {noun} couldn't be canceled because the update "
+                "couldn't be saved."
+            )
+        message = " ".join(parts)
         return RedirectResponse(
             url="/queue?notice=" + urllib.parse.quote(message), status_code=303
         )
@@ -9177,7 +9414,7 @@ def _diagnostics():
     beets_db = Path(cfg.BEETS_DB_PATH)
     if beets_db.exists():
         ok = os.access(beets_db, os.R_OK)
-        checks.append({"label": "beets DB (BEETS_DB_PATH)", "ok": ok,
+        checks.append({"label": "Beets database", "ok": ok,
                        "detail": f"{beets_db}" if ok
                        else f"{beets_db} exists but is not readable"})
     elif beets_db.parent.exists():
@@ -9189,7 +9426,7 @@ def _diagnostics():
 
     for binary in ("rip", "ffmpeg", "flac"):
         found = _sh.which(binary)
-        checks.append({"label": f"`{binary}` binary",
+        checks.append({"label": f"{binary} binary",
                        "ok": bool(found),
                        "detail": found or f"{binary} not on PATH. "
                        "Rebuild the image (docker compose build)"})
@@ -9292,16 +9529,14 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        unverified=False, error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
                        quality_note=False):
+    from qobuz_librarian.ui_cli.colors import format_size
     from qobuz_librarian.web import settings_store
     creds = _read_creds()
     values = settings_store.current()
-    # If credentials come from QOBUZ_USER_AUTH_TOKEN env, anything saved
-    # via the form is overridden on next process start, so let the user know.
+    # If credentials come from environment or a secret-file declaration,
+    # anything saved via the form lacks authority, so let the user know.
     import os
-    # cfg.QOBUZ_USER_AUTH_TOKEN resolves QOBUZ_USER_AUTH_TOKEN_FILE too (the
-    # secret isn't re-exported to os.environ), so a *_FILE deployment is
-    # correctly recognised as env-provided.
-    creds_from_env = bool(cfg.QOBUZ_USER_AUTH_TOKEN)
+    creds_from_env = _qobuz_token_is_env_owned()
     cli_only_env = os.environ.get("QL_CLI_ONLY", "").strip().lower() in (
         "1", "true", "yes", "on")
     # Two separate facts. disk_usage() measures the FILESYSTEM the music folder
@@ -9314,11 +9549,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
     try:
         du = shutil.disk_usage(cfg.MUSIC_ROOT)
 
-        def _tb(n):
-            return f"{n / 1e12:.2f} TB" if n >= 1e12 else f"{n / 1e9:.0f} GB"
-
         music_storage = {
-            "free": _tb(du.free), "total": _tb(du.total),
+            "free": format_size(du.free), "total": format_size(du.total),
             "pct": round(du.used / du.total * 100, 1) if du.total else 0,
             "own_volume": _is_mount_point(cfg.MUSIC_ROOT),
         }
@@ -9336,6 +9568,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "auth_token_set": bool(creds.get("auth_token")),
         "auth_token_prefill": auth_token_prefill,
         "creds_from_env": creds_from_env,
+        "env_user_id_set": bool(
+            cfg.QOBUZ_USER_ID or os.environ.get("QOBUZ_USER_ID", "").strip()
+        ),
         "cli_only_env": cli_only_env,
         "mode_changed": (mode or "").strip().lower(),
         "saved": saved,
@@ -9399,12 +9634,46 @@ def _streamrip_has_userid() -> bool:
         return False
 
 
+def _qobuz_token_is_env_owned() -> bool:
+    """Whether environment configuration owns the Qobuz token slot.
+
+    The *_FILE declaration counts even when its secret mount is temporarily
+    unreadable. Treating that state as form-owned permits a shadow credential
+    that silently loses authority when the mount recovers or the app restarts.
+    """
+    return bool(
+        cfg.QOBUZ_USER_AUTH_TOKEN
+        or os.environ.get("QOBUZ_USER_AUTH_TOKEN", "").strip()
+        or os.environ.get("QOBUZ_USER_AUTH_TOKEN_FILE", "").strip()
+    )
+
+
 @app.post("/settings", response_class=HTMLResponse)
 async def save_settings(request: Request, user_id: str = Form(""), auth_token: str = Form("")):
     global _TOKEN_VALID
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, _diagnostics)
     existing = _read_creds()
+    # Environment and secret-file credentials are authoritative for the live
+    # process. Refuse a form value that claims to replace one: writing it only
+    # to streamrip would report success while the app kept using the env value,
+    # and startup sync would overwrite the shadow value again. A token-only env
+    # may still use this page to supply streamrip's required user id.
+    env_owned = _qobuz_token_is_env_owned()
+    env_token = cfg.QOBUZ_USER_AUTH_TOKEN
+    env_user_id = cfg.QOBUZ_USER_ID
+    if env_owned and (
+        not env_token
+        or (auth_token.strip() and auth_token.strip() != env_token)
+        or (env_user_id and user_id.strip() and user_id.strip() != env_user_id)
+    ):
+        return _settings_response(
+            request,
+            error="envcreds",
+            user_id=existing.get("user_id", ""),
+            auth_token_prefill="",
+            diagnostics=diags,
+        )
     # First-run with empty inputs: nothing to save and no creds to keep,
     # bounce back with a banner rather than writing blanks and flashing green.
     if not auth_token.strip() and not user_id.strip() \
@@ -9506,6 +9775,9 @@ async def save_behavior(request: Request):
         bool(effective_before.get("PREFER_HIRES", False)),
     )
     ok, warnings = settings_store.save(values)
+    if ok is None:
+        return RedirectResponse(
+            url="/settings?error=invalidsettings#behaviour", status_code=303)
     # A quality-policy change leaves a parked/saved Upgrade review promising
     # targets the settings no longer produce.
     quality_note = False
@@ -9518,9 +9790,10 @@ async def save_behavior(request: Request):
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, upgrade_state.load)
         quality_note = bool((state or {}).get("candidates"))
-    # Applied in-memory regardless; error only means it won't persist.
+    # Durable publication is the settings store's admission point; failure
+    # leaves both the live config and any deferred overlay unchanged.
     if not ok:
-        return RedirectResponse(url="/settings?error=persist", status_code=303)
+        return RedirectResponse(url="/settings?error=persist#behaviour", status_code=303)
     if warnings:
         # Re-render in place so we can name exactly which entries were dropped
         # (a misspelt provider, an uninstalled beets plugin) without smuggling
@@ -9534,7 +9807,7 @@ async def save_behavior(request: Request):
     suffix = "&queued=1" if settings_store._any_active_job() else ""
     if quality_note:
         suffix += "&quality_note=1"
-    return RedirectResponse(url=f"/settings?saved=1{suffix}", status_code=303)
+    return RedirectResponse(url=f"/settings?saved=1{suffix}#behaviour", status_code=303)
 
 
 @app.post("/settings/mode")
@@ -9552,7 +9825,8 @@ async def set_mode(request: Request, target: str = Form("")):
         # Flip to CLI mode first so a /download or scan POST landing during
         # the handoff is refused (503) instead of slipping past the check and
         # racing the CLI over /staging once we release the lock below.
-        _CLI_MODE = True
+        with _auto_check_lock:
+            _CLI_MODE = True
 
         def _handoff():
             global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _CLI_MODE
@@ -9592,21 +9866,44 @@ async def set_mode(request: Request, target: str = Form("")):
             status_code=303,
         )
     if want == "web":
+        with _auto_check_lock:
+            prior_cli_mode = _CLI_MODE
         try:
             lease = run_lock.acquire()
-            _RUN_LOCK_HANDLE = lease
-            _LOCK_BUSY_PID = None
             if lease is None:
                 # Can't enforce the lock, same stance as startup: pause
                 # destructive routes until the filesystem can enforce it.
-                _LOCK_UNENFORCEABLE = True
-                _CLI_MODE = False
+                with _auto_check_lock:
+                    _RUN_LOCK_HANDLE = None
+                    _LOCK_BUSY_PID = None
+                    _LOCK_UNENFORCEABLE = True
+                    _CLI_MODE = False
             else:
-                _record_startup_recovery(lease)
-                # Terminal-first startup deliberately skipped persisted jobs.
-                _restore_jobs_once()
-                _LOCK_UNENFORCEABLE = False
-                _CLI_MODE = False
+                try:
+                    with _auto_check_lock:
+                        _recover_under_web_run_lock(lease)
+                        _LOCK_BUSY_PID = None
+                        _LOCK_UNENFORCEABLE = False
+                        _CLI_MODE = False
+                except Exception:
+                    with _auto_check_lock:
+                        _RUN_LOCK_HANDLE = None
+                        _LOCK_BUSY_PID = None
+                        _LOCK_UNENFORCEABLE = False
+                        _CLI_MODE = prior_cli_mode
+                    logging.getLogger("qobuz_librarian").exception(
+                        "couldn't resume Web mode because durable recovery "
+                        "could not be read"
+                    )
+                    return RedirectResponse(
+                        url="/settings?error=" + urllib.parse.quote(
+                            "Saved recovery state could not be checked. Web "
+                            "mode stayed paused and its safety lock was "
+                            "released; check the data-folder permissions, "
+                            "then try again."
+                        ),
+                        status_code=303,
+                    )
             # The CLI may have changed the saved token while it held the lock;
             # drop the cached creds so the banner reflects what's on disk now.
             _creds_cache = None
@@ -9733,7 +10030,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
         rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-ok" aria-label="OK">OK</span>'
-            f'<div class="min-w-0"><div class="ql-diagnostic-label">Downsample originals: {name}</div>'
+            f'<div class="min-w-0"><div class="ql-diagnostic-label">Downsample originals retained</div>'
             f'<div class="ql-diagnostic-detail">Hi-res copies kept so the rewrite '
             f'can be undone; cleared automatically after '
             f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.</div>'

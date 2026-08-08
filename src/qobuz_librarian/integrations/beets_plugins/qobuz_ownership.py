@@ -107,7 +107,7 @@ def _album_scope_parts(item, destination_parts):
         except (TypeError, UnicodeError, ValueError):
             return None
         # Beets types $disc as PaddedInt(2), so the bundled template files this
-        # disc as "Disc 01" — comparing against an unpadded "disc 1" matched
+        # disc as "Disc 01" - comparing against an unpadded "disc 1" matched
         # nothing and bound the scope to the disc folder on every stock
         # multi-disc import. Still strip only THIS item's disc.
         for prefix in ("disc", "cd"):
@@ -570,8 +570,11 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 raise OSError("safe source access is unavailable")
             flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
             source_fd = os.open(parts[-1], flags, dir_fd=current)
-            if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            held = os.fstat(source_fd)
+            if not stat.S_ISREG(held.st_mode):
                 raise OSError("ownership source is not a regular file")
+            if held.st_nlink != 1:
+                raise OSError("ownership source is not single-link")
             transferred = True
             return current, parts[-1], source_fd
         finally:
@@ -882,6 +885,8 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 held_source = os.fstat(selected["source_fd"])
                 if (
                     not stat.S_ISREG(named_source.st_mode)
+                    or named_source.st_nlink != 1
+                    or held_source.st_nlink != 1
                     or _ownership_identity(named_source) != _ownership_identity(held_source)
                 ):
                     raise ValueError("ownership source changed before move")
@@ -920,9 +925,13 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 source_identity = _ownership_identity(source_stat)
                 destination_identity = _ownership_identity(destination_stat)
                 if (
-                    destination_identity != source_identity
-                    and not self._stable_regular_files_equal(
-                        selected["source_fd"], destination_fd
+                    source_stat.st_nlink != 1
+                    or destination_stat.st_nlink != 1
+                    or (
+                        destination_identity != source_identity
+                        and not self._stable_regular_files_equal(
+                            selected["source_fd"], destination_fd
+                        )
                     )
                 ):
                     raise ValueError("ownership move did not copy the source")
@@ -1076,6 +1085,9 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             if (
                 not stat.S_ISREG(held.st_mode)
                 or not stat.S_ISREG(named_after.st_mode)
+                or named_before.st_nlink != 1
+                or named_after.st_nlink != 1
+                or held.st_nlink != 1
                 or _ownership_identity(named_before)
                 != _ownership_identity(held)
                 or _ownership_identity(named_after)

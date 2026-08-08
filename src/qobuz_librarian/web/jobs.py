@@ -23,6 +23,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -202,6 +203,10 @@ JOB_ADMISSION_ERROR = (
     "This job couldn't be saved to the data folder, so no work was started. "
     "Check the data volume, then restart Qobuz Librarian."
 )
+JOB_FINAL_SAVE_ERROR = (
+    "The work finished, but the app couldn't save the final job result. "
+    "Check the data volume before retrying or clearing this job."
+)
 
 # Distinguishes an intact review whose last eligible tick disappeared from a
 # stale/non-review job and from a durable admission failure.
@@ -334,6 +339,9 @@ class Job:
     _unchecked_artists: int = field(default=0, repr=False)
     _preserve_persisted_single: bool = field(default=False, repr=False)
     _single_undo_unavailable: bool = field(default=False, repr=False)
+    # Set only by a successful jobs.db admission or restart restore. Tests and
+    # diagnostics also create intentionally in-memory Jobs directly.
+    _durability_required: bool = field(default=False, repr=False)
     # When set to (current, total, unit), push_progress reports THESE counts
     # in place of the caller's, so a multi-item execute (repairing 16 albums)
     # keeps the progress card on "album 3 / 16" even while each album's inner
@@ -749,7 +757,7 @@ class JobRegistry:
             excess -= 1
 
     def clear_finished(self):
-        """Drop ordinary terminal jobs, retaining recovery and Undo state."""
+        """Drop ordinary terminal jobs from memory after durable clearing."""
         with self._lock:
             keep = [jid for jid in self._order
                     if (self._jobs.get(jid)
@@ -762,8 +770,6 @@ class JobRegistry:
             for jid in dropped:
                 self._jobs.pop(jid, None)
             self._order = keep
-        for jid in dropped:
-            job_persistence.delete(jid)
 
 
 # ── Logging capture ───────────────────────────────────────────────────────────
@@ -1020,12 +1026,40 @@ def _friendly_job_error(exc, fallback: str) -> str:
     return fallback
 
 
+def _mark_final_save_failure(job: Job) -> None:
+    """Make an unsaved terminal result visibly conservative in memory."""
+    prior_error = job.error
+    job.status = JobStatus.FAILED
+    job.error = (
+        f"{prior_error} {JOB_FINAL_SAVE_ERROR}".strip()
+        if prior_error
+        else JOB_FINAL_SAVE_ERROR
+    )
+
+
 def _finish_task_phase(job: Job) -> None:
     """Durably close one worker phase after its final status is known."""
     if job.status in TERMINAL and job.finished_at is None:
         job.finished_at = time.time()
+    saved = True
     if registry.get(job.id) is not None:
-        job_persistence.persist(job)
+        saved = job_persistence.persist(job)
+    if not saved and job.status == JobStatus.AWAITING_REVIEW:
+        # The review remains usable in memory, but its exact candidate set may
+        # not survive a restart. Tell every open review before closing the
+        # worker stream so the operator gets the same durable-write warning as
+        # a failed tick or fold.
+        job.notify_review_changed("save_failed")
+    elif (
+        not saved
+        and job.status in TERMINAL
+        and job._durability_required
+    ):
+        # The work may already have had its intended effect, so retain its
+        # truthful summary, but do not show a green/canceled terminal state
+        # that exists only in memory.  A restart will recover the older
+        # durable row; the live page must be at least as cautious.
+        _mark_final_save_failure(job)
     if job.status in TERMINAL:
         threading.Thread(target=_fire_post_job_hook, args=(job,),
                          daemon=True).start()
@@ -1379,6 +1413,14 @@ def submit_scan(job: Job, scan_fn, execute_fn):
     return job
 
 
+def _library_review_state_guard(job: Job):
+    """Serialize Library retirement with saved-state reconstruction."""
+    if job.execute_kind != "library":
+        return nullcontext()
+    from qobuz_librarian.library import library_scan_state
+    return library_scan_state.review_state_lock()
+
+
 def finalize_review_if_empty(job: Job) -> Optional[bool]:
     """Complete a triage review once dismissal has emptied its candidate list.
 
@@ -1389,10 +1431,15 @@ def finalize_review_if_empty(job: Job) -> Optional[bool]:
     Returns True if it finalized the job, False when it was not empty, or None
     when the terminal state could not be saved.
     """
-    with job._review_action_lock:
+    with _library_review_state_guard(job), job._review_action_lock:
+        review_generation = None
         with job._lock:
             if job.status != JobStatus.AWAITING_REVIEW or job.candidates:
                 return False
+            if job.execute_kind == "library":
+                review_generation = (job.execute_args or {}).get(
+                    "_library_review_generation"
+                )
             previous = (job.status, job.finished_at, job.summary)
             job.status = JobStatus.DONE
             job.finished_at = time.time()
@@ -1428,7 +1475,7 @@ def finalize_review_if_empty(job: Job) -> Optional[bool]:
             # saved-state reconstruction doesn't rebuild it from stale scan state.
             from qobuz_librarian.library import library_scan_state
             if not library_scan_state.mark_review_retired(
-                    reason="worked_through"):
+                    reason="worked_through", generation=review_generation):
                 with job._lock:
                     job.status, job.finished_at, job.summary = previous
                 job_persistence.persist(job)
@@ -1594,14 +1641,21 @@ def cancel_review(job: Job) -> Optional[bool]:
     # AWAITING_REVIEW under the lock); otherwise a cancel could land after an
     # approve already queued the execute phase, showing CANCELED while work
     # runs.
-    with job._review_action_lock:
+    with _library_review_state_guard(job), job._review_action_lock:
+        review_generation = None
         with job._lock:
             if job.status != JobStatus.AWAITING_REVIEW:
                 return False
+            if job.execute_kind == "library":
+                review_generation = (job.execute_args or {}).get(
+                    "_library_review_generation"
+                )
             previous_finished_at = job.finished_at
+            previous_summary = job.summary
             canceled_at = time.time()
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
+            job.summary = "Review discarded. No files were changed."
         if not job_persistence.persist(job):
             with job._lock:
                 if (
@@ -1610,15 +1664,20 @@ def cancel_review(job: Job) -> Optional[bool]:
                 ):
                     job.status = JobStatus.AWAITING_REVIEW
                     job.finished_at = previous_finished_at
+                    job.summary = previous_summary
             return None
         if job.execute_kind == "library":
             # Discarded. Retire the baseline's review so the saved-state
             # reconstruction doesn't immediately rebuild what was discarded.
             from qobuz_librarian.library import library_scan_state
-            if not library_scan_state.mark_review_retired(reason="discarded"):
+            if not library_scan_state.mark_review_retired(
+                reason="discarded",
+                generation=review_generation,
+            ):
                 with job._lock:
                     job.status = JobStatus.AWAITING_REVIEW
                     job.finished_at = previous_finished_at
+                    job.summary = previous_summary
                 job_persistence.persist(job)
                 return None
         job.end_stream()
@@ -1700,6 +1759,7 @@ def restore_jobs(
             ),
             finished_at=row.get("finished_at"),
         )
+        job._durability_required = True
         completion_acknowledged = False
         if job.album_id and not job.recoveries:
             completion_acknowledged = (
@@ -1919,11 +1979,19 @@ def load_historical_job(job_id: str) -> Optional[Job]:
     )
 
 
-def _finish_canceled(job: Job) -> None:
+def _finish_canceled(job: Job) -> bool:
     """Persist and publish a CANCELED transition made under the job lock."""
+    saved = True
     if registry.get(job.id) is not None:
-        job_persistence.persist(job)
+        saved = job_persistence.persist(job)
+    if not saved and not job._durability_required:
+        saved = True
+    if not saved:
+        _mark_final_save_failure(job)
+        job.end_stream()
+        return False
     job.end_stream()
+    return True
 
 
 def request_cancel(job: Job) -> bool:
@@ -1953,15 +2021,30 @@ def request_cancel(job: Job) -> bool:
     with job._lock:
         if job.status in TERMINAL:
             return False
-        job.cancel_requested = True
         canceled_pending = job.status == JobStatus.PENDING
         if canceled_pending:
-            # Finalize immediately rather than leaving a queued cancel behind
-            # whatever is already using the lane.
+            # Publish the terminal row while the same lock excludes the worker
+            # claim.  Mutating first and saving after releasing this lock let
+            # a failed write race the worker into consuming the queue entry,
+            # leaving neither a durable cancel nor runnable work.
+            previous_finished_at = job.finished_at
+            previous_cancel_requested = job.cancel_requested
+            canceled_at = time.time()
+            job.cancel_requested = True
             job.status = JobStatus.CANCELED
-            job.finished_at = time.time()
+            job.finished_at = canceled_at
+            if (
+                not job_persistence._persist_locked(job)
+                and job._durability_required
+            ):
+                job.status = JobStatus.PENDING
+                job.cancel_requested = previous_cancel_requested
+                job.finished_at = previous_finished_at
+                return False
+        else:
+            job.cancel_requested = True
     if canceled_pending:
-        _finish_canceled(job)
+        job.end_stream()
     return True
 
 

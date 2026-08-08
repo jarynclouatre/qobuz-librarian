@@ -8,10 +8,11 @@ until the user restores it.
 
 Keyed on a fingerprint, not the Qobuz album id: dedup can resolve to a
 different edition (a new id) of the same album on a later scan, and an id key
-would let that edition slip back onto the list. The fingerprint keeps every
-edition of one album dismissed together. The year is kept for the Hidden view
-but is deliberately not part of the match key; a remaster carries a different
-year, and a missing year (common from Qobuz) would otherwise mis-key.
+would let that edition slip back onto the list. The fingerprint normally keeps
+every edition of one album dismissed together. The year is kept for the Hidden
+view but is not part of the storage key; matching uses it only for the narrow
+case of undecorated, far-apart self-titled releases that are distinct works.
+Remasters and missing years remain edition-folded.
 
 Hides are scoped so the two walks don't cross-contaminate: a "missing" hide
 (don't offer to download this album I don't own) is independent of an "upgrade"
@@ -169,13 +170,51 @@ def save(store):
         return False
 
 
-def is_hidden(scope, artist, title, store):
+def _year_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _undecorated_self_titled(artist, title):
+    stripped = strip_album_decorations_strict(title or "")
+    return (
+        _fingerprint_text(title) == _fingerprint_text(stripped)
+        and _fingerprint_text(artist) == _fingerprint_text(stripped)
+    )
+
+
+def is_hidden(scope, artist, title, store, *, year=None):
     """True when (artist, title) is dismissed in this scope. `store` is a
-    preloaded dict from load() so a scan doesn't re-read the file per album."""
+    preloaded dict from load() so a scan doesn't re-read the file per album.
+
+    Edition decorations stay folded together regardless of year. The narrow
+    exception is an undecorated self-titled release whose known year is more
+    than three years from every known dismissed row: those are commonly
+    distinct works (for example Weezer's colour albums), and the catalogue
+    ownership logic deliberately keeps them separate too. Missing years and
+    old stores remain conservative and keep the fingerprint hidden.
+    """
     fp = album_fingerprint(artist, title)
     if fp is None:
         return False
-    return fp in (store.get(scope) or {})
+    entry = (store.get(scope) or {}).get(fp)
+    if entry is None:
+        return False
+    requested_year = _year_int(year)
+    if requested_year is None or not _undecorated_self_titled(artist, title):
+        return True
+    rows = _entry_rows(entry)
+    if any(not _undecorated_self_titled(artist, row.get("title") or "")
+           for row in rows):
+        return True
+    stored_years = [_year_int(row.get("year")) for row in rows]
+    if not stored_years or any(stored_year is None for stored_year in stored_years):
+        return True
+    return any(abs(stored_year - requested_year) <= 3
+               for stored_year in stored_years)
 
 
 def hide(scope, items):
@@ -285,6 +324,74 @@ def restore_albums(scope, fingerprints):
     return rows
 
 
+def is_hidden_row(scope, artist, title, year, store):
+    """True when this exact review row is already recorded.
+
+    Unlike :func:`is_hidden`, this does not apply edition folding. It is used
+    only to make a failed review mutation undo the rows that mutation added,
+    without erasing an older dismissal sharing the same fingerprint.
+    """
+    fp = album_fingerprint(artist, title)
+    if fp is None:
+        return False
+    entry = (store.get(scope) or {}).get(fp)
+    if entry is None:
+        return False
+    wanted_title = title or ""
+    wanted_year = str(year or "")
+    return any(
+        (row.get("title") or "") == wanted_title
+        and str(row.get("year") or "") == wanted_year
+        for row in _entry_rows(entry)
+    )
+
+
+def restore_rows(scope, items):
+    """Restore exact ``(artist, title, year)`` review rows.
+
+    This is the row-granular rollback companion to :func:`hide`. Fingerprint
+    restoration remains the operator-facing action because editions normally
+    move together; internal rollback must not erase older sibling rows.
+    """
+    targets = {}
+    for artist, title, year in items:
+        fp = album_fingerprint(artist, title)
+        if fp is None:
+            continue
+        targets.setdefault(fp, set()).add((title or "", str(year or "")))
+    if not targets:
+        return 0
+    with _store_lock():
+        store = load()
+        bucket = store.get(scope) or {}
+        removed = 0
+        for fp, rows_to_remove in targets.items():
+            entry = bucket.get(fp)
+            if entry is None:
+                continue
+            rows = _entry_rows(entry)
+            kept = [
+                row for row in rows
+                if ((row.get("title") or ""), str(row.get("year") or ""))
+                not in rows_to_remove
+            ]
+            removed += len(rows) - len(kept)
+            if not kept:
+                bucket.pop(fp, None)
+                continue
+            if len(kept) != len(rows):
+                head = kept[0]
+                entry["title"] = head.get("title") or ""
+                entry["year"] = str(head.get("year") or "")
+                entry["ts"] = head.get("ts") or entry.get("ts") or ""
+                entry["rows"] = kept
+        if removed:
+            store[scope] = bucket
+            if not save(store):
+                raise OSError(_SAVE_FAILED_MSG)
+    return removed
+
+
 def hidden_by_artist(scope, store=None):
     """[{artist, rows, albums: [{title, year, ts, fp, others}]}] for the Hidden view.
 
@@ -326,13 +433,48 @@ def count(scope, store=None):
 
 # Singles: a deliberately downloaded track, not a gap.
 
-def is_single(artist, title, store):
+def _single_rows(entry):
+    """Exact album identities held under one edition-folded fingerprint."""
+    rows = entry.get("single_rows")
+    if isinstance(rows, list):
+        valid = [row for row in rows if isinstance(row, dict)]
+        if valid:
+            return valid
+    return [{
+        "album_id": str(entry.get("album_id") or ""),
+        "year": str(entry.get("year") or ""),
+        "title": entry.get("title") or "",
+        "ts": entry.get("ts") or "",
+    }]
+
+
+def is_single(artist, title, store, *, year=None, album_id=None):
     """True when (artist, title) is marked as a deliberately downloaded single, so
-    its partial folder isn't read as a gap. `store` is preloaded by load()."""
+    its partial folder isn't read as a gap. Exact album id wins when available;
+    year distinguishes same-titled folders when only filesystem identity exists.
+    `store` is preloaded by load()."""
     fp = album_fingerprint(artist, title)
     if fp is None:
         return False
-    return fp in (store.get(SCOPE_SINGLE) or {})
+    entry = (store.get(SCOPE_SINGLE) or {}).get(fp)
+    if entry is None:
+        return False
+    rows = _single_rows(entry)
+    wanted_id = str(album_id or "")
+    if wanted_id:
+        known_ids = {str(row.get("album_id") or "") for row in rows}
+        known_ids.discard("")
+        if known_ids:
+            return wanted_id in known_ids
+    wanted_year = str(year or "")
+    if wanted_year:
+        known_years = {str(row.get("year") or "") for row in rows}
+        known_years.discard("")
+        if known_years:
+            return wanted_year in known_years
+    # Old stores may lack both fields. Preserve their conservative suppression
+    # until an exact mark or completion rewrites the entry.
+    return True
 
 
 def mark_single(artist, title, year, album_id):
@@ -345,17 +487,39 @@ def mark_single(artist, title, year, album_id):
         store = load()
         bucket = store.setdefault(SCOPE_SINGLE, {})
         prev = bucket.get(fp) or {}
+        rows = _single_rows(prev) if prev else []
+        wanted_id = str(album_id or "")
+        wanted_year = str(year or "")
+        if not any(
+            (wanted_id and str(row.get("album_id") or "") == wanted_id)
+            or (
+                not wanted_id
+                and not row.get("album_id")
+                and str(row.get("year") or "") == wanted_year
+            )
+            for row in rows
+        ):
+            rows.append({
+                "album_id": wanted_id,
+                "year": wanted_year,
+                "title": title or "",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+        head = rows[0]
         bucket[fp] = {
-            "artist": artist or "", "title": title or "", "year": str(year or ""),
-            "album_id": str(album_id or "") or prev.get("album_id", ""),
-            "ts": prev.get("ts") or datetime.now(timezone.utc).isoformat(),
+            "artist": artist or "",
+            "title": head.get("title") or title or "",
+            "year": str(head.get("year") or ""),
+            "album_id": str(head.get("album_id") or ""),
+            "ts": head.get("ts") or datetime.now(timezone.utc).isoformat(),
+            "single_rows": rows,
         }
         if not save(store):
             raise OSError(_SAVE_FAILED_MSG)
     return True
 
 
-def unmark_single(artist, title):
+def unmark_single(artist, title, *, year=None, album_id=None):
     """Drop the single mark after graduation or completing the album.
 
     Returns True if a mark was removed."""
@@ -367,7 +531,33 @@ def unmark_single(artist, title):
         bucket = store.get(SCOPE_SINGLE) or {}
         if fp not in bucket:
             return False
-        bucket.pop(fp, None)
+        if not album_id and not year:
+            bucket.pop(fp, None)
+        else:
+            entry = bucket[fp]
+            wanted_id = str(album_id or "")
+            wanted_year = str(year or "")
+
+            def selected(row):
+                row_id = str(row.get("album_id") or "")
+                if wanted_id and row_id:
+                    return row_id == wanted_id
+                row_year = str(row.get("year") or "")
+                return bool(wanted_year and row_year == wanted_year)
+
+            rows = _single_rows(entry)
+            kept = [row for row in rows if not selected(row)]
+            if len(kept) == len(rows):
+                return False
+            if kept:
+                head = kept[0]
+                entry["title"] = head.get("title") or entry.get("title") or ""
+                entry["year"] = str(head.get("year") or "")
+                entry["album_id"] = str(head.get("album_id") or "")
+                entry["ts"] = head.get("ts") or entry.get("ts") or ""
+                entry["single_rows"] = kept
+            else:
+                bucket.pop(fp, None)
         store[SCOPE_SINGLE] = bucket
         # Best-effort on purpose: unmark runs as internal bookkeeping inside
         # undo/repair/graduation flows; a failed cleanup write shouldn't

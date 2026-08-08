@@ -5,7 +5,7 @@ dedicated module avoids circular imports (client.py imports AuthLost from
 here without needing to import anything back).
 
 detect_auth_lost() lives here because it parses rip subprocess output for
-auth signals — no API calls, no session needed.
+auth signals - no API calls, no session needed.
 """
 import re
 import tomllib
@@ -22,7 +22,7 @@ class Aborted(Exception):     pass
 class QobuzError(Exception):  pass
 
 
-# Qobuz reached its retry ceiling without a usable answer — the network is
+# Qobuz reached its retry ceiling without a usable answer - the network is
 # down, the request timed out, or the API is rate-limiting / 5xx-ing.
 class QobuzUnavailable(Exception): pass
 
@@ -69,7 +69,7 @@ def friendly_qobuz_error(e):
 
 
 class NoCredsError(Exception):
-    """No usable Qobuz credentials — env var or streamrip config."""
+    """No usable Qobuz credentials - env var or streamrip config."""
 
 
 # ── Token loading ─────────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
             if _srv:
                 doc["misc"]["version"] = _srv
             doc["database"] = tomlkit.table()
-            # Keep streamrip's downloads db off — on it blocks re-downloading
+            # Keep streamrip's downloads db off - on it blocks re-downloading
             # any track the user deleted by hand.
             doc["database"]["downloads_enabled"] = False
             doc["database"]["failed_downloads_enabled"] = True
@@ -170,7 +170,7 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     doc["qobuz"]["password_or_token"] = auth_token
     doc["qobuz"]["use_auth_token"]    = True
     # streamrip 2.2.0 REQUIRES the `secrets` key to exist (it's a required
-    # field on QobuzConfig — deleting it makes the whole config fail to load).
+    # field on QobuzConfig - deleting it makes the whole config fail to load).
     doc["qobuz"]["app_id"] = ""
     if "secrets" not in doc["qobuz"]:
         doc["qobuz"]["secrets"] = tomlkit.array()
@@ -193,7 +193,7 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
                                    prefix=".streamrip.", suffix=".tmp")
         fd_owned = False
         try:
-            os.fchmod(fd, 0o600)  # holds the account token — keep it owner-only
+            os.fchmod(fd, 0o600)  # holds the account token - keep it owner-only
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 fd_owned = True
                 f.write(tomlkit.dumps(doc))
@@ -260,7 +260,7 @@ def sync_streamrip_creds_from_env():
         import logging
         logging.getLogger("qobuz_librarian").warning(fmt(
             C.YELLOW,
-            "  ⚠  QOBUZ_USER_AUTH_TOKEN is set but QOBUZ_USER_ID is not — "
+            "  ⚠  QOBUZ_USER_AUTH_TOKEN is set but QOBUZ_USER_ID is not - "
             "downloads need both. Set QOBUZ_USER_ID (or save credentials on "
             "the Settings page); `rip` cannot authenticate from the token "
             "alone."))

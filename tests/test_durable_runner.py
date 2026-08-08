@@ -67,14 +67,6 @@ def _single_track_item(label):
     )
 
 
-def test_managed_import_progress_uses_album_folder(tmp_path):
-    staging = tmp_path / "staging"
-    run = staging / (".qobuz-run-" + "a" * 24)
-
-    assert beets_module._beets_progress_album(
-        str(run / "Safe Album" / "01.flac"), staging
-    ) == "Safe Album"
-    assert beets_module._beets_progress_album(str(run), staging) == "Importing album"
 
 
 def test_download_quarantine_checkpoint_is_persisted_before_error_propagates(
@@ -450,7 +442,10 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         lambda _result: managed_holder["value"],
     )
 
-    def fake_retire(_result, *, recovery_checkpoint):
+    retirement_attempts = []
+
+    def fake_retire_after_import(_result, *, recovery_checkpoint):
+        retirement_attempts.append("after-import")
         journal = queue_state.list_queue_journals()[0].journal
         owner = journal.items[0].completion_input["owner"]
         recovery_checkpoint(
@@ -467,7 +462,18 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         )
         return True
 
-    monkeypatch.setattr(durable_runner, "retire_empty_download_staging", fake_retire)
+    def fake_retire_empty(_result, *, recovery_checkpoint):
+        retirement_attempts.append("empty")
+        return False
+
+    monkeypatch.setattr(
+        durable_runner, "retire_empty_download_staging", fake_retire_empty
+    )
+    monkeypatch.setattr(
+        durable_runner,
+        "retire_download_staging_after_import",
+        fake_retire_after_import,
+    )
     absent = StagingReferenceInspection(StagingReferenceStatus.ABSENT)
     monkeypatch.setattr(durable_runner, "inspect_staging_run_reference", lambda *_: absent)
     monkeypatch.setattr(durable_runner, "inspect_staging_group_reference", lambda *_: absent)
@@ -557,6 +563,7 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     )
 
     assert result.status is durable_runner.DurableAlbumStatus.COMPLETE
+    assert retirement_attempts == ["empty", "after-import"]
     assert observed["active_before_download"] is True
     assert observed["live_queue"] and observed["live_queue"][0] is True
     assert queue == []

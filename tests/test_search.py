@@ -1,5 +1,6 @@
-"""Tests for qobuz_librarian.api.search — strict ISRC matching (album repair
+"""Tests for qobuz_librarian.api.search - strict ISRC matching (album repair
 depends on it), result extraction, pagination, and the album/catalog cache."""
+
 from unittest.mock import patch
 
 import pytest
@@ -23,7 +24,7 @@ def _track(isrc=None, **kwargs):
 
 
 def test_find_qobuz_track_by_isrc_is_strict():
-    # Hyphens/case are folded, but matching is otherwise exact — album repair
+    # Hyphens and case are folded, but matching is otherwise exact. Album repair
     # would refill the wrong recording if a substring/prefix counted.
     with patch("qobuz_librarian.api.search.search_tracks",
                return_value=[_track(isrc="USRC1234567")]):
@@ -134,7 +135,7 @@ def test_get_artist_albums_does_not_cache_a_short_fetch(tmp_path, monkeypatch):
     album_cache._reset_for_tests()
     try:
         # Qobuz says the artist has 105 albums but hands back 100 and then an
-        # empty page — a transient short read.
+        # empty page, a transient short read.
         page1 = {"albums": {"items": [{"id": i} for i in range(100)], "total": 105}}
         empty = {"albums": {"items": []}}
         with patch("qobuz_librarian.api.search.qobuz_get", side_effect=[page1, empty]):
@@ -167,5 +168,29 @@ def test_get_album_cached_by_id(tmp_path, monkeypatch):
         a1 = search.get_album("ALB1", "tok")
         a2 = search.get_album("ALB1", "tok")
         assert calls["n"] == 1 and a1 == a2 and a1["id"] == "ALB1"
+    finally:
+        album_cache._reset_for_tests()
+
+
+def test_get_album_refuses_cross_edition_provider_identity(tmp_path, monkeypatch):
+    import qobuz_librarian.config as cfg
+    from qobuz_librarian.api import album_cache, search
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "ALBUM_CACHE_ENABLED", True)
+    album_cache._reset_for_tests()
+    try:
+        monkeypatch.setattr(
+            search,
+            "qobuz_get",
+            lambda *_args, **_kwargs: {
+                "id": "OTHER-EDITION",
+                "title": "X",
+                "tracks": {"items": [{"id": 1, "title": "T"}]},
+            },
+        )
+        with pytest.raises(QobuzError, match="OTHER-EDITION"):
+            search.get_album("REQUESTED-EDITION", "tok")
+        assert album_cache.get("REQUESTED-EDITION") is None
     finally:
         album_cache._reset_for_tests()

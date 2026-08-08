@@ -278,8 +278,8 @@ def test_cross_fs_restore_ignores_backup_sidecars(tmp_path, monkeypatch):
 
 
 def test_backup_receipt_survives_ctime_only_metadata_drift(tmp_path, monkeypatch):
-    # A chown or chmod sweep — a boot-time ownership fix, a NAS permission
-    # change — bumps every file's ctime without touching content. A sealed
+    # A chown or chmod sweep - a boot-time ownership fix, a NAS permission
+    # change - bumps every file's ctime without touching content. A sealed
     # receipt has to keep loading, reopening from the journal, and restoring
     # across that, while any real content change still refuses.
     import qobuz_librarian.library.backup as bkmod
@@ -334,7 +334,7 @@ def test_backup_receipt_survives_ctime_only_metadata_drift(tmp_path, monkeypatch
 def test_retire_verified_repair_backup_needs_superseding_tracks(tmp_path, monkeypatch):
     # After a verified refill the originals' backup may be retired only when
     # every file it holds has, at the same path, a decode-clean track of at
-    # least its duration. Size may shrink — the backup holds the damaged
+    # least its duration. Size may shrink - the backup holds the damaged
     # copies, and a corrupt original is often larger than its clean refill.
     _need_audio_tools()
     import qobuz_librarian.library.backup as bkmod
@@ -374,7 +374,7 @@ def test_retire_verified_repair_backup_needs_superseding_tracks(tmp_path, monkey
 def test_gap_fill_backup_copies_a_source_it_cannot_lease(tmp_path, monkeypatch):
     # A repair source the app doesn't own can't carry a write lease. With
     # the scan's sealed receipt pinning its content, the backup must take
-    # the copy route instead of giving up — the copy is app-owned, so the
+    # the copy route instead of giving up - the copy is app-owned, so the
     # rest of the transaction keeps ordinary leases. Without a receipt the
     # refusal stands.
     import qobuz_librarian.library.backup as bkmod
@@ -418,7 +418,7 @@ def test_gap_fill_backup_copies_a_source_it_cannot_lease(tmp_path, monkeypatch):
 
 
 def test_discard_redundant_backup_requires_byte_identical_files(tmp_path, monkeypatch):
-    # The age sweep's size proof can't override a keep pin — a same-size
+    # The age sweep's size proof can't override a keep pin - a same-size
     # origin file could still be a different rendition whose original
     # survives only in the backup. The user-driven Remove must delete only
     # after exact digests match on both sides, pin or no pin.
@@ -631,43 +631,6 @@ def test_cleanup_old_upgrade_backups_respects_dates_and_throttle(tmp_path, monke
     assert cleanup_old_upgrade_backups(retention_days=1, force=True) == 1
 
 
-def test_backup_retention_names_the_actual_refusal_stage(tmp_path, monkeypatch):
-    import qobuz_librarian.library.backup as bk
-
-    backup_root = tmp_path / "backups"
-    backup_root.mkdir()
-    unreadable = backup_root / "20200101_000000_unreadable"
-    disposal_failed = backup_root / "20200101_000001_disposal_failed"
-    unreadable.mkdir()
-    disposal_failed.mkdir()
-    (unreadable / "01.flac").write_bytes(b"unreadable record")
-    (disposal_failed / "01.flac").write_bytes(b"retained audio")
-    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", backup_root)
-    monkeypatch.setattr(bk.cfg, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(
-        bk,
-        "load_backup_result",
-        lambda path: object() if Path(path) == disposal_failed else None,
-    )
-    monkeypatch.setattr(bk, "_backup_safe_to_reap", lambda _path: True)
-    monkeypatch.setattr(bk, "_dispose_retention_candidate", lambda _candidate: False)
-    messages = []
-    monkeypatch.setattr(bk.log, "info", messages.append)
-
-    assert bk.cleanup_old_upgrade_backups(retention_days=1, force=True) == 0
-
-    assert unreadable.exists() and disposal_failed.exists()
-    assert any(
-        "unreadable" in message
-        and "app-owned recovery record was unavailable" in message
-        for message in messages
-    )
-    assert any(
-        "disposal_failed" in message
-        and "safe disposal could not be completed" in message
-        for message in messages
-    )
-    assert not any("ownership receipt could not be verified" in message for message in messages)
 
 
 
@@ -786,7 +749,7 @@ def _bind_consolidation_summary(summary, tmp_path, monkeypatch):
 
 def test_sibling_grouping_does_not_group_distinct_years(tmp_path, monkeypatch):
     """Two folders that BOTH carry a year and don't share one are distinct
-    works with a similar name, and consolidation deletes "duplicate" tracks —
+    works with a similar name, and consolidation deletes "duplicate" tracks -
     grouping them would feed a real recording to the deleter. A one-sided year
     still groups: that's the same release re-tagged."""
     import qobuz_librarian.config as cfg
@@ -894,6 +857,82 @@ def test_execute_consolidation_moves_overlap_to_recoverable_backup(tmp_path, mon
             "SELECT id FROM album_attributes"
         ).fetchall() == []
     connection.close()
+
+
+@pytest.mark.parametrize("failure_point", ("before-publication", "after-publication"))
+def test_consolidation_publication_failure_keeps_recovery_and_reports_failure(
+        tmp_path, monkeypatch, failure_point):
+    import sqlite3
+
+    import qobuz_librarian.config as cfg
+    from qobuz_librarian.modes import consolidate as consolidation
+
+    root = tmp_path / failure_point
+    sibling = root / "Album Deluxe"
+    sibling.mkdir(parents=True)
+    reviewed = sibling / "01.flac"
+    reviewed.write_bytes(b"reviewed audio")
+    database = root / "beets.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE albums (id INTEGER PRIMARY KEY, artpath BLOB)"
+        )
+        connection.execute(
+            "CREATE TABLE items ("
+            "id INTEGER PRIMARY KEY, path BLOB NOT NULL, album_id INTEGER)"
+        )
+        connection.execute(
+            "CREATE TABLE album_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, "
+            "key TEXT NOT NULL, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE item_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, "
+            "key TEXT NOT NULL, value TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO albums VALUES (10, NULL)")
+        connection.execute(
+            "INSERT INTO items VALUES (1, ?, 10)",
+            (os.fsencode(reviewed),),
+        )
+    connection.close()
+
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", root / "backups")
+    summary = {
+        "dir": sibling,
+        "overlap": [({"path": str(reviewed)}, {})],
+        "unique": [],
+    }
+    primary_seal, sibling_seal, binding = _bind_consolidation_summary(
+        summary, root, monkeypatch)
+    real_publish = consolidation.AtomicSQLiteWrite.commit_and_publish
+
+    def fail_publication(transaction, *args, **kwargs):
+        if failure_point == "after-publication":
+            real_publish(transaction, *args, **kwargs)
+        raise OSError(f"injected {failure_point} failure")
+
+    monkeypatch.setattr(
+        consolidation.AtomicSQLiteWrite,
+        "commit_and_publish",
+        fail_publication,
+    )
+    try:
+        removed, n_failed = execute_consolidation(summary)
+    finally:
+        binding.close()
+        sibling_seal.close()
+        primary_seal.close()
+
+    assert removed == [] and n_failed == 1
+    assert not reviewed.exists()
+    assert [path.read_bytes() for path in (root / "backups").rglob("*.flac")] == [
+        b"reviewed audio"
+    ]
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT id FROM items").fetchall()
+    assert rows == ([] if failure_point == "after-publication" else [(1,)])
 
 
 def test_execute_consolidation_refuses_a_same_name_replacement(

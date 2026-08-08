@@ -19,6 +19,7 @@ import ctypes
 import errno
 import logging
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -32,6 +33,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 
@@ -42,7 +44,7 @@ from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 # mutagen-only paths too.
 try:
     from mutagen.flac import FLAC
-except Exception:  # mutagen missing — tag I/O unavailable
+except Exception:  # mutagen missing - tag I/O unavailable
     FLAC = None  # type: ignore
 
 try:
@@ -129,7 +131,7 @@ def _is_provider_dead(prov: str, log: Optional[logging.Logger] = None) -> bool:
             del _dead_providers[prov]
             _provider_fails[prov] = 0
             if log is not None:
-                log.info("provider %s cooldown elapsed — re-enabling", prov)
+                log.info("provider %s cooldown elapsed - re-enabling", prov)
             return False
         return True
 
@@ -234,7 +236,7 @@ def _state_file_lock(path: Path):
     """Hold an exclusive cross-process lock for the state file while reading +
     writing it. The state file is shared by a CLI import hook and the web
     worker (separate processes), so a threading.Lock can't serialise them; an
-    flock on a sidecar lock file does. Best-effort — if the lock file can't be
+    flock on a sidecar lock file does. Best-effort - if the lock file can't be
     opened we proceed unlocked rather than block a lyric save."""
     with state_file.store_lock(path):
         yield
@@ -272,7 +274,7 @@ def prune_missing(state: dict[str, TrackState]) -> int:
     """Drop entries whose file no longer exists, mutating `state` in place.
 
     Keys are absolute paths, so a moved, renamed, or deleted track otherwise
-    leaves an orphan that's reloaded and re-serialised on every walk — the JSON
+    leaves an orphan that's reloaded and re-serialised on every walk - the JSON
     grows without bound and is parsed in full each run. Returns the count
     dropped. Mirrors flac_cache.prune_missing."""
     gone = [k for k in state if not os.path.exists(k)]
@@ -1146,12 +1148,12 @@ def save_flac_tags(
 
 def write_lyrics(f, content: str, *, path=None, **save_kwargs) -> None:
     # Vorbis comments are case-insensitive in mutagen, so assigning
-    # "lyrics" already replaces any existing lyrics/LYRICS value — and
+    # "lyrics" already replaces any existing lyrics/LYRICS value - and
     # only the distinct `unsyncedlyrics` field needs explicit removal
     # (deleting it is likewise case-insensitive, so it also clears
     # UNSYNCEDLYRICS). The previous implementation deleted key "LYRICS"
     # *after* writing it which, being case-insensitive, wiped the lyrics
-    # just written — embed/both silently stored nothing.
+    # just written - embed/both silently stored nothing.
     if "unsyncedlyrics" in f.tags:
         del f.tags["unsyncedlyrics"]
     f.tags["lyrics"] = [content]
@@ -1431,7 +1433,7 @@ def write_output(
 
 # Title suffixes that confuse provider matching. Strip Spotify-style
 # "(Remastered 2009)", "(Album Version)", "(Live at Wembley)", "[Mono]",
-# trailing " - 2009 Remaster", etc., before querying — providers index the
+# trailing " - 2009 Remaster", etc., before querying - providers index the
 # canonical title.
 _TITLE_NOISE_KEYWORDS = (
     "remaster", "remastered", "remix", "remixed", "re-recorded", "rerecorded",
@@ -1501,6 +1503,45 @@ def lrc_duration_sane(lyrics: str, track_seconds: float) -> tuple[bool, str]:
 
 
 # ── Provider query (with circuit breaker) ────────────────────────────────────
+def _bounded_provider_search(query: str, prov: str, **kwargs):
+    """Run one third-party provider lookup behind an application deadline.
+
+    syncedlyrics providers do not share one reliable timeout contract. Use a
+    daemon thread so a provider that ignores its own socket timeout cannot park
+    a lyrics worker or prevent process shutdown. The caller records the timeout
+    as a hard provider failure, which trips the existing circuit breaker and
+    prevents an unbounded stream of abandoned calls.
+    """
+    outcome = queue.Queue(maxsize=1)
+
+    def invoke():
+        _ChatterCapture.begin()
+        result = None
+        error = None
+        try:
+            result = syncedlyrics.search(query, providers=[prov], **kwargs)
+        except BaseException as exc:  # provider code must always signal caller
+            error = exc
+        chatter = _ChatterCapture.end()
+        outcome.put_nowait((result, error, chatter))
+
+    worker = threading.Thread(
+        target=invoke,
+        name=f"lyrics-provider-{prov}",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        result, error, chatter = outcome.get(
+            timeout=max(0.001, float(cfg.LYRICS_PROVIDER_TIMEOUT))
+        )
+    except queue.Empty:
+        return None, TimeoutError(
+            f"provider lookup exceeded {cfg.LYRICS_PROVIDER_TIMEOUT:g}s"
+        ), ""
+    return result, error, chatter
+
+
 def _query_provider(query: str, prov: str, log: logging.Logger,
                     **kwargs) -> tuple[Optional[str], bool]:
     """
@@ -1511,22 +1552,19 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
     result clears strikes.
 
     Returns (result, failed_hard). failed_hard means the provider raised or
-    logged a connection-style error — the query never got an answer, which is
+    logged a connection-style error - the query never got an answer, which is
     not the same fact as a clean "no lyrics here" and must not be recorded as
     one.
     """
     if _is_provider_dead(prov, log):
         return None, False
-    _ChatterCapture.begin()
-    raised = False
-    try:
-        result = syncedlyrics.search(query, providers=[prov], **kwargs)
-    except Exception as e:
-        log.debug("provider %s raised: %s", prov, e)
-        result = None
-        raised = True
-    chatter = _ChatterCapture.end()
-    # A provider that raises (rather than logging) is still a hard failure — it
+    result, error, chatter = _bounded_provider_search(
+        query, prov, **kwargs
+    )
+    raised = error is not None
+    if error is not None:
+        log.debug("provider %s raised: %s", prov, error)
+    # A provider that raises (rather than logging) is still a hard failure - it
     # must strike the breaker, or a broken provider is re-queried for every
     # track of a walk instead of being disabled after a few strikes.
     if raised or _PROVIDER_ERROR_RE.search(chatter):
@@ -1550,7 +1588,7 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
         with _breaker_lock:
             _provider_fails[prov] = 0
     elif not _PROVIDER_ERROR_RE.search(chatter):
-        # Clean "not found" — not a connection failure, reset any stale fail count.
+        # Clean "not found" - not a connection failure, reset any stale fail count.
         with _breaker_lock:
             _provider_fails[prov] = 0
     return result, False
@@ -1704,7 +1742,7 @@ def process_file(
     try:
         binding = _BoundTrack(path, owned_root)
     except (OSError, TypeError, ValueError) as e:
-        log.warning("unsafe lyric path refused: %s — %s", path, e)
+        log.warning("unsafe lyric path refused: %s - %s", path, e)
         if not dry_run:
             key = str(path)
             st = state.get(key) or TrackState()
@@ -1752,7 +1790,7 @@ def _process_bound_file(
     try:
         f = FLAC(f"/proc/self/fd/{binding.track_fd}")
     except Exception as e:
-        log.error("FLAC open failed: %s — %s", path, e)
+        log.error("FLAC open failed: %s - %s", path, e)
         st.status = "error"
         st.last_seen = time.time()
         commit(state, key, st)
@@ -1809,7 +1847,32 @@ def _process_bound_file(
     kind = ""
     write_format = requested_format
 
-    if missing and existing_kind != "none":
+    representation_kinds = {
+        name: classify(value) for name, value in representations.items()
+    }
+    mismatched_both = (
+        requested_format == "both"
+        and not missing
+        and set(representation_kinds.values()) == {"plain", "synced"}
+    )
+
+    if mismatched_both:
+        # Both requested copies exist, but one is a weaker stale plain lyric.
+        # Repair that representation from the locally held synced copy. Treating
+        # the pair as already-synced leaves the disagreement cached forever.
+        write_format = next(
+            name for name, value in representation_kinds.items()
+            if value == "plain"
+        )
+        lyrics = next(
+            value for name, value in representations.items()
+            if representation_kinds[name] == "synced"
+        )
+        source = "existing-representation"
+        kind = "synced"
+        action = "wrote-synced"
+        st.last_seen = time.time()
+    elif missing and existing_kind != "none":
         # A requested representation is absent, but the other one already has
         # usable lyrics. Complete the configured format locally instead of
         # making a provider call or rewriting the representation we trust.
@@ -1864,7 +1927,7 @@ def _process_bound_file(
                 # Either the circuit breaker had killed every provider before
                 # this file's turn, or every attempt this file made died on a
                 # connection-style failure. Neither is a verdict about the
-                # track — "not found" here would suppress it for
+                # track - "not found" here would suppress it for
                 # RECHECK_AFTER_DAYS. Keep it immediately retryable.
                 st.status = "transient"
                 st.source = "providers-unavailable"
@@ -1901,7 +1964,7 @@ def _process_bound_file(
         final_identity = write_output(
             path, f, lyrics, write_format, binding=binding)
     except Exception as e:
-        log.error("write failed: %s — %s", path, e)
+        log.error("write failed: %s - %s", path, e)
         if binding.exact_track_is_named():
             st.status = "error"
         else:
@@ -1960,7 +2023,7 @@ def fetch_for_paths(
     caller stop cleanly (e.g. on SIGINT).
 
     `workers` controls per-file concurrency. Each file's work is dominated
-    by network I/O (multi-provider HTTP), which releases the GIL — so
+    by network I/O (multi-provider HTTP), which releases the GIL - so
     threading is the right tool here. Default 8 is a reasonable balance
     against provider rate limits; raise it if your library is huge and
     your providers tolerate more parallelism, lower it (or set 1) to debug.
@@ -1979,7 +2042,7 @@ def fetch_for_paths(
     # Drop entries for files that have moved or gone since last run, so the state
     # can't grow without bound across a library's churn. Route through
     # update_state so the prune's read and write happen under one cross-process
-    # lock — a plain load→save here would clobber entries a concurrent process
+    # lock - a plain load→save here would clobber entries a concurrent process
     # added in between.
     if not dry_run:
         update_state(prune_missing, state_path)
@@ -2015,13 +2078,13 @@ def fetch_for_paths(
         try:
             with _state_lock:
                 # Merge into the on-disk state under the cross-process lock so a
-                # concurrent writer's entries survive — a blind save would clobber
+                # concurrent writer's entries survive - a blind save would clobber
                 # whatever another process (CLI import hook / other lane) wrote
                 # since this run loaded its snapshot (see update_state's docstring).
                 update_state(lambda disk: disk.update(state), state_path)
         except Exception as e:
             # An overnight run shouldn't die because the disk hiccupped on
-            # one checkpoint write. Log and keep going — the next checkpoint
+            # one checkpoint write. Log and keep going - the next checkpoint
             # (or the final one) will retry.
             log.warning("checkpoint failed (continuing): %s", e)
 
@@ -2035,7 +2098,7 @@ def fetch_for_paths(
             outcome = run_one(fp)
             completed += 1
             counts[outcome] += 1
-            log.info("[%d/%d] %s — %s", completed, total, _outcome_label(outcome), fp.name)
+            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), fp.name)
             if progress_cb:
                 progress_cb(completed, total, fp.name)
             if completed % save_every == 0:
@@ -2075,7 +2138,7 @@ def fetch_for_paths(
                         try:
                             completed += 1
                             counts[outcome] += 1
-                            log.info("[%d/%d] %s — %s", completed, total, _outcome_label(outcome), fp.name)
+                            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), fp.name)
                             if progress_cb:
                                 progress_cb(completed, total, fp.name)
                             if completed % save_every == 0:
@@ -2110,7 +2173,7 @@ def index_existing(
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
 ) -> Counter:
     """
-    Fast scan-only pass — open each FLAC, classify the existing lyrics tag,
+    Fast scan-only pass - open each FLAC, classify the existing lyrics tag,
     and write state entries for files that already have synced or plain
     lyrics. No provider calls, so workers can be cranked far higher than the
     network path tolerates. Use this to seed the state file after a
@@ -2149,7 +2212,7 @@ def index_existing(
         try:
             binding = _BoundTrack(fp, owned_root)
         except (OSError, TypeError, ValueError) as e:
-            log.warning("unsafe lyric index path refused: %s — %s", fp, e)
+            log.warning("unsafe lyric index path refused: %s - %s", fp, e)
             return "unsafe-path"
         with binding:
             held = os.fstat(binding.track_fd)
@@ -2169,11 +2232,11 @@ def index_existing(
             try:
                 f = FLAC(f"/proc/self/fd/{binding.track_fd}")
             except Exception as e:
-                log.debug("FLAC open failed: %s — %s", fp, e)
+                log.debug("FLAC open failed: %s - %s", fp, e)
                 return "open-error"
             kind = classify(get_existing_lyrics(f))
             if kind == "none":
-                # Don't write state for files with no lyrics — let the normal
+                # Don't write state for files with no lyrics - let the normal
                 # run pick them up via should_process(st=None).
                 return "no-lyrics"
             st = TrackState(
@@ -2189,7 +2252,7 @@ def index_existing(
         try:
             with _state_lock:
                 # Merge into the on-disk state under the cross-process lock so a
-                # concurrent writer's entries survive — a blind save would clobber
+                # concurrent writer's entries survive - a blind save would clobber
                 # whatever another process (CLI import hook / other lane) wrote
                 # since this run loaded its snapshot (see update_state's docstring).
                 update_state(lambda disk: disk.update(state), state_path)

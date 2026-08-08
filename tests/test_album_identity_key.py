@@ -1,6 +1,6 @@
 """The dismissed-store key must tell distinct albums apart.
 
-The loose decoration strip collapsed 'Alone' with 'Alone (Again)' — dismissing
+The loose decoration strip collapsed 'Alone' with 'Alone (Again)' - dismissing
 one buried the other, and a kept album could vanish under a dismissed
 sibling's fingerprint. The strict key keeps identity-bearing parentheses while
 still folding real edition decorations.
@@ -71,7 +71,7 @@ def test_loose_keyed_store_rekeys_and_splits_on_load(tmp_path, monkeypatch):
     assert set(bucket) == {fp_alone, fp_again}
     assert [r["title"] for r in bucket[fp_alone]["rows"]] == ["Alone"]
     assert [r["title"] for r in bucket[fp_again]["rows"]] == ["Alone (Again)"]
-    # Bringing one back leaves the other dismissed — the burial this key
+    # Bringing one back leaves the other dismissed - the burial this key
     # change exists to end.
     hidden.restore_albums("missing", [fp_again])
     after = hidden.load()["missing"]

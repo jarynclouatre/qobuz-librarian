@@ -12,6 +12,10 @@
   </div>
 </header>
 
+{% if error %}
+<div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
+{% endif %}
+
 {% macro job_side(job) -%}
     <div class="ql-activity-side">
       {% if job.status == 'done' %}
@@ -71,7 +75,7 @@
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
-            data-confirm="Clear finished jobs from history? Active single-track Undo and recovery records stay until resolved."
+            data-confirm="Clear finished jobs from history? Active single-track Undo, parked reviews, and recovery records stay until resolved."
             data-confirm-action="Clear history" data-confirm-danger>Clear history</button>
   </form>
 </div>
@@ -97,7 +101,7 @@
           {% if job.recovery_unreadable %}
           <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% elif job.recoveries %}
-          <p class="ql-row-meta ql-row-meta--error">Original files are being kept safely. Review or restore them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+          <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% endif %}
           {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
           {% if job.error %}<p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>{% endif %}

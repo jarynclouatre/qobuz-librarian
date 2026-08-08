@@ -7,11 +7,11 @@ its own any more, so a fix lands once and the two can't drift.
 The answer is built in two passes, because the right question differs for albums
 you own versus albums you don't:
 
-  Pass A — disk walk. For every folder you own under the artist, match it to the
+  Pass A - disk walk. For every folder you own under the artist, match it to the
     Qobuz edition that folder actually is and compare track-for-track. This is
     what catches gaps accurately, including in deluxe/anniversary editions and in
     singles the catalog-level filters drop.
-  Pass B — catalog walk. Everything in the artist's catalog that Pass A didn't
+  Pass B - catalog walk. Everything in the artist's catalog that Pass A didn't
     already account for, isn't owned under another folder, and isn't dismissed,
     surfaces as a fully-missing album.
 
@@ -34,6 +34,7 @@ from qobuz_librarian.library.catalog import (
     _dir_year,
     _paths_equal,
     album_released_within,
+    album_year,
     compute_missing,
     dedup_album_versions,
     filter_compilation_albums,
@@ -124,7 +125,7 @@ def resolve_artist(query, token):
 
     Qobuz lists the canonical artist ('The Beatles') next to bare-name twins
     ('Beatles') that aggregate covers, interviews and bootlegs. A raw string
-    match favours the twin — it has no 'The ' to cost it similarity — so compare
+    match favours the twin - it has no 'The ' to cost it similarity - so compare
     with the leading article stripped and, among equally close names, take the
     one with the deepest catalog: the real artist's, not the twin's.
 
@@ -154,7 +155,7 @@ def resolve_artist(query, token):
     best = max(qualifying,
                key=lambda a: (match_score(a), a.get("albums_count") or 0))
     aid, aname = best.get("id"), best.get("name")
-    # A name match with no id is a malformed/partial result, not a usable hit —
+    # A name match with no id is a malformed/partial result, not a usable hit -
     # the callers need the id, so caching [None, name] would skip the artist on
     # every later scan. Treat it as a miss (don't cache); a later scan retries.
     if aid:
@@ -170,7 +171,7 @@ def resolve_artist_dir(artist_query, candidates=None):
     Pass ``candidates`` (a list_library_artists() result) to match many artists
     against one directory listing. The search-ownership annotation resolves the
     artist of every result; left to itself this re-walks MUSIC_ROOT once per
-    result, turning an O(library) listing into O(results × library) — slow
+    result, turning an O(library) listing into O(results × library) - slow
     enough on a large library to trip the caller's timeout and drop every mark."""
     if not artist_query:
         return None
@@ -215,13 +216,13 @@ _LIVE_RELEASE_PATTERNS = (
     # "(Live)", "(Live at Wembley)", "[Live in Tokyo]", "(Recorded Live ...)"
     re.compile(r"[\(\[][^)\]]*\blive\b", re.IGNORECASE),
     # " - Live", " - Live at the Apollo", "– Live in ..." (en/em dash too)
-    re.compile(r"[\-–—]\s*live\b", re.IGNORECASE),
-    # "Live at/in/from/on ..." — a place/date phrase, not "Live and ..."/"Live Through ..."
+    re.compile(r"[\-–]\s*live\b", re.IGNORECASE),
+    # "Live at/in/from/on ..." - a place/date phrase, not "Live and ..."/"Live Through ..."
     re.compile(r"\blive\s+(?:at|in|from|on)\b", re.IGNORECASE),
     # Acoustic/unplugged/session formats, as a tagged or delimited marker.
     re.compile(r"\bunplugged\b", re.IGNORECASE),
     re.compile(r"[\(\[][^)\]]*\b(?:acoustic|session|sessions)\b", re.IGNORECASE),
-    re.compile(r"[\-–—]\s*(?:acoustic\s+session|live\s+session)", re.IGNORECASE),
+    re.compile(r"[\-–]\s*(?:acoustic\s+session|live\s+session)", re.IGNORECASE),
     re.compile(r"\b(?:bbc|peel|abbey\s+road)\s+sessions?\b", re.IGNORECASE),
     re.compile(r"\blive\s+sessions?\b", re.IGNORECASE),
     # A bracketed/parenthetical "... Tour" tag, e.g. "(The Wall Tour Live)".
@@ -270,12 +271,12 @@ class DiscoveryResult:
     artist_name: str | None
     gaps: list = field(default_factory=list)          # AlbumGap (partials + fully-missing)
     complete: list = field(default_factory=list)      # {dir, qobuz_album, existing}
-    singles: list = field(default_factory=list)       # {dir, qobuz_album, present, missing} — downloaded singles, not gaps
+    singles: list = field(default_factory=list)       # {dir, qobuz_album, present, missing} - downloaded singles, not gaps
     skipped: list = field(default_factory=list)       # {dir, reason, qobuz_title, ...}
     unmatched_dirs: list = field(default_factory=list)  # folders no Qobuz album matched
     catalog: list = field(default_factory=list)       # the fetched catalog (callers may reuse)
     # The catalog fetch was a transient SHORT page (a partial 200), NOT a
-    # legitimate cap — so it's not the whole discography.
+    # legitimate cap - so it's not the whole discography.
     catalog_incomplete: bool = False
 
     @property
@@ -296,7 +297,7 @@ class NewReleaseResult:
     artist_name: str | None
     new_gaps: list = field(default_factory=list)
     current_ids: list = field(default_factory=list)
-    # True when the catalog fetch came back empty AND with no total — a
+    # True when the catalog fetch came back empty AND with no total - a
     # failed or empty 200, indistinguishable from a transient API hiccup.
     fetch_failed: bool = False
 
@@ -309,7 +310,7 @@ def _record_owned_title(owned_titles, album_dir):
 
 
 def owned_album_titles(album_dirs):
-    """{normalized bare title: {years}} for a set of album folders — the
+    """{normalized bare title: {years}} for a set of album folders - the
     year-aware owned set the missing pass uses as a resolution-miss backstop.
     Shared so the CLI gap-fill and the engine seed it identically."""
     titles: dict = {}
@@ -320,7 +321,7 @@ def owned_album_titles(album_dirs):
 
 def _owned_by_name(owned_titles, album, artist_name=None):
     """True when the album's bare title (year-aware) already names an owned
-    folder — the backstop for a resolution miss, so a duplicate isn't offered.
+    folder - the backstop for a resolution miss, so a duplicate isn't offered.
     ``artist_name`` lets filter_owned_albums offer distinct self-titled albums
     (a 2001 'Weezer' when only the 1994 one is owned) instead of hiding them."""
     return not filter_owned_albums([(album, 1)], owned_titles, artist_name)
@@ -328,17 +329,28 @@ def _owned_by_name(owned_titles, album, artist_name=None):
 
 def _is_hidden(hidden, artist_name, album):
     return hidden is not None and hidden_mod.is_hidden(
-        hidden_mod.SCOPE_MISSING, artist_name, album.get("title"), hidden)
+        hidden_mod.SCOPE_MISSING,
+        artist_name,
+        album.get("title"),
+        hidden,
+        year=album_year(album),
+    )
 
 
 def _is_single(single_store, artist_name, album):
     return (single_store is not None and album is not None
-            and hidden_mod.is_single(artist_name, album.get("title"), single_store))
+            and hidden_mod.is_single(
+                artist_name,
+                album.get("title"),
+                single_store,
+                year=album_year(album),
+                album_id=album.get("id"),
+            ))
 
 
 def _collecting(single_store, artist_name, album_dirs):
-    """An artist is 'collected' — surfaced by the bulk catalog walk and the
-    new-release check — only when they own at least one album folder that isn't
+    """An artist is 'collected' - surfaced by the bulk catalog walk and the
+    new-release check - only when they own at least one album folder that isn't
     just a downloaded single. No single store (an explicit single-artist request)
     means show everything."""
     if single_store is None:
@@ -346,7 +358,8 @@ def _collecting(single_store, artist_name, album_dirs):
     # Derive per-folder, not by count: an artist is collecting if ANY owned
     # folder isn't a downloaded single (is_single normalises the folder name
     # to the mark's fingerprint).
-    return any(not hidden_mod.is_single(artist_name, ad.name, single_store)
+    return any(not hidden_mod.is_single(
+                   artist_name, ad.name, single_store, year=_dir_year(ad.name))
                for ad in album_dirs)
 
 
@@ -428,6 +441,9 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
     and no track lists are fetched, so the cost stays at the catalog list alone.
     """
     owned_titles = owned_titles or {}
+    handled_id_keys = {
+        str(album_id) for album_id in handled_ids if album_id is not None
+    }
     gaps = []
     pairs = dedup_album_versions(
         [a for a in catalog if is_lossless_album(a)],
@@ -440,7 +456,8 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
         pairs = [(a, n) for (a, n) in pairs
                  if not _is_live_release(a.get("title") or "")]
     for album, _n_versions in pairs:
-        if album.get("id") in handled_ids:
+        album_id = album.get("id")
+        if album_id is not None and str(album_id) in handled_id_keys:
             continue
         # A deliberately downloaded single from this album: the owned pass
         # suppresses it, but this fully-missing pass would otherwise re-offer
@@ -454,7 +471,7 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             continue
         if existing and quick:
             # New-release check: a catalog entry that resolves to a folder the
-            # user already has (even partially) isn't new — skip it without the
+            # user already has (even partially) isn't new - skip it without the
             # track-list fetch the gap path below would need.
             continue
         if existing:
@@ -498,16 +515,16 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                             skip_dir=None, fresh=False):
     """Find what's missing for one artist.
 
-    query        — artist name (or folder name) used to resolve the Qobuz artist.
-    opts         — DiscoveryOpts (prefer_hires / include_comps / include_singles).
-    artist_dir   — the artist's on-disk folder; resolved from query when omitted.
-    hidden       — a loaded hidden-store (library.hidden.load()) to filter bulk
+    query        - artist name (or folder name) used to resolve the Qobuz artist.
+    opts         - DiscoveryOpts (prefer_hires / include_comps / include_singles).
+    artist_dir   - the artist's on-disk folder; resolved from query when omitted.
+    hidden       - a loaded hidden-store (library.hidden.load()) to filter bulk
                    walks; pass None for a single-artist request, which sees all.
-    want_missing — when False, only owned-album gaps are returned (no fully-
+    want_missing - when False, only owned-album gaps are returned (no fully-
                    missing albums); the album-fill walk uses this.
-    skip_dir     — optional predicate(Path) -> bool; folders it accepts are left
+    skip_dir     - optional predicate(Path) -> bool; folders it accepts are left
                    unmatched (the album-fill walk skips already-decided albums).
-    fresh        — bypass the catalog cache so an explicit single-artist scan
+    fresh        - bypass the catalog cache so an explicit single-artist scan
                    sees just-released albums; the bulk walk leaves it off.
     """
     opts = opts or DiscoveryOpts()
@@ -544,7 +561,7 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
         classify_owned_match(result, m, hidden, single_store, artist_name,
                              handled_ids, resolved_dirs)
 
-    # Skip the catalog walk for an artist you own only downloaded singles by — they
+    # Skip the catalog walk for an artist you own only downloaded singles by - they
     # aren't one you're collecting, so their back catalogue shouldn't surface.
     # hidden is None on an explicit single-artist request, which always sees all.
     if want_missing and (hidden is None
@@ -565,7 +582,7 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
                                  hidden=None, single_store=None, artist_dir=None,
                                  baseline_only=False):
     """Albums new to this artist's Qobuz catalog since the last check that the
-    user doesn't own and hasn't hidden — the cheap "what's new" path.
+    user doesn't own and hasn't hidden - the cheap "what's new" path.
 
     Unlike find_missing_for_artist this skips the owned-folder matching pass and
     never fetches track lists (a fully-missing album is read straight off the
@@ -581,7 +598,7 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     if not artist_id:
         return NewReleaseResult(None, None)
     # The baseline is persisted as JSON (string keys), so key everything by a
-    # string id — otherwise an int id from resolve never matches the reloaded
+    # string id - otherwise an int id from resolve never matches the reloaded
     # snapshot and every run silently re-baselines instead of diffing.
     artist_id = str(artist_id)
     if artist_dir is None:
@@ -603,7 +620,7 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     # Two cases where we record the snapshot as baseline but surface NOTHING:
     # - capped: a catalogue bigger than the fetch cap comes back as a
     # different unstable slice each run (Qobuz has no stable sort), so the
-    # diff can't be trusted — it would oscillate and dump old albums as "new".
+    # diff can't be trusted - it would oscillate and dump old albums as "new".
     capped = (len(catalog) >= cfg.ARTIST_CATALOG_LIMIT
               or (_total is not None and _total > cfg.ARTIST_CATALOG_LIMIT))
     if capped or baseline_only:
@@ -611,7 +628,7 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
 
     album_dirs = list_artist_album_dirs(artist_dir) if artist_dir else []
     # Still record the baseline so a later real album doesn't dump the back
-    # catalogue as "new" — but an artist you own only singles by isn't one
+    # catalogue as "new" - but an artist you own only singles by isn't one
     # you're collecting, so don't surface their releases.
     if not _collecting(single_store, artist_name, album_dirs):
         return NewReleaseResult(artist_id, artist_name, [], current_ids)
@@ -620,11 +637,11 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     if seen is None:
         return NewReleaseResult(artist_id, artist_name, [], current_ids)
 
-    # "New" = appeared in the catalogue since the baseline — including an old
+    # "New" = appeared in the catalogue since the baseline - including an old
     # album Qobuz only just added, which is genuinely new TO YOU.
     seen_set = set(seen)
     # An id-less album never makes it into the baseline (current_ids filters
-    # id=None), so skip it here too — str(None) would otherwise miss the set and
+    # id=None), so skip it here too - str(None) would otherwise miss the set and
     # flag it new on every check.
     fresh = [a for a in lossless if a.get("id") is not None
              and str(a.get("id")) not in seen_set]
@@ -690,11 +707,15 @@ def classify_owned_match(result, m, hidden, single_store, artist_name,
     else:
         # Graduation is completeness-driven, not button-driven: an album that's
         # now fully present on disk drops any stale single marker no matter which
-        # path completed it (CLI fill, repair, bulk import) — otherwise the mark
+        # path completed it (CLI fill, repair, bulk import) - otherwise the mark
         # suppresses the artist from walks and new-release checks forever.
         if single_store is not None and _is_single(single_store, artist_name,
                                                    m.qobuz_album):
             hidden_mod.unmark_single(
-                artist_name, (m.qobuz_album or {}).get("title") or "")
+                artist_name,
+                (m.qobuz_album or {}).get("title") or "",
+                year=album_year(m.qobuz_album or {}),
+                album_id=(m.qobuz_album or {}).get("id"),
+            )
         result.complete.append({"dir": ad, "qobuz_album": m.qobuz_album,
                                  "existing": m.existing})

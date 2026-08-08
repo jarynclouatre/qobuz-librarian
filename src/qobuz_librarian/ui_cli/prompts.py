@@ -54,7 +54,7 @@ def log_fetch(entry):
                 first = b""
             if first == b"[":
                 # If the legacy-array migration didn't complete, the file is
-                # still a JSON array — appending a JSONL line would leave a
+                # still a JSON array - appending a JSONL line would leave a
                 # hybrid that can't be parsed and hides all history.
                 if not _migrate_fetch_log_to_jsonl():
                     return
@@ -139,7 +139,7 @@ def _read_fetch_log(limit_tail=None):
                 if isinstance(obj, dict):     # a non-dict line would break entry.get(...)
                     entries.append(obj)
             return entries
-        # legacy array format — fall through to full read (we never tail-
+        # legacy array format - fall through to full read (we never tail-
         # optimised this path; once log_fetch migrates the file, it's a
         # one-time cost).
     try:
@@ -177,7 +177,7 @@ def _read_fetch_log(limit_tail=None):
 
 def show_recent_fetches(limit=10):
     """Print the last N entries from FETCH_LOG_FILE. Used by '?' in album-mode
-    interactive query — useful on mobile when the user can't recall what they
+    interactive query - useful on mobile when the user can't recall what they
     last grabbed.
 
     Reads via _read_fetch_log so both JSONL (new) and legacy JSON-array
@@ -204,7 +204,7 @@ def show_recent_fetches(limit=10):
             tag = fmt(C.GRAY, " (already complete)")
         elif n_ok:
             tag = fmt(C.GREEN, f" +{n_ok}")
-        log.info(f"    {fmt(C.GRAY, ts)}  {truncate(artist, 22)} — {truncate(title, 32)}{tag}")
+        log.info(f"    {fmt(C.GRAY, ts)}  {truncate(artist, 22)} - {truncate(title, 32)}{tag}")
 
 
 # ── Interactive UI ────────────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, strict=False):
         try:
             r = input(fmt(C.CYAN, msg + suffix)).strip().lower()
         except EOFError:
-            # Closed stdin is not consent — and not an answer either.
+            # Closed stdin is not consent - and not an answer either.
             return on_eof
         if not r:
             return default_yes
@@ -240,7 +240,7 @@ def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, strict=False):
         if not strict or r in ("n", "no"):
             return False
         # strict: the caller SAVES this answer (or destroys something on it),
-        # so a typo must not read as consent — "maybe" mapping to No is
+        # so a typo must not read as consent - "maybe" mapping to No is
         # harmless when No is safe, but here No means "delete the originals,
         # permanently, from now on". Re-ask until it's a real yes or no.
         print(fmt(C.YELLOW, "  Please answer y or n."))
@@ -278,7 +278,7 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
 
         line1 = (f"  {fmt(C.BOLD, str(i).rjust(2))}.  "
                  f"{fmt(C.WHITE, truncate(artist, title_max // 2))} "
-                 f"{fmt(C.GRAY, '—')} "
+                 f"{fmt(C.GRAY, '-')} "
                  f"{fmt(C.WHITE, truncate(title, title_max))}")
         line2 = f"      {fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}')}{marker}"
         print(line1)
@@ -292,7 +292,7 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
         try:
             r = input(fmt(C.CYAN, f"  Pick a number ({hint}): ")).strip().lower()
         except EOFError:
-            print(fmt(C.GRAY, "  stdin closed — cancelling."))
+            print(fmt(C.GRAY, "  stdin closed - cancelling."))
             return None
         if r in ("q", "quit", "exit", ""):
             return None
@@ -352,7 +352,7 @@ def _is_qobuz_url(text: str) -> bool:
 
 def interactive_query():
     """Return one of: None (cancel), (URL_QUERY, url), or (artist, album)."""
-    section("Album mode — interactive query", color=C.CYAN)
+    section("Album mode - interactive query", color=C.CYAN)
     print()
     while True:
         try:
@@ -374,7 +374,7 @@ def interactive_query():
                 "or search by artist/title."))
             continue
         artist = line
-        # Inner loop so '?' here re-asks for the album, not the artist —
+        # Inner loop so '?' here re-asks for the album, not the artist -
         # otherwise the user loses the artist name they just typed.
         while True:
             try:
@@ -520,7 +520,7 @@ def print_consolidation_overview(summaries):
         if qc["unknown"]:
             log.info(fmt(C.RED + C.BOLD,
                 f"      ⚠  {qc['unknown']} track(s) here have uncertain quality "
-                "or channel layout — can't confirm they're safe to delete."))
+                "or channel layout - can't confirm they're safe to delete."))
 
 
 def print_per_track_consolidation(summary):
@@ -595,14 +595,14 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
 
     section("Selected album")
     print()
-    log.info(f"  {fmt(C.BOLD + C.WHITE, artist)} {fmt(C.GRAY, '—')} "
+    log.info(f"  {fmt(C.BOLD + C.WHITE, artist)} {fmt(C.GRAY, '-')} "
              f"{fmt(C.BOLD + C.WHITE, title)}  {fmt(C.GRAY, f'({year})')}")
     log.info(f"  {fmt(C.GRAY, 'quality:')}  {qual}")
     log.info(f"  {fmt(C.GRAY, 'tracks:')}   {n_total}")
 
     if auto_upgrade:
         # If process_album passed us the existing-quality label, show the
-        # before→after contrast on the summary line too — mirrors the louder
+        # before→after contrast on the summary line too - mirrors the louder
         # banner above and reinforces what's about to happen.
         if existing_quality_label:
             log.info(f"  {fmt(C.MAGENTA + C.BOLD, f'↑ AUTO-UPGRADE: {existing_quality_label} → {qual}')} "
@@ -620,7 +620,7 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
         log.info(f"  {fmt(C.GRAY, 'found:')}    not found on disk")
 
     if n_present == 0:
-        log.info(f"  {fmt(C.GREEN, 'in your library:')}  none — full album will be fetched")
+        log.info(f"  {fmt(C.GREEN, 'in your library:')}  none - full album will be fetched")
     elif n_missing == 0:
         log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
                  f"ALL {n_total} track{'s' if n_total != 1 else ''}")

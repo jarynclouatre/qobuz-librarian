@@ -884,7 +884,7 @@ def test_a_blocked_item_can_park_its_staging_group(tmp_path, monkeypatch):
     # Settling a blocked download parks its run before discarding it, and that
     # park is a staging-group checkpoint. Refusing the checkpoint from BLOCKED
     # left the settle path transitioning to ACTIVE to earn it, which the
-    # resolved-state rule refuses once an import has landed — so a download that
+    # resolved-state rule refuses once an import has landed - so a download that
     # imported and then stranded a file could never be settled from the UI.
     from qobuz_librarian.integrations.staging import retain_staging_run
 

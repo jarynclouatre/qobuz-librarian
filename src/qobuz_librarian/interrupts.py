@@ -15,7 +15,7 @@ def run_sigint_deferred(callback, *, unavailable=OSError,
     """Run ``callback`` with SIGINT parked, re-delivering it afterwards.
 
     When the deferring handler can't be installed at all, raises
-    ``unavailable(detail)`` — callers pass their own error type so the
+    ``unavailable(detail)`` - callers pass their own error type so the
     failure surfaces in their subsystem's vocabulary.
     """
     if threading.current_thread() is not threading.main_thread():

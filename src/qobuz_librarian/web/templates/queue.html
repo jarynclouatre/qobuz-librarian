@@ -36,7 +36,7 @@
       {%- elif job.progress_phase -%}
       {{ job.progress_phase }}
       {%- else -%}
-      Scanning your library…
+      {{ labels.job_activity(job) }}…
       {%- endif -%}
     </p>
     {% elif job.status.value == 'running' %}

@@ -19,7 +19,7 @@ class Mode(str, Enum):
     LYRICS        = "lyrics"
 
 
-# Picker sentinels — typed as plain str so existing `is`/`==` checks at
+# Picker sentinels - typed as plain str so existing `is`/`==` checks at
 # call sites keep working without forcing every caller to import.
 MORE = "__more__"
 URL_QUERY = "__url__"

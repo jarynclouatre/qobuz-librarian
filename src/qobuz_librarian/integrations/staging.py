@@ -432,6 +432,8 @@ def capture_file(path, *, expected=None):
         if (
             not stat.S_ISREG(held.st_mode)
             or not stat.S_ISREG(named.st_mode)
+            or held.st_nlink != 1
+            or named.st_nlink != 1
             or _identity(named) != frozen
             or (expected is not None and frozen != expected)
             or not _chain_is_named(staging, relative, chain, directory=False)
@@ -465,7 +467,11 @@ def _capture_tree_at(directory_fd, relative, directories, files):
             child_fd = os.open(name, _regular_flags(), dir_fd=directory_fd)
             try:
                 held = os.fstat(child_fd)
-                if _identity(value) != _identity(held):
+                if (
+                    value.st_nlink != 1
+                    or held.st_nlink != 1
+                    or _identity(value) != _identity(held)
+                ):
                     raise OSError("staging file changed while sealing")
                 files.append((child_relative, _identity(held)))
             finally:

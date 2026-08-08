@@ -1,4 +1,4 @@
-# Seeded once into the persistent config volume, then never overwritten —
+# Seeded once into the persistent config volume, then never overwritten -
 # edit it freely. Full reference: https://beets.readthedocs.io/
 library: /config/beets/musiclibrary.db
 directory: /music

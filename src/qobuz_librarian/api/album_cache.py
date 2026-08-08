@@ -42,7 +42,7 @@ def _is_corrupt_error(e: sqlite3.Error) -> bool:
 
 def _discard_corrupt_db() -> bool:
     """Remove a malformed cache db (and its WAL sidecars). Returns True if
-    anything was cleared. The cache is derived data — losing it just makes
+    anything was cleared. The cache is derived data - losing it just makes
     the next scan refetch from Qobuz, which beats a permanently dead cache."""
     db = _db_path()
     cleared = False
@@ -56,7 +56,7 @@ def _discard_corrupt_db() -> bool:
             vlog(f"couldn't clear corrupt album cache {p.name}: {e}")
             return False
     if cleared:
-        vlog("album cache was corrupt — rebuilt from scratch")
+        vlog("album cache was corrupt - rebuilt from scratch")
     return cleared
 
 
@@ -65,7 +65,7 @@ def _handle_db_error(e: sqlite3.Error) -> None:
     corruption (common after an unclean NAS/container power off, the
     deployment this app targets) often passes connect + 'CREATE TABLE IF NOT
     EXISTS' and only surfaces as 'database disk image is malformed' on a later
-    row access — which _ensure() never re-checks.
+    row access - which _ensure() never re-checks.
     """
     global _initialized, _generation
     conn = getattr(_local, "conn", None)
@@ -85,7 +85,7 @@ def _handle_db_error(e: sqlite3.Error) -> None:
             _generation += 1
             import logging
             logging.getLogger("qobuz_librarian").info(
-                "album cache was corrupt — discarded; it rebuilds on next scan")
+                "album cache was corrupt - discarded; it rebuilds on next scan")
 
 
 def _ensure() -> bool:
@@ -137,7 +137,7 @@ def _conn() -> sqlite3.Connection:
     A scan looks up one cached album per owned album; opening a fresh connection
     per lookup costs many times the lookup it's meant to make cheap, so each
     thread keeps one (SQLite connections can't be shared across threads).
-    synchronous is dropped to NORMAL — the cache is derived data, so a row lost
+    synchronous is dropped to NORMAL - the cache is derived data, so a row lost
     to an OS crash is just refetched from Qobuz on the next scan.
     """
     conn = getattr(_local, "conn", None)

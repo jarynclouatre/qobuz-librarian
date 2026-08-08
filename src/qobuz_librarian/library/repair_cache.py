@@ -1,17 +1,17 @@
-"""On-disk cache of Qobuz ISRC→track lookups — the one network cost of a repair scan.
+"""On-disk cache of Qobuz ISRC→track lookups - the one network cost of a repair scan.
 
 A repair scan resolves every track to its exact Qobuz recording by ISRC to
 compare durations, and that lookup (one search per track) is both the slow part
 and the only part that touches the network. An ISRC names a recording for good,
 so the result is safe to remember: a re-scan, and any album that shares the same
 ISRC, skips the lookup. The file itself is still decode-tested fresh on every
-scan, so corruption that turns up on disk later is always caught — only the
+scan, so corruption that turns up on disk later is always caught - only the
 network round trip is cached, never a verdict about a file.
 
 An entry is reused while it is younger than ``REPAIR_CACHE_TTL_DAYS`` so a
 remembered track still re-checks against Qobuz that often, in case its catalogue
 entry changed; a TTL of 0 keeps entries until the db is deleted. Only a positive
-hit is stored — a lookup that found nothing (a transient outage, a delisted
+hit is stored - a lookup that found nothing (a transient outage, a delisted
 track) is never cached, so a hiccup can't freeze a "no match" in place. Set
 ``REPAIR_CACHE_ENABLED=false`` to disable; delete the db to drop everything.
 """
@@ -41,7 +41,7 @@ def _is_corrupt_error(e: sqlite3.Error) -> bool:
 
 
 def _discard_corrupt_db() -> bool:
-    """Delete a malformed cache db (+ WAL sidecars). The cache is derived data —
+    """Delete a malformed cache db (+ WAL sidecars). The cache is derived data -
     losing it just makes the next scan look tracks up again, which beats a
     permanently dead cache. Returns True if anything was cleared."""
     db = _db_path()
@@ -56,7 +56,7 @@ def _discard_corrupt_db() -> bool:
             vlog(f"couldn't clear corrupt repair cache {p.name}: {e}")
             return False
     if cleared:
-        vlog("repair cache was corrupt — rebuilt from scratch")
+        vlog("repair cache was corrupt - rebuilt from scratch")
     return cleared
 
 
@@ -80,7 +80,7 @@ def _handle_db_error(e: sqlite3.Error) -> None:
             _generation += 1
             import logging
             logging.getLogger("qobuz_librarian").info(
-                "repair cache was corrupt — discarded; it rebuilds on next scan")
+                "repair cache was corrupt - discarded; it rebuilds on next scan")
 
 
 def _ensure() -> bool:
@@ -123,7 +123,7 @@ def _conn():
     """Connection scoped to the calling thread (SQLite connections can't be
     shared across the scan's worker threads). Reopened when a corrupt-db recovery
     on another thread has bumped the generation, so a worker mid-scan stops
-    writing into the discarded file. synchronous=NORMAL — a row lost to a crash
+    writing into the discarded file. synchronous=NORMAL - a row lost to a crash
     just costs one fresh lookup next run."""
     conn = getattr(_local, "conn", None)
     if conn is not None and getattr(_local, "generation", None) != _generation:
@@ -188,7 +188,7 @@ def put_track(isrc, track) -> None:
 def prune_expired(force: bool = False) -> int:
     """Drop entries past the TTL so the db stays proportional to the library.
 
-    Throttled to once a day — a CLI session that opens and closes repeatedly
+    Throttled to once a day - a CLI session that opens and closes repeatedly
     shouldn't re-walk the table each time. A TTL of 0 (keep forever) prunes
     nothing. Returns the number removed.
     """

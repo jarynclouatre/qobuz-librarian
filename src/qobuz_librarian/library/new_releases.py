@@ -3,7 +3,7 @@
 The quickscan compares each library artist's current Qobuz catalog against the
 album ids recorded here from the last check; anything new the user doesn't own
 and hasn't hidden is a new release. The first check of an artist records only a
-baseline (so the back catalogue isn't dumped as "new") — later checks surface
+baseline (so the back catalogue isn't dumped as "new") - later checks surface
 the difference. ``last_run`` lets the dashboard throttle the automatic check.
 """
 import threading
@@ -86,7 +86,7 @@ def mark_run(seen, when=None, complete=False, baseline_limit=None) -> bool:
 
 def is_baseline_complete() -> bool:
     """True once a full library scan has established the baseline. The automatic
-    new-release check stays dormant until then — so it never crawls to an empty
+    new-release check stays dormant until then - so it never crawls to an empty
     baseline (surfacing nothing) or activates off a partial scan."""
     return bool(load().get("baseline_complete"))
 

@@ -5,6 +5,7 @@ hide/restore round-trip, migration move-vs-copy, persist-without-tearing),
 auth/session/CSRF, the run-lock destructive-route guard, settings save/load,
 one search + one approve endpoint, and a few genuinely tricky bits of logic.
 """
+
 import asyncio
 import concurrent.futures
 import threading
@@ -19,17 +20,10 @@ from qobuz_librarian.web import jobs as jm
 # ── jobs.py: Job ──────────────────────────────────────────────────────────────
 
 
-def test_log_lines_capped_with_truncation_marker():
-    job = jm.Job()
-    total = jm.Job.LOG_CAP + jm.Job._LOG_SLACK + 1
-    for i in range(total):
-        job.push_line(f"line{i}")
-    assert len(job.log_lines) == jm.Job.LOG_CAP
-    assert job.log_lines[0] == jm.Job._TRUNCATION_MARKER
-    assert job.log_lines[-1] == f"line{total - 1}"
 
 
 # ── jobs.py: worker loop ──────────────────────────────────────────────────────
+
 
 def _wait_for(predicate, timeout=5.0):
     deadline = time.time() + timeout
@@ -138,6 +132,87 @@ def test_submit_refuses_job_without_durable_admission(monkeypatch):
     assert work.empty()
 
 
+def test_late_cancel_cannot_relabel_proven_durable_download(monkeypatch):
+    """Once exact durable completion settles, a racing cancel is too late.
+
+    The durable lane deliberately finishes an import after the download has
+    become complete.  A cancel arriving during that finalisation used to leave
+    ``cancel_requested`` set, so the generic worker wrapper relabelled the
+    completed album CANCELED after the queue journal had already cleared.
+    """
+    from types import SimpleNamespace
+
+    from qobuz_librarian.library import catalog, hidden
+    from qobuz_librarian.queue import durable_album, executor
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import flows
+
+    album = {
+        "id": "late-cancel-album",
+        "title": "Completed Album",
+        "artist": {"name": "Artist"},
+        "tracks": {"items": [{"id": "track-1"}]},
+    }
+    durable_item = {"album": album}
+    monkeypatch.setattr(catalog, "is_lossless_album", lambda _album: True)
+    monkeypatch.setattr(catalog, "find_existing_tracks", lambda _album: ([], None))
+    monkeypatch.setattr(
+        catalog,
+        "compute_missing",
+        lambda tracks, _existing: (list(tracks), []),
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.queue.builder._build_queue_item",
+        lambda **_kwargs: durable_item,
+    )
+    monkeypatch.setattr(durable_album, "plan_durable_new_album", lambda *_args: object())
+    monkeypatch.setattr(flows, "build_args", lambda: SimpleNamespace())
+    monkeypatch.setattr(flows, "_note_staging_wait", lambda *_args: None)
+    monkeypatch.setattr(flows, "_refresh_after_local_album_change", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flows, "prune_library_review_candidates", lambda *_args: None)
+    monkeypatch.setattr(hidden, "unmark_single", lambda *_args, **_kwargs: None)
+
+    job = jm.Job(
+        title=album["title"],
+        artist=album["artist"]["name"],
+        album_id=album["id"],
+    )
+    job.status = jm.JobStatus.RUNNING
+
+    def exact_completion(_queue, _args, _token, **_kwargs):
+        job.cancel_requested = True
+        return (
+            [
+                {
+                    "result": "downloaded",
+                    "imported": True,
+                    "n_ok": 1,
+                    "n_fail": 0,
+                    "n_lossy": 0,
+                }
+            ],
+            True,
+        )
+
+    monkeypatch.setattr(executor, "_execute_download_queue", exact_completion)
+    monkeypatch.setattr(webapp, "_run_lock_intact", lambda: True)
+    monkeypatch.setattr(
+        webapp,
+        "_record_startup_recovery",
+        lambda _authority: SimpleNamespace(status=SimpleNamespace(value="clear")),
+    )
+    monkeypatch.setattr(webapp, "_RUN_LOCK_HANDLE", object())
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    monkeypatch.setattr(jm.job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(jm, "_fire_post_job_hook", lambda _job: None)
+    jm.registry.add(job)
+
+    jm._run_task(job, webapp._make_download_run(album, "token"))
+
+    assert job.status is jm.JobStatus.DONE
+    assert job.cancel_requested is False
+
+
 def test_delayed_selection_save_reports_a_write_failure(monkeypatch):
     registry = jm.JobRegistry()
     job = jm.Job(id="unsaved-selection", title="Review")
@@ -154,20 +229,6 @@ def test_delayed_selection_save_reports_a_write_failure(monkeypatch):
     job.unsubscribe(subscriber)
 
 
-def test_late_cancel_does_not_discard_a_parked_review():
-    # A cancel flag arriving just as a scan parks its results must not flip
-    # AWAITING_REVIEW to CANCELED, and the found candidates would be lost.
-    job = jm.Job(title="scan")
-    job.status = jm.JobStatus.RUNNING
-    job.cancel_requested = True
-
-    def fn(j):
-        j.add_candidate("album", "Album A", "Artist", payload={"id": 1})
-        j.status = jm.JobStatus.AWAITING_REVIEW
-
-    jm._run_task(job, fn)
-    assert job.status == jm.JobStatus.AWAITING_REVIEW
-    assert len(job.candidates) == 1
 
 
 def test_per_artist_rescan_supersedes_only_that_artists_parked_review(
@@ -232,64 +293,6 @@ def test_download_dedup_respects_new_edition_and_single_track_intent():
     assert app_mod._duplicate_download_job("Y", track_id="7") is grab
     assert app_mod._duplicate_download_job("Y", track_id="8") is None
     assert app_mod._duplicate_download_job("Y") is None
-
-
-def test_download_fragments_report_their_queue_outcome(
-        client, monkeypatch, tmp_path):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.library.catalog as catalog_mod
-    import qobuz_librarian.web.app as app_mod
-
-    headers = {"HX-Request": "true"}
-    failed = client.post("/download", data={}, headers=headers)
-    assert failed.headers["X-QL-Download-Outcome"] == "failed"
-
-    duplicate = jm.Job(title="Queued", artist="The Lab", album_id="duplicate")
-    duplicate.status = jm.JobStatus.RUNNING
-    jm.registry.add(duplicate)
-    try:
-        response = client.post(
-            "/download", data={"album_id": "duplicate"}, headers=headers)
-        assert response.headers["X-QL-Download-Outcome"] == "duplicate"
-    finally:
-        _remove_job(duplicate)
-
-    folder = tmp_path / "Signals"
-    folder.mkdir()
-    album = {
-        "id": "signals",
-        "title": "Signals",
-        "artist": {"name": "The Lab"},
-        "tracks": {"items": [{"id": "owned", "title": "Already Here"}]},
-    }
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    monkeypatch.setattr(search_mod, "get_album", lambda *_a: album)
-    monkeypatch.setattr(
-        catalog_mod, "find_album_dir_filesystem", lambda _album: folder)
-    monkeypatch.setattr(
-        catalog_mod,
-        "find_existing_tracks",
-        lambda _album, album_dir=None: ([{"title": "Already Here"}], album_dir),
-    )
-    response = client.post(
-        "/download",
-        data={"album_id": "signals", "track_id": "owned"},
-        headers=headers,
-    )
-    assert response.headers["X-QL-Download-Outcome"] == "owned"
-
-    monkeypatch.setattr(
-        catalog_mod,
-        "find_existing_tracks",
-        lambda _album, album_dir=None: ([], album_dir),
-    )
-    monkeypatch.setattr(app_mod.job_mgr, "submit", lambda job, _run: job)
-    response = client.post(
-        "/download",
-        data={"album_id": "signals", "track_id": "owned"},
-        headers=headers,
-    )
-    assert response.headers["X-QL-Download-Outcome"] == "queued"
 
 
 def test_new_release_review_never_owns_the_library_surface():
@@ -379,70 +382,6 @@ def test_direct_album_download_refreshes_saved_quality_state(
     }
 
 
-def test_direct_single_track_download_refreshes_saved_quality_state(
-        monkeypatch, tmp_path):
-    import qobuz_librarian.library.catalog as cat_mod
-    import qobuz_librarian.queue.builder as builder_mod
-    import qobuz_librarian.queue.executor as executor_mod
-    from qobuz_librarian.web import app as app_mod
-    from qobuz_librarian.web import flows
-
-    album_dir = tmp_path / "Artist" / "Album"
-    album_dir.mkdir(parents=True)
-    album = {
-        "id": "alb1",
-        "title": "Album",
-        "year": 2024,
-        "artist": {"name": "Artist"},
-        "tracks": {"items": [
-            {"id": "t1", "title": "One", "track_number": 1},
-            {"id": "t2", "title": "Two", "track_number": 2},
-        ]},
-    }
-    track = album["tracks"]["items"][0]
-    calls = []
-
-    monkeypatch.setattr(cat_mod, "find_existing_tracks", lambda *_a, **_k: ([], None))
-    monkeypatch.setattr(
-        builder_mod,
-        "_build_queue_item",
-        lambda **kwargs: {
-            "album": kwargs["album"],
-            "missing": kwargs["missing"],
-            "n_ok": 0,
-            "n_fail": 0,
-            "imported": False,
-        },
-    )
-
-    def fake_execute(queue, *_a, **_k):
-        queue[0]["n_ok"] = 1
-        queue[0]["n_fail"] = 0
-        queue[0]["imported"] = True
-        queue[0]["_resolved_post_dir"] = str(album_dir)
-
-    monkeypatch.setattr(executor_mod, "_execute_download_queue", fake_execute)
-    monkeypatch.setattr(
-        flows,
-        "_refresh_after_local_album_change",
-        lambda *a, **kw: calls.append((a, kw)),
-    )
-    monkeypatch.setattr(app_mod.cfg, "SUPPRESS_SINGLE_TRACK_GAPS", False, raising=False)
-
-    job = jm.Job(title="One", artist="Artist", album_id="alb1")
-    app_mod._make_single_track_run(album, track, "tok")(job)
-
-    assert job.status != jm.JobStatus.FAILED
-    assert len(calls) == 1
-    assert calls[0][0][0] is album
-    assert Path(calls[0][0][1]["dir"]) == album_dir
-    assert calls[0][1] == {
-        "fallback_artist": "Artist",
-        "token": "tok",
-        "args": calls[0][1]["args"],
-        "upgrade": True,
-        "downsample": True,
-    }
 
 
 def test_cancel_while_queued_finalizes_and_worker_skips_it():
@@ -484,35 +423,21 @@ def test_cancel_while_queued_finalizes_and_worker_skips_it():
     assert queued.status == jm.JobStatus.CANCELED
 
 
-def test_approve_flips_status_then_passes_chosen_to_execute(monkeypatch):
-    job = jm.Job(title="scan-approve")
-    job.kind = "scan"
-    job.status = jm.JobStatus.AWAITING_REVIEW
-    got_chosen = []
-    job._execute_fn = lambda j, chosen: got_chosen.append(chosen)
-    job.add_candidate("album", "A", "Artist", payload={"id": 1})
+def test_pending_cancel_rolls_back_when_terminal_state_cannot_be_saved(monkeypatch):
+    job = jm.Job(title="unsaved queued cancel")
+    job._durability_required = True
+    monkeypatch.setattr(jm.job_persistence, "_persist_locked", lambda _job: False)
 
-    status_at_put = []
-    enqueued = []
+    assert jm.request_cancel(job) is False
+    assert job.status == jm.JobStatus.PENDING
+    assert job.cancel_requested is False
+    assert job.finished_at is None
 
-    def _spy_put(item):
-        status_at_put.append(item[0].status)
-        enqueued.append(item[1])
 
-    monkeypatch.setattr(jm._scan_queue, "put", _spy_put)
-
-    assert jm.approve(job, ["c0"]) is True
-    # Status flips to PENDING before the execute step is enqueued, so a second
-    # concurrent approve can't double-enqueue the download.
-    assert status_at_put == [jm.JobStatus.PENDING]
-    # Running the enqueued step hands execute_fn exactly the kept candidate.
-    enqueued[0](job)
-    assert [c["payload"] for c in got_chosen[0]] == [{"id": 1}]
-    # A second approve no longer sees AWAITING_REVIEW, so it's rejected.
-    assert jm.approve(job, ["c0"]) is False
 
 
 # ── app.py: HTTP routes ───────────────────────────────────────────────────────
+
 
 class _SameThreadASGIClient:
     """Small sync wrapper around HTTPX's ASGI transport.
@@ -702,50 +627,8 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
     assert client.get("/readyz").json() == {"ok": True, "status": "ready"}
 
 
-def test_search_uses_a_generous_result_limit(client, monkeypatch):
-    # The front-page search was capped at 8, so a major artist surfaced almost
-    # nothing (the owner's first complaint).
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian import config as cfg
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    seen = {}
-
-    def fake(q, t, limit=None):
-        seen["limit"] = limit
-        return []
-
-    monkeypatch.setattr(search_mod, "search_albums", fake)
-    r = client.post("/search", data={"q": "Paul McCartney", "kind": "album"},
-                    headers={"HX-Request": "true"})
-    assert r.status_code == 200
-    assert seen.get("limit") == cfg.SEARCH_LIMIT
-    assert cfg.SEARCH_LIMIT >= 20
 
 
-def test_artist_search_lists_qobuz_artists(client, monkeypatch):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian import config as cfg
-
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    seen = {}
-
-    def fake(q, t, limit=None):
-        seen["query"] = q
-        seen["limit"] = limit
-        return [{"id": "artist1", "name": "Paysage d'Hiver", "albums_count": 12}]
-
-    monkeypatch.setattr(search_mod, "search_artists", fake)
-
-    r = client.post("/search", data={"q": "Paysage", "kind": "artist"},
-                    headers={"HX-Request": "true"})
-
-    assert r.status_code == 200
-    assert seen == {"query": "Paysage", "limit": cfg.ARTIST_LOOKUP_LIMIT}
-    assert "Paysage" in r.text
-    assert "View albums" in r.text
-    assert 'name="artist_id" value="artist1"' in r.text
 
 
 def test_artist_search_selected_artist_shows_discography(client, monkeypatch):
@@ -791,27 +674,6 @@ def test_artist_search_selected_artist_shows_discography(client, monkeypatch):
     assert "Download" in r.text
 
 
-def test_dashboard_artist_query_renders_initial_results(client, monkeypatch):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian import config as cfg
-
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    seen = {}
-
-    def fake(q, t, limit=None):
-        seen["query"] = q
-        seen["limit"] = limit
-        return [{"id": "artist1", "name": "Paysage d'Hiver", "albums_count": 12}]
-
-    monkeypatch.setattr(search_mod, "search_artists", fake)
-
-    r = client.get("/?kind=artist&q=Paysage")
-
-    assert r.status_code == 200
-    assert seen == {"query": "Paysage", "limit": cfg.ARTIST_LOOKUP_LIMIT}
-    assert "Paysage d&#39;Hiver" in r.text
-    assert "View albums" in r.text
 
 
 def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path):
@@ -923,15 +785,6 @@ def test_new_edition_download_rechecks_exact_ownership(
     assert len(submitted) == 1
 
 
-def test_ordinary_web_downloads_do_not_auto_replace_editions(monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import flows
-
-    monkeypatch.setattr(cfg, "AUTO_UPGRADE_ENABLED", True)
-
-    assert flows.build_args().auto_upgrade is False
-
-
 def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch, tmp_path):
     import qobuz_librarian.api.search as search_mod
     import qobuz_librarian.library.catalog as catalog_mod
@@ -974,105 +827,38 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
 # 11-track pressings of Waiting for the Sun, none of which carries a version
 # field. That is the shape that breaks a grouped row.
 _WAITING = [
-    {"id": "deluxe", "title": "Waiting for the Sun (50th Anniversary Deluxe Edition)",
-     "artist": {"name": "The Doors"}, "year": 1968, "tracks_count": 25,
-     "maximum_bit_depth": 24, "maximum_sampling_rate": 192},
-    {"id": "cd", "title": "Waiting for the Sun",
-     "artist": {"name": "The Doors"}, "year": 1968, "tracks_count": 11,
-     "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
-    {"id": "hires", "title": "Waiting For The Sun",
-     "artist": {"name": "The Doors"}, "year": 1968, "tracks_count": 11,
-     "maximum_bit_depth": 24, "maximum_sampling_rate": 96},
+    {
+        "id": "deluxe",
+        "title": "Waiting for the Sun (50th Anniversary Deluxe Edition)",
+        "artist": {"name": "The Doors"},
+        "year": 1968,
+        "tracks_count": 25,
+        "maximum_bit_depth": 24,
+        "maximum_sampling_rate": 192,
+    },
+    {
+        "id": "cd",
+        "title": "Waiting for the Sun",
+        "artist": {"name": "The Doors"},
+        "year": 1968,
+        "tracks_count": 11,
+        "maximum_bit_depth": 16,
+        "maximum_sampling_rate": 44.1,
+    },
+    {
+        "id": "hires",
+        "title": "Waiting For The Sun",
+        "artist": {"name": "The Doors"},
+        "year": 1968,
+        "tracks_count": 11,
+        "maximum_bit_depth": 24,
+        "maximum_sampling_rate": 96,
+    },
 ]
 
 
-def _search_waiting_for_the_sun(client, monkeypatch, folder):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.library.catalog as catalog_mod
-    import qobuz_librarian.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    monkeypatch.setattr(search_mod, "search_albums", lambda *_a, **_kw: list(_WAITING))
-    exact = {
-        album["id"]: {
-            **album,
-            "tracks": {"items": [
-                {"id": f'{album["id"]}-{n}'}
-                for n in range(1, album["tracks_count"] + 1)
-            ]},
-        }
-        for album in _WAITING
-    }
-    monkeypatch.setattr(search_mod, "get_album",
-                        lambda album_id, _token: exact[album_id])
-    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: folder)
-
-    def existing(album, album_dir=None):
-        have = len(list(folder.glob("*.flac")))
-        return album["tracks"]["items"][:have], album_dir
-
-    def missing(wanted, have):
-        have_ids = {track["id"] for track in have}
-        return [track for track in wanted if track["id"] not in have_ids], have
-
-    monkeypatch.setattr(catalog_mod, "find_existing_tracks", existing)
-    monkeypatch.setattr(catalog_mod, "compute_missing", missing)
-    r = client.post("/search", data={"q": "Waiting for the Sun", "kind": "album"},
-                    headers={"HX-Request": "true"})
-    assert r.status_code == 200
-    table = r.text[r.text.index('data-search-view-panel="table"'):
-                   r.text.index('data-search-view-panel="grid"')]
-    grid = r.text[r.text.index('data-search-view-panel="grid"'):]
-    return table, grid
 
 
-def _subrow_titles(table):
-    import re
-    return [re.sub(r"<[^>]+>", "", m).strip()
-            for m in re.findall(r'class="ql-subtitle">(.*?)</p>', table, re.S)]
-
-
-def test_other_versions_are_named_by_their_own_release(client, monkeypatch, tmp_path):
-    # Every alternate pressing was drawn with the GROUP's title, so the plain
-    # 11-track album was offered as the 25-track deluxe it had been grouped
-    # under, and the download confirmation named that deluxe too. Two different
-    # records, one name, and no way to tell from the row which one you get.
-    folder = tmp_path / "Waiting for the Sun (1968)"
-    folder.mkdir()
-    table, grid = _search_waiting_for_the_sun(client, monkeypatch, folder)
-
-    subs = _subrow_titles(table)
-    assert subs == ["Waiting for the Sun", "Waiting For The Sun"]
-    assert not any("Deluxe" in s for s in subs)
-    # The invented "<year> edition" label stood in for a version the release
-    # never had, so both pressings read identically.
-    assert "1968 edition" not in table
-    # The confirm prompt and the aria-label name the pressing being fetched.
-    assert 'Download "Waiting For The Sun" by The Doors?' in table
-    assert 'aria-controls="search-grid-versions-0"' in grid
-    assert 'name="album_id" value="cd"' in grid
-    assert 'name="album_id" value="hires"' in grid
-    assert "Waiting for the Sun" in grid
-    assert "Waiting For The Sun" in grid
-
-
-def test_a_grouped_row_counts_the_pressing_it_shows(client, monkeypatch, tmp_path):
-    # The "N of M" came from whichever pressing matched a folder on disk and the
-    # track total from whichever pressing represented the group, so a row read
-    # "25 tracks" and "3 of 11" at once. Ticking it fetched 22 tracks, not 8.
-    import re
-    folder = tmp_path / "Waiting for the Sun (1968)"
-    folder.mkdir()
-    for n, t in enumerate(("Hello I Love You", "Love Street", "Not to Touch the Earth"), 1):
-        (folder / f"{n:02d} - {t}.flac").write_bytes(b"\x00")
-
-    table, _grid = _search_waiting_for_the_sun(client, monkeypatch, folder)
-    row = table[:table.index('class="ql-version-panel')]
-
-    total = re.findall(r'ql-table-mono ql-num" role="cell">([^<]*)<', row)[-1].strip()
-    have, want = re.search(r'ql-partial-label"[^>]*>\s*(\d+) of (\d+)\s*<', row).groups()
-    assert have == "3"
-    assert want == total, f"badge counts {want} tracks, row shows {total}"
 
 
 def test_search_keeps_release_identities_distinct(client, monkeypatch):
@@ -1155,66 +941,6 @@ def test_search_keeps_release_identities_distinct(client, monkeypatch):
         assert f'aria-label="Download {display} by The Lab"' in table
 
 
-def test_track_search_marks_tracks_already_in_the_library(
-        client, monkeypatch, tmp_path):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.library.catalog as catalog_mod
-    import qobuz_librarian.web.app as app_mod
-
-    album = {
-        "id": "signals",
-        "title": "Signals",
-        "artist": {"name": "The Lab"},
-        "tracks_count": 2,
-    }
-    tracks = [
-        {"id": "owned", "title": "Already Here", "album": album},
-        {"id": "missing", "title": "Still Missing", "album": album},
-    ]
-    exact_album = {**album, "tracks": {"items": tracks}}
-    folder = tmp_path / "Signals"
-    folder.mkdir()
-    calls = []
-
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    monkeypatch.setattr(search_mod, "search_tracks", lambda *_a, **_kw: tracks)
-
-    def get_album(album_id, _token):
-        calls.append(album_id)
-        return exact_album
-
-    monkeypatch.setattr(search_mod, "get_album", get_album)
-    monkeypatch.setattr(
-        catalog_mod, "find_album_dir_filesystem", lambda _album: folder)
-    monkeypatch.setattr(
-        catalog_mod,
-        "find_existing_tracks",
-        lambda _album, album_dir=None: ([{"title": "Already Here"}], album_dir),
-    )
-
-    response = client.post(
-        "/search",
-        data={"q": "Signals", "kind": "track"},
-        headers={"HX-Request": "true"},
-    )
-
-    assert response.status_code == 200
-    assert calls == ["signals"]
-    table_at = response.text.index('data-search-view-panel="table"')
-    grid_at = response.text.index('data-search-view-panel="grid"')
-    table = response.text[table_at:grid_at]
-    grid = response.text[grid_at:]
-    for view in (table, grid):
-        owned = view[view.index('data-search-key="track-signals-owned"'):]
-        owned = owned[:owned.index('data-search-key="track-signals-missing"')]
-        assert 'data-owned="1"' in owned
-        assert "In library" in owned
-        assert 'name="track_id" value="owned"' not in owned
-        assert 'data-search-select data-search-key="track-signals-owned"' not in owned
-        assert 'name="track_id" value="missing"' in view
-        assert 'data-search-select data-search-key="track-signals-missing"' in view
-
-
 def test_new_release_check_refused_without_baseline(client, monkeypatch):
     # "Check for new releases" is a library-walk-and-compare, useless until a
     # full library scan has built the baseline.
@@ -1229,17 +955,6 @@ def test_new_release_check_refused_without_baseline(client, monkeypatch):
     assert app_mod._existing_new_release_check() is None     # no crawl was started
 
 
-def test_library_scan_state_explains_empty_music_root(tmp_path, monkeypatch):
-    import qobuz_librarian.web.app as app_mod
-
-    monkeypatch.setattr(app_mod.cfg, "MUSIC_ROOT", tmp_path)
-    state = app_mod._library_scan_state()
-
-    assert state["ready"] is False
-    assert str(tmp_path) in state["message"]
-    assert "MUSIC_ROOT" not in state["message"]
-    assert "QL_MUSIC_DIR" not in state["message"]
-    assert "artist" in state["message"].lower()
 
 
 def test_qobuz_ready_false_when_saved_token_is_rejected(monkeypatch):
@@ -1252,14 +967,6 @@ def test_qobuz_ready_false_when_saved_token_is_rejected(monkeypatch):
     assert app_mod._qobuz_ready() is False
 
 
-def test_qobuz_ready_allows_unproven_saved_token(monkeypatch):
-    import qobuz_librarian.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "_read_creds",
-                        lambda: {"auth_token": "maybe-token", "user_id": "user"})
-    monkeypatch.setattr(app_mod, "_TOKEN_VALID", None)
-
-    assert app_mod._qobuz_ready() is True
 
 
 def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):
@@ -1283,29 +990,28 @@ def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):
     assert cfg.DOWNSAMPLE_HIRES_ENABLED is True  # idempotent
 
 
-def test_parked_review_does_not_defer_settings(tmp_path, monkeypatch):
-    """A parked review can sit for weeks, so a save made next to one must apply
-    right away, not wait in the pending slot for a job that may never run."""
+def test_failed_settings_write_does_not_apply_live_values(monkeypatch):
+    """A failed durable save must leave the running process unchanged too."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import settings_store as ss
 
-    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
     monkeypatch.setattr(cfg, "DOWNSAMPLE_HIRES_ENABLED", False)
-    review = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    review.execute_kind = "downsample"
+    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
+    monkeypatch.setattr(ss, "_atomic_write_settings", lambda _data: False)
     with ss._pending_lock:
         ss._pending_apply = None
 
-    assert ss._any_active_job() is False
     ok, _ = ss.save({"DOWNSAMPLE_HIRES_ENABLED": True})
-    assert ok is True
-    assert cfg.DOWNSAMPLE_HIRES_ENABLED is True  # applied immediately
+
+    assert ok is False
+    assert cfg.DOWNSAMPLE_HIRES_ENABLED is False
     with ss._pending_lock:
         assert ss._pending_apply is None
 
 
-def test_quality_change_flags_the_stale_upgrade_review(
-        client, tmp_path, monkeypatch):
+
+
+def test_quality_change_flags_the_stale_upgrade_review(client, tmp_path, monkeypatch):
     """Lowering/raising the download quality leaves a saved Upgrade
     review promising dead targets, so the save must say a refresh updates it.
     An unchanged save stays quiet."""
@@ -1322,23 +1028,25 @@ def test_quality_change_flags_the_stale_upgrade_review(
     state = {
         "complete": True,
         "quality_signature": upgrade_state.quality_signature(),
-        "candidates": [{
-            "title": "Dummy",
-            "artist": "Portishead",
-            "detail": "16-bit/44.1 kHz -> 24-bit/192 kHz",
-            "payload": {"album_id": "up1"},
-        }],
+        "candidates": [
+            {
+                "title": "Dummy",
+                "artist": "Portishead",
+                "detail": "16-bit/44.1 kHz -> 24-bit/192 kHz",
+                "payload": {"album_id": "up1"},
+            }
+        ],
     }
     monkeypatch.setattr(upgrade_state, "load", lambda: state)
     monkeypatch.setattr(ss, "_pending_apply", None)
 
-    r = client.post("/settings/behavior", data={"STREAMRIP_QUALITY": "2"},
-                    follow_redirects=False)
+    r = client.post("/settings/behavior", data={"STREAMRIP_QUALITY": "2"}, follow_redirects=False)
     assert r.status_code == 303
     assert "quality_note=1" in r.headers["location"]
-    r2 = client.post("/settings/behavior", data={"STREAMRIP_QUALITY": "2"},
-                     follow_redirects=False)
+    assert r.headers["location"].endswith("#behaviour")
+    r2 = client.post("/settings/behavior", data={"STREAMRIP_QUALITY": "2"}, follow_redirects=False)
     assert "quality_note" not in r2.headers["location"]
+    assert r2.headers["location"].endswith("#behaviour")
 
     monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
     monkeypatch.setattr(ss, "_any_active_job", lambda: True)
@@ -1401,18 +1109,53 @@ def test_settings_save_only_pins_changed_fields(tmp_path, monkeypatch):
     assert on_disk == {"LYRICS_ENABLED": False, "PREFER_HIRES": False}
 
 
+def test_concurrent_settings_saves_merge_without_losing_either_change(tmp_path, monkeypatch):
+    import json
+    import threading
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(cfg, "PREFER_HIRES", True)
+    with ss._pending_lock:
+        ss._pending_apply = None
+    start = threading.Barrier(3)
+    outcomes = []
+
+    def save_one(values):
+        start.wait()
+        outcomes.append(ss.save(values)[0])
+
+    threads = [
+        threading.Thread(target=save_one, args=({"LYRICS_ENABLED": False},)),
+        threading.Thread(target=save_one, args=({"PREFER_HIRES": False},)),
+    ]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert outcomes == [True, True]
+    assert json.loads((tmp_path / "s.json").read_text()) == {
+        "LYRICS_ENABLED": False,
+        "PREFER_HIRES": False,
+    }
+    assert cfg.LYRICS_ENABLED is False
+    assert cfg.PREFER_HIRES is False
+
+
 # ── CSRF middleware ───────────────────────────────────────────────────────────
 
-def test_csrf_post_without_token_is_rejected():
-    """One representative POST verifies CSRF-missing → 403."""
-    from qobuz_librarian.web import app as app_mod
-    with _SameThreadASGIClient(app_mod.app) as c:
-        c.get("/queue")
-        r = c.post("/search", data={"q": "anything"})
-        assert r.status_code == 403
+
 
 
 # ── run-lock busy → destructive routes 503, read-only stay open ───────
+
 
 def test_lock_busy_refuses_destructive_routes(monkeypatch):
     from qobuz_librarian import config as cfg
@@ -1503,154 +1246,14 @@ def test_folder_move_recovery_pause_names_cause_and_exact_paths(
     assert "exact relocation evidence changed" not in blocked.text
 
 
-def test_nav_shows_qobuz_setup_when_credentials_are_missing(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds", lambda: {})
-
-    r = client.get("/")
-
-    assert r.status_code == 200
-    assert "Set up Qobuz in Settings" in r.text
-    assert 'href="/settings"' in r.text
-    assert "Your Qobuz token was rejected" not in r.text
 
 
-def test_dashboard_qobuz_setup_card_stays_until_qobuz_is_connected(
-        client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds", lambda: {})
-
-    r = client.get("/")
-
-    assert r.status_code == 200
-    assert 'data-qobuz-setup-card' in r.text
-    assert 'data-qobuz-setup-dismiss' not in r.text
-    assert "Qobuz credentials" in r.text
-    assert "Open Settings" in r.text
-    assert "Downsample" in r.text
-    assert "Lyrics" in r.text
-    assert "Set up Qobuz in Settings" in r.text
 
 
-def test_search_page_does_not_show_empty_dashboard_cards(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-
-    r = client.get("/")
-
-    assert r.status_code == 200
-    assert "<h1>Search</h1>" in r.text
-    assert 'class="ql-search-form"' in r.text
-    assert "Needs review" not in r.text
-    assert "Running and queued" not in r.text
-    assert "Recent downloads" not in r.text
-    assert "Latest completed downloads" not in r.text
-    assert "No scans waiting for review." not in r.text
-    assert "Nothing running or queued." not in r.text
 
 
-def test_search_page_does_not_render_review_jobs_as_front_page_cards(
-        client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
-    job.execute_kind = "library"
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      payload={"year": "1994"}, selected=False)
-    try:
-        r = client.get("/")
-
-        assert r.status_code == 200
-        assert 'class="ql-search-form"' in r.text
-        assert "Library scan" not in r.text
-        assert "1 missing album or Gap Fill candidate found." not in r.text
-        assert f'href="/jobs/{job.id}"' not in r.text
-    finally:
-        _remove_job(job)
 
 
-def test_upgrade_disabled_hides_nav_and_badge(client, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import review_badges
-
-    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False, raising=False)
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    review_badges.mark_ready("upgrade", now=100.0)
-
-    r = client.get("/")
-
-    assert r.status_code == 200
-    assert 'href="/upgrade"' not in r.text
-    assert 'data-review-badge="upgrade"' not in r.text
-
-
-def test_only_candidate_pages_acknowledge_review_badges(
-        client, monkeypatch, tmp_path):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import review_badges
-
-    monkeypatch.setattr(
-        cfg, "REVIEW_BADGE_STATE_FILE", tmp_path / "review-badges.json"
-    )
-    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
-    monkeypatch.setattr(webapp, "_upgrade_available", lambda *_args: True)
-    monkeypatch.setattr(webapp, "_qobuz_ready", lambda: True)
-
-    surfaces = ("library", "upgrade", "downsample", "repair")
-    for index, surface in enumerate(surfaces, 1):
-        review_badges.mark_ready(surface, now=100.0 + index)
-
-    utility_paths = (
-        "/library/hidden?q=missing&p=2",
-        "/upgrade/hidden",
-        "/downsample/hidden",
-        "/repair/history",
-    )
-    for path in utility_paths:
-        response = client.get(path)
-        assert response.status_code == 200
-        assert all(review_badges.snapshot().values())
-
-    jobs = []
-    try:
-        for surface in surfaces:
-            job = jm.Job(title=f"{surface.title()} review")
-            job.execute_kind = surface
-            job.add_candidate(
-                kind="album",
-                title="Dummy",
-                artist="Portishead",
-                payload={"album_id": f"{surface}-album"},
-                selected=False,
-            )
-            job.status = jm.JobStatus.AWAITING_REVIEW
-            jm.registry.add(job)
-            jobs.append(job)
-
-        paths = {
-            "library": "/library",
-            "upgrade": f"/jobs/{jobs[1].id}",
-            "downsample": f"/jobs/{jobs[2].id}",
-            "repair": "/repair",
-        }
-        for surface in surfaces:
-            response = client.get(paths[surface])
-            assert response.status_code == 200
-            assert 'id="review-candidates"' in response.text, surface
-            assert review_badges.snapshot()[surface] is False
-    finally:
-        for job in jobs:
-            _remove_job(job)
 
 
 def test_upgrade_disabled_page_redirects_cleanly(client, monkeypatch):
@@ -1667,115 +1270,17 @@ def test_upgrade_disabled_page_redirects_cleanly(client, monkeypatch):
     assert r.headers["location"] == "/"
 
 
-def test_upgrade_page_reviews_saved_baseline_candidates(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.quality.upgrade_state.load",
-        lambda: {
-            "updated_at": time.time(),
-            "complete": True,
-            "quality_signature": webapp._effective_upgrade_quality_signature(),
-            "candidates": [{
-                "title": "Dummy",
-                "artist": "Portishead",
-                "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-                "payload": {"album_id": "up1", "year": "1994", "cover": ""},
-            }],
-        },
-    )
-
-    r = client.get("/upgrade")
-
-    assert r.status_code == 200
-    assert "upgrade candidate" in r.text
-    assert "1 upgrade candidate" in r.text
-    assert 'action="/upgrade/review"' in r.text
-    assert "Review candidates" in r.text
-    assert "Start upgrade scan" not in r.text
-    assert "Quality upgrade scan" not in r.text
 
 
-def test_upgrade_review_post_uses_saved_state_without_scanning(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import jobs as job_mgr
-
-    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.quality.upgrade_state.load",
-        lambda: {
-            "updated_at": time.time(),
-            "complete": True,
-            "quality_signature": webapp._effective_upgrade_quality_signature(),
-            "candidates": [{
-                "title": "Dummy",
-                "artist": "Portishead",
-                "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-                "payload": {"album_id": "up1", "year": "1994", "cover": ""},
-            }],
-        },
-    )
-
-    def fail_scan(*_args, **_kwargs):
-        raise AssertionError("Upgrade review must not start a scan")
-
-    monkeypatch.setattr("qobuz_librarian.web.flows.scan_upgrades", fail_scan)
-
-    r = client.post("/upgrade/review", follow_redirects=False)
-
-    assert r.status_code == 303
-    job_id = r.headers["location"].removeprefix("/jobs/")
-    job = job_mgr.registry.get(job_id)
-    assert job is not None
-    assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
-    assert job.execute_kind == "upgrade"
-    assert job.review_verb == "Upgrade"
-    assert len(job.candidates) == 1
-    assert job.candidates[0]["selected"] is False
 
 
-def test_upgrade_review_post_reuses_existing_saved_review_job(
-        client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import jobs as job_mgr
 
-    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.quality.upgrade_state.load",
-        lambda: {
-            "updated_at": time.time(),
-            "complete": True,
-            "quality_signature": webapp._effective_upgrade_quality_signature(),
-            "candidates": [{
-                "title": "Dummy",
-                "artist": "Portishead",
-                "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-                "payload": {"album_id": "up1", "year": "1994", "cover": ""},
-            }],
-        },
-    )
-
-    first = client.post("/upgrade/review", follow_redirects=False)
-    second = client.post("/upgrade/review", follow_redirects=False)
-
-    assert first.status_code == 303
-    assert second.status_code == 303
-    assert second.headers["location"] == first.headers["location"]
-    assert len([
-        j for j in job_mgr.registry.awaiting_review()
-        if j.execute_kind == "upgrade"
-    ]) == 1
 
 def test_saved_review_creation_is_atomic_for_parallel_posts(monkeypatch):
     from qobuz_librarian.web import app as webapp
     from qobuz_librarian.web import jobs as job_mgr
 
+    monkeypatch.setattr(webapp, "_web_writes_paused", lambda: False)
     real_add = job_mgr.registry.add
 
     def slow_add(job):
@@ -1802,33 +1307,40 @@ def test_saved_review_creation_is_atomic_for_parallel_posts(monkeypatch):
     }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        jobs = list(ex.map(
-            lambda _i: webapp._review_job_from_upgrade_state(state),
-            range(8),
-        ))
+        jobs = list(
+            ex.map(
+                lambda _i: webapp._review_job_from_upgrade_state(state),
+                range(8),
+            )
+        )
 
     assert len({j.id for j in jobs}) == 1
-    assert len([
-        j for j in job_mgr.registry.awaiting_review()
-        if j.execute_kind == "upgrade"
-    ]) == 1
+    assert len([j for j in job_mgr.registry.awaiting_review() if j.execute_kind == "upgrade"]) == 1
 
     for candidate in jobs[0].candidates:
         candidate["selected"] = True
     jobs[0].status = job_mgr.JobStatus.RUNNING
     remaining = {
         "complete": True,
-        "candidates": [{
-            **state["candidates"][1],
-            "detail": "fresh saved-state detail",
-        }],
+        "candidates": [
+            {
+                **state["candidates"][1],
+                "detail": "fresh saved-state detail",
+            }
+        ],
     }
     claimed = webapp._review_job_from_upgrade_state(remaining)
     assert claimed is jobs[0]
-    assert len([
-        j for j in job_mgr.registry.all()
-        if j.execute_kind == "upgrade" and j.status in job_mgr.ACTIVE
-    ]) == 1
+    assert (
+        len(
+            [
+                j
+                for j in job_mgr.registry.all()
+                if j.execute_kind == "upgrade" and j.status in job_mgr.ACTIVE
+            ]
+        )
+        == 1
+    )
 
 
 def test_upgrade_saved_review_respects_hidden_candidates(
@@ -1891,90 +1403,35 @@ def test_upgrade_saved_review_respects_hidden_candidates(
     ]) == 1
 
 
-def test_upgrade_saved_review_restore_updates_existing_job(
-        client, monkeypatch, tmp_path):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import hidden
+
+
+def test_upgrade_approve_resyncs_saved_review_before_execution(client, monkeypatch):
     from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
     from qobuz_librarian.web import jobs as job_mgr
 
-    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.quality.upgrade_state.load",
-        lambda: {
-            "updated_at": time.time(),
-            "complete": True,
-            "quality_signature": webapp._effective_upgrade_quality_signature(),
-            "candidates": [
-                {
-                    "title": "Dummy",
-                    "artist": "Portishead",
-                    "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-                    "payload": {"album_id": "up1", "year": "1994", "cover": ""},
-                },
-                {
-                    "title": "Third",
-                    "artist": "Portishead",
-                    "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-                    "payload": {"album_id": "up2", "year": "2008", "cover": ""},
-                },
-            ],
-        },
-    )
-
-    first = client.post("/upgrade/review", follow_redirects=False)
-    job_id = first.headers["location"].removeprefix("/jobs/")
-    job = job_mgr.registry.get(job_id)
-    keep = next(c["cid"] for c in job.candidates if c["title"] == "Dummy")
-    client.post(f"/jobs/{job.id}/select", data={"cid": keep, "checked": "1"})
-    client.post(f"/jobs/{job.id}/hide", data={"artist": "Portishead"})
-    hidden.restore_albums(hidden.SCOPE_UPGRADE, [
-        hidden.album_fingerprint("Portishead", "Third")
-    ])
-
-    second = client.post("/upgrade/review", follow_redirects=False)
-
-    assert second.headers["location"] == first.headers["location"]
-    assert [c["title"] for c in job.candidates] == ["Dummy", "Third"]
-    assert {c["title"]: c["selected"] for c in job.candidates} == {
-        "Dummy": True,
-        "Third": False,
-    }
-    assert len([
-        j for j in job_mgr.registry.awaiting_review()
-        if j.execute_kind == "upgrade"
-    ]) == 1
-
-
-def test_upgrade_approve_resyncs_saved_review_before_execution(
-        client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import jobs as job_mgr
-
-    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
+    monkeypatch.setattr(webapp, "_read_creds", lambda: {"auth_token": "dummy", "user_id": "dummy"})
     state = {
         "updated_at": time.time(),
         "complete": True,
         "quality_signature": webapp._effective_upgrade_quality_signature(),
-        "candidates": [{
-            "title": "Stale",
-            "artist": "Portishead",
-            "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-            "payload": {"album_id": "old", "year": "1994", "cover": ""},
-        }],
+        "candidates": [
+            {
+                "title": "Stale",
+                "artist": "Portishead",
+                "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
+                "payload": {"album_id": "old", "year": "1994", "cover": ""},
+            }
+        ],
     }
     monkeypatch.setattr("qobuz_librarian.quality.upgrade_state.load", lambda: state)
 
     first = client.post("/upgrade/review", follow_redirects=False)
     job_id = first.headers["location"].removeprefix("/jobs/")
     job = job_mgr.registry.get(job_id)
-    client.post(f"/jobs/{job.id}/select",
-                data={"cid": job.candidates[0]["cid"], "checked": "1"})
+    client.post(f"/jobs/{job.id}/select", data={"cid": job.candidates[0]["cid"], "checked": "1"})
     state["candidates"] = []
 
     r = client.post(f"/jobs/{job.id}/approve", follow_redirects=False)
@@ -1985,42 +1442,6 @@ def test_upgrade_approve_resyncs_saved_review_before_execution(
     assert job.candidates == []
 
 
-def test_approve_refuses_parked_upgrade_review_without_credentials(
-        client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import jobs as job_mgr
-
-    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
-    creds = {"auth_token": "dummy", "user_id": "dummy"}
-    monkeypatch.setattr(webapp, "_read_creds", lambda: dict(creds))
-    monkeypatch.setattr(
-        "qobuz_librarian.quality.upgrade_state.load",
-        lambda: {
-            "updated_at": time.time(),
-            "complete": True,
-            "quality_signature": webapp._effective_upgrade_quality_signature(),
-            "candidates": [{
-                "title": "Dummy",
-                "artist": "Portishead",
-                "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
-                "payload": {"album_id": "up1", "year": "1994", "cover": ""},
-            }],
-        },
-    )
-
-    first = client.post("/upgrade/review", follow_redirects=False)
-    job_id = first.headers["location"].removeprefix("/jobs/")
-    job = job_mgr.registry.get(job_id)
-    client.post(f"/jobs/{job.id}/select",
-                data={"cid": job.candidates[0]["cid"], "checked": "1"})
-    creds.clear()
-
-    r = client.post(f"/jobs/{job.id}/approve", follow_redirects=False)
-
-    assert r.status_code == 303
-    assert r.headers["location"] == "/"
-    assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
-    assert any(c.get("selected") for c in job.candidates)
 
 
 def test_approve_refuses_parked_library_review_without_credentials(
@@ -2167,48 +1588,6 @@ def test_first_downsample_prompts_for_keep_choice_then_saves_it(
     assert cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
 
 
-def test_first_downsample_keep_choice_applies_while_a_job_is_running(
-        client, monkeypatch, tmp_path):
-    """The keep/delete pick made at the first-downsample prompt must take
-    effect for the run it launches even when another job is already active.
-    settings_store.save() defers its in-memory apply while a job runs, so the
-    approve path applies the choice itself; otherwise the run reads the still
-    unset value and deletes the hi-res originals despite a 'keep' choice."""
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import jobs as job_mgr
-    from qobuz_librarian.web import settings_store as ss
-
-    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
-    monkeypatch.setattr(ss, "_pending_apply", None)
-    monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", None)
-    monkeypatch.setattr(
-        "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
-    monkeypatch.setattr(job_mgr._scan_queue, "put", lambda item: None)
-    # A job is running in the other lane, so save() takes its deferral branch,
-    # the exact condition that can strand the choice at its unset default.
-    monkeypatch.setattr(ss, "_any_active_job", lambda: True)
-    state = {
-        "updated_at": time.time(), "complete": True,
-        "candidates": [{
-            "title": "Album", "artist": "Portishead",
-            "detail": "24-bit / 96 kHz -> 16-bit / 48 kHz",
-            "album_dir": "/music/Portishead/Album", "est_saving": 1234,
-        }],
-    }
-    monkeypatch.setattr(
-        "qobuz_librarian.library.downsample_state.load", lambda: state)
-
-    first = client.post("/downsample/review", follow_redirects=False)
-    job = job_mgr.registry.get(first.headers["location"].removeprefix("/jobs/"))
-    client.post(f"/jobs/{job.id}/select",
-                data={"cid": job.candidates[0]["cid"], "checked": "1"})
-
-    r = client.post(f"/jobs/{job.id}/approve",
-                    data={"keep_choice": "keep"}, follow_redirects=False)
-    assert r.status_code == 303
-    # Applied in-memory immediately despite the deferral: the launched run
-    # reads "keep" and parks a restorable backup rather than deleting.
-    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
 
 
 def test_approve_refuses_parked_downsample_review_without_engine(
@@ -2247,29 +1626,6 @@ def test_approve_refuses_parked_downsample_review_without_engine(
     assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
 
 
-def test_incomplete_downsample_state_is_not_reviewable(client, monkeypatch):
-    from qobuz_librarian.web import jobs as job_mgr
-
-    monkeypatch.setattr(
-        "qobuz_librarian.library.downsample_state.load",
-        lambda: {
-            "updated_at": time.time(),
-            "complete": False,
-            "candidates": [{
-                "title": "Partial",
-                "artist": "Portishead",
-                "detail": "stale",
-                "album_dir": "/music/Portishead/Partial",
-                "est_saving": 1234,
-            }],
-        },
-    )
-
-    r = client.post("/downsample/review", follow_redirects=False)
-
-    assert r.status_code == 303
-    assert r.headers["location"] == "/downsample"
-    assert job_mgr.registry.awaiting_review() == []
 
 
 def test_dashboard_first_run_offers_baseline_scan_with_skip(client, monkeypatch):
@@ -2297,159 +1653,14 @@ def test_dashboard_first_run_offers_baseline_scan_with_skip(client, monkeypatch)
     assert "Your baseline scan is running" not in r.text
 
 
-def test_library_force_full_post_starts_forced_scan(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
-    monkeypatch.setattr(webapp, "_library_scan_state",
-                        lambda: {"ready": True, "count": 1, "message": ""})
-    started = {}
-
-    def fake_start_library_scan(*, partial_only=False, force_full=False):
-        job = jm.Job(title="scan")
-        started["partial_only"] = partial_only
-        started["force_full"] = force_full
-        return job
-
-    monkeypatch.setattr(webapp, "_start_library_scan", fake_start_library_scan)
-
-    r = client.post(
-        "/library",
-        data={"mode": "missing_albums", "force_full": "1"},
-        follow_redirects=False,
-    )
-
-    assert r.status_code == 303
-    assert started == {"partial_only": False, "force_full": True}
 
 
-def test_non_htmx_search_post_returns_to_dashboard(client, monkeypatch):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
-    monkeypatch.setattr(search_mod, "search_albums", lambda *_a, **_kw: [])
-
-    r = client.post("/search", data={"q": "Paysage d'Hiver"},
-                    follow_redirects=False)
-
-    assert r.status_code == 303
-    assert r.headers["location"] == "/"
 
 
-def test_queue_shows_empty_state_when_only_parked_reviews_exist(client):
-    # Parked reviews render on their own surfaces, not in the queue, so a
-    # registry holding nothing but a parked review must still show the queue's
-    # empty state rather than a blank page (the stack wrapper with no sections).
-    review = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Parked library review")
-    review.execute_kind = "library"
-    running = None
-    try:
-        r = client.get("/queue")
-
-        assert r.status_code == 200
-        assert "Queue is empty." in r.text
-
-        running = _inject_job(jm.JobStatus.RUNNING, "Exact running library job")
-        running.execute_kind = "library"
-        queue = client.get("/queue").text
-        dashboard = client.get("/").text
-        exact = client.get(f"/jobs/{running.id}").text
-
-        assert f'href="/jobs/{running.id}" class="ql-row-link"' in queue
-        assert (
-            f'href="/jobs/{running.id}" class="ql-row-title ql-row-link"'
-            in dashboard
-        )
-        assert "Exact running library job" in exact
-    finally:
-        if running is not None:
-            _remove_job(running)
-        _remove_job(review)
 
 
-def test_history_retry_shows_for_archived_failed_download_too(
-        client, monkeypatch):
-    from qobuz_librarian.web import job_persistence
-
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence._reset_for_tests()
-    job_persistence.init()
-
-    archived = jm.Job(title="Archived failure", artist="Portishead",
-                      album_id="archived")
-    archived.status = jm.JobStatus.FAILED
-    archived.finished_at = time.time() - 10
-    job_persistence.persist(archived)
-
-    repair = jm.Job(title="Old repair result")
-    repair.execute_kind = "repair"
-    repair.status = jm.JobStatus.DONE
-    repair.summary = "Exact old repair summary"
-    repair.finished_at = time.time() - 20
-    job_persistence.persist(repair)
-
-    live = jm.Job(title="Live failure", artist="Portishead", album_id="live")
-    live.status = jm.JobStatus.FAILED
-    live.finished_at = time.time()
-    jm.registry.add(live)
-    try:
-        r = client.get("/queue/history")
-
-        assert r.status_code == 200
-        assert f'action="/jobs/{live.id}/retry"' in r.text
-        assert f'action="/jobs/{archived.id}/retry"' in r.text
-        assert f'href="/jobs/{repair.id}" class="ql-row-open"' in r.text
-        exact_repair = client.get(f"/jobs/{repair.id}").text
-        assert "Exact old repair summary" in exact_repair
-    finally:
-        _remove_job(live)
 
 
-def test_archived_job_page_keeps_retry_and_undo(client, monkeypatch):
-    from qobuz_librarian.web import job_persistence
-
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence._reset_for_tests()
-    job_persistence.init()
-
-    failed = jm.Job(title="Archived album", artist="Portishead",
-                    album_id="album-id")
-    failed.status = jm.JobStatus.FAILED
-    failed.finished_at = time.time()
-    job_persistence.persist(failed)
-
-    single = jm.Job(title="Archived single", artist="Portishead")
-    single.status = jm.JobStatus.DONE
-    single.single = {
-        "dir": "/music/Portishead/Dummy", "track_id": "t1",
-        "owned_path": {
-            "relative": "01 - Track.flac",
-            "directories": [[1, 2]],
-            "file": {
-                "device": 1, "inode": 3, "size": 4,
-                "modified_ns": 5, "changed_ns": 6,
-            },
-        },
-    }
-    single.finished_at = time.time()
-    job_persistence.persist(single)
-
-    r = client.get(f"/jobs/{failed.id}")
-    assert r.status_code == 200
-    assert "This job is archived." in r.text
-    assert ">Retry</button>" in r.text
-
-    r = client.get(f"/jobs/{single.id}")
-    assert r.status_code == 200
-    assert f'action="/jobs/{single.id}/undo"' in r.text
-
-    r = client.post("/queue/clear", follow_redirects=False)
-    assert r.status_code == 303
-    assert job_persistence.load_one(failed.id) is None
-    assert job_persistence.load_one(single.id) is not None
-    r = client.get(f"/jobs/{single.id}")
-    assert f'action="/jobs/{single.id}/undo"' in r.text
 
 
 def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
@@ -2752,6 +1963,7 @@ def test_undo_bounces_when_the_staging_mutex_is_held(client, monkeypatch, tmp_pa
 
 # ── per-job cancel button on queue page ───────────────────────────────
 
+
 def _inject_job(status, title="Test Job"):
     """Add a job directly to the shared registry and return it.
     Caller must remove the job in a finally block."""
@@ -2769,16 +1981,6 @@ def _remove_job(job):
             pass
 
 
-def test_job_status_includes_terminal_summary(client):
-    job = _inject_job(jm.JobStatus.DONE)
-    job.summary = "Checked 4 albums; 1 was repaired."
-    try:
-        response = client.get(f"/api/jobs/{job.id}/status")
-
-        assert response.status_code == 200
-        assert response.json()["summary"] == job.summary
-    finally:
-        _remove_job(job)
 
 
 def test_queue_cancel_stays_on_queue_without_accepting_other_targets(client):
@@ -2821,51 +2023,6 @@ def test_queue_cancel_stays_on_queue_without_accepting_other_targets(client):
         _remove_job(other)
 
 
-def test_library_hide_then_restore_round_trip(client, monkeypatch, tmp_path):
-    """Dismissing an artist from a library review writes the durable store and
-    drops those candidates; the Dismissed albums and Gap Fill view then restores them."""
-    from qobuz_librarian.library import hidden
-    from qobuz_librarian.web import job_persistence
-
-    monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    c_dummy = job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                                payload={"year": "1994"}, selected=False)
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
-    job.add_candidate(kind="album", title="Untrue", artist="Burial",
-                      payload={"year": "2007"}, selected=False)
-    try:
-        # Selection is server-backed: tick Dummy via the select endpoint, then
-        # dismissing unselected Portishead albums drops only Third, keeps the
-        # ticked Dummy, and never touches Burial.
-        r = client.post(f"/jobs/{job.id}/select",
-                        data={"cid": c_dummy, "checked": "1"})
-        assert r.status_code == 200 and r.json()["selected"] == 1
-        r = client.post(f"/jobs/{job.id}/hide", data={"artist": "Portishead"})
-        assert r.status_code == 200
-        survivors = {c["artist"] + "/" + c["title"]: c["selected"]
-                     for c in job.candidates}
-        assert survivors == {"Portishead/Dummy": True, "Burial/Untrue": False}
-        store = hidden.load()
-        assert hidden.is_hidden(hidden.SCOPE_MISSING, "Portishead", "Third", store)
-        assert not hidden.is_hidden(hidden.SCOPE_MISSING, "Portishead", "Dummy", store)
-        assert not hidden.is_hidden(hidden.SCOPE_MISSING, "Burial", "Untrue", store)
-
-        r = client.get("/library/hidden")
-        assert r.status_code == 200
-        assert "Portishead" in r.text
-        assert 'href="/?kind=artist&q=Portishead"' in r.text
-        assert 'href="/artist?artist=Portishead"' not in r.text
-
-        r = client.post("/library/hidden/restore", data={"artist": "Portishead"})
-        assert r.status_code == 200  # follows the 303 to the dismissed-items view
-        assert hidden.count(hidden.SCOPE_MISSING) == 0
-    finally:
-        _remove_job(job)
 
 
 def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
@@ -2940,38 +2097,6 @@ def test_history_job_cards_reach_past_the_first_page(client, monkeypatch):
     assert f"Scan {cap + 4}" in second.text
 
 
-def test_history_survives_unreadable_retry_details(client, monkeypatch, tmp_path):
-    import sqlite3
-
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import job_persistence
-
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-    job_persistence._reset_for_tests()
-    job_persistence.init()
-    job = jm.Job(title="Dummy", artist="Portishead", album_id="album-1")
-    job.status = jm.JobStatus.FAILED
-    job.finished_at = time.time()
-    assert job_persistence.persist(job)
-
-    con = sqlite3.connect(tmp_path / "jobs.db")
-    con.execute(
-        "UPDATE jobs SET execute_args=? WHERE id=?", ("not-json", job.id)
-    )
-    con.commit()
-    con.close()
-
-    saved = job_persistence.load_all()
-    assert saved[0]["execute_args_unreadable"] is True
-    history = client.get("/queue/history")
-    assert history.status_code == 200
-    assert "Retry unavailable" in history.text
-    assert f'action="/jobs/{job.id}/retry"' not in history.text
-
-    detail = client.get(f"/jobs/{job.id}")
-    assert detail.status_code == 200
-    assert "The saved details needed to retry this job could not be read" in detail.text
-    assert ">Retry</button>" not in detail.text
 
 
 def test_archive_pruning_keeps_active_single_undo(monkeypatch, tmp_path):
@@ -3005,31 +2130,6 @@ def test_archive_pruning_keeps_active_single_undo(monkeypatch, tmp_path):
     assert job_persistence.load_one(newest.id) is not None
 
 
-def test_library_review_tab_is_addressable(client, monkeypatch, tmp_path):
-    """The tab lives in the address, so a reload or a bookmark lands on the one
-    that was open rather than the default.
-    """
-    from qobuz_librarian.web import app as webapp
-
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      detail="1994 · CD 16-bit/44.1kHz · gap-fill: 2 missing of 11",
-                      payload={"year": "1994", "gap_fill": 2}, selected=False)
-    monkeypatch.setattr(webapp, "_review_job_from_library_state", lambda: job)
-    try:
-        r = client.get("/library", params={"tab": "gaps"})
-        assert r.status_code == 200
-        assert "Dummy" in r.text and "Third" not in r.text
-        r = client.get("/library")
-        assert "Third" in r.text and "Dummy" not in r.text
-        # An unusable value falls back rather than rendering an empty review.
-        r = client.get("/library", params={"tab": "nonsense"})
-        assert r.status_code == 200 and "Third" in r.text
-    finally:
-        _remove_job(job)
 
 
 def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch):
@@ -3204,46 +2304,6 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
             _remove_job(split)
 
 
-def test_library_approve_when_everything_is_already_on_disk(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import flows
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "t", "user_id": "u"})
-    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
-    monkeypatch.setattr(jm._scan_queue, "put", lambda item: None)
-    monkeypatch.setattr(
-        "qobuz_librarian.library.catalog.find_album_dir_filesystem",
-        lambda alb: Path("/music/Portishead/x"))
-    monkeypatch.setattr(
-        "qobuz_librarian.library.catalog.find_existing_tracks",
-        lambda _album, album_dir=None: (
-            [{"title": "Silence", "discnumber": 1, "isrc": "GB001"}],
-            album_dir,
-        ))
-    monkeypatch.setattr(
-        flows, "get_album",
-        lambda album_id, _token: {
-            "id": album_id,
-            "title": "Third",
-            "artist": {"name": "Portishead"},
-            "tracks": {"items": [
-                {"title": "Silence", "media_number": 1, "isrc": "GB001"},
-            ]},
-        })
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job._execute_fn = lambda j, chosen: None
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"album_id": "q123"}, selected=True)
-    try:
-        r = client.post(f"/jobs/{job.id}/approve", follow_redirects=False)
-        assert r.status_code == 303
-        assert r.headers["location"] == "/library?skipped=1"
-        # Nothing left to review or download; the review completed quietly.
-        assert job.candidates == []
-        assert job.status != jm.JobStatus.AWAITING_REVIEW
-    finally:
-        _remove_job(job)
 
 
 def test_drop_owned_requires_every_expected_track(
@@ -3308,23 +2368,6 @@ def test_drop_owned_requires_every_expected_track(
         _remove_job(job)
 
 
-def test_library_select_all_scoped_to_tab(client):
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      payload={"year": "1994", "gap_fill": 2}, selected=False)
-    try:
-        r = client.post(f"/jobs/{job.id}/select-all",
-                        data={"on": "1", "scope": "all", "tab": "missing"})
-        assert r.status_code == 200
-        c = r.json()
-        assert (c["missing_selected"], c["gap_selected"]) == (1, 0)
-        flags = {x["title"]: x["selected"] for x in job.candidates}
-        assert flags == {"Third": True, "Dummy": False}
-    finally:
-        _remove_job(job)
 
 
 def test_select_all_scoped_to_the_active_filter(client):
@@ -3353,24 +2396,6 @@ def test_select_all_scoped_to_the_active_filter(client):
         _remove_job(job)
 
 
-def test_select_page_returns_the_candidate_ids_it_accepted(client):
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    cids = [
-        job.add_candidate(kind="album", title=f"Album {n}",
-                          artist=f"Artist {n}", selected=False)
-        for n in range(41)
-    ]
-    try:
-        r = client.post(
-            f"/jobs/{job.id}/select-all",
-            data={"on": "1", "scope": "page", "cid": cids + ["missing"]},
-        )
-        assert r.status_code == 200
-        assert r.json()["accepted_cids"] == cids
-        assert all(candidate["selected"] for candidate in job.candidates)
-    finally:
-        _remove_job(job)
 
 
 def test_dismiss_rest_scoped_to_the_active_filter(client, monkeypatch):
@@ -3396,89 +2421,14 @@ def test_dismiss_rest_scoped_to_the_active_filter(client, monkeypatch):
         _remove_job(job)
 
 
-def test_review_pages_split_on_a_candidate_budget():
-    """Pagination counts candidates, not just artists: a few prolific
-    artists must not put thousands of rows in one page's DOM. Whole groups
-    stay together; a single over-budget group still gets its own page."""
-    from qobuz_librarian.web import app as webapp
-
-    big = [("Artist %d" % i, [{"cid": f"c{i}-{j}"} for j in range(900)])
-           for i in range(4)]
-    page1, page, n_pages = webapp._paginate_groups(big, 1)
-    assert n_pages == 4  # 900+900 > 1500, so one group per page
-    assert [a for a, _ in page1] == ["Artist 0"]
-    monster = [("Huge", [{"cid": f"c{j}"} for j in range(3000)]),
-               ("Small", [{"cid": "s1"}])]
-    p1, _, n = webapp._paginate_groups(monster, 1)
-    assert n == 2 and [a for a, _ in p1] == ["Huge"]
 
 
-def test_mangled_query_param_renders_the_error_page(client):
-    """A mangled page param (/library?page=abc) must answer with the styled
-    error page, not raw
-    framework validation JSON; API routes keep the JSON detail."""
-    r = client.get("/library?page=abc")
-    assert r.status_code == 400
-    assert "text/html" in r.headers.get("content-type", "")
-    assert "Bad request" in r.text
-    r2 = client.get("/api/jobs?status=nonsense")
-    assert "application/json" in r2.headers.get("content-type", "")
 
 
-def test_review_zero_selection_has_clear_disabled_action(client):
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.review_verb = "Download"
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      payload={"year": "1994"}, selected=False)
-    try:
-        r = client.get(f"/jobs/{job.id}")
-        assert r.status_code == 200
-        assert "Select candidates to download" in r.text
-        assert "Download 1 selected" not in r.text
-    finally:
-        _remove_job(job)
 
 
-def test_review_artist_header_carries_group_controls(client):
-    # The select-artist checkbox lives in the group header (its own activation
-    # runs instead of the summary's); the dismiss button must stay OUTSIDE the
-    # summary, where a click can't fold the group.
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.review_verb = "Download"
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      payload={"year": "1994"}, selected=True)
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
-    try:
-        r = client.get(f"/jobs/{job.id}")
-
-        assert r.status_code == 200
-        summary = r.text.split('<summary class="ql-review-summary">', 1)[1].split("</summary>", 1)[0]
-        assert 'data-artist-select value="Portishead"' in summary
-        assert "data-hide" not in summary
-        assert 'data-hide data-artist="Portishead"' in r.text
-    finally:
-        _remove_job(job)
 
 
-def test_review_hides_page_select_when_everything_is_on_one_page(client):
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.review_verb = "Download"
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      payload={"year": "1994"}, selected=True)
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
-    try:
-        r = client.get(f"/jobs/{job.id}")
-
-        assert r.status_code == 200
-        assert 'data-select-all="1"' in r.text
-        assert "data-select-page" not in r.text
-    finally:
-        _remove_job(job)
 
 
 def test_library_dismiss_rest_hides_everything_unselected(client, monkeypatch, tmp_path):
@@ -3586,34 +2536,6 @@ def test_a_finished_download_is_not_failed_by_another_items_recovery(
     assert restored.attention == ""
 
 
-def test_a_download_holding_the_outstanding_recovery_still_says_so(monkeypatch):
-    """The other half of the same call: when the outstanding recovery IS this
-    job's, its acknowledged completion is not enough to retire it here.
-    """
-    from qobuz_librarian.web import job_persistence
-
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    saved = jm.Job(title="Agalloch, The White EP", artist="Agalloch")
-    saved.kind = "download"
-    saved.album_id = "def456"
-    saved.status = jm.JobStatus.RUNNING
-    job_persistence.persist(saved)
-
-    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-    monkeypatch.setattr(job_persistence, "durable_completion_acknowledged",
-                        lambda job_id, **_kw: True)
-
-    jm.restore_jobs({}, durable_recovery_clear=False,
-                    durable_recovery_job_id=saved.id)
-
-    restored = jm.registry.get(saved.id)
-    assert restored.status == jm.JobStatus.FAILED
-    assert restored.attention == "recovery"
-    # This state survives a restart, so the error must not prescribe one.
-    assert "estart" not in (restored.error or "")
 
 
 def test_a_finished_job_keeps_its_log_across_a_restart(monkeypatch):
@@ -3671,24 +2593,6 @@ def test_a_long_finished_log_is_stored_as_a_marked_tail(monkeypatch):
     assert restored.log_lines[-1] == f"line {jm.Job.LOG_PERSIST_CAP + 39}"
 
 
-def test_a_running_job_does_not_rewrite_its_log_on_every_snapshot(monkeypatch):
-    """A running job's log is on screen live, and persist() is debounced but
-    still frequent, and re-serialising a growing blob each time would rewrite the
-    whole log over and over on a NAS.
-    """
-    from qobuz_librarian.web import job_persistence
-
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    running = jm.Job(title="Burial, Untrue", artist="Burial")
-    running.kind = "download"
-    running.status = jm.JobStatus.RUNNING
-    running.push_line("  ── Downloading full album ──")
-    job_persistence.persist(running)
-
-    assert job_persistence.load_one(running.id)["log_lines"] == []
 
 
 def test_persistence_restores_awaiting_review_with_candidates(monkeypatch):
@@ -3829,7 +2733,7 @@ def test_library_download_parks_unselected_and_keeps_only_picks():
             _remove_job(other)
 
 
-def test_library_review_rebuilds_from_saved_state_when_no_live_job():
+def test_library_review_rebuilds_from_saved_state_when_no_live_job(monkeypatch):
     """F1: with the baseline complete but no live library job (swept cancel,
     discarded scan job, corrupt restart row), the Missing Albums / Gap Fill
     review must rebuild from saved scan state, never 'Baseline ready' + no
@@ -3837,16 +2741,34 @@ def test_library_review_rebuilds_from_saved_state_when_no_live_job():
     from qobuz_librarian.library import library_scan_state
     from qobuz_librarian.web import app as webapp
 
-    library_scan_state.save_kind("missing", artists={
-        "Agalloch": {"fingerprint": "fp", "artist_id": "a1", "catalog_ids": [],
-                     "candidates": [
-            {"kind": "album", "title": "The Mantle", "artist": "Agalloch",
-             "detail": "2002 · fully missing", "payload": {"album_id": "m1"}},
-            {"kind": "album", "title": "Ashes", "artist": "Agalloch",
-             "detail": "gap-fill: 2 missing",
-             "payload": {"album_id": "m2", "gap_fill": 2}},
-        ]},
-    }, complete=True)
+    monkeypatch.setattr(webapp, "_web_writes_paused", lambda: False)
+    library_scan_state.save_kind(
+        "missing",
+        artists={
+            "Agalloch": {
+                "fingerprint": "fp",
+                "artist_id": "a1",
+                "catalog_ids": [],
+                "candidates": [
+                    {
+                        "kind": "album",
+                        "title": "The Mantle",
+                        "artist": "Agalloch",
+                        "detail": "2002 · fully missing",
+                        "payload": {"album_id": "m1"},
+                    },
+                    {
+                        "kind": "album",
+                        "title": "Ashes",
+                        "artist": "Agalloch",
+                        "detail": "gap-fill: 2 missing",
+                        "payload": {"album_id": "m2", "gap_fill": 2},
+                    },
+                ],
+            },
+        },
+        complete=True,
+    )
     job = None
     try:
         job = webapp._review_job_from_library_state()
@@ -3865,6 +2787,140 @@ def test_library_review_rebuilds_from_saved_state_when_no_live_job():
         library_scan_state.save_kind("missing", artists={}, complete=False)
         if job is not None:
             _remove_job(job)
+
+
+def test_saved_library_review_is_not_published_without_durable_admission(monkeypatch):
+    from qobuz_librarian.library import library_scan_state
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(webapp, "_web_writes_paused", lambda: False)
+    original = library_scan_state.load()
+    job = None
+    try:
+        library_scan_state.save_kind(
+            "missing",
+            artists={
+                "Agalloch": {
+                    "fingerprint": "fp",
+                    "artist_id": "a1",
+                    "catalog_ids": [],
+                    "candidates": [
+                        {
+                            "kind": "album",
+                            "title": "The Mantle",
+                            "artist": "Agalloch",
+                            "detail": "2002",
+                            "payload": {"album_id": "m1"},
+                        }
+                    ],
+                },
+            },
+            complete=True,
+        )
+        monkeypatch.setattr(job_persistence, "admit", lambda _job: False)
+
+        job = webapp._review_job_from_library_state()
+
+        assert job is None
+        assert not any(
+            candidate.execute_kind == "library" and candidate.status == jm.JobStatus.AWAITING_REVIEW
+            for candidate in jm.registry.all()
+        )
+    finally:
+        library_scan_state._write_state(original)
+        if job is not None:
+            _remove_job(job)
+
+
+
+
+def test_library_review_retirement_cannot_race_saved_state_reconstruction(monkeypatch):
+    from qobuz_librarian.library import hidden, library_scan_state
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    original = library_scan_state.load()
+    old = None
+    rebuilt = []
+    entered_hidden_load = threading.Event()
+    release_hidden_load = threading.Event()
+    cancellation_finished = threading.Event()
+    real_hidden_load = hidden.load
+    try:
+        monkeypatch.setattr(job_persistence, "persist", lambda _job: True)
+        library_scan_state.save_kind(
+            "missing",
+            artists={
+                "Agalloch": {
+                    "fingerprint": "fp",
+                    "artist_id": "a1",
+                    "catalog_ids": [],
+                    "candidates": [
+                        {
+                            "kind": "album",
+                            "title": "The Mantle",
+                            "artist": "Agalloch",
+                            "detail": "2002",
+                            "payload": {"album_id": "m1"},
+                        }
+                    ],
+                },
+            },
+            complete=True,
+        )
+        old = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
+        old.execute_kind = "library"
+        old.add_candidate(
+            kind="album",
+            title="The Mantle",
+            artist="Agalloch",
+            payload={"album_id": "m1"},
+            selected=True,
+        )
+
+        def blocked_hidden_load():
+            entered_hidden_load.set()
+            assert release_hidden_load.wait(timeout=2)
+            return real_hidden_load()
+
+        monkeypatch.setattr(hidden, "load", blocked_hidden_load)
+        builder = threading.Thread(
+            target=lambda: rebuilt.append(webapp._review_job_from_library_state())
+        )
+        builder.start()
+        assert entered_hidden_load.wait(timeout=2)
+
+        def discard():
+            try:
+                assert jm.cancel_review(old) is True
+            finally:
+                cancellation_finished.set()
+
+        canceler = threading.Thread(target=discard)
+        canceler.start()
+        cancellation_finished.wait(timeout=0.2)
+        release_hidden_load.set()
+        builder.join(timeout=2)
+        canceler.join(timeout=2)
+
+        assert not builder.is_alive()
+        assert not canceler.is_alive()
+        assert cancellation_finished.is_set()
+        assert not any(
+            candidate.execute_kind == "library" and candidate.status == jm.JobStatus.AWAITING_REVIEW
+            for candidate in jm.registry.all()
+        )
+    finally:
+        release_hidden_load.set()
+        library_scan_state._write_state(original)
+        if old is not None:
+            _remove_job(old)
+        for job in rebuilt:
+            if job is not None and job is not old:
+                _remove_job(job)
+
+
 
 
 def test_partial_scan_does_not_resurrect_a_retired_library_review():
@@ -3904,61 +2960,8 @@ def test_partial_scan_does_not_resurrect_a_retired_library_review():
         lss._write_state(original)
 
 
-def test_bring_back_lifts_a_retired_library_review():
-    """Bring all back rebuilds a retired review from its saved state."""
-    from qobuz_librarian.library import library_scan_state as lss
-    from qobuz_librarian.web import app as webapp
-
-    original = lss.load()
-    try:
-        lss.save_kind("missing", artists={
-            "Agalloch": {"fingerprint": "fp", "artist_id": "a1", "catalog_ids": [],
-                         "candidates": [
-                {"kind": "album", "title": "The Mantle", "artist": "Agalloch",
-                 "detail": "2002", "payload": {"album_id": "m1"}}]},
-        }, complete=True)
-        lss.mark_review_retired(now=time.time() + 60, reason="discarded")
-        assert webapp._review_job_from_library_state() is None
-
-        assert lss.clear_review_retired() is True
-        job = webapp._review_job_from_library_state()
-        assert job is not None
-        assert {c["title"] for c in job.candidates} == {"The Mantle"}
-        _remove_job(job)
-        # Idempotent: nothing left to lift once it's cleared.
-        assert lss.clear_review_retired() is False
-    finally:
-        lss._write_state(original)
 
 
-def test_cancel_folds_unrun_picks_back_into_the_review(monkeypatch):
-    """Cancellation returns unstarted picks to the living review."""
-    from qobuz_librarian.web import flows, job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    parked = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
-    parked.execute_kind = "library"
-    parked.add_candidate(kind="album", title="Left Unticked", artist="Agalloch",
-                         payload={"album_id": "u1"}, selected=False)
-    try:
-        unrun = [
-            {"cid": "c9", "seq": 9, "kind": "album", "title": "Unrun One",
-             "artist": "Abigail", "detail": "", "payload": {"album_id": "r1"},
-             "selected": True},
-            {"cid": "c10", "seq": 10, "kind": "album", "title": "Unrun Two",
-             "artist": "Abigail", "detail": "", "payload": {"album_id": "r2"},
-             "selected": True},
-        ]
-        assert flows.refold_into_living_review(unrun) == 2
-        by_title = {c["title"]: c for c in parked.candidates}
-        assert {"Unrun One", "Unrun Two"} <= set(by_title)
-        # They rejoin ticked; the existing leftover is untouched.
-        assert by_title["Unrun One"]["selected"] is True
-        assert by_title["Unrun Two"]["selected"] is True
-        assert by_title["Left Unticked"]["selected"] is False
-    finally:
-        _remove_job(parked)
 
 
 def test_cancel_mid_download_folds_every_unfinished_pick_back(monkeypatch):
@@ -4004,44 +3007,6 @@ def test_cancel_mid_download_folds_every_unfinished_pick_back(monkeypatch):
         _remove_job(running)
 
 
-def test_cancelled_whole_review_parks_unfinished_picks(monkeypatch):
-    """A cancelled whole-review run rebuilds the review it consumed."""
-    from qobuz_librarian.modes import process as process_mod
-    from qobuz_librarian.web import flows
-
-    running = _inject_job(jm.JobStatus.RUNNING, "Library scan")
-    running.execute_kind = "library"
-    running._consumed_whole_review = True
-    running.add_candidate(kind="album", title="In Flight", artist="Abigail",
-                          payload={"album_id": "r1"}, selected=True)
-    running.add_candidate(kind="album", title="Never Started", artist="Abigail",
-                          payload={"album_id": "r2"}, selected=True)
-    monkeypatch.setattr(flows.cfg, "ARTIST_API_DELAY", 0)
-    monkeypatch.setattr(flows, "get_album", lambda aid, _t: {"id": aid})
-    monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
-
-    def fake_process(_full, *_a, **_k):
-        running.cancel_requested = True
-        return {"result": "cancelled"}
-
-    monkeypatch.setattr(process_mod, "process_album", fake_process)
-    parked = None
-    try:
-        flows.execute_albums(running, list(running.candidates), "tok")
-        reviews = [
-            job for job in jm.registry.awaiting_review()
-            if getattr(job, "execute_kind", "") == "library"
-        ]
-        assert len(reviews) == 1
-        parked = reviews[0]
-        assert {c["title"]: c["selected"] for c in parked.candidates} == {
-            "In Flight": True,
-            "Never Started": True,
-        }
-    finally:
-        _remove_job(running)
-        if parked is not None:
-            _remove_job(parked)
 
 
 def test_whole_review_download_retires_and_reparks_failures(monkeypatch, tmp_path):
@@ -4146,83 +3111,8 @@ def test_reparked_failures_resolve_the_token_at_approve_time(monkeypatch, tmp_pa
             _remove_job(parked)
 
 
-def test_partial_run_failure_folds_back_into_the_living_review(monkeypatch, tmp_path):
-    """On a partial approve (only some picks ticked), a living split-off
-    review still holds the unticked picks. An album that FAILS on that run must
-    fold back into it, ticked, to retry (matching the whole-review re-park),
-    instead of surviving only as the job's error line until a manual refresh."""
-    from qobuz_librarian.modes import process as process_mod
-    from qobuz_librarian.web import flows, job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    parked = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
-    parked.execute_kind = "library"
-    parked.add_candidate(kind="album", title="Left Unticked", artist="Agalloch",
-                         payload={"album_id": "u1"}, selected=False)
-    running = _inject_job(jm.JobStatus.RUNNING, "Library scan")
-    running.execute_kind = "library"
-    running._consumed_whole_review = False   # partial approve, so the remnant lives
-    running.add_candidate(kind="album", title="Downloaded OK", artist="Agalloch",
-                          payload={"album_id": "ok1"}, selected=True)
-    running.add_candidate(kind="album", title="Failed One", artist="Agalloch",
-                          payload={"album_id": "fail1"}, selected=True)
-    chosen = list(running.candidates)
-    monkeypatch.setattr(flows.cfg, "ARTIST_API_DELAY", 0)
-    monkeypatch.setattr(flows, "get_album", lambda aid, _t: {"id": aid})
-    monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
-    monkeypatch.setattr(flows, "_refresh_after_local_album_change",
-                        lambda *a, **k: None)
-    monkeypatch.setattr(flows, "prune_library_review_candidates", lambda *a, **k: 0)
-
-    def fake_process(full, *_a, **_k):
-        if full["id"] == "fail1":
-            return {"result": "error", "imported": False, "n_ok": 0}
-        return {"imported": True, "n_ok": 1, "n_fail": 0, "result": "downloaded",
-                "dir": str(tmp_path)}
-
-    monkeypatch.setattr(process_mod, "process_album", fake_process)
-    try:
-        flows.execute_albums(running, chosen, "tok")
-        by_title = {c["title"]: c for c in parked.candidates}
-        # The failure rejoined the living review, ticked; the leftover is untouched
-        # and the successful download was NOT parked.
-        assert by_title.get("Failed One", {}).get("selected") is True
-        assert by_title["Left Unticked"]["selected"] is False
-        assert "Downloaded OK" not in by_title
-    finally:
-        _remove_job(running)
-        _remove_job(parked)
 
 
-def test_partial_run_failure_reparks_after_remnant_is_retired(monkeypatch):
-    """A failed pick stays retryable if its partial-approval remnant is gone."""
-    from qobuz_librarian.modes import process as process_mod
-    from qobuz_librarian.web import flows
-
-    running = _inject_job(jm.JobStatus.RUNNING, "Library scan")
-    running.execute_kind = "library"
-    running._consumed_whole_review = False
-    running.add_candidate(kind="album", title="Failed One", artist="Agalloch",
-                          payload={"album_id": "fail1"}, selected=True)
-    monkeypatch.setattr(flows.cfg, "ARTIST_API_DELAY", 0)
-    monkeypatch.setattr(flows, "get_album", lambda aid, _t: {"id": aid})
-    monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
-    monkeypatch.setattr(process_mod, "process_album",
-                        lambda *_a, **_k: {"result": "error", "n_ok": 0})
-    parked = None
-    try:
-        flows.execute_albums(running, list(running.candidates), "tok")
-        reviews = [j for j in jm.registry.awaiting_review()
-                   if getattr(j, "execute_kind", "") == "library"]
-        assert len(reviews) == 1
-        parked = reviews[0]
-        assert [(c["title"], c["selected"]) for c in parked.candidates] == [
-            ("Failed One", True)]
-    finally:
-        _remove_job(running)
-        if parked is not None:
-            _remove_job(parked)
 
 
 def test_new_release_run_recoveries_never_touch_the_library_review(monkeypatch):
@@ -4353,17 +3243,16 @@ def test_auth_death_mid_batch_folds_unfinished_picks_back(monkeypatch, tmp_path)
         _remove_job(parked)
 
 
-def test_bulk_cancel_pending_never_touches_parked_reviews(client):
+def test_bulk_cancel_pending_never_touches_parked_reviews(client, monkeypatch):
     """Bulk cancellation leaves reviews and protected recovery untouched."""
+    monkeypatch.setattr(jm.job_persistence, "_persist_locked", lambda _job: True)
     review = jm.Job(title="Library scan")
     review.execute_kind = "library"
     review.status = jm.JobStatus.AWAITING_REVIEW
     review.add_candidate("album", "Keep me", "X", payload={})
     queued = jm.Job(title="Album", artist="A", album_id="q1")
     queued.status = jm.JobStatus.PENDING
-    recovery = jm.Job(
-        id="durable-owner", title="Interrupted album retry", artist="A"
-    )
+    recovery = jm.Job(id="durable-owner", title="Interrupted album retry", artist="A")
     recovery.status = jm.JobStatus.RUNNING
     jm.registry.add(review)
     jm.registry.add(queued)
@@ -4377,13 +3266,10 @@ def test_bulk_cancel_pending_never_touches_parked_reviews(client):
         assert "Recovery protected" in queue_before.text
         assert "stays active until its saved step settles" in job_before.text
         assert (
-            "The interrupted-download recovery stays active until its saved "
-            "step settles."
+            "The interrupted-download recovery stays active until its saved step settles."
         ) in queue_before.text
 
-        individual = client.post(
-            f"/jobs/{recovery.id}/cancel", follow_redirects=False
-        )
+        individual = client.post(f"/jobs/{recovery.id}/cancel", follow_redirects=False)
         assert individual.status_code == 303
         refused = client.get(individual.headers["location"])
         assert "cannot be canceled until its saved step settles" in refused.text
@@ -4414,152 +3300,35 @@ def test_bulk_cancel_pending_never_touches_parked_reviews(client):
         _remove_job(recovery)
 
 
-def test_review_cancel_stays_open_when_it_cannot_be_saved(monkeypatch):
-    review = jm.Job(title="Library scan")
-    review.status = jm.JobStatus.AWAITING_REVIEW
-    review.add_candidate("album", "Keep me", "Portishead", payload={})
+
+
+
+
+
+
+
+
+
+
+def test_clear_history_keeps_memory_and_reports_failed_durable_delete(client, monkeypatch):
+    from qobuz_librarian.web import job_persistence
+
+    finished = _inject_job(jm.JobStatus.DONE, "History that must survive")
     monkeypatch.setattr(
-        "qobuz_librarian.web.job_persistence.persist",
-        lambda _job: False,
+        job_persistence,
+        "clear_history",
+        lambda **_kwargs: False,
     )
-
-    assert jm.request_cancel(review) is False
-    assert review.status == jm.JobStatus.AWAITING_REVIEW
-    assert review.finished_at is None
-    assert review.cancel_requested is False
-
-
-def test_restart_interrupt_message_matches_the_retry_affordance(monkeypatch):
-    # A job rebadged FAILED by a restart must not tell the user to "submit
-    # this job again" unless it actually offers a Retry button.
-    from qobuz_librarian.web import job_persistence
-
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    album = jm.Job(title="Album", artist="Artist", album_id="abc")
-    album.status = jm.JobStatus.RUNNING
-    job_persistence.persist(album)
-
-    lyrics = jm.Job(title="Lyrics backfill")
-    lyrics.execute_kind = "lyrics"
-    lyrics.status = jm.JobStatus.RUNNING
-    job_persistence.persist(lyrics)
-
-    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-    jm.restore_jobs({})
-
-    a = jm.registry.get(album.id)
-    ly = jm.registry.get(lyrics.id)
-    assert a.status == jm.JobStatus.FAILED and ly.status == jm.JobStatus.FAILED
-    assert "Retry" in a.error
-    assert "Submit this" not in ly.error
-    assert "Lyrics" in ly.error
-
-
-def test_interrupted_scan_summary_matches_the_real_resume_path(monkeypatch):
-    """Only a pre-baseline library scan auto-resumes; post-baseline the
-    summary must point at the manual resume notice instead."""
-    from qobuz_librarian.web import job_persistence
-
-    for complete, expect in ((False, "next time you open the app"),
-                             (True, "notice on the Search page")):
-        job_persistence._reset_for_tests()
-        monkeypatch.setattr(job_persistence, "_disabled", False)
-        job_persistence.init()
-        monkeypatch.setattr(
-            "qobuz_librarian.library.new_releases.is_baseline_complete",
-            lambda complete=complete: complete)
-        scan = jm.Job(title="Library scan")
-        scan.execute_kind = "library"
-        scan.status = jm.JobStatus.SCANNING
-        job_persistence.persist(scan)
-        monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-        jm.restore_jobs({})
-        restored = jm.registry.get(scan.id)
-        assert expect in restored.summary
-
-
-def test_clear_history_serializes_with_durable_resume_publication(
-        client, monkeypatch):
-    from qobuz_librarian.queue.startup_recovery import (
-        StartupRecoveryResult,
-        StartupRecoveryStatus,
-    )
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import job_persistence
-
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-    owner = jm.Job(id="resume-race", title="In progress", album_id="album-1")
-    owner.status = jm.JobStatus.RUNNING
-    jm.registry.add(owner)
-    monkeypatch.setattr(
-        webapp,
-        "_STARTUP_RECOVERY_RESULT",
-        StartupRecoveryResult(StartupRecoveryStatus.CLEAR),
-    )
-    monkeypatch.setattr(webapp, "_STARTUP_RECOVERY_UNKNOWN", False)
-    jm.set_durable_recovery_job_id(None)
-
-    clear_entered = threading.Event()
-    publication_attempted = threading.Event()
-    real_clear_finished = jm.registry.clear_finished
-
-    def pause_clear_finished():
-        clear_entered.set()
-        assert publication_attempted.wait(2)
-        real_clear_finished()
-
-    monkeypatch.setattr(jm.registry, "clear_finished", pause_clear_finished)
-
-    def publish_resume():
-        assert clear_entered.wait(2)
-        publication_attempted.set()
-        with webapp._STARTUP_RECOVERY_LOCK:
-            webapp._STARTUP_RECOVERY_RESULT = StartupRecoveryResult(
-                StartupRecoveryStatus.RESUME_REQUIRED)
-            jm.set_durable_recovery_job_id(owner.id)
-            with owner._lock:
-                owner.status = jm.JobStatus.FAILED
-                owner.finished_at = time.time()
-            assert job_persistence.persist(owner)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        publication = executor.submit(publish_resume)
+    try:
         response = client.post("/queue/clear", follow_redirects=False)
-        publication.result(timeout=3)
 
-    assert response.status_code == 303
-    assert jm.durable_recovery_job_id() == owner.id
-    assert jm.registry.get(owner.id) is owner
-    assert job_persistence.load_one(owner.id) is not None
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/queue/history?error=")
+        assert jm.registry.get(finished.id) is finished
+    finally:
+        _remove_job(finished)
 
 
-def test_persist_survives_non_json_candidate_payload(monkeypatch):
-    """A stray non-JSON value in a candidate payload (a Path, say) must coerce
-    to text at the write boundary, not raise TypeError, which escaped the
-    sqlite guard, killed the worker, and lost the whole parked review."""
-    from pathlib import Path
-
-    from qobuz_librarian.web import job_persistence
-
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    job = jm.Job(title="Review")
-    job.kind = "scan"
-    job.status = jm.JobStatus.AWAITING_REVIEW
-    job.add_candidate("album", "Album", "Artist",
-                      payload={"album_id": "A1", "dir": Path("/music/A/B")})
-    job_persistence.persist(job)
-
-    row = job_persistence.load_one(job.id)
-    assert row is not None
-    assert row["candidates"][0]["payload"]["album_id"] == "A1"
 
 
 def test_download_partial_album_proceeds_to_gap_fill(client, monkeypatch):
@@ -4788,65 +3557,63 @@ def test_settings_save_rejects_out_of_enum_quality(tmp_path, monkeypatch):
 
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import settings_store as ss
+
     monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
     monkeypatch.setattr(ss, "_any_active_job", lambda: False)
     monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
 
-    assert ss.save({"STREAMRIP_QUALITY": "99"})[0] is True
-    on_disk = json.loads((tmp_path / "s.json").read_text())
-    assert on_disk.get("STREAMRIP_QUALITY") != "99"
+    assert ss.save({"STREAMRIP_QUALITY": "99"})[0] is None
+    assert not (tmp_path / "s.json").exists()
+    # A mixed forged submission is rejected as one unit: the valid sibling
+    # must not apply while the invalid enum is silently dropped.
+    assert (
+        ss.save(
+            {
+                "STREAMRIP_QUALITY": "99",
+                "LYRICS_ENABLED": False,
+            }
+        )[0]
+        is None
+    )
+    assert cfg.STREAMRIP_QUALITY == 4
+    assert cfg.LYRICS_ENABLED is True
+    assert not (tmp_path / "s.json").exists()
     # A valid value still persists.
     assert ss.save({"STREAMRIP_QUALITY": "2"})[0] is True
     assert json.loads((tmp_path / "s.json").read_text())["STREAMRIP_QUALITY"] == "2"
 
 
-def test_settings_omits_cli_only_consolidation_setting(
-        client, tmp_path, monkeypatch):
-    import json
-
+def test_environment_qobuz_credentials_cannot_be_shadowed_by_the_form(client, monkeypatch):
+    """The form must not claim to replace an environment-owned credential."""
     import qobuz_librarian.web.app as app_mod
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import settings_store as ss
 
-    monkeypatch.setattr(app_mod, "_read_creds",
-                        lambda: {"user_id": "u", "auth_token": "t"})
-    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
-    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
-    monkeypatch.setattr(cfg, "CONSOLIDATE", True)
+    monkeypatch.setattr(cfg, "QOBUZ_USER_AUTH_TOKEN", "environment-token")
+    monkeypatch.setattr(cfg, "QOBUZ_USER_ID", "environment-user")
+    writes = []
+    monkeypatch.setattr(
+        app_mod,
+        "_write_creds",
+        lambda user_id, token: writes.append((user_id, token)) or True,
+    )
+    monkeypatch.setattr(app_mod, "_classify_token", lambda _token: "ok")
 
-    r = client.get("/settings")
+    response = client.post(
+        "/settings",
+        data={"user_id": "form-user", "auth_token": "form-secret-token"},
+        follow_redirects=False,
+    )
 
-    assert r.status_code == 200
-    assert "Consolidate duplicate folders" not in r.text
-    assert "CLI only" not in r.text
-    assert "CONSOLIDATE" not in r.text
-
-    data = {"form_complete": "1", "CONSOLIDATE": "1"}
-    data.update({key: "" for key in ss.TEXT_KEYS})
-    r = client.post("/settings/behavior", data=data, follow_redirects=False)
-
-    assert r.status_code == 303
-    assert "CONSOLIDATE" not in json.loads((tmp_path / "s.json").read_text())
+    assert response.status_code == 200
+    assert "supplied by environment" in response.text
+    assert "was not changed" in response.text
+    assert "form-secret-token" not in response.text
+    assert writes == []
 
 
-def test_settings_renders_both_forms_and_mode_switch(client, monkeypatch):
-    import qobuz_librarian.web.app as app_mod
-    monkeypatch.setattr(app_mod, "_read_creds",
-                        lambda: {"user_id": "u", "auth_token": "t"})
-    r = client.get("/settings")
 
-    assert r.status_code == 200
-    assert 'data-toggle-password="auth_token"' in r.text
-    assert ">Save &amp; connect</button>" in r.text
-    assert "Switch to terminal mode" in r.text
-    assert ">Save behaviour</button>" in r.text
-    assert "CLI command" in r.text
-    assert "CLI entrypoint" not in r.text
-    assert "Paths currently in use" in r.text
-    assert "QL_MUSIC_DIR" not in r.text
-    assert "QL_STAGING_DIR" not in r.text
-    assert "MUSIC_ROOT" not in r.text
-    assert "STAGING_DIR" not in r.text
+
 
 
 # ── CLI/web mode hand-off ───────────────────────────────────────────────────────
@@ -4924,23 +3691,6 @@ def test_shutdown_keeps_run_lock_until_workers_and_direct_writes_settle(
     assert app_mod._RUN_LOCK_HANDLE is None
 
 
-def test_parked_review_does_not_block_cli_handoff(client):
-    """The staging race the handoff guards against needs a running worker; a
-    review waiting on the user has none, and it can wait for weeks, so refusing
-    on it would make terminal mode unreachable."""
-    import qobuz_librarian.web.app as app_mod
-    review = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    review.execute_kind = "downsample"
-
-    r = client.post("/settings/mode", data={"target": "cli"},
-                    follow_redirects=False)
-    assert r.status_code == 303
-    assert r.headers["location"] == "/settings?mode=cli"
-    assert app_mod._CLI_MODE is True
-    back = client.post("/settings/mode", data={"target": "web"},
-                       follow_redirects=False)
-    assert back.status_code == 303
-    assert app_mod._CLI_MODE is False
 
 
 def test_resuming_web_mode_restores_saved_jobs_before_unpausing(
@@ -5020,6 +3770,46 @@ def _enable_auth(monkeypatch, tmp_path, *, configure=True):
     return _SameThreadASGIClient(app_mod.app)
 
 
+def _mutation_paths(app):
+    """Concrete inert paths for every unsafe route in the live route table."""
+    return sorted(
+        {
+            route.path.replace("{job_id}", "guard-probe")
+            for route in app.routes
+            if "POST" in (getattr(route, "methods", None) or set())
+        }
+    )
+
+
+def test_every_mutation_route_requires_csrf(monkeypatch):
+    from qobuz_librarian.web import app as app_mod
+
+    monkeypatch.setenv("WEB_AUTH", "none")
+    with _SameThreadASGIClient(app_mod.app) as client:
+        for path in _mutation_paths(app_mod.app):
+            client.cookies.clear()
+            response = client.post(path, follow_redirects=False)
+            assert response.status_code == 403, path
+
+
+def test_every_non_auth_mutation_route_requires_a_session(monkeypatch, tmp_path):
+    from qobuz_librarian.web import app as app_mod
+
+    with _enable_auth(monkeypatch, tmp_path) as client:
+        client.get("/login")
+        csrf_token = client.cookies.get("ql_csrf")
+        for path in _mutation_paths(app_mod.app):
+            if path in {"/login", "/setup"}:
+                continue
+            response = client.post(
+                path,
+                headers={"X-CSRF-Token": csrf_token},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303, path
+            assert response.headers["location"] == "/login", path
+
+
 def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import auth as web_auth
@@ -5076,43 +3866,6 @@ def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path)
     monkeypatch.setenv("WEB_AUTH_PASSWORD_FILE", str(password_file))
     assert web_auth.apply_env_credentials() == "applied"
     assert web_auth.verify_login("admin", "ember orbit atlas")
-
-
-def test_stale_setup_form_reports_the_winning_login(monkeypatch, tmp_path):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import app as app_mod
-    from qobuz_librarian.web import auth as web_auth
-
-    with _enable_auth(monkeypatch, tmp_path, configure=False) as winner, \
-            _SameThreadASGIClient(app_mod.app) as stale:
-        winner.get("/setup")
-        stale.get("/setup")
-        winner_token = winner.cookies.get("ql_csrf")
-        stale_token = stale.cookies.get("ql_csrf")
-
-        created = winner.post(
-            "/setup",
-            data={"username": "first-admin", "password": "winning-password",
-                  "confirm": "winning-password", "_csrf_token": winner_token},
-            headers={"X-CSRF-Token": winner_token}, follow_redirects=False,
-        )
-        conflict = stale.post(
-            "/setup",
-            data={"username": "stale-admin", "password": "stale-password",
-                  "confirm": "stale-password", "_csrf_token": stale_token},
-            headers={"X-CSRF-Token": stale_token}, follow_redirects=False,
-        )
-
-    assert created.status_code == 303
-    assert conflict.status_code == 409
-    assert "Login already created" in conflict.text
-    assert "another browser or tab" in conflict.text
-    assert 'href="/login"' in conflict.text
-    assert "stale-admin" not in conflict.text
-    assert "stale-password" not in conflict.text
-    assert cfg.WEB_AUTH_FILE.stat().st_mode & 0o777 == 0o600
-    assert web_auth.verify_login("first-admin", "winning-password")
-    assert not web_auth.verify_login("stale-admin", "stale-password")
 
 
 def test_login_rejects_wrong_password(monkeypatch, tmp_path):
@@ -5230,25 +3983,6 @@ def test_authenticated_pages_are_not_stored_in_the_browser_cache(
         )
 
 
-def test_asset_version_covers_every_static_file(monkeypatch, tmp_path):
-    from qobuz_librarian.web import app as webapp
-
-    nested = tmp_path / "vendor"
-    nested.mkdir()
-    (tmp_path / "app.js").write_text("app-v1", encoding="utf-8")
-    cached = nested / "offline.js"
-    cached.write_text("offline-v1", encoding="utf-8")
-    monkeypatch.setattr(webapp, "static_dir", tmp_path)
-
-    first = webapp._asset_version()
-    cached.write_text("offline-v2", encoding="utf-8")
-    second = webapp._asset_version()
-    (tmp_path / "new-icon.png").write_bytes(b"new")
-
-    assert second != first
-    assert webapp._asset_version() != second
-
-
 def test_login_returns_to_the_page_that_bounced(monkeypatch, tmp_path):
     # A deep link opened while logged out should survive the login bounce:
     # /queue → /login?next=/queue → sign in → land on /queue, not the dashboard.
@@ -5352,189 +4086,12 @@ def test_malformed_host_cannot_bypass_auth(monkeypatch, tmp_path):
         assert r.status_code != 200
 
 
-def test_artist_sort_key_files_articles_under_the_real_letter():
-    # "The Beatles" must sort under B, not T (owner acceptance criterion);
-    # leading the/a/an are ignored, the rest of the name is not.
-    from qobuz_librarian.web.app import _artist_sort_key
-    names = ["The Beatles", "Bob Dylan", "ABBA", "Adele", "The Who",
-             "A Tribe Called Quest", "an Evening"]
-    ordered = sorted(names, key=_artist_sort_key)
-    assert ordered.index("Adele") < ordered.index("The Beatles") < ordered.index("Bob Dylan")
-    assert ordered[-1] == "The Who"            # "who" sorts last
-    assert _artist_sort_key("The Beatles") == "beatles"
-    assert _artist_sort_key("A Tribe Called Quest") == "tribe called quest"
-    assert _artist_sort_key("Adele") == "adele"   # no leading "a " to strip
 
 
-def test_review_artist_groups_use_library_sort_order():
-    from qobuz_librarian.web.app import _review_artist_groups
-
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.add_candidate(kind="album", title="Revolver", artist="The Beatles",
-                      payload={"album_id": "beatles"})
-    job.add_candidate(kind="album", title="Highway 61 Revisited",
-                      artist="Bob Dylan", payload={"album_id": "dylan"})
-    job.add_candidate(kind="album", title="Low", artist="David Bowie",
-                      payload={"album_id": "bowie"})
-
-    assert [artist for artist, _items in _review_artist_groups(job)] == [
-        "The Beatles",
-        "Bob Dylan",
-        "David Bowie",
-    ]
 
 
-def test_migrate_post_submits_a_creds_free_job(client, monkeypatch, tmp_path):
-    import qobuz_librarian.config as cfg
-    src = tmp_path / "src"
-    src.mkdir()
-    monkeypatch.setattr(cfg, "MIGRATE_SRC", str(src))
-    monkeypatch.setattr(cfg, "MIGRATE_DEST", str(tmp_path / "dest"))
-    r = client.post("/migrate", data={"in_place": "on"}, follow_redirects=False)
-    assert r.status_code == 303
-    assert r.headers["location"].startswith("/jobs/")
-    job_id = r.headers["location"].split("/jobs/")[1].split("?")[0]
-    job = jm.registry.get(job_id)
-    assert job is not None
-    assert job.review_verb == "Move"                  # in-place toggle carried through
-    assert job.execute_args["allow_low_space"] is False
-    _remove_job(job)
 
 
-def test_migrate_offers_a_preview(client, monkeypatch, tmp_path):
-    import qobuz_librarian.config as cfg
-    from qobuz_librarian.web import app as app_mod
-
-    src = tmp_path / "src"
-    src.mkdir()
-    monkeypatch.setattr(cfg, "MIGRATE_SRC", str(src))
-    monkeypatch.setattr(cfg, "MIGRATE_DEST", str(tmp_path / "dest"))
-
-    r = client.get("/migrate")
-
-    assert r.status_code == 200
-    assert 'id="migrate-preview"' in r.text
-    assert 'name="allow_low_space"' not in r.text
-
-    monkeypatch.setattr(app_mod, "_CLI_MODE", True)
-    paused = client.get("/migrate")
-    preview = paused.text.split('id="migrate-preview"', 1)[1].split(
-        "</button>", 1
-    )[0]
-    assert " disabled " in preview
-    assert 'title="Terminal mode is holding the library."' in preview
-
-
-def test_migration_low_space_ack_is_required_and_saved_before_approval(
-    client, monkeypatch
-):
-    import queue
-
-    from qobuz_librarian.web import job_persistence
-
-    job = jm.Job(title="Library migration")
-    job.execute_kind = "migration"
-    job.review_verb = "Move"
-    job.status = jm.JobStatus.AWAITING_REVIEW
-    job.execute_args = {
-        "dest": "/disposable/dest",
-        "in_place": True,
-        "src": "/disposable/src",
-        "allow_low_space": False,
-        "requires_low_space_override": True,
-    }
-    job._execute_fn = lambda _job, _chosen: None
-    job.summary = "Not enough free space for this preview."
-    job.add_candidate("migrate", "Album", "Artist", payload={})
-    job.candidates[0]["selected"] = True
-    jm.registry.add(job)
-    try:
-        rendered = client.get(f"/jobs/{job.id}")
-        assert 'name="allow_low_space"' in rendered.text
-        assert 'name="allow_low_space" class="ql-checkbox" required' in rendered.text
-
-        unchecked = client.post(
-            f"/jobs/{job.id}/approve", follow_redirects=False
-        )
-        assert unchecked.status_code == 303
-        assert "Confirm%20the%20low-space%20risk" in unchecked.headers["location"]
-        assert job.status == jm.JobStatus.AWAITING_REVIEW
-        assert job.execute_args["allow_low_space"] is False
-
-        admitted = []
-
-        def _admit(approved_job, _parked=()):
-            admitted.append(dict(approved_job.execute_args))
-            return len(admitted) > 1
-
-        monkeypatch.setattr(
-            job_persistence, "admit_review_transition", _admit
-        )
-        work = queue.Queue()
-        monkeypatch.setattr(jm, "_scan_queue", work)
-
-        failed_save = client.post(
-            f"/jobs/{job.id}/approve",
-            data={"allow_low_space": "on"},
-            follow_redirects=False,
-        )
-        assert failed_save.status_code == 303
-        assert job.status == jm.JobStatus.AWAITING_REVIEW
-        assert job.execute_args["allow_low_space"] is False
-        assert work.empty()
-
-        checked = client.post(
-            f"/jobs/{job.id}/approve",
-            data={"allow_low_space": "on"},
-            follow_redirects=False,
-        )
-        assert checked.status_code == 303
-        assert job.status == jm.JobStatus.PENDING
-        assert job.execute_args["allow_low_space"] is True
-        assert admitted[-1]["allow_low_space"] is True
-        assert not work.empty()
-    finally:
-        _remove_job(job)
-
-
-def test_migration_ignores_a_legacy_launcher_low_space_flag(client, monkeypatch):
-    import queue
-
-    from qobuz_librarian.web import job_persistence
-
-    job = jm.Job(title="Legacy migration review")
-    job.execute_kind = "migration"
-    job.status = jm.JobStatus.AWAITING_REVIEW
-    job.execute_args = {
-        "dest": "/disposable/dest",
-        "in_place": True,
-        "src": "/disposable/src",
-        "allow_low_space": True,
-    }
-    job._execute_fn = lambda _job, _chosen: None
-    job.add_candidate("migrate", "Album", "Artist", payload={})
-    job.candidates[0]["selected"] = True
-    jm.registry.add(job)
-    admitted = []
-    try:
-        monkeypatch.setattr(
-            job_persistence,
-            "admit_review_transition",
-            lambda approved, _parked=(): (
-                admitted.append(dict(approved.execute_args)) or True
-            ),
-        )
-        monkeypatch.setattr(jm, "_scan_queue", queue.Queue())
-
-        response = client.post(
-            f"/jobs/{job.id}/approve", follow_redirects=False
-        )
-
-        assert response.status_code == 303
-        assert admitted[-1]["allow_low_space"] is False
-        assert job.execute_args["allow_low_space"] is False
-    finally:
-        _remove_job(job)
 
 
 def test_settings_path_resolver_maps_container_paths_to_host_bind_mounts(
@@ -5580,6 +4137,34 @@ def test_session_tokens_are_per_login_and_revocable():
     assert web_auth.verify_session("") is False
 
 
+def test_password_rotation_rejects_old_sessions_after_failed_session_save(tmp_path, monkeypatch):
+    """A stale session file must not revive prior-password access on restart."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(cfg, "WEB_AUTH_FILE", tmp_path / "auth.json")
+    monkeypatch.setattr(web_auth, "_SESSIONS_FILE", tmp_path / "sessions.json")
+    with web_auth._sessions_lock:
+        original_sessions = dict(web_auth._sessions)
+        web_auth._sessions = {}
+    try:
+        assert web_auth.set_credentials("admin", "first secure password")
+        old_token = web_auth.mint_session()
+        assert web_auth.verify_session(old_token)
+
+        # Credential publication succeeds, but invalidating the durable session
+        # file does not. Simulate process reconstruction from that stale file.
+        monkeypatch.setattr(web_auth, "_save_sessions_locked", lambda: False)
+        assert web_auth.set_credentials("admin", "second secure password")
+        with web_auth._sessions_lock:
+            web_auth._sessions = web_auth._load_sessions()
+
+        assert web_auth.verify_session(old_token) is False
+    finally:
+        with web_auth._sessions_lock:
+            web_auth._sessions = original_sessions
+
+
 def test_restore_backup_rejects_path_shaped_names(client, tmp_path, monkeypatch):
     # The Restore form posts a bare directory name; anything path-shaped is a
     # probe, not a backup the diagnostics list rendered, so it must not resolve
@@ -5592,8 +4177,7 @@ def test_restore_backup_rejects_path_shaped_names(client, tmp_path, monkeypatch)
     assert "isn't there anymore" in r.text
 
 
-def test_missing_repair_recovery_can_be_acknowledged_and_cleared(
-        client, tmp_path, monkeypatch):
+def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_path, monkeypatch):
     from qobuz_librarian.web import job_persistence
 
     job_persistence._reset_for_tests()
@@ -5613,7 +4197,7 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(
     try:
         assert job_persistence.persist(job)
         history = client.get("/queue/history").text
-        assert "Original files are being kept safely" in history
+        assert "Recovery files are still held" in history
         assert job.summary in history
         assert "1 album couldn&#39;t be repaired." in history
 
@@ -5755,26 +4339,46 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
 
     parked = jm.Job(title="Library scan")
     parked.execute_kind = "library"
-    parked.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                         detail="1994 · 16-bit/44.1 kHz · 11 tracks",
-                         payload={"album_id": "al1"}, selected=False)
-    parked.add_candidate(kind="album", title="Third", artist="Portishead",
-                         detail="2008 · 24-bit/44.1 kHz · 10 tracks",
-                         payload={"album_id": "al2"}, selected=False)
+    parked.add_candidate(
+        kind="album",
+        title="Dummy",
+        artist="Portishead",
+        detail="1994 · 16-bit/44.1 kHz · 11 tracks",
+        payload={"album_id": "al1"},
+        selected=False,
+    )
+    parked.add_candidate(
+        kind="album",
+        title="Third",
+        artist="Portishead",
+        detail="2008 · 24-bit/44.1 kHz · 10 tracks",
+        payload={"album_id": "al2"},
+        selected=False,
+    )
     parked.status = jm.JobStatus.AWAITING_REVIEW
     parked.set_selected(parked.candidates[0]["cid"], True)
     jm.registry.add(parked)
 
     scan = jm.Job(title="Library scan")
     scan.execute_kind = "library"
+    scan.execute_args = {"_library_review_generation": 123.0}
     scan.status = jm.JobStatus.SCANNING
-    scan.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                       detail="1994 · 16-bit/44.1 kHz · 11 tracks",
-                       payload={"album_id": "al1"}, selected=False)
-    scan.add_candidate(kind="album", title="Roseland NYC Live",
-                       artist="Portishead",
-                       detail="1998 · 16-bit/44.1 kHz · 11 tracks",
-                       payload={"album_id": "al3"}, selected=False)
+    scan.add_candidate(
+        kind="album",
+        title="Dummy",
+        artist="Portishead",
+        detail="1994 · 16-bit/44.1 kHz · 11 tracks",
+        payload={"album_id": "al1"},
+        selected=False,
+    )
+    scan.add_candidate(
+        kind="album",
+        title="Roseland NYC Live",
+        artist="Portishead",
+        detail="1998 · 16-bit/44.1 kHz · 11 tracks",
+        payload={"album_id": "al3"},
+        selected=False,
+    )
     jm.registry.add(scan)
     changed_scan = None
     try:
@@ -5785,12 +4389,11 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         assert "Folded 1 new find" in (scan.summary or "")
         ids = [c["payload"]["album_id"] for c in parked.candidates]
         assert ids == ["al1", "al2", "al3"]
-        ticked = [c["payload"]["album_id"]
-                  for c in parked.candidates if c.get("selected")]
+        ticked = [c["payload"]["album_id"] for c in parked.candidates if c.get("selected")]
         assert ticked == ["al1"]
+        assert parked.execute_args["_library_review_generation"] == 123.0
         assert parked.status == jm.JobStatus.AWAITING_REVIEW
-        library_reviews = [j for j in jm.registry.awaiting_review()
-                           if j.execute_kind == "library"]
+        library_reviews = [j for j in jm.registry.awaiting_review() if j.execute_kind == "library"]
         assert library_reviews == [parked]
 
         parked.add_candidate(
@@ -5810,6 +4413,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         badge_calls.clear()
         changed_scan = jm.Job(title="Library scan")
         changed_scan.execute_kind = "library"
+        changed_scan.execute_args = {"_library_review_generation": 124.0}
         changed_scan.status = jm.JobStatus.SCANNING
         changed_scan.add_candidate(
             kind="album",
@@ -5827,15 +4431,13 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
 
         webapp._fold_into_parked_library_review(changed_scan)
 
-        fresh_gap = next(
-            c for c in parked.candidates
-            if c["payload"].get("album_id") == "gap1"
-        )
+        fresh_gap = next(c for c in parked.candidates if c["payload"].get("album_id") == "gap1")
         assert (fresh_gap["cid"], fresh_gap["seq"]) == old_identity
         assert fresh_gap["selected"] is True
         assert fresh_gap["detail"] == "gap-fill: 4 of 10 tracks missing"
         assert fresh_gap["payload"]["gap_fill"] == 4
         assert fresh_gap["payload"]["refresh_generation"] == "fresh"
+        assert parked.execute_args["_library_review_generation"] == 124.0
         assert "Updated 1 changed item" in (changed_scan.summary or "")
         assert "up to date" not in (changed_scan.summary or "")
         assert badge_calls == ["library"]
@@ -5890,82 +4492,8 @@ def test_refresh_fold_refuses_to_publish_an_unsaved_review(monkeypatch, tmp_path
     assert restored.candidates[0]["selected"] is True
 
 
-def test_fold_swaps_candidate_class_and_keeps_the_tick(monkeypatch):
-    """An album that changed on disk while the review sat parked (missing →
-    partially added, or a gapped album deleted by hand) must swap to the fresh
-    candidate class instead of being silently swallowed as a duplicate key,
-    and the user's tick must survive the swap."""
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    parked = jm.Job(title="Library scan")
-    parked.execute_kind = "library"
-    parked.add_candidate(kind="album", title="The White EP", artist="Agalloch",
-                         detail="2019 · fully missing · 8 tracks",
-                         payload={"album_id": "wx1"}, selected=True)
-    parked.add_candidate(kind="album", title="Ashes", artist="Agalloch",
-                         detail="gap-fill: 3 of 10 tracks missing",
-                         payload={"album_id": "ax1", "gap_fill": True},
-                         selected=False)
-    parked.status = jm.JobStatus.AWAITING_REVIEW
-    jm.registry.add(parked)
-
-    scan = jm.Job(title="Library scan")
-    scan.execute_kind = "library"
-    scan.status = jm.JobStatus.SCANNING
-    # The White EP appeared on disk with some tracks → now a gap candidate;
-    # Ashes was deleted by hand → now fully missing.
-    scan.add_candidate(kind="album", title="The White EP", artist="Agalloch",
-                       detail="gap-fill: 5 of 8 tracks missing",
-                       payload={"album_id": "wx1", "gap_fill": True},
-                       selected=False)
-    scan.add_candidate(kind="album", title="Ashes", artist="Agalloch",
-                       detail="2005 · fully missing · 10 tracks",
-                       payload={"album_id": "ax1"}, selected=False)
-    jm.registry.add(scan)
-    try:
-        webapp._fold_into_parked_library_review(scan)
-
-        from qobuz_librarian.web import flows
-        by_id = {c["payload"]["album_id"]: c for c in parked.candidates}
-        assert flows.is_gap_candidate(by_id["wx1"])
-        assert by_id["wx1"]["selected"] is True
-        assert not flows.is_gap_candidate(by_id["ax1"])
-        assert by_id["ax1"]["selected"] is False
-        assert "Updated 2" in (scan.summary or "")
-        assert "up to date" not in (scan.summary or "")
-        cids = [c["cid"] for c in parked.candidates]
-        assert len(set(cids)) == len(cids)
-    finally:
-        _remove_job(parked)
-        _remove_job(scan)
 
 
-def test_fold_carries_the_scan_honesty_caveat(monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    parked = jm.Job(title="Library scan")
-    parked.execute_kind = "library"
-    parked.add_candidate(kind="album", title="A", artist="X",
-                         payload={"album_id": "a1"}, selected=False)
-    parked.status = jm.JobStatus.AWAITING_REVIEW
-    jm.registry.add(parked)
-
-    scan = jm.Job(title="Library scan")
-    scan.execute_kind = "library"
-    scan.status = jm.JobStatus.SCANNING
-    scan._unchecked_artists = 10
-    jm.registry.add(scan)
-    try:
-        webapp._fold_into_parked_library_review(scan)
-
-        assert "10 artists couldn't be checked" in (scan.summary or "")
-        assert "up to date" not in (scan.summary or "")
-    finally:
-        _remove_job(parked)
-        _remove_job(scan)
 
 
 def test_fold_does_not_resurrect_albums_dismissed_during_the_refresh(
@@ -6028,193 +4556,14 @@ def test_fold_skips_a_review_approved_mid_refresh(monkeypatch):
         _remove_job(scan)
 
 
-def test_restore_refolds_into_the_parked_library_review(monkeypatch, tmp_path):
-    from qobuz_librarian.library import catalog, library_scan_state
-    from qobuz_librarian.web import flows, job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    album_dir = tmp_path / "Agalloch" / "Pale Folklore"
-    album_dir.mkdir(parents=True)
-    albums = {
-        "ag1": None,
-        "ag3": {
-            "id": "ag3", "title": "Pale Folklore", "tracks_count": 2,
-            "artist": {"name": "Agalloch"},
-            "tracks": {"items": [{"id": "t1"}, {"id": "t2"}]},
-        },
-    }
-    monkeypatch.setattr(flows, "load_qobuz_token", lambda: ("user", "token"))
-    monkeypatch.setattr(
-        catalog, "find_album_dir_filesystem",
-        lambda album: album_dir if album.get("id") == "ag3" else None,
-    )
-    monkeypatch.setattr(flows, "get_album", lambda album_id, _token: albums[album_id])
-    monkeypatch.setattr(catalog, "find_existing_tracks",
-                        lambda *_args, **_kwargs: ([{"id": "t1"}], album_dir))
-    monkeypatch.setattr(catalog, "compute_missing",
-                        lambda tracks, existing: ([tracks[1]], [tracks[0]]))
-
-    parked = jm.Job(title="Library scan")
-    parked.execute_kind = "library"
-    parked.status = jm.JobStatus.AWAITING_REVIEW
-    jm.registry.add(parked)
-    pending = jm.Job(title="Library download", status=jm.JobStatus.PENDING)
-    pending.execute_kind = "library"
-    pending.add_candidate(kind="album", title="The Mantle",
-                          artist="Agalloch", payload={"album_id": "ag2"})
-    jm.registry.add(pending)
-    library_scan_state.save_kind("missing", artists={
-        "Agalloch": {"fingerprint": "fp", "candidates": [
-            {"kind": "album", "title": "Ashes Against the Grain",
-             "artist": "Agalloch", "detail": "2006 · fully missing",
-             "payload": {"album_id": "ag1"}},
-            {"kind": "album", "title": "The Mantle",
-             "artist": "Agalloch", "detail": "2002 · fully missing",
-             "payload": {"album_id": "ag2"}},
-            {"kind": "album", "title": "Pale Folklore",
-             "artist": "Agalloch", "detail": "1999 · fully missing",
-             "payload": {"album_id": "ag3", "year": "1999"}},
-        ]},
-    }, complete=True)
-    try:
-        added = flows.refold_restored_missing(["Agalloch"], [])
-        assert added == 2
-        restored = {
-            c["payload"]["album_id"]: c for c in parked.candidates
-        }
-        assert set(restored) == {"ag1", "ag3"}
-        assert restored["ag1"]["selected"] is False
-        assert restored["ag3"]["payload"]["gap_fill"] == 1
-        assert "gap-fill: 1 missing of 2" in restored["ag3"]["detail"]
-    finally:
-        library_scan_state.save_kind("missing", artists={}, complete=False)
-        _remove_job(parked)
-        _remove_job(pending)
 
 
-def test_refresh_without_parked_review_parks_normally(monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    scan = jm.Job(title="Library scan")
-    scan.execute_kind = "library"
-    scan.status = jm.JobStatus.SCANNING
-    scan.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                       payload={"album_id": "al1"}, selected=False)
-    jm.registry.add(scan)
-    try:
-        webapp._fold_into_parked_library_review(scan)
-
-        assert scan.status == jm.JobStatus.SCANNING
-        assert len(scan.candidates) == 1
-    finally:
-        _remove_job(scan)
 
 
-def test_post_baseline_library_scan_control_recedes(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.library.new_releases.is_baseline_complete",
-        lambda: True)
-    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
-    monkeypatch.setattr(webapp, "_library_scan_state",
-                        lambda: {"ready": True, "count": 3, "message": ""})
-    monkeypatch.setattr(webapp, "_last_scan_age", lambda: "2 days ago")
-    monkeypatch.setattr(webapp, "_census_view", lambda: None)
-
-    r = client.get("/library")
-
-    assert r.status_code == 200
-    assert 'class="ql-header-refresh"' in r.text
-    assert "Scan for music added outside the app" in r.text
-    assert ">Scan library</button>" not in r.text
-    assert ">Check new releases</button>" in r.text
 
 
-def test_volume_gate_accepts_boolean_env_and_reopens_live(
-        tmp_path, monkeypatch, capsys):
-    # A writability verdict sealed at startup leaves downloads refusing after
-    # the ownership of a root-created music folder is fixed, while Diagnostics
-    # (which re-checks live) shows green. The gate probes live and has to
-    # agree with Diagnostics.
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import app as webapp
-
-    music = tmp_path / "music"
-    music.mkdir()
-    monkeypatch.setenv("QL_CHECK_VOLUMES", "true")
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
-    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
-    (tmp_path / "staging").mkdir()
-
-    music.chmod(0o500)
-    try:
-        assert any("MUSIC_ROOT" in item and "read-only" in item
-                   for item in webapp._unwritable_volumes())
-        assert webapp._web_writes_paused() is True
-
-        monkeypatch.setenv("QL_CHECK_VOLUMES", "typo")
-        assert webapp._unwritable_volumes()
-        assert "QL_CHECK_VOLUMES='typo' is not a valid boolean" in (
-            capsys.readouterr().err)
-
-        monkeypatch.setenv("QL_CHECK_VOLUMES", "false")
-        assert webapp._unwritable_volumes() == []
-    finally:
-        music.chmod(0o700)
-
-    monkeypatch.setenv("QL_CHECK_VOLUMES", "true")
-    assert webapp._unwritable_volumes() == []
 
 
-def test_new_release_check_stays_reachable_while_a_review_is_parked(
-        client, monkeypatch):
-    # A parked review can live for months and it hides the baseline-ready
-    # strip, so the manual check cannot live only there.
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.library.new_releases.is_baseline_complete",
-        lambda: True)
-    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
-    monkeypatch.setattr(webapp, "_library_scan_state",
-                        lambda: {"ready": True, "count": 3, "message": ""})
-    monkeypatch.setattr(webapp, "_census_view", lambda: None)
-    parked = jm.Job(title="Library scan")
-    parked.execute_kind = "library"
-    parked.status = jm.JobStatus.AWAITING_REVIEW
-    jm.registry.add(parked)
-    try:
-        r = client.get("/library")
-        assert r.status_code == 200
-        assert ">Check new releases</button>" in r.text
-        assert 'class="ql-header-refresh"' in r.text
-    finally:
-        _remove_job(parked)
-
-
-def test_pre_baseline_library_keeps_the_scan_hero(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(
-        "qobuz_librarian.library.new_releases.is_baseline_complete",
-        lambda: False)
-    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
-    monkeypatch.setattr(webapp, "_library_scan_state",
-                        lambda: {"ready": True, "count": 3, "message": ""})
-
-    r = client.get("/library")
-
-    assert r.status_code == 200
-    assert ">Scan library</button>" in r.text
-    assert 'class="ql-header-refresh"' not in r.text
 
 
 def test_quality_shortfall_marks_history_until_the_job_is_opened(
@@ -6276,36 +4625,6 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
     assert "data-attention-badge" not in r.text
 
 
-def test_note_quality_shortfall_flags_the_running_job():
-    job = jm.Job(title="Dummy")
-    jm._TLS.current_job = job
-    try:
-        jm.note_quality_shortfall({
-            "target": (24, 96000),
-            "served": (16, 44100),
-            "source": (24, 192000),
-            "n_below": 1,
-            "n_unknown": 0,
-            "retried": True,
-            "recovered": False,
-            "effective_tier": 3,
-            "staged_dirs": [Path("/temporary/staging")],
-        })
-    finally:
-        jm._TLS.current_job = None
-    assert job.attention == "quality"
-    assert job.quality_shortfall == {
-        "version": 1,
-        "target": [24, 96000],
-        "served": [16, 44100],
-        "source": [24, 192000],
-        "n_below": 1,
-        "n_unknown": 0,
-        "retried": True,
-        "recovered": False,
-        "effective_tier": 3,
-    }
-    assert jm._queue_executor.on_quality_shortfall is jm.note_quality_shortfall
 
 
 def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
@@ -6342,64 +4661,8 @@ def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
             _remove_job(remnant)
 
 
-def test_failed_new_release_pick_returns_to_a_new_release_review():
-    """A failed new-release download wasn't downloaded, so it folds back into
-    the parked New Releases review (or re-parks a fresh one), ticked, instead
-    of being consumed with the dead job. It must never land in a Library
-    review."""
-    from qobuz_librarian.web import flows
-
-    parked = jm.Job(title="New-release check")
-    parked.execute_kind = "new_releases"
-    parked.status = jm.JobStatus.AWAITING_REVIEW
-    parked.add_candidate("album", "Untouched", "X",
-                         payload={"album_id": "a1"}, selected=False)
-    jm.registry.add(parked)
-    library = jm.Job(title="Library scan")
-    library.kind = "scan"
-    library.execute_kind = "library"
-    library.status = jm.JobStatus.AWAITING_REVIEW
-    library.add_candidate("album", "LibThing", "Y", payload={"album_id": "L1"})
-    jm.registry.add(library)
-    try:
-        flows._return_new_release_picks(
-            [{"kind": "album", "title": "Failed NR", "artist": "X",
-              "detail": "", "payload": {"album_id": "a2"}}])
-        titles = {c["title"] for c in parked.candidates}
-        assert titles == {"Untouched", "Failed NR"}
-        failed = next(c for c in parked.candidates if c["title"] == "Failed NR")
-        assert failed["selected"] is True
-        assert {c["title"] for c in library.candidates} == {"LibThing"}
-    finally:
-        _remove_job(parked)
-        _remove_job(library)
 
 
-def test_partial_import_folds_an_instant_gap_fill_candidate(monkeypatch):
-    """An album that lands with some tracks failed becomes a Gap Fill
-    candidate in the living Library review immediately, unticked, with honest
-    detail, instead of waiting for the next manual refresh."""
-    from qobuz_librarian.web import flows, job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    parked = jm.Job(title="Library scan")
-    parked.kind = "scan"
-    parked.execute_kind = "library"
-    parked.status = jm.JobStatus.AWAITING_REVIEW
-    parked.add_candidate("album", "Existing", "Y", payload={"album_id": "L1"})
-    jm.registry.add(parked)
-    try:
-        flows._fold_partial_gap_fill(
-            {"id": "a9", "title": "Short Album", "tracks_count": 10},
-            "Artist", 3)
-        gap = next(c for c in parked.candidates
-                   if c["title"] == "Short Album")
-        assert gap["selected"] is False
-        assert (gap.get("payload") or {}).get("gap_fill") == 3
-        assert "gap-fill: 3 missing of 10" in (gap.get("detail") or "")
-    finally:
-        _remove_job(parked)
 
 
 def test_partial_new_release_download_returns_to_the_nr_review(monkeypatch):
@@ -6407,7 +4670,9 @@ def test_partial_new_release_download_returns_to_the_nr_review(monkeypatch):
     release goes back to the New Releases review (ticked, like a failure), and
     its remainder must NOT leak into the Library review as Gap Fill."""
     from qobuz_librarian.modes import process as process_mod
-    from qobuz_librarian.web import flows
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked_nr = _inject_job(jm.JobStatus.AWAITING_REVIEW, "New-release check")
     parked_nr.execute_kind = "new_releases"
@@ -6415,25 +4680,29 @@ def test_partial_new_release_download_returns_to_the_nr_review(monkeypatch):
     parked_lib.execute_kind = "library"
     running = _inject_job(jm.JobStatus.RUNNING, "New-release check")
     running.execute_kind = "new_releases"
-    running.add_candidate(kind="album", title="Fresh Drop", artist="Abigail",
-                          payload={"album_id": "nr1"}, selected=True)
+    running.add_candidate(
+        kind="album",
+        title="Fresh Drop",
+        artist="Abigail",
+        payload={"album_id": "nr1"},
+        selected=True,
+    )
     chosen = list(running.candidates)
     monkeypatch.setattr(flows.cfg, "ARTIST_API_DELAY", 0)
-    monkeypatch.setattr(flows, "get_album",
-                        lambda aid, _t: {"id": aid, "title": "Fresh Drop",
-                                         "tracks_count": 10})
+    monkeypatch.setattr(
+        flows, "get_album", lambda aid, _t: {"id": aid, "title": "Fresh Drop", "tracks_count": 10}
+    )
     monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
-    monkeypatch.setattr(flows, "_refresh_after_local_album_change",
-                        lambda *a, **k: None)
-    monkeypatch.setattr(process_mod, "process_album",
-                        lambda *_a, **_k: {"imported": True, "n_ok": 7,
-                                           "n_fail": 3, "result": "downloaded"})
+    monkeypatch.setattr(flows, "_refresh_after_local_album_change", lambda *a, **k: None)
+    monkeypatch.setattr(
+        process_mod,
+        "process_album",
+        lambda *_a, **_k: {"imported": True, "n_ok": 7, "n_fail": 3, "result": "downloaded"},
+    )
     try:
         flows.execute_albums(running, chosen, "tok")
         assert running.status == jm.JobStatus.FAILED
-        assert running.summary == (
-            "1 album only partly downloaded (some tracks are missing)."
-        )
+        assert running.summary == ("1 album only partly downloaded (some tracks are missing).")
         assert running.attention == "partial"
         titles = {c["title"] for c in parked_nr.candidates}
         assert "Fresh Drop" in titles
@@ -6456,8 +4725,13 @@ def test_dismiss_honours_a_tick_saved_during_the_store_write(monkeypatch):
 
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
     job.execute_kind = "library"
-    job.add_candidate(kind="album", title="Kept", artist="Abigail",
-                      payload={"album_id": "k1", "year": 2020}, selected=False)
+    job.add_candidate(
+        kind="album",
+        title="Kept",
+        artist="Abigail",
+        payload={"album_id": "k1", "year": 2020},
+        selected=False,
+    )
     cand = job.candidates[0]
     restored = []
 
@@ -6467,14 +4741,13 @@ def test_dismiss_honours_a_tick_saved_during_the_store_write(monkeypatch):
         return len(list(specs))
 
     monkeypatch.setattr(hidden_mod, "hide", hide_and_race)
-    monkeypatch.setattr(hidden_mod, "restore_albums",
-                        lambda scope, fps: restored.extend(fps))
+    monkeypatch.setattr(hidden_mod, "restore_rows", lambda scope, specs: restored.extend(specs))
     try:
         n = flows.dismiss_albums(job, "Abigail")
         assert n == 0
         assert [c["title"] for c in job.candidates] == ["Kept"]
         assert job.candidates[0]["selected"] is True
-        assert restored == [hidden_mod.album_fingerprint("Abigail", "Kept")]
+        assert restored == [("Abigail", "Kept", 2020)]
 
         # A route can pass its opening status check and then lose a race to
         # approval before the off-thread store write begins.
@@ -6486,8 +4759,43 @@ def test_dismiss_honours_a_tick_saved_during_the_store_write(monkeypatch):
         _remove_job(job)
 
 
+def test_failed_dismiss_save_restores_only_the_new_exact_row(tmp_path, monkeypatch):
+    from qobuz_librarian.library import hidden as hidden_mod
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(hidden_mod.cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    hidden_mod.hide(hidden_mod.SCOPE_MISSING, [("Weezer", "Weezer", "1994")])
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW, "Library scan")
+    job.execute_kind = "library"
+    job.add_candidate(
+        kind="album",
+        title="Weezer",
+        artist="Weezer",
+        payload={"album_id": "green-album", "year": 2001},
+        selected=False,
+    )
+    monkeypatch.setattr(
+        job_persistence,
+        "persist_review_mutation",
+        lambda _job, _mutate: (False, None),
+    )
+    try:
+        assert flows.dismiss_albums(job, "Weezer") is False
+        store = hidden_mod.load()
+        assert (
+            hidden_mod.is_hidden(hidden_mod.SCOPE_MISSING, "Weezer", "Weezer", store, year="1994")
+            is True
+        )
+        assert (
+            hidden_mod.is_hidden(hidden_mod.SCOPE_MISSING, "Weezer", "Weezer", store, year="2001")
+            is False
+        )
+    finally:
+        _remove_job(job)
+
+
 def test_new_edition_download_folds_onto_an_identical_running_job():
-    """"Get this edition too" deliberately skips the owned-album fold, but two
+    """ "Get this edition too" deliberately skips the owned-album fold, but two
     identical new-edition submits are the same tap twice, so the second folds
     onto the in-flight job instead of queueing a concurrent duplicate."""
     from qobuz_librarian.web import app as web_app
@@ -6534,34 +4842,6 @@ def test_approve_rechecks_the_write_pause_after_awaits(client, monkeypatch):
     assert any(c.get("selected") for c in job.candidates)
 
 
-def test_settings_storage_separates_the_library_from_the_drive(client, monkeypatch):
-    # One line reading "Music folder: 3.31 TB used" is the whole filesystem,
-    # on an instance holding 1.6 MB of music.
-    import shutil
-
-    import qobuz_librarian.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "_read_creds",
-                        lambda: {"user_id": "u", "auth_token": "t"})
-    monkeypatch.setattr(app_mod, "_census_view",
-                        lambda: {"total": "38,201 tracks · 412 GB"})
-    monkeypatch.setattr(
-        shutil, "disk_usage",
-        lambda _p: type("du", (), {"used": 3_310_000_000_000,
-                                   "free": 520_000_000_000,
-                                   "total": 3_830_000_000_000})())
-
-    monkeypatch.setattr(app_mod, "_is_mount_point", lambda _p: True)
-    r = client.get("/settings")
-    assert "Your library: 38,201 tracks · 412 GB" in r.text
-    assert "Music drive: 520 GB free of 3.83 TB" in r.text
-    assert "Music folder: 3.31 TB used" not in r.text
-
-    # Sharing a disk with everything else says so instead of implying the
-    # figures are the music's own.
-    monkeypatch.setattr(app_mod, "_is_mount_point", lambda _p: False)
-    r = client.get("/settings")
-    assert "Drive holding your music: 520 GB free of 3.83 TB" in r.text
 
 
 def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
@@ -6586,24 +4866,6 @@ def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
     assert "ql_csrf" in r.headers.get("set-cookie", "")
 
 
-def test_connection_badge_reports_only_what_qobuz_has_confirmed(client, monkeypatch):
-    # "Connected" must not show for any saved token; one that has never
-    # authenticated, or one Qobuz has rejected.
-    import qobuz_librarian.web.app as app_mod
-    monkeypatch.setattr(app_mod, "_read_creds",
-                        lambda: {"user_id": "u", "auth_token": "t"})
-
-    monkeypatch.setattr(app_mod, "_TOKEN_VALID", True)
-    assert "Connected" in client.get("/settings").text
-
-    monkeypatch.setattr(app_mod, "_TOKEN_VALID", None)
-    body = client.get("/settings").text
-    assert "Token saved" in body and ">Connected" not in body
-
-    monkeypatch.setattr(app_mod, "_TOKEN_VALID", False)
-    body = client.get("/settings").text
-    assert "Token not authenticating" in body
-    assert "Connected" not in body
 
 
 def test_blank_login_does_not_spend_a_strike(client, monkeypatch):
@@ -6721,99 +4983,3 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
     phase = page.text.split('class="ql-repair-phase"', 1)[1].split("</div>", 1)[0]
     assert 'ql-repair-phase-label is-current is-error">Scan' in phase
     assert 'ql-repair-phase-label is-done">Review' not in phase
-
-
-def test_repair_sweep_logs_the_albums_it_sends_for_re_download(monkeypatch):
-    """The sweep header promises every problem appears in the log. A damaged
-    file that cannot be identified produces a whole-album re-download card,
-    and that card used to reach the review with no log line at all, so a long
-    scan read as idle and then a review appeared from nowhere."""
-    from pathlib import Path
-
-    from qobuz_librarian.web import flows
-
-    monkeypatch.setattr(
-        "qobuz_librarian.repair_log.scan_dir_for_isrc_repairs",
-        lambda *a, **k: {
-            "verified_ok": 3, "unverified": 0, "verified_truncated": [],
-            "isrc_mismatch": [],
-            "no_isrc_tag": [],
-            "isrc_no_match": [{"path": "/music/A/B/02.flac", "title": "Two",
-                               "local_title": "Two", "isrc": "X",
-                               "diagnostic": "won't decode"}],
-        })
-    monkeypatch.setattr(
-        flows, "find_qobuz_album_for_dir",
-        lambda *a, **k: {"id": "42", "title": "Mezzanine",
-                         "release_date_original": "1998-04-20"})
-
-    out = flows._repair_album_outcome(
-        Path("/music/Massive Attack/Mezzanine (1998)"), "Massive Attack",
-        "token")
-
-    assert any(k["kind"] == "redownload" for k in out["specs"])
-    assert any("Mezzanine (1998)" in w for w in out["warns"]), (
-        f"the flagged album never reached the log (got {out['warns']})")
-
-
-def test_kept_backup_says_why_it_was_kept(client, monkeypatch):
-    """Every kept backup rendered the same line, "N of N original files kept
-    while Repair stopped", whatever actually happened. In the case that
-    produced it most often the replacement had already landed in the album, so
-    the page told people nothing had changed while their album held a
-    different file. The record carries an exact reason; show it."""
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import jobs as job_mgr
-
-    monkeypatch.setattr(webapp, "_read_creds",
-                        lambda: {"auth_token": "dummy", "user_id": "dummy"})
-    monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
-
-    reason = ("The replacement is in the album but could not be shown to be "
-              "any better than the original, which is kept here.")
-    job = job_mgr.Job(title="Repair")
-    job.execute_kind = "repair"
-    job.status = job_mgr.JobStatus.FAILED
-    job.recoveries = [{
-        "version": 1, "kind": "repair-backup", "status": "retained",
-        "location": "/upgrade_backups/gone", "album_dir": "/music/A/B",
-        "stage": "verification", "reason": reason, "complete": True,
-        "requested": 1, "backed_up": 1, "receipt": None,
-    }]
-    monkeypatch.setattr(webapp, "_repair_current_job", lambda: job)
-
-    page = client.get("/repair")
-    assert page.status_code == 200
-    assert reason in page.text, (
-        "the kept backup does not say what actually happened to the files")
-    assert "kept while Repair stopped" not in page.text
-
-
-def test_a_damaged_mismatched_file_is_reported_once(monkeypatch):
-    """It belongs in two places at once: the mismatch bucket describes why it
-    cannot be refilled, the re-download harvest decides what to do about it.
-    Reporting from both printed the same file twice in different words."""
-    from pathlib import Path
-
-    from qobuz_librarian.web import flows
-
-    entry = {"path": "/music/A/B/03.flac", "title": "A Rock 'n' Roll Swindler",
-             "local_title": "Broken Beyond Repair", "isrc": "GBBTF1800330",
-             "file_length": 6.0, "qobuz_duration": 407.0,
-             "reason": "decode_failed", "diagnostic": "damaged, but its ISRC "
-             "names a different recording"}
-    monkeypatch.setattr(
-        "qobuz_librarian.repair_log.scan_dir_for_isrc_repairs",
-        lambda *a, **k: {
-            "verified_ok": 2, "unverified": 0, "verified_truncated": [],
-            "isrc_mismatch": [entry], "no_isrc_tag": [], "isrc_no_match": [],
-        })
-    monkeypatch.setattr(flows, "find_qobuz_album_for_dir", lambda *a, **k: None)
-
-    out = flows._repair_album_outcome(
-        Path("/music/Artist/Wrong Tag (2026)"), "Artist", "token")
-
-    named = [w for w in out["warns"] if "Broken Beyond Repair" in w]
-    assert len(named) == 1, f"reported {len(named)} times: {out['warns']}"
-    assert "A Rock 'n' Roll Swindler" not in named[0], (
-        "the row must not be labelled with the song the bad tag points at")

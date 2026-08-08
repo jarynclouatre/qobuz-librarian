@@ -26,7 +26,7 @@ def _detect_color() -> bool:
     if _fc and _fc != "0":
         return True
     # die() and other error output goes to stderr, so honour a TTY on EITHER
-    # stream — otherwise raw ANSI escapes leak into a redirected stdout while
+    # stream - otherwise raw ANSI escapes leak into a redirected stdout while
     # the user watches a coloured terminal on stderr (or vice versa).
     return ((sys.stdout.isatty() or sys.stderr.isatty())
             and os.environ.get("TERM", "") != "dumb")
@@ -68,7 +68,7 @@ def wrap(text, indent="  ", hanging=None, cap=TEXT_CAP):
     """One paragraph of prose reflowed to the terminal, `indent` on the first
     line and `hanging` on the rest.
 
-    Pass the whole sentence — any line breaks already in it are collapsed
+    Pass the whole sentence - any line breaks already in it are collapsed
     first. Wrapping at write time is what makes the message fit a phone
     terminal; a string broken at authoring time is stuck at whatever width the
     author had. Colour goes on afterwards: fmt(C.RED, wrap(…)), not inside.
@@ -92,7 +92,7 @@ def block(text, cap=TEXT_CAP):
 
     Each line keeps its own indent, and one that opens with a ✗/⚠/• marker or a
     step number hangs its continuation under the text rather than under the
-    marker — so headers, labelled lines and numbered steps stay aligned at any
+    marker - so headers, labelled lines and numbered steps stay aligned at any
     width. Blank lines are kept. Prose only: internal spacing is collapsed, so
     don't put an aligned listing through it.
 
@@ -139,7 +139,7 @@ def truncate(s, n):
 
 def banner(title, color=None):
     # Goes through the shared logger so the same call site renders to
-    # both the CLI stdout AND the web UI's captured SSE stream — using
+    # both the CLI stdout AND the web UI's captured SSE stream - using
     # bare print() here loses the banner in the web log.
     from qobuz_librarian.ui_cli.logging import log
     color = color or C.BLUE

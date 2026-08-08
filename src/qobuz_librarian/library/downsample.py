@@ -2,7 +2,7 @@
 
 Local housekeeping: walk the library, read each FLAC's sample rate, and group
 the high-rate files into per-album candidates the downsample mode offers for
-review. No Qobuz lookup — unlike the upgrade scan the answer comes entirely off
+review. No Qobuz lookup - unlike the upgrade scan the answer comes entirely off
 disk, so it runs without credentials.
 """
 from dataclasses import dataclass

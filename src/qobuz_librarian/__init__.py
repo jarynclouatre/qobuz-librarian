@@ -1,4 +1,4 @@
-"""Qobuz Librarian — album/artist downloader and music-library maintenance tool."""
+"""Qobuz Librarian - album/artist downloader and music-library maintenance tool."""
 from importlib.metadata import version
 
 try:

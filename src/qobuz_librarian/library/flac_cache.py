@@ -46,7 +46,7 @@ def _is_corrupt_error(e: sqlite3.Error) -> bool:
 
 
 def _discard_corrupt_db() -> bool:
-    """Delete a malformed cache db (+ WAL sidecars). The cache is derived data —
+    """Delete a malformed cache db (+ WAL sidecars). The cache is derived data -
     losing it just makes the next scan re-parse, which beats a permanently dead
     cache that re-parses every file forever. Returns True if anything cleared."""
     db = _db_path()
@@ -61,13 +61,13 @@ def _discard_corrupt_db() -> bool:
             vlog(f"couldn't clear corrupt flac cache {p.name}: {e}")
             return False
     if cleared:
-        vlog("flac cache was corrupt — rebuilt from scratch")
+        vlog("flac cache was corrupt - rebuilt from scratch")
     return cleared
 
 
 def _handle_db_error(e: sqlite3.Error) -> None:
     """Drop this thread's connection and, on a corrupt-db error, discard the
-    malformed file so the next _ensure() rebuilds — the same recovery
+    malformed file so the next _ensure() rebuilds - the same recovery
     album_cache has. SQLite data-page corruption can pass connect + CREATE TABLE
     and only surface on a row read, which would otherwise leave the cache
     permanently dead (every scan re-parsing every file)."""
@@ -87,7 +87,7 @@ def _handle_db_error(e: sqlite3.Error) -> None:
             _generation += 1
             import logging
             logging.getLogger("qobuz_librarian").info(
-                "flac cache was corrupt — discarded; it rebuilds on next scan")
+                "flac cache was corrupt - discarded; it rebuilds on next scan")
 
 
 def _ensure() -> bool:
@@ -134,7 +134,7 @@ def _conn():
     A scan reads tens of thousands of files; opening a fresh connection per
     lookup costs ~20x the lookup it's meant to make cheap, so each thread
     keeps one (SQLite connections can't be shared across threads). synchronous
-    is dropped to NORMAL — this is a self-invalidating cache, so a row lost to
+    is dropped to NORMAL - this is a self-invalidating cache, so a row lost to
     a crash is just re-parsed next scan, and the per-write fsync it avoids is
     otherwise the bulk of a cold scan's caching cost.
     """
@@ -157,7 +157,7 @@ def _conn():
 
 
 def signature(path):
-    """``(mtime_ns, size)`` for ``path``, or None if it can't be stat'd — the
+    """``(mtime_ns, size)`` for ``path``, or None if it can't be stat'd - the
     key that detects a file changing out from under a stored entry. Capture it
     BEFORE reading a file you intend to ``put()``, so an edit landing between the
     read and the store doesn't pair the file's new mtime with the old tags."""
@@ -217,7 +217,7 @@ def put(path, payload, sig=None) -> None:
     Writes are buffered and flushed in batches (see ``flush_pending``) so a
     cold library scan doesn't commit once per file. ``get()`` reads the
     buffer before falling back to disk, so a `put()` immediately followed by
-    `get()` on the same path is still a hit — the put→get visibility scans
+    `get()` on the same path is still a hit - the put→get visibility scans
     depend on is preserved across the buffering boundary.
     """
     if not isinstance(payload, dict) or not _ensure():
@@ -243,7 +243,7 @@ def flush_pending() -> None:
 
     Called automatically when the buffer hits ``_PENDING_LIMIT``, by
     ``scanner.clear_scan_caches`` at scan-end, and at process exit via
-    ``atexit``. A crash mid-scan loses at most ``_PENDING_LIMIT`` entries —
+    ``atexit``. A crash mid-scan loses at most ``_PENDING_LIMIT`` entries -
     the next scan re-parses them (no data loss, just rework). Idempotent;
     a no-op when the buffer is empty.
     """
@@ -272,7 +272,7 @@ def flush_pending() -> None:
                 del _PENDING_ROWS[p]
 
 
-# Flush whatever's still in the buffer when the process exits cleanly — a CLI
+# Flush whatever's still in the buffer when the process exits cleanly - a CLI
 # run that ends without a clear_scan_caches call (a quick --search, a forced
 # exit between scan phases) would otherwise drop its last partial batch.
 atexit.register(flush_pending)
@@ -283,8 +283,8 @@ def prune_missing(force: bool = False) -> int:
 
     Keying on absolute path means every upgrade-replace, move, or consolidation
     leaves the old path's row orphaned, so the table would otherwise grow
-    without bound. Throttled to once a day — a CLI session that opens and closes
-    repeatedly shouldn't re-walk the whole table each time — and skipped when
+    without bound. Throttled to once a day - a CLI session that opens and closes
+    repeatedly shouldn't re-walk the whole table each time - and skipped when
     MUSIC_ROOT is absent so an unmounted library volume can't wipe the cache.
     """
     if not _ensure() or not cfg.MUSIC_ROOT.exists():

@@ -24,6 +24,11 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 | `QL_UPGRADE_BACKUPS` | `./upgrade_backups` | Backups taken before a quality upgrade |
 | `WEB_PORT` | `8666` | Host port for the web UI |
 
+The music, staging, and upgrade-backup directories must be separate,
+non-nested trees. The app refuses to start if any one is the same as, inside,
+or an alias of another. This keeps in-progress downloads and retained backups
+out of library scans and import targets.
+
 ## Behaviour toggles
 
 | Variable | Default | Purpose |
@@ -33,6 +38,7 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 | `LYRICS_ENABLED` | `true` | Fetch lyrics on import |
 | `LYRICS_FORMAT` | `embed` | `embed` (FLAC tag), `sidecar` (.lrc), or `both` |
 | `LYRICS_PROVIDERS` | `Lrclib,NetEase,Musixmatch` | Ordered comma list |
+| `LYRICS_PROVIDER_TIMEOUT` | `30` | Maximum seconds for one provider lookup before its circuit-breaker records a failure |
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
 | `AUTO_LIBRARY_SCAN` | `true` | Offer the one-time baseline scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
@@ -90,9 +96,10 @@ For a `pip` or `pipx` installation, install beets 2.12.0 in the same environment
 
 Treat enabled beets plugins as trusted code. A plugin must finish all database work before its `beet` command exits; detached or background database writers are unsupported. Stop Qobuz Librarian completely before running a manual `beet` command, since external commands do not participate in the app's database coordination.
 
-For its own imports, the downloader pins four beets settings regardless of your config:
+For its own imports, the downloader pins five beets settings regardless of your config:
 
 - `autotag: no` keeps Qobuz's tags
+- `write: no` prevents beets from rewriting media tags during the move
 - `move: yes` clears staging, including across filesystems
 - `incremental: no` rescans on retry
 - `duplicate_action: merge` gap-fills into the existing folder without deleting your files

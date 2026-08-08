@@ -76,7 +76,7 @@
   {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
   <div class="ql-notice ql-notice-warning ql-job-error" role="alert">
     <div class="ql-notice-copy">
-      <strong>{% if kept.on_disk %}Original files kept safely{% else %}Original files are no longer kept{% endif %}</strong>
+      <strong>{% if kept.on_disk %}Recovery files still held{% else %}Original files are no longer kept{% endif %}</strong>
       {# Say why this backup exists. The record carries an exact per-stage
          reason, and collapsing every stage into one "kept while Repair
          stopped" told people nothing had changed even where the replacement
@@ -180,8 +180,8 @@
     {% set _cancel_protected = job.id == cancel_protected_job_id %}
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
-        <span id="job-activity" aria-live="polite">{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s == 'scanning' %}{{ job.progress_phase or 'Scanning' }}{% elif s == 'running' %}{{ job.progress_phase or labels.job_activity(job) }}{% else %}Queued{% endif %}</span>
-        <span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>
+        <span id="job-activity" aria-live="polite">{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s == 'scanning' %}{{ job.progress_phase or 'Scanning' }}{% elif s == 'running' %}{{ job.progress_phase or labels.job_activity(job) }}{% else %}Waiting to start{% endif %}</span>
+        {% if s in ('scanning', 'running') %}<span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>{% endif %}
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
       </p>

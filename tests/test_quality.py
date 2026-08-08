@@ -1,4 +1,5 @@
 """Tests for quality/tiers.py and quality/decision.py."""
+
 from datetime import datetime, timedelta, timezone
 
 from qobuz_librarian.quality.decision import (
@@ -14,14 +15,14 @@ from qobuz_librarian.quality.tiers import format_quality
 def test_format_quality_renders_known_tiers_and_unknown():
     assert format_quality(16, 44100) == "16/44.1"
     assert format_quality(24, 96000) == "24/96"
-    # A 0-bit track read came back unreadable — show "?" instead of crashing.
+    # Unreadable tracks stay visible as unknown.
     assert format_quality(0, 44100) == "?"
 
 
 def test_streamrip_quality_tier_1_coerces_to_lossless(monkeypatch, capsys):
     # Tier 1 (320kbps MP3) is unsupported: the pipeline is FLAC-only and the
     # post-download cleanup discards every non-FLAC file, so a tier-1 setting
-    # would rip each track and then delete it — the setting silently downloads
+    # would rip each track and then delete it, so the setting downloads
     # nothing.
     import importlib
 
@@ -54,12 +55,12 @@ def test_album_max_quality_keeps_qobuz_master_when_downsample_enabled(monkeypatc
 
 def test_compare_album_quality_classifies_and_counts_unknown():
     qalbum = {"maximum_bit_depth": 24, "maximum_sampling_rate": 96.0}
-    # No existing tracks — there's nothing to compare, classification stays distinct.
+    # No existing tracks stays distinct from an equal-quality album.
     assert compare_album_quality([], qalbum)["classification"] == "no_existing"
     # All-lower → all-upgrading territory.
     assert compare_album_quality(
         [{"bits": 16, "sample_rate": 44100}], qalbum)["classification"] == "all_lower"
-    # All-equal — nothing to do, but must classify distinctly so the upgrade
+    # All-equal must stay distinct so the upgrade
     # flow doesn't kick off a wipe-replace for parity.
     assert compare_album_quality(
         [{"bits": 24, "sample_rate": 96000}], qalbum)["classification"] == "all_equal"
