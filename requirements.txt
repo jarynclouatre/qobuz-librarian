@@ -34,7 +34,7 @@ mutagen==1.48.1
     # via qobuz-librarian (pyproject.toml)
 pydantic==2.13.4
     # via fastapi
-pydantic-core==2.46.4
+pydantic-core==2.47.0
     # via pydantic
 python-dotenv==1.2.2
     # via uvicorn

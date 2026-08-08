@@ -51,7 +51,7 @@ pluggy==1.6.0
     # via pytest
 pydantic==2.13.4
     # via fastapi
-pydantic-core==2.46.4
+pydantic-core==2.47.0
     # via pydantic
 pygments==2.20.0
     # via pytest
