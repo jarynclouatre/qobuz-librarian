@@ -385,6 +385,10 @@ def _save_locked(values: dict):
         # on-disk file stays consistent with cfg.
         if kind == "enum" and choices:
             v = str(values[key] or "").strip().lower()
+            if key == "DOWNSAMPLE_KEEP_ORIGINALS" and not v:
+                # This choice stays unset until the first downsample asks.
+                # The full Settings form still posts its empty placeholder.
+                continue
             if key == "STREAMRIP_QUALITY" and v in ("0", "1"):
                 v = "2"  # lossy tiers the FLAC pipeline discards (see _apply)
             if v not in choices:

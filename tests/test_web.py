@@ -1091,13 +1091,15 @@ def test_settings_save_only_pins_changed_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
     monkeypatch.setattr(cfg, "PREFER_HIRES", True)
     monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", None)
     monkeypatch.setattr(ss, "_any_active_job", lambda: False)
     with ss._pending_lock:
         ss._pending_apply = None
 
     # The form posts every field; only LYRICS_ENABLED actually changed.
     ok, _ = ss.save({"LYRICS_ENABLED": False, "PREFER_HIRES": True,
-                     "STREAMRIP_QUALITY": "4"})
+                     "STREAMRIP_QUALITY": "4",
+                     "DOWNSAMPLE_KEEP_ORIGINALS": ""})
     assert ok is True
     on_disk = json.loads((tmp_path / "s.json").read_text())
     assert on_disk == {"LYRICS_ENABLED": False}
