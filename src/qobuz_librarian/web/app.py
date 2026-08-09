@@ -924,16 +924,21 @@ def _shutdown_web_mutations() -> None:
         _RUN_LOCK_HANDLE = None
 
 
-async def _finish_web_lifespan(ticker, lock_retry_task, maintenance_task) -> None:
+async def _finish_web_lifespan(
+    ticker,
+    lock_retry_task,
+    maintenance_task,
+    token_probe_task,
+) -> None:
     """Stop background work, then release the run lock after all writers."""
     global _SHUTTING_DOWN
     with _auto_check_lock:
         _SHUTTING_DOWN = True
-    for task in (ticker, lock_retry_task):
+    for task in (ticker, lock_retry_task, token_probe_task):
         if task is not None:
             task.cancel()
     try:
-        for task in (ticker, lock_retry_task):
+        for task in (ticker, lock_retry_task, token_probe_task):
             if task is None:
                 continue
             try:
@@ -1049,10 +1054,19 @@ def _resume_migration(job, args):
         src=Path(src) if src else None, allow_low_space=allow_low_space)
 
 
+def _job_downsample_keep_originals(job):
+    value = (job.execute_args or {}).get("keep_originals")
+    return value if type(value) is bool else None
+
+
 def _resume_downsample(job, _args):
     from qobuz_librarian.web import flows
     return lambda j, chosen: flows.execute_downsamples(
-        j, chosen, token=_get_optional_token())
+        j,
+        chosen,
+        token=_get_optional_token(),
+        keep_originals=_job_downsample_keep_originals(j),
+    )
 
 
 def _upgrade_available(creds_ok: bool | None = None) -> bool:
@@ -1470,7 +1484,11 @@ def _review_job_from_downsample_state(state):
         job.review_verb = "Downsample"
         job._saved_review_signature = signature
         job._execute_fn = lambda j, chosen: flows.execute_downsamples(
-            j, chosen, token=_get_optional_token())
+            j,
+            chosen,
+            token=_get_optional_token(),
+            keep_originals=_job_downsample_keep_originals(j),
+        )
         for spec in state.get("candidates") or []:
             job.add_candidate(
                 kind="downsample",
@@ -1644,9 +1662,24 @@ async def _lifespan(_app: FastAPI):
     else:
         try:
             cred_status = web_auth.apply_env_credentials()
+        except web_auth.CredentialSeedError as exc:
+            raise RuntimeError(str(exc)) from None
         except web_auth.PasswordRejected as exc:
             raise RuntimeError(
                 f"WEB_AUTH_PASSWORD was rejected: {exc}") from None
+        if (
+            cred_status in {"partial", "failed"}
+            and not web_auth.credentials_configured()
+        ):
+            if cred_status == "partial":
+                raise RuntimeError(
+                    "Incomplete web login seed: set both WEB_AUTH_USER and "
+                    "WEB_AUTH_PASSWORD (or WEB_AUTH_PASSWORD_FILE)."
+                )
+            raise RuntimeError(
+                "The seeded web login could not be saved; refusing to start "
+                "with an open first-run setup screen."
+            )
         if cred_status == "applied":
             _log.info("Configured the web login from WEB_AUTH_USER / "
                       "WEB_AUTH_PASSWORD.")
@@ -1725,6 +1758,7 @@ async def _lifespan(_app: FastAPI):
     lock_retry_task = None
     maintenance_task = None
     ticker = None
+    token_probe_task = None
     try:
         lock_retry_task = (
             asyncio.create_task(_retry_web_run_lock(run_lock, _log))
@@ -1805,7 +1839,7 @@ async def _lifespan(_app: FastAPI):
         # Probe the saved token against Qobuz so a stale slot (non-empty but
         # not actually authenticated) surfaces in the dashboard banner rather
         # than failing the user's first search.
-        asyncio.create_task(_probe_token())
+        token_probe_task = asyncio.create_task(_probe_token())
         # Keep the dashboard banner honest after startup: any in-session 401 from
         # the API client flips _TOKEN_VALID to False here, so a token that expires
         # mid-session shows "saved token isn't authenticating" immediately instead
@@ -1838,7 +1872,7 @@ async def _lifespan(_app: FastAPI):
         yield
     finally:
         await _finish_web_lifespan(
-            ticker, lock_retry_task, maintenance_task)
+            ticker, lock_retry_task, maintenance_task, token_probe_task)
 
 
 def _classify_token(token):
@@ -1868,13 +1902,16 @@ def _on_auth_state(valid: bool) -> None:
     """Listener registered with api.auth so a 401 mid-session flips the
     dashboard banner without waiting for the next page-load probe."""
     global _TOKEN_VALID
-    was = _TOKEN_VALID
-    _TOKEN_VALID = bool(valid)
-    # A working (or not-yet-probed) token turning rejected is the one event
-    # worth pushing through the notification hook: an unattended box
-    # otherwise fails jobs quietly until somebody opens the UI.
-    if was is not False and not valid:
-        job_mgr.fire_auth_lost_hook()
+    with _auto_check_lock:
+        if _SHUTTING_DOWN:
+            return
+        was = _TOKEN_VALID
+        _TOKEN_VALID = bool(valid)
+        # A working (or not-yet-probed) token turning rejected is the one event
+        # worth pushing through the notification hook: an unattended box
+        # otherwise fails jobs quietly until somebody opens the UI.
+        if was is not False and not valid:
+            job_mgr.fire_auth_lost_hook()
 
 
 def _qobuz_ready() -> bool:
@@ -1911,9 +1948,9 @@ async def _probe_token():
     except asyncio.TimeoutError:
         verdict = "unreachable"
     if verdict == "ok":
-        _TOKEN_VALID = True
+        _on_auth_state(True)
     elif verdict == "rejected":
-        _TOKEN_VALID = False
+        _on_auth_state(False)
 
 
 app = FastAPI(title="Qobuz Librarian", docs_url=None, redoc_url=None,
@@ -1939,8 +1976,18 @@ templates.env.globals["release_title"] = job_mgr.release_title
 templates.env.globals["now_ts"] = time.time
 # Callable, not a snapshot: the toggle lives in Settings and the downsample
 # warnings have to describe whichever mode is active when the page renders.
-templates.env.globals["keeps_ds_originals"] = lambda: cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
-templates.env.globals["ds_originals_chosen"] = lambda: cfg.DOWNSAMPLE_KEEP_ORIGINALS in ("keep", "delete")
+def _downsample_originals_choice():
+    from qobuz_librarian.web import settings_store
+
+    return settings_store.current().get("DOWNSAMPLE_KEEP_ORIGINALS")
+
+
+templates.env.globals["keeps_ds_originals"] = (
+    lambda: _downsample_originals_choice() == "keep"
+)
+templates.env.globals["ds_originals_chosen"] = (
+    lambda: _downsample_originals_choice() in ("keep", "delete")
+)
 templates.env.globals["backup_retention_days"] = cfg.UPGRADE_BACKUP_RETENTION_DAYS
 
 
@@ -2374,6 +2421,16 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     # warning dot on the Queue nav until each flagged job page is opened.
     from qobuz_librarian.web import job_persistence
     context.setdefault("history_attention", job_persistence.attention_count())
+    if name in {"job.html", "_job_body.html"}:
+        job = context.get("job")
+        context.setdefault(
+            "downsample_originals_choice",
+            (
+                _downsample_originals_choice()
+                if getattr(job, "execute_kind", "") == "downsample"
+                else None
+            ),
+        )
     if name in {"job.html", "_job_body.html", "history.html"}:
         context.setdefault(
             "durable_recovery_control",
@@ -3764,7 +3821,11 @@ def _summarize_download_result(r):
         parts.append(f"{n_fail} failed")
     if n_lossy:
         parts.append(f"{n_lossy} lossy-dropped")
-    if r.get("upgrade_unverified"):
+    if r.get("catalogue_unverified"):
+        parts.append("Beets catalogue needs attention; backup retained")
+    elif r.get("recovery_unverified"):
+        parts.append("recovery backup retained for review")
+    elif r.get("upgrade_unverified"):
         parts.append("upgrade couldn't be verified; original kept")
     elif r.get("auto_upgrade"):
         parts.append("auto-upgrade verified")
@@ -7170,7 +7231,11 @@ async def downsample_scan(request: Request):
         job,
         lambda j: flows.scan_downsamples(j),
         lambda j, chosen: flows.execute_downsamples(
-            j, chosen, token=_get_optional_token()),
+            j,
+            chosen,
+            token=_get_optional_token(),
+            keep_originals=_job_downsample_keep_originals(j),
+        ),
         "downsample")
     if job is None:
         return _scan_submission_failure_response(request, "/downsample")
@@ -7718,6 +7783,7 @@ async def job_approve(request: Request, job_id: str):
                 return RedirectResponse(url=f"{dest}?skipped={skipped}",
                                         status_code=303)
     _skip_q = f"&skipped={skipped}" if skipped else ""
+    downsample_keep_originals = None
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
         from qobuz_librarian.web import flows
         if tab:
@@ -7735,24 +7801,60 @@ async def job_approve(request: Request, job_id: str):
         # a standing policy saved to Settings, so asking and saving it before
         # anything checks that an album is ticked lets a no-op approve change
         # what every future downsample does with your originals.
-        if (job.execute_kind == "downsample"
-                and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
-            choice = (form.get("keep_choice") or "").strip().lower()
-            if choice in ("keep", "delete"):
-                from qobuz_librarian.web import settings_store
+        if job.execute_kind == "downsample":
+            from qobuz_librarian.web import settings_store
 
-                def _save_keep_choice():
-                    # Persist as the standing default AND apply in-memory now.
-                    settings_store.save({"DOWNSAMPLE_KEEP_ORIGINALS": choice})
-                    cfg.DOWNSAMPLE_KEEP_ORIGINALS = choice
+            # current() includes a durably saved value whose live application
+            # was deferred for another active lane. Every approved run also
+            # binds the resolved policy into its durable job row below.
+            choice = _downsample_originals_choice()
+            rendered_choice = (
+                form.get("downsample_policy") or ""
+            ).strip().lower()
+            current_choice = choice if choice in ("keep", "delete") else ""
+            if (
+                rendered_choice not in ("", "keep", "delete")
+                or rendered_choice != current_choice
+            ):
+                return RedirectResponse(
+                    url=dest + "?error=" + urllib.parse.quote(
+                        "The keep-or-delete setting changed after this review "
+                        "was shown. No music files were changed; review the "
+                        "updated warning and approve again."
+                    ),
+                    status_code=303,
+                )
+            if choice not in ("keep", "delete"):
+                choice = (form.get("keep_choice") or "").strip().lower()
+                if choice in ("keep", "delete"):
 
-                await loop.run_in_executor(None, _save_keep_choice)
-            else:
-                with job._lock:
-                    picked = sum(1 for c in job.candidates if c.get("selected"))
-                return _tr(request, "downsample_keep_choice.html", {
-                    "job": job, "page": "downsample", "picked": picked,
-                    "backup_retention_days": cfg.UPGRADE_BACKUP_RETENTION_DAYS})
+                    def _save_keep_choice():
+                        saved, _warnings = settings_store.save(
+                            {"DOWNSAMPLE_KEEP_ORIGINALS": choice}
+                        )
+                        return saved
+
+                    saved = await loop.run_in_executor(None, _save_keep_choice)
+                    if saved is not True:
+                        return RedirectResponse(
+                            url=dest + "?error=" + urllib.parse.quote(
+                                "Couldn't save the keep-or-delete choice. No "
+                                "music files were changed; check the data "
+                                "folder and try again."
+                            ),
+                            status_code=303,
+                        )
+                else:
+                    with job._lock:
+                        picked = sum(
+                            1 for c in job.candidates if c.get("selected")
+                        )
+                    return _tr(request, "downsample_keep_choice.html", {
+                        "job": job, "page": "downsample", "picked": picked,
+                        "downsample_originals_choice": current_choice,
+                        "backup_retention_days":
+                            cfg.UPGRADE_BACKUP_RETENTION_DAYS})
+            downsample_keep_originals = choice == "keep"
     # Selection is saved server-side as the user ticks (the paginated review
     # no longer carries every checkbox in the form), so approve runs against
     # the saved flags; passing None keeps them as-is rather than reading the
@@ -7823,6 +7925,20 @@ async def job_approve(request: Request, job_id: str):
 
             previous_migration_args = None
             previous_migration_execute = None
+            previous_downsample_args = None
+            downsample_args_changed = False
+            if (
+                job.execute_kind == "downsample"
+                and downsample_keep_originals is not None
+            ):
+                with job._lock:
+                    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+                        previous_downsample_args = job.execute_args
+                        job.execute_args = {
+                            **(job.execute_args or {}),
+                            "keep_originals": downsample_keep_originals,
+                        }
+                        downsample_args_changed = True
             if job.execute_kind == "migration":
                 execute_args = dict(job.execute_args or {})
                 # Old parked reviews may still carry the former launcher
@@ -7849,6 +7965,9 @@ async def job_approve(request: Request, job_id: str):
                 )
                 return approved
             finally:
+                if downsample_args_changed and approved is not True:
+                    with job._lock:
+                        job.execute_args = previous_downsample_args
                 if (
                     previous_migration_args is not None
                     and approved is not True

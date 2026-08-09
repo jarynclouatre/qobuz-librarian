@@ -99,9 +99,9 @@ def run_upgrade_walk_mode(args, token):
 
     saved_state = upgrade_state.load()
     if not saved_state.get("complete"):
-        log.info(fmt(C.YELLOW,
+        log.warning(fmt(C.YELLOW,
             "  No complete saved upgrade candidates. Run a Library refresh first."))
-        return 0
+        return EXIT_GENERAL
     saved = [
         c for c in upgrade_state.visible_candidates(
             saved_state, hidden_mod.load())
@@ -334,14 +334,14 @@ def run_upgrade_walk_mode(args, token):
 
     log.info("")
     if interrupted:
-        log.info(fmt(C.YELLOW, "  ⚠  Upgrade walk stopped early."))
+        log.warning(fmt(C.YELLOW, "  ⚠  Upgrade walk stopped early."))
     elif no_answer:
         log.warning(block(fmt(C.YELLOW,
             "  ✗  The walk stopped: each artist needs a confirmation and "
             "there is no terminal to give one. Re-run with --yes (or "
             "--auto-safe) to accept unattended.")))
     elif n_failed_attempts:
-        log.info(fmt(C.RED, "  ✗  Upgrade walk finished with errors."))
+        log.warning(fmt(C.RED, "  ✗  Upgrade walk finished with errors."))
     elif n_upgraded_albums or not n_gone:
         log.info(fmt(C.GREEN, "  ✓  Upgrade walk complete."))
     else:

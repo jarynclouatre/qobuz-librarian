@@ -268,6 +268,158 @@ def test_downsample_never_sweeps_a_glob_matching_user_file(
     assert user_file.read_bytes() == b"user-owned audio"
 
 
+def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import downsample as mode
+    from qobuz_librarian.web import settings_store
+
+    artist_dir = tmp_path / "Artist"
+    album_dir = artist_dir / "Album"
+    album_dir.mkdir(parents=True)
+    candidate = SimpleNamespace(
+        album_dir=album_dir,
+        artist="Artist",
+        title="Album",
+        detail="96 kHz to 48 kHz",
+        est_saving=100,
+    )
+    refresh = SimpleNamespace(
+        candidates=[candidate],
+        artists_scanned=["Artist"],
+        errors={},
+    )
+    answers = iter((True,))
+    rewrites = []
+
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", None)
+    monkeypatch.setattr(mode, "HAVE_DOWNSAMPLE", True)
+    monkeypatch.setattr(mode, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(mode, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(mode.hidden_mod, "load", lambda: {})
+    monkeypatch.setattr(
+        mode.downsample_state,
+        "refresh_for_artists",
+        lambda *_args, **_kwargs: refresh,
+    )
+    monkeypatch.setattr(mode, "_flush_stdin", lambda: None)
+    monkeypatch.setattr(mode, "confirm", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(settings_store, "save", lambda _values: (False, []))
+    monkeypatch.setattr(
+        mode,
+        "downsample_dir",
+        lambda *_args, **kwargs: rewrites.append(kwargs) or {
+            "resampled": 1,
+            "errors": 0,
+            "saved_bytes": 100,
+            "flush_warnings": 0,
+        },
+    )
+    monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: None)
+    monkeypatch.setattr(mode.downsample_state, "update_artist", lambda *_a, **_k: None)
+    monkeypatch.setattr(mode.downsample_state, "load", lambda: {})
+    monkeypatch.setattr(
+        mode.downsample_state,
+        "has_visible_candidates",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(mode.review_badges, "set_ready", lambda *_args: None)
+
+    result = mode.run_downsample_walk_mode(
+        SimpleNamespace(dry_run=False, yes=True),
+    )
+
+    assert result == mode.EXIT_CONFIG
+    assert rewrites == []
+    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
+
+    # A running Web job can make settings_store defer applying the saved
+    # value. The CLI run must use its answer directly rather than treating the
+    # still-unset cfg value as "delete".
+    answers = iter((True, True))
+    monkeypatch.setattr(settings_store, "save", lambda _values: (True, []))
+
+    result = mode.run_downsample_walk_mode(
+        SimpleNamespace(dry_run=False, yes=True),
+    )
+
+    assert result == 0
+    assert len(rewrites) == 1
+    assert rewrites[0]["keep_originals"] is True
+    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
+
+
+@pytest.mark.parametrize("ordinary_errors", [0, 1])
+def test_walk_reports_a_flush_warning_as_unfinished_work(
+        tmp_path, monkeypatch, caplog, ordinary_errors):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import downsample as mode
+    from qobuz_librarian.ui_cli import logging as cli_logging
+
+    artist_dir = tmp_path / "Artist"
+    album_dir = artist_dir / "Album"
+    album_dir.mkdir(parents=True)
+    candidate = SimpleNamespace(
+        album_dir=album_dir,
+        artist="Artist",
+        title="Album",
+        detail="96 kHz to 48 kHz",
+        est_saving=100,
+    )
+    refresh = SimpleNamespace(
+        candidates=[candidate],
+        artists_scanned=["Artist"],
+        errors={},
+    )
+
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", "keep")
+    monkeypatch.setattr(mode, "HAVE_DOWNSAMPLE", True)
+    monkeypatch.setattr(mode, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(mode, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(mode.hidden_mod, "load", lambda: {})
+    monkeypatch.setattr(
+        mode.downsample_state,
+        "refresh_for_artists",
+        lambda *_args, **_kwargs: refresh,
+    )
+    monkeypatch.setattr(mode, "_flush_stdin", lambda: None)
+    monkeypatch.setattr(mode, "confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        mode,
+        "downsample_dir",
+        lambda *_args, **_kwargs: {
+            "resampled": 1,
+            "errors": ordinary_errors,
+            "saved_bytes": 100,
+            "flush_warnings": 1,
+        },
+    )
+    monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: None)
+    monkeypatch.setattr(mode.downsample_state, "update_artist", lambda *_a, **_k: None)
+    monkeypatch.setattr(mode.downsample_state, "load", lambda: {})
+    monkeypatch.setattr(
+        mode.downsample_state,
+        "has_visible_candidates",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(mode.review_badges, "set_ready", lambda *_args: None)
+
+    cli_logging.set_quiet(True)
+    try:
+        with caplog.at_level("INFO", logger="qobuz_librarian"):
+            result = mode.run_downsample_walk_mode(
+                SimpleNamespace(dry_run=False, yes=True),
+            )
+    finally:
+        cli_logging.set_quiet(False)
+
+    assert result == mode.EXIT_GENERAL
+    assert any(
+        record.levelname == "WARNING" and "couldn't be flushed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_downsample_dir_stops_between_tracks_on_cancel(tmp_path, monkeypatch):
     import time as _time
 

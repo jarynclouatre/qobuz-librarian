@@ -62,12 +62,20 @@ Advanced thresholds, including fuzzy-match cutoffs, retention windows, and `POST
 - `DELAY_BETWEEN`
 - `ARTIST_API_DELAY`
 - `ARTIST_SCAN_WORKERS`
+- `JOB_LOG_CAP`
+- `JOB_LOG_REPLAY_TAIL`
 - `SSE_MAX_WORKERS`
 - `SSE_HEARTBEAT_TICKS`
 - `MISSING_ALBUMS_MIN_TRACKS`
 - `REPAIR_LOOKUP_MIN_INTERVAL`
 
-`SSE_MAX_WORKERS` sets the number of concurrent progress and review streams. `SSE_HEARTBEAT_TICKS` controls their keepalive interval in 0.5-second ticks. The full annotated list is in `src/qobuz_librarian/config.py`. `POST_JOB_HOOK` runs in a shell, so only set it to a command you trust.
+`JOB_LOG_CAP` bounds the live lines retained per job, while `JOB_LOG_REPLAY_TAIL`
+sets how many prior lines a newly opened progress stream receives (`0` means
+live output only). `SSE_MAX_WORKERS` sets the number of concurrent progress and
+review streams. `SSE_HEARTBEAT_TICKS` controls their keepalive interval in
+0.5-second ticks. The full annotated list is in
+`src/qobuz_librarian/config.py`. `POST_JOB_HOOK` runs in a shell, so only set it
+to a command you trust.
 
 ## Download quality
 

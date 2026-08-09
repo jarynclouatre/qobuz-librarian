@@ -476,7 +476,7 @@ def acquire_run_lock():
             f"\n✗  Another Qobuz Librarian run is in progress (pid {busy.pid}).\n"
             f"   Lock file: {cfg.LOCK_FILE}\n\n"
             f"   The web app may be holding the lock. Either:\n"
-            f"     1. In the web UI (http://<host>:{cfg.WEB_PORT}), open Settings → Mode\n"
+            f"     1. In the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT}), open Settings → Mode\n"
             f"        and switch to terminal mode, then re-run this command.\n"
             f"        (Or just use the web UI; every CLI mode is also a web action.)\n"
             f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
@@ -701,7 +701,7 @@ def _help_epilog():
         break_on_hyphens=False,
     )))
     lines.extend(textwrap.wrap(
-        f"On a fresh install, open http://<host>:{cfg.WEB_PORT}/settings.",
+        f"On a fresh install, open http://<host>:{cfg.WEB_PUBLIC_PORT}/settings.",
         width=width,
         break_long_words=False,
         break_on_hyphens=False,
@@ -1038,8 +1038,7 @@ def main():
         from qobuz_librarian.modes.new_releases import (
             run_check_new_releases_mode,
         )
-        run_check_new_releases_mode(args)
-        return
+        raise SystemExit(run_check_new_releases_mode(args))
 
     # Downsample walk is local-only; it reads hi-res files off disk and
     # resamples them in place, never touching Qobuz.
@@ -1080,7 +1079,7 @@ def main():
             die(fmt(C.RED,
                 "\n✗  No Qobuz credentials configured.\n"
                 "   Paste your user_auth_token on the Settings page "
-                f"(http://<host>:{cfg.WEB_PORT}/settings)\n"
+                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
                 "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
                 EXIT_AUTH)
         from qobuz_librarian.api.auth import sync_streamrip_creds_from_env
@@ -1170,23 +1169,19 @@ def main():
     # bottom by main()'s wrapper.
     if args.artist:
         from qobuz_librarian.modes.artist import run_artist_mode
-        run_artist_mode(args.artist, args, download_token())
-        return
+        raise SystemExit(run_artist_mode(args.artist, args, download_token()))
 
     if args.library_walk:
         from qobuz_librarian.modes.walk import run_walk_queued_mode
-        run_walk_queued_mode(args, download_token())
-        return
+        raise SystemExit(run_walk_queued_mode(args, download_token()))
 
     if args.album_gaps:
         from qobuz_librarian.modes.walk import run_album_walk_mode
-        run_album_walk_mode(args, download_token())
-        return
+        raise SystemExit(run_album_walk_mode(args, download_token()))
 
     if args.repair:
         from qobuz_librarian.modes.repair import run_album_repair_mode
-        run_album_repair_mode(args, download_token())
-        return
+        raise SystemExit(run_album_repair_mode(args, download_token()))
 
     if args.upgrade_walk:
         if args.consolidate:
@@ -1203,8 +1198,7 @@ def main():
 
     if args.query:
         from qobuz_librarian.modes.album import run_album_mode
-        run_album_mode(args, download_token())
-        return
+        raise SystemExit(run_album_mode(args, download_token()))
 
     # Crash-recovery: if a previous queueing run died with decisions still in
     # memory, we'd have left .qobuz_pending_queue.json on disk.

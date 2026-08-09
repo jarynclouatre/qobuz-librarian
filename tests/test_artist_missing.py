@@ -36,3 +36,52 @@ def test_missing_albums_lists_partials_first_with_present_count(monkeypatch, cap
     assert "3/11" in out
     # The partially-present album is listed first (a lower pick number).
     assert out.index("Black Sands") < out.index("Migration")
+
+
+def test_missing_album_download_failure_is_returned_to_the_caller(
+        monkeypatch):
+    candidate = AlbumGap(
+        _qalbum("Migration", 12, 2017),
+        None,
+        missing=[{}] * 12,
+        present=[],
+    )
+    monkeypatch.setattr(
+        artist_mode,
+        "discover_fully_missing",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr("builtins.input", lambda *_args: "1")
+    monkeypatch.setattr(artist_mode, "_flush_stdin", lambda: None)
+    monkeypatch.setattr(
+        artist_mode,
+        "get_album",
+        lambda *_args: {
+            "id": "Migration",
+            "title": "Migration",
+            "artist": {"name": "Bonobo"},
+        },
+    )
+    monkeypatch.setattr(
+        artist_mode,
+        "process_album",
+        lambda *_args, **_kwargs: {"result": "failed", "imported": False},
+    )
+    monkeypatch.setattr(artist_mode.time, "sleep", lambda *_args: None)
+
+    args = SimpleNamespace(
+        prefer_hires=False,
+        include_comps=True,
+        include_singles=True,
+        dry_run=False,
+        yes=True,
+    )
+
+    assert run_artist_missing_albums(
+        "Bonobo",
+        {},
+        args,
+        "tok",
+        artist_id=99,
+        prefetched_catalog=[],
+    ) == (0, True)

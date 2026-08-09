@@ -35,7 +35,7 @@ def _resolve_paths(args):
     if not dest:
         dest = _prompt_path("  Destination for the organised copy: ")
     if not src or not dest:
-        log.info(fmt(C.RED,
+        log.warning(fmt(C.RED,
             "  ✗  Need both a source and a destination.\n"
             "     Set MIGRATE_SRC and MIGRATE_DEST, or pass "
             "--migrate-src / --migrate-dest."))
@@ -45,7 +45,7 @@ def _resolve_paths(args):
     in_place = bool(getattr(args, "in_place", False))
     err = engine.validate_paths(src, dest, in_place=in_place)
     if err:
-        log.info(fmt(C.RED, f"  ✗  {err}"))
+        log.warning(fmt(C.RED, f"  ✗  {err}"))
         return None, None
     return src, dest
 
@@ -120,7 +120,7 @@ def run_migrate_mode(args):
     section("Library migration: organise an existing collection")
 
     if not HAVE_MUTAGEN:
-        log.info(fmt(C.RED,
+        log.warning(fmt(C.RED,
             "  ✗  mutagen isn't available, so tags can't be read and every file "
             "would be unidentifiable.\n     Use the bundled image (it includes "
             "mutagen) or `pip install mutagen`."))
@@ -167,7 +167,7 @@ def run_migrate_mode(args):
         plan, in_place=in_place, resume_entries=resume_entries)
     short = free is not None and need > free
     if short and bool(getattr(args, "yes", False)):
-        log.info(fmt(C.RED,
+        log.warning(fmt(C.RED,
             "  ✗  Not enough free space at the destination; refusing to start an "
             "unattended (--yes) migration that would run out mid-move and scatter "
             "the library. Free up space or pick another destination."))
@@ -207,13 +207,13 @@ def run_migrate_mode(args):
         manifest = Path(manifest_artifact["path"])
         log.info(fmt(C.GRAY, f"  Full plan written to {manifest}"))
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as e:
-        log.info(fmt(C.RED,
+        log.warning(fmt(C.RED,
             "  ✗  Couldn't record the approved migration safely, so nothing "
             f"was copied ({e})."))
         return EXIT_GENERAL
 
     if not engine.verify_audit_artifact(plan, manifest_artifact):
-        log.info(fmt(C.RED,
+        log.warning(fmt(C.RED,
             "  ✗  The reviewed migration record changed or can no longer be "
             "proved. Nothing was copied; scan again before approving it."))
         return EXIT_GENERAL
@@ -233,7 +233,7 @@ def run_migrate_mode(args):
         log.info(fmt(C.GRAY, f"  · Results manifest: {results_manifest}"))
     except BaseException as e:
         try:
-            log.info(fmt(C.RED,
+            log.warning(fmt(C.RED,
                 "  ✗  The migration ran, but its durable results record could "
                 f"not be written ({e}). Do not start another migration until "
                 "the destination and its audit files have been checked."))
@@ -268,9 +268,9 @@ def run_migrate_mode(args):
             "Migration stopped with problems."
             if result.cancelled else "Migration needs attention."
         )
-        log.info(fmt(C.RED, f"  ✗  {outcome}"))
+        log.warning(fmt(C.RED, f"  ✗  {outcome}"))
     elif result.cancelled:
-        log.info(fmt(C.YELLOW,
+        log.warning(fmt(C.YELLOW,
             "  ⚠  Migration stopped early; the destination is incomplete."))
     else:
         log.info(fmt(C.GREEN,

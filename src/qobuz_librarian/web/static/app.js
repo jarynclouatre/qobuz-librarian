@@ -588,6 +588,31 @@
     setTimeout(function () { window.location.reload(); }, 900);
   }
 
+  // Raw fetch does not understand htmx's navigation headers. Mark these
+  // requests as htmx-compatible, then follow a rejected session to Login or
+  // reload after the CSRF middleware refreshes a stale token before a caller
+  // mistakes either response for JSON/HTML from the requested action.
+  function sessionFetch(url, options) {
+    var requestOptions = Object.assign({}, options || {});
+    requestOptions.headers = Object.assign({}, requestOptions.headers || {}, {
+      "HX-Request": "true",
+      "HX-Current-URL": window.location.href,
+    });
+    return fetch(url, requestOptions).then(function (response) {
+      if (response.headers.get("HX-Refresh") === "true") {
+        pageWentStale();
+        return Promise.reject("navigation");
+      }
+      var target = response.headers.get("HX-Redirect") || "";
+      if (response.status === 401 && target.charAt(0) === "/"
+          && target.charAt(1) !== "/") {
+        window.location.assign(target);
+        return Promise.reject("navigation");
+      }
+      return response;
+    });
+  }
+
   function initCoverFallbacks() {
     document.querySelectorAll("img.ql-cover, img.ql-grid-cover, img.ql-result-art").forEach(function (img) {
       if (img.dataset.coverFallbackWired === "1") return;
@@ -795,10 +820,9 @@
         return null;
       }
       function postForm(form) {
-        return fetch(form.action || "/download", {
+        return sessionFetch(form.action || "/download", {
           method: "POST",
           headers: {
-            "HX-Request": "true",
             "X-CSRF-Token": csrf(),
           },
           body: new FormData(form),
@@ -865,10 +889,12 @@
         var owned = 0;
         var failed = 0;
         var stale = false;
+        var navigating = false;
         var firstTitle = "";
         var chain = Promise.resolve();
         forms.forEach(function (form) {
           chain = chain.then(function () {
+            if (navigating) return;
             return postForm(form).then(function (res) {
               if (res.stale) { stale = true; failed += 1; }
               else if (!res.ok || res.text.indexOf("ql-notice-error") >= 0) failed += 1;
@@ -885,12 +911,16 @@
                 if (!firstTitle) firstTitle = itemTitle(form);
                 markSearchDownloadQueued(form);
               } else failed += 1;
-            }).catch(function () { failed += 1; });
+            }).catch(function (why) {
+              if (why === "navigation") navigating = true;
+              else failed += 1;
+            });
           });
         });
         chain.then(function () {
           bulkButton.disabled = false;
           bulkButton.textContent = original;
+          if (navigating) return;
           if (stale) { pageWentStale(); return; }
           selected = {};
           syncBoxes();
@@ -1414,7 +1444,7 @@
     }
 
     function post(url, body) {
-      return fetch(url, {
+      return sessionFetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -1477,6 +1507,7 @@
         })
         .catch(function (why) {
           done();
+          if (why === "navigation") return;
           revert();
           if (why === "stale") { pageWentStale(); return; }
           showToast("Couldn't save that choice. Try again.", "error");
@@ -1559,8 +1590,11 @@
           updateArtistChecks();
           return { ok: true, counts: c, current: current, accepted: accepted };
         })
-        .catch(function () {
+        .catch(function (why) {
           bulkBusy = false;
+          if (why === "navigation") {
+            return { ok: false, busy: false, navigating: true };
+          }
           flashSelectError();
           showToast("Couldn't confirm those choices. Reloading the review.", "error");
           setTimeout(function () { location.reload(); }, 900);
@@ -1590,6 +1624,7 @@
       bulkSelect(on, "artist", det.dataset.artist || "").then(function (result) {
         det._selecting = false;
         if (header) header.removeAttribute("aria-busy");
+        if (result.navigating) return;
         if (result.ok && result.current && groupCandidateIds(det).every(function (cid) {
           return result.accepted.has(cid);
         })) {
@@ -1697,7 +1732,7 @@
       var generation = (boxEl._loadGeneration || 0) + 1;
       boxEl._loadGeneration = generation;
       boxEl.dataset.loading = "1";
-      var p = fetch(boxEl.dataset.itemsUrl, { headers: { "HX-Request": "true" } })
+      var p = sessionFetch(boxEl.dataset.itemsUrl)
         .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
         .then(function (txt) {
           if (boxEl._loadGeneration !== generation) return false;
@@ -1711,9 +1746,10 @@
           updateArtistChecks();
           return true;
         })
-        .catch(function () {
+        .catch(function (why) {
           if (boxEl._loadGeneration !== generation) return false;
           delete boxEl.dataset.loading;
+          if (why === "navigation") return false;
           showToast("Couldn't load this artist's albums. Try opening it again.", "error");
           return false;
         });
@@ -1732,7 +1768,7 @@
       var url = "/jobs/" + id + "/review?page=" + (page || 2) +
                 "&q=" + encodeURIComponent(curQuery()) +
                 "&tab=" + encodeURIComponent(curTab());
-      fetch(url, { headers: { "HX-Request": "true" } })
+      sessionFetch(url)
         .then(function (r) { return r.ok ? r.text() : null; })
         .then(function (txt) {
           loading = false;
@@ -1754,7 +1790,12 @@
           updateHideLabels();
           updateArtistChecks();
         })
-        .catch(function () { loading = false; if (gen === loadGen) showToast("Couldn't load those results. Check your connection.", "error"); });
+        .catch(function (why) {
+          loading = false;
+          if (why !== "navigation" && gen === loadGen) {
+            showToast("Couldn't load those results. Check your connection.", "error");
+          }
+        });
     }
 
     // Fetch and swap one review page. Requests are generation-tagged and only
@@ -1778,7 +1819,7 @@
       var url = "/jobs/" + id + "/review?page=" + (page || 1) +
                 "&q=" + encodeURIComponent(query || "") +
                 "&tab=" + encodeURIComponent(curTab());
-      fetch(url, { headers: { "HX-Request": "true" } })
+      sessionFetch(url)
         .then(function (r) { return r.ok ? r.text() : null; })
         .then(function (txt) {
           if (gen !== loadGen) return;
@@ -1800,7 +1841,11 @@
             updateDismissRest();
           }
         })
-        .catch(function () { if (gen === loadGen) showToast("Couldn't load those results. Check your connection.", "error"); });
+        .catch(function (why) {
+          if (why !== "navigation" && gen === loadGen) {
+            showToast("Couldn't load those results. Check your connection.", "error");
+          }
+        });
     }
 
     // Delegated interactions keep swapped pages wired.
@@ -1913,6 +1958,7 @@
             .catch(function (why) {
               dismissRest.disabled = false;
               dismissRest.textContent = prev;
+              if (why === "navigation") return;
               if (why === "stale") { pageWentStale(); return; }
               flashSelectError();
             });

@@ -356,6 +356,9 @@ def validate_storage_roots() -> None:
 # ── Web UI ────────────────────────────────────────────────────────────────────
 WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 WEB_PORT = _env("WEB_PORT", 8666)
+# Compose always binds WEB_PORT=8666 inside the container, but may publish a
+# different host port. CLI recovery links must name the public side.
+WEB_PUBLIC_PORT = _env("WEB_PUBLIC_PORT", WEB_PORT)
 
 # ── Versioned file schemas ────────────────────────────────────────────────────
 PENDING_QUEUE_VERSION = 2

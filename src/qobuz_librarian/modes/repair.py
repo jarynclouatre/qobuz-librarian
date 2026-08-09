@@ -58,7 +58,7 @@ from qobuz_librarian.queue.builder import _build_queue_item
 from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_AUTH, die
+from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, die
 from qobuz_librarian.ui_cli.logging import log, vlog
 
 
@@ -2525,7 +2525,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     log.info(fmt(C.YELLOW,
                         "  ⚠  No album folders found under the music root."))
                     if not loop:
-                        return
+                        return 0
                     continue
                 section(f"Repair scan, whole library "
                         f"({len(targets)} album(s))")
@@ -2540,6 +2540,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     "failed": 0,
                     "recovery": 0,
                 }
+                interrupted = False
                 try:
                     for i, (adir, aldir) in enumerate(targets, 1):
                         _line = (f"  [{i}/{len(targets)}] Scanning "
@@ -2563,6 +2564,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                             raise
                         tally[status] = tally.get(status, 0) + 1
                 except KeyboardInterrupt:
+                    interrupted = True
                     print()
                     log.info(fmt(C.YELLOW,
                         "  Interrupted, stopping library repair sweep."))
@@ -2579,20 +2581,37 @@ def run_album_repair_mode(args, token, *, loop=False):
                     _summary += f"  ·  failed: {tally['failed']}"
                 if tally["recovery"]:
                     _summary += f"  ·  recovery needed: {tally['recovery']}"
-                log.info(fmt(C.GRAY, _summary))
+                needs_attention = (
+                    interrupted
+                    or any(tally[key] for key in (
+                        "attention", "failed", "recovery"
+                    ))
+                )
+                (log.warning if needs_attention else log.info)(
+                    fmt(C.YELLOW if needs_attention else C.GRAY, _summary)
+                )
                 if not loop:
-                    return
+                    return EXIT_GENERAL if needs_attention else 0
                 continue
 
             if album_dir is None:
-                return
+                return 0
 
             try:
-                _scan_report_repair(album_dir, artist_dir.name, args, token)
+                status = _scan_report_repair(
+                    album_dir, artist_dir.name, args, token
+                )
             except AuthLost:
                 die(fmt(C.RED, _REPAIR_AUTH_LOST), EXIT_AUTH)
 
             if not loop:
-                return
+                needs_attention = status in {"attention", "failed", "recovery"}
+                if needs_attention:
+                    log.warning(fmt(
+                        C.YELLOW,
+                        "  ⚠  Repair needs attention; review the result "
+                        "above before retrying.",
+                    ))
+                return EXIT_GENERAL if needs_attention else 0
     finally:
         args.no_upgrade = saved_no_upgrade

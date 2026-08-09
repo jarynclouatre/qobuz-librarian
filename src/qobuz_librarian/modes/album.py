@@ -39,6 +39,33 @@ from qobuz_librarian.ui_cli.prompts import (
 from qobuz_librarian.ui_cli.sentinels import MORE, URL_QUERY
 
 _DIRECT_QUEUE_MODE = "album-now"
+_SETTLED_ONE_SHOT_RESULTS = {
+    "already_complete",
+    "downloaded",
+    "dry_run",
+    "skipped_already_higher_quality",
+    "user_skipped",
+}
+
+
+def _one_shot_exit_code(result):
+    if not isinstance(result, dict):
+        return EXIT_GENERAL
+    verdict = result.get("quality_verdict") or {}
+    if (
+        result.get("attention")
+        or result.get("upgrade_unverified")
+        or result.get("catalogue_unverified")
+        or result.get("recovery_unverified")
+        or result.get("consolidation_interrupted")
+        or (verdict.get("under") and not verdict.get("recovered"))
+    ):
+        return EXIT_GENERAL
+    return (
+        0
+        if result.get("result") in _SETTLED_ONE_SHOT_RESULTS
+        else EXIT_GENERAL
+    )
 
 
 def _download_album_now(
@@ -306,10 +333,12 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
             except AuthLost:
                 die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
             except CatalogMiss as e:
-                log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
+                (log.info if loop else log.warning)(
+                    fmt(C.YELLOW, f"\n⚠  {e}\n")
+                )
                 args.query = saved_query
                 if not loop:
-                    return
+                    return EXIT_GENERAL
                 continue
             except QobuzUnavailable as e:
                 args.query = saved_query
@@ -319,11 +348,12 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 continue
             except QobuzError as e:
                 cleaned = friendly_qobuz_error(e)
+                report = log.info if loop else log.warning
                 if cleaned.startswith("HTTP 404"):
-                    log.info(fmt(C.RED,
+                    report(fmt(C.RED,
                         "\n✗  No album with that id. Check the URL or search by name.\n"))
                 else:
-                    log.info(fmt(C.RED, f"\n✗  Qobuz API error: {cleaned}.\n"))
+                    report(fmt(C.RED, f"\n✗  Qobuz API error: {cleaned}.\n"))
                 args.query = saved_query
                 if not loop:
                     # One-shot invocation: a Qobuz API failure is fatal.
@@ -339,7 +369,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                     continue
                 log.info(fmt(C.GRAY, "  Cancelled."))
                 args.query = saved_query
-                return
+                return 0
             finally:
                 args.query = saved_query
 
@@ -347,12 +377,19 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 _interactive_album_action(album, args, token, album_queue, _flush_queue)
             else:
                 try:
-                    _download_album_now(album, args, token)
+                    result = _download_album_now(album, args, token)
                 except AuthLost:
                     die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
 
             if not loop:
-                return
+                exit_code = _one_shot_exit_code(result)
+                if exit_code:
+                    log.warning(fmt(
+                        C.YELLOW,
+                        "  ⚠  Album run needs attention; review the result "
+                        "above and retry if needed.",
+                    ))
+                return exit_code
     except KeyboardInterrupt:
         interrupted = True
         if album_queue:

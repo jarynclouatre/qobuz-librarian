@@ -36,6 +36,10 @@ class PasswordRejected(ValueError):
     pass
 
 
+class CredentialSeedError(RuntimeError):
+    pass
+
+
 class SessionPersistenceError(RuntimeError):
     pass
 
@@ -365,9 +369,14 @@ def _env_password() -> str:
     try:
         with open(path, encoding="utf-8") as f:
             # Strip only the trailing newline a file editor adds.
-            return f.read().rstrip("\n")
-    except OSError:
-        return ""
+            password = f.read().rstrip("\n")
+    except OSError as exc:
+        raise CredentialSeedError(
+            "WEB_AUTH_PASSWORD_FILE could not be read"
+        ) from exc
+    if not password:
+        raise CredentialSeedError("WEB_AUTH_PASSWORD_FILE is empty")
+    return password
 
 
 def apply_env_credentials() -> str:

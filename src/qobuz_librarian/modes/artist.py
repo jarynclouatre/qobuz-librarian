@@ -48,7 +48,7 @@ from qobuz_librarian.quality.tiers import downsample_target_rate, streamrip_qual
 from qobuz_librarian.queue.builder import _build_queue_item
 from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
-from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     _flush_stdin,
@@ -468,13 +468,76 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             catalog if catalog_fetched else None)
 
 
+_ATTENTION_BUCKETS = {"partial", "not_imported", "stopped", "failed", "other"}
+
+
+def _gap_fill_result_bucket(result):
+    """Map one album result to the same bucket used by the artist summary."""
+    hard_failures = {
+        "failed", "nothing_landed", "not_imported", "import_failed",
+        "upgrade_aborted_backup_failed",
+        "replacement_aborted_catalogue_failed",
+    }
+    stopped_results = {
+        "interrupted", "cancelled", "disk_full", "io_error", "auth_lost",
+    }
+    partial_fields = {
+        "n_fail", "n_lossy", "n_broken", "downsample_errors",
+        "downsample_flush_warnings",
+    }
+    status = result.get("result", "")
+    imported = bool(result.get("imported", False))
+    downloaded = result.get("n_ok", 0) > 0
+    verdict = result.get("quality_verdict") or {}
+    has_partial_attention = (
+        status == "partial"
+        or any(result.get(field, 0) for field in partial_fields)
+        or result.get("downsample_cancelled", False)
+        or result.get("consolidation_interrupted", False)
+        or result.get("upgrade_unverified", False)
+        or result.get("catalogue_unverified", False)
+        or result.get("recovery_unverified", False)
+        or (verdict.get("under") and not verdict.get("recovered"))
+    )
+
+    if status in {"already_complete", "skipped_already_higher_quality"}:
+        return "already_complete"
+    if status in {"user_skipped", "user_stopped"}:
+        return "skipped"
+    if status == "no_qobuz_match":
+        return "no_match"
+    if status == "predicted_path_mismatch":
+        return "path_mismatch"
+    if status == "false_match":
+        return "false_match"
+    if status == "dry_run":
+        return "dry_run"
+    if status in {"no_tracks", "lossy_only"}:
+        return "nothing_available"
+    if status in {"low_overlap", "sibling_skipped"}:
+        return "held"
+    if status in stopped_results:
+        return "stopped"
+    if status in hard_failures:
+        return "failed"
+    if downloaded and not imported:
+        return "not_imported"
+    if imported and has_partial_attention:
+        return "partial"
+    if imported and downloaded and result.get("auto_upgrade", False):
+        return "upgraded"
+    if imported and downloaded:
+        return "filled"
+    return "other"
+
+
 def run_artist_missing_albums(artist_name, owned_titles, args, token,
                       artist_id=None, handled_ids=None, resolved_dirs=None,
                       prefetched_catalog=None, *, shared_queue=None, fresh=False):
     """List the artist's full Qobuz catalog with already-owned albums filtered
     out, prompt to download some. The matching is discovery.discover_fully_missing;
-    this is the numbered-list presentation around it. Returns count downloaded
-    (or queued, in shared_queue mode).
+    this is the numbered-list presentation around it. Returns
+    ``(count_downloaded_or_queued, needs_attention)``.
     """
     section(f"Step 2: Missing albums by {artist_name}, not yet in your library")
 
@@ -486,11 +549,11 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
             log.info(fmt(C.YELLOW,
                 "  ⚠  Qobuz couldn't complete the artist lookup. "
                 "Try this step again."))
-            return 0
+            return 0, True
         if artist_id is None:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Couldn't find {artist_name!r} on Qobuz. Skipping step 2."))
-            return 0
+            return 0, False
         if resolved_name:
             artist_name = resolved_name
         log.info(fmt(C.GRAY, f"  Matched Qobuz artist: {artist_name!r} (id {artist_id})"))
@@ -506,7 +569,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                                                      fresh=fresh)
         except QobuzError as e:
             log.info(fmt(C.YELLOW, f"  ⚠  Couldn't fetch artist catalog: {e}."))
-            return 0
+            return 0, True
         if qobuz_total is not None and qobuz_total > len(catalog):
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Qobuz reports {qobuz_total} total albums; only fetched "
@@ -529,7 +592,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
 
     if not ordered:
         log.info(fmt(C.GREEN, "\n  ✓  No new albums to suggest. You're caught up!\n"))
-        return 0
+        return 0, False
 
     print()
     header = f"  {len(ordered)} album(s) you don't have"
@@ -558,7 +621,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
 
     if args.dry_run:
         log.info(fmt(C.YELLOW, "  --dry-run: stopping here, nothing prompted."))
-        return 0
+        return 0, False
 
     _flush_stdin()
     try:
@@ -568,18 +631,20 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         raw = ""
     picks = parse_number_list(raw, len(ordered))
     if not picks:
-        return 0
+        return 0, False
 
     if shared_queue is not None:
         log.info(fmt(C.GRAY,
             f"  Queuing {plural(len(picks), 'album')}; fetching track lists …"))
         n_queued = 0
+        needs_attention = False
         for i, idx in enumerate(picks, 1):
             chosen = ordered[idx - 1].qobuz_album
             try:
                 full = get_album(chosen["id"], token)
             except QobuzError as e:
                 log.info(fmt(C.YELLOW, f"    ⚠  Couldn't fetch: {e}. Skipping."))
+                needs_attention = True
                 continue
             full_tracks = (full.get("tracks") or {}).get("items") or []
             shared_queue.append(_build_queue_item(
@@ -594,13 +659,14 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         log.info(fmt(C.GREEN,
             f"  ✓ Queued {plural(n_queued, 'album')} "
             f"(queue total: {len(shared_queue)})."))
-        return n_queued
+        return n_queued, needs_attention
 
     log.info(fmt(C.GRAY, f"  Selected {plural(len(picks), 'album')}; fetching track lists …"))
 
     saved_yes = args.yes
     args.yes = True
     n_done = 0
+    needs_attention = False
     try:
         for i, idx in enumerate(picks, 1):
             chosen = ordered[idx - 1].qobuz_album
@@ -611,20 +677,24 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                 full = get_album(chosen["id"], token)
             except QobuzError as e:
                 log.info(fmt(C.YELLOW, f"    ⚠  Couldn't fetch: {e}. Skipping."))
+                needs_attention = True
                 continue
             try:
                 r = process_album(full, args, allow_force=False, label=label,
                                   already_confirmed=True, token=token)
             except KeyboardInterrupt:
                 log.info(fmt(C.GRAY, "\n    Interrupted. Stopping step 2."))
+                needs_attention = True
                 break
             if r.get("n_ok", 0) > 0 and r.get("imported", False):
                 n_done += 1
+            if _gap_fill_result_bucket(r) in _ATTENTION_BUCKETS:
+                needs_attention = True
             time.sleep(cfg.ARTIST_API_DELAY)
     finally:
         args.yes = saved_yes
 
-    return n_done
+    return n_done, needs_attention
 
 
 def _report_gap_fill_summary(results):
@@ -646,63 +716,8 @@ def _report_gap_fill_summary(results):
         "failed": 0,
         "other": 0,
     }
-    hard_failures = {
-        "failed", "nothing_landed", "not_imported", "import_failed",
-        "upgrade_aborted_backup_failed",
-        "replacement_aborted_catalogue_failed",
-    }
-    stopped_results = {
-        "interrupted", "cancelled", "disk_full", "io_error", "auth_lost",
-    }
-    partial_fields = {
-        "n_fail", "n_lossy", "n_broken", "downsample_errors",
-        "downsample_flush_warnings",
-    }
-
     for result in results:
-        status = result.get("result", "")
-        imported = bool(result.get("imported", False))
-        downloaded = result.get("n_ok", 0) > 0
-        has_partial_attention = (
-            status == "partial"
-            or any(result.get(field, 0) for field in partial_fields)
-            or result.get("downsample_cancelled", False)
-            or result.get("consolidation_interrupted", False)
-            or result.get("upgrade_unverified", False)
-            or result.get("catalogue_unverified", False)
-        )
-
-        if status == "already_complete":
-            bucket = "already_complete"
-        elif status in {"user_skipped", "user_stopped"}:
-            bucket = "skipped"
-        elif status == "no_qobuz_match":
-            bucket = "no_match"
-        elif status == "predicted_path_mismatch":
-            bucket = "path_mismatch"
-        elif status == "false_match":
-            bucket = "false_match"
-        elif status == "dry_run":
-            bucket = "dry_run"
-        elif status in {"no_tracks", "lossy_only"}:
-            bucket = "nothing_available"
-        elif status in {"low_overlap", "sibling_skipped"}:
-            bucket = "held"
-        elif status in stopped_results:
-            bucket = "stopped"
-        elif status in hard_failures:
-            bucket = "failed"
-        elif downloaded and not imported:
-            bucket = "not_imported"
-        elif imported and has_partial_attention:
-            bucket = "partial"
-        elif imported and downloaded and result.get("auto_upgrade", False):
-            bucket = "upgraded"
-        elif imported and downloaded:
-            bucket = "filled"
-        else:
-            bucket = "other"
-        counts[bucket] += 1
+        counts[_gap_fill_result_bucket(result)] += 1
 
     labels = (
         ("already_complete", C.GREEN, "✓ already complete:"),
@@ -725,6 +740,21 @@ def _report_gap_fill_summary(results):
         if counts[bucket]:
             padded_label = f"{label:<30}"
             log.info(f"  {fmt(colour, padded_label)}{counts[bucket]}")
+    return counts
+
+
+def _gap_fill_exit_code(counts):
+    needs_attention = any(
+        counts[bucket]
+        for bucket in _ATTENTION_BUCKETS
+    )
+    if needs_attention:
+        log.warning(fmt(
+            C.YELLOW,
+            "  ⚠  Artist run needs attention; review the summary above "
+            "and retry any unfinished albums.",
+        ))
+    return EXIT_GENERAL if needs_attention else 0
 
 
 def run_artist_mode(artist_name, args, token):
@@ -733,11 +763,11 @@ def run_artist_mode(artist_name, args, token):
     banner(f"Artist mode: {artist_name}")
 
     if normalize(artist_name) in VA_NORMALIZED:
-        log.info(fmt(C.YELLOW,
+        log.warning(fmt(C.YELLOW,
             "\n  ⚠  'Various Artists' isn't a real artist; artist mode doesn't support it."))
         log.info(fmt(C.GRAY,
             "     Use album mode for individual compilation albums."))
-        return
+        return EXIT_GENERAL
 
     # --consolidate inside artist mode would prompt per album (a LOT on a
     # 30-album scan).
@@ -752,8 +782,17 @@ def run_artist_mode(artist_name, args, token):
             log.info(fmt(C.YELLOW, f"\n  ⚠  No matching artist directory in {cfg.MUSIC_ROOT}."))
             if confirm("\n  Continue anyway and just look for albums by this artist on Qobuz?",
                        default_yes=False, auto_yes=args.yes):
-                run_artist_missing_albums(artist_name, {}, args, token, fresh=True)
-            return
+                _, needs_attention = run_artist_missing_albums(
+                    artist_name, {}, args, token, fresh=True
+                )
+                if needs_attention:
+                    log.warning(fmt(
+                        C.YELLOW,
+                        "  ⚠  Artist run needs attention; review the "
+                        "details above and retry.",
+                    ))
+                    return EXIT_GENERAL
+            return 0
         vlog(f"  Library: {artist_dir}")
 
         # fresh=True: an explicit single-artist run should see just-released
@@ -768,7 +807,8 @@ def run_artist_mode(artist_name, args, token):
 
         section("Step 1: Gap-fill summary")
         print()
-        _report_gap_fill_summary(gap_fill_results)
+        counts = _report_gap_fill_summary(gap_fill_results)
+        exit_code = _gap_fill_exit_code(counts)
 
         if no_match:
             print()
@@ -797,15 +837,25 @@ def run_artist_mode(artist_name, args, token):
 
         if args.no_catalog:
             log.info(fmt(C.GRAY, "\n  --no-catalog: skipping step 2."))
-            return
+            return exit_code
         print()
 
-        n_added = run_artist_missing_albums(artist_name, owned_titles, args, token,
-                                    artist_id=artist_id, handled_ids=handled_ids,
-                                    resolved_dirs=resolved_dirs,
-                                    prefetched_catalog=catalog)
+        n_added, step_two_attention = run_artist_missing_albums(
+            artist_name, owned_titles, args, token,
+            artist_id=artist_id, handled_ids=handled_ids,
+            resolved_dirs=resolved_dirs,
+            prefetched_catalog=catalog,
+        )
         if n_added:
             log.info(fmt(C.GREEN, f"\n  ✓  Added {n_added} new album(s) for {artist_name}.\n"))
+        if step_two_attention:
+            log.warning(fmt(
+                C.YELLOW,
+                "  ⚠  Artist run needs attention; review Step 2 above "
+                "and retry any unfinished albums.",
+            ))
+            return EXIT_GENERAL
+        return exit_code
     finally:
         # Restore --consolidate so the menu loop sees the original CLI value.
         args.consolidate = saved_consolidate

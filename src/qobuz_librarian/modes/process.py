@@ -890,12 +890,18 @@ def process_album(album, args, *, allow_force=True, label=None,
             "tracks_total": len(qobuz_tracks),
             "tracks_downloaded": 0,
         })
+        consolidation_interrupted = False
         if args.consolidate:
             try:
                 consolidate_albums(album, args)
             except KeyboardInterrupt:
+                consolidation_interrupted = True
                 log.info(fmt(C.GRAY, "\n  Consolidation interrupted."))
-        return {"result": "already_complete", "n_total": len(qobuz_tracks)}
+        return {
+            "result": "already_complete",
+            "n_total": len(qobuz_tracks),
+            "consolidation_interrupted": consolidation_interrupted,
+        }
 
     # A dry run has already printed the plan above; stop before the download
     # confirm so we don't ask "proceed with downloading?" for a run that never
@@ -1013,6 +1019,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     download_result = {}
     quality_verdict = None
     _gap_fill_not_located = False  # gap-fill succeeded on paper but album not found on disk
+    recovery_unverified = False
 
     try:
         snapshot = snapshot_staging()
@@ -1315,6 +1322,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(fmt(C.WHITE,
                     f"     Restore: mv {upgrade_backup_path!s} {album_dir!s}"))
             elif download_phase_completed and args.no_import:
+                upgrade_unverified = True
                 if not pin_unverified_upgrade_backup(
                         upgrade_backup_path,
                         "upgrade backup kept; --no-import leaves the "
@@ -1391,6 +1399,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                         _filled_receipt,
                     ):
                         _gap_fill_not_located = True
+                        recovery_unverified = True
+                        catalogue_unverified = True
                         if not pin_unverified_upgrade_backup(
                                 gap_fill_backup_path,
                                 "gap-fill backup kept; the replaced Beets "
@@ -1409,6 +1419,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                                 replacement, qobuz_tracks, destructive=True)
                         ),
                     ):
+                        recovery_unverified = True
                         if not pin_unverified_upgrade_backup(
                                 gap_fill_backup_path,
                                 "gap-fill backup kept; final exact "
@@ -1419,6 +1430,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             "couldn't be safely removed."))
                 elif _filled_ok:
                     _gap_fill_not_located = True
+                    recovery_unverified = True
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
                             "gap-fill backup kept; replacement not durable"):
@@ -1430,6 +1442,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         f"     Backup remains at {gap_fill_backup_path}."))
                 else:
                     _gap_fill_not_located = True
+                    recovery_unverified = True
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
                             "gap-fill backup kept; the complete replacement "
@@ -1443,6 +1456,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 # Gate on download_phase_completed like the upgrade branch above:
                 # a crash MID-download (phase not completed) must fall through to
                 # the restore branch, not keep a backup while the album is short.
+                recovery_unverified = True
                 if not pin_unverified_upgrade_backup(
                         gap_fill_backup_path,
                         "gap-fill backup kept; --no-import leaves the "
@@ -1463,6 +1477,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     log.info(fmt(C.GREEN,
                         f"  ✓  Restored {_n_back} track(s) to {album_dir}."))
                 else:
+                    recovery_unverified = True
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
                             "gap-fill backup kept; automatic restore was "
@@ -1614,6 +1629,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         and not n_lossy
         and imported
         and not _gap_fill_not_located
+        and not recovery_unverified
         and not downsample_attention
         and not consolidation_interrupted
     ):
@@ -1672,7 +1688,15 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     if n_ok and (
         n_retryable or n_truly_lossy or downsample_attention
+        or upgrade_unverified
+        or catalogue_unverified
+        or recovery_unverified
         or consolidation_interrupted
+        or (
+            quality_verdict
+            and quality_verdict.get("under")
+            and not quality_verdict.get("recovered")
+        )
     ):
         result_status = "partial"
     elif n_ok and not imported and not args.no_import:
@@ -1709,6 +1733,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "upgrade_backup_path": str(upgrade_backup_path) if upgrade_backup_path else None,
         "upgrade_restored": upgrade_restored,
         "catalogue_unverified": catalogue_unverified,
+        "recovery_unverified": recovery_unverified,
         "consolidated": bool(
             args.consolidate and imported and not consolidation_interrupted),
         "consolidation_interrupted": consolidation_interrupted,
@@ -1737,6 +1762,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "imported": imported,
         "upgrade_unverified": upgrade_unverified,
         "catalogue_unverified": catalogue_unverified,
+        "recovery_unverified": recovery_unverified,
         "auto_upgrade": bool(auto_upgrade_active),
         "quality_verdict": quality_verdict,
         "consolidation_interrupted": consolidation_interrupted,

@@ -4,6 +4,7 @@ originals are backed up before a re-rip, and the backup is only dropped once the
 refills are proven back in place and re-verified. An outage or a still-short
 re-rip must keep the backup rather than lose the only good copy.
 """
+import json
 import os
 from argparse import Namespace
 from unittest.mock import patch
@@ -11,6 +12,51 @@ from unittest.mock import patch
 import pytest
 
 from qobuz_librarian.repair_log import scan_dir_for_isrc_repairs
+
+# CLI fetch history
+
+def test_recent_fetch_history_does_not_show_a_partial_result_as_clean(
+        tmp_path, monkeypatch, caplog):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.ui_cli.prompts import show_recent_fetches
+
+    fetch_log = tmp_path / "fetch.jsonl"
+    entries = [
+        {
+            "ts": "2026-08-09T12:00:00+00:00",
+            "artist": "Artist",
+            "title": "Partial Album",
+            "result": "partial",
+            "tracks_downloaded": 8,
+            "tracks_failed": 2,
+        },
+        {
+            "ts": "2026-08-09T12:01:00+00:00",
+            "artist": "Artist",
+            "title": "Stopped Album",
+            "result": "interrupted",
+            "tracks_downloaded": 1,
+            "tracks_failed": 0,
+        },
+    ]
+    fetch_log.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", fetch_log)
+
+    with caplog.at_level("INFO", logger="qobuz_librarian"):
+        show_recent_fetches()
+
+    partial_line = next(
+        line for line in caplog.text.splitlines() if "Partial Album" in line
+    )
+    stopped_line = next(
+        line for line in caplog.text.splitlines() if "Stopped Album" in line
+    )
+    assert "partial" in partial_line
+    assert "+8" in partial_line
+    assert "✗2" in partial_line
+    assert "interrupted" in stopped_line
+    assert "+1" not in stopped_line
+
 
 # ── scan_dir_for_isrc_repairs: the truncation gates ────────────────────
 

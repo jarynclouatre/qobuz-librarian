@@ -273,6 +273,7 @@ def test_executor_self_heal_retry_no_files_keeps_first_download_state(
     staging = tmp_path / "staging"
     first_staged = staging / "Artist" / "Album"
     monkeypatch.setattr(cfg, "STAGING_DIR", staging)
+    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", tmp_path / "fetch.jsonl")
 
     album = {"id": "ALB", "title": "Album", "artist": {"name": "Artist"},
              "maximum_bit_depth": 24, "maximum_sampling_rate": 192.0,
@@ -293,12 +294,16 @@ def test_executor_self_heal_retry_no_files_keeps_first_download_state(
         executor, "_staged_album_dirs",
         lambda _item: [first_staged] if first_staged.exists() else [],
     )
-    # Production threads the exact held run-lock lease into resolution.
-    monkeypatch.setattr(executor, "_resolve_queue_item",
-                        lambda item, _args, imported, *, authority=None: {
-                            "result": "imported" if imported else item.get("result"),
-                            "n_ok": item.get("n_ok", 0),
-                        })
+    monkeypatch.setattr(
+        executor,
+        "find_album_dir_by_track_signatures",
+        lambda _signatures: first_staged if first_staged.exists() else None,
+    )
+    monkeypatch.setattr(
+        executor,
+        "find_album_dir_filesystem",
+        lambda _album: first_staged if first_staged.exists() else None,
+    )
 
     imported_dirs = []
     monkeypatch.setattr(executor, "_import_album_with_retry",
@@ -339,9 +344,107 @@ def test_executor_self_heal_retry_no_files_keeps_first_download_state(
     assert queue == []
     assert item["n_ok"] == 1
     assert results[-1]["n_ok"] == 1
+    assert results[-1]["result"] == "partial"
+    assert results[-1]["quality_verdict"] == item["quality_verdict"]
+    logged = json.loads(cfg.FETCH_LOG_FILE.read_text().splitlines()[-1])
+    assert logged["result"] == "partial"
     assert imported_dirs == [[first_staged]]
     assert (first_staged / "01.flac").read_bytes() == b"first"
     assert shortfalls == [item["quality_verdict"]]
+
+
+def test_executor_logs_the_started_interrupt_but_not_untouched_followers(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.queue import executor
+
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(cfg, "STAGING_DIR", staging)
+    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", tmp_path / "fetch.jsonl")
+    items = [
+        _qitem(title="Started", album_dir=None),
+        _qitem(title="Untouched", album_dir=None),
+    ]
+
+    monkeypatch.setattr(executor, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(executor, "snapshot_staging", lambda: set())
+    monkeypatch.setattr(executor, "is_cancel_requested", lambda: False)
+    monkeypatch.setattr(executor, "_reimport_parked_albums", lambda: (False, []))
+    monkeypatch.setattr(executor, "find_album_dir_filesystem", lambda _album: None)
+    monkeypatch.setattr(
+        executor,
+        "find_album_dir_by_track_signatures",
+        lambda _signatures: None,
+    )
+
+    def download(item):
+        album_dir = staging / item["album"]["title"]
+        album_dir.mkdir(parents=True)
+        (album_dir / "01.flac").write_bytes(b"staged")
+        item.update(
+            n_ok=1,
+            n_fail=0,
+            n_lossy=0,
+            failed_tracks=[],
+            lossy_tracks=[],
+            broken_tracks=[],
+            elapsed=0.0,
+        )
+
+    monkeypatch.setattr(executor, "_download_for_queue_item", download)
+    monkeypatch.setattr(
+        executor,
+        "_staged_album_dirs",
+        lambda item: [staging / item["album"]["title"]],
+    )
+    monkeypatch.setattr(
+        executor,
+        "verify_and_recover",
+        lambda _album, dirs, **_kwargs: {
+            "under": False,
+            "recovered": False,
+            "retried": False,
+            "staged_dirs": dirs,
+        },
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run_pre_import_hooks_for_dirs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    real_resolver = executor._resolve_queue_item
+    results = []
+
+    def capture_result(*args, **kwargs):
+        result = real_resolver(*args, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(executor, "_resolve_queue_item", capture_result)
+
+    with pytest.raises(KeyboardInterrupt):
+        executor._execute_download_queue(
+            items,
+            Namespace(
+                dry_run=False,
+                no_import=False,
+                no_downsample=True,
+                consolidate=False,
+            ),
+            token="tok",
+        )
+
+    rows = [
+        json.loads(line)
+        for line in cfg.FETCH_LOG_FILE.read_text().splitlines()
+    ]
+    assert [result["result"] for result in results] == [
+        "interrupted",
+        "interrupted",
+    ]
+    assert [(row["title"], row["result"]) for row in rows] == [
+        ("Started", "interrupted")
+    ]
 
 
 def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypatch, tmp_path):
@@ -379,15 +482,23 @@ def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypa
     monkeypatch.setattr(executor, "retire_backup_beets_entries",
                         lambda *_a, **_k: True)
     monkeypatch.setattr(proc, "_upgrade_replacement_verified", lambda *a: False)
-    executor._resolve_queue_item(item, args, imported_globally=True)
+    unverified = executor._resolve_queue_item(
+        item, args, imported_globally=True
+    )
     assert not carried and not disposed
+    assert unverified["result"] == "partial"
+    assert unverified["upgrade_unverified"] is True
 
     monkeypatch.setattr(proc, "_upgrade_replacement_verified", lambda *a: True)
     monkeypatch.setattr(proc, "_carry_non_audio_from_backup",
                         lambda *_a, **_k: (album_dir, {"sealed": True}))
     item["backup_path"] = backup
-    executor._resolve_queue_item(item, args, imported_globally=True)
+    item["upgrade_unverified"] = False
+    verified = executor._resolve_queue_item(
+        item, args, imported_globally=True
+    )
     assert disposed == [True]
+    assert verified["result"] == "downloaded"
 
 
 def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, tmp_path):
@@ -770,10 +881,12 @@ def test_executor_gap_fill_backup_survives_partial_beets_move(monkeypatch, tmp_p
         "auto_upgrade": False,
     }
     args = Namespace(no_import=False, consolidate=False)
-    executor._resolve_queue_item(item, args, imported_globally=True)
+    result = executor._resolve_queue_item(item, args, imported_globally=True)
 
     assert gfb.exists()
     assert (gfb / "01 - owned.flac").read_bytes() == b"the-owned-original"
+    assert result["result"] == "partial"
+    assert result["recovery_unverified"] is True
 
 
 def test_executor_gap_fill_backup_kept_when_extras_satisfy_the_count(monkeypatch, tmp_path):

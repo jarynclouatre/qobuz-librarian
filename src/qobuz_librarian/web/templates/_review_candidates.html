@@ -85,14 +85,14 @@
   </div>
 
   {% if job.execute_kind == 'downsample' %}
-  {% if not ds_originals_chosen() %}
+  {% if downsample_originals_choice not in ('keep', 'delete') %}
   <div class="ql-notice ql-notice-info ql-review-warning">
     <span><strong>You choose what happens to your originals.</strong>
       Before anything is rewritten, you'll pick whether to keep a restorable
       backup of the hi-res files or delete them to save space. Each file is
       verified to decode cleanly before it replaces the original.</span>
   </div>
-  {% elif keeps_ds_originals() %}
+  {% elif downsample_originals_choice == 'keep' %}
   <div class="ql-notice ql-notice-info ql-review-warning">
     <span><strong>Undoable for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}.</strong>
       Downsampling rewrites each file in place, and a copy of every hi-res

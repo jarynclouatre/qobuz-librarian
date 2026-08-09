@@ -197,11 +197,26 @@ def show_recent_fetches(limit=10):
         title  = e.get("title") or "?"
         n_ok   = e.get("tracks_downloaded", 0)
         n_fail = e.get("tracks_failed", 0)
+        result = e.get("result")
         tag    = ""
-        if n_fail:
-            tag = fmt(C.RED, f" ✗{n_fail}")
-        elif e.get("result") == "already_complete":
+        if result == "partial":
+            counts = []
+            if n_ok:
+                counts.append(f"+{n_ok}")
+            if n_fail:
+                counts.append(f"✗{n_fail}")
+            detail = f" ({', '.join(counts)})" if counts else ""
+            tag = fmt(C.YELLOW, f" ⚠ partial{detail}")
+        elif result == "already_complete":
             tag = fmt(C.GRAY, " (already complete)")
+        elif result not in (None, "downloaded"):
+            failures = f" (✗{n_fail})" if n_fail else ""
+            tag = fmt(
+                C.YELLOW,
+                f" ⚠ {str(result).replace('_', ' ')}{failures}",
+            )
+        elif n_fail:
+            tag = fmt(C.RED, f" ✗{n_fail}")
         elif n_ok:
             tag = fmt(C.GREEN, f" +{n_ok}")
         log.info(f"    {fmt(C.GRAY, ts)}  {truncate(artist, 22)} - {truncate(title, 32)}{tag}")

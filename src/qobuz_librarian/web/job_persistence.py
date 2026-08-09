@@ -735,9 +735,7 @@ def acknowledge_missing_recoveries(job, is_missing) -> bool:
         job.recoveries = []
         job.summary = next_summary
         job.log_lines.extend(acknowledgement_lines)
-        if len(job.log_lines) > job.LOG_CAP + job._LOG_SLACK:
-            del job.log_lines[:len(job.log_lines) - job.LOG_CAP]
-            job.log_lines[0] = job._TRUNCATION_MARKER
+        job._trim_log_lines_locked()
         return True
 
 

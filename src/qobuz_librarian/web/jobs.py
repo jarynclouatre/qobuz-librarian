@@ -415,6 +415,18 @@ class Job:
     # garbles the JSON status endpoint.
     _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
+    def _trim_log_lines_locked(self) -> None:
+        """Bound the live tail while preserving the newest line.
+
+        The caller holds ``self._lock``.  A one-line cap cannot also carry a
+        truncation marker, so the real latest line wins in that configuration.
+        """
+        if len(self.log_lines) <= self.LOG_CAP + self._LOG_SLACK:
+            return
+        del self.log_lines[:len(self.log_lines) - self.LOG_CAP]
+        if self.LOG_CAP > 1:
+            self.log_lines[0] = self._TRUNCATION_MARKER
+
     def push_line(self, line: str):
         """Append a real log line and stream it to live subscribers."""
         line = self._CTRL_RE.sub("", line)
@@ -423,12 +435,7 @@ class Job:
         # below would otherwise tear a concurrent reader's slice.
         with self._lock:
             self.log_lines.append(line)
-            if len(self.log_lines) > self.LOG_CAP + self._LOG_SLACK:
-                del self.log_lines[:len(self.log_lines) - self.LOG_CAP]
-                # A one-line cap must preserve the latest line; larger tails
-                # reserve their first slot for the truncation marker.
-                if self.LOG_CAP > 1:
-                    self.log_lines[0] = self._TRUNCATION_MARKER
+            self._trim_log_lines_locked()
         self._fan_out(line)
 
     def persisted_log_lines_locked(self) -> list:
@@ -1066,8 +1073,7 @@ def _finish_task_phase(job: Job) -> None:
         # durable row; the live page must be at least as cautious.
         _mark_final_save_failure(job)
     if job.status in TERMINAL:
-        payload = _post_job_hook_payload(job)
-        _start_post_job_hook(payload)
+        _start_post_job_hook_for_job(job)
     job.end_stream()
 
 
@@ -1147,18 +1153,39 @@ def _run_post_job_hook(payload: dict) -> None:
                 "post-job hook exited with status %s", proc.returncode)
 
 
+def _build_post_job_hook_payload(
+    *, event_id, status, title, edition="", artist="", error=None,
+    finished_at=None,
+):
+    """Build the stable payload shared by job and authentication events."""
+    return {
+        "id": event_id,
+        "status": status,
+        "title": title,
+        "edition": edition,
+        "display_title": release_title(title, edition),
+        "artist": artist,
+        "error": error,
+        "finished_at": finished_at,
+    }
+
+
 def _post_job_hook_payload(job):
     """Capture a job's final state before its object can be reused."""
-    return {
-        "id": job.id,
-        "status": job.status.value,
-        "title": job.title,
-        "edition": job.edition,
-        "display_title": job.display_title,
-        "artist": job.artist,
-        "error": job.error,
-        "finished_at": job.finished_at,
-    }
+    return _build_post_job_hook_payload(
+        event_id=job.id,
+        status=job.status.value,
+        title=job.title,
+        edition=job.edition,
+        artist=job.artist,
+        error=job.error,
+        finished_at=job.finished_at,
+    )
+
+
+def _start_post_job_hook_for_job(job):
+    """Capture and dispatch one terminal transition."""
+    _start_post_job_hook(_post_job_hook_payload(job))
 
 
 def _fire_post_job_hook(payload):
@@ -1220,15 +1247,13 @@ def fire_auth_lost_hook():
     The payload keeps the normal hook's core fields so existing scripts can
     render it without special-casing.
     """
-    from datetime import datetime, timezone
-    payload = {
-        "id": "qobuz-auth",
-        "status": "auth_lost",
-        "title": "Qobuz token rejected: replace it on the Settings page",
-        "artist": None,
-        "error": "Qobuz returned 401 for the saved token",
-        "finished_at": datetime.now(timezone.utc).isoformat(),
-    }
+    payload = _build_post_job_hook_payload(
+        event_id="qobuz-auth",
+        status="auth_lost",
+        title="Qobuz token rejected: replace it on the Settings page",
+        error="Qobuz rejected the saved token",
+        finished_at=time.time(),
+    )
     _start_post_job_hook(payload)
 
 
@@ -1287,7 +1312,7 @@ def _worker_loop(work_queue: "queue.Queue"):
                         job.status = JobStatus.FAILED
                         job.error = JOB_ADMISSION_ERROR
                         job.finished_at = time.time()
-                    job.end_stream()
+                    _finish_task_phase(job)
                 else:
                     _run_task(job, fn)
         except BaseException as e:  # noqa: BLE001 - must not die
@@ -1553,6 +1578,7 @@ def finalize_review_if_empty(job: Job) -> Optional[bool]:
                 # review we just emptied.
                 review_badges.clear_ready_if_generation(
                     "library", badge_generation)
+        _start_post_job_hook_for_job(job)
     return True
 
 
@@ -1736,6 +1762,7 @@ def cancel_review(job: Job) -> Optional[bool]:
                     job.summary = previous_summary
                 job_persistence.persist(job)
                 return None
+        _start_post_job_hook_for_job(job)
         job.end_stream()
         return True
 
@@ -1773,11 +1800,28 @@ def restore_jobs(
     review = 0
     historical = 0
     restored = []
+    terminal_payloads = []
+
+    def _persist_restored_transition(job, previous_status):
+        saved = job_persistence.persist(job)
+        if saved is not True:
+            _mark_final_save_failure(job)
+        if (
+            saved is True
+            and previous_status is not None
+            and previous_status not in TERMINAL
+            and job.status in TERMINAL
+        ):
+            terminal_payloads.append(_post_job_hook_payload(job))
+        return saved
+
     for row in rows:
         unknown_recovery_status = False
         try:
             status = JobStatus(row["status"])
+            previous_status = status
         except ValueError:
+            previous_status = None
             if not row.get("recoveries"):
                 # An ordinary row from an incompatible version cannot be
                 # resumed safely and carries nothing the user must recover.
@@ -1847,7 +1891,7 @@ def restore_jobs(
             job.cancel_requested = False
             job.finished_at = job.finished_at or time.time()
             historical += 1
-            job_persistence.persist(job)
+            _persist_restored_transition(job, previous_status)
         elif completion_acknowledged:
             # This job's own recovery is the outstanding one, so the
             # acknowledgement is not enough to retire it here.
@@ -1864,7 +1908,7 @@ def restore_jobs(
             job.cancel_requested = False
             job.finished_at = job.finished_at or time.time()
             interrupted += 1
-            job_persistence.persist(job)
+            _persist_restored_transition(job, previous_status)
         elif unknown_recovery_status:
             job.error = ("This saved Repair job had an unrecognised state. "
                          "Original files remain at the recovery location "
@@ -1872,7 +1916,7 @@ def restore_jobs(
             job.attention = "recovery"
             job.finished_at = job.finished_at or time.time()
             interrupted += 1
-            job_persistence.persist(job)
+            _persist_restored_transition(job, previous_status)
         elif status in (JobStatus.PENDING, JobStatus.RUNNING):
             job.status = JobStatus.FAILED
             # Only an album download / single-track download carries an
@@ -1900,7 +1944,7 @@ def restore_jobs(
                              "location shown below. Check them before retrying.")
             job.finished_at = time.time()
             interrupted += 1
-            job_persistence.persist(job)
+            _persist_restored_transition(job, previous_status)
         elif status == JobStatus.SCANNING:
             # A scan caught mid-crawl isn't a failure. Record it as cancelled
             # (neutral) with a note in the summary, not a red error.
@@ -1927,7 +1971,7 @@ def restore_jobs(
                 job.summary = "Interrupted by a restart. Run the scan again to retry."
             job.finished_at = time.time()
             interrupted += 1
-            job_persistence.persist(job)
+            _persist_restored_transition(job, previous_status)
         elif status == JobStatus.AWAITING_REVIEW:
             if job.recoveries:
                 # Older builds could re-park a Repair after its originals had
@@ -1938,7 +1982,7 @@ def restore_jobs(
                              "retrying this repair.")
                 job.finished_at = time.time()
                 interrupted += 1
-                job_persistence.persist(job)
+                _persist_restored_transition(job, previous_status)
             elif job.execute_args_unreadable:
                 job.status = JobStatus.FAILED
                 job.error = (
@@ -1947,14 +1991,14 @@ def restore_jobs(
                 )
                 job.finished_at = time.time()
                 interrupted += 1
-                job_persistence.persist(job)
+                _persist_restored_transition(job, previous_status)
             elif (factory := execute_registry.get(job.execute_kind)) is None:
                 job.status = JobStatus.FAILED
                 job.error = ("Couldn't restore this job's executor across "
                              "the restart. Re-run the original scan.")
                 job.finished_at = time.time()
                 interrupted += 1
-                job_persistence.persist(job)
+                _persist_restored_transition(job, previous_status)
             else:
                 try:
                     execute_fn = factory(job, job.execute_args)
@@ -1969,7 +2013,7 @@ def restore_jobs(
                     )
                     job.finished_at = time.time()
                     interrupted += 1
-                    job_persistence.persist(job)
+                    _persist_restored_transition(job, previous_status)
                 else:
                     job._execute_fn = execute_fn
                     review += 1
@@ -1984,6 +2028,8 @@ def restore_jobs(
             registry._jobs[job.id] = job
             registry._order.append(job.id)
         registry._prune_locked()
+    for payload in terminal_payloads:
+        _start_post_job_hook(payload)
     if interrupted or review:
         logging.getLogger("qobuz_librarian").info(
             "Restored %s / %s / %s from the previous run.",
@@ -2046,6 +2092,7 @@ def _finish_canceled(job: Job) -> bool:
         _mark_final_save_failure(job)
         job.end_stream()
         return False
+    _start_post_job_hook_for_job(job)
     job.end_stream()
     return True
 
@@ -2100,6 +2147,7 @@ def request_cancel(job: Job) -> bool:
         else:
             job.cancel_requested = True
     if canceled_pending:
+        _start_post_job_hook_for_job(job)
         job.end_stream()
     return True
 

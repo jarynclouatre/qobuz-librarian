@@ -74,7 +74,7 @@ def run_library_lyrics_mode(args):
         )
     except KeyboardInterrupt:
         print()
-        log.info(fmt(C.GRAY,
+        log.warning(fmt(C.YELLOW,
             "  Interrupted. What was done is saved; re-run to continue."))
         return EXIT_GENERAL
     finally:

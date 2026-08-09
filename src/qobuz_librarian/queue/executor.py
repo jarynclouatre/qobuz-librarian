@@ -1067,6 +1067,18 @@ def _downsample_outcome_needs_attention(item):
     )
 
 
+def _queue_outcome_needs_attention(item):
+    verdict = item.get("quality_verdict") or {}
+    return bool(
+        _downsample_outcome_needs_attention(item)
+        or item.get("upgrade_unverified", False)
+        or item.get("catalogue_unverified", False)
+        or item.get("recovery_unverified", False)
+        or item.get("_siblings_preserved")
+        or (verdict.get("under") and not verdict.get("recovered"))
+    )
+
+
 def _import_album_with_retry(
         album_dirs, *, ownership_out=None, source_receipts=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
@@ -1300,7 +1312,14 @@ def _reunite_split_album(
     return post_dir
 
 
-def _resolve_queue_item(item, args, imported_globally, *, authority=None):
+def _resolve_queue_item(
+    item,
+    args,
+    imported_globally,
+    *,
+    authority=None,
+    record_fetch=True,
+):
     """Resolve backup and compute result for one completed queue item.
 
     Handles art cleanup, safe folder consolidation, sibling retention, and
@@ -1657,6 +1676,8 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                         replacement_path,
                         replacement_receipt,
                     ):
+                        item["upgrade_unverified"] = True
+                        item["catalogue_unverified"] = True
                         if not pin_unverified_upgrade_backup(
                                 bp,
                                 "upgrade kept; the replaced Beets entries "
@@ -1672,6 +1693,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                         expected_replacement_receipt=replacement_receipt,
                         replacement_validator=_upgrade_trees_verified,
                     ):
+                        item["upgrade_unverified"] = True
                         if not pin_unverified_upgrade_backup(
                                 bp,
                                 "upgrade kept; final exact replacement "
@@ -1681,6 +1703,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                             f"  ⚠  Couldn't safely remove the exact backup "
                             f"for {truncate(album_dir.name, 40)}."))
                 else:
+                    item["upgrade_unverified"] = True
                     if not pin_unverified_upgrade_backup(bp):
                         warn_pin_failed(bp)
                     log.info(fmt(C.YELLOW,
@@ -1691,6 +1714,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                         f"     Backup at {bp}; keep it until you've confirmed "
                         "the rebuilt album is safe."))
             else:
+                item["upgrade_unverified"] = True
                 if not pin_unverified_upgrade_backup(bp):
                     warn_pin_failed(bp)
                 log.info(fmt(C.YELLOW,
@@ -1705,6 +1729,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
             # matcher found), so post_dir fell back to the original we'd moved
             # aside. Restoring it now would duplicate the content beside the
             # fresh import. Keep the backup and let the user reconcile.
+            item["upgrade_unverified"] = True
             if not pin_unverified_upgrade_backup(
                     bp,
                     "upgrade backup kept; the clean imported replacement "
@@ -1718,6 +1743,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                 f"     Backup at {bp}; remove it once you've confirmed the "
                 f"upgrade landed."))
         elif args.no_import:
+            item["upgrade_unverified"] = True
             if not pin_unverified_upgrade_backup(
                     bp,
                     "upgrade backup kept; --no-import leaves the replacement "
@@ -1731,6 +1757,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
             if restore_upgrade_backup(bp, album_dir):
                 log.info(fmt(C.GREEN, f"  ✓  Restored {truncate(album_dir.name, 50)}"))
             else:
+                item["upgrade_unverified"] = True
                 if not pin_unverified_upgrade_backup(
                         bp,
                         "upgrade backup kept; automatic restore did not "
@@ -1770,6 +1797,8 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                 post_dir,
                 _filled_receipt,
             ):
+                item["recovery_unverified"] = True
+                item["catalogue_unverified"] = True
                 if not pin_unverified_upgrade_backup(
                         gfb,
                         "gap-fill backup kept; the replaced Beets entries "
@@ -1790,6 +1819,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                     )
                 ),
             ):
+                item["recovery_unverified"] = True
                 if not pin_unverified_upgrade_backup(
                         gfb,
                         "gap-fill backup kept; final exact replacement "
@@ -1799,6 +1829,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                     "  ⚠  Gap-fill complete but the exact backup couldn't "
                     "be safely removed."))
         elif _item_strict_success and _filled_whole:
+            item["recovery_unverified"] = True
             if not pin_unverified_upgrade_backup(
                     gfb, "gap-fill backup kept; replacement not durable"):
                 warn_pin_failed(gfb)
@@ -1815,6 +1846,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
             # strand them beside the fresh import and destroy the only backup
             # Keep it and let the user reconcile, exactly as the upgrade
             # branch above does.
+            item["recovery_unverified"] = True
             if not pin_unverified_upgrade_backup(
                     gfb,
                     "gap-fill backup kept; the clean imported replacement "
@@ -1830,6 +1862,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
         else:
             _restore_target = album_dir or post_dir
             if _restore_target is None:
+                item["recovery_unverified"] = True
                 if not pin_unverified_upgrade_backup(
                         gfb,
                         "gap-fill backup kept; no bound album path was "
@@ -1858,6 +1891,7 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
                         f"  ✓  Restored {_n_back} track(s) to "
                         f"{truncate(_restore_target.name, 50)}"))
                 else:
+                    item["recovery_unverified"] = True
                     if gfb.exists() and not pin_unverified_upgrade_backup(
                             gfb,
                             "gap-fill backup kept; automatic restore was "
@@ -1870,22 +1904,17 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
     n_ok = item.get("n_ok", 0)
     n_fail = item.get("n_fail", 0)
     n_retryable, n_lossy_only = incomplete_track_counts(item)
-    downsample_attention = _downsample_outcome_needs_attention(item)
-    if item.get("result") == "interrupted":
-        return {"dir": album_dir, "result": "interrupted"}
-    if item.get("result") == "upgrade_aborted_backup_failed":
-        return {"dir": album_dir, "result": "upgrade_aborted_backup_failed"}
-
+    outcome_attention = _queue_outcome_needs_attention(item)
     # A stop marker (cancel discarded the staged files; disk-full / I/O / auth
     # stopped the batch) must keep its label. n_ok still counts the tracks that
     # briefly landed, so the n_ok branch below would mislabel a discarded cancel
     # as "downloaded" in the fetch log.
     _stop = item.get("result")
     if _stop in (
-            "cancelled", "disk_full", "io_error", "auth_lost",
-            "import_failed"):
+            "cancelled", "interrupted", "disk_full", "io_error", "auth_lost",
+            "import_failed", "upgrade_aborted_backup_failed"):
         status = _stop
-    elif n_ok and (n_retryable or n_lossy_only or downsample_attention):
+    elif n_ok and (n_retryable or n_lossy_only or outcome_attention):
         status = "partial"
     elif n_ok:
         status = "downloaded"
@@ -1894,31 +1923,43 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
     else:
         status = "nothing_landed"
 
-    log_fetch({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "album_id": item["album"].get("id"),
-        "artist": (item["album"].get("artist") or {}).get("name"),
-        "title": item["album"].get("title"),
-        "result": status,
-        "tracks_total": len((item["album"].get("tracks") or {}).get("items") or []),
-        "tracks_downloaded": n_ok,
-        "tracks_failed": n_fail,
-        "tracks_lossy_deleted": item.get("n_lossy", 0),
-        "failed_titles": item.get("failed_tracks", []),
-        "lossy_titles": item.get("lossy_tracks", []),
-        "broken_titles": item.get("broken_tracks", []),
-        "downsample_errors": item.get("downsample_errors", 0),
-        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
-        "downsample_flush_warnings": item.get(
-            "downsample_flush_warnings", 0
-        ),
-        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
-        "siblings_preserved": item.get("_siblings_preserved", []),
-        "imported": imported_globally,
-        "auto_upgrade": item["auto_upgrade"],
-        "elapsed_s": int(item.get("elapsed", 0)),
-        "queued": True,
-    })
+    if record_fetch:
+        log_fetch({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "album_id": item["album"].get("id"),
+            "artist": (item["album"].get("artist") or {}).get("name"),
+            "title": item["album"].get("title"),
+            "result": status,
+            "tracks_total": len(
+                (item["album"].get("tracks") or {}).get("items") or []
+            ),
+            "tracks_downloaded": n_ok,
+            "tracks_failed": n_fail,
+            "tracks_lossy_deleted": item.get("n_lossy", 0),
+            "failed_titles": item.get("failed_tracks", []),
+            "lossy_titles": item.get("lossy_tracks", []),
+            "broken_titles": item.get("broken_tracks", []),
+            "downsample_errors": item.get("downsample_errors", 0),
+            "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
+            "downsample_flush_warnings": item.get(
+                "downsample_flush_warnings", 0
+            ),
+            "downsample_cancelled": bool(
+                item.get("downsample_cancelled", False)
+            ),
+            "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
+            "catalogue_unverified": bool(
+                item.get("catalogue_unverified", False)
+            ),
+            "recovery_unverified": bool(
+                item.get("recovery_unverified", False)
+            ),
+            "siblings_preserved": item.get("_siblings_preserved", []),
+            "imported": imported_globally,
+            "auto_upgrade": item["auto_upgrade"],
+            "elapsed_s": int(item.get("elapsed", 0)),
+            "queued": True,
+        })
     return {
         "dir": album_dir,
         "result": status,
@@ -1936,6 +1977,10 @@ def _resolve_queue_item(item, args, imported_globally, *, authority=None):
             "downsample_flush_warnings", 0
         ),
         "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
+        "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
+        "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
+        "recovery_unverified": bool(item.get("recovery_unverified", False)),
+        "quality_verdict": item.get("quality_verdict"),
         "siblings_preserved": item.get("_siblings_preserved", []),
         "imported": imported_globally,
         "auto_upgrade": item["auto_upgrade"],
@@ -2297,8 +2342,8 @@ def _durable_completed_result(item, post_dir):
     n_ok = item.get("n_ok", 0)
     n_fail = item.get("n_fail", 0)
     n_retryable, n_lossy_only = incomplete_track_counts(item)
-    downsample_attention = _downsample_outcome_needs_attention(item)
-    if n_ok and (n_retryable or n_lossy_only or downsample_attention):
+    outcome_attention = _queue_outcome_needs_attention(item)
+    if n_ok and (n_retryable or n_lossy_only or outcome_attention):
         status = "partial"
     elif n_retryable or n_lossy_only:
         status = "failed"
@@ -2325,6 +2370,9 @@ def _durable_completed_result(item, post_dir):
             "downsample_flush_warnings", 0
         ),
         "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
+        "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
+        "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
+        "recovery_unverified": bool(item.get("recovery_unverified", False)),
         "siblings_preserved": [],
         "imported": True,
         "auto_upgrade": bool(item.get("auto_upgrade")),
@@ -2348,6 +2396,10 @@ def _durable_completed_result(item, post_dir):
             "downsample_flush_warnings", 0
         ),
         "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
+        "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
+        "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
+        "recovery_unverified": bool(item.get("recovery_unverified", False)),
+        "quality_verdict": item.get("quality_verdict"),
         "siblings_preserved": [],
         "imported": True,
         "auto_upgrade": bool(item.get("auto_upgrade")),
@@ -2519,7 +2571,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                               else "io_error" if io_error
                               else "auth_lost")
         results.append(_resolve_queue_item(
-            item, args, False, authority=authority))
+            item,
+            args,
+            False,
+            authority=authority,
+            record_fetch=False,
+        ))
 
     def _handle_download_exception(item, exc):
         nonlocal interrupted, disk_full, io_error, auth_lost_exc
@@ -2765,6 +2822,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         # _queue_item_needs_retry and left in the queue forever.
         item["result"] = None
         item["quality_verdict"] = None
+        item["upgrade_unverified"] = False
+        item["catalogue_unverified"] = False
+        item["recovery_unverified"] = False
         item["resampled_n"] = 0
         item.update(
             downsample_errors=0,

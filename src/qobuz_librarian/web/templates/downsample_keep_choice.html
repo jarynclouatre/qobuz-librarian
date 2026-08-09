@@ -16,11 +16,13 @@
     <div class="ql-work-card-actions gap-3">
       <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
         <input type="hidden" name="keep_choice" value="keep">
         <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Keep a backup</button>
       </form>
       <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
         <input type="hidden" name="keep_choice" value="delete">
         <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Delete, save space</button>
       </form>

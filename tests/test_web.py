@@ -132,6 +132,49 @@ def test_submit_refuses_job_without_durable_admission(monkeypatch):
     assert work.empty()
 
 
+def test_worker_readmission_failure_finishes_and_notifies(monkeypatch):
+    registry = jm.JobRegistry()
+    job = jm.Job(id="worker-admission-failed", title="Album")
+    job._durability_required = True
+    registry.add(job)
+    stop = threading.Event()
+    ran = []
+    persisted = []
+    sent = []
+
+    class OneItemQueue:
+        def get(self, timeout):
+            stop.set()
+            return job, lambda _job: ran.append(True)
+
+        @staticmethod
+        def task_done():
+            return None
+
+    monkeypatch.setattr(jm, "registry", registry)
+    monkeypatch.setattr(jm, "_stop_event", stop)
+    monkeypatch.setattr(jm.job_persistence, "admit", lambda _job: False)
+    monkeypatch.setattr(
+        jm.job_persistence,
+        "persist",
+        lambda current: persisted.append(current.status.value) or True,
+    )
+    monkeypatch.setattr(
+        jm,
+        "_start_post_job_hook",
+        lambda payload: sent.append(
+            (list(persisted), payload["id"], payload["status"])
+        ),
+    )
+
+    jm._worker_loop(OneItemQueue())
+
+    assert ran == []
+    assert job.status is jm.JobStatus.FAILED
+    assert persisted == ["failed"]
+    assert sent == [(["failed"], job.id, "failed")]
+
+
 @pytest.mark.parametrize(
     ("command", "timeout", "expected"),
     [
@@ -195,6 +238,60 @@ def test_post_job_hook_receives_the_terminal_snapshot(monkeypatch):
     assert received[0]["status"] == "failed"
     assert received[0]["error"] == "download failed"
     assert received[0]["finished_at"] == 123.0
+
+
+def test_auth_loss_hook_keeps_the_normal_payload_contract(monkeypatch):
+    received = []
+    ordinary = jm.Job(title="Album", artist="Artist")
+    ordinary.status = jm.JobStatus.DONE
+    ordinary.finished_at = 123.0
+
+    monkeypatch.setattr(
+        jm,
+        "_start_post_job_hook",
+        lambda payload: received.append(dict(payload)),
+    )
+
+    jm.fire_auth_lost_hook()
+
+    payload = received[0]
+    assert set(payload) == set(jm._post_job_hook_payload(ordinary))
+    assert payload["status"] == "auth_lost"
+    assert payload["display_title"] == payload["title"]
+    assert isinstance(payload["finished_at"], float)
+
+
+def test_post_job_hook_covers_non_worker_terminal_paths(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        jm,
+        "_start_post_job_hook",
+        lambda payload: sent.append((payload["id"], payload["status"])),
+    )
+    monkeypatch.setattr(jm.job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(jm.job_persistence, "_persist_locked", lambda _job: True)
+
+    pending = jm.Job(id="pending-cancel")
+    pending._durability_required = True
+    assert jm.request_cancel(pending) is True
+
+    discarded = jm.Job(
+        id="review-discard",
+        status=jm.JobStatus.AWAITING_REVIEW,
+    )
+    assert jm.cancel_review(discarded) is True
+
+    emptied = jm.Job(
+        id="review-finished",
+        status=jm.JobStatus.AWAITING_REVIEW,
+    )
+    assert jm.finalize_review_if_empty(emptied) is True
+
+    assert sent == [
+        ("pending-cancel", "canceled"),
+        ("review-discard", "canceled"),
+        ("review-finished", "done"),
+    ]
 
 
 def test_post_job_hook_drain_waits_for_a_running_hook(monkeypatch):
@@ -1643,10 +1740,12 @@ def test_first_downsample_prompts_for_keep_choice_then_saves_it(
     one-time prompt instead of rewriting anything; picking one saves it to the
     real setting and the run proceeds, so a returning user is never asked again."""
     from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows
     from qobuz_librarian.web import jobs as job_mgr
     from qobuz_librarian.web import settings_store as ss
 
     monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(ss, "_pending_apply", None)
     monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", None)
     monkeypatch.setattr(
         "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
@@ -1667,16 +1766,123 @@ def test_first_downsample_prompts_for_keep_choice_then_saves_it(
     client.post(f"/jobs/{job.id}/select",
                 data={"cid": job.candidates[0]["cid"], "checked": "1"})
 
-    r = client.post(f"/jobs/{job.id}/approve", follow_redirects=False)
+    r = client.post(
+        f"/jobs/{job.id}/approve",
+        data={"downsample_policy": ""},
+        follow_redirects=False,
+    )
     assert r.status_code == 200
     assert "Before your first downsample" in r.text
+    assert 'name="downsample_policy" value=""' in r.text
     assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
     assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
 
-    r2 = client.post(f"/jobs/{job.id}/approve",
-                     data={"keep_choice": "keep"}, follow_redirects=False)
+    real_write = ss._atomic_write_settings
+    monkeypatch.setattr(ss, "_atomic_write_settings", lambda _data: False)
+    failed = client.post(
+        f"/jobs/{job.id}/approve",
+        data={"keep_choice": "keep", "downsample_policy": ""},
+        follow_redirects=False,
+    )
+    assert failed.status_code == 303
+    assert "error=" in failed.headers["location"]
+    assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
+    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
+
+    monkeypatch.setattr(ss, "_atomic_write_settings", real_write)
+    # A download in the other worker lane defers global settings application.
+    # This approval must still carry the saved keep policy into its own
+    # destructive run instead of reading the old None as "delete".
+    monkeypatch.setattr(ss, "_any_active_job", lambda: True)
+    r2 = client.post(
+        f"/jobs/{job.id}/approve",
+        data={"keep_choice": "keep", "downsample_policy": ""},
+        follow_redirects=False,
+    )
     assert r2.status_code == 303
-    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
+    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
+    assert ss.current()["DOWNSAMPLE_KEEP_ORIGINALS"] == "keep"
+    assert job.execute_args["keep_originals"] is True
+
+    received = []
+    monkeypatch.setattr(
+        flows,
+        "execute_downsamples",
+        lambda _job, _chosen, **kwargs: received.append(
+            kwargs["keep_originals"]
+        ),
+    )
+    job._execute_fn(job, job.selected_candidates())
+    assert received == [True]
+
+
+def test_downsample_confirmation_matches_a_deferred_delete_policy(
+        client, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import jobs as job_mgr
+    from qobuz_librarian.web import settings_store as ss
+
+    # A review that promised retained originals must not silently switch to a
+    # deferred delete policy saved in another tab before the approval lands.
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", "keep")
+    monkeypatch.setattr(ss, "_pending_apply", None)
+    monkeypatch.setattr(
+        "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE",
+        True,
+    )
+    monkeypatch.setattr(job_mgr._scan_queue, "put", lambda _item: None)
+    job = job_mgr.Job(
+        title="Deferred policy review",
+        kind="scan",
+        execute_kind="downsample",
+        review_verb="Downsample",
+        status=job_mgr.JobStatus.AWAITING_REVIEW,
+    )
+    job._execute_fn = lambda _job, _chosen: None
+    job.add_candidate(
+        "downsample",
+        "Album",
+        "Artist",
+        payload={"album_dir": "/music/Artist/Album"},
+        selected=True,
+    )
+    job_mgr.registry.add(job)
+    try:
+        page = client.get(f"/jobs/{job.id}")
+        assert "hi-res originals are kept" in page.text
+        assert 'name="downsample_policy" value="keep"' in page.text
+
+        monkeypatch.setattr(
+            ss,
+            "_pending_apply",
+            {"DOWNSAMPLE_KEEP_ORIGINALS": "delete"},
+        )
+        stale = client.post(
+            f"/jobs/{job.id}/approve",
+            data={"downsample_policy": "keep"},
+            follow_redirects=False,
+        )
+
+        assert stale.status_code == 303
+        assert "error=" in stale.headers["location"]
+        assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
+        assert "keep_originals" not in job.execute_args
+
+        updated = client.get(f"/jobs/{job.id}")
+        assert "hi-res originals are not kept" in updated.text
+        assert 'name="downsample_policy" value="delete"' in updated.text
+        assert "data-confirm-danger" in updated.text
+
+        response = client.post(
+            f"/jobs/{job.id}/approve",
+            data={"downsample_policy": "delete"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert job.execute_args["keep_originals"] is False
+    finally:
+        _remove_job(job)
 
 
 
@@ -2758,6 +2964,12 @@ def test_one_broken_review_does_not_abort_job_restore(monkeypatch):
     assert job_persistence.persist(healthy)
 
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    sent = []
+    monkeypatch.setattr(
+        jm,
+        "_start_post_job_hook",
+        lambda payload: sent.append((payload["id"], payload["status"])),
+    )
 
     def migration_factory(_job, args):
         Path(args["src"])
@@ -2770,6 +2982,33 @@ def test_one_broken_review_does_not_abort_job_restore(monkeypatch):
     assert "couldn't be restored" in restored_broken.error
     assert jm.registry.get(healthy.id).status == jm.JobStatus.DONE
     assert job_persistence.load_one(broken.id)["status"] == "failed"
+    assert sent == [(broken.id, "failed")]
+
+
+def test_restore_reports_a_terminal_state_that_could_not_be_saved(monkeypatch):
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    saved = jm.Job(title="Interrupted scan")
+    saved.kind = "scan"
+    saved.status = jm.JobStatus.SCANNING
+    assert job_persistence.persist(saved)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    monkeypatch.setattr(job_persistence, "persist", lambda _job: False)
+    sent = []
+    monkeypatch.setattr(jm, "_start_post_job_hook", sent.append)
+
+    jm.restore_jobs({})
+
+    restored = jm.registry.get(saved.id)
+    assert restored.status == jm.JobStatus.FAILED
+    assert jm.JOB_FINAL_SAVE_ERROR in restored.error
+    assert job_persistence.load_one(saved.id)["status"] == "scanning"
+    assert sent == []
 
 
 def test_rehydrated_review_never_mints_colliding_cids(monkeypatch):
@@ -3795,6 +4034,54 @@ def test_shutdown_keeps_run_lock_until_workers_and_direct_writes_settle(
 
 
 
+def test_shutdown_ignores_late_token_probe_callback_after_draining_hooks(
+        monkeypatch):
+    import qobuz_librarian.web.app as app_mod
+    from qobuz_librarian.api import auth
+    from qobuz_librarian.api import client as api_client
+
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    probe_finished = threading.Event()
+    events = []
+    monkeypatch.setattr(app_mod, "_SHUTTING_DOWN", False)
+    monkeypatch.setattr(app_mod, "_TOKEN_VALID", True)
+    monkeypatch.setattr(app_mod, "_read_creds", lambda: {"auth_token": "token"})
+    monkeypatch.setattr(auth, "_auth_state_listeners", [app_mod._on_auth_state])
+    monkeypatch.setattr(
+        app_mod.job_mgr,
+        "fire_auth_lost_hook",
+        lambda: events.append("hook"),
+    )
+
+    def blocked_call_within(_timeout, _fn, _token):
+        probe_started.set()
+        assert release_probe.wait(timeout=2)
+        auth.notify_auth_state(False)
+        probe_finished.set()
+        return "rejected"
+
+    monkeypatch.setattr(api_client, "call_within", blocked_call_within)
+
+    async def scenario():
+        probe_task = asyncio.create_task(app_mod._probe_token())
+        assert await asyncio.to_thread(probe_started.wait, 2)
+        monkeypatch.setattr(
+            app_mod,
+            "_shutdown_web_mutations",
+            lambda: events.append("drained"),
+        )
+        await app_mod._finish_web_lifespan(None, None, None, probe_task)
+        assert events == ["drained"]
+        release_probe.set()
+        assert await asyncio.to_thread(probe_finished.wait, 2)
+
+    asyncio.run(scenario())
+
+    assert events == ["drained"]
+    assert app_mod._TOKEN_VALID is True
+
+
 def test_resuming_web_mode_restores_saved_jobs_before_unpausing(
         client, monkeypatch):
     import qobuz_librarian.web.app as app_mod
@@ -3968,6 +4255,42 @@ def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path)
     monkeypatch.setenv("WEB_AUTH_PASSWORD_FILE", str(password_file))
     assert web_auth.apply_env_credentials() == "applied"
     assert web_auth.verify_login("admin", "ember orbit atlas")
+
+    monkeypatch.setattr(cfg, "WEB_AUTH_FILE", tmp_path / "missing_file_auth.json")
+    monkeypatch.setenv(
+        "WEB_AUTH_PASSWORD_FILE",
+        str(tmp_path / "missing_web_password"),
+    )
+    with pytest.raises(web_auth.CredentialSeedError,
+                       match="WEB_AUTH_PASSWORD_FILE could not be read"):
+        web_auth.apply_env_credentials()
+    assert not cfg.WEB_AUTH_FILE.exists()
+
+
+@pytest.mark.parametrize(
+    ("seed_status", "message"),
+    [
+        ("partial", "Incomplete web login seed"),
+        ("failed", "seeded web login could not be saved"),
+    ],
+)
+def test_startup_refuses_an_explicit_web_login_seed_that_left_setup_open(
+        monkeypatch, seed_status, message):
+    from qobuz_librarian.ui_cli import logging as cli_logging
+    from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(cli_logging, "attach_file_handler", lambda *_args: None)
+    monkeypatch.setattr(web_auth, "auth_disabled", lambda: False)
+    monkeypatch.setattr(web_auth, "apply_env_credentials", lambda: seed_status)
+    monkeypatch.setattr(web_auth, "credentials_configured", lambda: False)
+
+    async def start():
+        async with app_mod._lifespan(app_mod.app):
+            raise AssertionError("startup should have refused the open setup")
+
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(start())
 
 
 def test_login_rejects_wrong_password(monkeypatch, tmp_path):
@@ -4295,6 +4618,10 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_pat
     job.summary = "Checked 4 albums; 1 was repaired."
     job.error = "1 album couldn't be repaired."
     job.recoveries = [_repair_recovery_record(backup)]
+    job.LOG_CAP = 1
+    job.log_lines = [
+        f"prior line {number}" for number in range(job._LOG_SLACK + 1)
+    ]
     jm.registry.add(job)
     try:
         assert job_persistence.persist(job)
@@ -4319,6 +4646,7 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_pat
         assert saved["attention"] == ""
         assert "no kept originals remain" in saved["summary"]
         assert str(backup) in saved["log_lines"][-1]
+        assert str(backup) in job.log_lines[-1]
         assert job_persistence.recovery_history() == []
 
         job_persistence.clear_history()
@@ -4425,6 +4753,30 @@ def test_auth_loss_fires_the_hook_once_per_transition(monkeypatch):
     app_mod._on_auth_state(True)
     app_mod._on_auth_state(False)
     assert len(calls) == 2
+
+
+def test_startup_probe_rejection_fires_the_auth_loss_hook_once(monkeypatch):
+    from qobuz_librarian.web import app as app_mod
+
+    calls = []
+    monkeypatch.setattr(
+        app_mod,
+        "_read_creds",
+        lambda: {"auth_token": "rejected-token", "user_id": "user"},
+    )
+    monkeypatch.setattr(app_mod, "_classify_token", lambda _token: "rejected")
+    monkeypatch.setattr(
+        app_mod.job_mgr,
+        "fire_auth_lost_hook",
+        lambda: calls.append(1),
+    )
+    monkeypatch.setattr(app_mod, "_TOKEN_VALID", None)
+
+    asyncio.run(app_mod._probe_token())
+    asyncio.run(app_mod._probe_token())
+
+    assert app_mod._TOKEN_VALID is False
+    assert calls == [1]
 
 
 def test_refresh_folds_into_parked_library_review(monkeypatch):

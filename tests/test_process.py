@@ -205,6 +205,17 @@ def test_treat_as_new_downloads_an_owned_album_as_a_separate_edition(monkeypatch
     assert proc.process_album(album, _args(), token="tok")["result"] == "already_complete"
     assert consolidate_seen == []
 
+    monkeypatch.setattr(
+        proc,
+        "consolidate_albums",
+        lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    interrupted = proc.process_album(
+        album, _args(consolidate=True), token="tok"
+    )
+    assert interrupted["result"] == "already_complete"
+    assert interrupted["consolidation_interrupted"] is True
+
     result = proc.process_album(album, _args(), token="tok", treat_as_new=True)
     assert result.get("imported") is True
     assert consolidate_seen == [False]
@@ -425,6 +436,7 @@ def test_self_heal_retry_no_files_imports_first_staged_rip(
     result = proc.process_album(album, _args(), token="tok")
 
     assert result["imported"] is True
+    assert result["result"] == "partial"
     assert imported == [first_staged / "01.flac"]
     assert (first_staged / "01.flac").read_bytes() == b"first"
 

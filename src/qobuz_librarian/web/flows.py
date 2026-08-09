@@ -2169,7 +2169,8 @@ def scan_downsamples(job):
     log.info(job.summary)
 
 
-def execute_downsamples(job, chosen, token=None, args=None):
+def execute_downsamples(
+        job, chosen, token=None, args=None, keep_originals=None):
     """Shrink the chosen albums' hi-res FLACs to CD rate, in place.
 
     Each file is decode-verified before it overwrites the original (in
@@ -2179,6 +2180,9 @@ def execute_downsamples(job, chosen, token=None, args=None):
     from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
     from qobuz_librarian.quality.decision import mark_local_album_capped
     from qobuz_librarian.web.jobs import staging_lock
+
+    if type(keep_originals) is not bool:
+        keep_originals = cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
 
     if not HAVE_DOWNSAMPLE:
         job.error = "Downsampling isn't available on this server."
@@ -2248,7 +2252,7 @@ def execute_downsamples(job, chosen, token=None, args=None):
             with staging_lock():
                 res = downsample_dir(album_dir, verbose=True,
                                      base_dir=album_dir, log=log.info,
-                                     keep_originals=cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep",
+                                     keep_originals=keep_originals,
                                      cancel_check=lambda: job.cancel_requested)
         except Exception as e:
             log.info(f"  failed: {e}")

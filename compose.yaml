@@ -85,6 +85,8 @@ services:
       # ── Web UI ─────────────────────────────────────────────────────────────
       WEB_HOST: "0.0.0.0"
       WEB_PORT: "8666"
+      # Used only when CLI help/recovery text names the host-side web URL.
+      WEB_PUBLIC_PORT: "${WEB_PORT:-8666}"
       # Login. Unset (or any value other than "none") = the UI prompts you to
       # set a username/password on first visit and requires sign-in after.
       # "none" turns the login off entirely; only safe on a trusted network or
@@ -234,6 +236,11 @@ services:
       # QL_WEB_TEST_AUTH_TIMEOUT bounds the startup + Settings token probe.
       QL_WEB_FETCH_TIMEOUT:     "${QL_WEB_FETCH_TIMEOUT:-12.0}"
       QL_WEB_TEST_AUTH_TIMEOUT: "${QL_WEB_TEST_AUTH_TIMEOUT:-8.0}"
+
+      # Bound each live job log and the history replay sent to a newly opened
+      # progress stream. Set replay to 0 to show live output only.
+      JOB_LOG_CAP:         "${JOB_LOG_CAP:-5000}"
+      JOB_LOG_REPLAY_TAIL: "${JOB_LOG_REPLAY_TAIL:-500}"
 
       # Web live-update streams. Each open progress or review stream uses a
       # worker while it waits; heartbeat ticks are 0.5 seconds each.

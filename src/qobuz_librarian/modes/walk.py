@@ -21,7 +21,7 @@ from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.queue.journal import QueueJournalBlocked
 from qobuz_librarian.queue.persistence import clear_pending_queue, save_pending_queue
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
-from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 
@@ -228,7 +228,7 @@ def run_album_walk_mode(args, token):
     all_artists = list_library_artists()
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
-        return
+        return 0
 
     vlog(f"  {plural(len(all_artists), 'artist')} in library.")
     try:
@@ -242,7 +242,7 @@ def run_album_walk_mode(args, token):
         artists = [a for a in all_artists if flt in a.name.lower()]
         log.info(fmt(C.GRAY, f"  {len(artists)} artist(s) match {flt!r}."))
         if not artists:
-            return
+            return 0
 
     seen = load_album_walk_seen()
     if seen:
@@ -270,6 +270,8 @@ def run_album_walk_mode(args, token):
     n_albums_unplaced = 0
     n_albums_filled = 0
     interrupted = False
+    partial_completion = False
+    retry_needed = False
 
     _save_queue = _queue_saver("album_walk")
 
@@ -277,7 +279,7 @@ def run_album_walk_mode(args, token):
         _save_queue(shared_queue)
 
     def _flush_queue():
-        nonlocal n_albums_filled
+        nonlocal n_albums_filled, partial_completion, retry_needed
         if not shared_queue:
             log.info(fmt(C.GRAY, "    Queue is empty; nothing to flush."))
             return
@@ -289,6 +291,10 @@ def run_album_walk_mode(args, token):
             refresh_review=True)
         if args.dry_run:
             return
+        partial_completion = partial_completion or any(
+            r.get("result") == "partial" for r in results
+        )
+        retry_needed = not drained
         n_albums_filled += sum(1 for r in results
                                if r.get("result") in ("downloaded", "partial"))
         if drained:
@@ -407,9 +413,11 @@ def run_album_walk_mode(args, token):
                 f"persisted to {cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    if interrupted:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠ Album walk stopped early. "
+    needs_attention = interrupted or partial_completion or retry_needed
+    if needs_attention:
+        outcome = "stopped early" if interrupted else "needs attention"
+        log.warning(fmt(C.YELLOW,
+            f"  ⚠ Album walk {outcome}. "
             f"Artists scanned: {n_artists_scanned} · "
             f"Already complete: {n_albums_complete} · "
             f"Filled: {n_albums_filled}"))
@@ -428,6 +436,7 @@ def run_album_walk_mode(args, token):
         leftovers.append(f"couldn't place: {n_albums_unplaced}")
     if leftovers:
         log.info(fmt(C.GRAY, "    " + " · ".join(leftovers)))
+    return EXIT_GENERAL if needs_attention else 0
 
 
 # ── Library walk ──────────────────────────────────────────────────────
@@ -439,7 +448,7 @@ def run_walk_queued_mode(args, token):
     all_artists = list_library_artists()
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
-        return
+        return 0
 
     seen = load_walk_seen()
     if seen:
@@ -450,7 +459,7 @@ def run_walk_queued_mode(args, token):
             vlog(f"  Hiding {n_hidden} previously-decided artist(s).")
     if not all_artists:
         log.info(fmt(C.GREEN, "  ✓  All artists already decided."))
-        return
+        return 0
 
     vlog(f"  {len(all_artists)} artist(s) to walk.")
     try:
@@ -464,7 +473,7 @@ def run_walk_queued_mode(args, token):
         artists = [a for a in all_artists if flt in a.name.lower()]
         log.info(fmt(C.GRAY, f"  {len(artists)} artist(s) match {flt!r}."))
         if not artists:
-            return
+            return 0
 
     log.info(fmt(C.GRAY,
         "  Per artist: y=scan+queue, enter/n=skip, p=process queue,"))
@@ -478,11 +487,14 @@ def run_walk_queued_mode(args, token):
     args.consolidate = False
 
     _save_queue = _queue_saver("walk_queue")
+    partial_completion = False
+    retry_needed = False
 
     def _save_now():
         _save_queue(shared_queue)
 
     def _flush_queue():
+        nonlocal partial_completion, retry_needed
         if not shared_queue:
             log.info(fmt(C.GRAY, "  Queue is empty; nothing to process."))
             return 0
@@ -493,6 +505,10 @@ def run_walk_queued_mode(args, token):
             shared_queue, args, token, on_progress=_save_now,
             refresh_review=True)
         if not args.dry_run:
+            partial_completion = partial_completion or any(
+                r.get("result") == "partial" for r in results
+            )
+            retry_needed = not drained
             if drained:
                 clear_pending_queue()
             else:
@@ -569,7 +585,7 @@ def run_walk_queued_mode(args, token):
                         (_, owned_titles, handled_ids, resolved_dirs,
                          artist_id, prefetched_catalog) = gap_fill_result
                         if not args.no_catalog:
-                            run_artist_missing_albums(
+                            _, step_two_attention = run_artist_missing_albums(
                                 artist_query, owned_titles,
                                 args, token,
                                 artist_id=artist_id,
@@ -577,6 +593,9 @@ def run_walk_queued_mode(args, token):
                                 resolved_dirs=resolved_dirs,
                                 prefetched_catalog=prefetched_catalog,
                                 shared_queue=shared_queue,
+                            )
+                            partial_completion = (
+                                partial_completion or step_two_attention
                             )
                             _save_now()
                     except KeyboardInterrupt:
@@ -651,10 +670,13 @@ def run_walk_queued_mode(args, token):
                     f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    if interrupted:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠ Walk stopped early. Scanned {n_scanned}, "
+    needs_attention = interrupted or partial_completion or retry_needed
+    if needs_attention:
+        outcome = "stopped early" if interrupted else "needs attention"
+        log.warning(fmt(C.YELLOW,
+            f"  ⚠ Walk {outcome}. Scanned {n_scanned}, "
             f"skipped {n_skipped}."))
     else:
         log.info(fmt(C.GREEN,
             f"  ✓ Walk done. Scanned {n_scanned}, skipped {n_skipped}."))
+    return EXIT_GENERAL if needs_attention else 0

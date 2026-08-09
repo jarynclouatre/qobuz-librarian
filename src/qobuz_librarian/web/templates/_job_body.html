@@ -121,6 +121,7 @@
     <form id="review-form" action="/jobs/{{ job.id }}/approve" method="post"
           data-job-id="{{ job.id }}" data-review-kind="{{ job.execute_kind }}">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      {% if job.execute_kind == 'downsample' %}<input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">{% endif %}
       {% if review_tab %}<input type="hidden" name="tab" id="review-tab-field" value="{{ review_tab }}">{% endif %}
       {% if job.execute_kind == 'migration' and job.execute_args.get('in_place') and job.execute_args.get('requires_low_space_override') %}
       <label class="ql-option-row">
@@ -140,13 +141,13 @@
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or writes_paused %} disabled{% endif %}{% if writes_paused %} title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-            {%- if job.execute_kind == 'downsample' %} data-confirm="{% if not ds_originals_chosen() %}Downsample the selected albums now? You'll first choose whether to keep your hi-res originals; nothing is rewritten until you do.{% elif keeps_ds_originals() %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"
+            {%- if job.execute_kind == 'downsample' %} data-confirm="{% if downsample_originals_choice not in ('keep', 'delete') %}Downsample the selected albums now? You'll first choose whether to keep your hi-res originals; nothing is rewritten until you do.{% elif downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected files now? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Repair selected files ({count})? Files are replaced only after each new copy verifies."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
             {%- else %} data-confirm="Download selected albums ({count})? They queue now and import into your library."
             {%- endif %}
-            {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if ds_originals_chosen() %}Downsample{% else %}Continue{% endif %}"{% if ds_originals_chosen() and not keeps_ds_originals() %} data-confirm-danger{% endif %}
+            {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-confirm-danger{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-confirm-danger{% endif %}
             {%- elif job.execute_kind == 'repair' %} data-confirm-action="Repair"
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-confirm-danger

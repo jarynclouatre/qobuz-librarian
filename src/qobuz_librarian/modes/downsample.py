@@ -29,9 +29,9 @@ def run_downsample_walk_mode(args):
     NO; --yes accepts every one and --dry-run lists what would shrink and
     changes nothing.
 
-    Returns the exit code: 0 when the walk finished without file errors,
-    non-zero when it failed, was cut short, or couldn't ask. The interactive
-    menu ignores it; --downsample-walk exits with it.
+    Returns the exit code: 0 when the walk finished without file errors or
+    durability warnings, non-zero when it failed, was cut short, or couldn't
+    ask. The interactive menu ignores it; --downsample-walk exits with it.
     """
     clear_scan_caches()
     banner("Downsample: bring hi-res library files down to CD rate")
@@ -46,6 +46,7 @@ def run_downsample_walk_mode(args):
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found."))
         return 0
 
+    keep_originals = cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
     if cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep":
         log.info(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. A "
@@ -97,14 +98,26 @@ def run_downsample_walk_mode(args):
             default_yes=True, auto_yes=False, on_eof=None, strict=True)
         if keep is None:
             # Closed stdin never answered.
-            cfg.DOWNSAMPLE_KEEP_ORIGINALS = "keep"
+            keep_originals = True
             log.info(fmt(C.GRAY,
                 "  No input available; keeping originals for this run. "
                 "set the preference in Settings."))
         else:
             _choice = "keep" if keep else "delete"
-            settings_store.save({"DOWNSAMPLE_KEEP_ORIGINALS": _choice})
-            cfg.DOWNSAMPLE_KEEP_ORIGINALS = _choice
+            saved, _warnings = settings_store.save(
+                {"DOWNSAMPLE_KEEP_ORIGINALS": _choice}
+            )
+            if saved is not True:
+                log.warning(block(fmt(
+                    C.YELLOW,
+                    "  ✗  Couldn't save the keep-or-delete choice. No music "
+                    "files were changed; check the data folder and try again."
+                )))
+                return EXIT_CONFIG
+            # settings_store may defer changing cfg while a Web job runs. Bind
+            # this run to the answer that was just saved so "keep" cannot be
+            # misread as the still-unset default and delete the originals.
+            keep_originals = keep
             log.info(fmt(C.GRAY,
                 f"  Saved. Originals will be {'kept' if keep else 'deleted'}; "
                 "change this any time in Settings."))
@@ -179,7 +192,7 @@ def run_downsample_walk_mode(args):
                 artist_attempted = True
                 res = downsample_dir(c.album_dir, verbose=True,
                                      base_dir=c.album_dir, log=log.info,
-                                     keep_originals=cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep")
+                                     keep_originals=keep_originals)
                 if res.get("resampled"):
                     n_albums_done += 1
                     mark_local_album_capped(c.album_dir)
@@ -211,16 +224,16 @@ def run_downsample_walk_mode(args):
             f"accept all {plural(len(candidates_by_artist), 'artist')} "
             "unattended.")))
     elif interrupted:
-        log.info(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
+        log.warning(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
     elif unchecked:
         log.warning(block(fmt(C.YELLOW,
             f"  ✗  Downsample walk incomplete: {plural(unchecked, 'artist')} "
             "couldn't be checked. Re-run to retry.")))
     elif total_errors:
-        log.info(fmt(C.RED,
+        log.warning(fmt(C.RED,
             "  ✗  Downsample walk finished with errors. Re-run to retry the "
             "files left unchanged."))
-    else:
+    elif not total_flush_warns:
         log.info(fmt(C.GREEN, "  ✓  Downsample walk complete."))
     log.info(fmt(C.GRAY,
         f"     Checked {plural(n_scanned, 'artist')}; downsampled "
@@ -230,9 +243,10 @@ def run_downsample_walk_mode(args):
             f"     {plural(total_errors, 'file')} could not be downsampled "
             "(left unchanged)."))
     if total_flush_warns:
-        log.info(fmt(C.YELLOW,
-            f"     {plural(total_flush_warns, 'file')} resampled but couldn't "
-            f"be flushed to disk. The swap may not survive a power loss; "
-            f"check the drive."))
+        log.warning(block(fmt(C.YELLOW,
+            f"  ⚠  Downsample walk needs attention: "
+            f"{plural(total_flush_warns, 'file')} resampled but couldn't be "
+            "flushed to disk. The swap may not survive a power loss; check "
+            "the drive.")))
     return EXIT_GENERAL if (no_answer or interrupted or unchecked
-                            or total_errors) else 0
+                            or total_errors or total_flush_warns) else 0

@@ -46,7 +46,7 @@ def run_check_new_releases_mode(args):
         die(fmt(C.RED,
             "✗  No Qobuz credentials configured.\n"
             f"   Paste your user_auth_token on the Settings page "
-            f"(http://<host>:{cfg.WEB_PORT}/settings)\n"
+            f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
             "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
             EXIT_AUTH)
 
@@ -59,7 +59,7 @@ def run_check_new_releases_mode(args):
     artists = list_library_artists()
     if not artists:
         log.info(fmt(C.YELLOW, "No artist folders found under MUSIC_ROOT."))
-        return
+        return 0
 
     state = new_releases_mod.load()
     seen = state.get("seen") or {}
@@ -211,3 +211,12 @@ def run_check_new_releases_mode(args):
             "  ⚠  The baseline couldn't be saved. Run the check again."))
     else:
         log.info(fmt(C.GRAY, "  · Baseline recorded."))
+
+    exit_code = EXIT_GENERAL if failed_count or saved is False else 0
+    if exit_code:
+        log.warning(fmt(
+            C.YELLOW,
+            "  ⚠  New-release check incomplete; review the details above "
+            "and run it again.",
+        ))
+    return exit_code

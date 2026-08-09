@@ -2,6 +2,7 @@
 import os
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -19,13 +20,44 @@ VALID_TRACK_KEYS = {"albumartist", "albumcomposer", "artist", "composer",
                     "explicit", "id", "title", "tracknumber"}
 
 
-def test_compose_forwards_sse_tunables():
+def test_compose_forwards_web_stream_and_log_tunables():
     import yaml
 
     compose = yaml.safe_load(_COMPOSE.read_text())
     environment = compose["services"]["qobuz-librarian"]["environment"]
+    assert environment["WEB_PORT"] == "8666"
+    assert environment["WEB_PUBLIC_PORT"] == "${WEB_PORT:-8666}"
+    assert environment["JOB_LOG_CAP"] == "${JOB_LOG_CAP:-5000}"
+    assert environment["JOB_LOG_REPLAY_TAIL"] == "${JOB_LOG_REPLAY_TAIL:-500}"
     assert environment["SSE_MAX_WORKERS"] == "${SSE_MAX_WORKERS:-16}"
     assert environment["SSE_HEARTBEAT_TICKS"] == "${SSE_HEARTBEAT_TICKS:-30}"
+
+
+def test_custom_compose_web_port_reaches_cli_recovery_help():
+    import yaml
+
+    compose = yaml.safe_load(_COMPOSE.read_text())
+    service = compose["services"]["qobuz-librarian"]
+    assert "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8666}:8666" in service["ports"]
+
+    env = {
+        **os.environ,
+        "WEB_PORT": "8666",
+        "WEB_PUBLIC_PORT": "9443",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from qobuz_librarian import cli; print(cli._help_epilog())",
+        ],
+        cwd=_COMPOSE.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "http://<host>:9443/settings" in result.stdout
 
 
 def test_streamrip_default_toml_uses_valid_placeholders_and_flags():
