@@ -148,6 +148,7 @@ FROM runtime AS test
 COPY requirements-test.txt ./requirements-test.txt
 RUN pip install --no-cache-dir -r requirements-test.txt
 COPY tests/ ./tests/
+COPY compose.yaml ./compose.yaml
 COPY scripts/check_release_version.py ./scripts/check_release_version.py
 COPY docker/entrypoint.sh docker/streamrip-default.toml ./docker/
 USER appuser
