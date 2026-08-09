@@ -4,13 +4,14 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 
 ## [0.13.0] - Unreleased
 
-A focused update for dependable library maintenance and clearer status across the CLI and web interface.
+0.13.0 is mostly about interrupted work: keeping the app honest about what
+finished, what did not, and what can safely happen next.
 
-- Preserves accurate progress, history, and recovery choices when downloads are interrupted, retried, cancelled, or resumed after a restart.
-- Keeps alternate album editions and track versions distinct in Search, with durable Library review choices and clearer Repair findings.
-- Makes Repair, Migration, Downsample, and Lyrics safer around partial work, failed writes, backups, and imports.
-- Improves Queue and History status, job notifications, authentication, settings, offline use, and responsive controls across desktop and mobile.
-- Adds startup checks that keep music, staging, and backup paths separate, forwards web-stream tuning through Docker, and strengthens readiness and release validation.
+- Downloads keep their real progress and recovery choices through retries and restarts. History and post-job notifications now agree with the final result.
+- Search keeps different editions and track versions apart, while Library review choices survive refreshes and restarts.
+- Repair, Migration, Downsample, and Lyrics leave partial or unverified work recoverable instead of assuming it finished cleanly.
+- First-run settings save, logs keep the configured amount of history, and crowded Queue and History controls wrap properly on desktop and phone. Authentication and offline states are clearer too.
+- Startup catches unsafe overlap between music, staging, and backup paths. Docker passes through the web streaming settings, and release checks cover more of the image that is actually shipped.
 
 ## [0.12.1] - 2026-08-03
 
