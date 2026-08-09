@@ -1,11 +1,4 @@
-"""Validate files shipped inside the Docker image (docker/*).
-
-Catches the specific bugs that have bit us:
-- A typo'd placeholder in folder_format / track_format silently lands files
-  in the wrong layout (streamrip falls through to a default).
-- An older /config volume with downloads_enabled=true or
-  add_singles_to_folder=false carries forward across image rebuilds.
-"""
+"""Validate Docker defaults and persisted-config reconciliation."""
 import os
 import re
 import subprocess
@@ -31,7 +24,7 @@ def test_streamrip_default_toml_uses_valid_placeholders_and_flags():
     track_keys = {m.group(1) for m in _PLACEHOLDER_RE.finditer(cfg["filepaths"]["track_format"])}
     assert not (folder_keys - VALID_FOLDER_KEYS), f"folder uses unknown keys: {folder_keys - VALID_FOLDER_KEYS!r}"
     assert not (track_keys - VALID_TRACK_KEYS), f"track uses unknown keys: {track_keys - VALID_TRACK_KEYS!r}"
-    # The specific regression: '{album}' instead of '{title}' in folder_format.
+    # streamrip's folder formatter has no {album} key.
     fmt = cfg["filepaths"]["folder_format"]
     assert "{album}" not in fmt and "{album:" not in fmt
     # downloads.db dedupe is redundant with our own compute_missing logic;

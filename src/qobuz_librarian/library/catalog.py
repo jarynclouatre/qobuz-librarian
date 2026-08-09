@@ -743,9 +743,8 @@ def find_extras_in_existing(qobuz_tracks, existing_tracks):
 def album_year(album):
     """Album release year as a string, or '' if unknown.
 
-    Prefers release_date_original. Falls back to released_at parsed in UTC
-    (not local timezone - local-TZ parsing was a real bug that flipped the
-    year for albums released late at night UTC).
+    Prefers release_date_original. Falls back to released_at parsed in UTC so
+    late UTC releases keep their catalogue year in every local timezone.
     """
     rdo = album.get("release_date_original") or ""
     if isinstance(rdo, str) and rdo[:4].isdigit():

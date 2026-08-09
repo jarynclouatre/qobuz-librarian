@@ -956,15 +956,7 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
 
 def test_refill_is_not_rejected_because_another_folder_holds_that_name(
         tmp_path, monkeypatch):
-    """A track that appears on two records used to break its own repair.
-
-    before_names is the census of ONE folder, the one the resolved parent
-    album maps to. Comparing a receipt item's bare filename against it, with
-    no check that the item landed there, rejected a refill that had gone
-    somewhere else entirely because an unrelated album happened to hold a
-    track of the same name. The repair was correct on disk and the user was
-    told its location could not be proven.
-    """
+    """An unrelated same-named track cannot invalidate a proven refill."""
     repair, album_dir, landed_dir = _repair_relocation_dirs(
         tmp_path, monkeypatch)
     elsewhere = repair.cfg.MUSIC_ROOT / "Other Artist" / "Other Album (1995)"

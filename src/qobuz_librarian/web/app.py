@@ -2472,11 +2472,7 @@ async def _initial_artist_search_html(request: Request, query: str) -> str:
 
 
 def render_error_page(request, code, title, msg):
-    """The app's styled error page, reusable from middleware.
-
-    The CSRF middleware runs outside the route layer and used to answer with
-    bare text, which is how a refused action became an unstyled dead end.
-    """
+    """Render the app's styled error page from routes or middleware."""
     return _tr(request, "error.html",
                {"code": code, "title": title, "msg": msg}, status_code=code)
 
@@ -2769,8 +2765,8 @@ def _scan_target(job) -> str:
 
 def _active_scan(*kinds, statuses=("pending", "scanning"), target=_ANY_TARGET):
     """A job of one of the given execute_kinds in one of ``statuses``, or None,
-    used to fold a double-submitted pass onto the one already in flight instead
-    of stacking duplicate work. Defaults to the scan phase: a scan keeps its
+    folding a double-submitted pass onto the one already in flight instead of
+    stacking duplicate work. Defaults to the scan phase: a scan keeps its
     execute_kind through the post-review download (which runs as ``running``),
     so matching only pending/scanning lets a deliberate re-scan still queue
     behind a batch that's downloading. Run-to-completion jobs with no review

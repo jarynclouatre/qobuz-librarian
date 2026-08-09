@@ -192,11 +192,7 @@ def test_unstarted_durable_claim_returns_to_pending_when_it_cannot_replan(
 
 
 def test_durable_attention_stop_leaves_the_flush_returning(lease, stub_download):
-    """A durable item that stops for attention stays blocked in the journal on
-    purpose. Rewriting that journal as pending is exactly what must not happen,
-    so the batch-end persist has to stand down - it used to raise
-    QueueJournalBlocked straight through the walk at the moment the app had
-    correctly parked an album."""
+    """A parked attention item stays blocked without failing the batch flush."""
     from qobuz_librarian.queue.durable_runner import (
         DurableAlbumResult,
         DurableAlbumStatus,

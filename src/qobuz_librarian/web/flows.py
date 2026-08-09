@@ -75,12 +75,7 @@ def build_args():
 
 
 def _set_empty_library_summary(job):
-    """Nothing to scan. Say what the app expected to find and where to fix it.
-
-    The layout and the pointer to Settings used to go to the log, which the user
-    never sees, leaving a message that only told them to check that their folder
-    contained folders.
-    """
+    """Describe the expected layout and point an empty scan back to Settings."""
     from qobuz_librarian import config as _cfg
     from qobuz_librarian.web import jobs as _job_mgr
     job.error = (
@@ -304,10 +299,8 @@ def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False):
 def candidate_matches_query(c, q):
     """The review filter's predicate, artist or album title contains ``q``.
 
-    Shared by the fragment render and the bulk selection/dismiss endpoints so
-    what the user sees is exactly what a bulk action touches. It folds case
-    itself: it used to require a pre-lowered query, and a caller that passed
-    the raw box contents matched nothing and dismissed nothing, silently.
+    Shared by the fragment render and bulk endpoints so the visible filter and
+    affected rows remain identical. Both the query and candidate are folded.
     """
     hay = (c.get("artist") or "") + " " + (c.get("title") or "")
     return (q or "").lower() in hay.lower()

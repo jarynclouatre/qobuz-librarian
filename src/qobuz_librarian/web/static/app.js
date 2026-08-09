@@ -139,10 +139,7 @@
     }, 360);
   });
 
-  // Every global shortcut lives here. base.html used to bind "/" and Escape as
-  // well, without the modifier guards, so Ctrl+/ and friends were swallowed
-  // into the search box, and both layers ran on every keypress.
-  //
+  // Keep every global shortcut and its modifier guards in one handler.
   // "/" jumps to the search box from anywhere, unless you're already typing
   // in a field (so slashes in queries and paths still land). Pages without a
   // search box go to Search, carrying a hash so it lands focused. Escape
@@ -694,9 +691,7 @@
         }
         saveSelection();
       }
-      // "Hide owned" is a pure CSS filter, so nothing used to count what
-      // survived it: hiding every result left a blank panel under a heading
-      // that still claimed there was an album to see.
+      // "Hide owned" is a CSS filter, so update the visible count here.
       function applyOwnedFilterCount() {
         var meta = root.querySelector("[data-search-count]");
         var empty = root.querySelector("[data-owned-empty]");
@@ -827,8 +822,7 @@
         if (!keys.length || bulkButton.disabled) return;
         var forms = keys.map(firstFormForKey).filter(Boolean);
         if (!forms.length) return;
-        // The keys carry their own type ("track-…" vs "album-…"), so the noun
-        // does not have to be guessed. It used to say "albums" for tracks.
+        // The key prefix supplies the correct track or album noun.
         var nTracks = keys.filter(function (k) { return k.indexOf("track-") === 0; }).length;
         var nAlbums = keys.length - nTracks;
         function part(n, one) { return n + " " + (n === 1 ? one : one + "s"); }

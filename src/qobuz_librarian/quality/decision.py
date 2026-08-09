@@ -288,11 +288,9 @@ def is_local_album_capped(album_dir, capped, album=None):
 def clear_local_album_cap(album_dir):
     """Forget that an album was downsampled - the undo path.
 
-    The cap exists so Upgrade never re-offers an album the user deliberately
-    shrank. Restoring the hi-res originals makes that no longer true, and
-    nothing used to remove the entry, so an undone downsample left the album
-    invisible to Upgrade for good. Clears the path key and any entry that would
-    still match it by folder identity.
+    The cap keeps Upgrade from re-offering an album the user deliberately
+    shrank. Restoring the hi-res originals clears the path key and any entry
+    that still matches it by folder identity.
     """
     key = _local_album_cap_key(album_dir)
     if not key:

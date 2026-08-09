@@ -249,10 +249,7 @@ def test_scan_downgrades_a_file_that_changes_mid_check(tmp_path, _need_tools):
 
 def test_shallow_scan_files_corrupt_unmatched_isrc_under_no_match(
         tmp_path, _need_tools):
-    """A file that has an ISRC Qobuz doesn't know AND won't decode belongs
-    under the no-match heading carrying its diagnostic. It used to be appended
-    to no_isrc_tag, so the report told the user it had no ISRC tag while
-    printing the tag's own diagnostic beside it."""
+    """A corrupt unmatched ISRC keeps its diagnostic under no-match."""
     album = tmp_path / "Artist" / "Album (2020)"
     album.mkdir(parents=True)
     p = album / "01.flac"

@@ -220,10 +220,9 @@ def is_hidden(scope, artist, title, store, *, year=None):
 def hide(scope, items):
     """Record dismissals. `items` is an iterable of (artist, title, year).
 
-    Returns the number of ROWS newly recorded, which is what left the user's
-    review, not the number of fingerprints, which is smaller whenever two
-    editions of one album were both on the list. The two used to be reported
-    side by side as if they were the same number.
+    Returns the number of rows newly recorded, matching the review rows removed.
+    This may exceed the number of fingerprints when multiple editions of one
+    album appear in the review.
     """
     with _store_lock():
         store = load()

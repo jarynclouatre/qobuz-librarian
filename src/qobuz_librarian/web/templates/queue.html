@@ -106,8 +106,7 @@
 {%- endmacro %}
 
 {% if error %}
-{# Each sender writes its own complete sentence, including what to do next; the
-   page used to append generic advice to messages it could not see. #}
+{# Each sender supplies a complete error and its next action. #}
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
 {% endif %}
 

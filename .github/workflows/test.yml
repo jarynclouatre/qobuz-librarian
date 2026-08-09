@@ -91,10 +91,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Nothing else builds the image until docker.yml runs, and that only fires
-      # on release:published. A Dockerfile or image-lock.txt that no longer
-      # resolves would surface with the release already public and no image
-      # behind it. Build only, so this needs no registry credentials.
+      # Build on every push and pull request, before a release needs the image.
+      # This is build-only and needs no registry credentials.
       - name: Check runtime dependency pins
         run: python3 scripts/check_image_lock.py
 
@@ -121,9 +119,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      # Proves downsample, repair and the gap-fill backup can't eat files,
-      # against real ffmpeg/flac. It lives outside pytest on purpose, and
-      # nothing ran it automatically before, which is exactly how the harness
-      # itself once went stale with a check that couldn't fail.
+      # Exercise destructive paths against real ffmpeg and flac outside pytest.
       - name: Run the destructive-op checks
         run: python scripts/e2e_destructive_check.py

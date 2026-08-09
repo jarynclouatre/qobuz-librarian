@@ -22,11 +22,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Release gate. docker.yml is a separate workflow from test.yml, so a
-  # cross-workflow `needs:` isn't possible - the checks live here and
-  # build-and-push depends on them. This closes the gap where a published
-  # release built and pushed an image with no test, lint, or smoke gate, so a
-  # broken build/route/missing-tool could ship straight to users.
+  # docker.yml cannot depend on jobs from test.yml, so the release workflow
+  # repeats its tests, lint, runtime dependency, image and smoke gates.
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -60,10 +57,7 @@ jobs:
       - name: Image smoke test (builds the image, boots it, checks routes + bundled tools)
         run: bash scripts/smoke_test.sh
 
-      # The publish below ships linux/arm64 too, but nothing else in CI ever
-      # compiles the dependency set on arm - a pin with no arm wheel would
-      # surface for the first time in the middle of the release build. Build
-      # (not push) the arm64 image here so it fails the gate instead.
+      # Verify arm64 dependency resolution before build-and-push.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 

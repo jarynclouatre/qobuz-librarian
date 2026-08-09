@@ -49,9 +49,7 @@
     {% endif %}
     <div class="ql-review-summary-actions">
       <label class="ql-review-master">
-        {# Rendered from the saved selection, not left to the first tick: the
-           box used to read empty while everything was ticked, so the tap that
-           should clear the review selected all of it instead. #}
+        {# Render the master checkbox from the saved selection. #}
         {% set _m_total = review_tab_counts.missing if review_tab == 'missing' else review_tab_counts.gaps if review_tab == 'gaps' else review_counts.total %}
         {% set _m_selected = review_tab_counts.missing_selected if review_tab == 'missing' else review_tab_counts.gaps_selected if review_tab == 'gaps' else review_counts.selected %}
         <input type="checkbox" class="ql-checkbox" data-select-master

@@ -133,13 +133,7 @@ def test_submit_refuses_job_without_durable_admission(monkeypatch):
 
 
 def test_late_cancel_cannot_relabel_proven_durable_download(monkeypatch):
-    """Once exact durable completion settles, a racing cancel is too late.
-
-    The durable lane deliberately finishes an import after the download has
-    become complete.  A cancel arriving during that finalisation used to leave
-    ``cancel_requested`` set, so the generic worker wrapper relabelled the
-    completed album CANCELED after the queue journal had already cleared.
-    """
+    """A racing cancel cannot relabel an exact durable completion."""
     from types import SimpleNamespace
 
     from qobuz_librarian.library import catalog, hidden
@@ -1787,12 +1781,7 @@ def test_retry_keeps_the_new_edition_override(client, monkeypatch):
 def test_retry_finishes_a_download_whose_settlement_refused_after_clearing_it(
     client, monkeypatch,
 ):
-    """A download that imported and then stranded a file in staging is not a
-    pre-launch abort, so the blocked-item settler refuses it, but it parks the
-    staging on the way out, which is the whole of what the recovery was waiting
-    on. Retry used to report that refusal and leave the job Failed until it was
-    pressed a second time.
-    """
+    """Retry completes once a refused settlement parks stranded staging."""
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryResult,
         StartupRecoveryStatus,
