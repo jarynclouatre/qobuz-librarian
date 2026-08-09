@@ -132,6 +132,94 @@ def test_submit_refuses_job_without_durable_admission(monkeypatch):
     assert work.empty()
 
 
+@pytest.mark.parametrize(
+    ("command", "timeout", "expected"),
+    [
+        ("exit 17", 1, "post-job hook exited with status 17"),
+        ("sleep 5", 0.01, "post-job hook timed out"),
+    ],
+)
+def test_post_job_hook_reports_command_failures(
+    monkeypatch, caplog, command, timeout, expected,
+):
+    from qobuz_librarian import config
+
+    monkeypatch.setenv("POST_JOB_HOOK", command)
+    monkeypatch.setattr(config, "POST_JOB_HOOK_TIMEOUT", timeout)
+
+    with caplog.at_level("WARNING", logger="qobuz_librarian"):
+        jm._run_post_job_hook({"id": "inert-hook-check"})
+
+    assert expected in caplog.text
+
+
+def test_post_job_hook_delivers_json_to_an_inert_command(tmp_path, monkeypatch):
+    sink = tmp_path / "hook.json"
+    payload = {
+        "id": "local-hook-check",
+        "status": "done",
+        "title": "Album",
+    }
+    monkeypatch.setenv("HOOK_SINK", str(sink))
+    monkeypatch.setenv("POST_JOB_HOOK", 'tee "$HOOK_SINK"')
+
+    jm._run_post_job_hook(payload)
+
+    assert sink.read_text() == (
+        '{"id": "local-hook-check", "status": "done", "title": "Album"}'
+    )
+
+
+def test_post_job_hook_receives_the_terminal_snapshot(monkeypatch):
+    registry = jm.JobRegistry()
+    job = jm.Job(id="hook-snapshot", title="Album", artist="Artist")
+    job.status = jm.JobStatus.FAILED
+    job.error = "download failed"
+    job.finished_at = 123.0
+    registry.add(job)
+    received = []
+
+    monkeypatch.setattr(jm, "registry", registry)
+    monkeypatch.setattr(jm.job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(
+        jm,
+        "_start_post_job_hook",
+        lambda payload: received.append(dict(payload)),
+    )
+
+    jm._finish_task_phase(job)
+    job.status = jm.JobStatus.PENDING
+    job.error = None
+    job.finished_at = None
+
+    assert received[0]["status"] == "failed"
+    assert received[0]["error"] == "download failed"
+    assert received[0]["finished_at"] == 123.0
+
+
+def test_post_job_hook_drain_waits_for_a_running_hook(monkeypatch):
+    from qobuz_librarian import config
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_hook(_payload):
+        started.set()
+        release.wait(timeout=1)
+
+    monkeypatch.setattr(config, "POST_JOB_HOOK_TIMEOUT", 0.2)
+    monkeypatch.setattr(jm, "_run_post_job_hook", hold_hook)
+    jm._start_post_job_hook({"id": "shutdown-hook"})
+    assert started.wait(timeout=1)
+
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    started_at = time.monotonic()
+    jm._wait_for_post_job_hooks()
+    assert time.monotonic() - started_at >= 0.04
+    timer.join(timeout=1)
+
+
 def test_late_cancel_cannot_relabel_proven_durable_download(monkeypatch):
     """A racing cancel cannot relabel an exact durable completion."""
     from types import SimpleNamespace

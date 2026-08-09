@@ -897,6 +897,8 @@ _download_queue: "queue.Queue" = queue.Queue()
 _scan_queue: "queue.Queue" = queue.Queue()
 _stop_event = threading.Event()
 _worker_lifecycle_lock = threading.Lock()
+_post_job_hook_threads: set[threading.Thread] = set()
+_post_job_hook_threads_lock = threading.Lock()
 _staging_entry_guard_lock = threading.Lock()
 _staging_entry_guard: Callable[[Optional[Job]], bool] | None = None
 
@@ -1061,8 +1063,8 @@ def _finish_task_phase(job: Job) -> None:
         # durable row; the live page must be at least as cautious.
         _mark_final_save_failure(job)
     if job.status in TERMINAL:
-        threading.Thread(target=_fire_post_job_hook, args=(job,),
-                         daemon=True).start()
+        payload = _post_job_hook_payload(job)
+        _start_post_job_hook(payload)
     job.end_stream()
 
 
@@ -1094,9 +1096,7 @@ def _run_task(job: Job, fn):
     finally:
         _TLS.current_job = None
         app_logger.removeHandler(handler)
-        # Persist BEFORE the hook fires: durability must never wait on a
-        # webhook, and a stalled hook was able to leave a finished job saying
-        # "running" on disk for its whole timeout.
+        # Persist before the hook starts so durability never waits on a webhook.
         _finish_task_phase(job)
 
 
@@ -1109,7 +1109,7 @@ def _run_post_job_hook(payload: dict) -> None:
     import signal
     import subprocess
 
-    from qobuz_librarian.ui_cli.logging import vlog
+    hook_logger = logging.getLogger("qobuz_librarian")
     cmd = os.environ.get("POST_JOB_HOOK", "").strip()
     if not cmd:
         return
@@ -1125,25 +1125,28 @@ def _run_post_job_hook(payload: dict) -> None:
             start_new_session=True,
         )
     except OSError as e:
-        vlog(f"post-job hook failed: {e}")
+        hook_logger.warning("post-job hook could not start: %s", e)
         return
     try:
         proc.communicate(json.dumps(payload).encode("utf-8"),
                          timeout=_cfg.POST_JOB_HOOK_TIMEOUT)
     except subprocess.TimeoutExpired:
-        # communicate() doesn't kill or reap on timeout. Without this the shell
-        # child and its open stdin pipe linger as a zombie under PID 1.
+        # Kill and reap the whole pipeline, including the shell process.
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (OSError, ProcessLookupError):
             proc.kill()
         proc.communicate()
-        vlog("post-job hook timed out")
+        hook_logger.warning("post-job hook timed out")
+    else:
+        if proc.returncode:
+            hook_logger.warning(
+                "post-job hook exited with status %s", proc.returncode)
 
 
-def _fire_post_job_hook(job):
-    """Send the job's final state through POST_JOB_HOOK."""
-    _run_post_job_hook({
+def _post_job_hook_payload(job):
+    """Capture a job's final state before its object can be reused."""
+    return {
         "id": job.id,
         "status": job.status.value,
         "title": job.title,
@@ -1152,18 +1155,68 @@ def _fire_post_job_hook(job):
         "artist": job.artist,
         "error": job.error,
         "finished_at": job.finished_at,
-    })
+    }
+
+
+def _fire_post_job_hook(payload):
+    """Send a captured final state through POST_JOB_HOOK."""
+    _run_post_job_hook(payload)
+
+
+def _start_post_job_hook(payload):
+    """Start one tracked hook so graceful shutdown can drain it."""
+    thread = None
+
+    def run():
+        try:
+            _fire_post_job_hook(payload)
+        finally:
+            with _post_job_hook_threads_lock:
+                _post_job_hook_threads.discard(thread)
+
+    thread = threading.Thread(
+        target=run,
+        args=(),
+        daemon=True,
+        name="post-job-hook",
+    )
+    try:
+        with _post_job_hook_threads_lock:
+            _post_job_hook_threads.add(thread)
+            thread.start()
+    except RuntimeError as exc:
+        with _post_job_hook_threads_lock:
+            _post_job_hook_threads.discard(thread)
+        logging.getLogger("qobuz_librarian").warning(
+            "post-job hook thread could not start: %s", exc)
+
+
+def _wait_for_post_job_hooks():
+    """Wait at most one hook timeout for notifications already in flight."""
+    from qobuz_librarian import config as _cfg
+
+    deadline = time.monotonic() + float(_cfg.POST_JOB_HOOK_TIMEOUT) + 1.0
+    while True:
+        with _post_job_hook_threads_lock:
+            threads = tuple(_post_job_hook_threads)
+        if not threads:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logging.getLogger("qobuz_librarian").warning(
+                "%s post-job hook thread(s) still running at shutdown",
+                len(threads),
+            )
+            return
+        threads[0].join(remaining)
 
 
 def fire_auth_lost_hook():
-    """Tell the operator's hook that the saved Qobuz token stopped working.
+    """Report one healthy-to-rejected Qobuz token transition asynchronously.
 
-    Fired once per healthy-to-rejected transition by the web auth listener; an
-    unattended box otherwise fails its jobs quietly until somebody looks. Runs
-    on its own thread so the request that hit the 401 doesn't also wait out a
-    slow webhook. The payload keeps the job shape, so an existing hook script
-    renders it without special-casing."""
-    import threading
+    The payload keeps the normal hook's core fields so existing scripts can
+    render it without special-casing.
+    """
     from datetime import datetime, timezone
     payload = {
         "id": "qobuz-auth",
@@ -1173,8 +1226,7 @@ def fire_auth_lost_hook():
         "error": "Qobuz returned 401 for the saved token",
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
-    threading.Thread(target=_run_post_job_hook, args=(payload,),
-                     daemon=True).start()
+    _start_post_job_hook(payload)
 
 
 def _worker_loop(work_queue: "queue.Queue"):
@@ -1298,6 +1350,7 @@ def stop_worker():
         with _library_operations_condition:
             _library_operations_condition.wait_for(
                 lambda: not _library_operations)
+        _wait_for_post_job_hooks()
 
 
 def submit(job: Job, fn) -> Optional[Job]:
