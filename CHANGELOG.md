@@ -2,7 +2,11 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [0.13.0] - Unreleased
+## [0.13.1] - Unreleased
+
+- Docker image publishing works again after the release smoke test tripped over temporary file permissions.
+
+## [0.13.0] - 2026-08-09
 
 Most of 0.13.0 came from chasing down what happens when a download or maintenance run stops halfway.
 
