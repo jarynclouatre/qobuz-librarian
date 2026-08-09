@@ -9,6 +9,7 @@ import pytest
 
 _DEFAULT_TOML = Path(__file__).resolve().parents[1] / "docker" / "streamrip-default.toml"
 _ENTRYPOINT = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
+_COMPOSE = Path(__file__).resolve().parents[1] / "compose.yaml"
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::[^}]*)?\}")
 
 # Keys streamrip 2.2.0's format() info dict actually provides.
@@ -16,6 +17,15 @@ VALID_FOLDER_KEYS = {"albumartist", "albumcomposer", "bit_depth", "container",
                      "id", "sampling_rate", "title", "year"}
 VALID_TRACK_KEYS = {"albumartist", "albumcomposer", "artist", "composer",
                     "explicit", "id", "title", "tracknumber"}
+
+
+def test_compose_forwards_sse_tunables():
+    import yaml
+
+    compose = yaml.safe_load(_COMPOSE.read_text())
+    environment = compose["services"]["qobuz-librarian"]["environment"]
+    assert environment["SSE_MAX_WORKERS"] == "${SSE_MAX_WORKERS:-16}"
+    assert environment["SSE_HEARTBEAT_TICKS"] == "${SSE_HEARTBEAT_TICKS:-30}"
 
 
 def test_streamrip_default_toml_uses_valid_placeholders_and_flags():

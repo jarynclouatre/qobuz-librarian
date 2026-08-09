@@ -10,7 +10,7 @@ A focused update for dependable library maintenance and clearer status across th
 - Keeps alternate album editions and track versions distinct in Search, with durable Library review choices and clearer Repair findings.
 - Makes Repair, Migration, Downsample, and Lyrics safer around partial work, failed writes, backups, and imports.
 - Improves Queue and History status, job notifications, authentication, settings, offline use, and responsive controls across desktop and mobile.
-- Adds startup checks that keep music, staging, and backup paths separate, with clearer readiness checks and stronger release packaging and validation.
+- Adds startup checks that keep music, staging, and backup paths separate, forwards web-stream tuning through Docker, and strengthens readiness and release validation.
 
 ## [0.12.1] - 2026-08-03
 

@@ -235,6 +235,11 @@ services:
       QL_WEB_FETCH_TIMEOUT:     "${QL_WEB_FETCH_TIMEOUT:-12.0}"
       QL_WEB_TEST_AUTH_TIMEOUT: "${QL_WEB_TEST_AUTH_TIMEOUT:-8.0}"
 
+      # Web live-update streams. Each open progress or review stream uses a
+      # worker while it waits; heartbeat ticks are 0.5 seconds each.
+      SSE_MAX_WORKERS:     "${SSE_MAX_WORKERS:-16}"
+      SSE_HEARTBEAT_TICKS: "${SSE_HEARTBEAT_TICKS:-30}"
+
     volumes:
       # Host paths come from a .env file (see .env.example). Defaults to
       # ./music, ./staging, ./upgrade_backups so a fresh clone runs as-is.
