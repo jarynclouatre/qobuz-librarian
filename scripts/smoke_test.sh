@@ -259,7 +259,10 @@ cleanup_container
 bad_data="$TMP_DIR/unreadable-auth"
 mkdir -p "$bad_data"
 install -m 600 /dev/null "$bad_data/.qobuz_web_auth.json"
+bind_uid="$(id -u)"
+bind_gid="$(id -g)"
 docker run -d --name "$NAME" "${HEALTH_ARGS[@]}" -e DATA_DIR=/data \
+    -e PUID="$bind_uid" -e PGID="$bind_gid" \
     -v "$bad_data:/data" -p "127.0.0.1:${PORT}:8666" "$IMAGE" >/dev/null
 wait_for_server
 check /healthz 200
