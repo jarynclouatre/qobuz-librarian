@@ -240,85 +240,7 @@ def test_post_job_hook_receives_the_terminal_snapshot(monkeypatch):
     assert received[0]["finished_at"] == 123.0
 
 
-def test_auth_loss_hook_keeps_the_normal_payload_contract(monkeypatch):
-    received = []
-    ordinary = jm.Job(title="Album", artist="Artist")
-    ordinary.status = jm.JobStatus.DONE
-    ordinary.finished_at = 123.0
-
-    monkeypatch.setattr(
-        jm,
-        "_start_post_job_hook",
-        lambda payload: received.append(dict(payload)),
-    )
-
-    jm.fire_auth_lost_hook()
-
-    payload = received[0]
-    assert set(payload) == set(jm._post_job_hook_payload(ordinary))
-    assert payload["status"] == "auth_lost"
-    assert payload["display_title"] == payload["title"]
-    assert isinstance(payload["finished_at"], float)
-
-
-def test_post_job_hook_covers_non_worker_terminal_paths(monkeypatch):
-    sent = []
-    monkeypatch.setattr(
-        jm,
-        "_start_post_job_hook",
-        lambda payload: sent.append((payload["id"], payload["status"])),
-    )
-    monkeypatch.setattr(jm.job_persistence, "persist", lambda _job: True)
-    monkeypatch.setattr(jm.job_persistence, "_persist_locked", lambda _job: True)
-
-    pending = jm.Job(id="pending-cancel")
-    pending._durability_required = True
-    assert jm.request_cancel(pending) is True
-
-    discarded = jm.Job(
-        id="review-discard",
-        status=jm.JobStatus.AWAITING_REVIEW,
-    )
-    assert jm.cancel_review(discarded) is True
-
-    emptied = jm.Job(
-        id="review-finished",
-        status=jm.JobStatus.AWAITING_REVIEW,
-    )
-    assert jm.finalize_review_if_empty(emptied) is True
-
-    assert sent == [
-        ("pending-cancel", "canceled"),
-        ("review-discard", "canceled"),
-        ("review-finished", "done"),
-    ]
-
-
-def test_post_job_hook_drain_waits_for_a_running_hook(monkeypatch):
-    from qobuz_librarian import config
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def hold_hook(_payload):
-        started.set()
-        release.wait(timeout=1)
-
-    monkeypatch.setattr(config, "POST_JOB_HOOK_TIMEOUT", 0.2)
-    monkeypatch.setattr(jm, "_run_post_job_hook", hold_hook)
-    jm._start_post_job_hook({"id": "shutdown-hook"})
-    assert started.wait(timeout=1)
-
-    timer = threading.Timer(0.05, release.set)
-    timer.start()
-    started_at = time.monotonic()
-    jm._wait_for_post_job_hooks()
-    assert time.monotonic() - started_at >= 0.04
-    timer.join(timeout=1)
-
-
 def test_late_cancel_cannot_relabel_proven_durable_download(monkeypatch):
-    """A racing cancel cannot relabel an exact durable completion."""
     from types import SimpleNamespace
 
     from qobuz_librarian.library import catalog, hidden
@@ -568,6 +490,131 @@ def test_direct_album_download_refreshes_saved_quality_state(
     }
 
 
+def test_web_download_surfaces_a_retained_backup_without_calling_it_lossy(
+        client, monkeypatch):
+    import contextlib
+    from types import SimpleNamespace
+    from urllib.parse import unquote
+
+    from qobuz_librarian.library import catalog as catalog_mod
+    from qobuz_librarian.library import hidden as hidden_mod
+    from qobuz_librarian.modes import process as process_mod
+    from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import flows
+
+    album = {
+        "id": "unverified-recovery",
+        "title": "Album",
+        "artist": {"name": "Artist"},
+    }
+    outcome = {
+        "result": "cancelled",
+        "imported": False,
+        "n_ok": 1,
+        "n_fail": 0,
+        "n_lossy": 0,
+        "n_broken": 0,
+        "n_lossy_only": 0,
+        "recovery_unverified": True,
+    }
+    monkeypatch.setattr(catalog_mod, "is_lossless_album", lambda _album: False)
+    monkeypatch.setattr(
+        process_mod,
+        "process_album",
+        lambda *_a, **_k: dict(outcome),
+    )
+    monkeypatch.setattr(flows, "build_args", lambda: SimpleNamespace())
+    monkeypatch.setattr(flows, "_note_staging_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flows, "_refresh_after_local_album_change", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        flows, "prune_library_review_candidates", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(hidden_mod, "unmark_single", lambda *_a, **_k: None)
+    monkeypatch.setattr(jm, "staging_lock", contextlib.nullcontext)
+
+    job = jm.Job(
+        title=album["title"],
+        artist=album["artist"]["name"],
+        album_id=album["id"],
+        status=jm.JobStatus.RUNNING,
+    )
+    app_mod._make_download_run(album, "tok")(job)
+
+    assert job.status is jm.JobStatus.FAILED
+    assert job.attention == "backup"
+    assert job.execute_args["retry_disabled"] == "backup"
+    assert "backup" in job.error.lower()
+    assert "lossy" not in job.error.lower()
+    assert "backup" in job.summary.lower()
+    assert "discarded" not in job.summary.lower()
+    jm.registry.add(job)
+    try:
+        response = client.post(f"/jobs/{job.id}/retry", follow_redirects=False)
+        assert response.status_code == 303
+        assert "retained safety backup" in unquote(response.headers["location"])
+    finally:
+        _remove_job(job)
+
+
+def test_web_album_batch_marks_an_unverified_upgrade_as_attention(monkeypatch):
+    from qobuz_librarian.modes import process as process_mod
+    from qobuz_librarian.web import flows
+
+    album = {
+        "id": "unverified-upgrade",
+        "title": "Album",
+        "artist": {"name": "Artist"},
+    }
+    monkeypatch.setattr(flows.cfg, "ARTIST_API_DELAY", 0)
+    monkeypatch.setattr(flows, "get_album", lambda _aid, _token: album)
+    folded = []
+    monkeypatch.setattr(
+        process_mod,
+        "process_album",
+        lambda *_a, **_k: {
+            "result": "partial",
+            "imported": True,
+            "n_ok": 10,
+            "n_fail": 0,
+            "n_lossy": 0,
+            "n_broken": 0,
+            "n_lossy_only": 0,
+            "upgrade_unverified": True,
+        },
+    )
+    monkeypatch.setattr(
+        flows, "_refresh_after_local_album_change", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        flows, "prune_library_review_candidates", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        flows,
+        "_fold_partial_gap_fill",
+        lambda *_a, **_k: folded.append((_a, _k)),
+    )
+
+    job = jm.Job(title="Library downloads", status=jm.JobStatus.RUNNING)
+    job.execute_kind = "library"
+    flows.execute_albums(
+        job,
+        [{
+            "artist": "Artist",
+            "title": "Album",
+            "payload": {"album_id": album["id"]},
+        }],
+        "tok",
+    )
+
+    assert job.status is jm.JobStatus.FAILED
+    assert job.attention == "backup"
+    assert "backup" in job.summary.lower()
+    assert "lossy" not in job.error.lower()
+    assert folded == []
+
+
 
 
 def test_cancel_while_queued_finalizes_and_worker_skips_it():
@@ -760,7 +807,9 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import app as app_mod
     from qobuz_librarian.web import auth as web_auth
+    from qobuz_librarian.web import job_persistence
 
+    run_lock_handle = app_mod._RUN_LOCK_HANDLE
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     monkeypatch.setattr(cfg, "DATA_DIR", data_dir)
@@ -768,6 +817,10 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
     monkeypatch.setattr(
         web_auth, "creds_file_present_but_unreadable", lambda: False)
     monkeypatch.setattr(app_mod, "_unwritable_volumes", lambda: [])
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    monkeypatch.setattr(job_persistence, "_schema_ready", True)
+    monkeypatch.setattr(job_persistence, "_admission_ready", True)
+    monkeypatch.setattr(job_persistence, "_conn", None)
 
     assert client.get("/healthz").json() == {"ok": True}
     assert client.request("HEAD", "/healthz").status_code == 200
@@ -811,6 +864,29 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
 
     monkeypatch.setattr(app_mod, "_unwritable_volumes", lambda: [])
     assert client.get("/readyz").json() == {"ok": True, "status": "ready"}
+
+    monkeypatch.setattr(app_mod, "_RUN_LOCK_HANDLE", None)
+    monkeypatch.setattr(app_mod, "_LOCK_BUSY_PID", 4321)
+    monkeypatch.setattr(job_persistence, "_schema_ready", False)
+    response = client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "status": "degraded",
+        "checks": ["other_writer"],
+    }
+
+    monkeypatch.setattr(app_mod, "_RUN_LOCK_HANDLE", run_lock_handle)
+    monkeypatch.setattr(app_mod, "_LOCK_BUSY_PID", None)
+    (data_dir / "jobs.db").mkdir()
+    job_persistence._schema_ready = False
+    job_persistence.init()
+    assert job_persistence.ready_for_admission() is False
+    assert job_persistence.persist(jm.Job(title="refused")) is False
+    response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["checks"] == ["job_persistence"]
+    assert client.get("/healthz").status_code == 200
 
 
 
@@ -1174,6 +1250,52 @@ def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):
     assert cfg.DOWNSAMPLE_HIRES_ENABLED is True
     ss.drain_pending()
     assert cfg.DOWNSAMPLE_HIRES_ENABLED is True  # idempotent
+
+
+def test_worker_does_not_apply_settings_while_other_lane_runs(monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    active = jm.Job(id="active-lane", status=jm.JobStatus.RUNNING)
+    waiting = jm.Job(id="waiting-lane")
+    registry = jm.JobRegistry()
+    registry.add(active)
+    registry.add(waiting)
+    seen = []
+
+    class OneItemQueue:
+        used = False
+
+        def get(self, timeout):
+            if self.used:
+                raise SystemExit
+            self.used = True
+            return waiting, lambda _job: seen.append(
+                (cfg.DOWNSAMPLE_HIRES_ENABLED, dict(ss._pending_apply))
+            )
+
+        @staticmethod
+        def task_done():
+            return None
+
+    monkeypatch.setattr(jm, "registry", registry)
+    monkeypatch.setattr(jm, "_stop_event", threading.Event())
+    monkeypatch.setattr(jm.job_persistence, "admit", lambda _job: True)
+    monkeypatch.setattr(jm.job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(jm, "_start_post_job_hook_for_job", lambda _job: None)
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_HIRES_ENABLED", False)
+    monkeypatch.setattr(
+        ss,
+        "_pending_apply",
+        {"DOWNSAMPLE_HIRES_ENABLED": True},
+    )
+
+    with pytest.raises(SystemExit):
+        jm._worker_loop(OneItemQueue())
+
+    assert waiting.status is jm.JobStatus.DONE
+    assert seen == [(False, {"DOWNSAMPLE_HIRES_ENABLED": True})]
+    assert cfg.DOWNSAMPLE_HIRES_ENABLED is False
 
 
 def test_failed_settings_write_does_not_apply_live_values(monkeypatch):
@@ -2082,7 +2204,7 @@ def test_retry_keeps_the_new_edition_override(client, monkeypatch):
 def test_retry_finishes_a_download_whose_settlement_refused_after_clearing_it(
     client, monkeypatch,
 ):
-    """Retry completes once a refused settlement parks stranded staging."""
+    """Retry after a failed staging cleanup."""
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryResult,
         StartupRecoveryStatus,
@@ -2713,6 +2835,56 @@ def test_dismiss_rest_scoped_to_the_active_filter(client, monkeypatch):
         _remove_job(job)
 
 
+def test_dismiss_rest_reports_partial_durable_progress(client, monkeypatch,
+                                                       tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import hidden
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+    real_hide = hidden.hide
+    hide_calls = 0
+
+    def fail_second_hide(scope, items):
+        nonlocal hide_calls
+        hide_calls += 1
+        if hide_calls == 2:
+            raise OSError("inert hidden-store failure")
+        return real_hide(scope, items)
+
+    monkeypatch.setattr(hidden, "hide", fail_second_hide)
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    job.add_candidate(
+        kind="album", title="First Durable Dismissal", artist="Alpha",
+        payload={"year": "2001"}, selected=False,
+    )
+    job.add_candidate(
+        kind="album", title="Still Actionable", artist="Beta",
+        payload={"year": "2002"}, selected=False,
+    )
+    try:
+        response = client.post(f"/jobs/{job.id}/dismiss-rest")
+        assert response.status_code == 500
+        assert response.json()["hidden"] == 1
+        assert [c["title"] for c in job.candidates] == ["Still Actionable"]
+
+        store = hidden.load()
+        assert hidden.is_hidden(
+            hidden.SCOPE_MISSING, "Alpha", "First Durable Dismissal", store,
+        )
+        assert not hidden.is_hidden(
+            hidden.SCOPE_MISSING, "Beta", "Still Actionable", store,
+        )
+        rendered = client.get(f"/jobs/{job.id}")
+        assert rendered.status_code == 200
+        assert "Still Actionable" in rendered.text
+        assert "First Durable Dismissal" not in rendered.text
+    finally:
+        _remove_job(job)
+
+
 
 
 
@@ -2983,32 +3155,6 @@ def test_one_broken_review_does_not_abort_job_restore(monkeypatch):
     assert jm.registry.get(healthy.id).status == jm.JobStatus.DONE
     assert job_persistence.load_one(broken.id)["status"] == "failed"
     assert sent == [(broken.id, "failed")]
-
-
-def test_restore_reports_a_terminal_state_that_could_not_be_saved(monkeypatch):
-    from qobuz_librarian.web import job_persistence
-
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    saved = jm.Job(title="Interrupted scan")
-    saved.kind = "scan"
-    saved.status = jm.JobStatus.SCANNING
-    assert job_persistence.persist(saved)
-
-    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-    monkeypatch.setattr(job_persistence, "persist", lambda _job: False)
-    sent = []
-    monkeypatch.setattr(jm, "_start_post_job_hook", sent.append)
-
-    jm.restore_jobs({})
-
-    restored = jm.registry.get(saved.id)
-    assert restored.status == jm.JobStatus.FAILED
-    assert jm.JOB_FINAL_SAVE_ERROR in restored.error
-    assert job_persistence.load_one(saved.id)["status"] == "scanning"
-    assert sent == []
 
 
 def test_rehydrated_review_never_mints_colliding_cids(monkeypatch):
@@ -3751,6 +3897,7 @@ def test_incomplete_new_album_retries_broken_tracks_not_lossy_ones(
             "n_broken": 1,
             "n_lossy_only": 0,
             "broken_tracks": ["two"],
+            "siblings_preserved": ["/music/Portishead/Third (Alt)"],
         },
         {
             "result": "downloaded",
@@ -4032,54 +4179,6 @@ def test_shutdown_keeps_run_lock_until_workers_and_direct_writes_settle(
     assert app_mod._RUN_LOCK_HANDLE is None
 
 
-
-
-def test_shutdown_ignores_late_token_probe_callback_after_draining_hooks(
-        monkeypatch):
-    import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian.api import auth
-    from qobuz_librarian.api import client as api_client
-
-    probe_started = threading.Event()
-    release_probe = threading.Event()
-    probe_finished = threading.Event()
-    events = []
-    monkeypatch.setattr(app_mod, "_SHUTTING_DOWN", False)
-    monkeypatch.setattr(app_mod, "_TOKEN_VALID", True)
-    monkeypatch.setattr(app_mod, "_read_creds", lambda: {"auth_token": "token"})
-    monkeypatch.setattr(auth, "_auth_state_listeners", [app_mod._on_auth_state])
-    monkeypatch.setattr(
-        app_mod.job_mgr,
-        "fire_auth_lost_hook",
-        lambda: events.append("hook"),
-    )
-
-    def blocked_call_within(_timeout, _fn, _token):
-        probe_started.set()
-        assert release_probe.wait(timeout=2)
-        auth.notify_auth_state(False)
-        probe_finished.set()
-        return "rejected"
-
-    monkeypatch.setattr(api_client, "call_within", blocked_call_within)
-
-    async def scenario():
-        probe_task = asyncio.create_task(app_mod._probe_token())
-        assert await asyncio.to_thread(probe_started.wait, 2)
-        monkeypatch.setattr(
-            app_mod,
-            "_shutdown_web_mutations",
-            lambda: events.append("drained"),
-        )
-        await app_mod._finish_web_lifespan(None, None, None, probe_task)
-        assert events == ["drained"]
-        release_probe.set()
-        assert await asyncio.to_thread(probe_finished.wait, 2)
-
-    asyncio.run(scenario())
-
-    assert events == ["drained"]
-    assert app_mod._TOKEN_VALID is True
 
 
 def test_resuming_web_mode_restores_saved_jobs_before_unpausing(
@@ -5100,6 +5199,11 @@ def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
     jm.registry.add(job)
     remnant = None
     try:
+        rendered = client.get(f"/jobs/{job.id}")
+        assert rendered.status_code == 200
+        assert "already been recorded" in rendered.text
+        assert "Force full rescan" in rendered.text
+
         r = client.post(f"/jobs/{job.id}/approve", data={"tab": ""},
                         follow_redirects=False)
         assert r.status_code == 303

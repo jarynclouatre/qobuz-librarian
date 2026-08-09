@@ -1306,7 +1306,9 @@
     }
     function pageBox() { return document.getElementById("review-groups"); }
     function curPage() { var g = pageBox(); return g ? parseInt(g.dataset.page || "1", 10) : 1; }
-    function curQuery() { return (filterInput && filterInput.value || "").trim(); }
+    function inputQuery() { return (filterInput && filterInput.value || "").trim(); }
+    var loadedQuery = inputQuery();
+    function curQuery() { return loadedQuery; }
     function curTab() {
       var b = cont.querySelector("[data-review-tab].is-active");
       return b ? b.getAttribute("data-review-tab") : "";
@@ -1760,9 +1762,14 @@
       return boxEl._loadPromise;
     }
 
+    var loading = false;
+    var pageLoading = false;
+    var pendingTab = null;
+    var loadGen = 0;
+
     // Append the next page in place.
     function loadMore(page) {
-      if (loading) return;
+      if (loading || pageLoading) return;
       loading = true;
       var gen = ++loadGen;
       var url = "/jobs/" + id + "/review?page=" + (page || 2) +
@@ -1804,32 +1811,52 @@
     // response is discarded on arrival. Otherwise its rows would paint under
     // the newly selected tab while the hidden approval field already points
     // at the new tab.
-    var loading = false;
-    var loadGen = 0;
-    function loadPage(page, query) {
+    function loadPage(page, query, tab) {
       var gen = ++loadGen;
+      var requestedQuery = (query || "").trim();
+      var requestedTab = tab === undefined ? curTab() : tab;
       loading = false;   // a page swap supersedes any in-flight append
-      // The outgoing page's Load More dies NOW, not when the response lands:
-      // a click on it (or the auto-clicking observer) in that gap would bump
-      // the generation, discard this page-1 response, and append the new
-      // tab's page 2 beneath the old tab's rows. The swap brings its own
-      // control back; on a failed fetch the tab click re-issues the load.
+      pageLoading = true;
+      pendingTab = requestedTab;
+      // Pause the outgoing page's Load More until the response lands. A click
+      // on it (or the auto-clicking observer) in that gap would bump the
+      // generation, discard this page-1 response, and append page 2 beneath
+      // the wrong rows. A failed fetch re-enables the still-valid control.
       var staleMore = document.getElementById("review-loadmore");
-      if (staleMore) staleMore.remove();
+      var staleMoreButton = staleMore && staleMore.querySelector("button");
+      if (staleMoreButton) staleMoreButton.disabled = true;
       var url = "/jobs/" + id + "/review?page=" + (page || 1) +
-                "&q=" + encodeURIComponent(query || "") +
-                "&tab=" + encodeURIComponent(curTab());
+                "&q=" + encodeURIComponent(requestedQuery) +
+                "&tab=" + encodeURIComponent(requestedTab);
       sessionFetch(url)
-        .then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (r) { return r.ok ? r.text() : Promise.reject("response"); })
         .then(function (txt) {
           if (gen !== loadGen) return;
-          if (txt == null) { showToast("Couldn't load those results. Try again.", "error"); return; }
           var host = document.getElementById("review-page");
           if (host) {
+            pageLoading = false;
+            pendingTab = null;
             var openArtists = {};
             host.querySelectorAll("details[data-artist][open]").forEach(function (d) {
               if (d.dataset.artist) openArtists[d.dataset.artist] = true;
             });
+            if (requestedTab) {
+              cont.querySelectorAll("[data-review-tab]").forEach(function (b) {
+                var active = b.getAttribute("data-review-tab") === requestedTab;
+                b.classList.toggle("is-active", active);
+                if (active) b.setAttribute("aria-current", "true");
+                else b.removeAttribute("aria-current");
+              });
+              var tabField = document.getElementById("review-tab-field");
+              if (tabField) tabField.value = requestedTab;
+              try {
+                var nextUrl = new URL(window.location.href);
+                nextUrl.searchParams.set("tab", requestedTab);
+                window.history.replaceState({}, "", nextUrl);
+              } catch (e) { /* no URL support: the in-page switch still works */ }
+            }
+            loadedQuery = requestedQuery;
+            if (filterInput) filterInput.value = requestedQuery;
             host.innerHTML = txt;
             applyCounts(reviewPageCounts(host.querySelector("#review-groups")));
             host.querySelectorAll("details[data-artist]").forEach(function (d) {
@@ -1839,10 +1866,18 @@
             updateHideLabels();
             updateArtistChecks();
             updateDismissRest();
+          } else {
+            pageLoading = false;
+            pendingTab = null;
+            if (staleMoreButton) staleMoreButton.disabled = false;
           }
         })
         .catch(function (why) {
           if (why !== "navigation" && gen === loadGen) {
+            pageLoading = false;
+            pendingTab = null;
+            if (staleMoreButton) staleMoreButton.disabled = false;
+            if (filterInput) filterInput.value = loadedQuery;
             showToast("Couldn't load those results. Check your connection.", "error");
           }
         });
@@ -1878,24 +1913,14 @@
       var more = t.closest("[data-load-more]");
       if (more) { loadMore(parseInt(more.getAttribute("data-next-page") || "2", 10)); return; }
       var tabBtn = t.closest("[data-review-tab]");
-      if (tabBtn && !tabBtn.classList.contains("is-active")) {
-        cont.querySelectorAll("[data-review-tab]").forEach(function (b) {
-          var on2 = b === tabBtn;
-          b.classList.toggle("is-active", on2);
-          if (on2) b.setAttribute("aria-current", "true");
-          else b.removeAttribute("aria-current");
-        });
-        var tabField = document.getElementById("review-tab-field");
-        if (tabField) tabField.value = curTab();
-        applyCounts(lastCounts);  // re-scope the bulk bar to the new tab
-        loadPage(1, curQuery());
-        // Record the switch in the address so a reload comes back to it, and
-        // the tab can be linked to.
-        try {
-          var url = new URL(window.location.href);
-          url.searchParams.set("tab", curTab());
-          window.history.replaceState({}, "", url);
-        } catch (e) { /* no URL support: the in-page switch still works */ }
+      if (tabBtn && (
+        !tabBtn.classList.contains("is-active") || pageLoading
+      )) {
+        loadPage(
+          1,
+          inputQuery(),
+          tabBtn.getAttribute("data-review-tab") || ""
+        );
         return;
       }
       var expBtn = t.closest("[data-expand-all]");
@@ -1940,7 +1965,10 @@
                "&q=" + encodeURIComponent(curQuery()))
             .then(function (r) {
               if (r.status === 403) return Promise.reject("stale");
-              return r.ok ? r.json() : Promise.reject();
+              return r.json().catch(function () { return {}; }).then(function (body) {
+                if (!r.ok) return Promise.reject({ dismissFailure: true, body: body });
+                return body;
+              });
             })
             .then(function (c) {
               if (c.review_done) { location.reload(); return; }
@@ -1956,11 +1984,21 @@
               }
             })
             .catch(function (why) {
-              dismissRest.disabled = false;
-              dismissRest.textContent = prev;
               if (why === "navigation") return;
               if (why === "stale") { pageWentStale(); return; }
-              flashSelectError();
+              dismissRest.disabled = true;
+              dismissRest.textContent = "Reloading…";
+              var hidden = why && why.dismissFailure
+                ? parseInt(why.body && why.body.hidden || "0", 10) : 0;
+              showToast(
+                hidden > 0
+                  ? (isDownsampleReview
+                      ? "Kept " + plural(hidden, "album") + " hi-res before the rest failed. Reloading the review."
+                      : "Dismissed " + countLabel(hidden, dismissItemSingular(), dismissItemPlural()) + " before the rest failed. Reloading the review.")
+                  : "Couldn't confirm those dismissals. Reloading the review.",
+                "error"
+              );
+              setTimeout(function () { location.reload(); }, 900);
             });
         });
       });
@@ -1971,13 +2009,25 @@
     if (filterInput) {
       filterInput.addEventListener("input", function () {
         if (filterTimer) clearTimeout(filterTimer);
-        filterTimer = setTimeout(function () { loadPage(1, curQuery()); }, 250);
+        loadGen += 1;
+        filterTimer = setTimeout(function () {
+          loadPage(
+            1,
+            inputQuery(),
+            pendingTab === null ? curTab() : pendingTab
+          );
+        }, 250);
       });
       // A search input's Escape-clear and its native ✕ change the value
       // without firing `input`, which left the box empty and the list filtered.
       filterInput.addEventListener("search", function () {
         if (filterTimer) clearTimeout(filterTimer);
-        loadPage(1, curQuery());
+        loadGen += 1;
+        loadPage(
+          1,
+          inputQuery(),
+          pendingTab === null ? curTab() : pendingTab
+        );
       });
       // Enter should filter, not submit the review form.
       filterInput.addEventListener("keydown", function (e) {

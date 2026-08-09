@@ -23,7 +23,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -43,6 +43,14 @@ from qobuz_librarian.web import job_persistence, review_badges
 _TLS = threading.local()
 _durable_recovery_state_lock = threading.Lock()
 _durable_recovery_job_id: str | None = None
+_settings_admission_lock = threading.RLock()
+
+
+@contextmanager
+def settings_admission_guard():
+    """Serialize live config apply with both worker-lane RUNNING claims."""
+    with _settings_admission_lock:
+        yield
 
 
 def set_durable_recovery_job_id(job_id: str | None) -> None:
@@ -1157,7 +1165,6 @@ def _build_post_job_hook_payload(
     *, event_id, status, title, edition="", artist="", error=None,
     finished_at=None,
 ):
-    """Build the stable payload shared by job and authentication events."""
     return {
         "id": event_id,
         "status": status,
@@ -1171,7 +1178,6 @@ def _build_post_job_hook_payload(
 
 
 def _post_job_hook_payload(job):
-    """Capture a job's final state before its object can be reused."""
     return _build_post_job_hook_payload(
         event_id=job.id,
         status=job.status.value,
@@ -1184,17 +1190,14 @@ def _post_job_hook_payload(job):
 
 
 def _start_post_job_hook_for_job(job):
-    """Capture and dispatch one terminal transition."""
     _start_post_job_hook(_post_job_hook_payload(job))
 
 
 def _fire_post_job_hook(payload):
-    """Send a captured final state through POST_JOB_HOOK."""
     _run_post_job_hook(payload)
 
 
 def _start_post_job_hook(payload):
-    """Start one tracked hook so graceful shutdown can drain it."""
     thread = None
 
     def run():
@@ -1271,38 +1274,40 @@ def _worker_loop(work_queue: "queue.Queue"):
                 # lane may be mid-job, and applying a deferred quality/config
                 # change on this idle tick is exactly the mid-job mutation
                 # save() deferred to prevent.
-                if not settings_store._any_active_job():
-                    settings_store.drain_pending()
+                with settings_admission_guard():
+                    if not settings_store._any_active_job():
+                        settings_store.drain_pending()
             except Exception:
                 pass
             continue
         # Settings changes deferred while we were busy are applied BEFORE the
         # next job so "apply now" takes effect for it, but NOT while the
         # OTHER lane is mid-execution.
-        try:
-            from qobuz_librarian.web import settings_store
-            if not registry.executing():
-                settings_store.drain_pending()
-        except Exception:
-            pass
         # Sole worker thread. Catching BaseException ensures one
         # crashed job can't take down the whole queue.
         try:
             canceled_pending = False
-            with job._lock:
-                if job.cancel_requested or job.status in TERMINAL:
-                    # A queued cancel and this worker claim use the same lock.
-                    # Exactly one side can move PENDING to its next state.
-                    if job.status == JobStatus.PENDING:
-                        job.status = JobStatus.CANCELED
-                        job.finished_at = time.time()
-                        canceled_pending = True
-                    claimed = False
-                else:
-                    claimed = True
-                    job.status = JobStatus.RUNNING
-                    if job.started_at is None:
-                        job.started_at = time.time()
+            with settings_admission_guard():
+                try:
+                    from qobuz_librarian.web import settings_store
+                    if not registry.executing():
+                        settings_store.drain_pending()
+                except Exception:
+                    pass
+                with job._lock:
+                    if job.cancel_requested or job.status in TERMINAL:
+                        # A queued cancel and this worker claim use the same
+                        # lock. Exactly one side can move PENDING onward.
+                        if job.status == JobStatus.PENDING:
+                            job.status = JobStatus.CANCELED
+                            job.finished_at = time.time()
+                            canceled_pending = True
+                        claimed = False
+                    else:
+                        claimed = True
+                        job.status = JobStatus.RUNNING
+                        if job.started_at is None:
+                            job.started_at = time.time()
             if canceled_pending:
                 _finish_canceled(job)
             elif claimed:
@@ -2152,15 +2157,16 @@ def request_cancel(job: Job) -> bool:
     return True
 
 
+def record_quality_shortfall(job, verdict):
+    with job._lock:
+        job.attention = "quality"
+        job.quality_shortfall = _quality_shortfall_record(verdict)
+
+
 def note_quality_shortfall(verdict):
-    """Queue-layer callback: the download being processed stayed under the
-    quality target after the automatic recovery attempt. Flag the owning web
-    job so History marks it for review (see Job.attention)."""
     job = getattr(_TLS, "current_job", None)
     if job is not None:
-        with job._lock:
-            job.attention = "quality"
-            job.quality_shortfall = _quality_shortfall_record(verdict)
+        record_quality_shortfall(job, verdict)
 
 
 from qobuz_librarian.queue import executor as _queue_executor  # noqa: E402

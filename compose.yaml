@@ -69,7 +69,8 @@ services:
       BEETS_DB_PATH:        /config/beets/musiclibrary.db
       # Optional folder/file naming. Empty = use the fully-editable
       # /config/beets/config.yaml. beets path syntax ($albumartist, $album,
-      # $year, $track, $title, ...). Set in .env (escape $ as $$ if needed).
+      # $year, $track, $title, ...). In .env, single-quote the whole template
+      # so Compose passes the beets variables through literally (see .env.example).
       BEETS_PATH_DEFAULT:   "${BEETS_PATH_DEFAULT:-}"
       BEETS_PATH_SINGLETON: "${BEETS_PATH_SINGLETON:-}"
       BEETS_PATH_COMP:      "${BEETS_PATH_COMP:-}"

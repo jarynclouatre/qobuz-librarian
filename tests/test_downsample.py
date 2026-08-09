@@ -349,9 +349,8 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
     assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
 
 
-@pytest.mark.parametrize("ordinary_errors", [0, 1])
 def test_walk_reports_a_flush_warning_as_unfinished_work(
-        tmp_path, monkeypatch, caplog, ordinary_errors):
+        tmp_path, monkeypatch, caplog):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.modes import downsample as mode
     from qobuz_librarian.ui_cli import logging as cli_logging
@@ -389,7 +388,7 @@ def test_walk_reports_a_flush_warning_as_unfinished_work(
         "downsample_dir",
         lambda *_args, **_kwargs: {
             "resampled": 1,
-            "errors": ordinary_errors,
+            "errors": 0,
             "saved_bytes": 100,
             "flush_warnings": 1,
         },

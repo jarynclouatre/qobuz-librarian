@@ -48,6 +48,8 @@ _log = logging.getLogger("qobuz_librarian")
 _lock = threading.Lock()
 _disabled = False
 _conn: Optional[sqlite3.Connection] = None
+_schema_ready = False
+_admission_ready = False
 # The db opened fine but a write later failed (typically a full disk).
 _warned_write_failure = False
 
@@ -157,7 +159,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     forgoes restart durability rather than seeing a stream of OSError
     on every status change.
     """
-    global _disabled, _conn
+    global _disabled, _conn, _schema_ready, _admission_ready
     if _disabled:
         return None
     if _conn is not None:
@@ -178,6 +180,8 @@ def _get_conn() -> Optional[sqlite3.Connection]:
                 pass
         _log.info("job persistence disabled (%s); jobs won't survive restart.", e)
         _disabled = True
+        _schema_ready = False
+        _admission_ready = False
         return None
 
 
@@ -237,6 +241,7 @@ _SCHEMA_VERSION = 7
 
 def init() -> None:
     """Create the schema (and run additive migrations). Safe to call repeatedly."""
+    global _schema_ready, _admission_ready
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -281,8 +286,12 @@ def init() -> None:
             if version != _SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
+            _schema_ready = True
+            _admission_ready = True
         except sqlite3.Error as e:
             _rollback_failed_write(conn)
+            _schema_ready = False
+            _admission_ready = False
             # A transient/locked/full/corrupt jobs.db here would otherwise
             # propagate out of restore_jobs() into the caller's broad
             # "couldn't restore prior jobs; starting fresh" handler, masking
@@ -291,6 +300,12 @@ def init() -> None:
             _log.warning("job persistence schema/migration failed; running "
                          "without crash durability until the volume recovers "
                          "and the app restarts: %s", e)
+
+
+def ready_for_admission() -> bool:
+    """Whether the schema opened successfully and durable jobs can be saved."""
+    with _lock:
+        return _schema_ready and _admission_ready and not _disabled
 
 
 _PERSIST_SQL = (
@@ -364,21 +379,28 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
     )
 
 
-def _persist_locked(job) -> bool:
+def _persist_locked(job, *, admission=False) -> bool:
     """Write one ordinary snapshot while the caller holds ``job._lock``."""
+    global _admission_ready
     values = _job_values(job)
     if values is None:
         return False
     with _lock:
         conn = _get_conn()
         if conn is None:
+            if admission:
+                _admission_ready = False
             return False
         try:
             conn.execute(_PERSIST_SQL, values)
             conn.commit()
+            if admission:
+                _admission_ready = True
             return True
         except sqlite3.Error as e:
             _rollback_failed_write(conn)
+            if admission:
+                _admission_ready = False
             _note_write_failure(f"persist {job.id}", e)
             return False
 
@@ -488,14 +510,17 @@ def acknowledge_attention(job_id: str, expected_attention: str) -> bool:
             return False
 
 
-def _persist_preserving_single_locked(job) -> bool:
+def _persist_preserving_single_locked(job, *, admission=False) -> bool:
     """Save while preserving Undo; the caller holds ``job._lock``."""
+    global _admission_ready
     values = _job_values(job)
     if values is None:
         return False
     with _lock:
         conn = _get_conn()
         if conn is None:
+            if admission:
+                _admission_ready = False
             job._single_undo_unavailable = True
             return False
         try:
@@ -532,9 +557,13 @@ def _persist_preserving_single_locked(job) -> bool:
             else:
                 job.single = {}
                 job._single_undo_unavailable = True
+            if admission:
+                _admission_ready = True
             return True
         except sqlite3.Error as exc:
             _rollback_failed_write(conn)
+            if admission:
+                _admission_ready = False
             _note_write_failure(
                 f"persist {job.id} while preserving its Undo record",
                 exc,
@@ -555,10 +584,14 @@ def admit(job) -> bool:
     This named boundary distinguishes mandatory admission from later history
     updates, whose callers may still degrade to the in-memory view.
     """
-    saved = persist(job)
-    if saved:
-        job._durability_required = True
-    return saved
+    with job._lock:
+        if getattr(job, "_preserve_persisted_single", False) is True:
+            saved = _persist_preserving_single_locked(job, admission=True)
+        else:
+            saved = _persist_locked(job, admission=True)
+        if saved:
+            job._durability_required = True
+        return saved
 
 
 def admit_review_transition(job, parked_jobs=()) -> bool:
@@ -569,6 +602,7 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
     lock through the commit prevents Cancel from observing PENDING before the
     durable owner row exists.
     """
+    global _admission_ready
     parked = sorted(
         {other.id: other for other in parked_jobs}.values(), key=lambda j: j.id
     )
@@ -582,6 +616,7 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
         with _lock:
             conn = _get_conn()
             if conn is None:
+                _admission_ready = False
                 return False
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -589,9 +624,11 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
                 conn.commit()
                 for other in ordered:
                     other._durability_required = True
+                _admission_ready = True
                 return True
             except sqlite3.Error as e:
                 _rollback_failed_write(conn)
+                _admission_ready = False
                 _note_write_failure("admit related jobs", e)
                 return False
 
@@ -1612,7 +1649,8 @@ def load_all() -> list[dict]:
 
 def _reset_for_tests() -> None:
     """Test-only hook: drop the on-disk db so a fresh test starts clean."""
-    global _disabled, _conn, _warned_write_failure
+    global _disabled, _conn, _schema_ready, _admission_ready
+    global _warned_write_failure
     if _conn is not None:
         try:
             _conn.close()
@@ -1620,6 +1658,8 @@ def _reset_for_tests() -> None:
             pass
         _conn = None
     _disabled = False
+    _schema_ready = False
+    _admission_ready = False
     _warned_write_failure = False
     p = _path()
     for q in (p, p.with_suffix(".db-wal"), p.with_suffix(".db-shm")):

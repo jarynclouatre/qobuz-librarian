@@ -13,7 +13,6 @@ import pytest
 
 from qobuz_librarian.repair_log import scan_dir_for_isrc_repairs
 
-# CLI fetch history
 
 def test_recent_fetch_history_does_not_show_a_partial_result_as_clean(
         tmp_path, monkeypatch, caplog):
@@ -1002,7 +1001,7 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
 
 def test_refill_is_not_rejected_because_another_folder_holds_that_name(
         tmp_path, monkeypatch):
-    """An unrelated same-named track cannot invalidate a proven refill."""
+    """Ignore a same-named track from a different album."""
     repair, album_dir, landed_dir = _repair_relocation_dirs(
         tmp_path, monkeypatch)
     elsewhere = repair.cfg.MUSIC_ROOT / "Other Artist" / "Other Album (1995)"

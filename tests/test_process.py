@@ -160,6 +160,85 @@ def test_cancel_after_download_skips_beets_import(monkeypatch, tmp_path):
     assert beets_runs == []
 
 
+def test_partial_upgrade_reports_a_backup_that_could_not_be_restored(
+        monkeypatch, tmp_path):
+    from qobuz_librarian.modes import process as proc
+
+    album_dir = tmp_path / "music" / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01.flac").write_bytes(b"original")
+    backup = SimpleNamespace(
+        complete=True,
+        path=tmp_path / "backups" / "Album",
+    )
+    tracks = [
+        {"id": 1, "title": "A", "track_number": 1},
+        {"id": 2, "title": "B", "track_number": 2},
+    ]
+    album = {
+        "id": "upgrade-partial",
+        "title": "Album",
+        "artist": {"name": "Artist"},
+        "tracks": {"items": tracks},
+    }
+    existing = [{"title": "A", "path": str(album_dir / "01.flac")}]
+
+    monkeypatch.setattr(proc, "is_lossless_album", lambda _album: True)
+    monkeypatch.setattr(
+        proc, "find_existing_tracks", lambda _album: (existing, album_dir)
+    )
+    monkeypatch.setattr(
+        proc, "compute_missing", lambda _tracks, _existing: ([], list(tracks))
+    )
+    monkeypatch.setattr(
+        proc,
+        "compare_album_quality",
+        lambda _existing, _album: {
+            "classification": "all_lower",
+            "n_unknown": 0,
+            "qobuz_quality": (24, 96000),
+        },
+    )
+    monkeypatch.setattr(proc, "find_extras_in_existing", lambda *_a: [])
+    monkeypatch.setattr(proc, "existing_track_quality", lambda _track: (16, 44100))
+    monkeypatch.setattr(proc, "capture_beets_album_entries", lambda _path: [])
+    monkeypatch.setattr(proc, "backup_album_dir", lambda _path: backup)
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(proc, "snapshot_staging", lambda: set())
+    monkeypatch.setattr(proc, "print_album_summary", lambda *_a, **_k: None)
+    monkeypatch.setattr(proc, "is_cancel_requested", lambda: False)
+    monkeypatch.setattr(proc, "retain_download_staging", lambda *_a, **_k: True)
+    monkeypatch.setattr(proc, "restore_upgrade_backup", lambda *_a, **_k: False)
+    monkeypatch.setattr(proc, "pin_unverified_upgrade_backup", lambda *_a, **_k: True)
+    monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
+
+    def partial_download(**kwargs):
+        kwargs["result"].update(
+            n_ok=1,
+            n_fail=1,
+            n_lossy=0,
+            failed_tracks=["B"],
+            lossy_tracks=[],
+            broken_tracks=[],
+            elapsed=0.0,
+            gap_fill_backup_path=None,
+        )
+
+    monkeypatch.setattr(proc, "run_album_download", partial_download)
+
+    result = proc.process_album(
+        album,
+        _args(auto_upgrade=True),
+        already_confirmed=True,
+        upgrade_only=True,
+        token="tok",
+    )
+
+    assert result["result"] == "partial"
+    assert result["imported"] is False
+    assert result["upgrade_unverified"] is True
+
+
 def test_treat_as_new_downloads_an_owned_album_as_a_separate_edition(monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.modes import process as proc

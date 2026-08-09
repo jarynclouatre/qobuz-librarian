@@ -159,9 +159,9 @@ def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
 
     monkeypatch.setattr(flows, "get_album",
                         lambda album_id, token: {"id": album_id, "title": "Album"})
+    outcome = {"imported": True, "result": "downloaded", "dir": album_dir}
     monkeypatch.setattr("qobuz_librarian.modes.process.process_album",
-                        lambda *a, **k: {"imported": True, "result": "downloaded",
-                                         "dir": album_dir})
+                        lambda *a, **k: dict(outcome))
     monkeypatch.setattr("qobuz_librarian.library.catalog.find_existing_tracks",
                         lambda album: ([], None))
     monkeypatch.setattr(flows.upgrade_state, "update_artist",
@@ -200,6 +200,24 @@ def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
     assert refreshed_upgrade == ["Artist"]
     assert refreshed_downsample == ["Artist"]
 
+    outcome.update({
+        "result": "partial",
+        "upgrade_unverified": True,
+    })
+    attention_job = jm.Job(title="upgrade", status=jm.JobStatus.RUNNING)
+    attention_job.execute_args = {
+        "quality_signature": flows.upgrade_state.quality_signature(),
+    }
+
+    flows.execute_upgrades(attention_job, [{
+        "artist": "Artist",
+        "title": "Album",
+        "payload": {"album_id": "alb-1"},
+    }], "tok")
+
+    assert attention_job.status is jm.JobStatus.FAILED
+    assert attention_job.attention == "backup"
+    assert "backup retained" in attention_job.summary.lower()
 
 def test_execute_upgrades_marks_partial_cap_before_refresh(
         tmp_path, monkeypatch):

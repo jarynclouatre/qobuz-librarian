@@ -6,6 +6,8 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.web import job_persistence
 from qobuz_librarian.web.jobs import Job, JobStatus
 
+_REAL_ADMIT = job_persistence.admit
+
 
 class _FailCommitOnce:
     """Forward to SQLite but fail the first commit after its write began."""
@@ -48,11 +50,14 @@ def test_failed_job_commit_cannot_ride_a_later_successful_commit(
     monkeypatch.setattr(job_persistence, "_conn", connection)
 
     rejected = Job(title="Rejected admission")
-    assert job_persistence.persist(rejected) is False
+    assert job_persistence.ready_for_admission() is True
+    assert _REAL_ADMIT(rejected) is False
+    assert job_persistence.ready_for_admission() is False
     assert connection.in_transaction is False
 
     accepted = Job(title="Accepted admission")
-    assert job_persistence.persist(accepted) is True
+    assert _REAL_ADMIT(accepted) is True
+    assert job_persistence.ready_for_admission() is True
 
     observer = sqlite3.connect(cfg.DATA_DIR / "jobs.db")
     try:

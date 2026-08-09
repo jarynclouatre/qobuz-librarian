@@ -43,6 +43,10 @@
         <span class="ql-status-chip is-warning" title="This album is missing tracks; open it for details.">Incomplete</span>
       {% elif job.attention == 'lossy' %}
         <span class="ql-status-chip is-warning" title="Qobuz does not have every track in lossless quality.">Lossless unavailable</span>
+      {% elif job.attention == 'backup' %}
+        <span class="ql-status-chip is-warning" title="A retained safety backup needs review under Settings and Diagnostics.">Backup retained</span>
+      {% elif job.attention == 'processing' %}
+        <span class="ql-status-chip is-warning" title="Post-download work did not finish cleanly; open it for details.">Post-download attention</span>
       {% elif job.attention == 'catalog' %}
         <span class="ql-status-chip is-warning" title="The deleted track still has a stale Beets catalogue entry.">Catalogue cleanup</span>
       {% elif job.attention %}

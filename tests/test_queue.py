@@ -501,6 +501,130 @@ def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypa
     assert verified["result"] == "downloaded"
 
 
+@pytest.mark.parametrize(
+    "failure",
+    ["import", "cleanup"],
+)
+def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
+        monkeypatch, tmp_path, failure):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations.staging import create_staging_run
+    from qobuz_librarian.queue import executor
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    original = album_dir / "01.flac"
+    original.write_bytes(b"original")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "STAGING_DIR", staging)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", tmp_path / "fetch.jsonl")
+    item = _qitem(
+        album={
+            "id": "A",
+            "title": "Album",
+            "artist": {"name": "Artist"},
+            "tracks": {"items": []},
+        },
+        album_dir=album_dir,
+        auto_upgrade=True,
+    )
+    queue = [item]
+
+    monkeypatch.setattr(executor, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(executor, "snapshot_staging", lambda: set())
+    monkeypatch.setattr(executor, "is_cancel_requested", lambda: False)
+    monkeypatch.setattr(
+        executor, "_reimport_parked_albums", lambda: (False, [])
+    )
+    run = create_staging_run()
+    item["_staging_run"] = run.to_record()
+    staged_album = run.path / "Album"
+
+    def download(_item):
+        staged_album.mkdir()
+        (staged_album / "01.flac").write_bytes(b"replacement")
+        _item.update(
+            n_ok=1,
+            n_fail=0,
+            n_lossy=0,
+            failed_tracks=[],
+            lossy_tracks=[],
+            broken_tracks=[],
+            elapsed=0.0,
+        )
+
+    monkeypatch.setattr(executor, "_download_for_queue_item", download)
+    monkeypatch.setattr(
+        executor, "_staged_album_dirs", lambda _item: [staged_album]
+    )
+    monkeypatch.setattr(
+        executor,
+        "verify_and_recover",
+        lambda _album, dirs, **_kwargs: {
+            "under": False,
+            "recovered": False,
+            "retried": False,
+            "staged_dirs": dirs,
+        },
+    )
+    monkeypatch.setattr(
+        executor, "_run_pre_import_hooks_for_dirs", lambda _dirs, _args: ([], 0)
+    )
+    monkeypatch.setattr(
+        executor, "track_signatures_for_album_dirs", lambda _dirs: []
+    )
+
+    def import_album(_dirs, **_kwargs):
+        if failure == "import":
+            raise OSError(errno.ENOSPC, "beets storage failure")
+        staged_album.rename(album_dir)
+        return True
+
+    monkeypatch.setattr(executor, "_import_album_with_retry", import_album)
+    monkeypatch.setattr(
+        executor, "retain_download_staging", lambda *_args, **_kwargs: True
+    )
+    if failure == "cleanup":
+        monkeypatch.setattr(
+            executor,
+            "retire_download_staging_after_import",
+            lambda _item: (_ for _ in ()).throw(
+                OSError(errno.ENOSPC, "cannot retire imported staging")
+            ),
+        )
+
+    def execute():
+        return executor._execute_download_queue(
+            queue,
+            Namespace(
+                dry_run=False,
+                no_import=False,
+                no_downsample=True,
+                consolidate=False,
+            ),
+            token="tok",
+        )
+
+    if failure == "import":
+        _results, drained = execute()
+        assert drained is False
+        assert item["result"] == "disk_full"
+        assert original.read_bytes() == b"original"
+        assert not item["backup_path"].path.exists()
+    else:
+        with pytest.raises(OSError, match="cannot retire imported staging"):
+            execute()
+        assert item["result"] == "import_failed"
+        assert original.read_bytes() == b"replacement"
+        assert item["backup_path"].path.exists()
+        assert item["upgrade_unverified"] is True
+    assert queue == [item]
+
+
 def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, tmp_path):
     # Regression: the bulk/web upgrade path (this executor) must carry non-
     # audio companions (booklets, scans, .cue/.log, and hand-placed art) out of

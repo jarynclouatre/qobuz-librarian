@@ -98,7 +98,11 @@ The bundled tools' full config files live in the persistent `config` volume, see
 
 The default Compose `/config` named volume is supported for the beets database. If you replace it or set `BEETS_DB_PATH`, run the app on Linux with `/proc/self/fd` and keep the database on a local filesystem that supports hard links, xattrs, advisory `flock`, file leases, atomic `renameat2` exchange, and file and directory `fsync`. NFS, SMB/CIFS, and other network filesystems are not supported for the database; the music library itself may still live on network storage.
 
-Set folder and file naming with `BEETS_PATH_DEFAULT`, `BEETS_PATH_SINGLETON`, and `BEETS_PATH_COMP` on the **Settings** page or in `.env`. These use beets path syntax, for example `$albumartist/$album ($year)/$track - $title`.
+Set folder and file naming with `BEETS_PATH_DEFAULT`, `BEETS_PATH_SINGLETON`, and `BEETS_PATH_COMP` on the **Settings** page or in `.env`. These use beets path syntax, for example `$albumartist/$album ($year)/$track - $title`. Enter that raw template on the Settings page. In `.env`, single-quote the whole assignment so Compose does not consume the beets variables:
+
+```dotenv
+BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'
+```
 
 Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field, the artwork plugins required by `ARTWORK`, and its internal import guards. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
 

@@ -2578,9 +2578,30 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             record_fetch=False,
         ))
 
-    def _handle_download_exception(item, exc):
+    def _retain_failed_staging(item, *, label=None):
+        """Capture a retention failure without skipping backup resolution."""
+        try:
+            if label is None:
+                return retain_download_staging(item), None
+            return retain_download_staging(item, label=label), None
+        except BaseException as preserve_exc:
+            log.info(fmt(
+                C.RED,
+                "    Could not preserve the failed staging run; resolving "
+                "the album backup before returning the storage error.",
+            ))
+            return False, preserve_exc
+
+    def _resolve_failed_item(item, retention_exc=None, *, cause=None):
+        results.append(_resolve_queue_item(
+            item, args, False, authority=authority))
+        if retention_exc is not None:
+            if cause is None:
+                raise retention_exc
+            raise retention_exc from cause
+
+    def _handle_download_exception(item, exc, *, phase=None):
         nonlocal interrupted, disk_full, io_error, auth_lost_exc
-        retain_download_staging(item)
         if isinstance(exc, KeyboardInterrupt):
             log.info(fmt(C.YELLOW,
                 "\n    Interrupted. Stopping further downloads; "
@@ -2595,8 +2616,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             auth_lost_exc = exc
         elif isinstance(exc, OSError):
             if exc.errno == errno.ENOSPC:
+                location = (
+                    f" during {phase}"
+                    if phase
+                    else f" at {cfg.STAGING_DIR}"
+                )
                 log.info(fmt(C.RED,
-                    f"\n    Out of disk space at {cfg.STAGING_DIR}. Stopping "
+                    f"\n    Out of disk space{location}. Stopping "
                     "the queue; restoring backups and keeping the rest for a "
                     "retry once space is freed."))
                 item["result"] = "disk_full"
@@ -2609,8 +2635,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 io_error = True
         else:
             raise exc
-        results.append(_resolve_queue_item(
-            item, args, False, authority=authority))
+        _retained, retention_exc = _retain_failed_staging(item)
+        _resolve_failed_item(item, retention_exc, cause=exc)
 
     def _record_durable_completion(item, post_dir, idx):
         nonlocal any_imported, cancelled
@@ -2833,6 +2859,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             downsample_cancelled=False,
         )
         item["post_import_signatures"] = []
+        retention_exc = None
 
         album = item["album"]
         album_dir = item["album_dir"]
@@ -2935,22 +2962,22 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         # UPGRADE_BACKUP_DIR inside STAGING_DIR, and a backup copied in BEFORE
         # the snapshot is already present at snapshot time, so it's correctly
         # excluded from the freshly-downloaded diff (not re-imported/downsampled).
-        item["snapshot_before"] = snapshot_staging()
         try:
+            item["snapshot_before"] = snapshot_staging()
             _download_for_queue_item(item)
         except (KeyboardInterrupt, AuthLost, OSError) as exc:
             _handle_download_exception(item, exc)
             continue
 
         if is_cancel_requested():
-            retain_download_staging(item)
             item["result"] = "cancelled"
             cancelled = True
-            log.info(fmt(C.YELLOW,
-                "    Cancelled; retained this album's partial download "
-                "for review."))
-            results.append(_resolve_queue_item(
-                item, args, False, authority=authority))
+            _retained, retention_exc = _retain_failed_staging(item)
+            if retention_exc is None:
+                log.info(fmt(C.YELLOW,
+                    "    Cancelled; retained this album's partial download "
+                    "for review."))
+            _resolve_failed_item(item, retention_exc)
             continue
 
         summary_n_ok = item.get("n_ok", 0)
@@ -3109,11 +3136,30 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     results.append(_resolve_queue_item(
                         item, args, False, authority=authority))
                     continue
+                except OSError as exc:
+                    # The original may already be in the upgrade backup.
+                    # Resolve it before stopping the queue.
+                    _handle_download_exception(
+                        item, exc, phase="library import"
+                    )
+                    continue
 
-                if item_imported and (
-                    "_staging_run" not in item
-                    or retire_download_staging_after_import(item)
-                ):
+                retired_import_staging = True
+                if item_imported and "_staging_run" in item:
+                    try:
+                        retired_import_staging = (
+                            retire_download_staging_after_import(item)
+                        )
+                    except BaseException as cleanup_exc:
+                        retired_import_staging = False
+                        retention_exc = cleanup_exc
+                        log.info(fmt(
+                            C.RED,
+                            "  ✗  Could not retire the exact imported staging "
+                            "run; resolving the album backup before returning "
+                            "the storage error.",
+                        ))
+                if item_imported and retired_import_staging:
                     any_imported = True
                 else:
                     if item_imported:
@@ -3124,18 +3170,31 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         ))
                     item_imported = False
                     item["result"] = "import_failed"
-                    retained = retain_download_staging(
-                        item, label="beets-incomplete")
-                    if retained:
-                        log.info(fmt(
-                            C.YELLOW,
-                            "  ⚠  Kept the exact residual download run in "
-                            "private staging recovery; the queue item remains "
-                            "pending.",
-                        ))
-                    else:
-                        _move_to_beets_retry(
-                            album_dirs, title, expected=parking_receipts)
+                    if retention_exc is None:
+                        retained, retention_exc = _retain_failed_staging(
+                            item, label="beets-incomplete")
+                        if retained:
+                            log.info(fmt(
+                                C.YELLOW,
+                                "  ⚠  Kept the exact residual download run in "
+                                "private staging recovery; the queue item "
+                                "remains pending.",
+                            ))
+                        elif retention_exc is None:
+                            try:
+                                _move_to_beets_retry(
+                                    album_dirs,
+                                    title,
+                                    expected=parking_receipts,
+                                )
+                            except BaseException as parking_exc:
+                                retention_exc = parking_exc
+                                log.info(fmt(
+                                    C.RED,
+                                    "  ✗  Could not park the failed beets "
+                                    "import; resolving the album backup before "
+                                    "returning the storage error.",
+                                ))
         elif args.no_import:
             log.info(fmt(C.YELLOW,
                 f"  --no-import: skipping beets. Files in {cfg.STAGING_DIR}/"))
@@ -3150,6 +3209,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             _drop(item)
         results.append(_resolve_queue_item(
             item, args, item_imported, authority=authority))
+        if retention_exc is not None:
+            raise retention_exc
 
         # Same post-import length recheck process_album runs, here covering every
         # queue path (walk fill, artist/album queue, repair refill, resume,

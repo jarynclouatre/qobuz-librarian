@@ -1,6 +1,8 @@
 """Validate Docker defaults and persisted-config reconciliation."""
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -11,6 +13,7 @@ import pytest
 _DEFAULT_TOML = Path(__file__).resolve().parents[1] / "docker" / "streamrip-default.toml"
 _ENTRYPOINT = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
 _COMPOSE = Path(__file__).resolve().parents[1] / "compose.yaml"
+_ENV_EXAMPLE = _COMPOSE.parent / ".env.example"
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::[^}]*)?\}")
 
 # Keys streamrip 2.2.0's format() info dict actually provides.
@@ -58,6 +61,63 @@ def test_custom_compose_web_port_reaches_cli_recovery_help():
         check=True,
     )
     assert "http://<host>:9443/settings" in result.stdout
+
+
+def test_documented_beets_path_survives_compose_env(tmp_path):
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker CLI unavailable")
+    probe = subprocess.run(
+        [docker, "compose", "version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if probe.returncode:
+        pytest.skip("Docker Compose plugin unavailable")
+    example = next(
+        line.removeprefix("# ")
+        for line in _ENV_EXAMPLE.read_text().splitlines()
+        if line.startswith("# BEETS_PATH_DEFAULT=")
+    )
+    env_file = tmp_path / "beets.env"
+    env_file.write_text(example + "\n", encoding="utf-8")
+    env = dict(os.environ)
+    for name in (
+        "BEETS_PATH_DEFAULT",
+        "albumartist",
+        "album",
+        "year",
+        "track",
+        "title",
+    ):
+        env.pop(name, None)
+
+    result = subprocess.run(
+        [
+            docker,
+            "compose",
+            "--env-file",
+            str(env_file),
+            "-f",
+            str(_COMPOSE),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=_COMPOSE.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    rendered = json.loads(result.stdout)
+    value = rendered["services"]["qobuz-librarian"]["environment"][
+        "BEETS_PATH_DEFAULT"
+    ]
+    assert value.replace("$$", "$") == (
+        "$albumartist/$album ($year)/$track - $title"
+    )
+    assert "variable is not set" not in result.stderr
 
 
 def test_streamrip_default_toml_uses_valid_placeholders_and_flags():

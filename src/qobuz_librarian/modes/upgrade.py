@@ -5,6 +5,7 @@ from pathlib import Path
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.api.search import get_album
+from qobuz_librarian.download_result import download_attention_kind
 from qobuz_librarian.library import downsample_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.catalog import (
@@ -155,6 +156,7 @@ def run_upgrade_walk_mode(args, token):
     n_unverified_albums = 0
     n_catalogue_failed = 0
     n_failed_albums = 0
+    n_attention_albums = 0
     n_gone_albums = 0
     no_answer = False
     interrupted = False
@@ -274,6 +276,7 @@ def run_upgrade_walk_mode(args, token):
                     raise
 
                 _pr_result = (_proc_result or {}).get("result", "")
+                attention_kind = download_attention_kind(_proc_result or {})
                 if _pr_result == "upgrade_no_local_tracks":
                     # The album left the library after the scan (an older
                     # saved state without folder records, or the folder is
@@ -283,20 +286,20 @@ def run_upgrade_walk_mode(args, token):
                     n_gone_albums += 1
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
-                if _pr_result in BENIGN_UPGRADE_RESULTS:
-                    if _pr_result not in {"cancelled", "dry_run"}:
-                        _refresh_saved_state_after_upgrade(
-                            album, _proc_result, token, args)
-                    time.sleep(cfg.ARTIST_API_DELAY)
-                    continue
                 if (_proc_result or {}).get("catalogue_unverified", False):
                     n_catalogue_failed += 1
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
-                if (_proc_result or {}).get("upgrade_unverified", False):
-                    # Imported, but the rebuilt folder couldn't be verified as
-                    # complete as the original, so the backup was kept.
+                if attention_kind == "backup":
+                    # Keep the backup visible until the replacement or
+                    # automatic restore can be verified.
                     n_unverified_albums += 1
+                    time.sleep(cfg.ARTIST_API_DELAY)
+                    continue
+                if _pr_result in BENIGN_UPGRADE_RESULTS:
+                    if _pr_result not in {"cancelled", "dry_run"}:
+                        _refresh_saved_state_after_upgrade(
+                            album, _proc_result, token, args)
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
                 if not (_proc_result or {}).get("imported", False):
@@ -316,6 +319,13 @@ def run_upgrade_walk_mode(args, token):
                         f"     ⚠  Upgrade incomplete: "
                         f"{verdict['n_below']} track(s) still below target "
                         f"after retry. Marked capped."))
+                elif attention_kind == "processing":
+                    n_attention_albums += 1
+                    n_upgraded_albums += 1
+                    _refresh_saved_state_after_upgrade(
+                        album, _proc_result, token, args)
+                    time.sleep(cfg.ARTIST_API_DELAY)
+                    continue
                 n_upgraded_albums += 1
                 _refresh_saved_state_after_upgrade(album, _proc_result, token, args)
                 time.sleep(cfg.ARTIST_API_DELAY)
@@ -329,6 +339,7 @@ def run_upgrade_walk_mode(args, token):
         args.consolidate = saved_consolidate
 
     n_failed_attempts = (n_failed_albums + n_unverified_albums
+                         + n_attention_albums
                          + n_catalogue_failed + n_gone_albums)
     n_gone = n_stale_candidates + n_gone_albums
 
@@ -360,8 +371,12 @@ def run_upgrade_walk_mode(args, token):
             "Beets catalogue attention (backup retained)."))
     if n_unverified_albums:
         log.info(fmt(C.YELLOW,
-            f"     ⚠  {plural(n_unverified_albums, 'album')} kept the original "
-            "(upgrade couldn't be verified complete; backup retained)."))
+            f"     ⚠  {plural(n_unverified_albums, 'album')} kept a safety "
+            "backup because the replacement or recovery couldn't be verified."))
+    if n_attention_albums:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  {plural(n_attention_albums, 'album')} did not finish "
+            "cleanly (see the log above)."))
     if n_failed_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_failed_albums, 'album')} couldn't be upgraded "

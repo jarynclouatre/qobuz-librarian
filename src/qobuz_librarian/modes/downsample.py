@@ -114,9 +114,8 @@ def run_downsample_walk_mode(args):
                     "files were changed; check the data folder and try again."
                 )))
                 return EXIT_CONFIG
-            # settings_store may defer changing cfg while a Web job runs. Bind
-            # this run to the answer that was just saved so "keep" cannot be
-            # misread as the still-unset default and delete the originals.
+            # A Web job may defer applying the saved setting, so use this
+            # answer for the current run.
             keep_originals = keep
             log.info(fmt(C.GRAY,
                 f"  Saved. Originals will be {'kept' if keep else 'deleted'}; "

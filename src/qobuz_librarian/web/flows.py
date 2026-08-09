@@ -15,7 +15,10 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable, load_qobuz_token
 from qobuz_librarian.api.search import get_album
-from qobuz_librarian.download_result import incomplete_track_counts
+from qobuz_librarian.download_result import (
+    download_attention_kind,
+    incomplete_track_counts,
+)
 from qobuz_librarian.library import (
     downsample_state,
     library_scan_state,
@@ -1560,6 +1563,12 @@ def execute_albums(job, chosen, token):
     partial = 0
     retryable_tracks = 0
     lossy_only_tracks = 0
+    attention_counts = {
+        "backup": 0,
+        "quality": 0,
+        "processing": 0,
+        "partial": 0,
+    }
     failed = 0
     skipped = 0
     processed = 0
@@ -1591,6 +1600,43 @@ def execute_albums(job, chosen, token):
             job.push_line(
                 "The finished Library review could not be saved. Check the "
                 "data folder, then refresh before continuing."
+            )
+
+    def _apply_non_track_attention():
+        messages = []
+        if attention_counts["backup"]:
+            messages.append(
+                f"{plural(attention_counts['backup'], 'album')} "
+                "retained a safety backup because its replacement or recovery "
+                "could not be verified. Review it under Settings > Diagnostics "
+                "before downloading that album again."
+            )
+            job.attention = "backup"
+        if attention_counts["quality"]:
+            messages.append(
+                f"{plural(attention_counts['quality'], 'album')} remained "
+                "below the target quality after its automatic retry."
+            )
+            if not job.attention:
+                job.attention = "quality"
+        if attention_counts["processing"]:
+            messages.append(
+                f"{plural(attention_counts['processing'], 'imported album')} "
+                "has post-download work that did not finish cleanly; see the "
+                "job log."
+            )
+            if not job.attention:
+                job.attention = "processing"
+        if attention_counts["partial"]:
+            messages.append(
+                f"{plural(attention_counts['partial'], 'imported album')} "
+                "reported unfinished work; see the job log."
+            )
+            if not job.attention:
+                job.attention = "partial"
+        if messages:
+            job.error = " ".join(
+                part for part in (job.error, *messages) if part
             )
 
     def _fold_back_unfinished():
@@ -1643,7 +1689,13 @@ def execute_albums(job, chosen, token):
             # Cancelled mid-download: processed already points past this album,
             # so the cancel fold-back below would drop its pick, remember it.
             cancelled_cand = cand
-        if result and result.get("imported") and result.get("n_ok", 0) > 0:
+        attention_kind = download_attention_kind(result or {})
+        if attention_kind == "backup" and not (result or {}).get("imported"):
+            # Keep unresolved backups out of the retry review. Diagnostics
+            # owns the next decision.
+            attention_counts["backup"] += 1
+            job._imported_any = True
+        elif result and result.get("imported") and result.get("n_ok", 0) > 0:
             job._imported_any = True
             _refresh_after_local_album_change(
                 full,
@@ -1660,7 +1712,9 @@ def execute_albums(job, chosen, token):
             # would otherwise drop the fresh candidate as a same-id stale one)
             # instead of leaving it invisible until the next manual refresh.
             retryable, lossy_only = incomplete_track_counts(result)
-            if retryable or lossy_only:
+            if attention_kind == "backup":
+                attention_counts["backup"] += 1
+            elif retryable or lossy_only:
                 partial += 1
                 retryable_tracks += retryable
                 lossy_only_tracks += lossy_only
@@ -1669,6 +1723,13 @@ def execute_albums(job, chosen, token):
                 elif is_library_run and retryable:
                     _remember_review_save(_fold_partial_gap_fill(
                         full, cand.get("artist") or "", retryable))
+            elif attention_kind:
+                attention_counts[attention_kind] += 1
+                if attention_kind == "quality":
+                    from qobuz_librarian.web import jobs as job_mgr
+                    job_mgr.record_quality_shortfall(
+                        job, result.get("quality_verdict")
+                    )
             else:
                 ok += 1
         elif result and result.get("result") in _benign:
@@ -1699,6 +1760,9 @@ def execute_albums(job, chosen, token):
         parts = [f"{plural(ok, 'album')} downloaded"]
         if partial:
             parts.append(f"{plural(partial, 'album')} partly downloaded")
+        attention_total = sum(attention_counts.values())
+        if attention_total:
+            parts.append(f"{plural(attention_total, 'album')} needs attention")
         if failed:
             parts.append(f"{plural(failed, 'album')} failed")
         if interrupted:
@@ -1726,11 +1790,14 @@ def execute_albums(job, chosen, token):
                 "then refresh before retrying."
             )
             job.attention = job.attention or "review"
+        _apply_non_track_attention()
         log.info(job.summary)
         return
     if ok:
         parts = [f"{ok}/{plural(len(chosen), 'album')} downloaded and imported"]
     elif partial:
+        parts = []
+    elif sum(attention_counts.values()):
         parts = []
     else:
         parts = ["No albums downloaded or imported"]
@@ -1739,7 +1806,27 @@ def execute_albums(job, chosen, token):
             f"{plural(partial, 'album')} only partly downloaded "
             "(some tracks are missing)"
         )
-    has_issues = bool(partial or failed)
+    if attention_counts["backup"]:
+        parts.append(
+            f"{plural(attention_counts['backup'], 'album')} retained "
+            "a safety backup for review"
+        )
+    if attention_counts["quality"]:
+        parts.append(
+            f"{plural(attention_counts['quality'], 'album')} finished below "
+            "target quality"
+        )
+    if attention_counts["processing"]:
+        parts.append(
+            f"{plural(attention_counts['processing'], 'imported album')} needs "
+            "post-download attention"
+        )
+    if attention_counts["partial"]:
+        parts.append(
+            f"{plural(attention_counts['partial'], 'imported album')} reported "
+            "unfinished work"
+        )
+    has_issues = bool(partial or failed or sum(attention_counts.values()))
     job.summary = ("" if has_issues else "Finished. ") + ", ".join(parts) + "."
     log.info(job.summary)
     if partial:
@@ -1765,6 +1852,7 @@ def execute_albums(job, chosen, token):
                 "lossy on Qobuz and needs another source."
             )
         job.error = " ".join(messages)
+    _apply_non_track_attention()
     if has_issues:
         from qobuz_librarian.web import jobs as job_mgr
         job.status = job_mgr.JobStatus.FAILED
@@ -1948,6 +2036,8 @@ def execute_upgrades(job, chosen, token):
     ok = 0
     kept = 0
     catalogue_failed = 0
+    quality_attention = 0
+    processing_attention = 0
     failed = 0
     processed = 0
     for i, cand in enumerate(chosen, 1):
@@ -1985,10 +2075,11 @@ def execute_upgrades(job, chosen, token):
             failed += 1
             continue
         _res = (result or {}).get("result")
+        attention_kind = download_attention_kind(result or {})
         if result and result.get("catalogue_unverified"):
             catalogue_failed += 1
             job._imported_any = True
-        elif result and result.get("upgrade_unverified"):
+        elif result and attention_kind == "backup":
             # Imported, but the rebuilt folder couldn't be verified as
             # complete as the original, so the backup was kept.
             kept += 1
@@ -1998,7 +2089,10 @@ def execute_upgrades(job, chosen, token):
             ok += 1
             job._imported_any = True
             verdict = result.get("quality_verdict")
-            if verdict and verdict["under"] and not verdict["recovered"]:
+            if attention_kind == "quality":
+                quality_attention += 1
+                from qobuz_librarian.web import jobs as job_mgr
+                job_mgr.record_quality_shortfall(job, verdict)
                 from qobuz_librarian.quality.decision import mark_album_capped
                 mark_album_capped(album.get("id"), album, {
                     "n_below": verdict["n_below"],
@@ -2009,6 +2103,8 @@ def execute_upgrades(job, chosen, token):
                     f"  upgrade incomplete: {plural(verdict['n_below'], 'track')} "
                     "still below target after retry. Marked capped."
                 )
+            elif attention_kind == "processing":
+                processing_attention += 1
             _refresh_after_local_album_change(
                 album,
                 result,
@@ -2038,20 +2134,47 @@ def execute_upgrades(job, chosen, token):
     if job.cancel_requested:
         job.summary = (f"Stopped early. {ok} upgraded, "
                        f"{len(chosen) - processed} not started.")
+        if kept:
+            job.summary += (
+                f" {plural(kept, 'replacement')} retained a safety backup."
+            )
         if catalogue_failed:
             job.summary += (
                 f" {plural(catalogue_failed, 'replacement')} needs catalogue "
                 "attention; backup retained."
             )
-            job.error = (
-                f"{plural(catalogue_failed, 'replacement')} couldn't be "
-                "reconciled with the Beets catalogue; see the log."
+        if quality_attention:
+            job.summary += (
+                f" {plural(quality_attention, 'album')} finished below target "
+                "quality."
             )
+        if processing_attention:
+            job.summary += (
+                f" {plural(processing_attention, 'album')} needs "
+                "post-download attention."
+            )
+        if kept or catalogue_failed:
+            job.attention = "backup"
+            job.error = (
+                "A retained safety backup needs review under Settings > "
+                "Diagnostics before that album is upgraded again."
+            )
+        elif quality_attention:
+            job.attention = "quality"
+            job.error = (
+                "An album remained below the target quality after its "
+                "automatic retry."
+            )
+        elif processing_attention:
+            job.attention = "processing"
+            job.error = "Post-download work needs attention; see the job log."
+        if kept or catalogue_failed or quality_attention or processing_attention:
             _mark_job_failed(job)
         log.info(job.summary)
         return
     msg = f"Upgraded {ok}/{plural(len(chosen), 'album')}."
-    if not failed and not catalogue_failed:
+    if not any((failed, kept, catalogue_failed, quality_attention,
+                processing_attention)):
         msg = "Finished. " + msg
     if kept:
         msg += (f" {kept} kept the original (upgrade couldn't be verified "
@@ -2059,10 +2182,25 @@ def execute_upgrades(job, chosen, token):
     if catalogue_failed:
         msg += (f" {plural(catalogue_failed, 'replacement')} needs catalogue "
                 "attention; backup retained.")
+    if quality_attention:
+        msg += (
+            f" {plural(quality_attention, 'album')} finished below target "
+            "quality."
+        )
+    if processing_attention:
+        msg += (
+            f" {plural(processing_attention, 'album')} needs post-download "
+            "attention."
+        )
     job.summary = msg
     log.info(msg)
-    if catalogue_failed or failed:
+    if any((failed, kept, catalogue_failed, quality_attention,
+            processing_attention)):
         problems = []
+        if kept:
+            problems.append(
+                f"{plural(kept, 'replacement')} retained a safety backup"
+            )
         if catalogue_failed:
             problems.append(
                 f"{plural(catalogue_failed, 'replacement')} couldn't be "
@@ -2072,7 +2210,24 @@ def execute_upgrades(job, chosen, token):
             problems.append(
                 f"{plural(failed, 'album')} couldn't be upgraded"
             )
-        job.error = "; ".join(problems) + "; see the log."
+        if quality_attention:
+            problems.append(
+                f"{plural(quality_attention, 'album')} remained below target "
+                "quality"
+            )
+        if processing_attention:
+            problems.append(
+                f"{plural(processing_attention, 'album')} has post-download "
+                "work needing attention"
+            )
+        if kept or catalogue_failed:
+            problems.append("review retained backups under Settings > Diagnostics")
+            job.attention = "backup"
+        elif quality_attention:
+            job.attention = "quality"
+        elif processing_attention:
+            job.attention = "processing"
+        job.error = "; ".join(problems) + "."
         _mark_job_failed(job)
 
 

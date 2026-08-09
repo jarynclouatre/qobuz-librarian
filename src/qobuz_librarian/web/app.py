@@ -878,6 +878,12 @@ def _readiness_report() -> tuple[int, dict]:
         failed.append("credentials")
     if not _data_dir_available():
         failed.append("data")
+    if (
+        not _CLI_MODE
+        and _run_lock_intact()
+        and not job_mgr.job_persistence.ready_for_admission()
+    ):
+        failed.append("job_persistence")
     if _LOCK_UNENFORCEABLE or (
         not _CLI_MODE
         and _LOCK_BUSY_PID is None
@@ -3787,7 +3793,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "user_skipped": "Skipped at confirmation.",
     "lossy_only": "Qobuz only had lossy versions. Nothing downloaded.",
     "no_tracks": "Qobuz returned no tracks for this album.",
-    "cancelled": "Cancelled. The partial download was discarded.",
+    "cancelled": "Cancelled. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
     "not_imported": "Downloaded, but the import didn't land. Library unchanged.",
 }
@@ -3799,16 +3805,61 @@ def _summarize_download_result(r):
     Picks a phrase per result kind for the documented non-success branches,
     or builds the "N tracks downloaded" tally for an actual rip. Returns
     "" if there's nothing useful to say (process_album returned None / {})."""
+    from qobuz_librarian.download_result import incomplete_track_counts
     from qobuz_librarian.ui_cli.errors import plural
 
     if not r:
         return ""
     kind = r.get("result")
+    if kind == "cancelled" and (
+        r.get("catalogue_unverified")
+        or r.get("recovery_unverified")
+        or r.get("upgrade_unverified")
+    ):
+        return "Cancelled. Nothing was imported. A safety backup was retained."
     if kind == "partial":
         landed = plural(r.get("n_ok", 0), "track")
-        if r.get("imported"):
-            return f"{landed} downloaded."
-        return f"{landed} downloaded, but the incomplete album was not imported."
+        if not r.get("imported"):
+            summary = (
+                f"{landed} downloaded, but the incomplete album was not "
+                "imported."
+            )
+            if (
+                r.get("catalogue_unverified")
+                or r.get("recovery_unverified")
+                or r.get("upgrade_unverified")
+            ):
+                summary += " A safety backup was retained for review."
+            return summary
+        parts = [f"{landed} downloaded"]
+        if r.get("catalogue_unverified"):
+            parts.append("Beets catalogue needs attention; backup retained")
+        elif r.get("recovery_unverified"):
+            parts.append("recovery could not be verified; backup retained")
+        elif r.get("upgrade_unverified"):
+            parts.append("upgrade could not be verified; original backup retained")
+        else:
+            verdict = r.get("quality_verdict") or {}
+            if verdict.get("under") and not verdict.get("recovered"):
+                parts.append("highest-source retry remained below target quality")
+            if r.get("downsample_errors"):
+                parts.append(
+                    f"{plural(r['downsample_errors'], 'file')} could not be "
+                    "downsampled"
+                )
+            if r.get("downsample_flush_warnings"):
+                parts.append(
+                    f"{plural(r['downsample_flush_warnings'], 'rewritten file')} "
+                    "could not be confirmed flushed"
+                )
+            if r.get("downsample_cancelled"):
+                parts.append("post-download downsample stopped early")
+            if r.get("consolidation_interrupted"):
+                parts.append("duplicate cleanup stopped early")
+            retryable, lossy_only = incomplete_track_counts(r)
+            if r.get("siblings_preserved") and not (retryable or lossy_only):
+                parts.append("sibling cleanup needs review")
+        return ", ".join(parts) + "."
     if kind in _DOWNLOAD_SUMMARY_LABELS:
         return _DOWNLOAD_SUMMARY_LABELS[kind]
     if not r.get("imported"):
@@ -3832,6 +3883,102 @@ def _summarize_download_result(r):
     return ", ".join(parts) + "."
 
 
+def _mark_download_attention(job, result):
+    """Mark a job failed when download details still need attention."""
+    from qobuz_librarian.download_result import (
+        download_attention_kind,
+        incomplete_track_counts,
+    )
+    from qobuz_librarian.ui_cli.errors import plural
+
+    retryable, lossy_only = incomplete_track_counts(result)
+    kind = download_attention_kind(result)
+    job.status = job_mgr.JobStatus.FAILED
+    if kind == "backup":
+        job.attention = "backup"
+        if not isinstance(job.execute_args, dict):
+            job.execute_args = {}
+        job.execute_args["retry_disabled"] = "backup"
+        if result.get("catalogue_unverified"):
+            job.error = (
+                "The album's Beets catalogue entries could not be reconciled "
+                "safely. A backup was retained. Review it under Settings > "
+                "Diagnostics before downloading this album again."
+            )
+        elif result.get("recovery_unverified"):
+            job.error = (
+                "The album recovery could not be verified complete. A backup "
+                "was retained. Review it under Settings > Diagnostics before "
+                "downloading this album again."
+            )
+        else:
+            job.error = (
+                "The replacement could not be verified complete. Your "
+                "original was retained as a backup. Review it under Settings "
+                "> Diagnostics before downloading this album again."
+            )
+        return
+    if kind == "quality":
+        job_mgr.record_quality_shortfall(job, result.get("quality_verdict"))
+        job.error = (
+            "The album downloaded, but it still finished below the target "
+            "quality after the automatic retry."
+        )
+        return
+    if kind == "processing":
+        job.attention = "processing"
+        messages = []
+        if result.get("downsample_errors"):
+            messages.append(
+                f"{plural(result['downsample_errors'], 'file')} could not be "
+                "downsampled"
+            )
+        if result.get("downsample_flush_warnings"):
+            messages.append(
+                f"{plural(result['downsample_flush_warnings'], 'rewritten file')} "
+                "could not be confirmed flushed to disk"
+            )
+        if result.get("downsample_cancelled"):
+            messages.append("post-download downsampling stopped early")
+        if result.get("consolidation_interrupted"):
+            messages.append("duplicate cleanup stopped early")
+        if result.get("siblings_preserved"):
+            messages.append("sibling cleanup needs review")
+        detail = "; ".join(messages) or "post-download work did not finish"
+        job.error = (
+            f"The album imported, but {detail}. Check the job log before "
+            "retrying."
+        )
+        return
+    if kind == "lossy":
+        job.attention = "lossy"
+        job.execute_args["retry_disabled"] = "lossy"
+        job.error = (
+            f"{plural(lossy_only, 'track')} "
+            f"{'is' if lossy_only == 1 else 'are'} only available "
+            "lossy on Qobuz. The album is incomplete and needs another "
+            "source."
+        )
+        return
+    job.attention = "partial"
+    if retryable:
+        job.error = (
+            f"{plural(retryable, 'track')} "
+            f"{'is' if retryable == 1 else 'are'} still missing. "
+            f"Retry fetches {'it' if retryable == 1 else 'them'}."
+        )
+        if lossy_only:
+            job.error += (
+                f" {plural(lossy_only, 'track')} can only be found "
+                "lossy on Qobuz and needs another source."
+            )
+    else:
+        job.error = (
+            "The album imported, but the download reported unfinished work. "
+            "Check the job log before retrying."
+        )
+
+
 def _make_download_run(
     album,
     token,
@@ -3845,7 +3992,10 @@ def _make_download_run(
     edition is already owned: the "get this edition too" path.
     """
     def run(j):
-        from qobuz_librarian.download_result import incomplete_track_counts
+        from qobuz_librarian.download_result import (
+            download_attention_kind,
+            incomplete_track_counts,
+        )
         from qobuz_librarian.library.catalog import (
             compute_missing,
             find_existing_tracks,
@@ -4031,30 +4181,10 @@ def _make_download_run(
                   "lossy_only", "no_tracks", "cancelled"}
         if durable_failure:
             pass
+        elif download_attention_kind(r) == "backup":
+            _mark_download_attention(j, r)
         elif r.get("result") == "partial" and r.get("imported"):
-            retryable, lossy_only = incomplete_track_counts(r)
-            j.status = job_mgr.JobStatus.FAILED
-            if retryable:
-                j.attention = "partial"
-                j.error = (
-                    f"{plural(retryable, 'track')} "
-                    f"{'is' if retryable == 1 else 'are'} still missing. "
-                    f"Retry fetches {'it' if retryable == 1 else 'them'}."
-                )
-                if lossy_only:
-                    j.error += (
-                        f" {plural(lossy_only, 'track')} can only be found "
-                        "lossy on Qobuz and needs another source."
-                    )
-            else:
-                j.attention = "lossy"
-                j.execute_args["retry_disabled"] = "lossy"
-                j.error = (
-                    f"{plural(lossy_only, 'track')} "
-                    f"{'is' if lossy_only == 1 else 'are'} only available "
-                    "lossy on Qobuz. The album is incomplete and needs "
-                    "another source."
-                )
+            _mark_download_attention(j, r)
         elif r.get("result") not in benign and not r.get("imported"):
             j.status = job_mgr.JobStatus.FAILED
             if r.get("n_fail"):
@@ -7804,9 +7934,8 @@ async def job_approve(request: Request, job_id: str):
         if job.execute_kind == "downsample":
             from qobuz_librarian.web import settings_store
 
-            # current() includes a durably saved value whose live application
-            # was deferred for another active lane. Every approved run also
-            # binds the resolved policy into its durable job row below.
+            # current() includes a saved value waiting for another lane to
+            # finish. Bind that value to this approval below.
             choice = _downsample_originals_choice()
             rendered_choice = (
                 form.get("downsample_policy") or ""
@@ -8528,6 +8657,13 @@ async def job_retry(request: Request, job_id: str):
             url="/queue?error=" + urllib.parse.quote(
                 "Qobuz only has the missing tracks in lossy quality. This "
                 "album needs another source, so it cannot be retried here."),
+            status_code=303,
+        )
+    if (job.execute_args or {}).get("retry_disabled") == "backup":
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(
+                "This album has a retained safety backup. Review it under "
+                "Settings > Diagnostics before starting the album again."),
             status_code=303,
         )
     if (

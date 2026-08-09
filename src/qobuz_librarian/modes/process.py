@@ -1020,6 +1020,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     quality_verdict = None
     _gap_fill_not_located = False  # gap-fill succeeded on paper but album not found on disk
     recovery_unverified = False
+    early_result = None
 
     try:
         snapshot = snapshot_staging()
@@ -1049,8 +1050,14 @@ def process_album(album, args, *, allow_force=True, label=None,
                 "\n  Cancelled; retaining the partial download for review. "
                 "nothing imported."))
             retain_download_staging(download_result)
-            return {"result": "cancelled", "imported": False,
-                    "n_ok": n_ok, "n_lossy": n_lossy, "n_fail": n_fail}
+            early_result = {
+                "result": "cancelled",
+                "imported": False,
+                "n_ok": n_ok,
+                "n_lossy": n_lossy,
+                "n_fail": n_fail,
+            }
+            return early_result
 
         # A wipe-replace (auto-upgrade or --force moved the original aside)
         # that came back partial gets rolled back to the original by the
@@ -1068,8 +1075,14 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.YELLOW,
                 f"\n  Re-download came back incomplete; {disposition} and "
                 "keeping your original."))
-            return {"result": "partial", "imported": False,
-                    "n_ok": n_ok, "n_fail": n_fail, "n_lossy": n_lossy}
+            early_result = {
+                "result": "partial",
+                "imported": False,
+                "n_ok": n_ok,
+                "n_fail": n_fail,
+                "n_lossy": n_lossy,
+            }
+            return early_result
 
         if n_ok > 0 and not args.no_import and not use_force:
             staged_dirs_for_import = validated_staged_album_dirs(
@@ -1148,9 +1161,14 @@ def process_album(album, args, *, allow_force=True, label=None,
                         log.info(fmt(C.YELLOW,
                             "\n  Recovery re-download came back incomplete; "
                             f"{disposition} and keeping your original."))
-                        return {"result": "partial", "imported": False,
-                                "n_ok": n_ok, "n_fail": n_fail,
-                                "n_lossy": n_lossy}
+                        early_result = {
+                            "result": "partial",
+                            "imported": False,
+                            "n_ok": n_ok,
+                            "n_fail": n_fail,
+                            "n_lossy": n_lossy,
+                        }
+                        return early_result
                 if quality_verdict["recovered"]:
                     log.info(fmt(C.CYAN,
                         "  ↻ recovered: re-fetched at the highest source after "
@@ -1345,6 +1363,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     log.info(fmt(C.GREEN,
                         f"  ✓  Restored original folder to {album_dir}."))
                 else:
+                    upgrade_unverified = True
                     if not pin_unverified_upgrade_backup(
                             upgrade_backup_path,
                             "upgrade backup kept; automatic restore did not "
@@ -1486,6 +1505,15 @@ def process_album(album, args, *, allow_force=True, label=None,
                     log.info(fmt(C.RED,
                         f"  ✗  Restored {_n_back} track(s); remaining originals "
                         f"preserved at {gap_fill_backup_path}; reconcile by hand."))
+
+        # The return value was built before this recovery block. Update the
+        # same result if an automatic restore failed.
+        if early_result is not None:
+            early_result.update(
+                upgrade_unverified=upgrade_unverified,
+                catalogue_unverified=catalogue_unverified,
+                recovery_unverified=recovery_unverified,
+            )
 
     # ── Consolidation ────────────────────────────────────────────────────────
     n_consolidated = 0

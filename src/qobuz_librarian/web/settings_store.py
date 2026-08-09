@@ -331,8 +331,10 @@ def drain_pending():
     already-applied cfg.* values - never the gap in between, which would
     silently drop the pending change.
     """
+    from qobuz_librarian.web import jobs as job_mgr
+
     global _pending_apply
-    with _pending_lock:
+    with job_mgr.settings_admission_guard(), _pending_lock:
         pending = _pending_apply
         _pending_apply = None
         if pending is not None:
@@ -414,7 +416,9 @@ def _save_locked(values: dict):
         if k in persisted or v != baseline.get(k):
             persisted[k] = v
 
-    with _pending_lock:
+    from qobuz_librarian.web import jobs as job_mgr
+
+    with job_mgr.settings_admission_guard(), _pending_lock:
         # Durable publication is the admission point for a settings change.
         # Applying first leaves the running process (or its deferred overlay)
         # claiming values that a restart will discard when the atomic write
