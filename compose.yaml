@@ -221,8 +221,8 @@ services:
       EXCLUDE_LIVE_ALBUMS:   "${EXCLUDE_LIVE_ALBUMS:-false}"
       # Log verbosity: DEBUG | INFO | WARNING | ERROR.
       LOG_LEVEL:             "${LOG_LEVEL:-INFO}"
-      # Optional command run after every job; the job state
-      # (id/status/title/artist/error/finished_at) is piped to it as JSON on stdin
+      # Optional command run after every job; the job state (id, status, title,
+      # edition, display_title, artist, error, finished_at) arrives as JSON on stdin
       # (e.g. POST_JOB_HOOK='curl -sX POST https://ntfy.sh/your-topic -d @-').
       # POST_JOB_HOOK_TIMEOUT caps a slow webhook.
       POST_JOB_HOOK:         "${POST_JOB_HOOK:-}"

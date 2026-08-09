@@ -425,7 +425,10 @@ class Job:
             self.log_lines.append(line)
             if len(self.log_lines) > self.LOG_CAP + self._LOG_SLACK:
                 del self.log_lines[:len(self.log_lines) - self.LOG_CAP]
-                self.log_lines[0] = self._TRUNCATION_MARKER
+                # A one-line cap must preserve the latest line; larger tails
+                # reserve their first slot for the truncation marker.
+                if self.LOG_CAP > 1:
+                    self.log_lines[0] = self._TRUNCATION_MARKER
         self._fan_out(line)
 
     def persisted_log_lines_locked(self) -> list:

@@ -34,16 +34,12 @@ _file_handler = None
 
 
 def attach_file_handler(path, level_name: str = "INFO", role: str = ""):
-    """Attach a rotating file handler at `path`. Idempotent - safe to call
-    from both _entry() and the web _lifespan.
+    """Attach one rotating handler, with a role suffix for separate processes.
 
-    ``role`` names the writing process (e.g. "cli"); when set, the handler
-    writes to a role-suffixed file (qobuz-librarian-cli.log). The long-lived web
-    server and a `docker exec` CLI run can both be attached to the SAME log at
-    once, and a single shared RotatingFileHandler races on rollover at the 5 MB
-    boundary - two processes independently rename .log->.log.1 and reshuffle the
-    backup chain, losing lines and orphaning an inode. A distinct file per role
-    sidesteps the race without a cross-process rollover lock."""
+    The web process uses the base file. A CLI role writes to
+    ``qobuz-librarian-cli.log`` so independently rotating processes never share
+    a rollover chain.
+    """
     global _file_handler
     if _file_handler is not None:
         return
@@ -61,15 +57,12 @@ def attach_file_handler(path, level_name: str = "INFO", role: str = ""):
             datefmt="%Y-%m-%d %H:%M:%S"))
         level = getattr(logging, level_name.upper(), logging.INFO)
         h.setLevel(level)
-        # The logger itself gates at INFO (line 13), which would drop DEBUG
-        # records before any handler saw them - so LOG_LEVEL=DEBUG was a no-
-        # op.
+        # Let the configured file level lower the logger's global gate.
         log.setLevel(min(log.level, level))
         log.addHandler(h)
         _file_handler = h
     except OSError:
-        # Logging is best-effort - don't crash startup if the data volume
-        # isn't writable.
+        # Keep startup usable when the data volume cannot host a log file.
         pass
 
 # Progress-reporting hook.

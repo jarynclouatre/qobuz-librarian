@@ -10261,7 +10261,12 @@ async def job_stream(job_id: str):
         yield "retry: 750\n\n"
         if (job.status in job_mgr.TERMINAL
                 or job.status == job_mgr.JobStatus.AWAITING_REVIEW):
-            for line in job.log_lines[-job.REPLAY_TAIL:]:
+            replay = (
+                job.log_lines[-job.REPLAY_TAIL:]
+                if job.REPLAY_TAIL > 0
+                else ()
+            )
+            for line in replay:
                 escaped = line.replace("\n", " ").replace("\r", "")
                 yield f"data: {escaped}\n\n"
             yield f"event: done\ndata: {job.status.value}\n\n"

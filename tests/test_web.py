@@ -311,6 +311,13 @@ def test_delayed_selection_save_reports_a_write_failure(monkeypatch):
     job.unsubscribe(subscriber)
 
 
+def test_one_line_job_log_cap_keeps_the_latest_line():
+    job = jm.Job(title="bounded log")
+    job.LOG_CAP = 1
+    for number in range(job._LOG_SLACK + 2):
+        job.push_line(f"line {number}")
+
+    assert job.log_lines == [f"line {job._LOG_SLACK + 1}"]
 
 
 def test_per_artist_rescan_supersedes_only_that_artists_parked_review(
@@ -2579,6 +2586,22 @@ def test_sse_done_event_carries_final_status(client):
             else:
                 pytest.fail("SSE stream never sent 'event: done'")
         assert "data: failed" in seen
+    finally:
+        _remove_job(job)
+
+
+def test_finished_sse_respects_zero_replay_tail(client):
+    job = jm.Job(title="finished-job")
+    job.status = jm.JobStatus.DONE
+    job.log_lines = ["old line must not replay"]
+    job.REPLAY_TAIL = 0
+    jm.registry.add(job)
+    try:
+        with client.stream("GET", f"/api/jobs/{job.id}/stream") as response:
+            body = "".join(response.iter_text())
+        assert response.status_code == 200
+        assert "event: done" in body
+        assert "old line must not replay" not in body
     finally:
         _remove_job(job)
 

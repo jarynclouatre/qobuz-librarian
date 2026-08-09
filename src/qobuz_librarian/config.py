@@ -507,10 +507,11 @@ AUTO_LIBRARY_SCAN = _env_bool("AUTO_LIBRARY_SCAN", True)
 WEB_FETCH_TIMEOUT     = _env_num_min("QL_WEB_FETCH_TIMEOUT",     12.0, 1.0)
 WEB_TEST_AUTH_TIMEOUT = _env_num_min("QL_WEB_TEST_AUTH_TIMEOUT", 8.0,  1.0)
 
-# Web job log + SSE tunables. Defaults match the literals these replaced.
+# Web job log and SSE tunables.
 # JOB_LOG_CAP is the per-job line ceiling; very long artist walks
 # (500+ albums) on tight memory should drop this to e.g. 2000.
-# JOB_LOG_REPLAY_TAIL is what a late SSE subscriber gets replayed.
+# JOB_LOG_REPLAY_TAIL is what a late SSE subscriber gets replayed; 0 disables
+# historical replay while keeping live lines and the terminal event.
 # POST_JOB_HOOK_TIMEOUT bounds the subprocess that fires the optional
 # post-job hook. Slow webhooks (Apprise, ntfy with retries) may need
 # more. SSE_MAX_WORKERS sets the thread pool for SSE streams (each
