@@ -56,4 +56,4 @@ If your change touches how albums are matched, how upgrades are gated, or how fi
 
 ## Releases
 
-Publishing a GitHub release triggers the Docker workflow. Versioning is plain SemVer. Before publishing, refresh the README screenshots with synthetic content when the visible version or navigation has changed.
+Publishing a GitHub release triggers the Docker workflow. Versioning is plain SemVer.

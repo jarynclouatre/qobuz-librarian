@@ -17,10 +17,7 @@
 Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what you choose, and imports it with [beets](https://beets.io/). It also scans your local library for missing albums, albums missing tracks, quality upgrades, damaged files, and missing lyrics.
 
 <p align="center">
-  <picture>
-    <source media="(max-width: 600px)" srcset="assets/screenshot-search-mobile.png">
-    <img src="assets/screenshot-search.png" alt="Album search results in the responsive web UI" width="800">
-  </picture>
+  <img src="assets/screenshot-search.png" alt="Search results in the web UI" width="800">
 </p>
 
 ## Features
