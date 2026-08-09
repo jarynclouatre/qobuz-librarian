@@ -99,8 +99,8 @@ jobs:
       - name: Test the runtime dependency set
         run: docker build --target test .
 
-      - name: Build the runtime image (no push)
-        run: docker build .
+      - name: Build and smoke-test the runtime image (no push)
+        run: bash scripts/smoke_test.sh
 
   destructive-gate:
     runs-on: ubuntu-latest
