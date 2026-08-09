@@ -1,10 +1,40 @@
 """Env-var validation: a bad value falls back loudly instead of surfacing
 later as an opaque download/lyrics failure."""
 import os
+import subprocess
+import sys
 
 import pytest
 
 import qobuz_librarian.config as cfg
+
+
+@pytest.mark.parametrize(("raw", "expected", "warns"), [
+    (" DEBUG ", "DEBUG", False),
+    ("DEBUGGING", "INFO", True),
+    ("BASIC_FORMAT", "INFO", True),
+])
+def test_log_level_is_normalised_before_file_handler_setup(raw, expected, warns):
+    code = """
+import tempfile
+from pathlib import Path
+from qobuz_librarian import config
+from qobuz_librarian.ui_cli.logging import attach_file_handler
+
+with tempfile.TemporaryDirectory() as directory:
+    attach_file_handler(Path(directory) / "app.log", config.LOG_LEVEL)
+    print(repr(config.LOG_LEVEL))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "LOG_LEVEL": raw},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == repr(expected)
+    assert ("LOG_LEVEL=" in result.stderr) is warns
 
 
 def test_env_choice_falls_back_on_unknown_value(monkeypatch):

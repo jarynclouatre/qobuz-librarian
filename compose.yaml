@@ -219,7 +219,7 @@ services:
       REPAIR_CACHE_TTL_DAYS:      "${REPAIR_CACHE_TTL_DAYS:-30}"
       # Drop obvious live/tour/session releases from the missing-albums gap list.
       EXCLUDE_LIVE_ALBUMS:   "${EXCLUDE_LIVE_ALBUMS:-false}"
-      # Log verbosity: DEBUG | INFO | WARNING | ERROR.
+      # Log verbosity: DEBUG | INFO | WARNING | ERROR | CRITICAL.
       LOG_LEVEL:             "${LOG_LEVEL:-INFO}"
       # Optional command run after every job; the job state (id, status, title,
       # edition, display_title, artist, error, finished_at) arrives as JSON on stdin

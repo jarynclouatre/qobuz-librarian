@@ -68,6 +68,15 @@ def _env_choice(key, default: str, choices) -> str:
     return default
 
 
+def _env_log_level() -> str:
+    level = _env_choice(
+        "LOG_LEVEL",
+        "info",
+        ("debug", "info", "warning", "error", "critical", "warn", "fatal"),
+    )
+    return {"warn": "WARNING", "fatal": "CRITICAL"}.get(level, level.upper())
+
+
 def _env_downsample_choice():
     """The keep-originals choice from env (keep/delete), or None when unset.
 
@@ -260,7 +269,7 @@ DATA_DIR = _env_path(
 FETCH_LOG_FILE       = DATA_DIR / ".qobuz_librarian_log.json"
 LAST_SCAN_FILE       = DATA_DIR / ".qobuz_last_scan"
 APP_LOG_FILE         = DATA_DIR / "qobuz-librarian.log"
-LOG_LEVEL            = os.environ.get("LOG_LEVEL", "INFO")
+LOG_LEVEL            = _env_log_level()
 WALK_SEEN_FILE       = DATA_DIR / ".qobuz_walk_seen.txt"
 ALBUM_WALK_SEEN_FILE = DATA_DIR / ".qobuz_album_walk_seen.txt"
 PENDING_QUEUE_FILE   = DATA_DIR / ".qobuz_pending_queue.json"
