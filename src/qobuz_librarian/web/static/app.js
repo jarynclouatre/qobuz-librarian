@@ -5,14 +5,209 @@
   var REDUCE = window.matchMedia
     && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  // This tab's id, sent on review mutations so the server's review-changed
-  // nudge can name where a change came from. The tab that made the change
-  // skips the reload (its DOM is already current from the action's own
-  // response). Reloading it too replaced the page mid-interaction and ate
-  // the next tick of anyone working quickly down a review list.
+  // Identify this browser tab so its own review updates do not reload it.
   var TAB_ID = Math.random().toString(36).slice(2, 10)
     + Date.now().toString(36);
   window.qlTabId = TAB_ID;
+
+  var NAV_STATE_PREFIX = "ql-nav-state:";
+  var NAV_RESTORE_KEY = "ql-nav-restore";
+  var NAV_DEFAULTS = {
+    search: "/",
+    library: "/library",
+    upgrade: "/upgrade",
+    downsample: "/downsample",
+    repair: "/repair",
+    lyrics: "/lyrics",
+    queue: "/queue",
+    settings: "/settings",
+  };
+
+  function activeNavTab() {
+    return document.body && NAV_DEFAULTS[document.body.dataset.navTab]
+      ? document.body.dataset.navTab : "";
+  }
+
+  function currentNavUrl() {
+    return location.pathname + location.search + location.hash;
+  }
+
+  function pathBelongsToTab(tab, path) {
+    if (tab === "search") return path === "/";
+    if (tab === "library") return /^\/library(?:\/hidden)?\/?$/.test(path);
+    if (tab === "repair") return /^\/repair(?:\/history)?\/?$/.test(path);
+    if (tab === "lyrics") return path === "/lyrics" || path === "/lyrics/";
+    if (tab === "settings") return /^\/(?:settings|migrate)\/?$/.test(path);
+    if (tab === "queue") {
+      return /^\/queue(?:\/history)?\/?$/.test(path)
+        || /^\/jobs\/[^/]+\/?$/.test(path);
+    }
+    if (tab === "upgrade" || tab === "downsample") {
+      return new RegExp("^/" + tab + "(?:/hidden)?/?$").test(path)
+        || /^\/jobs\/[^/]+\/?$/.test(path);
+    }
+    return false;
+  }
+
+  function readNavState(tab) {
+    if (!NAV_DEFAULTS[tab]) return null;
+    try {
+      var state = JSON.parse(sessionStorage.getItem(NAV_STATE_PREFIX + tab) || "null");
+      var parsed = state && new URL(state.url, location.origin);
+      if (!parsed || parsed.origin !== location.origin
+          || !pathBelongsToTab(tab, parsed.pathname)
+          || typeof state.y !== "number" || !isFinite(state.y)
+          || state.y < 0 || state.y > 10000000) return null;
+      return {
+        url: parsed.pathname + parsed.search + parsed.hash,
+        y: Math.round(state.y),
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeCurrentNavState() {
+    var tab = activeNavTab();
+    if (!tab || !pathBelongsToTab(tab, location.pathname)) return;
+    try {
+      sessionStorage.setItem(NAV_STATE_PREFIX + tab, JSON.stringify({
+        url: currentNavUrl(),
+        y: Math.max(0, Math.round(window.scrollY || 0)),
+      }));
+    } catch (e) {}
+  }
+
+  function setNavRestore(tab, state) {
+    try {
+      if (state) {
+        sessionStorage.setItem(NAV_RESTORE_KEY, JSON.stringify({
+          tab: tab,
+          url: state.url,
+          y: state.y,
+        }));
+      } else {
+        sessionStorage.removeItem(NAV_RESTORE_KEY);
+      }
+    } catch (e) {}
+  }
+
+  function rememberedNavUrl(tab) {
+    var state = readNavState(tab);
+    return state ? state.url : NAV_DEFAULTS[tab];
+  }
+
+  function beginNavSwitch(tab, restorePosition) {
+    writeCurrentNavState();
+    var state = readNavState(tab);
+    setNavRestore(tab, restorePosition !== false ? state : null);
+    return state;
+  }
+
+  function navigateToTab(tab, options) {
+    options = options || {};
+    if (!NAV_DEFAULTS[tab]) return;
+    var url = rememberedNavUrl(tab);
+    beginNavSwitch(tab, options.restorePosition);
+    if (options.hash) {
+      var parsed = new URL(url, location.origin);
+      parsed.hash = options.hash;
+      url = parsed.pathname + parsed.search + parsed.hash;
+    }
+    location.href = url;
+  }
+
+  function restoreNavPosition(y) {
+    if (!(y > 0) || document.getElementById("review-form")) return;
+    var stopped = false;
+    var deadline = Date.now() + 15000;
+    var timer = null;
+    var events = ["wheel", "touchmove", "pointerdown", "keydown"];
+    function stop() {
+      if (stopped) return;
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("htmx:afterSwap", attempt);
+      window.removeEventListener("load", attempt);
+      events.forEach(function (name) {
+        window.removeEventListener(name, stop);
+      });
+    }
+    function attempt() {
+      if (stopped) return;
+      if (document.getElementById("review-form")) {
+        stop();
+        return;
+      }
+      var height = Math.max(
+        document.documentElement.scrollHeight,
+        document.body ? document.body.scrollHeight : 0
+      );
+      var limit = Math.max(0, height - window.innerHeight);
+      window.scrollTo(0, Math.min(y, limit));
+      if (Math.abs(window.scrollY - y) <= 2 || Date.now() >= deadline) {
+        stop();
+        return;
+      }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(attempt, 100);
+    }
+    events.forEach(function (name) {
+      window.addEventListener(name, stop, { passive: true });
+    });
+    document.addEventListener("htmx:afterSwap", attempt);
+    window.addEventListener("load", attempt);
+    requestAnimationFrame(attempt);
+  }
+
+  function initNavState() {
+    var active = activeNavTab();
+    var links = document.querySelectorAll("[data-nav-tab-link]");
+    if (!active && !links.length) return;
+    var current = currentNavUrl();
+    var saved = active ? readNavState(active) : null;
+    var restore = null;
+    try {
+      restore = JSON.parse(sessionStorage.getItem(NAV_RESTORE_KEY) || "null");
+      sessionStorage.removeItem(NAV_RESTORE_KEY);
+    } catch (e) {}
+
+    if (active && restore && NAV_DEFAULTS[restore.tab]
+        && restore.tab !== active && restore.url === current) {
+      try { sessionStorage.removeItem(NAV_STATE_PREFIX + restore.tab); } catch (e) {}
+      location.replace(NAV_DEFAULTS[restore.tab]);
+      return;
+    }
+    if (active && (!saved || saved.url !== current)) writeCurrentNavState();
+    links.forEach(function (link) {
+      var tab = link.dataset.navTabLink;
+      if (tab === active) return;
+      link.setAttribute("href", rememberedNavUrl(tab));
+    });
+    if (active && restore && restore.tab === active && restore.url === current
+        && typeof restore.y === "number") {
+      restoreNavPosition(restore.y);
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest && event.target.closest("[data-nav-tab-link]");
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey
+        || event.shiftKey || event.altKey || link.target === "_blank") return;
+    var tab = link.dataset.navTabLink;
+    if (!NAV_DEFAULTS[tab] || tab === activeNavTab()) return;
+    var state = beginNavSwitch(tab, true);
+    link.setAttribute("href", state ? state.url : NAV_DEFAULTS[tab]);
+  }, true);
+  window.addEventListener("pagehide", writeCurrentNavState);
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) initNavState();
+  });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initNavState);
+  } else {
+    initNavState();
+  }
 
   // Animate removals without layout jumps.
   function collapse(el, done) {
@@ -139,12 +334,7 @@
     }, 360);
   });
 
-  // Keep every global shortcut and its modifier guards in one handler.
-  // "/" jumps to the search box from anywhere, unless you're already typing
-  // in a field (so slashes in queries and paths still land). Pages without a
-  // search box go to Search, carrying a hash so it lands focused. Escape
-  // dismisses flashes, closes dropdowns and leaves the field. "g" then s/q/h
-  // navigates.
+  // Global search, escape, and g-then-key navigation shortcuts.
   var gPending = false;
   var gTimer = null;
   document.addEventListener("keydown", function (evt) {
@@ -166,7 +356,7 @@
       evt.preventDefault();
       var box = document.querySelector('input[name="q"]');
       if (!box) {
-        window.location.href = "/#search";
+        navigateToTab("search", { restorePosition: false, hash: "search" });
         return;
       }
       box.focus();
@@ -174,11 +364,11 @@
       return;
     }
     if (gPending) {
-      var map = { s: "/settings", q: "/queue", h: "/" };
+      var map = { s: "settings", q: "queue", h: "search" };
       gPending = false;
       if (map[evt.key]) {
         evt.preventDefault();
-        window.location.href = map[evt.key];
+        navigateToTab(map[evt.key]);
       }
       return;
     }
@@ -1763,24 +1953,28 @@
     }
 
     var loading = false;
+    var loadingPromise = null;
     var pageLoading = false;
     var pendingTab = null;
     var loadGen = 0;
 
     // Append the next page in place.
     function loadMore(page) {
-      if (loading || pageLoading) return;
+      if (loading) return loadingPromise || Promise.resolve(false);
+      if (pageLoading) return Promise.resolve(false);
       loading = true;
       var gen = ++loadGen;
       var url = "/jobs/" + id + "/review?page=" + (page || 2) +
                 "&q=" + encodeURIComponent(curQuery()) +
                 "&tab=" + encodeURIComponent(curTab());
-      sessionFetch(url)
+      loadingPromise = sessionFetch(url)
         .then(function (r) { return r.ok ? r.text() : null; })
         .then(function (txt) {
-          loading = false;
-          if (gen !== loadGen) return;
-          if (txt == null) { showToast("Couldn't load those results. Try again.", "error"); return; }
+          if (gen !== loadGen) return false;
+          if (txt == null) {
+            showToast("Couldn't load those results. Try again.", "error");
+            return false;
+          }
           var tmp = document.createElement("div");
           tmp.innerHTML = txt;
           var liveGroups = document.getElementById("review-groups");
@@ -1796,13 +1990,22 @@
           if (window.htmx) window.htmx.process(document.getElementById("review-page"));
           updateHideLabels();
           updateArtistChecks();
+          return true;
         })
         .catch(function (why) {
-          loading = false;
           if (why !== "navigation" && gen === loadGen) {
             showToast("Couldn't load those results. Check your connection.", "error");
           }
+          return false;
         });
+      var request = loadingPromise;
+      return request.then(function (loaded) {
+        if (loadingPromise === request) {
+          loadingPromise = null;
+          loading = false;
+        }
+        return loaded;
+      });
     }
 
     // Fetch and swap one review page. Requests are generation-tagged and only
@@ -1816,6 +2019,7 @@
       var requestedQuery = (query || "").trim();
       var requestedTab = tab === undefined ? curTab() : tab;
       loading = false;   // a page swap supersedes any in-flight append
+      loadingPromise = null;
       pageLoading = true;
       pendingTab = requestedTab;
       // Pause the outgoing page's Load More until the response lands. A click
@@ -1849,12 +2053,16 @@
               });
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
-              try {
-                var nextUrl = new URL(window.location.href);
-                nextUrl.searchParams.set("tab", requestedTab);
-                window.history.replaceState({}, "", nextUrl);
-              } catch (e) { /* no URL support: the in-page switch still works */ }
             }
+            try {
+              var nextUrl = new URL(window.location.href);
+              if (requestedTab) nextUrl.searchParams.set("tab", requestedTab);
+              else nextUrl.searchParams.delete("tab");
+              if (requestedQuery) nextUrl.searchParams.set("q", requestedQuery);
+              else nextUrl.searchParams.delete("q");
+              nextUrl.searchParams.delete("page");
+              window.history.replaceState({}, "", nextUrl);
+            } catch (e) { /* no URL support: the in-page switch still works */ }
             loadedQuery = requestedQuery;
             if (filterInput) filterInput.value = requestedQuery;
             host.innerHTML = txt;
@@ -2063,7 +2271,7 @@
       });
       try {
         sessionStorage.setItem(placeKey(),
-          JSON.stringify({ open: open, y: window.scrollY }));
+          JSON.stringify({ open: open, y: window.scrollY, page: curPage() }));
       } catch (e) {}
     }
     function savePlace() {
@@ -2084,22 +2292,42 @@
       try { place = JSON.parse(raw); } catch (e) { return; }
       if (!place || (!(place.open || []).length && !(place.y > 0))) return;
       var moved = false;
+      var moveEvents = ["wheel", "touchmove", "pointerdown", "keydown"];
       function noteMove() { moved = true; }
-      window.addEventListener("wheel", noteMove, { passive: true });
-      window.addEventListener("touchmove", noteMove, { passive: true });
-      var waits = [];
-      (place.open || []).forEach(function (name) {
-        var esc = window.CSS && CSS.escape ? CSS.escape(name)
-                                           : name.replace(/"/g, '\\"');
-        var d = cont.querySelector('details[data-artist="' + esc + '"]');
-        if (d && !d.open) {
-          d.open = true;
-          waits.push(loadGroupItems(d, false));
-        }
+      moveEvents.forEach(function (name) {
+        window.addEventListener(name, noteMove, { passive: true });
       });
-      Promise.all(waits).then(function () {
-        window.removeEventListener("wheel", noteMove);
-        window.removeEventListener("touchmove", noteMove);
+      var targetPage = Math.max(1, parseInt(place.page || "1", 10) || 1);
+      function loadSavedPages() {
+        if (moved || curPage() >= targetPage) return Promise.resolve(!moved);
+        var more = document.querySelector("#review-loadmore [data-load-more]");
+        var nextPage = more
+          ? parseInt(more.getAttribute("data-next-page") || "0", 10) : 0;
+        if (!(nextPage > curPage()) || nextPage > targetPage) {
+          return Promise.resolve(false);
+        }
+        return loadMore(nextPage).then(function (loaded) {
+          return loaded ? loadSavedPages() : false;
+        });
+      }
+      var pagesReady = loadSavedPages();
+      pagesReady.then(function () {
+        if (moved) return [];
+        var waits = [];
+        (place.open || []).forEach(function (name) {
+          var esc = window.CSS && CSS.escape ? CSS.escape(name)
+                                             : name.replace(/"/g, '\\"');
+          var d = cont.querySelector('details[data-artist="' + esc + '"]');
+          if (d && !d.open) {
+            d.open = true;
+            waits.push(loadGroupItems(d, false));
+          }
+        });
+        return Promise.all(waits);
+      }).then(function () {
+        moveEvents.forEach(function (name) {
+          window.removeEventListener(name, noteMove);
+        });
         // The user got there first. Don't yank the page out from under them.
         if (moved || !(place.y > 0)) return;
         requestAnimationFrame(function () { window.scrollTo(0, place.y); });

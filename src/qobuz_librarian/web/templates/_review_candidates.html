@@ -38,6 +38,7 @@
        class="ql-review-summary-row{% if not review_counts.total %} hidden{% endif %}">
     <div id="review-filter-row" class="ql-review-filter-row{% if review_counts.artists < 4 %} hidden{% endif %}">
       <input type="search" id="review-filter" autocomplete="off"
+             value="{{ review_query }}"
              placeholder="{% if job.execute_kind == 'migration' %}Filter by artist or folder&hellip;{% else %}Filter by artist or album&hellip;{% endif %}"
              aria-label="{% if job.execute_kind == 'migration' %}Filter the whole review list by artist or folder{% else %}Filter the whole review list by artist or album{% endif %}"
              class="ql-input ql-review-filter-input">

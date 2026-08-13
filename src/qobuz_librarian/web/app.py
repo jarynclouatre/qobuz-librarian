@@ -7613,7 +7613,7 @@ async def migrate_scan(request: Request):
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 async def job_page(request: Request, job_id: str, approved: bool = False,
                    stale: bool = False, noselection: bool = False, page: int = 1,
-                   error: str = ""):
+                   error: str = "", q: str = "", tab: str = ""):
     job = job_mgr.registry.get(job_id)
     historical = False
     if not job:
@@ -7650,7 +7650,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
            "error": error, "historical": historical,
            "queue_wait": _queue_wait(job),
            "JobStatus": job_mgr.JobStatus}
-    ctx.update(_review_context(job, page))
+    ctx.update(_review_context(job, page, q, tab))
     return _tr(
         request, "job.html", ctx, review_badge_ack=review_badge_ack
     )

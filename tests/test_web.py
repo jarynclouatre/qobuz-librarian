@@ -2462,6 +2462,12 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
         assert "Missing Albums" in r.text and "Gap Fill" in r.text
         # The default tab shows only the missing album, not the gap fill row.
         assert "Third" in r.text and "Dummy" not in r.text
+        restored = client.get(
+            f"/jobs/{job.id}", params={"tab": "gaps", "q": "Dum"}
+        )
+        assert restored.status_code == 200
+        assert "Dummy" in restored.text and "Third" not in restored.text
+        assert 'id="review-filter" autocomplete="off"\n             value="Dum"' in restored.text
         r = client.get(f"/jobs/{job.id}/review", params={"tab": "gaps"},
                        headers={"HX-Request": "true"})
         assert "Dummy" in r.text and "Third" not in r.text
