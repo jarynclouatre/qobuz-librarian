@@ -42,6 +42,156 @@ def _args(**over):
     return SimpleNamespace(**base)
 
 
+def test_bound_download_rechecks_access_before_staging(monkeypatch):
+    from qobuz_librarian.api import client
+    from qobuz_librarian.api.auth import DownloaderNotReady, credentials_from_values
+    from qobuz_librarian.modes import process as proc
+
+    credentials = credentials_from_values("", "token", source="streamrip")
+    album = {
+        "id": "album",
+        "title": "Album",
+        "artist": {"name": "Artist"},
+        "tracks": {"items": [{"id": "track", "title": "Track"}]},
+    }
+    staging_calls = []
+
+    monkeypatch.setattr(proc, "is_lossless_album", lambda _album: True)
+    monkeypatch.setattr(proc, "find_existing_tracks", lambda _album: ([], None))
+    monkeypatch.setattr(proc, "compute_missing", lambda tracks, existing: (tracks, []))
+    monkeypatch.setattr(proc, "print_album_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        proc,
+        "staging_preflight",
+        lambda _args: staging_calls.append(True),
+    )
+    monkeypatch.setattr(
+        client,
+        "authorize_qobuz_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(DownloaderNotReady()),
+    )
+
+    with pytest.raises(DownloaderNotReady):
+        proc.process_album(
+            album,
+            _args(),
+            already_confirmed=True,
+            token=credentials.token,
+        )
+
+    assert staging_calls == []
+
+
+def test_direct_download_refuses_files_changed_after_confirmation(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import process as proc
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    source = album_dir / "01.flac"
+    source.write_bytes(b"reviewed bytes")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    album = {
+        "id": "album",
+        "title": "Album",
+        "artist": {"name": "Artist"},
+        "tracks": {"items": [
+            {"id": "owned", "title": "Owned"},
+            {"id": "missing", "title": "Missing"},
+        ]},
+    }
+    existing = [{"title": "Owned", "path": str(source)}]
+
+    monkeypatch.setattr(proc, "is_lossless_album", lambda _album: True)
+    monkeypatch.setattr(
+        proc,
+        "find_existing_tracks",
+        lambda _album: (existing, album_dir),
+    )
+    monkeypatch.setattr(
+        proc,
+        "compute_missing",
+        lambda tracks, _existing: ([tracks[1]], [tracks[0]]),
+    )
+    monkeypatch.setattr(proc, "print_album_summary", lambda *_a, **_kw: None)
+
+    def confirm(*_args, **_kwargs):
+        source.write_bytes(b"replacement bytes")
+        return True
+
+    monkeypatch.setattr(proc, "confirm", confirm)
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(proc, "snapshot_staging", lambda: set())
+    monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
+    monkeypatch.setattr(
+        proc,
+        "run_album_download",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("download started against changed files")
+        ),
+    )
+
+    result = proc.process_album(album, _args(yes=False), token="tok")
+
+    assert result["result"] == "stale_candidate"
+    assert source.read_bytes() == b"replacement bytes"
+
+
+def test_direct_missing_album_refuses_album_added_after_confirmation(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import process as proc
+
+    music = tmp_path / "music"
+    music.mkdir()
+    appeared = music / "Artist" / "Album"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    album = {
+        "id": "album",
+        "title": "Album",
+        "artist": {"name": "Artist"},
+        "tracks": {"items": [{"id": "track", "title": "Track"}]},
+    }
+
+    monkeypatch.setattr(proc, "is_lossless_album", lambda _album: True)
+    monkeypatch.setattr(proc, "find_existing_tracks", lambda _album: ([], None))
+    monkeypatch.setattr(
+        proc,
+        "compute_missing",
+        lambda tracks, _existing: (tracks, []),
+    )
+    monkeypatch.setattr(
+        proc,
+        "find_album_dir_filesystem",
+        lambda _album: appeared if appeared.exists() else None,
+    )
+    monkeypatch.setattr(proc, "print_album_summary", lambda *_a, **_kw: None)
+
+    def confirm(*_args, **_kwargs):
+        appeared.mkdir(parents=True)
+        (appeared / "01.flac").write_bytes(b"added elsewhere")
+        return True
+
+    monkeypatch.setattr(proc, "confirm", confirm)
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(proc, "snapshot_staging", lambda: set())
+    monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
+    monkeypatch.setattr(
+        proc,
+        "run_album_download",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("download started after album appeared")
+        ),
+    )
+
+    result = proc.process_album(album, _args(yes=False), token="tok")
+
+    assert result["result"] == "stale_candidate"
+    assert (appeared / "01.flac").read_bytes() == b"added elsewhere"
+
+
 def test_force_stops_after_an_interrupted_backup(monkeypatch, tmp_path):
     from qobuz_librarian.modes import process as proc
 
@@ -162,11 +312,13 @@ def test_cancel_after_download_skips_beets_import(monkeypatch, tmp_path):
 
 def test_partial_upgrade_reports_a_backup_that_could_not_be_restored(
         monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
     from qobuz_librarian.modes import process as proc
 
     album_dir = tmp_path / "music" / "Artist" / "Album"
     album_dir.mkdir(parents=True)
     (album_dir / "01.flac").write_bytes(b"original")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
     backup = SimpleNamespace(
         complete=True,
         path=tmp_path / "backups" / "Album",
@@ -202,7 +354,17 @@ def test_partial_upgrade_reports_a_backup_that_could_not_be_restored(
     monkeypatch.setattr(proc, "find_extras_in_existing", lambda *_a: [])
     monkeypatch.setattr(proc, "existing_track_quality", lambda _track: (16, 44100))
     monkeypatch.setattr(proc, "capture_beets_album_entries", lambda _path: [])
-    monkeypatch.setattr(proc, "backup_album_dir", lambda _path: backup)
+    backup_receipts = []
+
+    def seal_backup(_path, **kwargs):
+        backup_receipts.append(kwargs.get("expected_receipt"))
+        return backup
+
+    monkeypatch.setattr(
+        proc,
+        "backup_album_dir",
+        seal_backup,
+    )
     monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
     monkeypatch.setattr(proc, "snapshot_staging", lambda: set())
     monkeypatch.setattr(proc, "print_album_summary", lambda *_a, **_k: None)
@@ -237,6 +399,7 @@ def test_partial_upgrade_reports_a_backup_that_could_not_be_restored(
     assert result["result"] == "partial"
     assert result["imported"] is False
     assert result["upgrade_unverified"] is True
+    assert backup_receipts and backup_receipts[0] is not None
 
 
 def test_treat_as_new_downloads_an_owned_album_as_a_separate_edition(monkeypatch, tmp_path):
@@ -444,7 +607,12 @@ def test_self_heal_retry_signatures_use_fresh_staged_dirs(monkeypatch, tmp_path)
         return kw["result"]
     monkeypatch.setattr(proc, "run_album_download", fake_download)
 
-    result = proc.process_album(album, _args(), token="tok")
+    result = proc.process_album(
+        album,
+        _args(),
+        token="tok",
+        treat_as_new=True,
+    )
 
     assert result["imported"] is True
     assert signature_dirs == [[retry_staged]]

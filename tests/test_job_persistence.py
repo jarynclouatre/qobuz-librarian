@@ -69,3 +69,36 @@ def test_failed_job_commit_cannot_ride_a_later_successful_commit(
 
     assert rejected.id not in saved_ids
     assert accepted.id in saved_ids
+
+
+def test_restore_split_review_replaces_main_and_removes_remnant(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    main = Job(title="Library review", execute_kind="library")
+    main.status = JobStatus.PENDING
+    main.add_candidate("album", "Picked", payload={"album_id": "picked"})
+    remnant = Job(title="Library review", execute_kind="library")
+    remnant.status = JobStatus.AWAITING_REVIEW
+    remnant.add_candidate(
+        "album", "Left parked", payload={"album_id": "parked"},
+        selected=False,
+    )
+    assert job_persistence.persist(main)
+    assert job_persistence.persist(remnant)
+
+    main.status = JobStatus.AWAITING_REVIEW
+    main.candidates = list(main.candidates) + list(remnant.candidates)
+    main.sync_cand_seq()
+    assert job_persistence.restore_split_review(main, remnant)
+
+    restored = job_persistence.load_one(main.id)
+    assert restored is not None
+    assert restored["status"] == JobStatus.AWAITING_REVIEW.value
+    assert [candidate["title"] for candidate in restored["candidates"]] == [
+        "Picked", "Left parked",
+    ]
+    assert job_persistence.load_one(remnant.id) is None

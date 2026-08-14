@@ -50,7 +50,12 @@ def stub_download(monkeypatch, tmp_path):
 
     monkeypatch.setattr(executor, "staging_preflight", lambda _a: None)
     monkeypatch.setattr(executor, "snapshot_staging", lambda: set())
-    monkeypatch.setattr(executor, "backup_album_dir", lambda _d: None)
+    monkeypatch.setattr(executor, "backup_album_dir", lambda _d, **_kw: None)
+    monkeypatch.setattr(
+        executor,
+        "_validate_queue_item_premise",
+        lambda _item: None,
+    )
     monkeypatch.setattr(executor, "_download_for_queue_item", fake_download)
     monkeypatch.setattr(
         executor, "_staged_album_dirs", lambda item: [staging / item["label"]])
@@ -124,6 +129,108 @@ def test_walk_flush_runs_items_the_durable_lane_cannot_plan(lease, stub_download
     loaded = queue_state.load_queue_journal()
     assert loaded.status is queue_state.QueueLoadStatus.ABSENT or not (
         loaded.journal.items)
+
+
+def test_cli_queue_refresh_keeps_downloaded_album_identity(
+        lease, stub_download, monkeypatch):
+    album = _album()
+    tracks = album["tracks"]["items"]
+    item = _build_queue_item(
+        album=album,
+        album_dir=Path("/music/Artist/Album"),
+        label="gap",
+        missing=tracks[:2],
+        present=tracks[2:],
+        upgrade_only=False,
+        auto_upgrade=False,
+    )
+    refreshed = []
+    monkeypatch.setattr(
+        executor,
+        "_refresh_review_state_after_downloads",
+        lambda changes, token, args, **kwargs: refreshed.append(
+            (changes, token, args, kwargs)
+        ),
+    )
+    args = _args()
+
+    results, drained = executor._execute_download_queue(
+        [item],
+        args,
+        "token",
+        refresh_review=True,
+    )
+
+    assert drained is True
+    assert [result["imported"] for result in results] == [True]
+    assert len(refreshed) == 1
+    changes, token, run_args, kwargs = refreshed[0]
+    assert token == "token"
+    assert run_args is args
+    assert kwargs == {"allow_upgrade_refresh": True}
+    assert changes == [{**results[0], "album": album}]
+
+
+def test_cli_queue_refreshes_completed_items_before_auth_loss(
+        lease, stub_download, monkeypatch):
+    from qobuz_librarian.api.auth import AuthLost
+
+    first_album = _album()
+    second_album = _album() | {"id": "album-2", "title": "Second"}
+    first_tracks = first_album["tracks"]["items"]
+    second_tracks = second_album["tracks"]["items"]
+    first = _build_queue_item(
+        album=first_album,
+        album_dir=Path("/music/Artist/Album"),
+        label="first",
+        missing=first_tracks[:2],
+        present=first_tracks[2:],
+        upgrade_only=False,
+        auto_upgrade=False,
+    )
+    second = _build_queue_item(
+        album=second_album,
+        album_dir=Path("/music/Artist/Second"),
+        label="second",
+        missing=second_tracks[:2],
+        present=second_tracks[2:],
+        upgrade_only=False,
+        auto_upgrade=False,
+    )
+    successful_download = executor._download_for_queue_item
+
+    def download(item):
+        if item["label"] == "second":
+            raise AuthLost("token expired")
+        successful_download(item)
+
+    monkeypatch.setattr(executor, "_download_for_queue_item", download)
+    refreshed = []
+    monkeypatch.setattr(
+        executor,
+        "_refresh_review_state_after_downloads",
+        lambda changes, token, args, **kwargs: refreshed.append(
+            (changes, token, args, kwargs)
+        ),
+    )
+    args = _args()
+
+    with pytest.raises(AuthLost):
+        executor._execute_download_queue(
+            [first, second],
+            args,
+            "token",
+            refresh_review=True,
+        )
+
+    assert len(refreshed) == 1
+    changes, token, run_args, kwargs = refreshed[0]
+    assert token == "token"
+    assert run_args is args
+    assert kwargs == {"allow_upgrade_refresh": False}
+    assert len(changes) == 1
+    assert changes[0]["album"] == first_album
+    assert changes[0]["imported"] is True
 
 
 def test_library_changing_item_without_a_plan_uses_the_legacy_lane(

@@ -232,7 +232,8 @@ def save_capped(data):
     try:
         state_file.write_json(cfg.CAPPED_FILE, fresh, ensure_ascii=False)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def is_album_capped(album_id, capped):
@@ -337,9 +338,9 @@ def _clear_local_album_cap_locked(key, album_dir):
 
 def mark_album_capped(album_id, qobuz_album, post_qual):
     if not album_id:
-        return
+        return False
     with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
-        _mark_album_capped_locked(album_id, qobuz_album, post_qual)
+        return _mark_album_capped_locked(album_id, qobuz_album, post_qual)
 
 
 def _mark_album_capped_locked(album_id, qobuz_album, post_qual):
@@ -353,15 +354,16 @@ def _mark_album_capped_locked(album_id, qobuz_album, post_qual):
         "actual_n_below": post_qual.get("n_below", 0),
         "actual_n_above": post_qual.get("n_above", 0),
     }
-    save_capped(capped)
+    return save_capped(capped)
 
 
 def mark_local_album_capped(album_dir, qobuz_album=None, post_qual=None):
     key = _local_album_cap_key(album_dir)
     if not key:
-        return
+        return False
     with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
-        _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual)
+        return _mark_local_album_capped_locked(
+            key, album_dir, qobuz_album, post_qual)
 
 
 def _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual):
@@ -386,7 +388,7 @@ def _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual):
         })
     capped = load_capped()
     capped[key] = entry
-    save_capped(capped)
+    return save_capped(capped)
 
 
 # ── Upgrade-candidate scan ────────────────────────────────────────────────────

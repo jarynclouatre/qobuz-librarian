@@ -7,19 +7,50 @@ here without needing to import anything back).
 detect_auth_lost() lives here because it parses rip subprocess output for
 auth signals - no API calls, no session needed.
 """
+import hashlib
 import re
 import tomllib
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import Callable
 
 from qobuz_librarian import config
 from qobuz_librarian.ui_cli.colors import C, fmt
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
-class AuthLost(Exception):    pass
+class AuthOutcome(StrEnum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    TEMPORARY = "temporary"
+    INCONCLUSIVE = "inconclusive"
+    ENTITLEMENT = "entitlement"
+
+
+@dataclass(frozen=True, slots=True)
+class AuthEvidence:
+    generation: str
+    outcome: AuthOutcome
+
+
+class AuthLost(Exception):
+    def __init__(self, message="Qobuz rejected the saved token", *,
+                 credential_generation: str = ""):
+        super().__init__(message)
+        self.credential_generation = credential_generation
+
+
 class CatalogMiss(Exception): pass
 class Aborted(Exception):     pass
-class QobuzError(Exception):  pass
+
+
+class QobuzError(Exception):
+    def __init__(self, message, *, status_code: int | None = None,
+                 auth_outcome: AuthOutcome = AuthOutcome.INCONCLUSIVE):
+        super().__init__(message)
+        self.status_code = status_code
+        self.auth_outcome = auth_outcome
 
 
 # Qobuz reached its retry ceiling without a usable answer - the network is
@@ -30,23 +61,45 @@ class QobuzUnavailable(Exception): pass
 # A hook the web layer registers in its lifespan so the dashboard's "saved
 # token isn't authenticating" banner reflects the most recent API call, not
 # just the startup probe.
-_auth_state_listeners: list = []
+_auth_state_listeners: list[Callable[[AuthEvidence], None]] = []
 
 
 def register_auth_state_listener(cb) -> None:
-    """Register a callback ``cb(valid: bool)`` invoked when an API call
-    reveals token validity. A False notify fires whenever client.qobuz_get
-    raises AuthLost from a 401, so the web UI can drop its cached "green"
-    state without re-probing on every page load."""
-    _auth_state_listeners.append(cb)
+    """Register a callback for generation-bound authentication evidence."""
+    if cb not in _auth_state_listeners:
+        _auth_state_listeners.append(cb)
 
 
-def notify_auth_state(valid: bool) -> None:
+def notify_auth_state(outcome: AuthOutcome, *, token="",
+                      generation: str = "") -> None:
+    if outcome not in {
+        AuthOutcome.ACCEPTED,
+        AuthOutcome.REJECTED,
+        AuthOutcome.ENTITLEMENT,
+    }:
+        return
+    generation = generation or token_credential_generation(token)
+    if not generation:
+        return
+    evidence = AuthEvidence(generation, outcome)
     for cb in list(_auth_state_listeners):
         try:
-            cb(valid)
+            cb(evidence)
         except Exception:
             pass
+
+
+def classify_qobuz_status(status_code: int) -> AuthOutcome:
+    """Classify HTTP evidence without guessing that every 4xx is bad auth."""
+    if 200 <= status_code < 300:
+        return AuthOutcome.ACCEPTED
+    if status_code == 401:
+        return AuthOutcome.REJECTED
+    if status_code in {402, 403}:
+        return AuthOutcome.ENTITLEMENT
+    if status_code in {408, 425, 429} or status_code >= 500:
+        return AuthOutcome.TEMPORARY
+    return AuthOutcome.INCONCLUSIVE
 
 
 _RAW_API_BODY_RE = re.compile(r"^((?:HTTP \d+|bad JSON) from [^:]+):\s+.+$", re.DOTALL)
@@ -72,40 +125,184 @@ class NoCredsError(Exception):
     """No usable Qobuz credentials - env var or streamrip config."""
 
 
+class DownloaderNotReady(Exception):
+    """The API token works, but streamrip still lacks its user identity."""
+
+
+class CredentialChanged(Exception):
+    """The active credential changed while an action was being admitted."""
+
+
+class QobuzEntitlementError(Exception):
+    """Qobuz accepted the token but refused the requested account action."""
+
+
 # ── Token loading ─────────────────────────────────────────────────────────────
+class CredentialToken(str):
+    """A token string carrying the non-secret generation that loaded it."""
+
+    def __new__(cls, value: str, generation: str):
+        obj = super().__new__(cls, value)
+        obj.credential_generation = generation
+        return obj
+
+
+@dataclass(frozen=True, slots=True)
+class QobuzCredentials:
+    user_id: str
+    token: CredentialToken
+    source: str
+    generation: str
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token)
+
+    @property
+    def downloader_ready(self) -> bool:
+        return bool(self.token and self.user_id)
+
+
+class QobuzAccess(StrEnum):
+    SAVED_READ = "saved_read"
+    LOCAL_ACTION = "local_action"
+    CATALOGUE_ACTION = "catalogue_action"
+    DOWNLOAD_ACTION = "download_action"
+
+
+class AccessBlock(StrEnum):
+    CONNECT_QOBUZ = "connect_qobuz"
+    RECONNECT_QOBUZ = "reconnect_qobuz"
+    ADD_USER_ID = "add_user_id"
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDecision:
+    allowed: bool
+    block: AccessBlock | None = None
+    live_check_required: bool = False
+    credential_generation: str = ""
+
+
+def credential_generation(user_id: str, token: str, *, source: str) -> str:
+    """Return a stable, non-secret identity for one effective credential."""
+    if not token:
+        return ""
+    value = "\0".join((source, user_id, token)).encode("utf-8")
+    return hashlib.blake2s(
+        value,
+        digest_size=16,
+        person=b"ql-qbz",
+    ).hexdigest()
+
+
+def credentials_from_values(user_id: str = "", token: str = "", *,
+                            source: str = "settings") -> QobuzCredentials:
+    user_id = str(user_id or "").strip()
+    token = str(token or "").strip()
+    generation = credential_generation(user_id, token, source=source)
+    return QobuzCredentials(
+        user_id=user_id,
+        token=CredentialToken(token, generation),
+        source=source,
+        generation=generation,
+    )
+
+
+def token_credential_generation(token) -> str:
+    generation = getattr(token, "credential_generation", "")
+    if generation:
+        return str(generation)
+    return credential_generation("", str(token or ""), source="token")
+
+
+def _read_streamrip_qobuz(*, strict: bool = False) -> dict:
+    if not config.STREAMRIP_CONFIG.exists():
+        return {}
+    try:
+        with open(config.STREAMRIP_CONFIG, "rb") as f:
+            cfg = tomllib.load(f)
+    except Exception as exc:
+        if strict:
+            raise NoCredsError(
+                f"Couldn't parse streamrip config: {exc}"
+            ) from exc
+        return {}
+    qobuz = cfg.get("qobuz") or {}
+    if not qobuz.get("use_auth_token"):
+        return {}
+    return {
+        "user_id": str(qobuz.get("email_or_userid", "") or "").strip(),
+        "token": str(qobuz.get("password_or_token", "") or "").strip(),
+    }
+
+
+def read_qobuz_credentials(*, strict: bool = False) -> QobuzCredentials:
+    """Read the effective API token and matching downloader identity."""
+    env_token = str(config.QOBUZ_USER_AUTH_TOKEN or "").strip()
+    if env_token:
+        # Environment credentials are authoritative. A malformed fallback
+        # file must not disable them; read it only as an optional source for a
+        # matching user id.
+        streamrip = _read_streamrip_qobuz(strict=False)
+        user_id = str(config.QOBUZ_USER_ID or "").strip()
+        if (not user_id and streamrip.get("token") == env_token):
+            user_id = streamrip.get("user_id", "")
+        return credentials_from_values(user_id, env_token, source="env")
+    streamrip = _read_streamrip_qobuz(strict=strict)
+    return credentials_from_values(
+        streamrip.get("user_id", ""),
+        streamrip.get("token", ""),
+        source="streamrip",
+    )
+
+
+def qobuz_capability(access: QobuzAccess, credentials: QobuzCredentials, *,
+                     auth_valid: bool | None) -> CapabilityDecision:
+    """Describe offer-time access. Remote actions still need a live check."""
+    if access in {QobuzAccess.SAVED_READ, QobuzAccess.LOCAL_ACTION}:
+        return CapabilityDecision(True)
+    if not credentials.configured:
+        return CapabilityDecision(False, AccessBlock.CONNECT_QOBUZ)
+    if auth_valid is False:
+        return CapabilityDecision(
+            False,
+            AccessBlock.RECONNECT_QOBUZ,
+            credential_generation=credentials.generation,
+        )
+    if access is QobuzAccess.DOWNLOAD_ACTION and not credentials.downloader_ready:
+        return CapabilityDecision(
+            False,
+            AccessBlock.ADD_USER_ID,
+            credential_generation=credentials.generation,
+        )
+    return CapabilityDecision(
+        True,
+        live_check_required=True,
+        credential_generation=credentials.generation,
+    )
+
+
+def load_qobuz_credentials() -> QobuzCredentials:
+    credentials = read_qobuz_credentials(strict=True)
+    if not credentials.configured:
+        raise NoCredsError(
+            "No Qobuz credentials found. Set QOBUZ_USER_AUTH_TOKEN, or "
+            "open the Settings page in the web UI. "
+            f"(streamrip config expected at {config.STREAMRIP_CONFIG})"
+        )
+    return credentials
+
+
 def load_qobuz_token():
-    """Return (user_id, token). Raises NoCredsError if credentials are absent
-    or the streamrip config is unreadable/misconfigured.
+    """Return (user_id, token). Raises NoCredsError when no token is saved.
 
     Priority order:
       1. QOBUZ_USER_AUTH_TOKEN / QOBUZ_USER_ID env vars.
       2. streamrip config.toml at STREAMRIP_CONFIG.
     """
-    if config.QOBUZ_USER_AUTH_TOKEN:
-        return config.QOBUZ_USER_ID or "<env-token>", config.QOBUZ_USER_AUTH_TOKEN
-
-    if not config.STREAMRIP_CONFIG.exists():
-        raise NoCredsError(
-            f"No Qobuz credentials found. Set QOBUZ_USER_AUTH_TOKEN, or "
-            f"open the Settings page in the web UI. "
-            f"(streamrip config expected at {config.STREAMRIP_CONFIG})")
-    try:
-        with open(config.STREAMRIP_CONFIG, "rb") as f:
-            cfg = tomllib.load(f)
-    except Exception as e:
-        raise NoCredsError(f"Couldn't parse streamrip config: {e}") from e
-    qz = cfg.get("qobuz", {})
-    if not qz.get("use_auth_token"):
-        raise NoCredsError(
-            "use_auth_token=false in streamrip config. Set QOBUZ_USER_AUTH_TOKEN "
-            "or update the streamrip config via the Settings page in the web UI.")
-    user_id = str(qz.get("email_or_userid", "")).strip()
-    token   = str(qz.get("password_or_token", "")).strip()
-    if not user_id or not token:
-        raise NoCredsError(
-            "Qobuz credentials not set. Set QOBUZ_USER_AUTH_TOKEN, or open "
-            "the Settings page in the web UI to configure your auth token.")
-    return user_id, token
+    credentials = load_qobuz_credentials()
+    return credentials.user_id, credentials.token
 
 
 def write_streamrip_creds(user_id, auth_token) -> bool:

@@ -16,6 +16,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
+from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
     album_quality_label,
@@ -46,7 +47,11 @@ from qobuz_librarian.modes.process import (
 from qobuz_librarian.quality.decision import compare_album_quality
 from qobuz_librarian.quality.tiers import downsample_target_rate, streamrip_quality_cap
 from qobuz_librarian.queue.builder import _build_queue_item
-from qobuz_librarian.queue.executor import _execute_download_queue
+from qobuz_librarian.queue.executor import (
+    _admit_new_queue_items,
+    _execute_download_queue,
+    _refresh_review_state_after_downloads,
+)
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -353,16 +358,22 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 _exp, _exp_extras = prompt_edition_pick(
                     album, len(extra_albums), _cands, existing, args, label_prefix="    ")
                 if _exp is not None:
+                    candidate = _build_queue_item(
+                        album=_exp, album_dir=ad, label=label,
+                        missing=list((_exp.get("tracks") or {}).get("items") or []),
+                        present=[], upgrade_only=False, auto_upgrade=True,
+                        siblings_to_delete=sibling_choices.get(ad, []),
+                    )
+                    try:
+                        _admit_new_queue_items([candidate], token)
+                    except CandidateStale as exc:
+                        log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
+                        results.append({"dir": ad, "result": "stale_candidate"})
+                        continue
                     log.info(fmt(C.MAGENTA,
                         f"    ↑  Switching to {_exp.get('title') or '?'!r} at "
                         f"{album_quality_label(_exp)}; queued for batch upgrade"))
-                    _exp_tracks = (_exp.get("tracks") or {}).get("items") or []
-                    queue.append(_build_queue_item(
-                        album=_exp, album_dir=ad, label=label,
-                        missing=list(_exp_tracks), present=[],
-                        upgrade_only=False, auto_upgrade=True,
-                        siblings_to_delete=sibling_choices.get(ad, []),
-                    ))
+                    queue.append(candidate)
                     continue
                 log.info(fmt(C.GRAY,
                     f"    ✓  All {n_total} track(s) present "
@@ -432,12 +443,19 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             results.append({"dir": ad, "result": "user_skipped", "n_missing": len(missing)})
             continue
 
-        queue.append(_build_queue_item(
+        candidate = _build_queue_item(
             album=album, album_dir=ad, label=label,
             missing=list(missing), present=list(present),
             upgrade_only=False, auto_upgrade=False,
             siblings_to_delete=sibling_choices.get(ad, []),
-        ))
+        )
+        try:
+            _admit_new_queue_items([candidate], token)
+        except CandidateStale as exc:
+            log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
+            results.append({"dir": ad, "result": "stale_candidate"})
+            continue
+        queue.append(candidate)
 
     # Shared_queue mode: decisions already went straight into shared_queue
     # (see above), so just persist; no extend (that would double every item).
@@ -636,7 +654,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     if shared_queue is not None:
         log.info(fmt(C.GRAY,
             f"  Queuing {plural(len(picks), 'album')}; fetching track lists …"))
-        n_queued = 0
+        pending = []
         needs_attention = False
         for i, idx in enumerate(picks, 1):
             chosen = ordered[idx - 1].qobuz_album
@@ -647,15 +665,22 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                 needs_attention = True
                 continue
             full_tracks = (full.get("tracks") or {}).get("items") or []
-            shared_queue.append(_build_queue_item(
+            pending.append(_build_queue_item(
                 album=full, album_dir=None,
                 label=f"new {i}/{len(picks)}",
                 missing=list(full_tracks), present=[],
                 upgrade_only=False, auto_upgrade=False,
                 siblings_to_delete=[],
             ))
-            n_queued += 1
             time.sleep(cfg.ARTIST_API_DELAY)
+        if pending:
+            try:
+                _admit_new_queue_items(pending, token)
+            except CandidateStale as exc:
+                log.info(fmt(C.YELLOW, f"  ⚠  {exc}"))
+                return 0, True
+            shared_queue.extend(pending)
+        n_queued = len(pending)
         log.info(fmt(C.GREEN,
             f"  ✓ Queued {plural(n_queued, 'album')} "
             f"(queue total: {len(shared_queue)})."))
@@ -688,6 +713,11 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                 break
             if r.get("n_ok", 0) > 0 and r.get("imported", False):
                 n_done += 1
+                _refresh_review_state_after_downloads(
+                    [{**r, "album": full}],
+                    token,
+                    args,
+                )
             if _gap_fill_result_bucket(r) in _ATTENTION_BUCKETS:
                 needs_attention = True
             time.sleep(cfg.ARTIST_API_DELAY)

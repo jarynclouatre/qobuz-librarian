@@ -14,6 +14,91 @@ import pytest
 from qobuz_librarian.repair_log import scan_dir_for_isrc_repairs
 
 
+def _allow_legacy_candidate_execution(monkeypatch):
+    """Keep executor-focused legacy fixtures out of receipt-gate coverage."""
+    from qobuz_librarian.library import candidate_premise
+
+    monkeypatch.setattr(
+        candidate_premise,
+        "validate",
+        lambda candidate: {
+            "kind": candidate_premise.expected_kind(candidate),
+            "receipt": None,
+        },
+    )
+
+
+def test_surgical_repair_rechecks_download_access_before_backup(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.api import client
+    from qobuz_librarian.api.auth import DownloaderNotReady, credentials_from_values
+    from qobuz_librarian.modes import repair
+
+    credentials = credentials_from_values("", "token", source="streamrip")
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    damaged = album_dir / "01.flac"
+    damaged.write_bytes(b"damaged")
+    qobuz_track = {
+        "id": "track",
+        "title": "Track",
+        "isrc": "ISRC",
+        "album": {"id": "album"},
+    }
+    verified = [{"path": damaged, "isrc": "ISRC", "qobuz_track": qobuz_track}]
+    backup_calls = []
+
+    class Held:
+        def close(self):
+            pass
+
+        def matches(self):
+            return True
+
+    monkeypatch.setattr(
+        repair,
+        "_verified_repair_source_receipts",
+        lambda *args: {"01.flac": {}},
+    )
+    monkeypatch.setattr(
+        repair,
+        "_resolve_parent_album",
+        lambda *args: {
+            "id": "album",
+            "title": "Album",
+            "artist": {"name": "Artist"},
+            "tracks": {"items": [qobuz_track]},
+        },
+    )
+    monkeypatch.setattr(repair, "_build_queue_item", lambda **kwargs: {})
+    monkeypatch.setattr(repair, "find_album_dir_filesystem", lambda album: album_dir)
+    monkeypatch.setattr(repair, "_HeldMusicRoot", lambda root: Held())
+    monkeypatch.setattr(repair, "_HeldRepairDirectory", lambda *args: Held())
+    monkeypatch.setattr(repair, "_repair_relative_parts", lambda *args: ())
+    monkeypatch.setattr(repair, "_require_repair_anchors", lambda *args: None)
+    monkeypatch.setattr(
+        repair,
+        "backup_gap_fill_files",
+        lambda *args, **kwargs: backup_calls.append(True),
+    )
+    monkeypatch.setattr(
+        client,
+        "authorize_qobuz_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(DownloaderNotReady()),
+    )
+
+    with pytest.raises(DownloaderNotReady):
+        repair.repair_album_dir(
+            album_dir,
+            verified,
+            "Artist",
+            Namespace(no_upgrade=False),
+            credentials.token,
+        )
+
+    assert backup_calls == []
+
+
 def test_recent_fetch_history_does_not_show_a_partial_result_as_clean(
         tmp_path, monkeypatch, caplog):
     from qobuz_librarian import config as cfg
@@ -96,9 +181,8 @@ def test_scan_isrc_repairs_truncation_gates(tmp_path):
 
 # ── Repair scan: resume from an interrupted sweep ──────────────────────
 
-def test_repair_scan_resumes_from_checkpoint(tmp_path, monkeypatch):
-    """An interrupted repair sweep skips the artists already checked, restores
-    the albums it flagged, and clears the checkpoint when it finishes cleanly."""
+def test_repair_scan_rechecks_legacy_checkpoint(tmp_path, monkeypatch):
+    """A legacy global Repair checkpoint is never reused as a health verdict."""
     from qobuz_librarian.library import scan_checkpoint
     from qobuz_librarian.web import flows
     monkeypatch.setattr("qobuz_librarian.config.SCAN_CHECKPOINT_FILE", tmp_path / "cp.json")
@@ -144,16 +228,156 @@ def test_repair_scan_resumes_from_checkpoint(tmp_path, monkeypatch):
     with patch.object(flows, "list_library_artists", return_value=artists), \
          patch.object(flows, "list_artist_album_dirs",
                       side_effect=lambda d: [p for p in d.iterdir() if p.is_dir()]), \
+         patch.object(
+             flows,
+             "_capture_repair_artist_proof",
+             side_effect=lambda d: {"artist": d.name},
+         ), \
          patch.object(flows, "clear_scan_caches"), \
          patch("qobuz_librarian.repair_log.scan_dir_for_isrc_repairs", side_effect=fake_scan):
         flows.scan_repairs(job, "token")
 
-    assert checked == ["New Album"]                                  # Artist A skipped
-    assert any(c["title"] == "Old Album" for c in job.candidates)    # prior flag restored
-    assert "5 tracks decode-verified clean" in job.summary
-    assert "2 tracks couldn't be decode-checked" in job.summary
-    assert "1 album couldn't be scanned" in job.summary
+    assert checked == ["New Album"]
+    assert not job.candidates
+    assert "1 track decode-verified intact" in job.summary
     assert scan_checkpoint.load("repair") is None                    # cleared on clean finish
+
+
+def test_repair_resume_reuses_only_exact_current_artist_bundles(
+        tmp_path, monkeypatch):
+    """Changed, removed, and malformed artists cannot ride a saved verdict."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scan_checkpoint
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    artists = {}
+    for name in ("Unchanged", "Changed", "Legacy", "Removed", "New"):
+        album = music / name / "Album"
+        album.mkdir(parents=True)
+        track = album / "01.flac"
+        track.write_bytes(f"{name} bytes".encode())
+        artists[name] = (album.parent, track)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "cp.json")
+
+    bundles = {}
+    for name in ("Unchanged", "Changed", "Removed"):
+        artist_dir, _track = artists[name]
+        proof = flows._capture_repair_artist_proof(artist_dir)
+        bundles[name] = flows._repair_checkpoint_bundle(
+            name,
+            {"verified_ok": 4, "unverified": 0, "failed": 0, "specs": []},
+            proof,
+        )
+    bundles["Legacy"] = {"old": "global candidate list"}
+    scan_checkpoint.save(
+        "repair",
+        set(bundles),
+        [],
+        {},
+        artists=bundles,
+        meta={
+            "repair_checkpoint_version": flows._REPAIR_CHECKPOINT_VERSION,
+        },
+    )
+    artists["Changed"][1].write_bytes(b"changed after checkpoint")
+    removed_dir, removed_track = artists["Removed"]
+    removed_track.unlink()
+    removed_dir.joinpath("Album").rmdir()
+    removed_dir.rmdir()
+
+    current = [
+        artists[name][0]
+        for name in ("Unchanged", "Changed", "Legacy", "New")
+    ]
+    checked = []
+
+    def fake_scan(album_dir, _token, deep=False):
+        checked.append(album_dir.parent.name)
+        return {
+            "verified_truncated": [],
+            "verified_ok": 1,
+            "unverified": 0,
+            "no_isrc_tag": [],
+        }
+
+    class _Job:
+        def __init__(self):
+            self.candidates = []
+            self.cancel_requested = False
+
+        def add_candidate(self, **value):
+            self.candidates.append(value)
+
+        def push_progress(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(flows, "list_library_artists", lambda: current)
+    monkeypatch.setattr(
+        flows,
+        "list_artist_album_dirs",
+        lambda artist: [artist / "Album"],
+    )
+    monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(
+        "qobuz_librarian.repair_log.scan_dir_for_isrc_repairs",
+        fake_scan,
+    )
+
+    job = _Job()
+    flows.scan_repairs(job, "token")
+
+    assert set(checked) == {"Changed", "Legacy", "New"}
+    assert "7 tracks decode-verified intact" in job.summary
+    assert scan_checkpoint.load("repair") is None
+
+
+def test_repair_checkpoint_survives_mount_namespace_renumbering(
+        tmp_path, monkeypatch):
+    import copy
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    artist = music / "Artist"
+    album = artist / "Album"
+    album.mkdir(parents=True)
+    (album / "01.flac").write_bytes(b"exact bytes")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+
+    proof = flows._capture_repair_artist_proof(artist)
+    saved = copy.deepcopy(proof)
+    mount_ids = {
+        identity[6]
+        for identity in saved["path_generations"]
+    } | {
+        identity[6]
+        for identity in saved["directory_generations"].values()
+    }
+    remapped = {
+        mount_id: mount_id + 100_000 + index
+        for index, mount_id in enumerate(sorted(mount_ids))
+    }
+    for identity in saved["path_generations"]:
+        identity[6] = remapped[identity[6]]
+    for identity in saved["directory_generations"].values():
+        identity[6] = remapped[identity[6]]
+    bundle = flows._repair_checkpoint_bundle(
+        "Artist",
+        {"verified_ok": 1, "unverified": 0, "failed": 0, "specs": []},
+        saved,
+    )
+
+    assert flows._validated_repair_checkpoint_bundle(artist, bundle) is not None
+
+    changed_topology = copy.deepcopy(bundle)
+    changed_topology["proof"]["directory_generations"]["Album"][6] += 1
+    assert flows._validated_repair_checkpoint_bundle(
+        artist,
+        changed_topology,
+    ) is None
 
 
 def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypatch):
@@ -623,9 +847,12 @@ def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,
                         lambda *a, **k: None)
 
     def fake_execute(queue, args, token):
+        from qobuz_librarian.library.candidate_premise import validate_premise
+
         if execute_calls is not None:
             execute_calls.append(queue)
         for qi in queue:
+            validate_premise(qi["_source_premise"])
             qi["n_ok"] = n_ok
             qi["n_fail"] = n_fail
             qi["imported"] = imported
@@ -804,6 +1031,8 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
     from qobuz_librarian.web import flows
     from qobuz_librarian.web import jobs as job_mgr
 
+    _allow_legacy_candidate_execution(monkeypatch)
+
     class _Job:
         cancel_requested = False
         _progress_scope = None
@@ -818,11 +1047,19 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
     monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
     monkeypatch.setattr(flows, "build_args", lambda: Namespace())
     monkeypatch.setattr(flows, "_note_staging_wait", lambda *a, **k: None)
+    monkeypatch.setattr(
+        flows,
+        "_return_qobuz_review_picks",
+        lambda *_args, **_kwargs: True,
+    )
     callback_seen = False
 
-    def unverified_redownload(_payload, _token, *, recovery_checkpoint=None):
+    def unverified_redownload(
+            _payload, _token, *, recovery_checkpoint=None,
+            expected_album_receipt=None):
         nonlocal callback_seen
         assert callable(recovery_checkpoint)
+        assert expected_album_receipt is None
         callback_seen = True
         return {"imported": True, "n_ok": 8,
                 "n_fail": 0, "repair_unverified": True}

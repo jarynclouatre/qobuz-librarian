@@ -11,26 +11,30 @@
 
   {% if error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
   {% if library_notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ library_notice }}</span></div>{% endif %}
+  {% set latest_attempt = library_generation.latest_attempt %}
+  {% if latest_attempt.status in ('failed', 'cancelled', 'incomplete') %}
+  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}. {% if baseline_complete %}Your previous complete baseline remains current.{% else %}No complete baseline was published.{% endif %}</span></div>
+  {% endif %}
+  {% if library_generation.outputs.library.limited %}
+  <div class="ql-flash ql-flash-warning" data-flash><span>The current Library result hit its cap. The catalogue crawl completed, but the saved list is limited.</span></div>
+  {% endif %}
+  {% if library_job and library_job.status == JobStatus.AWAITING_REVIEW and library_baseline_exists and not baseline_complete %}
+  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results are not complete for the current Library generation." }} Your saved review remains available below.</span></div>
+  {% endif %}
 
-  {% if not qobuz_ready and not library_job %}
-  <section class="ql-work-card">
-    {% with connect_embedded=True %}
-      {% include "_connect_cta.html" %}
-    {% endwith %}
-  </section>
-
-  {% elif library_job %}
-  {# Single surface: the scan's live progress and the Missing Albums / Gap
-     Fill review render right here, same as /repair. A dead token banners the
-     reconnect ABOVE the review instead of replacing it - ticking and
-     dismissing are local, only downloading needs Qobuz. #}
   {% if not qobuz_ready %}
   <section class="ql-work-card">
-    {% with connect_embedded=True, connect_note="Your parked review is below - you can keep ticking and dismissing; downloading waits for the connection." %}
+    {% with connect_embedded=True, connect_note="Your saved Library state remains available below. Downloading and refreshes wait for the connection." %}
       {% include "_connect_cta.html" %}
     {% endwith %}
   </section>
   {% endif %}
+
+  {% if library_job %}
+  {# Single surface: the scan's live progress and the Missing Albums / Gap
+     Fill review render right here, same as /repair. A dead token banners the
+     reconnect ABOVE the review instead of replacing it - ticking and
+     dismissing are local, only downloading needs Qobuz. #}
   {% with census_folded = true %}{% include "_census.html" %}{% endwith %}
   {% with job = library_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
 
@@ -45,7 +49,7 @@
     </div>
   </section>
 
-  {% elif not baseline_complete %}
+  {% elif not library_baseline_exists %}
 
   <section class="ql-scan-hero">
     <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
@@ -55,20 +59,20 @@
       <path d="M80.5 76.5 88 84" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
     <p class="ql-scan-hero-title">One scan builds your library&rsquo;s baseline.</p>
-    <p class="ql-scan-hero-text">It finds missing albums, missing tracks inside albums you own, and albums Qobuz can serve at better quality &mdash; ready to review here and on the Upgrade and Downsample pages.</p>
+    <p class="ql-scan-hero-text">It finds missing albums, missing tracks inside albums you own, and albums Qobuz can serve at better quality, ready to review here and on the Upgrade and Downsample pages.</p>
     <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked, continues from there{% endif %}</p>
     <form action="/library" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="missing_albums">
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Scan library</button>
+      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>Scan library</button>
     </form>
   </section>
 
   {% else %}
 
   <div class="ql-scan-status">
-    <span class="ql-status-chip is-success">Baseline ready</span>
-    <span class="ql-scan-status-meta">{% if last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full baseline has finished{% endif %}</span>
+    <span class="ql-status-chip {% if baseline_complete %}is-success{% else %}is-warning{% endif %}">{% if baseline_complete %}Baseline ready{% else %}Refresh needed{% endif %}</span>
+    <span class="ql-scan-status-meta">{% if not baseline_complete %}{{ library_generation.outputs.library.reason or "These saved results are not complete for the current Library generation." }}{% elif last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full baseline has finished{% endif %}</span>
   </div>
 
   {% if library_resume and library_resume.kind == 'missing' %}
@@ -92,10 +96,10 @@
     </svg>
     {% if library_review_retired_reason == 'discarded' %}
     <p class="ql-scan-hero-title">Review discarded</p>
-    <p class="ql-scan-hero-text">You discarded this review. New music you add in the app is tracked automatically &mdash; you won&rsquo;t need to scan again unless you add albums outside it.</p>
+    <p class="ql-scan-hero-text">You discarded this review. New music you add in the app is tracked automatically; you won&rsquo;t need to scan again unless you add albums outside it.</p>
     {% else %}
     <p class="ql-scan-hero-title">Review complete</p>
-    <p class="ql-scan-hero-text">Everything from your last scan has been reviewed. New music you add in the app is tracked automatically &mdash; you won&rsquo;t need to scan again unless you add albums outside it.</p>
+    <p class="ql-scan-hero-text">Everything from your last scan has been reviewed. New music you add in the app is tracked automatically; you won&rsquo;t need to scan again unless you add albums outside it.</p>
     {% endif %}
     {% if hidden_count or library_review_retired_reason == 'discarded' %}
     <div class="flex flex-wrap items-center justify-center gap-3 mt-4">

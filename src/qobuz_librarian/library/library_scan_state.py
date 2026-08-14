@@ -1,4 +1,5 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
+import copy
 import hashlib
 import json
 import threading
@@ -30,6 +31,7 @@ def _empty_state():
         # When the parked Library review derived from this snapshot was
         # retired (discarded, or worked through to empty).
         "review_retired_at": 0.0,
+        "review_retired_generation": 0,
         # Why the review retired: "discarded" (thrown away in one action) or
         # "worked_through" (dismissed/downloaded down to empty).
         "review_retired_reason": "",
@@ -40,7 +42,10 @@ def _empty_state():
 def _empty_kind():
     return {
         "updated_at": None,
+        "generation": 0,
+        "revision": 0,
         "complete": False,
+        "limited": False,
         "hidden_signature": "",
         "quality_signature": "",
         "artists": {},
@@ -86,6 +91,9 @@ def load():
     base.update({
         "updated_at": data.get("updated_at"),
         "review_retired_at": float(data.get("review_retired_at") or 0.0),
+        "review_retired_generation": int(
+            data.get("review_retired_generation") or 0
+        ),
         "review_retired_reason": str(data.get("review_retired_reason") or ""),
         "kinds": kinds,
     })
@@ -101,7 +109,10 @@ def kind_state(kind: str):
     artists = bucket.get("artists") if isinstance(bucket.get("artists"), dict) else {}
     base.update({
         "updated_at": bucket.get("updated_at"),
+        "generation": int(bucket.get("generation") or 0),
+        "revision": int(bucket.get("revision") or 0),
         "complete": bool(bucket.get("complete")),
+        "limited": bool(bucket.get("limited")),
         "hidden_signature": str(bucket.get("hidden_signature") or ""),
         "quality_signature": str(bucket.get("quality_signature") or ""),
         "artists": artists,
@@ -136,14 +147,20 @@ def _clean_artist_state(entry):
 
 
 def save_kind(kind: str, *, artists: dict, complete: bool,
-              hidden_signature: str = "", quality_sig: str = ""):
-    with _lock:
-        data = load()
+              hidden_signature: str = "", quality_sig: str = "",
+              generation: int = 0, revision: int = 0,
+              limited: bool = False):
+    with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
+        previous = load()
+        data = copy.deepcopy(previous)
         kinds = data.setdefault("kinds", {})
         now = time.time()
         kinds[kind] = {
             "updated_at": now,
+            "generation": int(generation or 0),
+            "revision": int(revision or 0),
             "complete": bool(complete),
+            "limited": bool(limited),
             "hidden_signature": str(hidden_signature or ""),
             "quality_signature": str(quality_sig or ""),
             "artists": {
@@ -153,7 +170,26 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
         }
         data["updated_at"] = now
         data["version"] = STATE_VERSION
-        return now if _write_state(data) else None
+        saved = _write_state(data)
+        if not saved:
+            return None
+        if generation and revision:
+            from qobuz_librarian.library import generation_state
+
+            if not generation_state.mark_output_current(
+                "library",
+                generation=generation,
+                revision=revision,
+                complete=complete,
+                limited=limited,
+                policy_signature=quality_sig,
+            ):
+                # The snapshot write landed but its authority record did not.
+                # No other snapshot writer can enter until the prior file is
+                # restored.
+                _write_state(previous)
+                return None
+    return int(generation) if generation else now
 
 
 def mark_review_retired(
@@ -167,24 +203,31 @@ def mark_review_retired(
     saved-state review reconstruction won't rebuild a review from a snapshot
     whose missing kind was last saved at or before this, so a finished review
     doesn't come back; a fresh missing scan clears the block by construction."""
-    with _lock:
+    with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
         data = load()
         if generation is not None:
             try:
-                expected = float(generation)
-                current = float(
+                expected = int(generation)
+                current = int(
                     ((data.get("kinds") or {}).get("missing") or {}).get(
-                        "updated_at"
+                        "generation"
                     )
-                    or 0.0
+                    or 0
                 )
             except (TypeError, ValueError):
-                expected = current = 0.0
+                expected = current = 0
             if not expected or current != expected:
                 # This review belongs to an older snapshot. Retiring it must
                 # not suppress results published by a newer full scan.
                 return True
         data["review_retired_at"] = float(time.time() if now is None else now)
+        current_generation = int(
+            ((data.get("kinds") or {}).get("missing") or {}).get(
+                "generation"
+            )
+            or 0
+        )
+        data["review_retired_generation"] = current_generation
         if reason:
             data["review_retired_reason"] = reason
         data["version"] = STATE_VERSION
@@ -195,11 +238,67 @@ def clear_review_retired() -> bool:
     """Lift a review retirement so the saved-state review rebuilds again, used
     when the user brings dismissed results back from the finished Library page.
     Returns True if a retirement was actually cleared (there was one to lift)."""
-    with _lock:
+    with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
         data = load()
         if not float(data.get("review_retired_at") or 0.0):
             return False
         data["review_retired_at"] = 0.0
+        data["review_retired_generation"] = 0
         data["review_retired_reason"] = ""
         data["version"] = STATE_VERSION
         return _write_state(data)
+
+
+def remove_album(album_id) -> bool:
+    """Remove one exact Qobuz album from the saved living Library snapshot."""
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        return False
+    from qobuz_librarian.library import generation_state
+
+    with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
+        data = load()
+        bucket = ((data.get("kinds") or {}).get("missing") or {})
+        generation = int(bucket.get("generation") or 0)
+        if not generation or generation != generation_state.current_generation():
+            return False
+        artists = bucket.get("artists") or {}
+        changed = False
+        rebuilt = {}
+        for name, entry in artists.items():
+            cleaned = _clean_artist_state(entry)
+            candidates = [
+                candidate
+                for candidate in cleaned["candidates"]
+                if str((candidate.get("payload") or {}).get("album_id") or "")
+                != album_id
+            ]
+            if len(candidates) != len(cleaned["candidates"]):
+                changed = True
+            cleaned["candidates"] = candidates
+            rebuilt[name] = cleaned
+        if not changed:
+            return True
+        revision = generation_state.reserve_revision()
+        if revision is None:
+            return False
+        now = time.time()
+        bucket = {
+            **bucket,
+            "updated_at": now,
+            "revision": revision,
+            "artists": rebuilt,
+        }
+        data.setdefault("kinds", {})["missing"] = bucket
+        data["updated_at"] = now
+        if not _write_state(data):
+            return False
+        return generation_state.mark_output_current(
+            "library",
+            generation=generation,
+            revision=revision,
+            complete=bool(bucket.get("complete")),
+            limited=bool(bucket.get("limited")),
+            policy_signature=str(bucket.get("quality_signature") or ""),
+            preserve_noncurrent=True,
+        )

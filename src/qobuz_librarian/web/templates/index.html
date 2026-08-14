@@ -84,7 +84,7 @@
     </div>
     {% endif %}
 
-    {% if qobuz_ready and not baseline_complete and (setup_scanning or not library_scan_state.ready or offer_baseline) %}
+    {% if qobuz_ready and not baseline_complete and (setup_scanning or not library_scan_state.ready or offer_baseline or library_resume) %}
     <div class="ql-notice {% if not setup_scanning and not library_scan_state.ready %}ql-notice-warning{% else %}ql-notice-info{% endif %} flex items-start flex-wrap gap-3 p-4">
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 {% if not setup_scanning and not library_scan_state.ready %}text-warning{% else %}text-info{% endif %}" fill="none"
            viewBox="0 0 24 24" stroke="currentColor">
@@ -101,6 +101,8 @@
         <strong>Library scan running.</strong> Building the Missing Albums, Gap Fill, Upgrade, and Downsample reviews.
         {% elif not library_scan_state.ready %}
         <strong>Music library unavailable.</strong> {{ library_scan_state.message }}
+        {% elif library_resume %}
+        <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. Resume to finish it.
         {% else %}
         <strong>Scan your library.</strong> Builds the Missing Albums, Gap Fill, Upgrade, and Downsample reviews.
         {% endif %}
@@ -113,12 +115,14 @@
         <form action="/library" method="post" class="flex-1 sm:flex-none">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="mode" value="missing_albums">
-          <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm w-full">Scan library</button>
+          <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm w-full">{{ 'Resume scan' if library_resume else 'Scan library' }}</button>
         </form>
+        {% if not library_resume %}
         <form action="/library/skip-setup" method="post" class="flex-1 sm:flex-none">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm w-full">Not now</button>
         </form>
+        {% endif %}
       </div>
       {% endif %}
     </div>

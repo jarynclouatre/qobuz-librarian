@@ -1,13 +1,17 @@
-{% if qobuz_ready and baseline_complete and library_scan_state.ready and (not library_job or library_job.status == JobStatus.AWAITING_REVIEW) %}
-{# Both stay reachable while a review is parked: new releases ask Qobuz what
-   came out since the baseline; the refresh only reads the folders. #}
+{% if library_baseline_exists and library_scan_state.ready and (not library_job or library_job.status == JobStatus.AWAITING_REVIEW) %}
+{# Both stay visible while a review is parked. New Releases skips the folders;
+   refresh compares externally-added files with the Qobuz catalogue. #}
 <div class="flex items-center gap-3">
+  {% if new_release_baseline_complete %}
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="new_releases">
-    <button type="submit" class="ql-link-action"
+    <button type="submit" class="ql-link-action"{% if not qobuz_ready %} disabled aria-disabled="true"{% endif %}
             title="Skips your folders entirely - just asks Qobuz for albums newer than your last scan.">Check new releases</button>
   </form>
+  {% else %}
+  <span class="ql-refresh-note" role="status">New Releases needs a Library refresh</span>
+  {% endif %}
   {% if library_refresh_running %}
   <span class="ql-refresh-note" role="status" title="Checking your folders for music added outside the app."
         hx-get="/library/refresh-note" hx-trigger="every 4s" hx-swap="outerHTML">Refreshing…</span>
@@ -15,8 +19,8 @@
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="missing_albums">
-    <button type="submit" class="ql-header-refresh"
-            title="Scan for music added outside the app"
+    <button type="submit" class="ql-header-refresh"{% if not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+            title="{% if qobuz_ready %}Scan for music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
             aria-label="Scan for music added outside the app">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
     </button>

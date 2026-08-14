@@ -15,9 +15,12 @@ from qobuz_librarian import __version__, run_lock
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import (
     AuthLost,
+    CredentialChanged,
+    DownloaderNotReady,
     NoCredsError,
+    QobuzAccess,
+    QobuzEntitlementError,
     QobuzUnavailable,
-    load_qobuz_token,
 )
 from qobuz_librarian.integrations.lyrics import _prune_lyric_state_orphans
 from qobuz_librarian.integrations.rip import HAVE_MUTAGEN
@@ -486,6 +489,22 @@ def acquire_run_lock():
     if lease is not None and lease.intact() is True:
         try:
             result = _record_startup_recovery(lease)
+            from qobuz_librarian.library import generation_state
+
+            publication_recovery = (
+                generation_state.reconcile_interrupted_library_publication(
+                    lease
+                )
+            )
+            if publication_recovery is None:
+                raise RuntimeError(
+                    "interrupted Library publication state could not be saved"
+                )
+            if publication_recovery:
+                log.warning(
+                    "Recovered a Library crawl interrupted before its saved "
+                    "view was published."
+                )
         except Exception as exc:
             try:
                 lease.close()
@@ -1052,15 +1071,41 @@ def main():
     # only box.
     download_stack = {}
 
-    def download_token():
-        if "token" in download_stack:
-            return download_stack["token"]
+    def prepare_download_stack():
+        if download_stack.get("tools_ready"):
+            return
         check_rip()
         check_media_tools()
-        require_music_root()
-
-        from qobuz_librarian.api.auth import verify_streamrip_downloads_folder
+        from qobuz_librarian.api.auth import (
+            sync_streamrip_creds_from_env,
+            verify_streamrip_downloads_folder,
+        )
         verify_streamrip_downloads_folder()
+        if sync_streamrip_creds_from_env() is False:
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Couldn't write env credentials into the streamrip "
+                f"config ({cfg.STREAMRIP_CONFIG}); downloads may fail."))
+        cap_depth, cap_rate = streamrip_quality_cap()
+        vlog(
+            f"streamrip quality cap: {cap_depth}-bit/"
+            f"{cap_rate/1000:g}kHz"
+        )
+        download_stack["tools_ready"] = True
+
+    def remote_token(access):
+        try:
+            from qobuz_librarian.api.client import authorize_qobuz_action
+
+            credentials = authorize_qobuz_action(access)
+        except NoCredsError:
+            die(fmt(C.RED,
+                "\n✗  No Qobuz credentials configured.\n"
+                "   Paste your user_auth_token on the Settings page "
+                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
+                "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
+                EXIT_AUTH)
+        user_id, token = credentials.user_id, credentials.token
+        require_music_root()
         if not HAVE_MUTAGEN:
             log.info(fmt(C.YELLOW,
                 "  ⚠  mutagen not installed; falling back to filename-only "
@@ -1073,20 +1118,10 @@ def main():
             else:
                 log.info(fmt(C.GRAY,
                     "     Install: `pip install mutagen` (or via pipx)."))
-        try:
-            user_id, token = load_qobuz_token()
-        except NoCredsError:
-            die(fmt(C.RED,
-                "\n✗  No Qobuz credentials configured.\n"
-                "   Paste your user_auth_token on the Settings page "
-                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
-                "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
-                EXIT_AUTH)
-        from qobuz_librarian.api.auth import sync_streamrip_creds_from_env
-        if sync_streamrip_creds_from_env() is False:
-            log.info(fmt(C.YELLOW,
-                "  ⚠  Couldn't write env credentials into the streamrip "
-                f"config ({cfg.STREAMRIP_CONFIG}); downloads may fail."))
+        from qobuz_librarian.api.client import bind_download_preflight
+        token = bind_download_preflight(token, prepare_download_stack)
+        if access is QobuzAccess.DOWNLOAD_ACTION:
+            prepare_download_stack()
         vlog(f"user_id: {user_id}  •  music root: {cfg.MUSIC_ROOT}")
         if args.verbose:
             if _in_container():
@@ -1100,10 +1135,13 @@ def main():
             log.info(fmt(C.GRAY, f"  staging:    {cfg.STAGING_DIR}"))
             log.info(fmt(C.GRAY, f"  log file:   {cfg.FETCH_LOG_FILE}"))
             log.info(fmt(C.GRAY, f"  lock:       {cfg.LOCK_FILE}"))
-        cap_depth, cap_rate = streamrip_quality_cap()
-        vlog(f"streamrip quality cap: {cap_depth}-bit/{cap_rate/1000:g}kHz")
-        download_stack["token"] = token
         return token
+
+    def catalogue_token():
+        return remote_token(QobuzAccess.CATALOGUE_ACTION)
+
+    def download_token():
+        return remote_token(QobuzAccess.DOWNLOAD_ACTION)
 
     if resume_interrupted_queue:
         # Keep this launch recovery-only.
@@ -1169,19 +1207,19 @@ def main():
     # bottom by main()'s wrapper.
     if args.artist:
         from qobuz_librarian.modes.artist import run_artist_mode
-        raise SystemExit(run_artist_mode(args.artist, args, download_token()))
+        raise SystemExit(run_artist_mode(args.artist, args, catalogue_token()))
 
     if args.library_walk:
         from qobuz_librarian.modes.walk import run_walk_queued_mode
-        raise SystemExit(run_walk_queued_mode(args, download_token()))
+        raise SystemExit(run_walk_queued_mode(args, catalogue_token()))
 
     if args.album_gaps:
         from qobuz_librarian.modes.walk import run_album_walk_mode
-        raise SystemExit(run_album_walk_mode(args, download_token()))
+        raise SystemExit(run_album_walk_mode(args, catalogue_token()))
 
     if args.repair:
         from qobuz_librarian.modes.repair import run_album_repair_mode
-        raise SystemExit(run_album_repair_mode(args, download_token()))
+        raise SystemExit(run_album_repair_mode(args, catalogue_token()))
 
     if args.upgrade_walk:
         if args.consolidate:
@@ -1194,11 +1232,11 @@ def main():
         # controls passive upgrades during ordinary gap-fill walks.
         args.auto_upgrade = True
         from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
-        raise SystemExit(run_upgrade_walk_mode(args, download_token()))
+        raise SystemExit(run_upgrade_walk_mode(args, catalogue_token()))
 
     if args.query:
         from qobuz_librarian.modes.album import run_album_mode
-        raise SystemExit(run_album_mode(args, download_token()))
+        raise SystemExit(run_album_mode(args, catalogue_token()))
 
     # Crash-recovery: if a previous queueing run died with decisions still in
     # memory, we'd have left .qobuz_pending_queue.json on disk.
@@ -1222,7 +1260,7 @@ def main():
             # Loop inside album mode so the user can search album after album
             # without bouncing back to the top menu each time.
             from qobuz_librarian.modes.album import run_album_mode
-            run_album_mode(args, download_token(), query_args=[], loop=True)
+            run_album_mode(args, catalogue_token(), query_args=[], loop=True)
         elif mode == Mode.ARTIST:
             from qobuz_librarian.modes.artist import run_artist_mode
             from qobuz_librarian.ui_cli.prompts import prompt_artist_name
@@ -1231,16 +1269,16 @@ def main():
                 if artist is None:
                     log.info(fmt(C.GRAY, "  Cancelled."))
                     break
-                run_artist_mode(artist, args, download_token())
+                run_artist_mode(artist, args, catalogue_token())
         elif mode == Mode.WALK_QUEUE:
             from qobuz_librarian.modes.walk import run_walk_queued_mode
-            run_walk_queued_mode(args, download_token())
+            run_walk_queued_mode(args, catalogue_token())
         elif mode == Mode.ALBUM_WALK:
             from qobuz_librarian.modes.walk import run_album_walk_mode
-            run_album_walk_mode(args, download_token())
+            run_album_walk_mode(args, catalogue_token())
         elif mode == Mode.ALBUM_REPAIR:
             from qobuz_librarian.modes.repair import run_album_repair_mode
-            run_album_repair_mode(args, download_token(), loop=True)
+            run_album_repair_mode(args, catalogue_token(), loop=True)
         elif mode == Mode.UPGRADE:
             # Explicit upgrade walk: the user chose this, so enable the
             # upgrade-replace path for its duration regardless of the
@@ -1250,7 +1288,7 @@ def main():
             saved = getattr(args, "auto_upgrade", cfg.AUTO_UPGRADE_ENABLED)
             args.auto_upgrade = True
             try:
-                run_upgrade_walk_mode(args, download_token())
+                run_upgrade_walk_mode(args, catalogue_token())
             finally:
                 args.auto_upgrade = saved
         elif mode == Mode.MIGRATE:
@@ -1354,6 +1392,19 @@ def _entry():
                 f"\n⚠  Qobuz is temporarily unavailable: {e}\n"
                 "   Nothing was lost; any queued work was saved. Re-run when it's "
                 "back.\n"), EXIT_TRANSIENT)
+        except DownloaderNotReady:
+            die(fmt(C.RED,
+                "\n✗  Your Qobuz token works, but downloads also need your "
+                "Qobuz user ID. Add it in Settings. Nothing changed.\n"),
+                EXIT_CONFIG)
+        except CredentialChanged:
+            die(fmt(C.YELLOW,
+                "\n⚠  Qobuz credentials changed while the action was starting. "
+                "Nothing changed; run it again.\n"), EXIT_TRANSIENT)
+        except QobuzEntitlementError:
+            die(fmt(C.RED,
+                "\n✗  Qobuz accepted the token, but this account cannot perform "
+                "the requested action. Nothing changed.\n"), EXIT_AUTH)
     finally:
         # Persist any artist resolutions this run discovered (no-op when none),
         # so the next CLI walk skips the search calls; only the web flows

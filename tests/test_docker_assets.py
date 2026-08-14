@@ -36,6 +36,14 @@ def test_compose_forwards_web_stream_and_log_tunables():
     assert environment["SSE_HEARTBEAT_TICKS"] == "${SSE_HEARTBEAT_TICKS:-30}"
 
 
+def test_compose_allows_tini_to_signal_the_nonroot_app():
+    import yaml
+
+    compose = yaml.safe_load(_COMPOSE.read_text())
+    capabilities = compose["services"]["qobuz-librarian"]["cap_add"]
+    assert "KILL" in capabilities
+
+
 def test_custom_compose_web_port_reaches_cli_recovery_help():
     import yaml
 

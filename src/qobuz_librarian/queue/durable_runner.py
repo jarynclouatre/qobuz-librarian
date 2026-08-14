@@ -656,6 +656,7 @@ def execute_durable_new_album(
         _require_current_plan(item, args, plan)
         backup = backup_album_dir(
             Path(item["album_dir"]),
+            expected_receipt=item.get("_validated_source_receipt"),
             owner=_owner_record(owner),
             on_intent=checkpoint_backup_intent,
         )
@@ -757,6 +758,9 @@ def execute_durable_new_album(
             recovery_owner=_owner_record(owner),
             recovery_checkpoint=checkpoint_staging,
             required_backup_kind=plan.library_backup_kind,
+            expected_gap_fill_receipts=item.get(
+                "_validated_gap_fill_receipts"
+            ),
         )
         _require_authority(authority)
     except Exception:

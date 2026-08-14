@@ -149,6 +149,43 @@ def test_cli_refuses_to_run_when_the_lock_is_unavailable(monkeypatch):
     assert stopped.value.code == 1
 
 
+def test_cli_reconciles_library_publication_under_its_run_lock(monkeypatch):
+    from qobuz_librarian import cli, run_lock
+    from qobuz_librarian.library import generation_state
+    from qobuz_librarian.queue.startup_recovery import (
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+
+    class Lease:
+        closed = False
+
+        def intact(self):
+            return not self.closed
+
+        def close(self):
+            self.closed = True
+
+    lease = Lease()
+    events = []
+    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(
+        cli,
+        "_recover_startup_queue",
+        lambda authority: events.append(("queue", authority))
+        or StartupRecoveryResult(StartupRecoveryStatus.CLEAR),
+    )
+    monkeypatch.setattr(
+        generation_state,
+        "reconcile_interrupted_library_publication",
+        lambda authority: events.append(("library", authority)) or True,
+    )
+
+    assert cli.acquire_run_lock() is lease
+    assert events == [("queue", lease), ("library", lease)]
+    assert lease.closed is False
+
+
 
 
 def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(

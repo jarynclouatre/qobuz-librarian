@@ -280,6 +280,7 @@ CAPPED_FILE          = DATA_DIR / ".qobuz_upgrade_capped.json"
 UPGRADE_STATE_FILE   = DATA_DIR / ".qobuz_upgrade_state.json"
 DOWNSAMPLE_STATE_FILE = DATA_DIR / ".qobuz_downsample_state.json"
 LIBRARY_SCAN_STATE_FILE = DATA_DIR / ".qobuz_library_scan_state.json"
+LIBRARY_GENERATION_STATE_FILE = DATA_DIR / ".qobuz_library_generation.json"
 REVIEW_BADGE_STATE_FILE = DATA_DIR / ".qobuz_review_badges.json"
 # Albums the user dismissed from the bulk library/upgrade walks so they stop
 # resurfacing on every scan. User-driven and durable (no auto-expiry, unlike

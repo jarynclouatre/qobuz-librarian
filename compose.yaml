@@ -15,6 +15,9 @@ services:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      # tini stays root while the app drops to PUID:PGID. It needs KILL only
+      # to forward Docker stop signals across that uid boundary.
+      - KILL
       - SETUID
       - SETGID
     ports:

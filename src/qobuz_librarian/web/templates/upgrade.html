@@ -17,13 +17,13 @@
       {% include "_connect_cta.html" %}
     {% endwith %}
   </section>
-  {% else %}
+  {% endif %}
   <div class="ql-work-status ql-work-status--bar ql-quality-status">
     <span class="ql-status-chip {% if upgrade_state.stale %}is-warning{% elif upgrade_state.count %}is-info{% else %}is-neutral{% endif %}">
-      {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.count %}Review ready{% else %}No saved candidates{% endif %}
+      {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}No upgrades found{% else %}Baseline not run{% endif %}
     </span>
     <span>
-      {% if upgrade_state.stale %}Download quality changed after these candidates were built.{% elif upgrade_state.updated %}Baseline refreshed {{ upgrade_state.updated }}.{% elif last_run %}Last library scan {{ last_run }}.{% else %}Scan library on the Library page to build upgrade candidates.{% endif %}
+      {% if upgrade_state.stale %}These results are not complete for the current Library generation and quality policy.{% elif upgrade_state.updated %}Baseline refreshed {{ upgrade_state.updated }}.{% elif last_run %}Last library scan {{ last_run }}.{% else %}Scan library on the Library page to build upgrade candidates.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/upgrade/hidden">
@@ -36,7 +36,7 @@
   <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">Refresh Upgrade candidates</p>
-      <p class="ql-work-card-text">Run a Library refresh before choosing albums. The saved candidates were built under your previous quality settings.</p>
+      <p class="ql-work-card-text">Run a Library refresh before choosing albums. The saved result is incomplete or belongs to an older Library generation or quality policy.</p>
     </div>
     <div class="ql-work-card-actions">
       <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>
@@ -56,17 +56,26 @@
       </form>
     </div>
   </section>
-  {% else %}
+  {% elif upgrade_state.complete %}
   <section class="ql-work-card ql-empty-work ql-quality-entry-card">
     <div class="ql-work-card-copy">
-      <p class="ql-work-card-title">No upgrade candidates saved</p>
-      <p class="ql-work-card-text">A library scan builds the Missing Albums, Gap Fill, Upgrade and Downsample reviews together.</p>
+      <p class="ql-work-card-title">No upgrades found</p>
+      <p class="ql-work-card-text">The current Library generation and quality policy were checked completely.</p>
     </div>
     <div class="ql-work-card-actions">
       <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>
     </div>
   </section>
-  {% endif %}
+  {% else %}
+  <section class="ql-work-card ql-empty-work ql-quality-entry-card">
+    <div class="ql-work-card-copy">
+      <p class="ql-work-card-title">No Upgrade baseline yet</p>
+      <p class="ql-work-card-text">A Library scan builds the Missing Albums, Gap Fill, Upgrade and Downsample reviews together.</p>
+    </div>
+    <div class="ql-work-card-actions">
+      <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>
+    </div>
+  </section>
   {% endif %}
 </div>
 

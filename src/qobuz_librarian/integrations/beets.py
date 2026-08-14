@@ -7643,9 +7643,11 @@ def forget_beets_entries(paths):
     Consolidation removes duplicate sibling tracks straight off disk; without
     this their rows linger in the beets library, so someone who also runs
     `beet` by hand sees ghost tracks until the next `beet update`. `beet
-    remove` is used rather than a direct sqlite delete so beets cleans up the
-    album row and any flexible-attribute rows along with the item, leaving
-    the database consistent.
+    remove` is used with exact item IDs rather than a direct sqlite delete so
+    beets cleans up the album row and any flexible-attribute rows along with
+    the item, leaving the database consistent. Resolving those IDs from the
+    anchored database also handles root-relative rows when Beets' ordinary
+    config names another mount alias for the same managed library.
     """
     paths = [str(p) for p in paths if str(p)]
     if not paths:
@@ -7681,31 +7683,50 @@ def forget_beets_entries(paths):
         "-l",
         os.path.abspath(os.fspath(cfg.BEETS_DB_PATH)),
     ]
-    query = []
-    for path in paths:
-        if query:
-            query.append(",")
-        query.append("path:" + path)
+    try:
+        target_paths = frozenset(_catalogue_item_path(path) for path in paths)
+    except (OSError, TypeError, ValueError) as exc:
+        _ghost_warning(f"the deleted path is outside the managed library: {exc}")
+        return ForgetBeetsEntriesResult(False)
 
     def _tracked_ids(stage):
+        def _inspect(connection):
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(items)")
+            }
+            if not {"id", "path"}.issubset(columns):
+                raise sqlite3.DatabaseError("beets items schema is incomplete")
+            tracked = []
+            seen_ids = set()
+            for item_id, raw_path in connection.execute(
+                "SELECT id, path FROM items ORDER BY id"
+            ):
+                if type(item_id) is not int or item_id <= 0 or item_id in seen_ids:
+                    raise sqlite3.DatabaseError("beets item identity is invalid")
+                seen_ids.add(item_id)
+                try:
+                    item_path = _catalogue_item_path(raw_path)
+                except (OSError, TypeError, ValueError) as exc:
+                    raise sqlite3.DatabaseError(
+                        "beets item path is outside the managed library"
+                    ) from exc
+                if item_path in target_paths:
+                    tracked.append(item_id)
+            return tracked
+
         try:
-            listing = _run_owned_beets_capture(
-                base + ["ls", "-f", "$id", *query],
-                env=beet_env,
-                timeout=120,
-                database_exclusion=exclusion,
-                before_spawn=lambda: _require_beets_runtime(runtime),
+            timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
+            timeout = float(timeout) if timeout and timeout > 0 else 5.0
+            return inspect_sqlite_source(
+                database_anchor,
+                _beets_database_anchor_matches,
+                _inspect,
+                connect=sqlite3.connect,
+                timeout=timeout,
             )
-        except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             _ghost_warning(f"couldn't {stage} the library: {exc}")
             return None
-        if listing.returncode != 0:
-            _ghost_warning(
-                f"couldn't {stage} the library: beet ls exited "
-                f"{listing.returncode}"
-            )
-            return None
-        return [line for line in listing.stdout.splitlines() if line.strip()]
 
     def _run_guarded():
         tracked = _tracked_ids("read")
@@ -7713,6 +7734,11 @@ def forget_beets_entries(paths):
             return ForgetBeetsEntriesResult(False)
         if not tracked:
             return ForgetBeetsEntriesResult(True)
+        query = []
+        for item_id in tracked:
+            if query:
+                query.append(",")
+            query.append(f"id:{item_id}")
         try:
             rm = _run_owned_beets_capture(
                 base + ["remove", "-f", *query],

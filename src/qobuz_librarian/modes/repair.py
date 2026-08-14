@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
+from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.backup import (
     BackupResult,
     _normalise_gap_fill_expected_receipts,
@@ -55,7 +56,10 @@ from qobuz_librarian.library.scanner import (
 )
 from qobuz_librarian.library.sqlite_atomic import AtomicSQLiteWrite
 from qobuz_librarian.queue.builder import _build_queue_item
-from qobuz_librarian.queue.executor import _execute_download_queue
+from qobuz_librarian.queue.executor import (
+    _execute_download_queue,
+    _refresh_review_state_after_downloads,
+)
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, die
@@ -1794,6 +1798,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "backup": None,
             }
 
+        expected_generation = getattr(token, "credential_generation", "")
+        if expected_generation:
+            from qobuz_librarian.api.client import authorize_bound_download
+
+            token = authorize_bound_download(token)
+
         # ── Back up the truncated originals (plan in hand) ───────────────
         broken_paths = [b["path"] for b in verified_truncated]
         backup_path = backup_gap_fill_files(
@@ -1925,6 +1935,35 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "imported": False,
                 "backup": recovery_result(),
             }
+        post_backup_premise = candidate_premise.capture(
+            "repair",
+            album_dir,
+        )
+        if post_backup_premise is None:
+            pin_repair_recovery(
+                "repair backup kept, the remaining album could not be sealed"
+            )
+            checkpoint_recovery(
+                backup_path,
+                "backup",
+                "The remaining album could not be sealed before its refill.",
+            )
+            log.info(fmt(
+                C.RED,
+                "  ✗  The remaining album could not be verified after its "
+                "damaged files were backed up. No replacement download was "
+                f"started; the originals are preserved at:\n     {backup_path}",
+            ))
+            return {
+                "n_ok": 0,
+                "n_fail": len(verified_truncated),
+                "imported": False,
+                "backup": recovery_result(),
+            }
+        qi["_source_premise"] = post_backup_premise
+        qi["_gap_fill_receipts"] = candidate_premise.gap_fill_receipts(
+            post_backup_premise
+        )
         log.info(fmt(C.GRAY,
             f"  ⟳  Moved {len(verified_truncated)} broken file(s) "
             f"to backup: {backup_path.name}"))
@@ -2487,6 +2526,11 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             and result.get("n_fail", 0) == 0
             and result.get("imported")
             and not result.get("repair_unverified")):
+        _refresh_review_state_after_downloads(
+            [{**result, "album": None, "dir": album_dir}],
+            token,
+            args,
+        )
         return "repaired"
     return "failed"
 

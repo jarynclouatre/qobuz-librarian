@@ -1439,6 +1439,7 @@
     var dsTotal = document.querySelector("[data-downsample-total]");
     var dismissRest = document.getElementById("review-dismiss-rest");
     var reviewKind = form.getAttribute("data-review-kind") || "";
+    var reviewBlocked = form.getAttribute("data-review-blocked") === "1";
     var isDownsampleReview = reviewKind === "downsample";
     var reviewItemSingular = cont.dataset.reviewItemSingular || "album";
     var reviewItemPlural = cont.dataset.reviewItemPlural || "albums";
@@ -1559,7 +1560,7 @@
       }
       var tc = tabCounts(c);
       if (submit) {
-        submit.disabled = tc.selected === 0;
+        submit.disabled = reviewBlocked || tc.selected === 0;
         submit.textContent = tc.selected
           ? (submit.dataset.reviewVerb || "Download") + " " + formatCount(tc.selected) + " selected"
           : (submit.dataset.emptyLabel || "Select " + reviewItemPlural);

@@ -57,6 +57,7 @@ _PLANNED_KEYS = frozenset({
     "siblings_to_delete",
     "quality",
     "force_track_by_track",
+    "source_premise",
 })
 _JOURNAL_KEYS = frozenset({
     "version",
@@ -406,6 +407,7 @@ def _serialize_queue_item(item):
         "siblings_to_delete": [str(p) for p in item.get("siblings_to_delete") or []],
         "quality": item.get("quality"),
         "force_track_by_track": item.get("force_track_by_track", False),
+        "source_premise": item.get("_source_premise"),
     })
 
 
@@ -423,6 +425,7 @@ def _deserialize_queue_item(data):
         siblings_to_delete=[Path(path) for path in planned["siblings_to_delete"]],
         quality=planned["quality"],
         force_track_by_track=planned["force_track_by_track"],
+        source_premise=planned["source_premise"],
     )
 
 
@@ -445,6 +448,16 @@ def _validate_planned(value: Any) -> dict[str, Any]:
             raise ValueError(f"planned {name} must be a boolean")
     if value["quality"] is not None and type(value["quality"]) is not int:
         raise ValueError("planned quality must be an integer or null")
+    if value["source_premise"] is not None:
+        from qobuz_librarian.library.candidate_premise import canonical_premise
+
+        premise = canonical_premise(value["source_premise"])
+        if premise is None or premise != value["source_premise"]:
+            raise ValueError("planned source premise is malformed")
+        if value["album_dir"] is None or premise["path"] != os.path.abspath(
+            value["album_dir"]
+        ):
+            raise ValueError("planned source premise has the wrong path")
     _validate_json_value(value, "planned")
     return _json_copy(value)
 

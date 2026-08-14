@@ -1,5 +1,6 @@
 """Core album processing: detect gaps, prompt, download, import, consolidate."""
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from qobuz_librarian.integrations.rip import (
     is_cancel_requested,
     snapshot_staging,
 )
+from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.backup import (
     backup_album_dir,
     capture_album_source_receipt,
@@ -138,7 +140,7 @@ def _recover_incomplete_upgrade_backup(backup, album_dir, *, operation):
     return outcome
 
 
-def force_cleanup_preflight(album, args):
+def force_cleanup_preflight(album, args, *, expected_album_receipt=None):
     """With --force, move an existing album dir aside to a backup before
     re-import, so beets doesn't make '<n>.1.flac' collisions against the old
     files, and a re-download that fails can be restored.
@@ -193,7 +195,14 @@ def force_cleanup_preflight(album, args):
         log.info(fmt(C.YELLOW, "  Continuing without moving it. Expect file collisions."))
         return False
 
-    backup_path = backup_album_dir(album_dir)
+    backup_path = (
+        backup_album_dir(
+            album_dir,
+            expected_receipt=expected_album_receipt,
+        )
+        if expected_album_receipt is not None
+        else backup_album_dir(album_dir)
+    )
     if backup_path is not None and not backup_path.complete:
         _recover_incomplete_upgrade_backup(
             backup_path, album_dir, operation="forced re-download backup")
@@ -539,7 +548,9 @@ def _offer_expanded_edition(album, album_dir, existing, extras, token, args):
 
 def process_album(album, args, *, allow_force=True, label=None,
                   already_confirmed=False, upgrade_only=False,
-                  token=None, quality=None, treat_as_new=False):
+                  token=None, quality=None, treat_as_new=False,
+                  expected_album_receipt=None,
+                  expected_gap_fill_receipts=None):
     """End-to-end processing for one Qobuz album: detect → prompt → download →
     cleanup → import → consolidate.
 
@@ -874,6 +885,39 @@ def process_album(album, args, *, allow_force=True, label=None,
             "  ⚠  Upgrade-only requested but no upgrade applies here; skipping."))
         return {"result": "upgrade_only_no_op", "n_total": len(qobuz_tracks)}
 
+    reviewed_album_absent = album_dir is None and not treat_as_new
+    source_premise = None
+    if missing and not args.dry_run and album_dir is not None:
+        premise_kind = (
+            "upgrade"
+            if auto_upgrade_active or upgrade_only or use_force
+            else "gap-fill"
+        )
+        if expected_album_receipt is None:
+            source_premise = candidate_premise.capture(
+                premise_kind,
+                album_dir,
+            )
+        else:
+            source_premise = candidate_premise.canonical_premise({
+                "version": candidate_premise.PREMISE_VERSION,
+                "kind": premise_kind,
+                "path": os.path.abspath(os.fspath(album_dir)),
+                "receipt": expected_album_receipt,
+            })
+        if source_premise is None:
+            log.info(fmt(
+                C.YELLOW,
+                "  ⚠  The local album could not be sealed exactly. Refresh "
+                "or rerun the command; nothing was changed.",
+            ))
+            return {"result": "stale_candidate"}
+        expected_album_receipt = source_premise["receipt"]
+        if expected_gap_fill_receipts is None:
+            expected_gap_fill_receipts = (
+                candidate_premise.gap_fill_receipts(source_premise)
+            )
+
     if not already_confirmed:
         print_album_summary(album, missing, present, album_dir, use_force,
                             auto_upgrade=auto_upgrade_active,
@@ -919,6 +963,34 @@ def process_album(album, args, *, allow_force=True, label=None,
         log.info(fmt(C.GRAY, "  Skipped."))
         return {"result": "user_skipped", "n_missing": len(missing)}
 
+    expected_generation = getattr(token, "credential_generation", "")
+    if expected_generation:
+        from qobuz_librarian.api.client import authorize_bound_download
+
+        token = authorize_bound_download(token)
+
+    if source_premise is not None:
+        current_premise = candidate_premise.capture(
+            source_premise["kind"],
+            source_premise["path"],
+        )
+        if current_premise != source_premise:
+            log.info(fmt(
+                C.YELLOW,
+                "  ⚠  The local files changed after this download was "
+                "approved. Refresh or rerun the command; nothing was changed.",
+            ))
+            return {"result": "stale_candidate"}
+    elif reviewed_album_absent:
+        clear_scan_caches()
+        if find_album_dir_filesystem(album) is not None:
+            log.info(fmt(
+                C.YELLOW,
+                "  ⚠  This album appeared locally after the download was "
+                "approved. Refresh or rerun the command; nothing was changed.",
+            ))
+            return {"result": "stale_candidate"}
+
     # ── Pre-flight: staging dir state (BEFORE backup so sys.exit can't strand it)
     staging_preflight(args)
 
@@ -947,7 +1019,14 @@ def process_album(album, args, *, allow_force=True, label=None,
     # Same-filesystem move, so this is fast (rename, not copy). The backup
     # is restored if anything fails before beets import succeeds.
     if auto_upgrade_active and album_dir and album_dir.exists():
-        upgrade_backup_path = backup_album_dir(album_dir)
+        upgrade_backup_path = (
+            backup_album_dir(
+                album_dir,
+                expected_receipt=expected_album_receipt,
+            )
+            if expected_album_receipt is not None
+            else backup_album_dir(album_dir)
+        )
         if (
             upgrade_backup_path is not None
             and not upgrade_backup_path.complete
@@ -984,7 +1063,11 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     # ── --force: NOW move the existing album dir aside (deferred from above) ──
     if use_force:
-        force_outcome = force_cleanup_preflight(album, args)
+        force_outcome = force_cleanup_preflight(
+            album,
+            args,
+            expected_album_receipt=expected_album_receipt,
+        )
         if force_outcome is None:
             # A symlink has no safe --force path; skip without asking again.
             return {"result": "cancelled"}
@@ -1031,7 +1114,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                 album=album, missing=missing, present=present,
                 existing=existing, album_dir=album_dir, snapshot=snapshot,
                 quality=quality, upgrade_only=upgrade_only,
-                result=download_result)
+                result=download_result,
+                expected_gap_fill_receipts=expected_gap_fill_receipts)
         except BaseException:
             retain_download_staging(download_result)
             raise
@@ -1102,7 +1186,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                             album=album, missing=missing, present=present,
                             existing=existing, album_dir=album_dir,
                             snapshot=snapshot, quality=4,
-                            upgrade_only=upgrade_only, result=retry_result)
+                            upgrade_only=upgrade_only, result=retry_result,
+                            expected_gap_fill_receipts=(
+                                expected_gap_fill_receipts
+                            ))
 
                     try:
                         fresh_dirs, retry_kept = redownload_with_staged_fallback(

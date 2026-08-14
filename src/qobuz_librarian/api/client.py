@@ -13,9 +13,19 @@ import requests
 from qobuz_librarian import config
 from qobuz_librarian.api.auth import (
     AuthLost,
+    AuthOutcome,
+    CredentialChanged,
+    DownloaderNotReady,
+    QobuzAccess,
+    QobuzEntitlementError,
     QobuzError,
     QobuzUnavailable,
+    classify_qobuz_status,
+    load_qobuz_credentials,
     notify_auth_state,
+    qobuz_capability,
+    read_qobuz_credentials,
+    token_credential_generation,
 )
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -137,9 +147,10 @@ def _net_reason(exc):
     return "a network error reaching the Qobuz API"
 
 
-def qobuz_get(endpoint, params, token):
+def qobuz_get(endpoint, params, token, *, report_auth: bool = True):
     headers = {"X-App-Id": config.QOBUZ_APP_ID, "X-User-Auth-Token": token}
     url = f"{config.QOBUZ_API_BASE}/{endpoint}"
+    generation = token_credential_generation(token)
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         timeout = _attempt_timeout()
         if timeout is None:
@@ -157,8 +168,12 @@ def qobuz_get(endpoint, params, token):
             _retry_sleep(wait)
             continue
         if r.status_code == 401:
-            notify_auth_state(False)
-            raise AuthLost(f"401 from Qobuz {endpoint}")
+            if report_auth:
+                notify_auth_state(AuthOutcome.REJECTED, generation=generation)
+            raise AuthLost(
+                f"401 from Qobuz {endpoint}",
+                credential_generation=generation,
+            )
         if r.status_code in _RETRY_STATUSES:
             # `is not None`, not truthiness: a server "Retry-After: 0"
             # (retry immediately) is valid and must not fall back to backoff.
@@ -182,14 +197,17 @@ def qobuz_get(endpoint, params, token):
             _retry_sleep(wait)
             continue
         if r.status_code != 200:
-            # A 4xx other than the 401 handled above still means Qobuz
-            # authenticated the request before answering - "no such album", a
-            # bad query, a lapsed subscription - so the token itself is good.
-            if 400 <= r.status_code < 500:
-                notify_auth_state(True)
-            raise QobuzError(f"HTTP {r.status_code} from {endpoint}: {r.text[:200]}")
+            outcome = classify_qobuz_status(r.status_code)
+            if report_auth and outcome is AuthOutcome.ENTITLEMENT:
+                notify_auth_state(outcome, generation=generation)
+            raise QobuzError(
+                f"HTTP {r.status_code} from {endpoint}: {r.text[:200]}",
+                status_code=r.status_code,
+                auth_outcome=outcome,
+            )
         # A 200 means Qobuz accepted the token.
-        notify_auth_state(True)
+        if report_auth:
+            notify_auth_state(AuthOutcome.ACCEPTED, generation=generation)
         try:
             return r.json()
         except ValueError as e:
@@ -197,3 +215,106 @@ def qobuz_get(endpoint, params, token):
             # and simplejson's variant when that's installed) - catch the base
             # so a junk body surfaces as a QobuzError, not an opaque traceback.
             raise QobuzError(f"bad JSON from {endpoint}: {e}") from e
+
+
+def probe_qobuz(token, *, report_auth: bool = True) -> AuthOutcome:
+    """Perform the small uncached check shared by every explicit action."""
+    try:
+        qobuz_get(
+            "album/search",
+            {"query": "ok", "limit": 1},
+            token,
+            report_auth=report_auth,
+        )
+        return AuthOutcome.ACCEPTED
+    except AuthLost:
+        return AuthOutcome.REJECTED
+    except QobuzUnavailable:
+        return AuthOutcome.TEMPORARY
+    except QobuzError as exc:
+        return exc.auth_outcome
+    except Exception:
+        return AuthOutcome.TEMPORARY
+
+
+def authorize_qobuz_action(
+    access: QobuzAccess,
+    *,
+    expected_generation: str = "",
+    auth_valid: bool | None = None,
+):
+    """Live-check one remote action and return its bound credential."""
+    credentials = load_qobuz_credentials()
+    if expected_generation and credentials.generation != expected_generation:
+        raise CredentialChanged(
+            "Qobuz credentials changed before the action started. Try again."
+        )
+    # qobuz_capability() is an offer-time UI decision.  An explicit action is
+    # stronger evidence: even a credential rejected by an earlier request gets
+    # one fresh, uncached check here so a recovered/replaced server-side token
+    # is not trapped behind stale process state.
+    live_access = (
+        QobuzAccess.CATALOGUE_ACTION
+        if access is QobuzAccess.DOWNLOAD_ACTION
+        else access
+    )
+    decision = qobuz_capability(live_access, credentials, auth_valid=None)
+    if not decision.allowed:
+        raise RuntimeError("Qobuz action capability was refused")
+
+    outcome = probe_qobuz(credentials.token)
+    if outcome is AuthOutcome.REJECTED:
+        raise AuthLost(
+            "Qobuz rejected the saved token",
+            credential_generation=credentials.generation,
+        )
+    if outcome is AuthOutcome.ENTITLEMENT:
+        raise QobuzEntitlementError(
+            "Qobuz accepted the token, but the account cannot perform this action."
+        )
+    if outcome in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}:
+        raise QobuzUnavailable(
+            "Qobuz could not be reached or could not confirm the request. Try again."
+        )
+
+    # A token-only setup is sufficient for catalogue work, but not for the
+    # downloader.  Check this after the live probe so the error can truthfully
+    # say that Qobuz accepted the token.
+    if access is QobuzAccess.DOWNLOAD_ACTION \
+            and not credentials.downloader_ready:
+        raise DownloaderNotReady(
+            "Your Qobuz token works, but downloads also need your "
+            "Qobuz user ID. Add it in Settings."
+        )
+
+    current = read_qobuz_credentials()
+    if current.generation != credentials.generation:
+        raise CredentialChanged(
+            "Qobuz credentials changed while the action was starting. Try again."
+        )
+    return credentials
+
+
+_DOWNLOAD_PREFLIGHT_ATTR = "_qobuz_librarian_download_preflight"
+
+
+def bind_download_preflight(token, preflight):
+    """Carry a CLI-only local downloader check with a generation-bound token."""
+    if callable(preflight):
+        setattr(token, _DOWNLOAD_PREFLIGHT_ATTR, preflight)
+    return token
+
+
+def authorize_bound_download(token, *, prepare: bool = True):
+    """Re-admit a bound download and run its local preflight when requested."""
+    expected_generation = getattr(token, "credential_generation", "")
+    if not expected_generation:
+        return token
+    preflight = getattr(token, _DOWNLOAD_PREFLIGHT_ATTR, None)
+    credentials = authorize_qobuz_action(
+        QobuzAccess.DOWNLOAD_ACTION,
+        expected_generation=expected_generation,
+    )
+    if prepare and callable(preflight):
+        preflight()
+    return bind_download_preflight(credentials.token, preflight)

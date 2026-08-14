@@ -23,7 +23,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -646,7 +646,7 @@ class Job:
         Returns None once the job has left review, False for no change, and
         True when one row changed.
         """
-        with self._lock:
+        with self._review_action_lock, self._lock:
             if self.status != JobStatus.AWAITING_REVIEW:
                 return None
             for c in self.candidates:
@@ -663,7 +663,7 @@ class Job:
         """
         want = set(cids) if cids is not None else None
         n = 0
-        with self._lock:
+        with self._review_action_lock, self._lock:
             if self.status != JobStatus.AWAITING_REVIEW:
                 return None
             for c in self.candidates:
@@ -719,6 +719,15 @@ class JobRegistry:
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
+
+    def discard_merged_review(self, job: Job) -> None:
+        """Forget a split remnant already removed by one database commit."""
+        with self._lock:
+            if self._jobs.get(job.id) is not job:
+                return
+            self._jobs.pop(job.id, None)
+            self._order = [job_id for job_id in self._order
+                           if job_id != job.id]
 
     def all(self) -> list[Job]:
         with self._lock:
@@ -1023,6 +1032,7 @@ def _friendly_job_error(exc, fallback: str) -> str:
         QobuzError,
         QobuzUnavailable,
     )
+    from qobuz_librarian.library.candidate_premise import CandidateStale
     if isinstance(exc, NoCredsError):
         return "No Qobuz credentials set. Visit Settings."
     if isinstance(exc, AuthLost):
@@ -1031,6 +1041,8 @@ def _friendly_job_error(exc, fallback: str) -> str:
         return "Qobuz is temporarily unavailable (network or rate limit). Try again shortly."
     if isinstance(exc, QobuzError):
         return "Couldn't reach the Qobuz API. Check the container's network."
+    if isinstance(exc, CandidateStale):
+        return str(exc)
     if isinstance(exc, FileNotFoundError):
         # job.error is rendered through Jinja autoescape, so don't escape here
         # too (that double-encodes characters like & in a path).
@@ -1680,6 +1692,50 @@ def approve(
         registry.add(parked)
         job.notify_review_changed()
 
+    def _restore_untouched_review(j: Job) -> bool:
+        action_jobs = sorted(
+            [item for item in (j, parked) if item is not None],
+            key=lambda item: item.id,
+        )
+        with _library_review_state_guard(j), ExitStack() as action_locks:
+            for item in action_jobs:
+                action_locks.enter_context(item._review_action_lock)
+            with ExitStack() as job_locks:
+                for item in action_jobs:
+                    job_locks.enter_context(item._lock)
+                if j.status != JobStatus.RUNNING or j.cancel_requested:
+                    return False
+                previous = (j.status, j.finished_at, j.error, j.candidates)
+                should_merge = bool(
+                    parked is not None
+                    and parked.status == JobStatus.AWAITING_REVIEW
+                )
+                if should_merge:
+                    candidates = list(j.candidates) + list(parked.candidates)
+                    candidates.sort(key=lambda candidate: (
+                        int(candidate.get("seq") or 0),
+                        str(candidate.get("cid") or ""),
+                    ))
+                    j.candidates = candidates
+                    j.sync_cand_seq()
+                j.status = JobStatus.AWAITING_REVIEW
+                j.finished_at = None
+                j.error = None
+                saved = (
+                    job_persistence.restore_split_review(j, parked)
+                    if should_merge
+                    else job_persistence.admit_review_transition(j)
+                )
+                if not saved:
+                    j.status, j.finished_at, j.error, j.candidates = previous
+                    j.sync_cand_seq()
+                    return False
+                if should_merge:
+                    registry.discard_merged_review(parked)
+        if parked is not None and should_merge:
+            parked.end_stream()
+        return True
+
     def _execute(j: Job):
         # Cancelled between approve and the worker picking this up: don't
         # start the work.
@@ -1699,23 +1755,33 @@ def approve(
             # Qobuz went away before ANYTHING landed: put the review back
             # exactly as it was instead of burying the picks in a failed job.
             # a months-old review's ticks would otherwise be gone for good.
-            from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
+            from qobuz_librarian.api.auth import (
+                AuthLost,
+                CredentialChanged,
+                DownloaderNotReady,
+                QobuzEntitlementError,
+                QobuzUnavailable,
+            )
+            from qobuz_librarian.library.candidate_premise import CandidateStale
             if (j._imported_any or j.cancel_requested or j.recoveries
                     or not isinstance(e, (AuthLost, QobuzUnavailable,
+                                          CredentialChanged,
+                                          DownloaderNotReady,
+                                          QobuzEntitlementError,
+                                          CandidateStale,
                                           SystemExit))):
                 raise
-            with j._lock:
-                # A cancel/discard that landed while the run was dying wins;
-                # only a still-RUNNING job goes back to review.
-                if j.status != JobStatus.RUNNING or j.cancel_requested:
-                    raise
-                j.status = JobStatus.AWAITING_REVIEW
-                j.finished_at = None
-                j.error = None
-            j.push_line(
-                "Couldn't reach Qobuz, so nothing was downloaded. Your "
-                "review and picks are untouched. Reconnect and try again.")
-            job_persistence.persist(j)
+            if not _restore_untouched_review(j):
+                raise RuntimeError(
+                    "The untouched review could not be restored durably."
+                ) from e
+            message = (
+                str(e)
+                if isinstance(e, CandidateStale)
+                else "Couldn't reach Qobuz, so nothing was downloaded. Your "
+                     "review and picks are untouched. Reconnect and try again."
+            )
+            j.push_line(message)
             j.notify_review_changed()
 
     _scan_queue.put((job, _execute))

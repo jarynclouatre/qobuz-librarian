@@ -18,11 +18,11 @@
   {% endif %}
 
   <div class="ql-work-status ql-work-status--bar ql-quality-status">
-    <span class="ql-status-chip {% if downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
-      {% if downsample_state.count %}Review ready{% else %}No saved candidates{% endif %}
+    <span class="ql-status-chip {% if downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
+      {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No downsample candidates{% else %}Not refreshed yet{% endif %}
     </span>
     <span>
-      {% if downsample_state.updated %}Candidates refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No downsample refresh has finished yet.{% endif %}
+      {% if downsample_state.stale %}Saved results are incomplete or belong to an older Library generation.{% elif downsample_state.updated %}Candidates refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No downsample refresh has finished yet.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/downsample/hidden">
@@ -41,6 +41,20 @@
       <p class="ql-tool-note-title">{% if _ds_executing %}Downsampling now{% else %}Downsample scan running{% endif %}</p>
       <p>{% if _ds_executing %}Your files are being rewritten in place.{% else %}Checking your files for albums that can be downsampled.{% endif %} <a href="/jobs/{{ downsample_running.id }}" class="ql-inline-link">Watch progress →</a></p>
     </div>
+    {% elif downsample_state.stale %}
+    <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
+      <div class="ql-work-card-copy">
+        <p class="ql-work-card-title">Refresh Downsample candidates</p>
+        <p class="ql-work-card-text">The saved result is not current. Refresh checks only local files and does not contact Qobuz.</p>
+      </div>
+      <div class="ql-work-card-actions">
+        <form action="/downsample" method="post" data-busy-submit>
+          <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+          <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
+                  data-confirm="{{ refresh_confirm }}" data-confirm-action="Refresh">Refresh candidates</button>
+        </form>
+      </div>
+    </section>
     {% elif downsample_state.count %}
     <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
       <div class="ql-work-card-copy">
@@ -63,7 +77,7 @@
     {% else %}
     <section class="ql-work-card ql-empty-work ql-quality-entry-card">
       <div class="ql-work-card-copy">
-        <p class="ql-work-card-title">No downsample candidates saved</p>
+      <p class="ql-work-card-title">{% if downsample_state.complete %}No downsample candidates{% else %}No Downsample refresh yet{% endif %}</p>
         <p class="ql-work-card-text">Refresh checks the files already on disk{% if keeps_ds_originals() %} - rewrites keep their hi-res originals for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% endif %}. A library scan rebuilds every candidate list in one pass.</p>
       </div>
       <div class="ql-work-card-actions">

@@ -12,18 +12,19 @@
 
 {% if not qobuz_ready %}
 <section class="ql-work-card">
-  {% with connect_embedded=True %}
+  {% with connect_embedded=True, connect_note="Saved Repair progress, review choices, recovery, and history remain available below." %}
     {% include "_connect_cta.html" %}
   {% endwith %}
 </section>
-{% elif not repair_job or repair_job.status.value in ('failed', 'canceled') %}
+{% endif %}
+{% if not repair_job or repair_job.status.value in ('failed', 'canceled') %}
 {# A failed or cancelled run stays on the page, but with the launcher under
    it, or the surface owned by a dead job had no way to start another scan. #}
-{% if repair_job and qobuz_ready %}
+{% if repair_job %}
 {% if repair_job.status.value == 'failed' %}
 <div class="ql-work-status" role="alert">
   <span class="ql-status-chip is-error">Repair failed</span>
-  <span>The failed albums remain below. Review the details, then start a new scan when you are ready.</span>
+  <span>{% if repair_job.candidates %}Review the saved album details below, then start a new scan when you are ready.{% else %}No repair choices were saved from that run. Review its log, then start a new scan when you are ready.{% endif %}</span>
 </div>
 {% endif %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
@@ -41,7 +42,7 @@
 {% if repair_resume %}
 <div class="ql-tool-note ql-tool-note-info">
   <p class="ql-tool-note-title">Scan can resume</p>
-  <p>A repair scan was interrupted. {{ repair_resume.done }} artist{{ 's' if repair_resume.done != 1 }} already checked{% if repair_resume.found %}, {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found{% endif %}. Starting it again continues from there.</p>
+  <p>A repair scan was interrupted{% if repair_resume.found %} with {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found so far{% endif %}. Starting it again reuses saved artists only when their exact files are unchanged, and checks changed or older saved work again.</p>
 </div>
 {% endif %}
 
@@ -52,15 +53,13 @@
   </div>
   <form action="/repair" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
+    <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused or not qobuz_ready %} disabled title="{{ writes_paused_reason if writes_paused else 'Connect Qobuz before starting a Repair scan.' }}" aria-disabled="true"{% endif %}
             {% if repair_resume %}data-confirm="Continue the repair scan from where it left off?" data-confirm-action="Resume scan"{% else %}data-confirm="Start a full repair scan? This can take a while on a large library." data-confirm-action="Start scan"{% endif %}>{% if repair_resume %}Resume scan{% else %}Start repair scan{% endif %}</button>
   </form>
 </section>
 {% else %}
-{% if qobuz_ready %}
 {% if repair_job %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
-{% endif %}
 {% endif %}
 {% endif %}
 </div>

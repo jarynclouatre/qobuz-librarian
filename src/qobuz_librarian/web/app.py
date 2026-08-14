@@ -35,7 +35,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from qobuz_librarian import __version__, state_file
 from qobuz_librarian import config as cfg
-from qobuz_librarian.api.auth import NoCredsError
+from qobuz_librarian.api.auth import (
+    AuthEvidence,
+    AuthLost,
+    AuthOutcome,
+    CredentialChanged,
+    DownloaderNotReady,
+    NoCredsError,
+    QobuzAccess,
+    QobuzEntitlementError,
+    QobuzUnavailable,
+    credentials_from_values,
+    qobuz_capability,
+)
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import auth as web_auth
@@ -74,6 +86,9 @@ _JOBS_RESTORED = False
 _JOBS_RESTORE_LOCK = threading.Lock()
 # Tri-state result of the startup token probe.
 _TOKEN_VALID: bool | None = None
+_TOKEN_GENERATION: str | None = None
+_AUTH_LOSS_NOTIFIED_GENERATIONS: set[str] = set()
+_CREDENTIAL_LOCK = threading.RLock()
 
 
 def _run_lock_intact() -> bool:
@@ -628,9 +643,7 @@ def _download_fragment(kind: str, body: str, outcome: str) -> HTMLResponse:
 def _download_error_message(exc, fallback: str) -> str:
     """Give download preparation failures the same Web-facing diagnosis."""
     from qobuz_librarian.api.auth import (
-        AuthLost,
         QobuzError,
-        QobuzUnavailable,
         friendly_qobuz_error,
     )
 
@@ -642,12 +655,77 @@ def _download_error_message(exc, fallback: str) -> str:
             "Try again shortly."
         )
     if isinstance(exc, AuthLost):
-        return "Token is expired or invalid. Update it in Settings."
+        return "Qobuz rejected the saved token. Reconnect in Settings."
+    if isinstance(exc, DownloaderNotReady):
+        return (
+            "Your Qobuz token works, but downloads also need your Qobuz "
+            "user ID. Add it in Settings."
+        )
+    if isinstance(exc, CredentialChanged):
+        return "Qobuz credentials changed while this was starting. Try again."
+    if isinstance(exc, QobuzEntitlementError):
+        return "Your Qobuz account cannot perform this download."
     if isinstance(exc, QobuzError):
         if friendly_qobuz_error(exc).startswith("HTTP 404"):
             return "No album with that id. Check the URL or use Search."
         return "Couldn't reach the Qobuz API. Check the container's network."
     return fallback
+
+
+def _qobuz_action_error_message(exc, *, unchanged=False) -> str:
+    """Short action-gate copy shared by scans and review approvals."""
+    if isinstance(exc, NoCredsError):
+        message = "Connect Qobuz in Settings."
+    elif isinstance(exc, AuthLost):
+        message = "Qobuz rejected the saved token. Reconnect in Settings."
+    elif isinstance(exc, DownloaderNotReady):
+        message = (
+            "Your Qobuz token works, but downloads also need your Qobuz "
+            "user ID. Add it in Settings."
+        )
+    elif isinstance(exc, CredentialChanged):
+        message = "Qobuz credentials changed while this was starting. Try again."
+    elif isinstance(exc, QobuzEntitlementError):
+        message = "Your Qobuz account cannot perform this action."
+    else:
+        message = "Qobuz could not be reached. Try again."
+    if unchanged:
+        message += " Nothing changed."
+    return message
+
+
+def _authorize_qobuz_live(access: QobuzAccess, *, expected_generation=""):
+    """Run the bounded uncached check used before a Web action is admitted."""
+    from qobuz_librarian.api.client import authorize_qobuz_action, call_within
+
+    return call_within(
+        cfg.WEB_TEST_AUTH_TIMEOUT,
+        authorize_qobuz_action,
+        access,
+        expected_generation=expected_generation,
+        auth_valid=_token_valid_for(),
+    )
+
+
+async def _authorize_qobuz_for_web(access: QobuzAccess, *,
+                                    expected_generation=""):
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(
+            None,
+            lambda: _authorize_qobuz_live(
+                access,
+                expected_generation=expected_generation,
+            ),
+        ),
+        timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
+    )
+
+
+def _credential_generation_is_active(generation: str) -> bool:
+    from qobuz_librarian.api.auth import read_qobuz_credentials
+
+    return bool(generation) and read_qobuz_credentials().generation == generation
 
 
 def _job_admission_response(request):
@@ -974,6 +1052,20 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
     _RUN_LOCK_HANDLE = lease
     try:
         result = _record_startup_recovery(lease)
+        from qobuz_librarian.library import generation_state
+
+        publication_recovery = (
+            generation_state.reconcile_interrupted_library_publication(lease)
+        )
+        if publication_recovery is None:
+            raise RuntimeError(
+                "interrupted Library publication state could not be saved"
+            )
+        if publication_recovery:
+            logging.getLogger("qobuz_librarian").warning(
+                "Recovered a Library crawl interrupted before its saved view "
+                "was published."
+            )
         if restore_jobs:
             _restore_jobs_once()
         return result
@@ -1034,19 +1126,44 @@ async def _retry_web_run_lock(run_lock, log, *, delay: float = 30) -> None:
         return
 
 
+def _review_download_token(job):
+    expected_generation = str(
+        (job.execute_args or {}).get("_credential_generation") or ""
+    )
+    return _authorize_qobuz_live(
+        QobuzAccess.DOWNLOAD_ACTION,
+        expected_generation=expected_generation,
+    ).token
+
+
+def _run_review_with_live_download(job, chosen, execute):
+    """Recheck both local receipts and the bound credential at worker start."""
+    from qobuz_librarian.library.candidate_premise import validate_all
+
+    validate_all(chosen)
+    token = _review_download_token(job)
+    # The live request above can take long enough for a local edit to land.
+    # Repeat the exact receipt check before the flow reaches its first backup.
+    validate_all(chosen)
+    return execute(job, chosen, token)
+
+
 def _resume_album_download(job, _args):
     from qobuz_librarian.web import flows
-    return lambda j, chosen: flows.execute_albums(j, chosen, _get_token())
+    return lambda j, chosen: _run_review_with_live_download(
+        j, chosen, flows.execute_albums)
 
 
 def _resume_upgrade(job, _args):
     from qobuz_librarian.web import flows
-    return lambda j, chosen: flows.execute_upgrades(j, chosen, _get_token())
+    return lambda j, chosen: _run_review_with_live_download(
+        j, chosen, flows.execute_upgrades)
 
 
 def _resume_repair(job, _args):
     from qobuz_librarian.web import flows
-    return lambda j, chosen: flows.execute_repairs(j, chosen, _get_token())
+    return lambda j, chosen: _run_review_with_live_download(
+        j, chosen, flows.execute_repairs)
 
 
 def _resume_migration(job, args):
@@ -1067,18 +1184,23 @@ def _job_downsample_keep_originals(job):
 
 def _resume_downsample(job, _args):
     from qobuz_librarian.web import flows
-    return lambda j, chosen: flows.execute_downsamples(
-        j,
-        chosen,
-        token=_get_optional_token(),
-        keep_originals=_job_downsample_keep_originals(j),
-    )
+
+    def execute(j, chosen):
+        from qobuz_librarian.library.candidate_premise import validate_all
+
+        validate_all(chosen)
+        return flows.execute_downsamples(
+            j,
+            chosen,
+            token=None,
+            keep_originals=_job_downsample_keep_originals(j),
+        )
+
+    return execute
 
 
 def _upgrade_available(creds_ok: bool | None = None) -> bool:
-    if creds_ok is None:
-        creds_ok = bool(_read_creds().get("auth_token"))
-    return bool(getattr(cfg, "UPGRADE_SCAN_ENABLED", True) and creds_ok)
+    return bool(getattr(cfg, "UPGRADE_SCAN_ENABLED", True))
 
 
 def _upgrade_unavailable_response():
@@ -1088,10 +1210,20 @@ def _upgrade_unavailable_response():
 
 
 def _upgrade_state_summary():
+    from qobuz_librarian.library import generation_state
     from qobuz_librarian.quality import upgrade_state
 
     state = upgrade_state.load()
-    complete = bool(state.get("complete"))
+    authority = generation_state.load()
+    generation = int(authority.get("generation") or 0)
+    output = generation_state.output_state("upgrade", authority)
+    snapshot_current = bool(
+        generation > 0
+        and int(state.get("generation") or 0) == generation
+        and output.get("status") == "current"
+        and int(output.get("revision") or 0) == int(state.get("revision") or 0)
+    )
+    complete = bool(state.get("complete") and snapshot_current)
     candidates = (
         _visible_saved_review_candidates("upgrade", state.get("candidates") or [])
         if complete else [])
@@ -1103,9 +1235,18 @@ def _upgrade_state_summary():
         "candidates": candidates,
         "count": len(candidates),
         "quality_signature": saved_quality_signature,
+        "generation": generation,
+        "status": (
+            "current" if complete
+            else "baseline_missing" if not generation
+            else "stale"
+        ),
         "stale": bool(
-            candidates
-            and saved_quality_signature != current_quality_signature
+            generation
+            and (
+                not complete
+                or saved_quality_signature != current_quality_signature
+            )
         ),
         "updated": _format_age(updated_at) if updated_at else None,
     }
@@ -1123,10 +1264,18 @@ def _effective_upgrade_quality_signature():
 
 
 def _downsample_state_summary():
-    from qobuz_librarian.library import downsample_state
+    from qobuz_librarian.library import downsample_state, generation_state
 
     state = downsample_state.load()
-    complete = bool(state.get("complete"))
+    authority = generation_state.load()
+    generation = int(authority.get("generation") or 0)
+    output = generation_state.output_state("downsample", authority)
+    snapshot_current = bool(
+        int(state.get("generation") or 0) == generation
+        and output.get("status") == "current"
+        and int(output.get("revision") or 0) == int(state.get("revision") or 0)
+    )
+    complete = bool(state.get("complete") and snapshot_current)
     candidates = (
         _visible_saved_review_candidates("downsample", state.get("candidates") or [])
         if complete else [])
@@ -1135,6 +1284,9 @@ def _downsample_state_summary():
         "complete": complete,
         "candidates": candidates,
         "count": len(candidates),
+        "generation": generation,
+        "status": "current" if complete else "stale",
+        "stale": bool(state.get("updated_at") and not complete),
         "updated": _format_age(updated_at) if updated_at else None,
     }
 
@@ -1162,6 +1314,9 @@ def _saved_review_row(surface, spec):
             "album_dir": spec.get("album_dir") or payload.get("album_dir") or "",
             "est_saving": spec.get("est_saving") or payload.get("est_saving") or 0,
         }
+        premise = spec.get("_premise") or payload.get("_premise")
+        if premise is not None:
+            row_payload["_premise"] = premise
     else:
         row_payload = spec.get("payload") or {}
     return {
@@ -1221,13 +1376,16 @@ def _saved_review_specs_from_job(surface, job):
     for c in candidates:
         payload = c.get("payload") or {}
         if surface == "downsample":
-            specs.append({
+            spec = {
                 "title": c.get("title") or "?",
                 "artist": c.get("artist") or "",
                 "detail": c.get("detail") or "",
                 "album_dir": payload.get("album_dir") or "",
                 "est_saving": payload.get("est_saving") or 0,
-            })
+            }
+            if payload.get("_premise") is not None:
+                spec["_premise"] = payload["_premise"]
+            specs.append(spec)
         else:
             specs.append({
                 "title": c.get("title") or "?",
@@ -1407,6 +1565,7 @@ def _publish_saved_review(job):
 
 
 def _sync_saved_review_before_approve(job):
+    """Confirm saved state still matches without mutating the parked review."""
     surface = job.execute_kind
     if surface not in _SAVED_REVIEW_TITLES:
         return job
@@ -1424,15 +1583,22 @@ def _sync_saved_review_before_approve(job):
         }
         if surface == "upgrade":
             current["quality_signature"] = state.get("quality_signature", "")
-        signature = _saved_review_signature(surface, current)
+        saved_signature = _saved_review_signature(surface, current)
         if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
             return job
-        return _sync_saved_review_job(job, surface, current, signature)
+        review_signature = _saved_review_signature(
+            surface,
+            {
+                "candidates": _saved_review_specs_from_job(surface, job),
+                "quality_signature": (job.execute_args or {}).get(
+                    "quality_signature", ""
+                ),
+            },
+        )
+        return job if review_signature == saved_signature else False
 
 
 def _review_job_from_upgrade_state(state):
-    from qobuz_librarian.web import flows
-
     with _SAVED_REVIEW_LOCK:
         claimed = _active_saved_review_claim("upgrade", state)
         if claimed is not None:
@@ -1452,7 +1618,7 @@ def _review_job_from_upgrade_state(state):
         }
         job.review_verb = "Upgrade"
         job._saved_review_signature = signature
-        job._execute_fn = lambda j, chosen: flows.execute_upgrades(j, chosen, _get_token())
+        job._execute_fn = _resume_upgrade(job, job.execute_args)
         for spec in state.get("candidates") or []:
             job.add_candidate(
                 kind="upgrade",
@@ -1471,7 +1637,6 @@ def _review_job_from_upgrade_state(state):
 
 
 def _review_job_from_downsample_state(state):
-    from qobuz_librarian.web import flows
 
     with _SAVED_REVIEW_LOCK:
         claimed = _active_saved_review_claim("downsample", state)
@@ -1489,22 +1654,20 @@ def _review_job_from_downsample_state(state):
         job.execute_kind = "downsample"
         job.review_verb = "Downsample"
         job._saved_review_signature = signature
-        job._execute_fn = lambda j, chosen: flows.execute_downsamples(
-            j,
-            chosen,
-            token=_get_optional_token(),
-            keep_originals=_job_downsample_keep_originals(j),
-        )
+        job._execute_fn = _resume_downsample(job, job.execute_args)
         for spec in state.get("candidates") or []:
+            payload = {
+                "album_dir": spec.get("album_dir") or "",
+                "est_saving": spec.get("est_saving") or 0,
+            }
+            if spec.get("_premise") is not None:
+                payload["_premise"] = spec["_premise"]
             job.add_candidate(
                 kind="downsample",
                 title=spec.get("title") or "?",
                 artist=spec.get("artist") or "",
                 detail=spec.get("detail") or "",
-                payload={
-                    "album_dir": spec.get("album_dir") or "",
-                    "est_saving": spec.get("est_saving") or 0,
-                },
+                payload=payload,
                 selected=False,
             )
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
@@ -1555,13 +1718,20 @@ def _review_job_from_library_state():
         if not mstate.get("complete"):
             return None
         full = library_scan_state.load()
-        # Compare the retire marker against the MISSING kind's OWN last-save time,
-        # not the global stamp: save_kind() bumps the global updated_at for every
-        # kind it writes (a gap-fill / partial scan included), so a global compare
-        # let any unrelated save resurrect a review the user discarded.
+        missing_generation = int(mstate.get("generation") or 0)
+        # Generation is the durable review identity. Keep the timestamp
+        # fallback only for a pre-generation saved snapshot.
         missing_updated = float(mstate.get("updated_at") or 0.0)
+        retired_generation = int(full.get("review_retired_generation") or 0)
         retired_at = float(full.get("review_retired_at") or 0.0)
-        if retired_at and retired_at >= missing_updated:
+        if (
+            missing_generation
+            and retired_generation == missing_generation
+        ) or (
+            not missing_generation
+            and retired_at
+            and retired_at >= missing_updated
+        ):
             return None
         hidden = hidden_mod.load()
         specs = []
@@ -1587,10 +1757,11 @@ def _review_job_from_library_state():
         job.kind = "scan"
         job.execute_kind = "library"
         job.execute_args = {
-            "_library_review_generation": missing_updated,
+            "_library_review_generation": (
+                missing_generation if missing_generation else missing_updated
+            ),
         }
-        job._execute_fn = lambda j, chosen: flows.execute_albums(
-            j, chosen, _get_token())
+        job._execute_fn = _resume_album_download(job, job.execute_args)
         for spec in specs:
             job.add_candidate(
                 kind=spec.get("kind", "album"),
@@ -1882,47 +2053,62 @@ async def _lifespan(_app: FastAPI):
 
 
 def _classify_token(token):
-    """Ask Qobuz whether a token works.
+    """Test a token without publishing evidence for an unsaved credential."""
+    from qobuz_librarian.api.client import probe_qobuz
 
-    Returns "ok", "rejected" (Qobuz refused the token), or "unreachable"
-    (couldn't tell: network down, timeout, or a Qobuz-side hiccup). A 401
-    or a 400 means Qobuz parsed the request and turned the token away;
-    everything else is treated as inconclusive so a transient blip doesn't
-    look like a bad token.
-    """
-    from qobuz_librarian.api.auth import AuthLost, QobuzError, friendly_qobuz_error
-    from qobuz_librarian.api.client import qobuz_get
-    try:
-        qobuz_get("album/search", {"query": "ok", "limit": 1}, token)
-        return "ok"
-    except AuthLost:
-        return "rejected"
-    except QobuzError as e:
-        return "rejected" if friendly_qobuz_error(e).startswith("HTTP 400") \
-            else "unreachable"
-    except Exception:
-        return "unreachable"
+    return probe_qobuz(token, report_auth=False)
 
 
-def _on_auth_state(valid: bool) -> None:
-    """Listener registered with api.auth so a 401 mid-session flips the
-    dashboard banner without waiting for the next page-load probe."""
-    global _TOKEN_VALID
+def _on_auth_state(evidence: AuthEvidence) -> None:
+    """Apply evidence only when it belongs to the active saved credential."""
+    global _TOKEN_GENERATION, _TOKEN_VALID
+    if evidence.outcome not in {
+        AuthOutcome.ACCEPTED,
+        AuthOutcome.REJECTED,
+        AuthOutcome.ENTITLEMENT,
+    }:
+        return
     with _auto_check_lock:
         if _SHUTTING_DOWN:
             return
-        was = _TOKEN_VALID
-        _TOKEN_VALID = bool(valid)
-        # A working (or not-yet-probed) token turning rejected is the one event
-        # worth pushing through the notification hook: an unattended box
-        # otherwise fails jobs quietly until somebody opens the UI.
-        if was is not False and not valid:
+        credentials = _credentials_snapshot()
+        if not credentials.configured \
+                or evidence.generation != credentials.generation:
+            return
+        valid = evidence.outcome in {
+            AuthOutcome.ACCEPTED,
+            AuthOutcome.ENTITLEMENT,
+        }
+        _TOKEN_VALID = valid
+        _TOKEN_GENERATION = evidence.generation
+        if (not valid and evidence.generation
+                not in _AUTH_LOSS_NOTIFIED_GENERATIONS):
+            _AUTH_LOSS_NOTIFIED_GENERATIONS.add(evidence.generation)
             job_mgr.fire_auth_lost_hook()
+
+
+def _token_valid_for(credentials=None) -> bool | None:
+    credentials = credentials or _credentials_snapshot()
+    if not credentials.configured:
+        return None
+    if _TOKEN_GENERATION is not None \
+            and _TOKEN_GENERATION != credentials.generation:
+        return None
+    return _TOKEN_VALID
+
+
+def _qobuz_access(access: QobuzAccess):
+    credentials = _credentials_snapshot()
+    return qobuz_capability(
+        access,
+        credentials,
+        auth_valid=_token_valid_for(credentials),
+    )
 
 
 def _qobuz_ready() -> bool:
     """True when Qobuz-dependent UI actions are worth offering."""
-    return bool(_read_creds().get("auth_token")) and _TOKEN_VALID is not False
+    return _qobuz_access(QobuzAccess.CATALOGUE_ACTION).allowed
 
 
 def _recent_empty_hint() -> str:
@@ -1938,25 +2124,26 @@ async def _probe_token():
     inconclusive (no token saved, or the probe couldn't reach Qobuz), so
     the dashboard treats it as "don't nag yet."
     """
-    global _TOKEN_VALID
-    creds = _read_creds()
-    if not creds.get("auth_token"):
+    credentials = _credentials_snapshot()
+    if not credentials.configured:
         return
-    token = creds["auth_token"]
     from qobuz_librarian.api.client import call_within
     try:
         verdict = await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
                 None, lambda: call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
-                                          _classify_token, token)),
+                                          _classify_token,
+                                          credentials.token)),
             timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        verdict = "unreachable"
-    if verdict == "ok":
-        _on_auth_state(True)
-    elif verdict == "rejected":
-        _on_auth_state(False)
+        verdict = AuthOutcome.TEMPORARY
+    if verdict in {
+        AuthOutcome.ACCEPTED,
+        AuthOutcome.REJECTED,
+        AuthOutcome.ENTITLEMENT,
+    }:
+        _on_auth_state(AuthEvidence(credentials.generation, verdict))
 
 
 app = FastAPI(title="Qobuz Librarian", docs_url=None, redoc_url=None,
@@ -2407,9 +2594,14 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     # a rejected token (auth lost mid-session) and a lock held by another
     # instance both stop downloads, and a user on Search/Queue shouldn't only
     # find out when a job fails. Both are cheap module-level flags, no I/O.
-    creds_ok = bool(_read_creds().get("auth_token"))
+    credentials = _credentials_snapshot()
+    creds_ok = credentials.configured
+    context.setdefault("qobuz_ready", _qobuz_ready())
     context.setdefault("health_qobuz_missing", not creds_ok)
-    context.setdefault("health_token_invalid", _TOKEN_VALID is False)
+    context.setdefault(
+        "health_token_invalid",
+        _token_valid_for(credentials) is False,
+    )
     context.setdefault("health_lock_busy", bool(_LOCK_BUSY_PID))
     context.setdefault("upgrade_available", _upgrade_available(creds_ok))
     from qobuz_librarian.web import review_badges
@@ -2739,7 +2931,7 @@ def _existing_new_release_check():
     return None
 
 
-def _start_new_release_check():
+def _start_new_release_check(credentials):
     """Submit a whole-library new-release check and return the job (or the one
     already queued). Shared by the manual Library-page option and the automatic
     dashboard trigger."""
@@ -2754,10 +2946,18 @@ def _start_new_release_check():
         from qobuz_librarian.web import flows
         job = job_mgr.Job(title="New-release check")
         job.execute_kind = "new_releases"
+
+        def _scan(j):
+            active = _authorize_qobuz_live(
+                QobuzAccess.CATALOGUE_ACTION,
+                expected_generation=credentials.generation,
+            )
+            flows.scan_new_releases(j, active.token)
+
         return job_mgr.submit_scan(
             job,
-            lambda j: flows.scan_new_releases(j, _get_token()),
-            lambda j, chosen: flows.execute_albums(j, chosen, _get_token()),
+            _scan,
+            _resume_album_download(job, job.execute_args),
         )
 
 
@@ -2781,7 +2981,7 @@ def _maybe_auto_check_new_releases():
         return
     # Don't bother (or thrash) when there's no token, or one we already know
     # Qobuz is rejecting; it would just fail on the first call every load.
-    if _TOKEN_VALID is False or not _read_creds().get("auth_token"):
+    if not _qobuz_ready():
         return
     from qobuz_librarian.library import new_releases
     # Only after a full library scan has established the baseline; otherwise the
@@ -2794,6 +2994,21 @@ def _maybe_auto_check_new_releases():
     # and a delta check can wait until the library is whole again.
     from qobuz_librarian.library import scan_checkpoint
     if scan_checkpoint.pending() is not None:
+        return
+    # Avoid a network probe until the interval says a run is due. This first
+    # read is repeated under the lock after the probe.
+    last = new_releases.last_run()
+    if last is not None and (time.time() - last) < cfg.NEW_RELEASE_CHECK_INTERVAL:
+        return
+    try:
+        credentials = _authorize_qobuz_live(QobuzAccess.CATALOGUE_ACTION)
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        CredentialChanged,
+    ):
         return
     # Serialise the check-and-submit so two concurrent dashboard loads can't
     # both pass the gate and queue the check twice.
@@ -2811,7 +3026,7 @@ def _maybe_auto_check_new_releases():
         # on a clean finish, so without this a failed/cancelled run would re-fire
         # on every load.
         new_releases.touch_run()
-        _start_new_release_check()
+        _start_new_release_check(credentials)
 
 
 _ANY_TARGET = object()
@@ -2898,6 +3113,8 @@ def _repair_current_job():
 # progress, and the parked Missing Albums / Gap Fill review all live on
 # /library, never handed off to /jobs/{id} under the Queue nav.
 _LIBRARY_SURFACE_KINDS = ("library", "new_releases")
+_QOBUZ_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair")
+_PREMISE_REVIEW_KINDS = _QOBUZ_REVIEW_KINDS + ("downsample",)
 
 
 def _library_current_job():
@@ -3025,7 +3242,24 @@ def _library_scan_state():
     return {"ready": True, "count": len(artists), "message": ""}
 
 
-def _start_library_scan(partial_only=False, force_full=False):
+def _truthful_library_generation():
+    """Expose an interrupted publication honestly even without write authority."""
+    from qobuz_librarian.library import generation_state
+
+    state = generation_state.load()
+    if not generation_state.library_publication_incomplete(state):
+        return state
+    state = copy.deepcopy(state)
+    latest = state.setdefault("latest_attempt", {})
+    latest["status"] = "incomplete"
+    latest["message"] = (
+        "The completed catalogue crawl was interrupted before its Library "
+        "view was published."
+    )
+    return state
+
+
+def _start_library_scan(credentials, partial_only=False, force_full=False):
     """Submit a library scan and return the job. Shared by the Library page and
     the automatic first-run/resume trigger. scan_library resumes from a matching
     checkpoint on its own, so this is the same call whether starting or resuming.
@@ -3047,14 +3281,18 @@ def _start_library_scan(partial_only=False, force_full=False):
         job.execute_kind = "library"
 
         def _scan(j):
-            flows.scan_library(j, _get_token(), partial_only=partial_only,
+            active = _authorize_qobuz_live(
+                QobuzAccess.CATALOGUE_ACTION,
+                expected_generation=credentials.generation,
+            )
+            flows.scan_library(j, active.token, partial_only=partial_only,
                                force_full=force_full)
             _fold_into_parked_library_review(j)
 
         return job_mgr.submit_scan(
             job,
             _scan,
-            lambda j, chosen: flows.execute_albums(j, chosen, _get_token()),
+            _resume_album_download(job, job.execute_args),
         )
 
 
@@ -3151,10 +3389,20 @@ def _maybe_resume_library_scan():
     """
     if not cfg.AUTO_LIBRARY_SCAN or _web_writes_paused():
         return
-    if _TOKEN_VALID is False or not _read_creds().get("auth_token"):
+    if not _qobuz_ready():
         return
-    from qobuz_librarian.library import new_releases, scan_checkpoint
-    if new_releases.is_baseline_complete():
+    from qobuz_librarian.library import generation_state, scan_checkpoint
+    if generation_state.baseline_complete():
+        return
+    try:
+        credentials = _authorize_qobuz_live(QobuzAccess.CATALOGUE_ACTION)
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        CredentialChanged,
+    ):
         return
     with _auto_check_lock:
         if any(j.status != job_mgr.JobStatus.AWAITING_REVIEW
@@ -3162,7 +3410,10 @@ def _maybe_resume_library_scan():
             return  # something already working
         cp = scan_checkpoint.pending()
         if cp is not None:
-            _start_library_scan(partial_only=(cp["kind"] == "partial"))
+            _start_library_scan(
+                credentials,
+                partial_only=(cp["kind"] == "partial"),
+            )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -3177,12 +3428,13 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     # iterdir().
     def _gather_disk_state():
         from qobuz_librarian.integrations.lyrics import load_lyric_retry
-        from qobuz_librarian.library import new_releases, scan_checkpoint
+        from qobuz_librarian.library import generation_state, new_releases, scan_checkpoint
         # These read state files and may submit a background job, so they run
         # here (off the event loop) alongside the other disk work.
         _maybe_resume_library_scan()
         _maybe_auto_check_new_releases()
         library_scan_state = _library_scan_state()
+        library_generation = _truthful_library_generation()
         return {
             "new_release_review": _new_release_review(),
             # First run offers the baseline scan as a Run/Skip choice rather than
@@ -3192,14 +3444,29 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
                                and not new_releases.auto_scan_attempted()),
             # First-run setup banner: shown until a full library scan has
             # seeded the new-release baseline.
-            "baseline_complete": new_releases.is_baseline_complete(),
+            "baseline_complete": generation_state.baseline_complete(),
             "setup_scanning": _active_library_scan() is not None,
             "library_scan_state": library_scan_state,
             # An interrupted gap-scan, surfaced on the dashboard the way
             # /library already does, gated on no scan running.
-            "library_resume": (lambda cp: cp if cp is not None
-                               and _active_library_scan() is None else None)(
-                                   scan_checkpoint.pending()),
+            "library_resume": (
+                lambda cp, generation: (
+                    cp
+                    if (
+                        cp is not None
+                        and _active_library_scan() is None
+                        and (
+                            not int(generation.get("generation") or 0)
+                            or str(
+                                (generation.get("latest_attempt") or {}).get(
+                                    "status"
+                                )
+                            ) in {"running", "failed", "incomplete"}
+                        )
+                    )
+                    else None
+                )
+            )(scan_checkpoint.pending(), library_generation),
             # First-run nudge: a fresh install has no creds, so every search/scan
             # would fail cryptically, so surface it up front. Filesystem-only.
             "creds_ok": bool(_read_creds().get("auth_token")),
@@ -3230,7 +3497,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         "active_jobs": active_jobs,
         "pending": job_mgr.registry.pending_and_running(),
         "review": job_mgr.registry.awaiting_review(),
-        "creds_token_valid": _TOKEN_VALID,
+        "creds_token_valid": _token_valid_for(),
         "search_q": search_q,
         "search_kind": search_kind,
         "search_artist_id": search_artist_id,
@@ -3991,6 +4258,10 @@ def _make_download_run(
     treat_as_new downloads the album as a brand-new one even if a different
     edition is already owned: the "get this edition too" path.
     """
+    from qobuz_librarian.api.auth import token_credential_generation
+
+    expected_generation = token_credential_generation(token)
+
     def run(j):
         from qobuz_librarian.download_result import (
             download_attention_kind,
@@ -4011,11 +4282,26 @@ def _make_download_run(
             _refresh_after_local_album_change,
             build_args,
         )
+        active = None
+        active_token = token
+        if getattr(token, "credential_generation", ""):
+            active = _authorize_qobuz_live(
+                QobuzAccess.DOWNLOAD_ACTION,
+                expected_generation=expected_generation,
+            )
+            active_token = active.token
         args = build_args()
         _note_staging_wait(j, "Downloading", 0, 1)
         durable_failure = False
         durable_completion_settled = False
         with job_mgr.staging_lock():
+            with _CREDENTIAL_LOCK:
+                if (active is not None
+                        and not _credential_generation_is_active(
+                            active.generation)):
+                    raise CredentialChanged(
+                        "Qobuz credentials changed before the download began."
+                    )
             durable_item = None
             if durable_planned is not None:
                 from qobuz_librarian.queue import journal as queue_state
@@ -4051,14 +4337,14 @@ def _make_download_run(
                     durable_item = candidate
             if durable_item is None:
                 r = process_album(album, args, allow_force=False,
-                                  already_confirmed=True, token=token,
+                                  already_confirmed=True, token=active_token,
                                   treat_as_new=treat_as_new) or {}
             else:
                 try:
                     results, drained = _execute_download_queue(
                         [durable_item],
                         args,
-                        token,
+                        active_token,
                         consolidate_duplicates=False,
                     )
                 except BaseException:
@@ -4208,7 +4494,7 @@ def _make_download_run(
                 album,
                 r,
                 fallback_artist=(album.get("artist") or {}).get("name"),
-                token=token,
+                token=active_token,
                 args=args,
                 upgrade=True,
                 downsample=True,
@@ -6268,6 +6554,10 @@ def _persist_single_download_undo(
 def _make_single_track_run(album, track, token):
     """Run a single-track download: download just ``track`` via the per-track
     queue path (the same isolation repair uses, never a whole-album rip)."""
+    from qobuz_librarian.api.auth import token_credential_generation
+
+    expected_generation = token_credential_generation(token)
+
     def run(j):
         from qobuz_librarian.library import hidden as hidden_mod
         from qobuz_librarian.library.catalog import (
@@ -6289,6 +6579,14 @@ def _make_single_track_run(album, track, token):
             _refresh_after_local_album_change,
             build_args,
         )
+        active = None
+        active_token = token
+        if getattr(token, "credential_generation", ""):
+            active = _authorize_qobuz_live(
+                QobuzAccess.DOWNLOAD_ACTION,
+                expected_generation=expected_generation,
+            )
+            active_token = active.token
         args = build_args()
         artist = (album.get("artist") or {}).get("name") or "?"
         title = album.get("title") or "?"
@@ -6315,8 +6613,15 @@ def _make_single_track_run(album, track, token):
         owned_path = None
         source_single = None
         with job_mgr.staging_lock():
+            with _CREDENTIAL_LOCK:
+                if (active is not None
+                        and not _credential_generation_is_active(
+                            active.generation)):
+                    raise CredentialChanged(
+                        "Qobuz credentials changed before the download began."
+                    )
             try:
-                _execute_download_queue([qi], args, token)
+                _execute_download_queue([qi], args, active_token)
                 landed_dir = qi.get("_resolved_post_dir") or album_dir
                 download_succeeded = (
                     qi.get("n_ok", 0) > 0
@@ -6521,7 +6826,7 @@ def _make_single_track_run(album, track, token):
             album,
             {"dir": landed_dir},
             fallback_artist=artist,
-            token=token,
+            token=active_token,
             args=args,
             upgrade=True,
             downsample=True,
@@ -6563,7 +6868,10 @@ async def queue_download(request: Request, album_id: str = Form(""),
             )
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
     try:
-        token = _get_token()
+        credentials = await _authorize_qobuz_for_web(
+            QobuzAccess.DOWNLOAD_ACTION
+        )
+        token = credentials.token
         from qobuz_librarian.api.client import call_within
         from qobuz_librarian.api.search import get_album
         loop = asyncio.get_running_loop()
@@ -6711,7 +7019,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
 
         # Re-check under the lock right before submitting: closes the race with
         # a concurrent /download for the same album across the get_album await.
-        with _DOWNLOAD_SUBMIT_LOCK:
+        with _DOWNLOAD_SUBMIT_LOCK, _CREDENTIAL_LOCK:
             dup = _duplicate_download_job(album_id, track_id, download_as_new_edition)
             if dup:
                 if _is_htmx(request):
@@ -6726,6 +7034,10 @@ async def queue_download(request: Request, album_id: str = Form(""),
             busy = _lock_busy_response(request)
             if busy is not None:
                 return busy
+            if not _credential_generation_is_active(credentials.generation):
+                raise CredentialChanged(
+                    "Qobuz credentials changed before the download was queued."
+                )
             run_fn = (_make_single_track_run(album, single_track, token)
                       if single_track
                       else _make_download_run(
@@ -6738,8 +7050,8 @@ async def queue_download(request: Request, album_id: str = Form(""),
             return response
         # Land on the new job's page so the user sees their download starting.
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
-    except (SystemExit, NoCredsError):
-        msg = "No Qobuz credentials set. Visit Settings."
+    except NoCredsError as exc:
+        msg = _qobuz_action_error_message(exc, unchanged=True)
         if _is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(url="/settings?error=creds", status_code=303)
@@ -6827,7 +7139,7 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
     from qobuz_librarian.web import review_badges
     badge_generation = review_badges.ready_generation("library")
     creds_ok = bool(_read_creds().get("auth_token"))
-    from qobuz_librarian.library import new_releases
+    from qobuz_librarian.library import generation_state, new_releases
     notice_bits = []
     _skipped = request.query_params.get("skipped", "")
     if _skipped.isdigit() and int(_skipped):
@@ -6841,6 +7153,7 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
     elif request.query_params.get("approved"):
         notice_bits.append("Download started. It's running in the queue.")
     notice = " ".join(notice_bits)
+    library_generation = _truthful_library_generation()
     ctx = {
         "creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(), "page": "library",
         "library_scan_state": _library_scan_state(),
@@ -6849,7 +7162,14 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
         # Freshness line: when a full gap scan last completed, and whether one
         # ever has (the new-release baseline is only seeded by a clean finish).
         "last_full_scan": _last_scan_age(),
-        "baseline_complete": new_releases.is_baseline_complete(),
+        "baseline_complete": generation_state.baseline_complete(
+            library_generation
+        ),
+        "library_baseline_exists": (
+            generation_state.library_snapshot_available(library_generation)
+        ),
+        "new_release_baseline_complete": new_releases.is_baseline_complete(),
+        "library_generation": library_generation,
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_MISSING),
         # Why a finished review retired ("discarded" / "worked_through" / ""),
         # so the finished-state card reads right.
@@ -6865,7 +7185,7 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
     # review renders inline right here, so results never hide behind the
     # launcher and never live under the Queue nav.
     ljob = _library_current_job()
-    if ljob is None and ctx["baseline_complete"]:
+    if ljob is None and ctx["library_baseline_exists"]:
         # No live job holds the surface, but the baseline is complete, so rebuild
         # the parked review from saved scan state so post-baseline ALWAYS shows
         # the Missing Albums / Gap Fill tabs, never "Baseline ready" with none.
@@ -6883,17 +7203,30 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
     else:
         # Resume hint: only when an interrupted baseline checkpoint exists and
         # nothing is running above.
-        cp = scan_checkpoint.pending()
+        latest_status = str(
+            (ctx["library_generation"].get("latest_attempt") or {}).get(
+                "status"
+            )
+            or "never"
+        )
+        cp = (
+            scan_checkpoint.pending()
+            if (
+                not int(ctx["library_generation"].get("generation") or 0)
+                or latest_status in {"running", "failed", "incomplete"}
+            )
+            else None
+        )
         ctx["library_resume"] = cp if cp is not None else None
         # Finished-state copy: the "Review complete" vs "Review discarded"
         # card keys off why the review retired.
-        if ctx["baseline_complete"]:
+        if ctx["library_baseline_exists"]:
             from qobuz_librarian.library import library_scan_state
             ctx["library_review_retired_reason"] = (
                 library_scan_state.load().get("review_retired_reason") or "")
     # The census renders whenever the page is calm (no job, or a parked
     # review below it), so it doesn't blink in and out with review state.
-    if ctx["baseline_complete"] and (
+    if ctx["library_baseline_exists"] and (
             ljob is None or ljob.status == job_mgr.JobStatus.AWAITING_REVIEW):
         loop = asyncio.get_running_loop()
         ctx["census"] = await loop.run_in_executor(None, _census_view)
@@ -6911,17 +7244,34 @@ async def library_refresh_note(request: Request):
     polls this while a refresh runs, so it swaps back to the idle icon when
     the scan ends instead of sitting there forever; the idle icon itself
     never polls."""
-    from qobuz_librarian.library import new_releases
+    from qobuz_librarian.library import generation_state, new_releases
     loop = asyncio.get_running_loop()
-    ctx = await loop.run_in_executor(None, lambda: {
-        "qobuz_ready": _qobuz_ready(),
-        "baseline_complete": new_releases.is_baseline_complete(),
-        "library_scan_state": _library_scan_state(),
-        "library_job": _library_current_job(),
-        "JobStatus": job_mgr.JobStatus,
-        "library_refresh_running": _active_scan(
-            "library", statuses=("pending", "scanning", "running")) is not None,
-    })
+    def _context():
+        library_generation = generation_state.load()
+        return {
+            "qobuz_ready": _qobuz_ready(),
+            "baseline_complete": generation_state.baseline_complete(
+                library_generation
+            ),
+            "library_baseline_exists": (
+                generation_state.library_snapshot_available(
+                    library_generation
+                )
+            ),
+            "new_release_baseline_complete": (
+                new_releases.is_baseline_complete()
+            ),
+            "library_generation": library_generation,
+            "library_scan_state": _library_scan_state(),
+            "library_job": _library_current_job(),
+            "JobStatus": job_mgr.JobStatus,
+            "library_refresh_running": _active_scan(
+                "library",
+                statuses=("pending", "scanning", "running"),
+            ) is not None,
+        }
+
+    ctx = await loop.run_in_executor(None, _context)
     return _tr(request, "_library_refresh.html", ctx)
 
 
@@ -6934,10 +7284,6 @@ async def library_scan(
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    try:
-        _get_token()
-    except (SystemExit, NoCredsError):
-        return _no_creds_response(request)
     mode_norm = (mode or "").strip().lower()
     # Run the submit off the event loop: it takes _auto_check_lock, which the
     # dashboard auto-triggers can hold across small data-volume reads, and the
@@ -6959,9 +7305,37 @@ async def library_scan(
                     status_code=200)
             return RedirectResponse(
                 url="/library?error=" + urllib.parse.quote(msg), status_code=303)
+        existing = _existing_new_release_check()
+        if existing is not None:
+            return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
+        try:
+            credentials = await _authorize_qobuz_for_web(
+                QobuzAccess.CATALOGUE_ACTION
+            )
+        except (
+            NoCredsError,
+            AuthLost,
+            QobuzUnavailable,
+            QobuzEntitlementError,
+            CredentialChanged,
+            asyncio.TimeoutError,
+        ) as exc:
+            msg = _qobuz_action_error_message(exc, unchanged=True)
+            if _is_htmx(request):
+                return HTMLResponse(
+                    _ql_notice_html("error", html.escape(msg)),
+                    status_code=200,
+                )
+            return RedirectResponse(
+                url="/library?error=" + urllib.parse.quote(msg),
+                status_code=303,
+            )
         # Same job the dashboard auto-check submits; its own execute_kind so
         # the review screen badges the new releases (left un-ticked).
-        job = await loop.run_in_executor(None, _start_new_release_check)
+        job = await loop.run_in_executor(
+            None,
+            lambda: _start_new_release_check(credentials),
+        )
         if job is None:
             return _scan_submission_failure_response(request, "/library")
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
@@ -6974,6 +7348,29 @@ async def library_scan(
                 status_code=200)
         return RedirectResponse(
             url="/library?error=" + urllib.parse.quote(msg), status_code=303)
+    existing = _active_library_scan()
+    if existing is not None:
+        return RedirectResponse(url="/library", status_code=303)
+    try:
+        credentials = await _authorize_qobuz_for_web(
+            QobuzAccess.CATALOGUE_ACTION
+        )
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        CredentialChanged,
+        asyncio.TimeoutError,
+    ) as exc:
+        msg = _qobuz_action_error_message(exc, unchanged=True)
+        if _is_htmx(request):
+            return HTMLResponse(
+                _ql_notice_html("error", html.escape(msg)),
+                status_code=200,
+            )
+        return RedirectResponse(
+            url="/library?error=" + urllib.parse.quote(msg), status_code=303)
     # "library" (not "album") so the review screen knows this is the paced triage
     # surface; both modes run the same album executor and resume from a matching
     # checkpoint if one's waiting (see _start_library_scan / scan_library).
@@ -6983,6 +7380,7 @@ async def library_scan(
     job = await loop.run_in_executor(
         None,
         lambda: _start_library_scan(
+            credentials,
             partial_only=(mode_norm == "partial_fill"),
             force_full=force_full_scan,
         ),
@@ -7272,10 +7670,6 @@ async def upgrade_review(request: Request):
         return busy
     if not _upgrade_available():
         return _upgrade_unavailable_response()
-    try:
-        _get_token()
-    except (SystemExit, NoCredsError):
-        return _no_creds_response(request)
     loop = asyncio.get_running_loop()
     job = await loop.run_in_executor(
         None, lambda: _review_job_from_current_saved_state("upgrade"))
@@ -7398,9 +7792,19 @@ async def repair_page(request: Request, page: int = 1):
         # Offer a resume only for a genuinely interrupted sweep (a stale
         # checkpoint), not one left by a run that's still active above.
         cp = scan_checkpoint.load("repair")
-        ctx["repair_resume"] = (
-            {"done": len(cp["scanned"]), "found": len(cp["candidates"])}
-            if cp is not None else None)
+        if cp is None:
+            ctx["repair_resume"] = None
+        else:
+            bundles = cp.get("artists") or {}
+            found = sum(
+                len(value.get("candidates") or [])
+                for value in bundles.values()
+                if isinstance(value, dict)
+            )
+            ctx["repair_resume"] = {
+                "saved": len(bundles),
+                "found": found,
+            }
         ctx["last_run"] = _tool_last_run_age("repair")
     badge_ack = None
     if (rjob is not None
@@ -7416,17 +7820,35 @@ async def repair_scan(request: Request):
     if busy is not None:
         return busy
     try:
-        _get_token()
-    except (SystemExit, NoCredsError):
-        return _no_creds_response(request)
+        credentials = await _authorize_qobuz_for_web(
+            QobuzAccess.CATALOGUE_ACTION
+        )
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        CredentialChanged,
+        asyncio.TimeoutError,
+    ) as exc:
+        msg = _qobuz_action_error_message(exc, unchanged=True)
+        return RedirectResponse(
+            url="/repair?error=" + urllib.parse.quote(msg), status_code=303)
     from qobuz_librarian.web import flows
     job = job_mgr.Job(title="Repair scan")
     job.execute_kind = "repair"
     job.review_verb = "Repair"  # the action refills damaged tracks, not a download
+    def _scan(j):
+        active = _authorize_qobuz_live(
+            QobuzAccess.CATALOGUE_ACTION,
+            expected_generation=credentials.generation,
+        )
+        flows.scan_repairs(j, active.token)
+
     job = await _submit_scan_deduped_async(
         job,
-        lambda j: flows.scan_repairs(j, _get_token()),
-        lambda j, chosen: flows.execute_repairs(j, chosen, _get_token()),
+        _scan,
+        _resume_repair(job, job.execute_args),
         "repair")
     if job is None:
         return _scan_submission_failure_response(request, "/repair")
@@ -7645,9 +8067,23 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
             with job._lock:
                 if job.attention == attention:
                     job.attention = ""
+    new_release_state = {"stale": False, "reason": ""}
+    if (
+        job.execute_kind == "new_releases"
+        and job.status == job_mgr.JobStatus.AWAITING_REVIEW
+    ):
+        from qobuz_librarian.library import generation_state, new_releases
+
+        output = generation_state.output_state("new_releases")
+        current = new_releases.is_baseline_complete()
+        new_release_state = {
+            "stale": not current,
+            "reason": str(output.get("reason") or ""),
+        }
     ctx = {"job": job, "page": nav_page,
            "approved": approved, "stale": stale, "noselection": noselection,
            "error": error, "historical": historical,
+           "new_release_state": new_release_state,
            "queue_wait": _queue_wait(job),
            "JobStatus": job_mgr.JobStatus}
     ctx.update(_review_context(job, page, q, tab))
@@ -7759,7 +8195,8 @@ async def job_review_page(request: Request, job_id: str, page: int = 1,
     )
 
 
-def _build_unapproved_review(job, tab, *, admission_filter=None):
+def _build_unapproved_review(job, tab, *, admission_filter=None,
+                             discard_ids=()):
     """Before approving a library or new-release review: move every candidate
     that ISN'T being downloaded right now into its own parked review, so a
     partial download consumes ONLY the ticked picks. Everything else stays in
@@ -7767,14 +8204,19 @@ def _build_unapproved_review(job, tab, *, admission_filter=None):
     the unticked candidates, plus (on a tab-scoped approve) the whole tab the
     user isn't looking at, ticks and all. A final admission filter may also
     keep a selected candidate parked when another job claimed it just before
-    approval. The caller holds ``job._lock`` and durably admits both jobs
-    before publishing either transition. Returns the new unpublished parked
-    job, or None when every candidate is being used."""
+    approval. ``discard_ids`` removes candidates already proven complete on
+    disk as part of the same durable transition. The caller holds ``job._lock``
+    and durably admits both jobs before publishing either transition. Returns
+    the new unpublished parked job, or None when every candidate is being
+    used."""
     from qobuz_librarian.web import flows
     tab_scoped = tab in ("missing", "gaps")
     gap_active = tab == "gaps"
     keep, split = [], []
+    discard_ids = set(discard_ids)
     for c in job.candidates:
+        if c.get("cid") in discard_ids:
+            continue
         in_scope = (not tab_scoped) or (flows.is_gap_candidate(c) == gap_active)
         selected = in_scope and c.get("selected")
         admitted = selected and (
@@ -7826,32 +8268,6 @@ async def job_approve(request: Request, job_id: str):
         dest = "/library"
     else:
         dest = f"/jobs/{job_id}"
-    # Library, new-release, and repair downloads need Qobuz just as much as
-    # upgrades do, so refuse up front rather than consuming the review with a
-    # run that dies on the first token lookup.
-    if (job.execute_kind in ("library", "new_releases", "repair")
-            and job.status == job_mgr.JobStatus.AWAITING_REVIEW
-            and not _qobuz_ready()):
-        return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
-                "Reconnect Qobuz before downloading. Your review is "
-                "untouched."),
-            status_code=303)
-    # Guard a zero-selection approve: with nothing ticked, approving would
-    # flip the job to done over an empty set and flash success while quietly
-    # discarding the whole review.
-    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-        synced_job = _sync_saved_review_before_approve(job)
-        if synced_job is None:
-            return RedirectResponse(
-                url=dest + "?error=" + urllib.parse.quote(
-                    "The refreshed review could not be saved. Your existing "
-                    "choices are untouched; check the data folder and try "
-                    "again."
-                ),
-                status_code=303,
-            )
-        job = synced_job
     if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
             and job.execute_kind == "upgrade"
             and (job.execute_args or {}).get("quality_signature")
@@ -7888,45 +8304,63 @@ async def job_approve(request: Request, job_id: str):
     if job.execute_kind != "library" or tab not in ("missing", "gaps"):
         tab = ""
     loop = asyncio.get_running_loop()
-    skipped = 0
-    if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
-            and job.execute_kind in _LIBRARY_SURFACE_KINDS):
-        # The review may have gone stale while parked: an album grabbed from
-        # Search (or added by hand) can still sit here as a missing-album
-        # candidate.
-        from qobuz_librarian.web import flows
-        token = _read_creds().get("auth_token")
-        skipped = await loop.run_in_executor(
-            None, lambda: flows.drop_owned_missing_candidates(job, token))
-        if skipped:
-            finalized = job_mgr.finalize_review_if_empty(job)
-            if finalized is None:
-                return RedirectResponse(
-                    url=dest + "?error=" + urllib.parse.quote(
-                        "The review change was saved, but the finished state "
-                        "could not be recorded. Check the data folder and "
-                        "reload before continuing."
-                    ),
-                    status_code=303,
-                )
-            if finalized:
-                return RedirectResponse(url=f"{dest}?skipped={skipped}",
-                                        status_code=303)
-    _skip_q = f"&skipped={skipped}" if skipped else ""
+    selected_candidate_ids = set()
+    selected_candidate_snapshot = []
+    stale_premise_candidate_ids = set()
     downsample_keep_originals = None
+    downsample_choice_to_save = ""
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
         from qobuz_librarian.web import flows
         if tab:
             gap_active = tab == "gaps"
             with job._lock:
-                has_pick = any(
-                    c.get("selected") for c in job.candidates
-                    if flows.is_gap_candidate(c) == gap_active)
+                selected_candidate_ids = {
+                    c.get("cid") for c in job.candidates
+                    if (c.get("selected")
+                        and flows.is_gap_candidate(c) == gap_active)
+                }
         else:
-            has_pick = any(c.get("selected") for c in job.candidates)
+            with job._lock:
+                selected_candidate_ids = {
+                    c.get("cid") for c in job.candidates if c.get("selected")
+                }
+        with job._lock:
+            selected_candidate_snapshot = copy.deepcopy([
+                c for c in job.candidates
+                if c.get("cid") in selected_candidate_ids
+            ])
+        has_pick = bool(selected_candidate_ids)
         if not has_pick:
-            return RedirectResponse(url=f"{dest}?noselection=1{_skip_q}",
+            return RedirectResponse(url=f"{dest}?noselection=1",
                                     status_code=303)
+        if job.execute_kind in _PREMISE_REVIEW_KINDS:
+            from qobuz_librarian.library.candidate_premise import (
+                CandidateStale,
+                validate_all,
+            )
+
+            def _stale_candidate_ids(candidates):
+                stale = set()
+                for candidate in candidates:
+                    try:
+                        validate_all([candidate])
+                    except CandidateStale:
+                        stale.add(candidate.get("cid"))
+                return stale
+
+            stale_premise_candidate_ids = await loop.run_in_executor(
+                None,
+                lambda: _stale_candidate_ids(selected_candidate_snapshot),
+            )
+            if selected_candidate_ids <= stale_premise_candidate_ids:
+                return RedirectResponse(
+                    url=dest + "?error=" + urllib.parse.quote(
+                        "The selected local files changed after this review "
+                        "was built, or the saved proof is too old. Refresh or "
+                        "rescan before trying again. Nothing changed."
+                    ),
+                    status_code=303,
+                )
         # Only now that the run is going to happen: the keep-vs-delete answer is
         # a standing policy saved to Settings, so asking and saving it before
         # anything checks that an album is ticked lets a no-op approve change
@@ -7956,23 +8390,7 @@ async def job_approve(request: Request, job_id: str):
             if choice not in ("keep", "delete"):
                 choice = (form.get("keep_choice") or "").strip().lower()
                 if choice in ("keep", "delete"):
-
-                    def _save_keep_choice():
-                        saved, _warnings = settings_store.save(
-                            {"DOWNSAMPLE_KEEP_ORIGINALS": choice}
-                        )
-                        return saved
-
-                    saved = await loop.run_in_executor(None, _save_keep_choice)
-                    if saved is not True:
-                        return RedirectResponse(
-                            url=dest + "?error=" + urllib.parse.quote(
-                                "Couldn't save the keep-or-delete choice. No "
-                                "music files were changed; check the data "
-                                "folder and try again."
-                            ),
-                            status_code=303,
-                        )
+                    downsample_choice_to_save = choice
                 else:
                     with job._lock:
                         picked = sum(
@@ -7984,11 +8402,52 @@ async def job_approve(request: Request, job_id: str):
                         "backup_retention_days":
                             cfg.UPGRADE_BACKUP_RETENTION_DAYS})
             downsample_keep_originals = choice == "keep"
+
+    authorized_credentials = None
+    stale_owned_candidate_ids = set()
+    if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
+            and job.execute_kind in _QOBUZ_REVIEW_KINDS):
+        try:
+            authorized_credentials = await _authorize_qobuz_for_web(
+                QobuzAccess.DOWNLOAD_ACTION
+            )
+        except (
+            NoCredsError,
+            AuthLost,
+            QobuzUnavailable,
+            QobuzEntitlementError,
+            DownloaderNotReady,
+            CredentialChanged,
+            asyncio.TimeoutError,
+        ) as exc:
+            message = _qobuz_action_error_message(exc, unchanged=True)
+            return RedirectResponse(
+                url=dest + "?error=" + urllib.parse.quote(message),
+                status_code=303,
+            )
+        if job.execute_kind in _LIBRARY_SURFACE_KINDS:
+            from qobuz_librarian.web import flows
+
+            stale_owned_candidate_ids = await loop.run_in_executor(
+                None,
+                lambda: flows.owned_missing_candidate_ids(
+                    job,
+                    authorized_credentials.token,
+                    candidate_ids=(
+                        selected_candidate_ids
+                        - stale_premise_candidate_ids
+                    ),
+                ),
+            )
+    skipped = len(stale_owned_candidate_ids)
+    _skip_q = f"&skipped={skipped}" if skipped else ""
     # Selection is saved server-side as the user ticks (the paginated review
     # no longer carries every checkbox in the form), so approve runs against
     # the saved flags; passing None keeps them as-is rather than reading the
     # form.
     def _split_and_approve():
+        nonlocal stale_premise_candidate_ids
+
         from qobuz_librarian.completion import normalise_album_id
 
         # Atomic recheck right before anything is consumed: the route's
@@ -8001,14 +8460,61 @@ async def job_approve(request: Request, job_id: str):
             _SAVED_REVIEW_LOCK,
             _auto_check_lock,
             _DOWNLOAD_SUBMIT_LOCK,
+            _CREDENTIAL_LOCK,
             job._review_action_lock,
         ):
             if _web_writes_paused():
                 return "paused"
-            # A library or new-release download consumes only the ticked
-            # picks: park everything else (unticked, plus the inactive tab on
-            # a tab-scoped approve) as its own living review first, so the
-            # download can't eat un-reviewed candidates.
+            if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
+                return False
+
+            def current_selected_candidates():
+                with job._lock:
+                    candidates = [
+                        c for c in job.candidates if c.get("selected")
+                    ]
+                    if tab:
+                        gap_active = tab == "gaps"
+                        candidates = [
+                            c for c in candidates
+                            if flows.is_gap_candidate(c) == gap_active
+                        ]
+                    return copy.deepcopy(candidates)
+
+            current_selected = current_selected_candidates()
+            if {
+                c.get("cid") for c in current_selected
+            } != selected_candidate_ids:
+                return "review_changed"
+            if job.execute_kind in _PREMISE_REVIEW_KINDS:
+                stale_premise_candidate_ids = _stale_candidate_ids(
+                    current_selected)
+                if {
+                    c.get("cid") for c in current_selected
+                } <= stale_premise_candidate_ids:
+                    return "all_candidates_stale"
+            if (authorized_credentials is not None
+                    and not _credential_generation_is_active(
+                        authorized_credentials.generation)):
+                return "credential_changed"
+            if (job.execute_kind in ("upgrade", "downsample")
+                    and job.status == job_mgr.JobStatus.AWAITING_REVIEW):
+                synced_job = _sync_saved_review_before_approve(job)
+                if synced_job is not job:
+                    return "review_changed"
+                current_selected = current_selected_candidates()
+                if not current_selected:
+                    return job_mgr.APPROVAL_NO_SELECTION
+                if job.execute_kind in _PREMISE_REVIEW_KINDS:
+                    stale_premise_candidate_ids = _stale_candidate_ids(
+                        current_selected)
+                    if {
+                        c.get("cid") for c in current_selected
+                    } <= stale_premise_candidate_ids:
+                        return "all_candidates_stale"
+            # A review action consumes only the ticked picks: park everything
+            # else (plus the inactive Library tab) as its own living review so
+            # one partial batch cannot eat unreviewed candidates.
             split_review = None
             admission_decisions = {}
 
@@ -8018,6 +8524,12 @@ async def job_approve(request: Request, job_id: str):
                     return False
                 if key in admission_decisions:
                     return admission_decisions[key]
+                if key in stale_owned_candidate_ids:
+                    admission_decisions[key] = False
+                    return False
+                if key in stale_premise_candidate_ids:
+                    admission_decisions[key] = False
+                    return False
                 if tab:
                     gap_active = tab == "gaps"
                     if flows.is_gap_candidate(candidate) != gap_active:
@@ -8036,16 +8548,19 @@ async def job_approve(request: Request, job_id: str):
                 admission_decisions[key] = admitted
                 return admitted
 
-            if tab:
-                from qobuz_librarian.web import flows
-            if (job.execute_kind in ("library", "new_releases")
+            if ((job.execute_kind in _PREMISE_REVIEW_KINDS
+                    or stale_premise_candidate_ids)
                     and job.status == job_mgr.JobStatus.AWAITING_REVIEW):
                 def split_review(review_job):
                     remnant = _build_unapproved_review(
                         review_job,
                         tab,
                         admission_filter=selection_filter,
+                        discard_ids=stale_owned_candidate_ids,
                     )
+                    if remnant is not None:
+                        remnant.execute_args.pop(
+                            "_credential_generation", None)
                     # Whole review ticked → retire the worked-through baseline
                     # after success instead of rebuilding its old candidates.
                     if review_job.execute_kind == "library":
@@ -8055,7 +8570,24 @@ async def job_approve(request: Request, job_id: str):
             previous_migration_args = None
             previous_migration_execute = None
             previous_downsample_args = None
+            previous_qobuz_args = None
+            previous_qobuz_execute = None
             downsample_args_changed = False
+            qobuz_args_changed = False
+            if authorized_credentials is not None:
+                with job._lock:
+                    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+                        previous_qobuz_args = job.execute_args
+                        previous_qobuz_execute = job._execute_fn
+                        job.execute_args = {
+                            **(job.execute_args or {}),
+                            "_credential_generation":
+                                authorized_credentials.generation,
+                        }
+                        factory = _RESUME_EXECUTE.get(job.execute_kind)
+                        if factory is not None:
+                            job._execute_fn = factory(job, job.execute_args)
+                        qobuz_args_changed = True
             if (
                 job.execute_kind == "downsample"
                 and downsample_keep_originals is not None
@@ -8067,7 +8599,15 @@ async def job_approve(request: Request, job_id: str):
                             **(job.execute_args or {}),
                             "keep_originals": downsample_keep_originals,
                         }
+                        job._execute_fn = _resume_downsample(
+                            job, job.execute_args)
                         downsample_args_changed = True
+            if downsample_choice_to_save:
+                saved, _warnings = settings_store.save({
+                    "DOWNSAMPLE_KEEP_ORIGINALS": downsample_choice_to_save,
+                })
+                if saved is not True:
+                    return "downsample_policy_failed"
             if job.execute_kind == "migration":
                 execute_args = dict(job.execute_args or {})
                 # Old parked reviews may still carry the former launcher
@@ -8097,6 +8637,12 @@ async def job_approve(request: Request, job_id: str):
                 if downsample_args_changed and approved is not True:
                     with job._lock:
                         job.execute_args = previous_downsample_args
+                        job._execute_fn = _resume_downsample(
+                            job, job.execute_args or {})
+                if qobuz_args_changed and approved is not True:
+                    with job._lock:
+                        job.execute_args = previous_qobuz_args
+                        job._execute_fn = previous_qobuz_execute
                 if (
                     previous_migration_args is not None
                     and approved is not True
@@ -8106,6 +8652,55 @@ async def job_approve(request: Request, job_id: str):
                         job._execute_fn = previous_migration_execute
 
     approved = await loop.run_in_executor(None, _split_and_approve)
+    if approved == "all_candidates_stale":
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(
+                "The selected local files changed after this review was "
+                "built, or the saved proof is too old. Refresh or rescan "
+                "before trying again. Nothing changed."
+            ),
+            status_code=303,
+        )
+    if (isinstance(approved, tuple)
+            and len(approved) == 2
+            and approved[0] == "candidate_stale"):
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(approved[1]),
+            status_code=303,
+        )
+    if approved == "review_changed":
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(
+                "That review changed while approval was being checked. "
+                "Nothing changed; review the current selections and try again."
+            ),
+            status_code=303,
+        )
+    if approved == "downsample_policy_failed":
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(
+                "Couldn't save the keep-or-delete choice. No music files "
+                "were changed; check the data folder and try again."
+            ),
+            status_code=303,
+        )
+    if approved == "credential_changed":
+        message = _qobuz_action_error_message(
+            CredentialChanged(),
+            unchanged=True,
+        )
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(message),
+            status_code=303,
+        )
+    if approved == "sync_failed":
+        return RedirectResponse(
+            url=dest + "?error=" + urllib.parse.quote(
+                "The refreshed review could not be saved. Your existing "
+                "choices are untouched; check the data folder and try again."
+            ),
+            status_code=303,
+        )
     if approved == "paused":
         busy = _lock_busy_response(request)
         if busy is not None:
@@ -8122,7 +8717,18 @@ async def job_approve(request: Request, job_id: str):
         return RedirectResponse(url=f"{dest}?noselection=1{_skip_q}",
                                 status_code=303)
     flag = "approved=1" if approved else "stale=1"
-    return RedirectResponse(url=f"{dest}?{flag}{_skip_q}", status_code=303)
+    local_stale = len(stale_premise_candidate_ids)
+    local_stale_q = ""
+    if local_stale:
+        local_stale_q = "&error=" + urllib.parse.quote(
+            f"Started the valid choices. {local_stale} selected "
+            f"album{'s' if local_stale != 1 else ''} changed since this "
+            "review and remain selected for a fresh scan."
+        )
+    return RedirectResponse(
+        url=f"{dest}?{flag}{_skip_q}{local_stale_q}",
+        status_code=303,
+    )
 
 
 # Review kinds that get the paced-triage surface (unticked and hideable). They
@@ -8703,6 +9309,25 @@ async def job_retry(request: Request, job_id: str):
             "started. Reload this page and try again.",
         )
 
+    try:
+        credentials = await _authorize_qobuz_for_web(
+            QobuzAccess.DOWNLOAD_ACTION
+        )
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        DownloaderNotReady,
+        CredentialChanged,
+        asyncio.TimeoutError,
+    ) as exc:
+        message = _qobuz_action_error_message(exc, unchanged=True)
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(message),
+            status_code=303,
+        )
+
     # A Retry is also the only user-triggered lane for an interrupted durable
     # Web download.
     if not _run_lock_intact():
@@ -8782,10 +9407,20 @@ async def job_retry(request: Request, job_id: str):
             BlockedItemSettlementAction,
         )
 
-        settled, reason = _settle_durable_web_recovery(
-            job,
-            BlockedItemSettlementAction.RETRY,
-        )
+        with _CREDENTIAL_LOCK:
+            if not _credential_generation_is_active(credentials.generation):
+                message = _qobuz_action_error_message(
+                    CredentialChanged(),
+                    unchanged=True,
+                )
+                return RedirectResponse(
+                    url="/queue?error=" + urllib.parse.quote(message),
+                    status_code=303,
+                )
+            settled, reason = _settle_durable_web_recovery(
+                job,
+                BlockedItemSettlementAction.RETRY,
+            )
         logging.getLogger("qobuz_librarian").info(
             "Retry %s: settling the blocked download %s.", job.id,
             "succeeded" if settled
@@ -8844,7 +9479,7 @@ async def job_retry(request: Request, job_id: str):
     if duplicate:
         return RedirectResponse(url=f"/jobs/{duplicate.id}", status_code=303)
     try:
-        token = _get_token()
+        token = credentials.token
         album = None
         if not durable_resume:
             from qobuz_librarian.api.client import call_within
@@ -8871,7 +9506,16 @@ async def job_retry(request: Request, job_id: str):
             )
         )
         # Re-check under the submit lock.
-        with _DOWNLOAD_SUBMIT_LOCK:
+        with _DOWNLOAD_SUBMIT_LOCK, _CREDENTIAL_LOCK:
+            if not _credential_generation_is_active(credentials.generation):
+                message = _qobuz_action_error_message(
+                    CredentialChanged(),
+                    unchanged=True,
+                )
+                return RedirectResponse(
+                    url="/queue?error=" + urllib.parse.quote(message),
+                    status_code=303,
+                )
             duplicate = _find_job_touching_album(album_id)
             if duplicate:
                 return RedirectResponse(url=f"/jobs/{duplicate.id}", status_code=303)
@@ -9090,8 +9734,11 @@ async def job_retry(request: Request, job_id: str):
                 if job_mgr.submit(new_job, run) is None:
                     return _job_admission_response(request)
         return RedirectResponse(url=f"/jobs/{new_job.id}", status_code=303)
-    except (SystemExit, NoCredsError):
-        return RedirectResponse(url="/settings?error=creds", status_code=303)
+    except NoCredsError as exc:
+        message = _qobuz_action_error_message(exc, unchanged=True)
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(message), status_code=303
+        )
     except Exception as exc:
         message = _download_error_message(
             exc,
@@ -9814,9 +10461,12 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "library_size": library_size,
         # True once Qobuz has accepted the saved token, False once it has
         # rejected it, None when it has never been asked.
-        "token_verified": _TOKEN_VALID,
+        "token_verified": _token_valid_for(),
         "user_id": creds.get("user_id", "") if user_id is None else user_id,
         "auth_token_set": bool(creds.get("auth_token")),
+        "downloader_ready": bool(
+            creds.get("auth_token") and creds.get("user_id")
+        ),
         "auth_token_prefill": auth_token_prefill,
         "creds_from_env": creds_from_env,
         "env_user_id_set": bool(
@@ -9873,16 +10523,9 @@ def _streamrip_has_userid() -> bool:
     actually authenticate a download. A token-only env (QOBUZ_USER_AUTH_TOKEN set,
     QOBUZ_USER_ID unset) has none until the id is set or creds are saved, even
     though the app's own Qobuz API calls work from the token alone."""
-    try:
-        if not cfg.STREAMRIP_CONFIG.exists():
-            return False
-        import tomllib
-        with open(cfg.STREAMRIP_CONFIG, "rb") as f:
-            data = tomllib.load(f)
-        uid = str(data.get("qobuz", {}).get("email_or_userid", "") or "").strip()
-        return bool(uid)
-    except Exception:
-        return False
+    from qobuz_librarian.api.auth import read_qobuz_credentials
+
+    return read_qobuz_credentials().downloader_ready
 
 
 def _qobuz_token_is_env_owned() -> bool:
@@ -9901,7 +10544,7 @@ def _qobuz_token_is_env_owned() -> bool:
 
 @app.post("/settings", response_class=HTMLResponse)
 async def save_settings(request: Request, user_id: str = Form(""), auth_token: str = Form("")):
-    global _TOKEN_VALID
+    global _TOKEN_GENERATION, _TOKEN_VALID
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, _diagnostics)
     existing = _read_creds()
@@ -9935,37 +10578,33 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
     # so an empty submission must not wipe a previously-saved credential.
     if not auth_token.strip() and not user_id.strip() and cfg.QOBUZ_USER_AUTH_TOKEN:
         # Blank submit with an env token = "keep the env creds".
-        if cfg.QOBUZ_USER_ID or _streamrip_has_userid():
-            return RedirectResponse(url="/settings?connected=1", status_code=303)
-        return _settings_response(request, error="needuser", user_id="",
-                                  auth_token_prefill="", diagnostics=diags)
+        return RedirectResponse(url="/settings?connected=1", status_code=303)
     new_token = auth_token.strip() or existing.get("auth_token", "")
     new_uid = user_id.strip() or existing.get("user_id", "")
-    # Both fields are mandatory.
-    if new_token and not new_uid:
-        return _settings_response(request, error="needuser",
-                                  user_id=user_id.strip(),
-                                  auth_token_prefill=auth_token.strip(),
-                                  diagnostics=diags)
     if new_uid and not new_token:
         return _settings_response(request, error="empty",
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
     # Check the token with Qobuz *before* writing it.
-    verdict = "unreachable"
+    verdict = AuthOutcome.TEMPORARY
     if new_token:
         from qobuz_librarian.api.client import call_within
+        probe = credentials_from_values(
+            new_uid,
+            new_token,
+            source="env" if env_owned else "streamrip",
+        )
         try:
             verdict = await asyncio.wait_for(
                 loop.run_in_executor(
                     None, lambda: call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
-                                              _classify_token, new_token)),
+                                              _classify_token, probe.token)),
                 timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            verdict = "unreachable"
-    if verdict == "rejected":
+            verdict = AuthOutcome.TEMPORARY
+    if verdict == AuthOutcome.REJECTED:
         # Re-render with the real token still in the (password-type, so
         # visually masked) field so the user can fix a paste slip without
         # re-typing it, same as the needuser/empty/creds branches.
@@ -9973,7 +10612,8 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    if (verdict == "unreachable" and new_token and _TOKEN_VALID
+    if (verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
+            and new_token and _token_valid_for() is True
             and new_token != existing.get("auth_token", "")):
         # Couldn't check it, and the token already saved is one that has
         # authenticated. Overwriting a known-good credential with an unproven
@@ -9985,17 +10625,47 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    ok = _write_creds(new_uid, new_token)
-    if not ok:
-        return _settings_response(request, error="creds",
-                                  user_id=user_id.strip(),
-                                  auth_token_prefill=auth_token.strip(),
-                                  diagnostics=diags)
-    # Keep the dashboard's "token isn't authenticating" banner in step with
-    # what we just verified; a freshly-fixed token shouldn't keep nagging
-    # until the next restart.
-    _TOKEN_VALID = True if verdict == "ok" else None
-    suffix = "&unverified=1" if verdict == "unreachable" else ""
+    with _CREDENTIAL_LOCK:
+        active_credentials = _credentials_snapshot()
+        candidate_credentials = credentials_from_values(
+            new_uid,
+            new_token,
+            source="env" if env_owned else "streamrip",
+        )
+        credential_work_running = any(
+            (getattr(job, "execute_kind", "") or "download")
+            not in {"downsample", "lyrics", "migration"}
+            for job in job_mgr.registry.executing()
+        )
+        if (
+            candidate_credentials.generation
+            != active_credentials.generation
+            and credential_work_running
+        ):
+            return _settings_response(
+                request,
+                error="credsbusy",
+                user_id=user_id.strip(),
+                auth_token_prefill=auth_token.strip(),
+                diagnostics=diags,
+            )
+        ok = _write_creds(new_uid, new_token)
+        if not ok:
+            return _settings_response(request, error="creds",
+                                      user_id=user_id.strip(),
+                                      auth_token_prefill=auth_token.strip(),
+                                      diagnostics=diags)
+        saved_credentials = _credentials_snapshot()
+        if verdict not in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
+            _TOKEN_VALID = None
+            _TOKEN_GENERATION = saved_credentials.generation
+    if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
+        _on_auth_state(AuthEvidence(saved_credentials.generation, verdict))
+    suffix = (
+        "&unverified=1"
+        if verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
+        else ""
+    )
     return RedirectResponse(url=f"/settings?connected=1{suffix}", status_code=303)
 
 
@@ -10374,6 +11044,20 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 except Exception:
                     logging.getLogger("qobuz_librarian").exception(
                         "downsample state refresh failed after undo")
+                try:
+                    from qobuz_librarian.library import generation_state
+                    if generation_state.output_is_current("upgrade"):
+                        generation_state.mark_output_status(
+                            "upgrade",
+                            "stale",
+                            reason=(
+                                "Upgrade needs refresh after Downsample was "
+                                "undone."
+                            ),
+                        )
+                except Exception:
+                    logging.getLogger("qobuz_librarian").exception(
+                        "upgrade state invalidation failed after undo")
             if n and not carried.exists():
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _ql_notice_html(
@@ -10819,30 +11503,27 @@ def _no_creds_response(request):
     return RedirectResponse(url="/settings?error=creds", status_code=303)
 
 
-_creds_cache: dict | None = None
-
-
 def _read_creds():
-    global _creds_cache
-    # cfg resolves QOBUZ_USER_AUTH_TOKEN_FILE too (the secret is no longer
-    # re-exported to os.environ), so a *_FILE deployment is recognised here.
-    env_token = cfg.QOBUZ_USER_AUTH_TOKEN
-    if env_token:
-        return {"user_id": cfg.QOBUZ_USER_ID or "", "auth_token": env_token}
-    if _creds_cache is not None:
-        return _creds_cache
-    if not cfg.STREAMRIP_CONFIG.exists():
+    from qobuz_librarian.api.auth import read_qobuz_credentials
+
+    credentials = read_qobuz_credentials()
+    if not credentials.configured:
         return {}
-    try:
-        import tomllib
-        with open(cfg.STREAMRIP_CONFIG, "rb") as f:
-            data = tomllib.load(f)
-        qz = data.get("qobuz", {})
-        _creds_cache = {"user_id": qz.get("email_or_userid", ""),
-                        "auth_token": qz.get("password_or_token", "")}
-        return _creds_cache
-    except Exception:
-        return {}
+    return {
+        "user_id": credentials.user_id,
+        "auth_token": credentials.token,
+        "_generation": credentials.generation,
+        "_source": credentials.source,
+    }
+
+
+def _credentials_snapshot():
+    values = _read_creds()
+    return credentials_from_values(
+        values.get("user_id", ""),
+        values.get("auth_token", ""),
+        source=values.get("_source", "web"),
+    )
 
 
 def _write_creds(user_id, auth_token) -> bool:
@@ -10852,8 +11533,6 @@ def _write_creds(user_id, auth_token) -> bool:
 
     Delegates to qobuz_librarian.api.auth.write_streamrip_creds so the web
     Settings path and the env-var sync share one credential writer."""
-    global _creds_cache
-    _creds_cache = None
     from qobuz_librarian.api.auth import write_streamrip_creds
     return write_streamrip_creds(user_id, auth_token)
 

@@ -13,6 +13,7 @@ from qobuz_librarian.api.auth import (
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.cli import parse_qobuz_url
 from qobuz_librarian.integrations.beets import staging_preflight
+from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     compute_missing,
     find_existing_tracks,
@@ -22,7 +23,11 @@ from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.modes.process import process_album
 from qobuz_librarian.queue.builder import _build_queue_item
 from qobuz_librarian.queue.durable_album import plan_durable_new_album
-from qobuz_librarian.queue.executor import _execute_download_queue
+from qobuz_librarian.queue.executor import (
+    _admit_new_queue_items,
+    _execute_download_queue,
+    _refresh_review_state_after_downloads,
+)
 from qobuz_librarian.queue.persistence import (
     clear_pending_queue,
     save_pending_queue,
@@ -77,6 +82,15 @@ def _download_album_now(
     already_confirmed=False,
 ):
     """Use the durable lane for an eligible fresh album, else the legacy path."""
+    def finish(result):
+        if isinstance(result, dict):
+            _refresh_review_state_after_downloads(
+                [{**result, "album": album}],
+                token,
+                args,
+            )
+        return result
+
     if is_lossless_album(album):
         if existing_state is None:
             existing, album_dir = find_existing_tracks(album)
@@ -119,6 +133,11 @@ def _download_album_now(
                 ):
                     log.info(fmt(C.GRAY, "  Skipped."))
                     return {"result": "user_skipped", "n_missing": len(missing)}
+            try:
+                token = _admit_new_queue_items([candidate], token)
+            except CandidateStale as exc:
+                log.info(fmt(C.YELLOW, f"  ⚠  {exc}"))
+                return {"result": "stale_candidate"}
             staging_preflight(args)
             queue = [candidate]
 
@@ -146,8 +165,8 @@ def _download_album_now(
                         "  ⚠  Safe recovery was saved. Restart without a "
                         "search argument and choose Resume before other work.",
                     ))
-            return results[0] if results else None
-    return process_album(album, args, allow_force=True, token=token)
+            return finish(results[0] if results else None)
+    return finish(process_album(album, args, allow_force=True, token=token))
 
 
 def resolve_album_from_args(args, token):
@@ -260,7 +279,7 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
             if any(qi["album"].get("id") == album_id for qi in album_queue):
                 log.info(fmt(C.GRAY, "  (already in queue; skipping duplicate)"))
             else:
-                album_queue.append(_build_queue_item(
+                candidate = _build_queue_item(
                     album=album,
                     album_dir=album_dir,
                     label=(f"{(album.get('artist') or {}).get('name') or '?'}"
@@ -269,7 +288,13 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                     present=present,
                     upgrade_only=False,
                     auto_upgrade=False,
-                ))
+                )
+                try:
+                    _admit_new_queue_items([candidate], token)
+                except CandidateStale as exc:
+                    log.info(fmt(C.YELLOW, f"  ⚠  {exc}"))
+                    return
+                album_queue.append(candidate)
             if r in ("f", "flush"):
                 flush_queue()
             else:

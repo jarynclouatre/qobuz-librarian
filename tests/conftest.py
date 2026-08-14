@@ -44,6 +44,11 @@ def _isolate_data_dir():
     cfg.REPAIR_LOG_PATH      = tmp_root / ".qobuz_replaced_tracks.log"
     cfg.CAPPED_FILE          = tmp_root / ".qobuz_upgrade_capped.json"
     cfg.LIBRARY_SCAN_STATE_FILE = tmp_root / ".qobuz_library_scan_state.json"
+    cfg.UPGRADE_STATE_FILE   = tmp_root / ".qobuz_upgrade_state.json"
+    cfg.DOWNSAMPLE_STATE_FILE = tmp_root / ".qobuz_downsample_state.json"
+    cfg.LIBRARY_GENERATION_STATE_FILE = (
+        tmp_root / ".qobuz_library_generation.json"
+    )
     cfg.HIDDEN_FILE          = tmp_root / ".qobuz_hidden.json"
     cfg.REVIEW_BADGE_STATE_FILE = tmp_root / ".qobuz_review_badges.json"
     cfg.SCAN_SEEN_FILE       = tmp_root / ".qobuz_scan_seen.json"

@@ -5,10 +5,17 @@ from unittest.mock import patch
 import pytest
 
 from qobuz_librarian.api.auth import (
+    AccessBlock,
+    AuthOutcome,
     NoCredsError,
+    QobuzAccess,
+    classify_qobuz_status,
+    credentials_from_values,
     detect_auth_lost,
     detect_rate_limited,
     load_qobuz_token,
+    qobuz_capability,
+    read_qobuz_credentials,
     sync_streamrip_creds_from_env,
     write_streamrip_creds,
 )
@@ -64,6 +71,101 @@ def test_load_qobuz_token_happy_and_error_paths(tmp_path):
         with patch("qobuz_librarian.config.STREAMRIP_CONFIG", cfg):
             with pytest.raises(NoCredsError):
                 load_qobuz_token()
+
+    cfg.write_text("this is not toml ===]]] [[[ ===")
+    with patch("qobuz_librarian.config.STREAMRIP_CONFIG", cfg):
+        with pytest.raises(NoCredsError, match="Couldn't parse streamrip config"):
+            load_qobuz_token()
+
+
+def test_credentials_separate_saved_reads_catalogue_and_download_access(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config
+
+    monkeypatch.setattr(config, "QOBUZ_USER_AUTH_TOKEN", "token-only")
+    monkeypatch.setattr(config, "QOBUZ_USER_ID", "")
+    monkeypatch.setattr(config, "STREAMRIP_CONFIG", tmp_path / "missing.toml")
+
+    credentials = read_qobuz_credentials()
+    assert credentials.configured is True
+    assert credentials.downloader_ready is False
+    assert "token-only" not in credentials.generation
+    assert credentials.token.credential_generation == credentials.generation
+
+    assert qobuz_capability(
+        QobuzAccess.SAVED_READ, credentials, auth_valid=False
+    ).allowed is True
+    catalogue = qobuz_capability(
+        QobuzAccess.CATALOGUE_ACTION, credentials, auth_valid=None
+    )
+    assert catalogue.allowed is True
+    assert catalogue.live_check_required is True
+    download = qobuz_capability(
+        QobuzAccess.DOWNLOAD_ACTION, credentials, auth_valid=True
+    )
+    assert download.allowed is False
+    assert download.block is AccessBlock.ADD_USER_ID
+
+    rejected = qobuz_capability(
+        QobuzAccess.CATALOGUE_ACTION, credentials, auth_valid=False
+    )
+    assert rejected.allowed is False
+    assert rejected.block is AccessBlock.RECONNECT_QOBUZ
+
+    ready = credentials_from_values("user-1", "token-only", source="env")
+    assert ready.generation != credentials.generation
+    assert qobuz_capability(
+        QobuzAccess.DOWNLOAD_ACTION, ready, auth_valid=True
+    ).allowed is True
+
+
+def test_env_token_reuses_only_a_matching_streamrip_user_id(tmp_path, monkeypatch):
+    from qobuz_librarian import config
+
+    streamrip = tmp_path / "config.toml"
+    streamrip.write_text(
+        '[qobuz]\nuse_auth_token = true\n'
+        'email_or_userid = "saved-user"\n'
+        'password_or_token = "old-token"\n'
+    )
+    monkeypatch.setattr(config, "STREAMRIP_CONFIG", streamrip)
+    monkeypatch.setattr(config, "QOBUZ_USER_AUTH_TOKEN", "active-token")
+    monkeypatch.setattr(config, "QOBUZ_USER_ID", "")
+
+    assert read_qobuz_credentials().downloader_ready is False
+    streamrip.write_text(streamrip.read_text().replace("old-token", "active-token"))
+    assert read_qobuz_credentials().user_id == "saved-user"
+
+
+def test_env_credentials_win_over_a_malformed_streamrip_file(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config
+
+    streamrip = tmp_path / "config.toml"
+    streamrip.write_text("this is not toml ===]]] [[[ ===")
+    monkeypatch.setattr(config, "STREAMRIP_CONFIG", streamrip)
+    monkeypatch.setattr(config, "QOBUZ_USER_AUTH_TOKEN", "environment-token")
+    monkeypatch.setattr(config, "QOBUZ_USER_ID", "environment-user")
+
+    user_id, token = load_qobuz_token()
+
+    assert user_id == "environment-user"
+    assert token == "environment-token"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (200, AuthOutcome.ACCEPTED),
+        (400, AuthOutcome.INCONCLUSIVE),
+        (401, AuthOutcome.REJECTED),
+        (403, AuthOutcome.ENTITLEMENT),
+        (429, AuthOutcome.TEMPORARY),
+        (503, AuthOutcome.TEMPORARY),
+    ],
+)
+def test_qobuz_http_status_classification(status, expected):
+    assert classify_qobuz_status(status) is expected
 
 
 def test_sync_streamrip_creds_from_env_writes_and_stays_idempotent(tmp_path, monkeypatch):
@@ -131,4 +233,3 @@ def test_failed_streamrip_credential_publish_keeps_the_prior_file(
     assert cfg_path.read_bytes() == prior_bytes
     assert cfg_path.stat().st_mode & 0o777 == 0o600
     assert not list(cfg_path.parent.glob(".streamrip.*.tmp"))
-

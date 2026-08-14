@@ -21,6 +21,7 @@ from qobuz_librarian.download_result import (
 )
 from qobuz_librarian.library import (
     downsample_state,
+    generation_state,
     library_scan_state,
     scan_checkpoint,
 )
@@ -161,6 +162,11 @@ def _refresh_downsample_artist_state(artist_dir):
         review_badges.set_ready("downsample", _surface_has_candidates("downsample"))
     else:
         err = next(iter(result.errors.values()), "unknown error")
+        generation_state.mark_output_status(
+            "downsample",
+            "stale",
+            reason="Downsample could not refresh after a local album change.",
+        )
         log.info(f"  downsample view refresh skipped for {artist_dir.name}: {err}")
 
 
@@ -185,6 +191,11 @@ def _refresh_upgrade_artist_state(artist_dir, token, args=None):
         review_badges.set_ready("upgrade", _surface_has_candidates("upgrade"))
     else:
         err = next(iter(result.errors.values()), "unknown error")
+        generation_state.mark_output_status(
+            "upgrade",
+            "stale",
+            reason="Upgrade could not refresh after a local album change.",
+        )
         log.info(f"  upgrade view refresh skipped for {artist_dir.name}: {err}")
 
 
@@ -198,11 +209,71 @@ def _refresh_after_local_album_change(
     upgrade=False,
     downsample=False,
 ):
+    album_id = (album or {}).get("id")
+    authority = generation_state.load()
+    if (
+        album_id
+        and generation_state.output_is_current("library", state=authority)
+        and not library_scan_state.remove_album(album_id)
+    ):
+        generation_state.mark_output_status(
+            "library",
+            "stale",
+            reason="An in-app album change could not update the saved Library view.",
+        )
+    if album_id and not new_releases_mod.note_owned_album(album):
+        if generation_state.output_is_current(
+            "new_releases", state=authority
+        ):
+            generation_state.mark_output_status(
+                "new_releases",
+                "stale",
+                reason="An in-app album change could not update New Releases.",
+            )
+    if not album_id:
+        for surface, reason in (
+            (
+                "library",
+                "The changed album could not be tied to one Library result.",
+            ),
+            (
+                "new_releases",
+                "The changed album could not be tied to one New Releases result.",
+            ),
+        ):
+            if generation_state.output_is_current(surface, state=authority):
+                generation_state.mark_output_status(
+                    surface,
+                    "stale",
+                    reason=reason,
+                )
     artist_dir = _artist_dir_from_result(album, result, fallback_artist)
     if artist_dir is None:
+        surfaces = []
+        if upgrade and generation_state.output_is_current(
+            "upgrade", state=authority
+        ):
+            surfaces.append("upgrade")
+        if downsample and generation_state.output_is_current(
+            "downsample", state=authority
+        ):
+            surfaces.append("downsample")
+        if surfaces:
+            generation_state.invalidate(
+                surfaces,
+                "The changed album could not be tied to one artist folder.",
+            )
         return
     if upgrade:
-        _refresh_upgrade_artist_state(artist_dir, token, args=args)
+        try:
+            _refresh_upgrade_artist_state(artist_dir, token, args=args)
+        except (AuthLost, QobuzUnavailable) as exc:
+            generation_state.mark_output_status(
+                "upgrade",
+                "stale",
+                reason="Upgrade could not refresh after a local album change.",
+            )
+            log.info(f"  upgrade view needs refresh: {exc}")
     if downsample:
         _refresh_downsample_artist_state(artist_dir)
 
@@ -288,15 +359,44 @@ def _gap_candidate_spec(
     album = gap.qobuz_album
     if gap.on_disk_dir is not None:
         album = {**album, "_partial_missing_count": gap.missing_count}
-    extra_payload = {"_artist_dir": artist_key} if artist_key else None
+    from qobuz_librarian.library.candidate_premise import capture
+
+    extra_payload = {"_artist_dir": artist_key} if artist_key else {}
+    if gap.on_disk_dir is not None:
+        from qobuz_librarian.library.backup import (
+            capture_gap_fill_source_receipt,
+        )
+
+        extra_payload["album_dir"] = str(gap.on_disk_dir)
+        receipts = {}
+        for track in gap.present:
+            source = track.get("path") if isinstance(track, dict) else None
+            sealed = (
+                capture_gap_fill_source_receipt(source, gap.on_disk_dir)
+                if source else None
+            )
+            if sealed is None:
+                receipts = {}
+                break
+            receipts[sealed["relative"]] = sealed["file"]
+        extra_payload["_gap_fill_receipts"] = receipts
+        premise = capture("gap-fill", gap.on_disk_dir)
+    else:
+        artist_dir = cfg.MUSIC_ROOT / artist_key if artist_key else None
+        extra_payload["_artist_dir_path"] = str(artist_dir or "")
+        premise = capture("missing", artist_dir) if artist_dir else None
+    if premise is not None:
+        extra_payload["_premise"] = premise
     return _album_candidate_spec(
         album, artist_name, selected=selected, is_new=is_new,
         extra_payload=extra_payload)
 
 
-def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False):
+def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False,
+                       artist_key=None):
     return _add_candidate_spec(
-        job, _gap_candidate_spec(gap, artist_name, selected, is_new))
+        job, _gap_candidate_spec(
+            gap, artist_name, selected, is_new, artist_key=artist_key))
 
 
 def candidate_matches_query(c, q):
@@ -427,7 +527,7 @@ def fold_new_candidates(parked, cands, *, review_generation=None):
         if review_generation is not None:
             parked.execute_args = {
                 **(parked.execute_args or {}),
-                "_library_review_generation": float(review_generation),
+                "_library_review_generation": int(review_generation),
             }
         return added, updated
 
@@ -586,7 +686,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
 
 
 def _park_library_failures(failed_cands, execute_kind="library",
-                           ticked=True, summary=None):
+                           ticked=True, summary=None, execute_args=None):
     """After a whole-review download (every candidate ticked) finishes, retire
     empties the living review, so the albums that FAILED to download would
     vanish until the next scan. Re-park them as a fresh living review of
@@ -603,12 +703,37 @@ def _park_library_failures(failed_cands, execute_kind="library",
         job = job_mgr.Job(title="New-release check",
                           execute_kind="new_releases",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
+    elif execute_kind == "upgrade":
+        job = job_mgr.Job(title="Upgrade candidates",
+                          execute_kind="upgrade",
+                          status=job_mgr.JobStatus.AWAITING_REVIEW)
+    elif execute_kind == "repair":
+        job = job_mgr.Job(title="Repair scan", kind="scan",
+                          execute_kind="repair",
+                          status=job_mgr.JobStatus.AWAITING_REVIEW,
+                          review_verb="Repair")
     else:
         job = job_mgr.Job(title="Library scan", kind="scan",
                           execute_kind="library",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
-    job._execute_fn = lambda j, chosen: execute_albums(
-        j, chosen, load_qobuz_token()[1])
+    job.execute_args = dict(execute_args or {})
+    job.execute_args.pop("_credential_generation", None)
+
+    def fresh_download_token():
+        from qobuz_librarian.api.auth import QobuzAccess
+        from qobuz_librarian.api.client import authorize_qobuz_action
+
+        return authorize_qobuz_action(QobuzAccess.DOWNLOAD_ACTION).token
+
+    if execute_kind == "upgrade":
+        job._execute_fn = lambda j, chosen: execute_upgrades(
+            j, chosen, fresh_download_token())
+    elif execute_kind == "repair":
+        job._execute_fn = lambda j, chosen: execute_repairs(
+            j, chosen, fresh_download_token())
+    else:
+        job._execute_fn = lambda j, chosen: execute_albums(
+            j, chosen, fresh_download_token())
     for c in failed_cands:
         job.add_candidate(
             kind=c.get("kind", "album"),
@@ -624,6 +749,12 @@ def _park_library_failures(failed_cands, execute_kind="library",
     elif execute_kind == "new_releases":
         job.summary = (f"{n:,} new release{'s' if n != 1 else ''} didn't "
                        "download last time. Ticked and ready to retry.")
+    elif execute_kind == "upgrade":
+        job.summary = (f"{n:,} album{'s' if n != 1 else ''} didn't upgrade "
+                       "last time. Ticked and ready to retry.")
+    elif execute_kind == "repair":
+        job.summary = (f"{n:,} album{'s' if n != 1 else ''} couldn't be "
+                       "repaired last time. Ticked and ready to retry.")
     else:
         job.summary = (f"{n:,} album{'s' if n != 1 else ''} didn't download "
                        "last time. Ticked and ready to retry.")
@@ -660,6 +791,22 @@ def _return_new_release_picks(picks):
     if folded is None:
         return _park_library_failures(
             picks, execute_kind="new_releases") is not False
+    return True
+
+
+def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
+    """Return unfinished Upgrade or Repair picks to a durable living review."""
+    if not picks:
+        return True
+    folded = refold_into_living_review(picks, execute_kind=execute_kind)
+    if folded is False:
+        return False
+    if folded is None:
+        return _park_library_failures(
+            picks,
+            execute_kind=execute_kind,
+            execute_args=execute_args,
+        ) is not False
     return True
 
 
@@ -731,21 +878,21 @@ def prune_library_review_candidates(album):
     return dropped
 
 
-def drop_owned_missing_candidates(job, token):
-    """Drop selected missing albums only when every expected track is on disk.
+def owned_missing_candidate_ids(job, token, candidate_ids=None):
+    """Return selected missing albums whose exact edition is already complete.
 
     A non-empty folder is not proof of ownership: it may hold one track from a
     partial import or unrelated audio. Fetch the selected edition and use the
     normal one-to-one track matcher. Any lookup, read, or identity uncertainty
-    leaves the candidate alone for ``process_album`` to handle safely. Gap Fill
-    candidates are already partial by definition and are never considered.
+    leaves the candidate alone. Gap Fill candidates are already partial by
+    definition and are never considered.
     """
     from qobuz_librarian.library.catalog import (
         compute_missing,
         find_album_dir_filesystem,
         find_existing_tracks,
     )
-    from qobuz_librarian.web import job_persistence
+    eligible = set(candidate_ids) if candidate_ids is not None else None
     with job._lock:
         snapshot = [
             (
@@ -757,10 +904,11 @@ def drop_owned_missing_candidates(job, token):
                 },
             )
             for c in job.candidates
-            if c.get("selected") and not is_gap_candidate(c)
+            if (c.get("selected") and not is_gap_candidate(c)
+                and (eligible is None or c.get("cid") in eligible))
         ]
     # Provider and disk reads happen outside the lock. A live scan may keep
-    # appending, but only the exact candidate IDs proved complete are removed.
+    # appending, but results remain bound to the exact candidate IDs checked.
     owned = set()
     for cid, candidate_album in snapshot:
         album_id = candidate_album.get("id")
@@ -785,6 +933,14 @@ def drop_owned_missing_candidates(job, token):
                 owned.add(cid)
         except Exception:
             continue
+    return owned
+
+
+def drop_owned_missing_candidates(job, token):
+    """Remove selected missing albums already proven complete on disk."""
+    from qobuz_librarian.web import job_persistence
+
+    owned = owned_missing_candidate_ids(job, token)
     if not owned:
         return 0
     def _drop():
@@ -1007,9 +1163,168 @@ _CHECKPOINT_EVERY = 15  # artists between progress saves (resume granularity)
 # Seconds between live-status refreshes during the whole-library repair sweep
 # (see scan_repairs).
 _REPAIR_HEARTBEAT_SECS = 2
+_REPAIR_CHECKPOINT_VERSION = 2
+_REPAIR_RESULT_VERSION = 1
+
+
+def _repair_checkpoint_signature():
+    """Settings and algorithm version needed to interpret a saved verdict."""
+    return {
+        "result_version": _REPAIR_RESULT_VERSION,
+        "deep_decode": True,
+        "min_short_seconds": 30,
+        "max_ratio": 0.85,
+        "max_short_seconds": 60,
+        "flac_tool": bool(shutil.which("flac")),
+    }
+
+
+def _capture_repair_artist_proof(artist_dir):
+    """Hash the exact artist tree used by a resumable Repair result."""
+    from qobuz_librarian.library.backup import capture_album_source_receipt
+
+    return capture_album_source_receipt(Path(artist_dir))
+
+
+def _repair_checkpoint_bundle(name, agg, proof):
+    return {
+        "version": _REPAIR_CHECKPOINT_VERSION,
+        "scan_signature": _repair_checkpoint_signature(),
+        "proof": proof,
+        "candidates": list(agg.get("specs") or []),
+        "counts": {
+            "verified_ok": int(agg.get("verified_ok") or 0),
+            "unverified": int(agg.get("unverified") or 0),
+            "failed_albums": int(agg.get("failed") or 0),
+        },
+        "artist": name,
+    }
+
+
+def _validated_repair_checkpoint_bundle(artist_dir, value):
+    """Return a reusable per-artist bundle, or None so Repair scans it again."""
+    from qobuz_librarian.library.backup import canonical_album_source_receipt
+    from qobuz_librarian.library.candidate_premise import (
+        canonical,
+        durable_receipts_match,
+    )
+    from qobuz_librarian.modes.repair import _verified_repair_source_receipts
+
+    name = Path(artist_dir).name
+    if (
+        type(value) is not dict
+        or set(value) != {
+            "version", "scan_signature", "proof", "candidates", "counts",
+            "artist",
+        }
+        or value.get("version") != _REPAIR_CHECKPOINT_VERSION
+        or value.get("scan_signature") != _repair_checkpoint_signature()
+        or value.get("artist") != name
+        or type(value.get("candidates")) is not list
+        or type(value.get("counts")) is not dict
+        or set(value["counts"]) != {
+            "verified_ok", "unverified", "failed_albums",
+        }
+        or any(
+            type(value["counts"].get(key)) is not int
+            or value["counts"][key] < 0
+            for key in ("verified_ok", "unverified", "failed_albums")
+        )
+        # Failed albums were not fully checked. Retry their artist instead of
+        # promoting the partial verdict through a later clean completion.
+        or value["counts"]["failed_albums"]
+    ):
+        return None
+    proof = canonical_album_source_receipt(
+        value.get("proof"),
+        expected_origin=str(Path(artist_dir).absolute()),
+    )
+    if proof is None:
+        return None
+    candidates = []
+    for spec in value["candidates"]:
+        if (
+            type(spec) is not dict
+            or spec.get("artist") != name
+            or spec.get("kind") not in ("repair", "redownload")
+            or canonical(spec) is None
+        ):
+            return None
+        if spec.get("kind") == "repair":
+            payload = spec.get("payload") or {}
+            try:
+                _verified_repair_source_receipts(
+                    payload.get("verified_truncated") or [],
+                    payload.get("album_dir"),
+                )
+            except (OSError, TypeError, ValueError):
+                return None
+        candidates.append(spec)
+    current = canonical_album_source_receipt(
+        _capture_repair_artist_proof(artist_dir),
+        expected_origin=str(Path(artist_dir).absolute()),
+    )
+    if current is None or not durable_receipts_match(proof, current):
+        return None
+    return {
+        **value,
+        "proof": proof,
+        "candidates": candidates,
+        "counts": dict(value["counts"]),
+    }
 
 
 def scan_library(job, token, partial_only=False, force_full=False):
+    previous_generation = generation_state.load()
+    previous_attempt_status = str(
+        (previous_generation.get("latest_attempt") or {}).get("status")
+        or "never"
+    )
+    allow_checkpoint_resume = bool(
+        partial_only
+        or previous_attempt_status in {"running", "failed", "incomplete"}
+        or generation_state.library_publication_incomplete(previous_generation)
+        or (
+            not int(previous_generation.get("generation") or 0)
+            and previous_attempt_status == "never"
+        )
+    )
+    attempt_id = None if partial_only else generation_state.begin_attempt()
+    if not partial_only and attempt_id is None:
+        job.error = (
+            "The Library scan could not save its starting state. Check the "
+            "data folder; no catalogue crawl was started."
+        )
+        job.summary = job.error
+        _mark_job_failed(job)
+        return
+    scan_started_revision = generation_state.revision()
+    try:
+        return _scan_library_impl(
+            job,
+            token,
+            partial_only=partial_only,
+            force_full=force_full,
+            attempt_id=attempt_id,
+            scan_started_revision=scan_started_revision,
+            allow_checkpoint_resume=allow_checkpoint_resume,
+        )
+    except Exception as exc:
+        if not partial_only:
+            generation_state.finish_attempt(attempt_id, "failed", str(exc))
+        raise
+
+
+def _scan_library_impl(
+    job,
+    token,
+    *,
+    partial_only=False,
+    force_full=False,
+    attempt_id=None,
+    scan_started_revision=0,
+    allow_checkpoint_resume=True,
+):
     clear_scan_caches()
     # Drop the Various-Artists folder: it has no single Qobuz artist catalog
     # to diff against, so a gap scan can only mis-resolve it.
@@ -1017,11 +1332,15 @@ def scan_library(job, token, partial_only=False, force_full=False):
                if normalize(d.name) not in VA_NORMALIZED]
     if not artists:
         _set_empty_library_summary(job)
+        if not partial_only:
+            generation_state.finish_attempt(
+                attempt_id, "incomplete", "No library artist folders were found."
+            )
         return
     kind = "partial" if partial_only else "missing"
     # Resume an interrupted scan of this kind: skip the artists already done and
     # restore the albums they turned up, so we continue rather than restart.
-    cp = scan_checkpoint.load(kind)
+    cp = scan_checkpoint.load(kind) if allow_checkpoint_resume else None
     resuming = cp is not None
     checkpoint_artists = dict(cp.get("artists") or {}) if resuming else {}
     current_artist_names = {ad.name for ad in artists}
@@ -1105,6 +1424,24 @@ def scan_library(job, token, partial_only=False, force_full=False):
         if _i % 25 == 0 or _i == len(artists):
             job.push_progress("Fingerprinting artist folders", _i, len(artists),
                               _ad.name, unit="folder")
+    if resuming:
+        # A checkpoint says what was compared, not that the local folder is
+        # still the same. Reuse only a current matching per-artist fingerprint;
+        # removed and legacy entries fall away independently.
+        scanned = {
+            name
+            for name in scanned
+            if isinstance(checkpoint_artists.get(name), dict)
+            and checkpoint_artists[name].get("fingerprint")
+            == fingerprints.get(name)
+        }
+        baseline_seen = {}
+        for name in scanned:
+            saved = checkpoint_artists[name]
+            artist_id = saved.get("artist_id") or ""
+            if artist_id:
+                baseline_seen[str(artist_id)] = list(
+                    saved.get("catalog_ids") or [])
     previous_artists = (previous_scan.get("artists") or {}) if cheap_refresh else {}
     state_artists: dict[str, dict] = {}
     if resuming:
@@ -1144,8 +1481,12 @@ def scan_library(job, token, partial_only=False, force_full=False):
                 "artist_id": saved.get("artist_id") or "",
                 "catalog_ids": list(catalog_ids or []),
             }
-        log.info(f"Resuming. {plural(len(scanned), 'artist')} already scanned, "
-                 f"{plural(total, 'album')} found so far.")
+        recheck = len(artists) - len(scanned)
+        log.info(
+            f"Resuming. Reusing {plural(len(scanned), 'unchanged artist')}; "
+            f"checking {plural(recheck, 'changed or unproven artist')} again. "
+            f"{plural(total, 'album')} found so far."
+        )
     todo = []
     n = len(artists)
     done = len(scanned)
@@ -1267,10 +1608,18 @@ def scan_library(job, token, partial_only=False, force_full=False):
     flush_resolve_cache()
     baseline_save_failed = False
     scan_state_save_failed = False
+    downsample_save_failed = False
+    upgrade_save_failed = False
     catalog_complete = False
     if job.cancel_requested:
         # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
-        scan_checkpoint.clear(kind)
+        if not scan_checkpoint.clear(kind):
+            job.push_line(
+                "The stopped scan checkpoint could not be cleared. It will be "
+                "ignored unless its artist proofs still match."
+            )
+        if not partial_only:
+            generation_state.finish_attempt(attempt_id, "cancelled")
     else:
         # Only a reached-all-artists crawl stamps "last scanned" or seeds the
         # new-release baseline.
@@ -1279,62 +1628,127 @@ def scan_library(job, token, partial_only=False, force_full=False):
             and len(scanned) == len(artists)
             and scan_errors == 0
         )
-        library_complete = (
-            catalog_complete
-            and not job.candidate_cap_hit
-        )
-        scan_generation = library_scan_state.save_kind(
-            kind,
-            artists=state_artists,
-            complete=library_complete,
-            hidden_signature=hidden_sig,
-            quality_sig=quality_sig,
-        )
-        scan_state_save_failed = scan_generation is None
-        if kind == "missing" and scan_generation is not None:
-            job.execute_args = {
-                **(job.execute_args or {}),
-                "_library_review_generation": scan_generation,
-            }
+        publication = None
+        if catalog_complete and kind == "missing":
+            publication = generation_state.commit_catalog_generation(
+                attempt_id,
+                limited=job.candidate_cap_hit,
+                expected_revision=scan_started_revision,
+            )
+            scan_state_save_failed = publication is None
+            if publication is None:
+                generation_state.finish_attempt(
+                    attempt_id,
+                    "incomplete",
+                    "Saved Library state changed while the crawl was running.",
+                )
+        elif catalog_complete:
+            partial_revision = generation_state.reserve_revision()
+            if partial_revision is not None:
+                saved_partial = library_scan_state.save_kind(
+                    kind,
+                    artists=state_artists,
+                    complete=True,
+                    hidden_signature=hidden_sig,
+                    quality_sig=quality_sig,
+                    revision=partial_revision,
+                )
+                scan_state_save_failed = saved_partial is None
+            else:
+                scan_state_save_failed = True
+        else:
+            if not partial_only:
+                generation_state.finish_attempt(
+                    attempt_id,
+                    "incomplete",
+                    "One or more artists could not be checked.",
+                )
+        if publication is not None:
+            scan_generation = int(publication["generation"])
+            scan_revision = generation_state.reserve_revision()
+            scan_saved = (
+                scan_revision is not None
+                and library_scan_state.save_kind(
+                    kind,
+                    artists=state_artists,
+                    complete=True,
+                    hidden_signature=hidden_sig,
+                    quality_sig=quality_sig,
+                    generation=scan_generation,
+                    revision=scan_revision,
+                    limited=job.candidate_cap_hit,
+                )
+                is not None
+            )
+            scan_state_save_failed = not scan_saved
+            if scan_saved:
+                job.execute_args = {
+                    **(job.execute_args or {}),
+                    "_library_review_generation": scan_generation,
+                }
+            else:
+                generation_state.abort_catalog_generation(
+                    publication,
+                    "The completed Library crawl could not publish its saved view.",
+                )
         # Publish Upgrade/Downsample from their OWN completeness, gated only
         # on a complete catalog crawl, NOT on library_complete.
-        if catalog_complete:
+        if publication is not None and not scan_state_save_failed:
+            scan_generation = int(publication["generation"])
             if downsample_refresh.complete:
-                downsample_state.save(
+                downsample_save_failed = not downsample_state.save(
                     downsample_refresh,
                     preserve_concurrent=True,
                     refresh_started_at=downsample_refresh_started_at,
+                    refresh_started_revision=scan_started_revision,
+                    generation=scan_generation,
                 )
-                review_badges.set_ready(
-                    "downsample", _surface_has_candidates("downsample"))
+                if not downsample_save_failed:
+                    review_badges.set_ready(
+                        "downsample", _surface_has_candidates("downsample"))
             if upgrade_refresh is not None and upgrade_refresh.complete:
-                upgrade_state.save(
+                upgrade_save_failed = not upgrade_state.save(
                     upgrade_refresh,
                     preserve_concurrent=True,
                     refresh_started_at=upgrade_refresh_started_at,
+                    refresh_started_revision=scan_started_revision,
+                    generation=scan_generation,
                 )
-                review_badges.set_ready(
-                    "upgrade", _surface_has_candidates("upgrade"))
-        if catalog_complete:
+                if not upgrade_save_failed:
+                    review_badges.set_ready(
+                        "upgrade", _surface_has_candidates("upgrade"))
+            elif upgrade_refresh is None:
+                generation_state.mark_output_status(
+                    "upgrade",
+                    "disabled",
+                    generation=scan_generation,
+                    reason="Upgrade scanning is disabled.",
+                )
+        if publication is not None and not scan_state_save_failed:
+            scan_generation = int(publication["generation"])
             if not scan_state_save_failed:
                 _record_last_scan()
             _flag_new_since_last_scan(job, kind)
             # The crawl reached every artist cleanly, establish the new-release
             # baseline from the catalog snapshot (only the first time; the daily
             # check keeps it fresh after), and clear this kind's checkpoint.
-            if not new_releases_mod.is_baseline_complete():
-                baseline_save_failed = (
-                    new_releases_mod.seed_baseline(baseline_seen) is False)
-            if scan_state_save_failed:
-                # Keep a complete resumable copy when the optimized saved scan
-                # snapshot could not be published. If the final job write also
-                # fails (for example because the data volume filled during a
-                # long crawl), restart can rebuild the exact candidate set
-                # instead of silently losing the whole completed scan.
-                scan_checkpoint.save(
-                    kind, scanned, job.candidates, baseline_seen, state_artists)
-            else:
-                scan_checkpoint.clear(kind)
+            baseline_save_failed = not new_releases_mod.seed_baseline(
+                baseline_seen,
+                generation=scan_generation,
+            )
+            if not scan_checkpoint.clear(kind):
+                job.push_line(
+                    "The completed scan checkpoint could not be cleared. Its "
+                    "saved generation is complete, so it will not be treated "
+                    "as newer results."
+                )
+        elif catalog_complete and scan_state_save_failed:
+            # Keep a complete resumable copy when the authoritative snapshot
+            # could not be published.
+            scan_checkpoint.save(
+                kind, scanned, job.candidates, baseline_seen, state_artists)
+        elif catalog_complete and partial_only:
+            scan_checkpoint.clear(kind)
         elif scanned or job.candidates or baseline_seen:
             scan_checkpoint.save(
                 kind, scanned, job.candidates, baseline_seen, state_artists)
@@ -1357,11 +1771,16 @@ def scan_library(job, token, partial_only=False, force_full=False):
         job.summary += (f" {plural(unchecked, 'artist')} couldn't be checked; "
                         "scan again to resume from where it left off.")
     stale_tabs = [
-        label for label, refresh in (
-            ("Upgrade", upgrade_refresh),
-            ("Downsample", downsample_refresh),
+        label for label, refresh, save_failed in (
+            ("Upgrade", upgrade_refresh, upgrade_save_failed),
+            ("Downsample", downsample_refresh, downsample_save_failed),
         )
-        if refresh is not None and not (catalog_complete and refresh.complete)
+        if refresh is not None and not (
+            catalog_complete
+            and refresh.complete
+            and not scan_state_save_failed
+            and not save_failed
+        )
     ]
     if not job.cancel_requested and stale_tabs:
         job.summary += (
@@ -1449,8 +1868,14 @@ def scan_new_releases(job, token):
                 # Leave new releases UN-ticked, like the library gap list: a
                 # review is for picking, and one tap must never queue the whole
                 # list of rips. The "new" badge still flags them for the eye.
-                _add_gap_candidate(job, gap, result.artist_name,
-                                   selected=False, is_new=True)
+                _add_gap_candidate(
+                    job,
+                    gap,
+                    result.artist_name,
+                    selected=False,
+                    is_new=True,
+                    artist_key=futures[fut].name,
+                )
                 total += 1
             hit = ({"artist": result.artist_name, "albums": len(result.new_gaps)}
                    if result.new_gaps else None)
@@ -1529,6 +1954,13 @@ def scan_new_releases(job, token):
                        "be saved. Check again.")
     else:
         job.summary = "No new releases added to your saved baseline."
+    if not total and (failed_count or saved is False):
+        # With no reviewable finds, submit_scan would otherwise replace this
+        # explicitly incomplete result with a green Done state. Keep partial
+        # success reviewable when it found albums, but never present an
+        # unchecked or unsaved zero as a completed zero.
+        job.error = "The New Releases check did not complete."
+        _mark_job_failed(job)
     log.info(job.summary)
 
 
@@ -1548,6 +1980,16 @@ def _note_staging_wait(job, phase, current, total):
 
 def execute_albums(job, chosen, token):
     """Download each selected album via the normal process_album path."""
+    from qobuz_librarian.library.candidate_premise import CandidateStale
+    from qobuz_librarian.library.candidate_premise import (
+        expected_kind as expected_premise_kind,
+    )
+    from qobuz_librarian.library.candidate_premise import (
+        validate as validate_candidate_premise,
+    )
+    from qobuz_librarian.library.candidate_premise import (
+        validate_container as validate_candidate_container,
+    )
     from qobuz_librarian.modes.process import process_album
     from qobuz_librarian.web.jobs import staging_lock
 
@@ -1675,8 +2117,33 @@ def execute_albums(job, chosen, token):
         _note_staging_wait(job, "Downloading albums", i, len(chosen))
         try:
             with staging_lock():
+                if expected_premise_kind(cand) == "missing":
+                    premise = validate_candidate_container(cand)
+                    # Earlier albums in this same batch may have changed the
+                    # artist tree. That is safe only while this exact edition
+                    # still has no local folder of its own.
+                    clear_scan_caches()
+                    if find_album_dir_filesystem(full) is not None:
+                        raise CandidateStale(
+                            "This missing album appeared locally after the "
+                            "review was built. Refresh the review; nothing "
+                            "was changed."
+                        )
+                else:
+                    premise = validate_candidate_premise(cand)
                 result = process_album(full, args, allow_force=False,
-                                       already_confirmed=True, token=token)
+                                       already_confirmed=True, token=token,
+                                       expected_album_receipt=(
+                                           premise["receipt"]
+                                           if premise["kind"] == "gap-fill"
+                                           else None
+                                       ),
+                                       expected_gap_fill_receipts=(
+                                           cand["payload"].get(
+                                               "_gap_fill_receipts")
+                                           if premise["kind"] == "gap-fill"
+                                           else None
+                                       ))
         except (AuthLost, QobuzUnavailable):
             _fold_back_unfinished()
             raise
@@ -1701,6 +2168,9 @@ def execute_albums(job, chosen, token):
                 full,
                 result,
                 fallback_artist=cand.get("artist"),
+                token=token,
+                args=args,
+                upgrade=True,
                 downsample=True,
             )
             # The album is on disk now, any OTHER parked library review still
@@ -1998,6 +2468,9 @@ def scan_upgrades(job, token):
 
 def execute_upgrades(job, chosen, token):
     """Re-rip the present tracks of each chosen album at higher quality."""
+    from qobuz_librarian.library.candidate_premise import (
+        validate as validate_candidate_premise,
+    )
     from qobuz_librarian.modes.process import process_album
     from qobuz_librarian.modes.upgrade import BENIGN_UPGRADE_RESULTS
     from qobuz_librarian.web import settings_store
@@ -2039,7 +2512,30 @@ def execute_upgrades(job, chosen, token):
     quality_attention = 0
     processing_attention = 0
     failed = 0
+    failed_cands = []
     processed = 0
+    current_interrupted = False
+
+    def return_unfinished(current_index):
+        if not job._imported_any:
+            return True
+        leftovers = failed_cands + chosen[current_index:]
+        saved = _return_qobuz_review_picks(
+            leftovers,
+            "upgrade",
+            execute_args=job.execute_args,
+        )
+        job.summary = (
+            f"Qobuz stopped after {plural(ok, 'album')} upgraded. "
+            f"{plural(len(leftovers), 'album')} selected for retry."
+        )
+        if saved is False:
+            job.error = (
+                "Retry choices could not be saved. Check the data folder, "
+                "then refresh Upgrade before retrying."
+            )
+        return saved
+
     for i, cand in enumerate(chosen, 1):
         if job.cancel_requested:
             break
@@ -2053,30 +2549,41 @@ def execute_upgrades(job, chosen, token):
         try:
             album = get_album(album_id, token)
         except (AuthLost, QobuzUnavailable):
+            return_unfinished(i - 1)
             raise
         except Exception as e:
             log.info(f"  could not fetch album {album_id}: {e}")
             failed += 1
+            failed_cands.append(cand)
             continue
         if not album:
             log.info(f"  album {album_id} is no longer on Qobuz; skipping.")
             failed += 1
+            failed_cands.append(cand)
             continue
         _note_staging_wait(job, "Upgrading albums", i, len(chosen))
         try:
             with staging_lock():
+                premise = validate_candidate_premise(cand)
                 result = process_album(album, args, allow_force=False,
                                        already_confirmed=True,
-                                       upgrade_only=True, token=token)
+                                       upgrade_only=True, token=token,
+                                       expected_album_receipt=premise["receipt"])
         except (AuthLost, QobuzUnavailable):
+            return_unfinished(i - 1)
             raise
         except Exception as e:
             log.info(f"  failed: {e}")
             failed += 1
+            failed_cands.append(cand)
             continue
         _res = (result or {}).get("result")
         attention_kind = download_attention_kind(result or {})
-        if result and result.get("catalogue_unverified"):
+        if result and (
+            _res == "cancelled" or result.get("cancelled")
+        ):
+            current_interrupted = True
+        elif result and result.get("catalogue_unverified"):
             catalogue_failed += 1
             job._imported_any = True
         elif result and attention_kind == "backup":
@@ -2129,11 +2636,25 @@ def execute_upgrades(job, chosen, token):
             )
         elif _res not in _skip:
             failed += 1
+            failed_cands.append(cand)
+        if current_interrupted:
+            break
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
-    if job.cancel_requested:
-        job.summary = (f"Stopped early. {ok} upgraded, "
-                       f"{len(chosen) - processed} not started.")
+    if job.cancel_requested or current_interrupted:
+        first_unfinished = processed - 1 if current_interrupted else processed
+        retry_count = len(failed_cands) + len(chosen[first_unfinished:])
+        retry_saved = return_unfinished(first_unfinished)
+        parts = [f"{ok} upgraded"]
+        if current_interrupted:
+            parts.append("1 interrupted")
+        parts.append(f"{len(chosen) - processed} not started")
+        job.summary = "Stopped early. " + ", ".join(parts) + "."
+        if retry_count and retry_saved is not False:
+            job.summary += (
+                f" {plural(retry_count, 'retry choice')} returned to Upgrade, "
+                "selected for retry."
+            )
         if kept:
             job.summary += (
                 f" {plural(kept, 'replacement')} retained a safety backup."
@@ -2194,6 +2715,11 @@ def execute_upgrades(job, chosen, token):
         )
     job.summary = msg
     log.info(msg)
+    retry_saved = _return_qobuz_review_picks(
+        failed_cands,
+        "upgrade",
+        execute_args=job.execute_args,
+    )
     if any((failed, kept, catalogue_failed, quality_attention,
             processing_attention)):
         problems = []
@@ -2228,6 +2754,13 @@ def execute_upgrades(job, chosen, token):
         elif processing_attention:
             job.attention = "processing"
         job.error = "; ".join(problems) + "."
+        if failed_cands:
+            retry_note = (
+                f" {plural(len(failed_cands), 'album')} selected for retry."
+                if retry_saved is not False
+                else " Retry choices could not be saved; refresh Upgrade."
+            )
+            job.error += retry_note
         _mark_job_failed(job)
 
 
@@ -2267,12 +2800,21 @@ def scan_downsamples(job):
                 continue
             # Unticked by default, a downsample is irreversible, so nothing is
             # shrunk without an explicit per-album tick.
+            from qobuz_librarian.library.candidate_premise import capture
+
+            premise = capture("downsample", c.album_dir)
+            payload = {
+                "album_dir": str(c.album_dir),
+                "est_saving": c.est_saving,
+            }
+            if premise is not None:
+                payload["_premise"] = premise
             job.add_candidate(
                 kind="downsample",
                 title=c.title,
                 artist=name,
                 detail=c.detail,
-                payload={"album_dir": str(c.album_dir), "est_saving": c.est_saving},
+                payload=payload,
                 selected=False,
             )
             total += 1
@@ -2333,6 +2875,9 @@ def execute_downsamples(
     re-download fallback.
     """
     from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
+    from qobuz_librarian.library.candidate_premise import (
+        validate as validate_candidate_premise,
+    )
     from qobuz_librarian.quality.decision import mark_local_album_capped
     from qobuz_librarian.web.jobs import staging_lock
 
@@ -2349,6 +2894,7 @@ def execute_downsamples(
     interrupted_saved = 0
     total_errors = 0
     total_flush_warns = 0
+    state_refresh_warnings = 0
     skipped_missing_details = 0
     skipped_missing_folders = 0
     skipped_unchanged = 0
@@ -2405,6 +2951,22 @@ def execute_downsamples(
         _note_staging_wait(job, "Downsampling albums", i, len(chosen))
         try:
             with staging_lock():
+                validate_candidate_premise(cand)
+                if mark_local_album_capped(album_dir) is not True:
+                    raise OSError(
+                        "The local downsample decision could not be saved; "
+                        "the album was left unchanged."
+                    )
+                if not upgrade_state.remove_album_dir(album_dir):
+                    generation_state.mark_output_status(
+                        "upgrade",
+                        "stale",
+                        reason=(
+                            "An intentional Downsample could not update the "
+                            "saved Upgrade view."
+                        ),
+                    )
+                    state_refresh_warnings += 1
                 res = downsample_dir(album_dir, verbose=True,
                                      base_dir=album_dir, log=log.info,
                                      keep_originals=keep_originals,
@@ -2423,14 +2985,6 @@ def execute_downsamples(
         elif res.get("resampled"):
             shrunk += 1
             total_saved += res.get("saved_bytes", 0)
-            mark_local_album_capped(album_dir)
-            if token:
-                try:
-                    _refresh_upgrade_artist_state(
-                        album_dir.parent, token, args=args or build_args())
-                except (AuthLost, QobuzUnavailable) as exc:
-                    log.info(
-                        f"  upgrade view refresh skipped after downsample: {exc}")
         elif res.get("errors"):
             failed_albums += 1
         else:
@@ -2474,6 +3028,11 @@ def execute_downsamples(
                f"{format_size(total_saved)} smaller." + _kept_originals_note())
     for part in skip_parts():
         summary += f" {part}."
+    if state_refresh_warnings:
+        summary += (
+            " The files were changed, but the saved Upgrade view needs a "
+            "Library refresh."
+        )
     job.summary = summary
     log.info(summary)
     if total_errors:
@@ -2541,13 +3100,27 @@ def _repair_album_outcome(album_dir, name, token):
     out["verified_ok"] = scan["verified_ok"]
     out["unverified"] = scan.get("unverified", 0)
     truncated = scan["verified_truncated"]
+    suspicious = [
+        entry
+        for bucket in ("isrc_no_match", "no_isrc_tag", "isrc_mismatch")
+        for entry in scan.get(bucket, [])
+        if entry.get("diagnostic")
+    ]
+    premise = None
+    if truncated or suspicious:
+        from qobuz_librarian.library.candidate_premise import capture
+
+        premise = capture("repair", album_dir)
     if truncated:
         detail = _repair_damage_detail(truncated)
+        payload = {"album_dir": str(album_dir), "artist_name": name,
+                   "verified_truncated": truncated}
+        if premise is not None:
+            payload["_premise"] = premise
         out["specs"].append({
             "kind": "repair", "title": album_dir.name, "artist": name,
             "detail": detail,
-            "payload": {"album_dir": str(album_dir), "artist_name": name,
-                        "verified_truncated": truncated}})
+            "payload": payload})
         # The sweep opens by promising that problems appear in the log, so each
         # flagged album has to say so as it is found. Without this the log runs
         # empty for hours and then a review appears from nowhere.
@@ -2568,12 +3141,6 @@ def _repair_album_outcome(album_dir, name, token):
     # confirms it in review). Every bucket that can hold one carries them: no
     # ISRC at all, an ISRC Qobuz doesn't know, or an ISRC that names some other
     # song (where a single-track refill would fetch that other song).
-    suspicious = [
-        entry
-        for bucket in ("isrc_no_match", "no_isrc_tag", "isrc_mismatch")
-        for entry in scan.get(bucket, [])
-        if entry.get("diagnostic")
-    ]
     if suspicious:
         matched = find_qobuz_album_for_dir(album_dir, name, token)
         if matched and matched.get("id"):
@@ -2582,12 +3149,18 @@ def _repair_album_outcome(album_dir, name, token):
             detail = (f"{plural(len(suspicious), 'damaged file')} can't be "
                       f"verified by ID. Re-download the whole album fresh "
                       f"as “{m_title}” ({m_year})")
+            payload = {"album_dir": str(album_dir), "artist_name": name,
+                       "album_id": matched.get("id"),
+                       "matched_title": m_title}
+            if premise is not None:
+                payload["_premise"] = {
+                    **premise,
+                    "kind": "repair-redownload",
+                }
             out["specs"].append({
                 "kind": "redownload", "title": album_dir.name, "artist": name,
                 "detail": detail,
-                "payload": {"album_dir": str(album_dir), "artist_name": name,
-                            "album_id": matched.get("id"),
-                            "matched_title": m_title}})
+                "payload": payload})
             # The sweep promises every problem reaches the log. A re-download
             # candidate is a problem, and without this it produced a review
             # card and no line at all, so hours of scanning read as idle and
@@ -2618,6 +3191,9 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
     cancel; AuthLost / QobuzUnavailable propagate so the caller can stop the
     sweep."""
     name = artist_dir.name
+    proof_before = _capture_repair_artist_proof(artist_dir)
+    if proof_before is None:
+        raise OSError("artist files could not be sealed before Repair checked them")
     agg = {"verified_ok": 0, "unverified": 0, "failed": 0, "checked": 0,
            "specs": []}
     for album_dir in list_artist_album_dirs(artist_dir):
@@ -2633,6 +3209,10 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
             log.info(w)
         if beat is not None:
             _emit_repair_heartbeat(beat, job, name)
+    proof_after = _capture_repair_artist_proof(artist_dir)
+    if proof_after is None or proof_after != proof_before:
+        raise OSError("artist files changed while Repair was checking them")
+    agg["proof"] = proof_after
     return name, agg
 
 
@@ -2711,32 +3291,45 @@ def scan_repairs(job, token):
     if not artists:
         _set_empty_library_summary(job)
         return
-    # Resume an interrupted sweep: skip the artists already checked and
-    # restore the damaged albums they turned up.
+    # Resume only per-artist verdicts whose exact byte proof still matches.
+    # Legacy/global checkpoints are deliberately treated as hints to rescan.
     cp = scan_checkpoint.load("repair")
-    scanned = set(cp["scanned"]) if cp else set()
+    checkpoint_artists = (
+        cp.get("artists", {})
+        if cp and cp.get("meta", {}).get("repair_checkpoint_version")
+        == _REPAIR_CHECKPOINT_VERSION
+        else {}
+    )
+    scanned = set()
+    repair_bundles = {}
     total = 0
-    saved_counts = (cp.get("meta", {}).get("repair_counts", {}) if cp else {})
-    if not isinstance(saved_counts, dict):
-        saved_counts = {}
-
-    def saved_count(name):
-        value = saved_counts.get(name, 0)
-        return value if isinstance(value, int) and value >= 0 else 0
-
-    # These counts belong to completed artists, so they resume with those
-    # artists. Artist-level failures stay current-pass only because the artist
-    # remains unscanned and will be retried.
-    n_verified = saved_count("verified_ok")
-    n_unverified = saved_count("unverified")
-    n_failed_albums = saved_count("failed_albums")
+    n_verified = 0
+    n_unverified = 0
+    n_failed_albums = 0
     n_failed_artists = 0
     if cp:
-        for c in cp["candidates"]:
-            _readd_candidate(job, c)
-            total += 1
-        log.info(f"Resuming. {plural(len(scanned), 'artist')} already checked, "
-                 f"{plural(total, 'album')} flagged so far.")
+        for artist_dir in artists:
+            bundle = _validated_repair_checkpoint_bundle(
+                artist_dir,
+                checkpoint_artists.get(artist_dir.name),
+            )
+            if bundle is None:
+                continue
+            repair_bundles[artist_dir.name] = bundle
+            scanned.add(artist_dir.name)
+            counts = bundle["counts"]
+            n_verified += counts["verified_ok"]
+            n_unverified += counts["unverified"]
+            n_failed_albums += counts["failed_albums"]
+            for spec in bundle["candidates"]:
+                _readd_candidate(job, spec)
+                total += 1
+        recheck = len(artists) - len(scanned)
+        log.info(
+            f"Resuming. Reusing {plural(len(scanned), 'unchanged artist')}; "
+            f"checking {plural(recheck, 'changed or unproven artist')} again. "
+            f"{plural(total, 'album')} flagged so far."
+        )
     log.info(f"Scanning {plural(len(artists), 'artist')} for damaged files. "
              "Only problems are listed below; expect long quiet stretches. "
              "Slow on a big library.")
@@ -2744,6 +3337,34 @@ def scan_repairs(job, token):
     n = len(artists)
     done = len(scanned)
     since_save = 0
+    checkpoint_warning = False
+
+    def warn_checkpoint(message):
+        nonlocal checkpoint_warning
+        if checkpoint_warning:
+            return
+        checkpoint_warning = True
+        log.info(message)
+        if hasattr(job, "push_line"):
+            job.push_line(message)
+
+    def save_checkpoint():
+        saved = scan_checkpoint.save(
+            "repair",
+            scanned,
+            [],
+            {},
+            artists=repair_bundles,
+            meta={
+                "repair_checkpoint_version": _REPAIR_CHECKPOINT_VERSION,
+            },
+        )
+        if saved is False:
+            warn_checkpoint(
+                "Repair progress could not be saved. Check the data folder; "
+                "an interruption will recheck these artists."
+            )
+        return saved
     # Shared heartbeat state: workers bump it per album and one logs the periodic
     # line when due, so progress keeps showing even while every worker is deep in
     # one large artist and no future has completed (see _emit_repair_heartbeat).
@@ -2774,7 +3395,13 @@ def scan_repairs(job, token):
                 job.summary = stopped + _repair_scan_caveats(
                     n_unverified, n_failed_albums, n_failed_artists)
                 log.info("Cancelled. Stopping scan.")
-                scan_checkpoint.clear("repair")
+                if scan_checkpoint.clear("repair") is False:
+                    warning = (
+                        " Old resume data could not be cleared; check the data "
+                        "folder before running Repair again."
+                    )
+                    job.summary += warning
+                    warn_checkpoint(warning.strip())
                 return
             done += 1
             try:
@@ -2785,6 +3412,8 @@ def scan_repairs(job, token):
                 # The checkpoint stays, so it resumes once auth/network is back.
                 for f in futures:
                     f.cancel()
+                if scanned:
+                    save_checkpoint()
                 raise
             except Exception as e:
                 # A per-artist failure (not auth/outage) is left unscanned so a
@@ -2805,7 +3434,13 @@ def scan_repairs(job, token):
             for spec in agg["specs"]:
                 job.add_candidate(**spec)
                 total += 1
-            scanned.add(name)
+            if not agg["failed"]:
+                scanned.add(name)
+                repair_bundles[name] = _repair_checkpoint_bundle(
+                    name,
+                    agg,
+                    agg["proof"],
+                )
             with beat["lock"]:
                 beat["artists"] = done
                 beat["flagged"] = total
@@ -2817,20 +3452,8 @@ def scan_repairs(job, token):
             since_save += 1
             if since_save >= _CHECKPOINT_EVERY:
                 since_save = 0
-                scan_checkpoint.save(
-                    "repair",
-                    scanned,
-                    job.candidates,
-                    {},
-                    meta={
-                        "repair_counts": {
-                            "verified_ok": n_verified,
-                            "unverified": n_unverified,
-                            "failed_albums": n_failed_albums,
-                        }
-                    },
-                )
-    scan_checkpoint.clear("repair")
+                save_checkpoint()
+    clear_failed = scan_checkpoint.clear("repair") is False
     # Honest summary: report what was actually decode-verified, and never
     # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
@@ -2843,10 +3466,20 @@ def scan_repairs(job, token):
         job.summary = (f"No damaged files found. "
                        f"{plural(n_verified, 'track')} decode-verified intact."
                        + caveats)
+    if clear_failed:
+        job.summary += (
+            " Old resume data could not be cleared. Check the data folder "
+            "before running Repair again."
+        )
+        warn_checkpoint(
+            "Repair finished, but its old resume data could not be cleared. "
+            "Check the data folder before running Repair again."
+        )
     log.info(job.summary)
 
 
-def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
+def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
+                              expected_album_receipt=None):
     """Re-fetch a whole album whose damaged file couldn't be ID-verified.
 
     The folder is moved aside first so beets imports a clean copy instead of
@@ -2890,7 +3523,25 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None):
                  "leaving Repair alone.")
         return {"imported": False, "n_ok": 0,
                 "result": "catalogue_snapshot_failed"}
-    backup = backup_album_dir(album_dir) if album_dir.exists() else None
+    expected_generation = getattr(token, "credential_generation", "")
+    if expected_generation:
+        from qobuz_librarian.api.auth import QobuzAccess
+        from qobuz_librarian.api.client import authorize_qobuz_action
+
+        token = authorize_qobuz_action(
+            QobuzAccess.DOWNLOAD_ACTION,
+            expected_generation=expected_generation,
+        ).token
+    backup = None
+    if album_dir.exists():
+        backup = (
+            backup_album_dir(
+                album_dir,
+                expected_receipt=expected_album_receipt,
+            )
+            if expected_album_receipt is not None
+            else backup_album_dir(album_dir)
+        )
     if backup is not None and not backup.complete:
         _recover_incomplete_upgrade_backup(
             backup, album_dir, operation="repair backup")
@@ -3150,6 +3801,9 @@ def _checkpoint_repair_recovery(job, recovery):
 def execute_repairs(job, chosen, token):
     """Refill ISRC-verified truncated tracks, or re-download whole albums
     whose damage couldn't be ID-verified, depending on each candidate."""
+    from qobuz_librarian.library.candidate_premise import (
+        validate as validate_candidate_premise,
+    )
     from qobuz_librarian.modes.repair import (
         RepairRecoveryRequired,
         repair_album_dir,
@@ -3160,9 +3814,39 @@ def execute_repairs(job, chosen, token):
     args = build_args()
     fixed = 0
     failed = 0
+    failed_cands = []
     interrupted = 0
     processed = 0
     stopped_early = False
+    unfinished_start = None
+
+    def return_unfinished(current_index, *, include_current=True):
+        if (not job._imported_any
+                and not getattr(job, "recoveries", None)):
+            return True
+        start = current_index if include_current else current_index + 1
+        leftovers = failed_cands + chosen[start:]
+        saved = _return_qobuz_review_picks(
+            leftovers,
+            "repair",
+            execute_args=getattr(job, "execute_args", None),
+        )
+        recovery_count = len(getattr(job, "recoveries", []) or [])
+        job.summary = (
+            f"Qobuz stopped after {plural(fixed, 'album')} repaired. "
+            f"{plural(len(leftovers), 'album')} selected for retry."
+        )
+        if recovery_count:
+            job.summary += (
+                f" {plural(recovery_count, 'backup')} kept for recovery."
+            )
+        if saved is False:
+            job.error = (
+                "Retry choices could not be saved. Check the data folder, "
+                "then run a fresh Repair scan."
+            )
+        return saved
+
     for i, cand in enumerate(chosen, 1):
         if job.cancel_requested:
             stopped_early = True
@@ -3179,16 +3863,19 @@ def execute_repairs(job, chosen, token):
         _note_staging_wait(job, "Repairing damaged albums", i, len(chosen))
         try:
             if cand.get("kind") == "redownload":
+                premise = validate_candidate_premise(cand)
                 # _redownload_damaged_album takes the staging lock itself.
                 result = _redownload_damaged_album(
                     p,
                     token,
+                    expected_album_receipt=premise["receipt"],
                     recovery_checkpoint=lambda recovery: (
                         _checkpoint_repair_recovery(job, recovery)
                     ),
                 )
             else:
                 with staging_lock():
+                    validate_candidate_premise(cand)
                     result = repair_album_dir(Path(p["album_dir"]),
                                               p["verified_truncated"],
                                               p["artist_name"], args, token,
@@ -3202,30 +3889,46 @@ def execute_repairs(job, chosen, token):
             _checkpoint_repair_recovery(job, exc.recovery)
             if job.cancel_requested:
                 stopped_early = True
+                unfinished_start = processed
                 break
             if isinstance(exc.cause, (AuthLost, QobuzUnavailable, SystemExit)):
+                return_unfinished(i - 1, include_current=False)
                 raise exc.cause
             raise
         except (AuthLost, QobuzUnavailable):
+            return_unfinished(i - 1)
             raise
         except Exception as e:
             log.info(f"  failed: {e}")
             failed += 1
+            failed_cands.append(cand)
             continue
         # Each chosen album was flagged as damaged, so anything that didn't
         # end up downloaded-and-imported is a real failure. A kept backup is
         # not one, a verified repair counts, and the backup is reported in
         # the summary's recovery tail.
+        local_files_changed = bool(
+            result
+            and result.get("imported")
+            and result.get("n_ok", 0) > 0
+        )
+        if local_files_changed:
+            job._imported_any = True
         if result and (
             result.get("result") == "cancelled" or result.get("cancelled")
         ):
             interrupted += 1
             stopped_early = True
+            unfinished_start = processed - 1
         elif (result and result.get("n_ok", 0) > 0 and result.get("imported")
                 and result.get("n_fail", 0) == 0
                 and not result.get("repair_unverified")):
             fixed += 1
             job._imported_any = True
+        else:
+            failed += 1
+            failed_cands.append(cand)
+        if local_files_changed:
             _refresh_after_local_album_change(
                 None,
                 result,
@@ -3235,14 +3938,16 @@ def execute_repairs(job, chosen, token):
                 upgrade=True,
                 downsample=True,
             )
-        else:
-            failed += 1
         if stopped_early:
             break
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
     recovery_count = len(getattr(job, "recoveries", []) or [])
     if stopped_early:
+        if unfinished_start is None:
+            unfinished_start = processed
+        retry_count = len(failed_cands) + len(chosen[unfinished_start:])
+        retry_saved = return_unfinished(unfinished_start)
         parts = [f"{fixed} repaired"]
         if interrupted:
             parts.append(f"{interrupted} interrupted")
@@ -3250,6 +3955,11 @@ def execute_repairs(job, chosen, token):
             parts.append(f"{recovery_count} kept for recovery")
         parts.append(f"{len(chosen) - processed} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
+        if retry_count and retry_saved is not False:
+            job.summary += (
+                f" {plural(retry_count, 'retry choice')} returned to Repair, "
+                "selected for retry."
+            )
         log.info(job.summary)
         from qobuz_librarian.web import jobs as job_mgr
         with job._lock:
@@ -3262,8 +3972,22 @@ def execute_repairs(job, chosen, token):
                    f"Repaired {fixed}/{plural(len(chosen), 'album')}."
                    f"{kept}")
     log.info(job.summary)
+    retry_saved = _return_qobuz_review_picks(
+        failed_cands,
+        "repair",
+        execute_args=getattr(job, "execute_args", None),
+    )
     if failed:
-        job.error = f"{failed} of {plural(len(chosen), 'album')} couldn't be repaired; see the log."
+        job.error = (
+            f"{failed} of {plural(len(chosen), 'album')} couldn't be repaired; "
+            "see the log."
+        )
+        if failed_cands:
+            job.error += (
+                f" {plural(len(failed_cands), 'album')} selected for retry."
+                if retry_saved is not False
+                else " Retry choices could not be saved; run a fresh scan."
+            )
         _mark_job_failed(job)
     else:
         _close_completed_job(job)

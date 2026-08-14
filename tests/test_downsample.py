@@ -315,7 +315,8 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
             "flush_warnings": 0,
         },
     )
-    monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: None)
+    monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: True)
+    monkeypatch.setattr(mode.upgrade_state, "remove_album_dir", lambda _path: True)
     monkeypatch.setattr(mode.downsample_state, "update_artist", lambda *_a, **_k: None)
     monkeypatch.setattr(mode.downsample_state, "load", lambda: {})
     monkeypatch.setattr(
@@ -393,7 +394,8 @@ def test_walk_reports_a_flush_warning_as_unfinished_work(
             "flush_warnings": 1,
         },
     )
-    monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: None)
+    monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: True)
+    monkeypatch.setattr(mode.upgrade_state, "remove_album_dir", lambda _path: True)
     monkeypatch.setattr(mode.downsample_state, "update_artist", lambda *_a, **_k: None)
     monkeypatch.setattr(mode.downsample_state, "load", lambda: {})
     monkeypatch.setattr(

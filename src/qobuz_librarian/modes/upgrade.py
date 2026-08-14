@@ -6,7 +6,13 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import download_attention_kind
-from qobuz_librarian.library import downsample_state
+from qobuz_librarian.library import (
+    candidate_premise,
+    downsample_state,
+    generation_state,
+    library_scan_state,
+    new_releases,
+)
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.catalog import (
     find_album_dir_filesystem,
@@ -57,23 +63,64 @@ def _artist_dir_from_upgrade_result(album, result):
 
 
 def _refresh_saved_state_after_upgrade(album, result, token, args):
+    authority = generation_state.load()
+    if (
+        generation_state.output_is_current("library", state=authority)
+        and not library_scan_state.remove_album((album or {}).get("id"))
+    ):
+        generation_state.mark_output_status(
+            "library",
+            "stale",
+            reason="A CLI replacement could not update the saved Library view.",
+        )
+    if not new_releases.note_owned_album(album):
+        if generation_state.output_is_current(
+            "new_releases", state=authority
+        ):
+            generation_state.mark_output_status(
+                "new_releases",
+                "stale",
+                reason="A CLI replacement could not update New Releases.",
+            )
     artist_dir = _artist_dir_from_upgrade_result(album, result)
     if artist_dir is None:
+        surfaces = [
+            surface
+            for surface in ("upgrade", "downsample")
+            if generation_state.output_is_current(surface, state=authority)
+        ]
+        if surfaces:
+            generation_state.invalidate(
+                surfaces,
+                "A CLI replacement could not be tied to one artist folder.",
+            )
         return
     hidden = hidden_mod.load()
-    upgrade_state.update_artist(
+    upgrade_result = upgrade_state.update_artist(
         artist_dir,
         token=token,
         args=args,
         capped=load_capped(),
         hidden=hidden,
     )
+    if not upgrade_result.complete:
+        generation_state.mark_output_status(
+            "upgrade",
+            "stale",
+            reason="Upgrade could not refresh after a CLI replacement.",
+        )
     upgrade_saved = upgrade_state.load()
     review_badges.set_ready(
         "upgrade",
         upgrade_state.has_visible_candidates(upgrade_saved, hidden),
     )
-    downsample_state.update_artist(artist_dir, hidden=hidden)
+    downsample_result = downsample_state.update_artist(artist_dir, hidden=hidden)
+    if not downsample_result.complete:
+        generation_state.mark_output_status(
+            "downsample",
+            "stale",
+            reason="Downsample could not refresh after a CLI replacement.",
+        )
     downsample_saved = downsample_state.load()
     review_badges.set_ready(
         "downsample",
@@ -99,9 +146,24 @@ def run_upgrade_walk_mode(args, token):
     banner("Upgrade walk: saved Library candidates")
 
     saved_state = upgrade_state.load()
-    if not saved_state.get("complete"):
+    authority = generation_state.load()
+    generation = int(authority.get("generation") or 0)
+    output = generation_state.output_state("upgrade", authority)
+    saved_current = bool(
+        generation > 0
+        and saved_state.get("complete")
+        and int(saved_state.get("generation") or 0) == generation
+        and int(saved_state.get("revision") or 0)
+        == int(output.get("revision") or 0)
+        and output.get("status") == "current"
+        and output.get("complete")
+        and str(saved_state.get("quality_signature") or "")
+        == upgrade_state.quality_signature()
+    )
+    if not saved_current:
         log.warning(fmt(C.YELLOW,
-            "  No complete saved upgrade candidates. Run a Library refresh first."))
+            "  Saved Upgrade results are missing, incomplete, or stale. "
+            "Run a Library refresh first."))
         return EXIT_GENERAL
     saved = [
         c for c in upgrade_state.visible_candidates(
@@ -158,6 +220,7 @@ def run_upgrade_walk_mode(args, token):
     n_failed_albums = 0
     n_attention_albums = 0
     n_gone_albums = 0
+    n_stale_albums = 0
     no_answer = False
     interrupted = False
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
@@ -260,6 +323,17 @@ def run_upgrade_walk_mode(args, token):
                 log.info(fmt(C.BOLD + C.WHITE,
                     f"  {label} {truncate(c.get('title') or '?', 55)}"))
                 try:
+                    premise = candidate_premise.validate(c)
+                except candidate_premise.CandidateStale:
+                    log.info(fmt(
+                        C.YELLOW,
+                        "  The local album changed after the Library refresh. "
+                        "It was left unchanged; refresh Library before "
+                        "trying this Upgrade again.",
+                    ))
+                    n_stale_albums += 1
+                    continue
+                try:
                     album = get_album(album_id, token)
                     if not album:
                         log.info(fmt(C.YELLOW,
@@ -271,7 +345,8 @@ def run_upgrade_walk_mode(args, token):
                     _proc_result = process_album(album, args, allow_force=False,
                                   label=label, already_confirmed=True,
                                   upgrade_only=True,
-                                  token=token)
+                                  token=token,
+                                  expected_album_receipt=premise["receipt"])
                 except AuthLost:
                     raise
 
@@ -340,7 +415,8 @@ def run_upgrade_walk_mode(args, token):
 
     n_failed_attempts = (n_failed_albums + n_unverified_albums
                          + n_attention_albums
-                         + n_catalogue_failed + n_gone_albums)
+                         + n_catalogue_failed + n_gone_albums
+                         + n_stale_albums)
     n_gone = n_stale_candidates + n_gone_albums
 
     log.info("")
@@ -365,6 +441,12 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_gone, 'candidate')} no longer in the library. "
             "Run a Library refresh to clear them."))
+    if n_stale_albums:
+        log.info(fmt(
+            C.YELLOW,
+            f"     ⚠  {plural(n_stale_albums, 'candidate')} changed after "
+            "the saved review. Refresh Library before retrying.",
+        ))
     if n_catalogue_failed:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_catalogue_failed, 'replacement')} needs "

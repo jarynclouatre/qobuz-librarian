@@ -633,6 +633,45 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
                 return False
 
 
+def restore_split_review(job, parked_job) -> bool:
+    """Atomically restore one review and remove its unpublished remnant.
+
+    The caller holds both job locks after rebuilding ``job.candidates``. This
+    is the inverse of ``admit_review_transition`` for a remote failure that
+    happened before any selected work changed files.
+    """
+    global _admission_ready
+    value = _job_values(job)
+    if value is None or parked_job is job:
+        return False
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            _admission_ready = False
+            return False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(_PERSIST_SQL, value)
+            conn.execute(
+                "DELETE FROM durable_job_completions WHERE job_id=?",
+                (parked_job.id,),
+            )
+            conn.execute(
+                "DELETE FROM post_import_relocation_handoffs WHERE job_id=?",
+                (parked_job.id,),
+            )
+            conn.execute("DELETE FROM jobs WHERE id=?", (parked_job.id,))
+            conn.commit()
+            job._durability_required = True
+            _admission_ready = True
+            return True
+        except sqlite3.Error as exc:
+            _rollback_failed_write(conn)
+            _admission_ready = False
+            _note_write_failure("restore split review", exc)
+            return False
+
+
 def persist_recoveries(job) -> bool:
     """Durably replace only a job's exact Repair-recovery state.
 

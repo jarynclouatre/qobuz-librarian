@@ -37,15 +37,17 @@ def _read() -> dict:
     return data if data is not None else {}
 
 
-def _write(data) -> None:
+def _write(data) -> bool:
     try:
         state_file.write_json(cfg.SCAN_CHECKPOINT_FILE, data, indent=None)
+        return True
     except OSError as e:
         # Surface (verbose) rather than fail completely silent. On a full or
         # read-only data volume an hours-long scan would otherwise save no
         # resumable checkpoint with zero signal.
         from qobuz_librarian.ui_cli.logging import vlog
         vlog(f"scan checkpoint write failed ({e}); resume won't be available")
+        return False
 
 
 def load(kind) -> dict | None:
@@ -74,7 +76,7 @@ def load(kind) -> dict | None:
     return cp
 
 
-def save(kind, scanned, candidates, seen, artists=None, meta=None) -> None:
+def save(kind, scanned, candidates, seen, artists=None, meta=None) -> bool:
     with _lock:
         data = _read()
         data[kind] = {
@@ -85,24 +87,27 @@ def save(kind, scanned, candidates, seen, artists=None, meta=None) -> None:
             "meta": meta or {},
             "ts": time.time(),
         }
-        _write(data)
+        return _write(data)
 
 
-def clear(kind) -> None:
+def clear(kind) -> bool:
     with _lock:
         data = _read()
         if kind not in data:
-            return
+            return True
         del data[kind]
         if data:
-            _write(data)
-            return
+            return _write(data)
         try:
             cfg.SCAN_CHECKPOINT_FILE.unlink()
+            return True
         except FileNotFoundError:
-            pass
-        except OSError:
-            pass
+            return True
+        except OSError as e:
+            from qobuz_librarian.ui_cli.logging import vlog
+
+            vlog(f"scan checkpoint clear failed ({e}); stale resume data remains")
+            return False
 
 
 def pending() -> dict | None:

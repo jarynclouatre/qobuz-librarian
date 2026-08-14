@@ -98,8 +98,13 @@
 </div>
 {% elif error == "needuser" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Enter your Qobuz account email or user ID as well. The token cannot be
-  used by itself.</span>
+  <span>Add your Qobuz account email or user ID to enable downloads. Your token
+  can still be used for Search and catalogue scans.</span>
+</div>
+{% elif error == "credsbusy" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>The account was not changed because Qobuz work is already running.
+  Wait for that album or scan to finish, then try again.</span>
 </div>
 {% elif error == "invalidsettings" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
@@ -145,6 +150,12 @@
       <span class="ql-badge ql-badge-primary">Required for search</span>
       {% endif %}
     </div>
+    {% if auth_token_set and not downloader_ready %}
+    <div class="ql-notice ql-notice-warning">
+      <span>Your token can use Search and catalogue scans. Downloads also need
+      your Qobuz email or user ID; add it below when you are ready.</span>
+    </div>
+    {% endif %}
     {% if not auth_token_set %}
     <details class="ql-settings-details">
       <summary class="ql-disclosure-summary">How do I find my token?</summary>
@@ -187,13 +198,14 @@
     <form action="/settings" method="post" class="ql-settings-form ql-credentials-form">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <div class="ql-field">
-        <label class="ql-field-label" for="user_id">Email or user ID <span class="ql-required" aria-hidden="true">*</span></label>
+        <label class="ql-field-label" for="user_id">Email or user ID <span class="ql-field-optional">Optional for scans</span></label>
         <input type="text" name="user_id" id="user_id" value="{{ user_id or '' }}"
                placeholder="name@example.com or numeric ID"
                {% if env_user_id_set %}disabled aria-disabled="true"{% endif %}
                class="ql-input max-w-lg">
         <p class="ql-field-help">
-          Your Qobuz email or numeric user ID.
+          Needed by the downloader; a token by itself still supports Search,
+          Library, New Releases, and Repair scans.
         </p>
       </div>
       <div class="ql-field">

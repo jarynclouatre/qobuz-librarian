@@ -3,8 +3,23 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from qobuz_librarian.library.downsample import DownsampleCandidate
 from qobuz_librarian.web import jobs as jm
+
+
+def _allow_legacy_candidate_execution(monkeypatch):
+    from qobuz_librarian.library import candidate_premise
+
+    monkeypatch.setattr(
+        candidate_premise,
+        "validate",
+        lambda candidate: {
+            "kind": candidate_premise.expected_kind(candidate),
+            "receipt": None,
+        },
+    )
 
 
 def _candidate(album_dir: Path):
@@ -86,6 +101,36 @@ def test_baseline_scan_refreshes_shared_downsample_state(tmp_path, monkeypatch):
     assert calls == [["Artist"]]
 
 
+def test_scan_library_reuses_checkpoint_from_interrupted_publication(monkeypatch):
+    from qobuz_librarian.web import flows
+
+    previous = {
+        "generation": 4,
+        "catalog_complete": True,
+        "latest_attempt": {"id": 10, "status": "complete"},
+        "outputs": {},
+    }
+    captured = {}
+    monkeypatch.setattr(flows.generation_state, "load", lambda: previous)
+    monkeypatch.setattr(
+        flows.generation_state,
+        "library_publication_incomplete",
+        lambda state: state is previous,
+    )
+    monkeypatch.setattr(flows.generation_state, "begin_attempt", lambda: 11)
+    monkeypatch.setattr(flows.generation_state, "revision", lambda: 12)
+
+    def _capture(_job, _token, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(flows, "_scan_library_impl", _capture)
+
+    flows.scan_library(jm.Job(title="baseline"), "tok")
+
+    assert captured["allow_checkpoint_resume"] is True
+    assert captured["attempt_id"] == 11
+
+
 def test_upgrade_scan_uses_shared_refresh_state(tmp_path, monkeypatch):
     from qobuz_librarian.quality import upgrade_state
     from qobuz_librarian.web import flows
@@ -122,9 +167,12 @@ def test_upgrade_scan_uses_shared_refresh_state(tmp_path, monkeypatch):
 def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypatch):
     from qobuz_librarian.web import flows
 
+    _allow_legacy_candidate_execution(monkeypatch)
+
     album_dir = tmp_path / "Artist" / "Album"
     album_dir.mkdir(parents=True)
     refreshed = []
+    suppressed = []
 
     monkeypatch.setattr(
         "qobuz_librarian.integrations.downsample_engine.HAVE_DOWNSAMPLE", True)
@@ -134,6 +182,18 @@ def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypat
     monkeypatch.setattr(flows.downsample_state, "update_artist",
                         lambda artist_dir, **kwargs: refreshed.append(artist_dir.name)
                         or SimpleNamespace(complete=True, candidates=[]))
+    monkeypatch.setattr(
+        flows.upgrade_state,
+        "remove_album_dir",
+        lambda path: suppressed.append(path) or True,
+    )
+    monkeypatch.setattr(
+        flows,
+        "_refresh_upgrade_artist_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Downsample must not contact Qobuz")
+        ),
+    )
     monkeypatch.setattr(flows.review_badges, "set_ready", lambda *a, **k: None)
     job = jm.Job(title="downsample")
 
@@ -144,6 +204,7 @@ def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypat
     }])
 
     assert refreshed == ["Artist"]
+    assert suppressed == [album_dir]
 
 
 
@@ -151,6 +212,8 @@ def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypat
 def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
         tmp_path, monkeypatch):
     from qobuz_librarian.web import flows
+
+    _allow_legacy_candidate_execution(monkeypatch)
 
     refreshed_upgrade = []
     refreshed_downsample = []
@@ -219,11 +282,120 @@ def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
     assert attention_job.attention == "backup"
     assert "backup retained" in attention_job.summary.lower()
 
+
+def test_web_unverified_repair_with_local_change_marks_remote_views_stale(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.web import flows
+
+    _allow_legacy_candidate_execution(monkeypatch)
+
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    marked = []
+
+    monkeypatch.setattr(
+        "qobuz_librarian.modes.repair.repair_album_dir",
+        lambda *args, **kwargs: {
+            "imported": True,
+            "n_ok": 1,
+            "n_fail": 0,
+            "dir": album_dir,
+            "repair_unverified": True,
+        },
+    )
+    monkeypatch.setattr(flows.generation_state, "load", lambda: {})
+    monkeypatch.setattr(
+        flows.generation_state,
+        "output_is_current",
+        lambda surface, **kwargs: surface in {"library", "new_releases"},
+    )
+    monkeypatch.setattr(
+        flows.generation_state,
+        "mark_output_status",
+        lambda surface, status, **kwargs: marked.append((surface, status)) or True,
+    )
+    monkeypatch.setattr(
+        flows,
+        "_refresh_upgrade_artist_state",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        flows,
+        "_refresh_downsample_artist_state",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(flows, "_return_qobuz_review_picks", lambda *a, **k: True)
+    monkeypatch.setattr(flows.time, "sleep", lambda *_: None)
+    job = jm.Job(title="repair", status=jm.JobStatus.RUNNING)
+
+    flows.execute_repairs(job, [{
+        "kind": "repair",
+        "artist": "Artist",
+        "title": "Album",
+        "payload": {
+            "album_dir": str(album_dir),
+            "artist_name": "Artist",
+            "verified_truncated": [],
+        },
+    }], "tok")
+
+    assert marked == [("library", "stale"), ("new_releases", "stale")]
+
+
+def test_whole_album_repair_rechecks_download_access_before_backup(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.api import client
+    from qobuz_librarian.api.auth import DownloaderNotReady, credentials_from_values
+    from qobuz_librarian.integrations import beets
+    from qobuz_librarian.library import backup
+    from qobuz_librarian.web import flows
+
+    credentials = credentials_from_values("", "token", source="streamrip")
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    backup_calls = []
+
+    monkeypatch.setattr(
+        flows,
+        "get_album",
+        lambda album_id, token: {
+            "id": album_id,
+            "title": "Album",
+            "artist": {"name": "Artist"},
+            "tracks": {"items": []},
+        },
+    )
+    monkeypatch.setattr(beets, "capture_beets_album_entries", lambda path: [])
+    monkeypatch.setattr(
+        backup,
+        "backup_album_dir",
+        lambda *args, **kwargs: backup_calls.append(True),
+    )
+    monkeypatch.setattr(
+        client,
+        "authorize_qobuz_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(DownloaderNotReady()),
+    )
+
+    with pytest.raises(DownloaderNotReady):
+        flows._redownload_damaged_album(
+            {
+                "album_id": "album",
+                "album_dir": str(album_dir),
+                "artist_name": "Artist",
+            },
+            credentials.token,
+        )
+
+    assert backup_calls == []
+
 def test_execute_upgrades_marks_partial_cap_before_refresh(
         tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.quality import decision
     from qobuz_librarian.web import flows
+
+    _allow_legacy_candidate_execution(monkeypatch)
 
     monkeypatch.setattr(cfg, "CAPPED_FILE", tmp_path / "capped.json")
     album_dir = tmp_path / "Artist" / "Album"
@@ -525,7 +697,7 @@ def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkey
     state = library_scan_state.kind_state("missing")
     assert state["complete"] is True
     assert sorted(state["artists"]) == ["Good", "Next"]
-    assert job.execute_args["_library_review_generation"] == state["updated_at"]
+    assert job.execute_args["_library_review_generation"] == state["generation"]
     assert flows.scan_checkpoint.load("missing") is None
 
 
@@ -936,6 +1108,8 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
     assert marked["baseline_limit"] is None
     assert "3 artists couldn't be checked" in job.summary
     assert "Recorded a fresh baseline" not in job.summary
+    assert job.status is jm.JobStatus.FAILED
+    assert job.error == "The New Releases check did not complete."
 
 
 def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
@@ -966,6 +1140,62 @@ def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
     flows.scan_new_releases(job, "tok")
 
     assert "couldn't be saved" in job.summary
+    assert job.status is jm.JobStatus.FAILED
+    assert job.error == "The New Releases check did not complete."
+
+
+def test_partial_new_release_find_stays_reviewable(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows
+
+    good = tmp_path / "Good"
+    failed = tmp_path / "Failed"
+    good.mkdir()
+    failed.mkdir()
+
+    def _find(name, **_kwargs):
+        if name == "Failed":
+            raise RuntimeError("temporary failure")
+        return SimpleNamespace(
+            artist_id="artist-id",
+            fetch_failed=False,
+            current_ids=["old", "new"],
+            new_gaps=[object()],
+            artist_name="Good",
+        )
+
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(flows, "list_library_artists", lambda: [good, failed])
+    monkeypatch.setattr(flows, "find_new_releases_for_artist", _find)
+    monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
+        "seen": {"artist-id": ["old"]},
+        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
+    })
+    monkeypatch.setattr(
+        flows.new_releases_mod,
+        "mark_run",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        flows,
+        "_add_gap_candidate",
+        lambda job, *_args, **_kwargs: job.add_candidate(
+            kind="album",
+            title="New album",
+            artist="Good",
+            detail="2026",
+            payload={"album_id": "new"},
+            selected=False,
+        ),
+    )
+    job = jm.Job(title="new releases")
+
+    flows.scan_new_releases(job, "tok")
+
+    assert len(job.candidates) == 1
+    assert job.status is jm.JobStatus.PENDING
+    assert job.error is None
+    assert "1 artist couldn't be checked" in job.summary
 
 
 

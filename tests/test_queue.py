@@ -74,6 +74,90 @@ def test_build_queue_item_defaults_and_copies_siblings():
     assert len(item["siblings_to_delete"]) == 2
 
 
+def test_download_executor_checks_bound_credentials_before_file_preflight(
+        monkeypatch):
+    from qobuz_librarian.api.auth import (
+        CredentialChanged,
+        credentials_from_values,
+    )
+    from qobuz_librarian.queue import executor
+
+    credentials = credentials_from_values(
+        "user",
+        "token",
+        source="streamrip",
+    )
+    file_preflight = []
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.authorize_qobuz_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(CredentialChanged()),
+    )
+    monkeypatch.setattr(
+        executor,
+        "staging_preflight",
+        lambda _args: file_preflight.append(True),
+    )
+
+    with pytest.raises(CredentialChanged):
+        executor._execute_download_queue(
+            [_qitem()],
+            Namespace(dry_run=False),
+            credentials.token,
+        )
+
+    assert file_preflight == []
+
+
+def test_download_executor_rechecks_credentials_when_item_reaches_worker(
+        monkeypatch):
+    from qobuz_librarian.api.auth import (
+        CredentialChanged,
+        credentials_from_values,
+    )
+    from qobuz_librarian.queue import executor
+
+    credentials = credentials_from_values(
+        "user",
+        "token",
+        source="streamrip",
+    )
+    calls = []
+
+    def authorize(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            return credentials
+        raise CredentialChanged()
+
+    file_preflight = []
+    downloads = []
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.authorize_qobuz_action",
+        authorize,
+    )
+    monkeypatch.setattr(
+        executor,
+        "staging_preflight",
+        lambda _args: file_preflight.append(True),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_download_for_queue_item",
+        lambda _item: downloads.append(True),
+    )
+
+    with pytest.raises(CredentialChanged):
+        executor._execute_download_queue(
+            [_qitem(album_dir=None)],
+            Namespace(dry_run=False),
+            credentials.token,
+        )
+
+    assert len(calls) == 2
+    assert file_preflight == []
+    assert downloads == []
+
+
 def test_queue_item_round_trips_and_resets_runtime_fields():
     item = _qitem(album={"id": "42", "title": "Round Trip"}, auto_upgrade=True,
                   siblings_to_delete=[Path("/music/old-edition")], quality=3)
@@ -84,6 +168,132 @@ def test_queue_item_round_trips_and_resets_runtime_fields():
     assert restored["quality"] == 3
     # Runtime accounting is per-run state, not persisted, and resets on restore.
     assert restored["n_ok"] == 0 and restored["imported"] is False
+
+
+def test_queue_item_round_trip_preserves_exact_local_premise(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    source = album_dir / "01.flac"
+    source.write_bytes(b"reviewed bytes")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+
+    item = _qitem(album_dir=album_dir, present=[{"id": "track-1"}])
+    restored = _deserialize_queue_item(_serialize_queue_item(item))
+
+    assert restored["_source_premise"] == item["_source_premise"]
+    assert restored["_source_premise"]["path"] == str(album_dir)
+    assert restored["_gap_fill_receipts"] == item["_gap_fill_receipts"]
+    assert restored["_gap_fill_receipts"]["01.flac"]["sha256"]
+
+
+def test_legacy_queue_item_without_source_premise_fails_closed():
+    planned = _serialize_queue_item(_qitem(album_dir=None))
+    planned.pop("source_premise")
+
+    with pytest.raises(ValueError, match="invalid schema"):
+        _deserialize_queue_item(planned)
+
+
+def test_queue_download_passes_reviewed_receipts_to_gap_fill_backup(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.queue import executor
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01.flac").write_bytes(b"reviewed bytes")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    item = _qitem(
+        album_dir=album_dir,
+        missing=[{"id": "track-2"}],
+        present=[{"id": "track-1"}],
+    )
+    item["snapshot_before"] = set()
+    executor._validate_queue_item_premise(item)
+
+    calls = []
+    monkeypatch.setattr(
+        executor,
+        "run_album_download",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    executor._download_for_queue_item(item)
+
+    assert calls[0]["expected_gap_fill_receipts"] == (
+        item["_gap_fill_receipts"]
+    )
+
+
+def test_queued_missing_album_is_refused_if_it_appears_locally(monkeypatch):
+    from qobuz_librarian.library.candidate_premise import CandidateStale
+    from qobuz_librarian.queue import executor
+
+    item = _qitem(album_dir=None)
+    monkeypatch.setattr(
+        executor,
+        "find_album_dir_filesystem",
+        lambda _album: Path("/music/Artist/Album"),
+    )
+
+    with pytest.raises(CandidateStale, match="appeared locally"):
+        executor._validate_queue_item_premise(item)
+
+
+def test_executor_refuses_changed_queued_album_before_download(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.queue import executor
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    source = album_dir / "01.flac"
+    source.write_bytes(b"reviewed bytes")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    item = _qitem(
+        album_dir=album_dir,
+        missing=[{"id": "track-2"}],
+        present=[{"id": "track-1"}],
+    )
+    source.write_bytes(b"replacement bytes")
+
+    file_preflight = []
+    downloads = []
+    monkeypatch.setattr(
+        executor,
+        "staging_preflight",
+        lambda _args: file_preflight.append(True),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_download_for_queue_item",
+        lambda _item: downloads.append(True),
+    )
+    monkeypatch.setattr(executor, "is_cancel_requested", lambda: False)
+
+    queue = [item]
+    results, drained = executor._execute_download_queue(
+        queue,
+        Namespace(
+            dry_run=False,
+            no_import=True,
+            no_downsample=True,
+            consolidate=False,
+        ),
+        token=None,
+    )
+
+    assert drained is True
+    assert queue == []
+    assert file_preflight == [True]
+    assert downloads == []
+    assert results[-1]["result"] == "stale_candidate"
+    assert source.read_bytes() == b"replacement bytes"
 
 
 def test_pending_queue_round_trips_and_clears(tmp_path, monkeypatch):

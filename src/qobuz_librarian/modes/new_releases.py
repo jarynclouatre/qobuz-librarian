@@ -13,9 +13,10 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import (
     AuthLost,
     NoCredsError,
+    QobuzAccess,
     QobuzUnavailable,
-    load_qobuz_token,
 )
+from qobuz_librarian.api.client import authorize_qobuz_action
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import new_releases as new_releases_mod
 from qobuz_librarian.library.discovery import (
@@ -40,8 +41,15 @@ def run_check_new_releases_mode(args):
     library records the baseline and surfaces nothing, matching the web's
     first-touch contract.
     """
+    if not new_releases_mod.is_baseline_complete():
+        die(fmt(C.YELLOW,
+            "No new-release baseline exists yet. Run a Library refresh first."),
+            EXIT_GENERAL)
+
     try:
-        _user_id, token = load_qobuz_token()
+        token = authorize_qobuz_action(
+            QobuzAccess.CATALOGUE_ACTION
+        ).token
     except NoCredsError:
         die(fmt(C.RED,
             "✗  No Qobuz credentials configured.\n"
@@ -49,11 +57,6 @@ def run_check_new_releases_mode(args):
             f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
             "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
             EXIT_AUTH)
-
-    if not new_releases_mod.is_baseline_complete():
-        die(fmt(C.YELLOW,
-            "No new-release baseline exists yet. Run a Library refresh first."),
-            EXIT_GENERAL)
 
     clear_scan_caches()
     artists = list_library_artists()

@@ -4,8 +4,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
-from qobuz_librarian.api.client import _retry_after, qobuz_get, request_deadline
+from qobuz_librarian.api.auth import (
+    AuthLost,
+    AuthOutcome,
+    CredentialChanged,
+    DownloaderNotReady,
+    QobuzAccess,
+    QobuzError,
+    QobuzUnavailable,
+    credentials_from_values,
+)
+from qobuz_librarian.api.client import (
+    _retry_after,
+    authorize_bound_download,
+    authorize_qobuz_action,
+    bind_download_preflight,
+    probe_qobuz,
+    qobuz_get,
+    request_deadline,
+)
 
 
 def _response(status_code=200, json_data=None, text=""):
@@ -53,23 +70,150 @@ def test_qobuz_get_retries_429_but_not_404():
         assert not isinstance(QobuzUnavailable(), QobuzError)  # distinct signals
 
 
-def test_qobuz_get_reports_token_validity(monkeypatch):
-    # The dashboard banner listens for auth state.
+def test_qobuz_get_reports_generation_bound_auth_evidence(monkeypatch):
     from qobuz_librarian.api import auth
+
+    credentials = credentials_from_values("user", "tok", source="streamrip")
     seen = []
     monkeypatch.setattr(auth, "_auth_state_listeners", [seen.append])
     with patch("qobuz_librarian.api.client._get_session") as sess:
         sess.return_value.get.return_value = _response(200, {"ok": True})
-        qobuz_get("album/search", {}, "tok")
+        qobuz_get("album/search", {}, credentials.token)
     with patch("qobuz_librarian.api.client._get_session") as sess:
-        sess.return_value.get.return_value = _response(404, text="not found")
+        sess.return_value.get.return_value = _response(400, text="bad request")
         with pytest.raises(QobuzError):
-            qobuz_get("album/get", {"album_id": "nope"}, "tok")
+            qobuz_get("album/search", {}, credentials.token)
+    with patch("qobuz_librarian.api.client._get_session") as sess:
+        sess.return_value.get.return_value = _response(403, text="subscription")
+        with pytest.raises(QobuzError):
+            qobuz_get("album/get", {"album_id": "nope"}, credentials.token)
     with patch("qobuz_librarian.api.client._get_session") as sess:
         sess.return_value.get.return_value = _response(401)
         with pytest.raises(AuthLost):
-            qobuz_get("album/search", {}, "bad")
-    assert seen == [True, True, False]
+            qobuz_get("album/search", {}, credentials.token)
+    assert [e.generation for e in seen] == [credentials.generation] * 3
+    assert [e.outcome for e in seen] == [
+        AuthOutcome.ACCEPTED,
+        AuthOutcome.ENTITLEMENT,
+        AuthOutcome.REJECTED,
+    ]
+
+
+def test_unsaved_settings_probe_publishes_no_auth_evidence(monkeypatch):
+    from qobuz_librarian.api import auth
+
+    credentials = credentials_from_values("new-user", "new-token")
+    seen = []
+    monkeypatch.setattr(auth, "_auth_state_listeners", [seen.append])
+    with patch("qobuz_librarian.api.client._get_session") as sess:
+        sess.return_value.get.return_value = _response(401)
+        assert probe_qobuz(
+            credentials.token,
+            report_auth=False,
+        ) is AuthOutcome.REJECTED
+    assert seen == []
+
+
+def test_shared_probe_does_not_call_http_400_a_rejected_token():
+    with patch("qobuz_librarian.api.client._get_session") as session:
+        session.return_value.get.return_value = _response(400, text="bad request")
+        assert probe_qobuz("token") is AuthOutcome.INCONCLUSIVE
+
+
+def test_action_authorization_live_checks_before_reporting_missing_identity(
+        monkeypatch):
+    credentials = credentials_from_values("", "token", source="env")
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.load_qobuz_credentials",
+        lambda: credentials,
+    )
+    with patch("qobuz_librarian.api.client._get_session") as session:
+        session.return_value.get.return_value = _response(200, {"ok": True})
+        with pytest.raises(DownloaderNotReady):
+            authorize_qobuz_action(QobuzAccess.DOWNLOAD_ACTION)
+    assert session.return_value.get.call_count == 1
+
+
+def test_bound_download_runs_and_carries_local_preflight(monkeypatch):
+    from qobuz_librarian.api import client
+
+    credentials = credentials_from_values("user", "token", source="env")
+    events = []
+
+    def authorize(access, **kwargs):
+        events.append(("authorize", access, kwargs["expected_generation"]))
+        return credentials
+
+    token = bind_download_preflight(
+        credentials.token,
+        lambda: events.append(("preflight",)),
+    )
+    monkeypatch.setattr(client, "authorize_qobuz_action", authorize)
+
+    admitted = authorize_bound_download(token)
+    carried = authorize_bound_download(admitted, prepare=False)
+
+    assert carried == credentials.token
+    assert events == [
+        ("authorize", QobuzAccess.DOWNLOAD_ACTION, credentials.generation),
+        ("preflight",),
+        ("authorize", QobuzAccess.DOWNLOAD_ACTION, credentials.generation),
+    ]
+
+
+def test_action_authorization_does_not_trust_cached_rejection(monkeypatch):
+    credentials = credentials_from_values("user", "token", source="streamrip")
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.load_qobuz_credentials",
+        lambda: credentials,
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.read_qobuz_credentials",
+        lambda: credentials,
+    )
+    with patch("qobuz_librarian.api.client._get_session") as session:
+        session.return_value.get.return_value = _response(200, {"ok": True})
+        authorized = authorize_qobuz_action(
+            QobuzAccess.CATALOGUE_ACTION,
+            auth_valid=False,
+        )
+    assert authorized == credentials
+    assert session.return_value.get.call_count == 1
+
+
+def test_action_authorization_rejects_a_generation_change(monkeypatch):
+    before = credentials_from_values("user", "old", source="streamrip")
+    after = credentials_from_values("user", "new", source="streamrip")
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.load_qobuz_credentials",
+        lambda: before,
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.read_qobuz_credentials",
+        lambda: after,
+    )
+    with patch("qobuz_librarian.api.client._get_session") as session:
+        session.return_value.get.return_value = _response(200, {"ok": True})
+        with pytest.raises(CredentialChanged):
+            authorize_qobuz_action(QobuzAccess.CATALOGUE_ACTION)
+
+
+def test_queued_action_rejects_changed_credentials_before_network(monkeypatch):
+    before = credentials_from_values("user", "old", source="streamrip")
+    after = credentials_from_values("user", "new", source="streamrip")
+    monkeypatch.setattr(
+        "qobuz_librarian.api.client.load_qobuz_credentials",
+        lambda: after,
+    )
+
+    with patch("qobuz_librarian.api.client._get_session") as session:
+        with pytest.raises(CredentialChanged):
+            authorize_qobuz_action(
+                QobuzAccess.CATALOGUE_ACTION,
+                expected_generation=before.generation,
+            )
+
+    session.assert_not_called()
 
 
 def test_retry_after_header_parsing():

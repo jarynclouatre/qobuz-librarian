@@ -63,6 +63,11 @@ from qobuz_librarian.library.backup import (
     restore_upgrade_backup,
     warn_pin_failed,
 )
+from qobuz_librarian.library.candidate_premise import (
+    CandidateStale,
+    canonical_premise,
+    validate_premise,
+)
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
     _is_split_album_merge,
@@ -951,6 +956,67 @@ def _download_for_queue_item(item):
         upgrade_only=item["upgrade_only"],
         force_track_by_track=item.get("force_track_by_track", False),
         result=item,
+        expected_gap_fill_receipts=item.get(
+            "_validated_gap_fill_receipts"
+        ),
+    )
+
+
+def _bind_queue_item_premise(item, premise):
+    album_dir = item.get("album_dir")
+    if album_dir is None:
+        item["_validated_source_receipt"] = None
+        item["_validated_gap_fill_receipts"] = None
+        return None
+    if (
+        premise is None
+        or premise["path"] != os.path.abspath(os.fspath(album_dir))
+    ):
+        raise CandidateStale(
+            "The queued album path no longer matches its local receipt. "
+            "Refresh or rescan; nothing was changed."
+        )
+    item["_validated_source_receipt"] = premise["receipt"]
+    item["_validated_gap_fill_receipts"] = item.get("_gap_fill_receipts")
+    return premise
+
+
+def _validate_queue_item_premise(item):
+    """Recheck the exact approved local state when queued work starts."""
+    album_dir = item.get("album_dir")
+    if album_dir is None:
+        clear_scan_caches()
+        if find_album_dir_filesystem(item["album"]) is not None:
+            raise CandidateStale(
+                "This album appeared locally after the download was queued. "
+                "Refresh or rescan; nothing was changed."
+            )
+        item["_validated_source_receipt"] = None
+        item["_validated_gap_fill_receipts"] = None
+        return None
+    premise = validate_premise(item.get("_source_premise"))
+    return _bind_queue_item_premise(item, premise)
+
+
+def _admit_new_queue_items(items, token):
+    """Validate, admit, and revalidate new selections before queue persistence."""
+    items = list(items)
+    for item in items:
+        _validate_queue_item_premise(item)
+    if items:
+        from qobuz_librarian.api.client import authorize_bound_download
+
+        token = authorize_bound_download(token)
+    for item in items:
+        _validate_queue_item_premise(item)
+    return token
+
+
+def _bind_resumed_queue_item_premise(item):
+    """Keep the original seal for exact recovery after mutation began."""
+    return _bind_queue_item_premise(
+        item,
+        canonical_premise(item.get("_source_premise")),
     )
 
 
@@ -1912,7 +1978,8 @@ def _resolve_queue_item(
     _stop = item.get("result")
     if _stop in (
             "cancelled", "interrupted", "disk_full", "io_error", "auth_lost",
-            "import_failed", "upgrade_aborted_backup_failed"):
+            "import_failed", "upgrade_aborted_backup_failed",
+            "stale_candidate"):
         status = _stop
     elif n_ok and (n_retryable or n_lossy_only or outcome_attention):
         status = "partial"
@@ -2002,52 +2069,239 @@ def _sleep_unless_cancelled(seconds, cancel_check, step=0.5):
         time.sleep(min(step, remaining))
 
 
-def _refresh_review_state_after_downloads(results, token, args):
-    """Keep the saved Upgrade/Downsample review state fresh after a CLI download
-    batch. The WebUI reads that saved state, and WEBUI_SCAN_CONTRACT requires CLI
-    file changes to update it too. The web download path does the same via
-    flows._refresh_after_local_album_change. One re-scan per changed artist;
-    best-effort, so a refresh hiccup never fails a download that already landed."""
-    from pathlib import Path
+def _refresh_review_state_after_downloads(
+    changes,
+    token,
+    args,
+    *,
+    allow_upgrade_refresh=True,
+):
+    """Keep every Library-derived saved view truthful after CLI file changes.
 
-    changed = []
-    seen = set()
-    for r in results:
-        if not (r.get("imported") and r.get("n_ok", 0) > 0 and r.get("dir")):
-            continue
-        artist_dir = Path(r["dir"]).parent
-        if str(artist_dir) not in seen:
-            seen.add(str(artist_dir))
-            changed.append(artist_dir)
-    if not changed:
+    Exact album ids can be folded into Library and New Releases. Upgrade and
+    Downsample are re-derived once per changed artist. If identity, discovery,
+    or persistence is uncertain, the corresponding generation output is marked
+    stale instead of leaving its older snapshot current. A bookkeeping failure
+    never changes the already-completed download result.
+    """
+    successful = [
+        change
+        for change in changes
+        if change.get("imported") and change.get("n_ok", 0) > 0
+    ]
+    if not successful:
         return
+
     try:
-        from qobuz_librarian.library import downsample_state
+        from qobuz_librarian.library import generation_state
+
+        authority = generation_state.load()
+        was_current = {
+            surface: generation_state.output_is_current(
+                surface,
+                state=authority,
+            )
+            for surface in generation_state.SURFACES
+        }
+        if generation_state.reserve_revision() is None:
+            log.warning(
+                "  The Library change revision could not be saved after files "
+                "changed. Run a Library refresh before using saved results."
+            )
+    except Exception as exc:
+        log.warning(
+            "  Saved Library state could not be refreshed after files "
+            "changed. Run a Library refresh before using saved results."
+        )
+        vlog(f"post-download generation-state refresh unavailable: {exc}")
+        return
+
+    stale = set()
+
+    def mark_stale(reason):
+        if not stale:
+            return
+        try:
+            saved = generation_state.invalidate(sorted(stale), reason)
+        except Exception as exc:
+            saved = False
+            vlog(f"post-download stale marker failed: {exc}")
+        if not saved:
+            log.warning(
+                "  Saved Library state could not be marked stale after files "
+                "changed. Run a Library refresh before using saved results."
+            )
+        else:
+            log.warning(
+                "  Some saved Library views need a refresh after this file "
+                "change. The completed download is unchanged."
+            )
+
+    try:
+        from qobuz_librarian.library import (
+            downsample_state,
+            library_scan_state,
+            new_releases,
+        )
         from qobuz_librarian.library import hidden as hidden_mod
         from qobuz_librarian.quality import upgrade_state
         from qobuz_librarian.quality.decision import load_capped
         from qobuz_librarian.web import review_badges
-    except Exception as e:
-        vlog(f"post-download review-state refresh unavailable: {e}")
+    except Exception as exc:
+        stale.update(
+            surface for surface, current in was_current.items() if current
+        )
+        mark_stale(
+            "CLI file changes could not update the affected saved views."
+        )
+        vlog(f"post-download saved-state refresh unavailable: {exc}")
         return
-    hidden = hidden_mod.load()
-    capped = load_capped()
-    for artist_dir in changed:
+
+    artist_dirs = []
+    seen_artists = set()
+    artist_unknown = False
+    seen_albums = set()
+    for change in successful:
+        album = change.get("album")
+        album_id = str((album or {}).get("id") or "").strip()
+        artist_id = str(
+            ((album or {}).get("artist") or {}).get("id") or ""
+        ).strip()
+        album_key = (album_id, artist_id)
+        if album_key not in seen_albums:
+            seen_albums.add(album_key)
+            if was_current["library"]:
+                try:
+                    updated = (
+                        bool(album_id)
+                        and library_scan_state.remove_album(album_id)
+                    )
+                except Exception as exc:
+                    updated = False
+                    vlog(f"post-download Library refresh failed: {exc}")
+                if not updated:
+                    stale.add("library")
+            if was_current["new_releases"]:
+                try:
+                    updated = (
+                        bool(album_id)
+                        and bool(artist_id)
+                        and new_releases.note_owned_album(album)
+                    )
+                except Exception as exc:
+                    updated = False
+                    vlog(f"post-download New Releases refresh failed: {exc}")
+                if not updated:
+                    stale.add("new_releases")
+
+        changed_path = change.get("_resolved_post_dir") or change.get("dir")
         try:
-            upgrade_state.update_artist(artist_dir, token=token, args=args,
-                                        capped=capped, hidden=hidden)
-            downsample_state.update_artist(artist_dir, hidden=hidden)
-        except Exception as e:
-            vlog(f"post-download review-state refresh failed for {artist_dir}: {e}")
+            album_path = Path(changed_path) if changed_path else None
+            if album_path is None or not album_path.exists():
+                artist_unknown = True
+                continue
+            artist_dir = (
+                album_path.parent
+                if album_path.is_dir()
+                else album_path.parent.parent
+            )
+        except (OSError, TypeError, ValueError):
+            artist_unknown = True
+            continue
+        key = str(artist_dir)
+        if key not in seen_artists:
+            seen_artists.add(key)
+            artist_dirs.append(artist_dir)
+
     try:
-        review_badges.set_ready(
-            "upgrade",
-            upgrade_state.has_visible_candidates(upgrade_state.load(), hidden))
-        review_badges.set_ready(
-            "downsample",
-            downsample_state.has_visible_candidates(downsample_state.load(), hidden))
-    except Exception as e:
-        vlog(f"post-download review-badge refresh failed: {e}")
+        hidden = hidden_mod.load()
+    except Exception as exc:
+        hidden = None
+        stale.update(
+            surface
+            for surface in ("upgrade", "downsample")
+            if was_current[surface]
+        )
+        vlog(f"post-download hidden-state input unavailable: {exc}")
+
+    capped = None
+    upgrade_inputs_ready = True
+    if (
+        hidden is not None
+        and was_current["upgrade"]
+        and allow_upgrade_refresh
+    ):
+        try:
+            capped = load_capped()
+        except Exception as exc:
+            upgrade_inputs_ready = False
+            stale.add("upgrade")
+            vlog(f"post-download Upgrade policy input unavailable: {exc}")
+
+    if hidden is not None:
+        for artist_dir in artist_dirs:
+            if was_current["upgrade"]:
+                if not allow_upgrade_refresh:
+                    stale.add("upgrade")
+                elif upgrade_inputs_ready:
+                    try:
+                        result = upgrade_state.update_artist(
+                            artist_dir,
+                            token=token,
+                            args=args,
+                            capped=capped,
+                            hidden=hidden,
+                        )
+                        if not result.complete:
+                            stale.add("upgrade")
+                    except Exception as exc:
+                        stale.add("upgrade")
+                        vlog(
+                            f"post-download Upgrade refresh failed for "
+                            f"{artist_dir}: {exc}"
+                        )
+            if was_current["downsample"]:
+                try:
+                    result = downsample_state.update_artist(
+                        artist_dir,
+                        hidden=hidden,
+                    )
+                    if not result.complete:
+                        stale.add("downsample")
+                except Exception as exc:
+                    stale.add("downsample")
+                    vlog(
+                        f"post-download Downsample refresh failed for "
+                        f"{artist_dir}: {exc}"
+                    )
+
+    if artist_unknown:
+        stale.update(
+            surface
+            for surface in ("upgrade", "downsample")
+            if was_current[surface]
+        )
+    mark_stale(
+        "CLI file changes could not update every affected saved view."
+    )
+
+    try:
+        if hidden is None:
+            return
+        for surface, state_module in (
+            ("upgrade", upgrade_state),
+            ("downsample", downsample_state),
+        ):
+            review_badges.set_ready(
+                surface,
+                generation_state.output_is_current(surface)
+                and state_module.has_visible_candidates(
+                    state_module.load(),
+                    hidden,
+                ),
+            )
+    except Exception as exc:
+        vlog(f"post-download review-badge refresh failed: {exc}")
 
 
 def _require_executor_authority(authority):
@@ -2491,6 +2745,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                                     "n_missing": len(item["missing"])})
         return dry_run_results, True
 
+    expected_generation = getattr(token, "credential_generation", "")
+    if expected_generation:
+        from qobuz_librarian.api.client import authorize_bound_download
+
+        token = authorize_bound_download(token, prepare=False)
+
     authority = run_lock.current_lease()
     _require_executor_authority(authority)
     (
@@ -2513,6 +2773,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     durable_stopped = False
     recovery_persist_blocked = False
     results = []
+    saved_state_changes = []
 
     def _persist():
         if on_progress is not None:
@@ -2539,6 +2800,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         _require_executor_authority(authority)
         any_imported = any_imported or parked_imported
         _parked_post_dirs.extend(parked_dirs)
+        if parked_imported:
+            saved_state_changes.extend({
+                "album": None,
+                "dir": post_dir,
+                "imported": True,
+                "n_ok": 1,
+            } for post_dir in (parked_dirs or [None]))
         preflight_done = True
 
     def _drop(item):
@@ -2646,6 +2914,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             queue_transient_lyric_sigs.extend(lyric_sigs)
         result = _durable_completed_result(item, post_dir)
         results.append(result)
+        saved_state_changes.append({**result, "album": item.get("album")})
         log.info(fmt(*_durable_completion_line(
             result, item.get("elapsed", 0)
         )))
@@ -2825,6 +3094,33 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 raise DurableAlbumUnavailable(
                     "the saved queue item is not yet supported by safe recovery"
                 )
+        if (
+            resume_owner is None
+            or resume_action is StartupRecoveryAction.PENDING
+        ):
+            try:
+                token = _admit_new_queue_items([item], token)
+            except CandidateStale as exc:
+                log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
+                item["result"] = "stale_candidate"
+                _drop(item)
+                results.append(_resolve_queue_item(
+                    item,
+                    args,
+                    False,
+                    authority=authority,
+                ))
+                continue
+        else:
+            _bind_resumed_queue_item_premise(item)
+        if (
+            expected_generation
+            and resume_owner is not None
+            and resume_action is not StartupRecoveryAction.PENDING
+        ):
+            from qobuz_librarian.api.client import authorize_bound_download
+
+            token = authorize_bound_download(token)
         if resume_owner is None:
             _ensure_preflight()
 
@@ -2935,7 +3231,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
 
         _seal_queue_item_siblings(item)
         if item["auto_upgrade"] and album_dir and album_dir.exists():
-            bp = backup_album_dir(album_dir)
+            bp = backup_album_dir(
+                album_dir,
+                expected_receipt=item.get("_validated_source_receipt"),
+            )
             if bp is not None and not bp.complete:
                 from qobuz_librarian.modes.process import (
                     _recover_incomplete_upgrade_backup,
@@ -3207,8 +3506,14 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         # left queued and needlessly re-downloaded on the next resume.
         if not _queue_item_needs_retry(item):
             _drop(item)
-        results.append(_resolve_queue_item(
-            item, args, item_imported, authority=authority))
+        result = _resolve_queue_item(
+            item, args, item_imported, authority=authority)
+        results.append(result)
+        if result.get("imported") and result.get("n_ok", 0) > 0:
+            change = {**result, "album": item.get("album")}
+            if item.get("_resolved_post_dir") is not None:
+                change["_resolved_post_dir"] = item["_resolved_post_dir"]
+            saved_state_changes.append(change)
         if retention_exc is not None:
             raise retention_exc
 
@@ -3385,6 +3690,16 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     # at the exact moment an album has been correctly parked.
     if not recovery_persist_blocked and not durable_stopped:
         _persist()
+    # Only the CLI batch callers (walk / artist / album / queue resume) refresh
+    # saved state here. The web single-track and CLI Repair callers refresh
+    # after their own higher-level operation has verified the file change.
+    if refresh_review:
+        _refresh_review_state_after_downloads(
+            saved_state_changes,
+            token,
+            args,
+            allow_upgrade_refresh=(auth_lost_exc is None and not interrupted),
+        )
     if auth_lost_exc is not None:
         raise auth_lost_exc
     # Re-raising KeyboardInterrupt is what stops _flush_queue in modes 4/5
@@ -3392,11 +3707,4 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     # were short-circuited (and so still need a retry).
     if interrupted:
         raise KeyboardInterrupt
-    # Only the CLI batch callers (walk / artist / album / queue resume) refresh
-    # the saved review state. They change library files and nothing else keeps
-    # that state fresh. The web single-track and CLI repair callers must NOT:
-    # the web path already refreshes right after, under the same staging lock,
-    # and repair calls this per album in a loop (one artist re-scan per album).
-    if refresh_review:
-        _refresh_review_state_after_downloads(results, token, args)
     return results, not queue and not durable_stopped

@@ -9,6 +9,7 @@ returned - so the gap-fill backup taken mid-download can still be resolved by
 the caller's finally/except when a rip raises AuthLost or hits a full disk.
 """
 
+import os
 import re
 import shutil
 import time
@@ -739,6 +740,7 @@ def run_album_download(
     recovery_owner=None,
     recovery_checkpoint=None,
     required_backup_kind=None,
+    expected_gap_fill_receipts=None,
 ):
     """Download ``missing`` for one album and reconcile what actually landed.
 
@@ -878,18 +880,49 @@ def run_album_download(
             extra_paths = {e["path"] for e in find_extras_in_existing(qobuz_tracks, ex)}
             to_clear = [e for e in ex if e["path"] not in extra_paths]
             if to_clear:
+                exact_receipts = expected_gap_fill_receipts
+                if expected_gap_fill_receipts is not None:
+                    try:
+                        album_root = Path(os.path.abspath(os.fspath(album_dir)))
+                        exact_receipts = {}
+                        for entry in to_clear:
+                            source = Path(os.path.abspath(entry["path"]))
+                            relative = source.relative_to(album_root).as_posix()
+                            exact_receipts[relative] = (
+                                expected_gap_fill_receipts[relative]
+                            )
+                    except (KeyError, OSError, TypeError, ValueError):
+                        raise OSError(
+                            "Reviewed gap-fill receipts do not cover the "
+                            "files that would be moved; the download was not "
+                            "started."
+                        ) from None
                 vlog(
                     f"pre-download: backing up + removing {len(to_clear)} present "
                     f"track(s) to prevent .1.flac collisions"
                 )
                 if recovery_owner is None:
-                    backup_result = backup_gap_fill_files([e["path"] for e in to_clear], album_dir)
+                    backup_result = (
+                        backup_gap_fill_files(
+                            [e["path"] for e in to_clear],
+                            album_dir,
+                            expected_receipts=exact_receipts,
+                        )
+                        if expected_gap_fill_receipts is not None
+                        else backup_gap_fill_files(
+                            [e["path"] for e in to_clear], album_dir)
+                    )
                 else:
+                    backup_kwargs = {
+                        "owner": recovery_owner,
+                        "on_intent": recovery_checkpoint,
+                    }
+                    if expected_gap_fill_receipts is not None:
+                        backup_kwargs["expected_receipts"] = exact_receipts
                     backup_result = backup_gap_fill_files(
                         [e["path"] for e in to_clear],
                         album_dir,
-                        owner=recovery_owner,
-                        on_intent=recovery_checkpoint,
+                        **backup_kwargs,
                     )
                 result["gap_fill_backup_path"] = backup_result
                 if recovery_owner is not None and backup_result is not None:

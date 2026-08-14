@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.library import generation_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.catalog import album_year
@@ -27,6 +28,7 @@ class RefreshResult:
     hidden_signature: str = ""
     refresh_started_at: float = 0.0
     quality_signature: str = ""
+    refresh_started_revision: int = 0
 
 
 def quality_signature(streamrip_quality=None, prefer_hires=None) -> str:
@@ -42,11 +44,14 @@ def _empty_state():
     return {
         "version": STATE_VERSION,
         "updated_at": None,
+        "generation": 0,
+        "revision": 0,
         "complete": False,
         "artists_scanned": [],
         "errors": {},
         "fingerprints": {},
         "artist_updated_at": {},
+        "artist_revision": {},
         "hidden_signature": "",
         "quality_signature": "",
         "candidates": [],
@@ -60,26 +65,33 @@ def _album_cover(album):
 
 
 def _candidate_spec(artist_name: str, candidate: dict):
+    from qobuz_librarian.library.candidate_premise import capture
+
     album = candidate["qobuz_album"]
     title = album.get("title") or "?"
     n_present = candidate.get("n_present", 0)
     n_total = candidate.get("n_total", 0)
     part = f" · {n_present}/{n_total} tracks" if n_total and n_present < n_total else ""
+    album_dir = candidate.get("album_dir")
+    payload = {
+        "album_id": album.get("id"),
+        # Where the scan found the album locally, so a later walk can tell
+        # a candidate that's still there from one whose folder has gone.
+        "album_dir": str(album_dir or ""),
+        "year": album_year(album),
+        "cover": _album_cover(album),
+        "needed_edition_swap": bool(candidate.get("_needed_edition_swap")),
+        "title_similarity": float(candidate.get("_title_similarity") or 0.0),
+    }
+    premise = capture("upgrade", album_dir) if album_dir else None
+    if premise is not None:
+        payload["_premise"] = premise
     return {
         "title": title,
         "artist": artist_name,
         "detail": (f"{candidate.get('existing_quality_label', '?')} → "
                    f"{candidate.get('target_quality_label', '?')}{part}"),
-        "payload": {
-            "album_id": album.get("id"),
-            # Where the scan found the album locally, so a later walk can tell
-            # a candidate that's still there from one whose folder has gone.
-            "album_dir": str(candidate.get("album_dir") or ""),
-            "year": album_year(album),
-            "cover": _album_cover(album),
-            "needed_edition_swap": bool(candidate.get("_needed_edition_swap")),
-            "title_similarity": float(candidate.get("_title_similarity") or 0.0),
-        },
+        "payload": payload,
     }
 
 
@@ -104,6 +116,8 @@ def load():
     base = _empty_state()
     base.update({
         "updated_at": data.get("updated_at"),
+        "generation": int(data.get("generation") or 0),
+        "revision": int(data.get("revision") or 0),
         "complete": bool(data.get("complete")),
         "artists_scanned": list(data.get("artists_scanned") or []),
         "errors": data.get("errors") if isinstance(data.get("errors"), dict) else {},
@@ -112,6 +126,9 @@ def load():
         "artist_updated_at": (data.get("artist_updated_at")
                               if isinstance(data.get("artist_updated_at"), dict)
                               else {}),
+        "artist_revision": (data.get("artist_revision")
+                            if isinstance(data.get("artist_revision"), dict)
+                            else {}),
         "hidden_signature": str(data.get("hidden_signature") or ""),
         "quality_signature": str(data.get("quality_signature") or ""),
         "candidates": (data.get("candidates")
@@ -123,24 +140,31 @@ def load():
 def _write_state(data):
     try:
         state_file.write_json(cfg.UPGRADE_STATE_FILE, data)
+        return True
     except OSError as e:
         # The Upgrade view reads this snapshot; a failed write means it shows
         # stale candidates until the next scan. Surface it (verbose) instead
         # of staying silent on a full/read-only volume.
         from qobuz_librarian.ui_cli.logging import vlog
         vlog(f"upgrade state write failed ({e}); saved upgrade view may be stale")
+        return False
 
 
-def _state_from_result(result: RefreshResult):
+def _state_from_result(result: RefreshResult, *, generation: int, revision: int):
     now = time.time()
     return {
         "version": STATE_VERSION,
         "updated_at": now,
+        "generation": int(generation),
+        "revision": int(revision),
         "complete": bool(result.complete),
         "artists_scanned": list(result.artists_scanned),
         "errors": dict(result.errors),
         "fingerprints": dict(result.fingerprints),
         "artist_updated_at": {name: now for name in result.artists_scanned},
+        "artist_revision": {
+            name: int(revision) for name in result.artists_scanned
+        },
         "hidden_signature": result.hidden_signature,
         "quality_signature": (
             getattr(result, "quality_signature", "") or quality_signature()
@@ -149,18 +173,29 @@ def _state_from_result(result: RefreshResult):
     }
 
 
-def _preserve_concurrent_artist_updates(data, refresh_started_at):
-    if not refresh_started_at:
+def _preserve_concurrent_artist_updates(
+    data,
+    refresh_started_at,
+    refresh_started_revision,
+):
+    if not refresh_started_at and not refresh_started_revision:
         return data
     current = load()
     if current.get("quality_signature") != data.get("quality_signature"):
         return data
     current_artist_updated_at = current.get("artist_updated_at") or {}
+    current_artist_revision = current.get("artist_revision") or {}
     current_fingerprints = current.get("fingerprints") or {}
-    preserved_artists = {
-        name for name, updated_at in current_artist_updated_at.items()
-        if float(updated_at or 0) > float(refresh_started_at)
-    }
+    if refresh_started_revision:
+        preserved_artists = {
+            name for name, artist_revision in current_artist_revision.items()
+            if int(artist_revision or 0) > int(refresh_started_revision)
+        }
+    else:
+        preserved_artists = {
+            name for name, updated_at in current_artist_updated_at.items()
+            if float(updated_at or 0) > float(refresh_started_at)
+        }
     if not preserved_artists:
         return data
     data["candidates"] = [
@@ -176,10 +211,13 @@ def _preserve_concurrent_artist_updates(data, refresh_started_at):
            if name in preserved_artists]
     ))
     data_artist_updated_at = dict(data.get("artist_updated_at") or {})
+    data_artist_revision = dict(data.get("artist_revision") or {})
     for name in preserved_artists:
         data["fingerprints"][name] = current_fingerprints.get(name, "")
         data_artist_updated_at[name] = current_artist_updated_at.get(name, 0)
+        data_artist_revision[name] = current_artist_revision.get(name, 0)
     data["artist_updated_at"] = data_artist_updated_at
+    data["artist_revision"] = data_artist_revision
     return data
 
 
@@ -188,17 +226,47 @@ def save(
     *,
     preserve_concurrent: bool = False,
     refresh_started_at=None,
+    refresh_started_revision=None,
+    generation=None,
+    revision=None,
 ):
-    with _STATE_LOCK:
-        data = _state_from_result(result)
+    with _STATE_LOCK, state_file.store_lock(cfg.UPGRADE_STATE_FILE):
+        target_generation = (
+            generation_state.current_generation()
+            if generation is None
+            else int(generation)
+        )
+        target_revision = (
+            generation_state.reserve_revision()
+            if revision is None
+            else int(revision)
+        )
+        if target_revision is None:
+            return False
+        data = _state_from_result(
+            result,
+            generation=target_generation,
+            revision=target_revision,
+        )
         if preserve_concurrent:
             data = _preserve_concurrent_artist_updates(
                 data,
                 refresh_started_at
                 if refresh_started_at is not None
                 else result.refresh_started_at,
+                refresh_started_revision
+                if refresh_started_revision is not None
+                else result.refresh_started_revision,
             )
-        _write_state(data)
+        if not _write_state(data):
+            return False
+        return generation_state.mark_output_current(
+            "upgrade",
+            generation=target_generation,
+            revision=target_revision,
+            complete=result.complete,
+            policy_signature=data.get("quality_signature", ""),
+        )
 
 
 def _default_scan_artist(token, args, capped):
@@ -248,6 +316,52 @@ def has_visible_candidates(state=None, hidden=None):
     return bool(visible_candidates(state=state, hidden=hidden))
 
 
+def remove_album_dir(album_dir) -> bool:
+    """Suppress one exact locally-capped album without contacting Qobuz."""
+    def resolved(value):
+        try:
+            return str(Path(value).resolve(strict=False))
+        except (OSError, TypeError, ValueError):
+            return None
+
+    target = resolved(album_dir)
+    if target is None:
+        return False
+    with _STATE_LOCK, state_file.store_lock(cfg.UPGRADE_STATE_FILE):
+        state = load()
+        generation = int(state.get("generation") or 0)
+        if generation != generation_state.current_generation():
+            return False
+        kept = [
+            candidate
+            for candidate in state.get("candidates") or []
+            if resolved((candidate.get("payload") or {}).get("album_dir"))
+            != target
+        ]
+        if len(kept) == len(state.get("candidates") or []):
+            return True
+        revision = generation_state.reserve_revision()
+        if revision is None:
+            return False
+        now = time.time()
+        state = {
+            **state,
+            "updated_at": now,
+            "revision": revision,
+            "candidates": kept,
+        }
+        if not _write_state(state):
+            return False
+        return generation_state.mark_output_current(
+            "upgrade",
+            generation=generation,
+            revision=revision,
+            complete=bool(state.get("complete")),
+            policy_signature=str(state.get("quality_signature") or ""),
+            preserve_noncurrent=True,
+        )
+
+
 def update_artist(
     artist_dir: Path,
     *,
@@ -271,9 +385,17 @@ def update_artist(
     except Exception as exc:
         return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
 
-    with _STATE_LOCK:
+    with _STATE_LOCK, state_file.store_lock(cfg.UPGRADE_STATE_FILE):
         state = load()
         now = time.time()
+        target_generation = generation_state.current_generation()
+        state_revision = generation_state.reserve_revision()
+        if state_revision is None:
+            return RefreshResult(
+                [], [name], {name: "saved state revision could not be written"},
+                False, {name: fingerprint},
+                quality_signature=scan_quality_signature,
+            )
         kept = [c for c in state["candidates"] if c.get("artist") != name]
         kept.extend(specs)
         artists_scanned = list(dict.fromkeys(
@@ -284,14 +406,19 @@ def update_artist(
         fingerprints[name] = fingerprint
         artist_updated_at = dict(state.get("artist_updated_at") or {})
         artist_updated_at[name] = now
-        _write_state({
+        artist_revision = dict(state.get("artist_revision") or {})
+        artist_revision[name] = state_revision
+        saved = _write_state({
             "version": STATE_VERSION,
             "updated_at": now,
+            "generation": target_generation,
+            "revision": state_revision,
             "complete": bool(state.get("complete", True)),
             "artists_scanned": artists_scanned,
             "errors": errors,
             "fingerprints": fingerprints,
             "artist_updated_at": artist_updated_at,
+            "artist_revision": artist_revision,
             "hidden_signature": state.get("hidden_signature", ""),
             "quality_signature": (
                 scan_quality_signature
@@ -300,6 +427,19 @@ def update_artist(
             ),
             "candidates": kept,
         })
+        authority_saved = saved and generation_state.mark_output_current(
+            "upgrade",
+            generation=target_generation,
+            revision=state_revision,
+            complete=bool(state.get("complete", True)),
+            policy_signature=scan_quality_signature,
+            preserve_noncurrent=True,
+        )
+    if not authority_saved:
+        return RefreshResult(
+            [], [name], {name: "saved Upgrade view needs refresh"}, False,
+            {name: fingerprint}, quality_signature=scan_quality_signature,
+        )
     return RefreshResult(
         specs,
         [name],
@@ -327,6 +467,7 @@ def refresh_for_artists(
 ):
     """Refresh upgrade candidates for ``artists`` and persist review specs."""
     refresh_started_at = time.time()
+    refresh_started_revision = generation_state.revision()
     scan_quality_signature = quality_signature()
     if scan_artist is None:
         scan_artist = _default_scan_artist(token, args, capped)
@@ -420,7 +561,7 @@ def refresh_for_artists(
 
     result = RefreshResult(
         specs, artists_scanned, errors, complete, fingerprints, hidden_sig,
-        refresh_started_at, scan_quality_signature)
+        refresh_started_at, scan_quality_signature, refresh_started_revision)
     # A cancelled refresh only contains the artists reached before the cancel.
     # Keep the last complete snapshot instead of turning a partial crawl into a
     # saved review list.
@@ -429,5 +570,6 @@ def refresh_for_artists(
             result,
             preserve_concurrent=True,
             refresh_started_at=refresh_started_at,
+            refresh_started_revision=refresh_started_revision,
         )
     return result

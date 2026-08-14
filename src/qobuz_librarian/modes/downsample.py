@@ -9,9 +9,10 @@ import sys
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
-from qobuz_librarian.library import downsample_state
+from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
+from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import mark_local_album_capped
 from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, format_size, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, plural
@@ -142,6 +143,7 @@ def run_downsample_walk_mode(args):
     total_saved = 0
     total_errors = 0
     total_flush_warns = 0
+    state_refresh_warnings = 0
     interrupted = False
     no_answer = False
 
@@ -189,12 +191,29 @@ def run_downsample_walk_mode(args):
                 log.info(fmt(C.BOLD + C.WHITE,
                     f"  [{j}/{n_albums}] {truncate(c.title, 55)}"))
                 artist_attempted = True
+                if mark_local_album_capped(c.album_dir) is not True:
+                    total_errors += 1
+                    log.info(fmt(
+                        C.YELLOW,
+                        "  The local downsample decision could not be saved; "
+                        "the album was left unchanged.",
+                    ))
+                    continue
+                if not upgrade_state.remove_album_dir(c.album_dir):
+                    generation_state.mark_output_status(
+                        "upgrade",
+                        "stale",
+                        reason=(
+                            "An intentional Downsample could not update the "
+                            "saved Upgrade view."
+                        ),
+                    )
+                    state_refresh_warnings += 1
                 res = downsample_dir(c.album_dir, verbose=True,
                                      base_dir=c.album_dir, log=log.info,
                                      keep_originals=keep_originals)
                 if res.get("resampled"):
                     n_albums_done += 1
-                    mark_local_album_capped(c.album_dir)
                 total_saved += res.get("saved_bytes", 0)
                 total_errors += res.get("errors", 0)
                 total_flush_warns += res.get("flush_warnings", 0)
@@ -247,5 +266,12 @@ def run_downsample_walk_mode(args):
             f"{plural(total_flush_warns, 'file')} resampled but couldn't be "
             "flushed to disk. The swap may not survive a power loss; check "
             "the drive.")))
+    if state_refresh_warnings:
+        log.warning(fmt(
+            C.YELLOW,
+            "  Files were changed, but the saved Upgrade view needs a "
+            "Library refresh.",
+        ))
     return EXIT_GENERAL if (no_answer or interrupted or unchecked
-                            or total_errors or total_flush_warns) else 0
+                            or total_errors or total_flush_warns
+                            or state_refresh_warnings) else 0

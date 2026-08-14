@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -394,6 +395,79 @@ def test_beets_runtime_check_rejects_an_unrelated_executable(monkeypatch):
     monkeypatch.setattr(cfg, "BEETS_PYTHON", unrelated)
 
     assert beets.beets_runtime_path() is None
+
+
+def test_forget_beets_entries_resolves_relative_catalogue_paths(
+    monkeypatch, tmp_path
+):
+    """Undo must find a relative Beets row through the configured music root.
+
+    Managed imports can store a root-relative path even when an administrator's
+    normal Beets config names another mount alias for the same library.  The
+    cleanup path is already gone by the time this helper runs, so an absolute
+    ``path:`` query cannot use filesystem identity to bridge those aliases.
+    """
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+
+    music_root = tmp_path / "app-view" / "music"
+    deleted = music_root / "Artist" / "Album" / "01 - Track.flac"
+    deleted.parent.mkdir(parents=True)
+    config_dir = tmp_path / "beets"
+    config_dir.mkdir()
+    database = config_dir / "library.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO items (id, path) VALUES (?, ?)",
+            (7, os.fsencode("Artist/Album/01 - Track.flac")),
+        )
+        connection.execute(
+            "INSERT INTO items (id, path) VALUES (?, ?)",
+            (8, os.fsencode("Other/Album/01 - Track.flac")),
+        )
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music_root)
+    monkeypatch.setattr(cfg, "BEETS_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+
+    class Runtime:
+        python = sys.executable
+
+    monkeypatch.setattr(beets, "_resolve_beets_runtime", Runtime)
+    monkeypatch.setattr(beets, "_require_beets_runtime", lambda _runtime: None)
+    calls = []
+
+    def run_beets(args, **_kwargs):
+        calls.append(args)
+        if "remove" in args:
+            item_ids = [
+                int(argument.removeprefix("id:"))
+                for argument in args
+                if argument.startswith("id:")
+            ]
+            with sqlite3.connect(database) as connection:
+                connection.executemany(
+                    "DELETE FROM items WHERE id = ?",
+                    [(item_id,) for item_id in item_ids],
+                )
+        # Model Beets' old absolute-path lookup missing this relative row.
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(beets, "_run_owned_beets_capture", run_beets)
+
+    result = beets.forget_beets_entries([deleted])
+
+    assert result == beets.ForgetBeetsEntriesResult(True, 1)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT id, path FROM items").fetchall() == [
+            (8, os.fsencode("Other/Album/01 - Track.flac"))
+        ]
+    remove = next(args for args in calls if "remove" in args)
+    assert "id:7" in remove
+    assert not any(argument.startswith("path:") for argument in remove)
 
 
 def test_beets_direct_preflights_a_new_database_before_import(monkeypatch, tmp_path):
