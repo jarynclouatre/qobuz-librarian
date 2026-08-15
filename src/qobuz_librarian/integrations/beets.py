@@ -1666,6 +1666,67 @@ def _managed_album_directory_identity(root, root_identity, relative):
                 pass
 
 
+def _managed_catalogue_album(connection, destinations, root):
+    """Identify the one album with one row for every managed destination."""
+    item_columns = {row[1] for row in connection.execute("PRAGMA table_info(items)")}
+    album_columns = {row[1] for row in connection.execute("PRAGMA table_info(albums)")}
+    if not {"path", "album_id"}.issubset(item_columns) or "id" not in album_columns:
+        return None
+    destinations = frozenset(destinations)
+    if not destinations or any(
+        type(destination) is not str or not destination
+        for destination in destinations
+    ):
+        return None
+    root_path = os.path.abspath(root)
+    destination_counts = {}
+    album_paths = {}
+    for raw, album_id in connection.execute("SELECT path, album_id FROM items"):
+        if isinstance(raw, bytes):
+            raw = os.fsdecode(raw)
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            return None
+        absolute = os.path.abspath(
+            raw if os.path.isabs(raw) else os.path.join(root_path, raw)
+        )
+        try:
+            relative = Path(absolute).relative_to(root_path).as_posix()
+        except ValueError:
+            return None
+        valid_album_id = type(album_id) is int and album_id > 0
+        if relative in destinations and not valid_album_id:
+            return None
+        if valid_album_id:
+            album_paths.setdefault(album_id, []).append(relative)
+            if relative in destinations:
+                counts = destination_counts.setdefault(album_id, {})
+                counts[relative] = counts.get(relative, 0) + 1
+    if any(
+        count > 1
+        for counts in destination_counts.values()
+        for count in counts.values()
+    ):
+        return None
+    candidates = [
+        album_id
+        for album_id, counts in destination_counts.items()
+        if set(counts) == destinations
+        and all(count == 1 for count in counts.values())
+    ]
+    if len(candidates) != 1:
+        return None
+    album_id = candidates[0]
+    album_rows = connection.execute(
+        "SELECT id FROM albums WHERE id = ?", (album_id,)
+    ).fetchall()
+    if album_rows != [(album_id,)]:
+        return None
+    paths = album_paths.get(album_id)
+    if not paths or len(paths) != len(set(paths)):
+        return None
+    return album_id, tuple(paths)
+
+
 def _managed_album_boundary(destinations, root, root_identity, *, database_anchor=None):
     """Bind imported destinations to one live Beets album directory."""
     current_anchor = None
@@ -1682,48 +1743,13 @@ def _managed_album_boundary(destinations, root, root_identity, *, database_ancho
             return None
 
         def inspect(connection):
-            item_columns = {row[1] for row in connection.execute("PRAGMA table_info(items)")}
-            album_columns = {row[1] for row in connection.execute("PRAGMA table_info(albums)")}
-            if not {"path", "album_id"}.issubset(item_columns) or "id" not in album_columns:
-                return None
-            destination_counts = {destination: 0 for destination in destinations}
-            destination_album_ids = set()
-            album_paths = {}
             root_path = os.path.abspath(root)
-            for raw, album_id in connection.execute("SELECT path, album_id FROM items"):
-                if isinstance(raw, bytes):
-                    raw = os.fsdecode(raw)
-                if not isinstance(raw, str) or not raw or "\x00" in raw:
-                    return None
-                absolute = os.path.abspath(
-                    raw if os.path.isabs(raw) else os.path.join(root_path, raw)
-                )
-                try:
-                    relative = Path(absolute).relative_to(root_path).as_posix()
-                except ValueError:
-                    return None
-                if relative in destination_counts:
-                    destination_counts[relative] += 1
-                    destination_album_ids.add(album_id)
-                if type(album_id) is int and album_id > 0:
-                    album_paths.setdefault(album_id, []).append(relative)
-            if (
-                not destination_counts
-                or any(count != 1 for count in destination_counts.values())
-                or len(destination_album_ids) != 1
-            ):
+            catalogue_album = _managed_catalogue_album(
+                connection, destinations, root_path
+            )
+            if catalogue_album is None:
                 return None
-            album_id = next(iter(destination_album_ids))
-            if type(album_id) is not int or album_id <= 0:
-                return None
-            album_rows = connection.execute(
-                "SELECT id FROM albums WHERE id = ?", (album_id,)
-            ).fetchall()
-            if album_rows != [(album_id,)]:
-                return None
-            paths = album_paths.get(album_id)
-            if not paths or len(paths) != len(set(paths)):
-                return None
+            _album_id, paths = catalogue_album
             directories = {str((Path(root_path) / relative).parent) for relative in paths}
             if len(directories) == 1:
                 album_directory = next(iter(directories))
@@ -1771,29 +1797,20 @@ def _managed_database_matches(database_anchor, destinations, root):
             or not _beets_database_anchor_matches(anchor)
         ):
             return False
-        path = _beets_database_connection_path(anchor)
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(items)")}
-            if "path" not in columns:
-                return False
-            counts = {destination: 0 for destination in destinations}
-            for (raw,) in connection.execute("SELECT path FROM items"):
-                if isinstance(raw, bytes):
-                    raw = os.fsdecode(raw)
-                if not isinstance(raw, str) or not raw or "\x00" in raw:
-                    return False
-                absolute = os.path.abspath(raw if os.path.isabs(raw) else os.path.join(root, raw))
-                try:
-                    relative = str(Path(absolute).relative_to(root))
-                except ValueError:
-                    return False
-                if relative in counts:
-                    counts[relative] += 1
-            matches = all(count == 1 for count in counts.values())
-        finally:
-            connection.close()
-        return matches and _beets_database_anchor_matches(anchor)
+        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
+        timeout = float(timeout) if timeout and timeout > 0 else 5.0
+        return bool(
+            inspect_sqlite_source(
+                anchor,
+                _beets_database_anchor_matches,
+                lambda connection: _managed_catalogue_album(
+                    connection, destinations, root
+                )
+                is not None,
+                connect=sqlite3.connect,
+                timeout=timeout,
+            )
+        )
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
     finally:
@@ -7130,13 +7147,13 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
             return False
         old_paths = frozenset(old_paths)
         replacement_paths = frozenset(replacement_paths)
+        old_only_paths = old_paths - replacement_paths
         if (
             len(old_paths) > 4096
             or len(replacement_paths) > 4096
-            or old_paths & replacement_paths
         ):
             return False
-        if any(os.path.lexists(path) for path in old_paths):
+        if any(os.path.lexists(path) for path in old_only_paths):
             return False
         if any(
             path.is_symlink() or not path.is_file()
@@ -7171,6 +7188,19 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
         item_id_index = item_columns.index("id")
         item_album_index = item_columns.index("album_id")
         item_path_index = item_columns.index("path")
+        music_root = _catalogue_item_path(
+            Path(cfg.MUSIC_ROOT) / "placeholder"
+        ).parent
+        replacement_relatives = {
+            path.relative_to(music_root).as_posix()
+            for path in replacement_paths
+        }
+        catalogue_album = _managed_catalogue_album(
+            connection, replacement_relatives, music_root
+        )
+        if catalogue_album is None:
+            raise sqlite3.IntegrityError("exact Beets replacement proof failed")
+        replacement_album_id, _replacement_album_paths = catalogue_album
         retiring_ids = []
         retiring_album_ids = set()
         replacement_rows = {path: [] for path in replacement_paths}
@@ -7180,19 +7210,40 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
         ):
             item_id = row[item_id_index]
             path = _catalogue_item_path(row[item_path_index])
-            if path in old_paths:
-                if type(item_id) is not int or item_id <= 0:
-                    raise sqlite3.DatabaseError("invalid beets item identity")
+            if path not in old_paths and path not in replacement_rows:
+                continue
+            if type(item_id) is not int or item_id <= 0:
+                raise sqlite3.DatabaseError("invalid beets item identity")
+            album_id = row[item_album_index]
+            if path in replacement_rows:
+                if type(album_id) is not int or album_id <= 0:
+                    raise sqlite3.DatabaseError("invalid beets album identity")
+                replacement_rows[path].append((item_id, album_id))
+            if path in old_paths and (
+                path not in replacement_rows
+                or album_id != replacement_album_id
+            ):
                 retiring_ids.append(item_id)
-                album_id = row[item_album_index]
                 if album_id is not None:
                     if type(album_id) is not int or album_id <= 0:
                         raise sqlite3.DatabaseError("invalid beets album identity")
                     retiring_album_ids.add(album_id)
-            if path in replacement_rows:
-                replacement_rows[path].append(item_id)
-        if len(retiring_ids) > 4096 or any(
-            len(item_ids) != 1 for item_ids in replacement_rows.values()
+        replacement_proven = all(
+            sum(
+                album_id == replacement_album_id
+                for _item_id, album_id in rows
+            )
+            == 1
+            and all(
+                album_id == replacement_album_id or path in old_paths
+                for _item_id, album_id in rows
+            )
+            for path, rows in replacement_rows.items()
+        )
+        if (
+            len(retiring_ids) > 4096
+            or len(retiring_ids) != len(set(retiring_ids))
+            or not replacement_proven
         ):
             raise sqlite3.IntegrityError("exact Beets replacement proof failed")
         if not retiring_ids:
@@ -7251,15 +7302,19 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
         def validate(current):
             if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
                 return False
-            for raw_path, in current.execute("SELECT path FROM items"):
-                if _catalogue_item_path(raw_path) in old_paths:
-                    return False
-            counts = {path: 0 for path in replacement_paths}
-            for raw_path, in current.execute("SELECT path FROM items"):
+            counts = {path: [] for path in replacement_paths}
+            for item_id, album_id, raw_path in current.execute(
+                "SELECT id, album_id, path FROM items"
+            ):
                 path = _catalogue_item_path(raw_path)
+                if item_id in retiring_ids or path in old_only_paths:
+                    return False
                 if path in counts:
-                    counts[path] += 1
-            return all(count == 1 for count in counts.values())
+                    counts[path].append(album_id)
+            return all(
+                album_ids == [replacement_album_id]
+                for album_ids in counts.values()
+            )
 
         transaction.commit_and_publish(
             lambda: _beets_database_anchor_matches(database_anchor), validate

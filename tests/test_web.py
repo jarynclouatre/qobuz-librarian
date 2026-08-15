@@ -1124,6 +1124,7 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
         "year": 2013,
         "tracks_count": 2,
         "maximum_bit_depth": 24,
+        "maximum_sampling_rate": 96,
     }
     tracks = [{"id": "track1"}, {"id": "track2"}]
     exact_album = {**album, "tracks": {"items": tracks}}
@@ -1146,6 +1147,7 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
     assert r.status_code == 200
     assert "In library" not in r.text
     assert "1 of 2" in r.text
+    assert r.text.count(">24/96</span>") == 2
     assert 'name="album_id" value="album1"' in r.text   # still downloadable
 
 
@@ -1181,6 +1183,77 @@ _WAITING = [
         "maximum_sampling_rate": 96,
     },
 ]
+
+
+def test_album_search_keeps_quality_for_grouped_partial_editions(
+        client, monkeypatch, tmp_path):
+    import copy
+
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    releases = copy.deepcopy(_WAITING)
+    qualities = {
+        "deluxe": (24, 192),
+        "cd": (16, 44.1),
+        "hires": (24, 96),
+    }
+    exact = {}
+    partial_dirs = {}
+    for release in releases:
+        bits, rate = qualities[release["id"]]
+        release["maximum_bit_depth"] = bits
+        release["maximum_sampling_rate"] = rate
+        tracks = [
+            {"id": f'{release["id"]}-1'},
+            {"id": f'{release["id"]}-2'},
+        ]
+        exact[release["id"]] = {**release, "tracks": {"items": tracks}}
+        if release["id"] in {"cd", "hires"}:
+            directory = tmp_path / release["id"]
+            directory.mkdir()
+            partial_dirs[release["id"]] = directory
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(
+        search_mod, "search_albums", lambda *_a, **_kw: releases
+    )
+    monkeypatch.setattr(
+        search_mod, "get_album", lambda album_id, *_a, **_kw: exact[album_id]
+    )
+    monkeypatch.setattr(
+        catalog_mod,
+        "find_album_dir_filesystem",
+        lambda album: partial_dirs.get(album["id"]),
+    )
+    monkeypatch.setattr(
+        catalog_mod,
+        "find_existing_tracks",
+        lambda album, **_kw: ([album["tracks"]["items"][0]],
+                              partial_dirs[album["id"]]),
+    )
+    monkeypatch.setattr(
+        catalog_mod,
+        "compute_missing",
+        lambda wanted, _have: (wanted[1:], wanted[:1]),
+    )
+
+    response = client.post(
+        "/search",
+        data={"q": "Waiting for the Sun", "kind": "album"},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "data-version-toggle" in response.text
+    assert response.text.count("1 of 2") == 4
+    assert response.text.count(">16/44.1</span>") == 2
+    assert response.text.count("24/96") == 2
+    for album_id in ("cd", "hires"):
+        assert response.text.count(
+            f'name="album_id" value="{album_id}"'
+        ) == 2
 
 
 
@@ -5033,6 +5106,61 @@ def test_settings_accepts_a_token_without_downloader_identity(client, monkeypatc
     assert writes == [("", "token-only")]
 
 
+def test_settings_rejected_candidate_token_cannot_fire_auth_loss_hook(
+        client, monkeypatch):
+    import qobuz_librarian.api.client as client_mod
+    import qobuz_librarian.web.app as app_mod
+    from qobuz_librarian.api.auth import AuthOutcome, credentials_from_values
+
+    active = credentials_from_values(
+        "saved-user", "saved-token", source="streamrip"
+    )
+    probes = []
+    hooks = []
+    writes = []
+
+    def reject_candidate(token, *, report_auth=True):
+        probes.append((token, report_auth))
+        return AuthOutcome.REJECTED
+
+    monkeypatch.setattr(
+        app_mod,
+        "_read_creds",
+        lambda: {
+            "user_id": active.user_id,
+            "auth_token": active.token,
+            "_source": active.source,
+        },
+    )
+    monkeypatch.setattr(app_mod, "_qobuz_token_is_env_owned", lambda: False)
+    monkeypatch.setattr(client_mod, "probe_qobuz", reject_candidate)
+    monkeypatch.setattr(
+        app_mod.job_mgr,
+        "fire_auth_lost_hook",
+        lambda: hooks.append(True),
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "_write_creds",
+        lambda user_id, token: writes.append((user_id, token)) or True,
+    )
+    monkeypatch.setattr(app_mod, "_TOKEN_VALID", True)
+    monkeypatch.setattr(app_mod, "_TOKEN_GENERATION", active.generation)
+
+    response = client.post(
+        "/settings",
+        data={"user_id": "candidate-user", "auth_token": "candidate-token"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert probes == [("candidate-token", False)]
+    assert hooks == []
+    assert writes == []
+    assert app_mod._TOKEN_VALID is True
+    assert app_mod._TOKEN_GENERATION == active.generation
+
+
 def test_settings_refuses_account_change_during_remote_file_work(
         client, monkeypatch):
     import qobuz_librarian.web.app as app_mod
@@ -6698,6 +6826,76 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
     phase = page.text.split('class="ql-repair-phase"', 1)[1].split("</div>", 1)[0]
     assert 'ql-repair-phase-label is-current is-error">Scan' in phase
     assert 'ql-repair-phase-label is-done">Review' not in phase
+
+
+def test_idle_repair_surface_explains_its_distinct_scan(client, monkeypatch):
+    from qobuz_librarian.web import app as webapp
+
+    monkeypatch.setattr(webapp, "_repair_current_job", lambda: None)
+    monkeypatch.setattr(webapp, "_qobuz_ready", lambda: True)
+
+    page = client.get("/repair")
+
+    assert page.status_code == 200
+    assert page.text.count(
+        "Repair reads every file end to end for damage. "
+        "Library builds the catalogue baseline. "
+        "Nothing is replaced until you review and approve a verified repair."
+    ) == 1
+
+
+def test_library_census_reclaim_sentence_uses_a_plain_period():
+    from qobuz_librarian.web import app as webapp
+
+    html = webapp.templates.env.get_template("_census.html").render(
+        census={
+            "bar": [],
+            "rows": [],
+            "top": [],
+            "total": "3 tracks · 157.2MB",
+            "reclaim": "117.9MB",
+        },
+        census_folded=False,
+    )
+
+    assert (
+        "about <b>117.9MB</b>. "
+        '<a href="/downsample" class="ql-inline-link">'
+        "Review candidates</a>"
+    ) in html
+    assert "—" not in html
+
+
+@pytest.mark.parametrize(
+    ("status", "phase"),
+    [
+        (jm.JobStatus.RUNNING, "scan"),
+        (jm.JobStatus.AWAITING_REVIEW, "review"),
+    ],
+)
+def test_repair_owned_surface_repeats_scan_distinction(
+        client, monkeypatch, status, phase):
+    from qobuz_librarian.web import app as webapp
+
+    job = jm.Job(title="Repair scan")
+    job.execute_kind = "repair"
+    job.phase = phase
+    job.status = status
+    if status is jm.JobStatus.AWAITING_REVIEW:
+        job.add_candidate(
+            "album", "Album", "Artist", payload={"album_id": "album"}
+        )
+    monkeypatch.setattr(webapp, "_repair_current_job", lambda: job)
+    monkeypatch.setattr(webapp, "_qobuz_ready", lambda: True)
+
+    page = client.get("/repair")
+
+    assert page.status_code == 200
+    assert page.text.count(
+        "Repair checks your existing files for damage; "
+        "Library builds the catalogue baseline."
+    ) == 1
+    assert "Start repair scan" not in page.text
 
 
 def test_interrupted_library_publication_stays_visible_without_write_authority(

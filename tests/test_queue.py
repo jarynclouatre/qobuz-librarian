@@ -1223,6 +1223,134 @@ def test_executor_gap_fill_backup_survives_partial_beets_move(monkeypatch, tmp_p
     assert result["recovery_unverified"] is True
 
 
+@pytest.mark.parametrize("ambiguous_catalogue", [False, True])
+def test_executor_full_gap_fill_settles_one_reused_beets_path_or_keeps_backup(
+        monkeypatch, tmp_path, ambiguous_catalogue):
+    import os
+    import sqlite3
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import backup as backup_module
+    from qobuz_librarian.queue import executor
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", tmp_path / "beets.db")
+    monkeypatch.setattr(cfg, "BEETS_TIMEOUT", 5)
+
+    shared = album_dir / "01 - First.flac"
+    added = album_dir / "02 - Second.flac"
+    shared.write_bytes(b"owned-original")
+    backup = backup_module.backup_gap_fill_files([shared], album_dir)
+    assert backup is not None and not shared.exists()
+
+    shared.write_bytes(b"full-replacement-one")
+    added.write_bytes(b"full-replacement-two")
+    with sqlite3.connect(cfg.BEETS_DB_PATH) as connection:
+        connection.execute(
+            "CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE items ("
+            "id INTEGER PRIMARY KEY, path BLOB NOT NULL, "
+            "album_id INTEGER, title TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE album_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, "
+            "key TEXT, value TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE item_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, "
+            "key TEXT, value TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO albums VALUES (?, ?)",
+            [(10, "Owned partial"), (20, "Full replacement")],
+        )
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, ?, ?)",
+            [
+                (1, os.fsencode(shared), 10, "Owned first"),
+                (11, os.fsencode(shared), 20, "First"),
+                (12, os.fsencode(added), 20, "Second"),
+            ],
+        )
+        if ambiguous_catalogue:
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?, ?)",
+                (2, os.fsencode(added), 10, "Ambiguous complete row"),
+            )
+    connection.close()
+
+    monkeypatch.setattr(
+        executor, "find_album_dir_filesystem", lambda _album: album_dir
+    )
+    monkeypatch.setattr(
+        executor, "folder_holds_all_tracks", lambda *_args, **_kwargs: True
+    )
+    item = {
+        "album": {
+            "id": "album",
+            "title": "Album",
+            "artist": {"name": "Artist"},
+            "tracks": {
+                "items": [
+                    {"id": "first", "title": "First"},
+                    {"id": "second", "title": "Second"},
+                ]
+            },
+        },
+        "album_dir": album_dir,
+        "backup_path": None,
+        "gap_fill_backup_path": backup,
+        "siblings_to_delete": [],
+        "n_ok": 2,
+        "n_fail": 0,
+        "n_lossy": 0,
+        "auto_upgrade": False,
+    }
+
+    result = executor._resolve_queue_item(
+        item,
+        Namespace(no_import=False, consolidate=False),
+        imported_globally=True,
+        record_fetch=False,
+    )
+
+    if ambiguous_catalogue:
+        assert result["result"] == "partial"
+        assert result["catalogue_unverified"] is True
+        assert result["recovery_unverified"] is True
+        assert backup.path.is_dir()
+        assert (backup.path / shared.name).read_bytes() == b"owned-original"
+    else:
+        assert result["result"] == "downloaded"
+        assert result["catalogue_unverified"] is False
+        assert result["recovery_unverified"] is False
+        assert not backup.path.exists()
+
+    with sqlite3.connect(cfg.BEETS_DB_PATH) as connection:
+        rows = connection.execute(
+            "SELECT id, album_id, path FROM items ORDER BY id"
+        ).fetchall()
+    expected = [
+        (11, 20, os.fsencode(shared)),
+        (12, 20, os.fsencode(added)),
+    ]
+    if ambiguous_catalogue:
+        expected = [
+            (1, 10, os.fsencode(shared)),
+            (2, 10, os.fsencode(added)),
+            *expected,
+        ]
+    assert rows == expected
+
+
 def test_executor_gap_fill_backup_kept_when_extras_satisfy_the_count(monkeypatch, tmp_path):
     """The resolved folder holds ENOUGH audio files, but an expected track is
     still absent because extras make up the number. A raw file count reads that as

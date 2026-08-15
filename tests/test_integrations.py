@@ -694,6 +694,104 @@ def test_managed_override_seals_pinned_database_root_and_plugin_order(
         os.close(descriptor)
 
 
+@pytest.mark.parametrize(
+    "catalogue_shape",
+    [
+        "proved",
+        "legacy-album-complete",
+        "candidate-album-duplicate",
+        "destination-without-album",
+        "missing-candidate-album",
+        "outside-library-row",
+        "malformed-path",
+    ],
+)
+def test_managed_import_identifies_one_complete_album_beside_legacy_rows(
+        monkeypatch, tmp_path, catalogue_shape):
+    """A gap fill can leave legacy rows beside the one complete album."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+
+    music = tmp_path / "music"
+    album = music / "Artist" / "Album"
+    album.mkdir(parents=True)
+    first = album / "01.flac"
+    second = album / "02.flac"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    database = tmp_path / "beets.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE items ("
+            "id INTEGER PRIMARY KEY, path BLOB NOT NULL, album_id INTEGER)"
+        )
+        connection.executemany("INSERT INTO albums VALUES (?)", [(10,), (20,)])
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, ?)",
+            [
+                (1, os.fsencode(first), 10),
+                (11, os.fsencode(first), 20),
+                (12, os.fsencode(second), 20),
+            ],
+        )
+        if catalogue_shape == "legacy-album-complete":
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?)",
+                (2, os.fsencode(second), 10),
+            )
+        elif catalogue_shape == "candidate-album-duplicate":
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?)",
+                (13, os.fsencode(first), 20),
+            )
+        elif catalogue_shape == "destination-without-album":
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?)",
+                (13, os.fsencode(second), None),
+            )
+        elif catalogue_shape == "missing-candidate-album":
+            connection.execute("DELETE FROM albums WHERE id = 20")
+        elif catalogue_shape == "outside-library-row":
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?)",
+                (2, os.fsencode(tmp_path / "outside.flac"), 10),
+            )
+        elif catalogue_shape == "malformed-path":
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?)",
+                (2, b"bad\x00path", 10),
+            )
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+    monkeypatch.setattr(cfg, "BEETS_TIMEOUT", 5)
+    destinations = {
+        first.relative_to(music).as_posix(),
+        second.relative_to(music).as_posix(),
+    }
+    anchor = beets._open_beets_database_anchor()
+    try:
+        matches = beets._managed_database_matches(
+            anchor, destinations, str(music)
+        )
+        boundary = beets._managed_album_boundary(
+            destinations,
+            str(music),
+            beets._ownership_identity(os.stat(music)),
+            database_anchor=anchor,
+        )
+    finally:
+        beets._close_beets_database_anchor(anchor)
+
+    assert matches is (catalogue_shape == "proved")
+    if catalogue_shape != "proved":
+        assert boundary is None
+    else:
+        assert boundary is not None
+        assert boundary[0] == "Artist/Album"
+
+
 def test_beets_pruning_stays_bound_to_the_captured_staging_roots(monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations import beets
@@ -774,6 +872,79 @@ def test_ownership_source_guard_refuses_a_hardlinked_track(
             os.close(held[0])
 
     assert outside.read_bytes() == b"audio"
+
+
+@pytest.mark.parametrize(
+    ("move_shape", "accepted"),
+    [
+        ("rename", True),
+        ("copy-unlink", True),
+        ("source-name-reused", False),
+        ("source-still-linked", False),
+        ("content-changed", False),
+        ("destination-hardlinked", False),
+    ],
+)
+def test_ownership_accepts_only_an_exact_single_link_move(
+        tmp_path, monkeypatch, move_shape, accepted):
+    """Accept rename or copy-unlink, but reject unsafe lookalikes."""
+    module = _load_ownership_for_test(monkeypatch)
+    staging = tmp_path / "staging"
+    source = staging / "01.flac"
+    library = tmp_path / "music"
+    destination = library / "Artist" / "Album" / "01.flac"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"single-track-audio")
+
+    plugin = object.__new__(module.QobuzOwnershipPlugin)
+    plugin._lock = threading.RLock()
+    plugin._enabled = True
+    plugin._managed = True
+    plugin._root = os.fsencode(library)
+    plugin._root_fd = os.open(library, os.O_RDONLY | os.O_DIRECTORY)
+    source_parent_fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY)
+    source_fd = os.open(source, os.O_RDONLY)
+    item = object()
+    selected = {
+        "item": item,
+        "source_path": os.path.abspath(os.fsencode(source)),
+        "source_parent_fd": source_parent_fd,
+        "source_name": os.fsencode(source.name),
+        "source_fd": source_fd,
+        "destination_parent": [b"Artist", b"Album"],
+        "pending_move": None,
+        "destination": None,
+        "destination_identity": None,
+        "move_proven": False,
+    }
+    plugin._source_items = [selected]
+    plugin._source_item = selected
+
+    try:
+        plugin._before_item_moved(item, source, destination)
+        if move_shape == "rename":
+            source.rename(destination)
+        else:
+            shutil.copyfile(source, destination)
+        if move_shape not in {"rename", "source-still-linked"}:
+            source.unlink()
+        if move_shape == "source-name-reused":
+            source.write_bytes(b"unrelated-replacement")
+        elif move_shape == "content-changed":
+            destination.write_bytes(b"tampered-audio")
+        elif move_shape == "destination-hardlinked":
+            os.link(destination, tmp_path / "outside-hardlink.flac")
+        if accepted:
+            plugin._item_moved(item, source, destination)
+        else:
+            with pytest.raises((OSError, ValueError)):
+                plugin._item_moved(item, source, destination)
+        assert selected["move_proven"] is accepted
+    finally:
+        os.close(source_fd)
+        os.close(source_parent_fd)
+        os.close(plugin._root_fd)
 
 
 def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeypatch, _need_ffmpeg):

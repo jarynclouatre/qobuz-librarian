@@ -6,6 +6,16 @@
   {% else %}<span class="{{ cls }} quality-cd" title="Qobuz source quality">{{ quality or 'CD' }}</span>{% endif %}
 {%- endmacro %}
 
+{% macro album_quality_status(item) -%}
+  {% if item.owned %}<span class="ql-owned-label">In library</span>
+  {% else %}
+  <span class="ql-search-quality-status">
+    {{ quality_badge(item) }}
+    {% if item.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ item.have_tracks }} of {{ item.want_tracks }}</span>{% endif %}
+  </span>
+  {% endif %}
+{%- endmacro %}
+
 {% macro download_icon() -%}
   <svg class="ql-download-icon" viewBox="0 0 24 24" aria-hidden="true">
     <path d="M12 4v10"/>
@@ -293,7 +303,7 @@
             </div>
             <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
-            <span role="cell">{% if g.owned %}<span class="ql-owned-label">In library</span>{% elif g.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ g.have_tracks }} of {{ g.want_tracks }}</span>{% else %}{{ quality_badge(g) }}{% endif %}</span>
+            <span role="cell">{{ album_quality_status(g) }}</span>
             <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True) }}{% endif %}</span>
           </div>
           {% if g.others %}
@@ -318,7 +328,7 @@
               </div>
               <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
               <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
-              <span role="cell">{% if e.owned %}<span class="ql-owned-label">In library</span>{% elif e.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ e.have_tracks }} of {{ e.want_tracks }}</span>{% else %}{{ quality_badge(e) }}{% endif %}</span>
+              <span role="cell">{{ album_quality_status(e) }}</span>
               <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True) }}{% endif %}</span>
             </div>
             {% endfor %}
@@ -385,7 +395,7 @@
         </div>
         {% endif %}
         <div class="ql-grid-footer">
-          {% if g.owned %}<span class="ql-owned-label">In library</span>{% elif g.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ g.have_tracks }} of {{ g.want_tracks }}</span>{% else %}{{ quality_badge(g) }}{% endif %}
+          {{ album_quality_status(g) }}
           {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True) }}{% endif %}
         </div>
       </div>

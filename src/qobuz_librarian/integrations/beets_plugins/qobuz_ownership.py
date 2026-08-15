@@ -900,6 +900,21 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 if getattr(self, "_managed", False):
                     raise
 
+    @staticmethod
+    def _source_name_is_missing(selected):
+        """Prove the exact held source name was removed by a copy-unlink move."""
+        try:
+            os.stat(
+                selected["source_name"],
+                dir_fd=selected["source_parent_fd"],
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+        return False
+
     def _item_moved(self, item, source, destination):
         with self._lock:
             selected = self._select_source_item_locked(item, source)
@@ -924,15 +939,22 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 source_stat = os.fstat(selected["source_fd"])
                 source_identity = _ownership_identity(source_stat)
                 destination_identity = _ownership_identity(destination_stat)
-                if (
-                    source_stat.st_nlink != 1
-                    or destination_stat.st_nlink != 1
-                    or (
-                        destination_identity != source_identity
-                        and not self._stable_regular_files_equal(
-                            selected["source_fd"], destination_fd
-                        )
+                renamed = (
+                    destination_identity == source_identity
+                    and source_stat.st_nlink == 1
+                )
+                copied_and_unlinked = (
+                    destination_identity != source_identity
+                    and source_stat.st_nlink == 0
+                    and self._source_name_is_missing(selected)
+                    and self._stable_regular_files_equal(
+                        selected["source_fd"], destination_fd
                     )
+                    and self._source_name_is_missing(selected)
+                )
+                if (
+                    destination_stat.st_nlink != 1
+                    or not (renamed or copied_and_unlinked)
                 ):
                     raise ValueError("ownership move did not copy the source")
 

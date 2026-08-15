@@ -911,6 +911,131 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
     connection.close()
 
 
+@pytest.mark.parametrize(
+    "scenario", ["clean", "ambiguous", "after-publication"]
+)
+def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
+        monkeypatch, tmp_path, scenario):
+    """Retire legacy rows only when one album covers every replacement."""
+    import os
+    import sqlite3
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+
+    music = tmp_path / "music"
+    album = music / "Artist" / "Album"
+    album.mkdir(parents=True)
+    shared = album / "01.flac"
+    added = album / "02.flac"
+    retired = album / "Old name.flac"
+    shared.write_bytes(b"replacement-one")
+    added.write_bytes(b"replacement-two")
+
+    database = tmp_path / "beets.db"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+    monkeypatch.setattr(cfg, "BEETS_TIMEOUT", 5)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE items ("
+            "id INTEGER PRIMARY KEY, path BLOB NOT NULL, "
+            "album_id INTEGER, title TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE album_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, "
+            "key TEXT, value TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE item_attributes ("
+            "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, "
+            "key TEXT, value TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO albums VALUES (?, ?)",
+            [(10, "Retired partial"), (20, "Full replacement")],
+        )
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, ?, ?)",
+            [
+                (1, os.fsencode(shared), 10, "Original shared row"),
+                (2, os.fsencode(retired), 10, "Old name"),
+                (11, os.fsencode(shared), 20, "Replacement one"),
+                (12, os.fsencode(added), 20, "Replacement two"),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO item_attributes VALUES (1, 1, 'source', 'old')"
+        )
+        connection.execute(
+            "INSERT INTO album_attributes VALUES (1, 10, 'source', 'old')"
+        )
+        if scenario == "ambiguous":
+            connection.execute(
+                "INSERT INTO items VALUES (?, ?, ?, ?)",
+                (3, os.fsencode(added), 10, "Ambiguous complete row"),
+            )
+    connection.close()
+
+    backup = {
+        "receipt": {
+            "origin": str(album),
+            "tree": {
+                "files": {
+                    shared.name: {},
+                    retired.name: {},
+                }
+            },
+        }
+    }
+    replacement_receipt = {
+        "tree": {"files": {shared.name: {}, added.name: {}}}
+    }
+
+    real_publish = beets.AtomicSQLiteWrite.commit_and_publish
+    if scenario == "after-publication":
+        def fail_after_publication(transaction, *args, **kwargs):
+            real_publish(transaction, *args, **kwargs)
+            raise OSError("injected failure after catalogue publication")
+
+        monkeypatch.setattr(
+            beets.AtomicSQLiteWrite,
+            "commit_and_publish",
+            fail_after_publication,
+        )
+    result = beets.retire_backup_beets_entries(
+        backup, album, replacement_receipt
+    )
+    monkeypatch.setattr(
+        beets.AtomicSQLiteWrite,
+        "commit_and_publish",
+        real_publish,
+    )
+    replayed = beets.retire_backup_beets_entries(
+        backup, album, replacement_receipt
+    )
+
+    assert result is (scenario == "clean")
+    assert replayed is (scenario != "ambiguous")
+    with sqlite3.connect(database) as connection:
+        item_ids = connection.execute(
+            "SELECT id FROM items ORDER BY id"
+        ).fetchall()
+        album_ids = connection.execute(
+            "SELECT id FROM albums ORDER BY id"
+        ).fetchall()
+    if scenario == "ambiguous":
+        assert item_ids == [(1,), (2,), (3,), (11,), (12,)]
+        assert album_ids == [(10,), (20,)]
+    else:
+        assert item_ids == [(11,), (12,)]
+        assert album_ids == [(20,)]
+
+
 def test_upgrade_verification_rejects_a_masked_per_track_downgrade(monkeypatch, tmp_path):
     from qobuz_librarian.modes import process as proc
 

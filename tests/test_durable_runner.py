@@ -318,7 +318,11 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         bindings=(binding,),
         counts=DownloadCounts(),
     )
-    observed = {"live_queue": [], "active_before_download": False}
+    observed = {
+        "live_queue": [],
+        "active_before_download": False,
+        "database_generation": 0,
+    }
     managed_holder = {}
 
     monkeypatch.setattr(durable_runner, "snapshot_staging", lambda: set())
@@ -479,7 +483,12 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     monkeypatch.setattr(durable_runner, "inspect_staging_group_reference", lambda *_: absent)
 
     class ManagedLease:
+        def __init__(self):
+            self.database_generation = observed["database_generation"]
+
         def revalidate(self):
+            if self.database_generation != observed["database_generation"]:
+                raise OSError("database anchor was replaced")
             return managed_holder["value"]
 
     @contextmanager
@@ -533,6 +542,18 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         yield LiveLease(assessment.evidence)
 
     monkeypatch.setattr(durable_runner, "capture_new_album_completion", fake_capture)
+    finish_backup = durable_runner.finish_library_backup_settlement
+
+    def replace_database_during_backup_settlement(*args, **kwargs):
+        result = finish_backup(*args, **kwargs)
+        observed["database_generation"] += 1
+        return result
+
+    monkeypatch.setattr(
+        durable_runner,
+        "finish_library_backup_settlement",
+        replace_database_during_backup_settlement,
+    )
     monkeypatch.setattr(
         beets_module,
         "retire_managed_carrier",
@@ -565,6 +586,7 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     assert result.status is durable_runner.DurableAlbumStatus.COMPLETE
     assert retirement_attempts == ["empty", "after-import"]
     assert observed["active_before_download"] is True
+    assert observed["database_generation"] == 1
     assert observed["live_queue"] and observed["live_queue"][0] is True
     assert queue == []
     assert queue_state.list_queue_journals() == ()

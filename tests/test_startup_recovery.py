@@ -560,12 +560,22 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
     )
 
     events = []
+    database_generations = {}
 
     class ManagedLease:
         def __init__(self, owner):
             self.owner = owner
+            self.database_generation = database_generations.get(
+                owner.item_id, 0
+            )
 
         def revalidate(self):
+            if self.database_generation != database_generations.get(
+                self.owner.item_id, 0
+            ):
+                raise beets.ManagedEvidenceUnavailable(
+                    "database anchor was replaced"
+                )
             return SimpleNamespace(manifest_hash="c" * 64)
 
     class LiveLease:
@@ -644,6 +654,22 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
     monkeypatch.setattr(startup_recovery, "capture_new_album_completion", capture)
     monkeypatch.setattr(startup_recovery, "inspect_managed_carrier", inspect)
     monkeypatch.setattr(beets, "retire_managed_carrier", retire)
+    finish_backup = startup_recovery.finish_library_backup_settlement
+
+    def replace_database_during_backup_settlement(
+            current, item_id, *args, **kwargs):
+        result = finish_backup(current, item_id, *args, **kwargs)
+        database_generations[item_id] = (
+            database_generations.get(item_id, 0) + 1
+        )
+        events.append(("backup-settled", item_id))
+        return result
+
+    monkeypatch.setattr(
+        startup_recovery,
+        "finish_library_backup_settlement",
+        replace_database_during_backup_settlement,
+    )
 
     authority = run_lock.acquire()
     assert authority is not None
@@ -690,6 +716,8 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
     assert events[0] == ("retire", retirement_id)
     assert ("live-proof", complete_id) in events
     assert ("live-proof", sealed_id) in events
+    assert events.index(("backup-settled", sealed_id)) \
+        < events.index(("managed-open", sealed_id))
     assert events.index(("live-close", complete_id)) < events.index(("retire", complete_id))
     assert events.index(("live-close", sealed_id)) < events.index(("retire", sealed_id))
     assert acknowledged == [complete_id, sealed_id]

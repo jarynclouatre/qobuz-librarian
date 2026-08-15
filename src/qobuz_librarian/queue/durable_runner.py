@@ -1219,6 +1219,48 @@ def execute_durable_new_album(
     post_dir = Path(managed.library_root) / managed.album_path
     try:
         _require_authority(authority)
+        backup_resolution = finish_library_backup_settlement(
+            journal,
+            item_id,
+            owner,
+            item["album"],
+            authority_check=lambda: _require_authority(authority),
+        )
+        if (
+            backup_resolution.status
+            is LibraryBackupResolutionStatus.ATTENTION
+        ):
+            reason = (
+                backup_resolution.reason
+                or "library-backup-settlement-unavailable"
+            )
+            _block(
+                operation_id,
+                item_id,
+                reason,
+                authority=authority,
+            )
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                reason,
+                post_dir,
+                operation_id,
+                item_id,
+            )
+        journal = backup_resolution.journal
+        settled_managed = managed_completion_evidence(imported)
+        if settled_managed != managed:
+            reason = "managed-completion-changed-during-backup-resolution"
+            _block(operation_id, item_id, reason, authority=authority)
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                reason,
+                post_dir,
+                operation_id,
+                item_id,
+            )
+        managed = settled_managed
+        post_dir = Path(managed.library_root) / managed.album_path
         with reopen_managed_evidence(carrier.data, owner) as managed_lease:
             reopened = managed_lease.revalidate()
             if reopened != managed:
@@ -1231,35 +1273,6 @@ def execute_durable_new_album(
             ) as live_lease:
                 evidence = live_lease.revalidate()
                 _require_authority(authority)
-                backup_resolution = finish_library_backup_settlement(
-                    journal,
-                    item_id,
-                    owner,
-                    item["album"],
-                    authority_check=lambda: _require_authority(authority),
-                )
-                if (
-                    backup_resolution.status
-                    is LibraryBackupResolutionStatus.ATTENTION
-                ):
-                    reason = (
-                        backup_resolution.reason
-                        or "library-backup-settlement-unavailable"
-                    )
-                    _block(
-                        operation_id,
-                        item_id,
-                        reason,
-                        authority=authority,
-                    )
-                    return DurableAlbumResult(
-                        DurableAlbumStatus.ATTENTION,
-                        reason,
-                        post_dir,
-                        operation_id,
-                        item_id,
-                    )
-                journal = backup_resolution.journal
                 managed_lease.revalidate()
                 live_lease.revalidate()
                 _require_authority(authority)

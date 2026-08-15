@@ -712,29 +712,30 @@ def _recover_resolving(authority, journal, item, _acknowledge_completion):
             )
             return False
 
+        _require_authority(authority)
+        backup_resolution = finish_library_backup_settlement(
+            current_journal,
+            item.item_id,
+            owner,
+            item.planned["album"],
+            authority_check=lambda: _require_authority(authority),
+        )
+        current_journal = backup_resolution.journal
+        if backup_resolution.status is LibraryBackupResolutionStatus.ATTENTION:
+            _block_resolving(
+                authority,
+                current_journal,
+                _find_item(current_journal, item.item_id),
+                backup_resolution.reason
+                or "library-backup-settlement-unavailable",
+            )
+            return False
+
         with _capture_live_completion(
             current_journal,
             _find_item(current_journal, item.item_id),
             expected_manifest_hash=inspection.manifest_hash,
         ) as (managed_lease, live_lease, evidence):
-            _require_authority(authority)
-            backup_resolution = finish_library_backup_settlement(
-                current_journal,
-                item.item_id,
-                owner,
-                item.planned["album"],
-                authority_check=lambda: _require_authority(authority),
-            )
-            current_journal = backup_resolution.journal
-            if backup_resolution.status is LibraryBackupResolutionStatus.ATTENTION:
-                _block_resolving(
-                    authority,
-                    current_journal,
-                    _find_item(current_journal, item.item_id),
-                    backup_resolution.reason
-                    or "library-backup-settlement-unavailable",
-                )
-                return False
             if (
                 managed_lease.revalidate().manifest_hash
                 != inspection.manifest_hash
