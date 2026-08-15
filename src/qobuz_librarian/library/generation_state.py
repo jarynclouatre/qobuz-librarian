@@ -1,4 +1,4 @@
-"""Authoritative Library generation and monotonic saved-view revisions."""
+"""Track which Library scan and saved views are current."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ STATE_VERSION = 1
 SURFACES = ("library", "upgrade", "downsample", "new_releases")
 _lock = threading.RLock()
 _UNPUBLISHED_LIBRARY_REASON = (
-    "The latest Library crawl has not published this view."
+    "The latest Library scan stopped before this review was saved."
 )
 _INTERRUPTED_PUBLICATION_MESSAGE = (
-    "The completed catalogue crawl was interrupted before its Library view "
-    "was published."
+    "The Library scan finished checking the catalogue, but stopped before "
+    "its review was saved."
 )
 
 
@@ -167,7 +167,7 @@ def output_is_current(surface: str, *, generation=None, state=None) -> bool:
 
 
 def library_snapshot_available(state=None) -> bool:
-    """Whether the current generation has a durable Library snapshot.
+    """Whether the current scan has a saved Library snapshot.
 
     Freshness is deliberately separate. A local change can make the snapshot
     stale without erasing the completed baseline or its saved review.
@@ -197,13 +197,13 @@ def baseline_complete(state=None) -> bool:
 
 
 def library_publication_incomplete(state=None) -> bool:
-    """Identify the commit-before-snapshot restart window exactly.
+    """Detect a restart after the catalogue commit but before the review save.
 
     A catalogue generation is committed before its Library snapshot so a
     snapshot can never claim authority from an older crawl. If the process is
     interrupted between those writes, the attempt used to look complete even
-    though its main view was never published. The zero revision and original
-    publication reason distinguish that window from a later local invalidation.
+    though its main view was never saved. The zero revision and original reason
+    distinguish that window from a later local change.
     """
     state = load() if state is None else state
     latest = state.get("latest_attempt") or {}
@@ -222,7 +222,7 @@ def library_publication_incomplete(state=None) -> bool:
 
 
 def reconcile_interrupted_library_publication(authority) -> bool | None:
-    """Mark a committed but unpublished Library attempt incomplete.
+    """Mark a catalogue commit without its saved review as incomplete.
 
     Callers must hold the process run lock. ``True`` means the interrupted
     state was repaired, ``False`` means there was nothing to repair, and
@@ -298,7 +298,7 @@ def commit_catalog_generation(
     limited: bool = False,
     expected_revision: int | None = None,
 ):
-    """Publish a clean crawl before any dependent snapshot is replaced."""
+    """Commit a completed crawl before replacing its saved views."""
     with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
         data = load()
         latest = data.get("latest_attempt") or {}
@@ -388,7 +388,7 @@ def mark_output_current(
     policy_signature: str = "",
     preserve_noncurrent: bool = False,
 ) -> bool:
-    """Publish one output revision.
+    """Save one output revision.
 
     A full scan may make the output current. A targeted artist or album merge
     may advance its exact saved revision, but it cannot prove that an unrelated

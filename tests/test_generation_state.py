@@ -112,7 +112,7 @@ def test_restart_marks_committed_unpublished_library_attempt_incomplete(
     assert state["generation"] == publication["generation"]
     assert state["revision"] == revision + 1
     assert state["latest_attempt"]["status"] == "incomplete"
-    assert "before its Library view was published" in (
+    assert "before its review was saved" in (
         state["latest_attempt"]["message"]
     )
     assert state["outputs"]["library"]["status"] == "needs_refresh"

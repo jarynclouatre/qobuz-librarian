@@ -502,8 +502,8 @@ def acquire_run_lock():
                 )
             if publication_recovery:
                 log.warning(
-                    "Recovered a Library crawl interrupted before its saved "
-                    "view was published."
+                    "Recovered a Library scan that stopped before its review "
+                    "was saved."
                 )
         except Exception as exc:
             try:

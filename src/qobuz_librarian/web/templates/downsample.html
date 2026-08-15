@@ -22,7 +22,7 @@
       {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No downsample candidates{% else %}Not refreshed yet{% endif %}
     </span>
     <span>
-      {% if downsample_state.stale %}Saved results are incomplete or belong to an older Library generation.{% elif downsample_state.updated %}Candidates refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No downsample refresh has finished yet.{% endif %}
+      {% if downsample_state.stale %}Saved results need a Library refresh.{% elif downsample_state.updated %}Candidates refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No downsample refresh has finished yet.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/downsample/hidden">

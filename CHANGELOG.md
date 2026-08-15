@@ -2,7 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [0.13.1] - Unreleased
+## [0.13.2] - Unreleased
+
+This release tightens the handoff between saved reviews, Qobuz access, and the
+files those reviews describe.
+
+- Saved Library, New Releases, Upgrade, and Repair results stay available when Qobuz is disconnected. Work that needs Qobuz checks the current token before it starts, while Downsample and Lyrics remain independent of the Qobuz login.
+- Downloads and replacements recheck both the selected files and the active account before queueing, and again before the first file change. If an album or credential changed, the app leaves the files and review choices alone and asks for a refresh or retry.
+- Library refreshes keep the previous complete baseline if a later scan fails, and interrupted publication, partial results, stale quality views, and resumable Repair work now survive restarts without looking complete.
+- Partly completed Library, Upgrade, and Repair batches keep finished albums finished and return untouched picks to the living review. The CLI follows the same admission and saved-state rules.
+- Partial-to-full album downloads can settle the exact old Beets rows and backup safely. Single-track Undo works after a verified cross-mount import, partially owned Search results keep their source quality, and Docker stop signals reach the nonroot app cleanly.
+- Tabs keep their last page and scroll position when you move around the app. A search no longer disappears after a trip to Settings, and returning to Queue, History, or a maintenance tool picks up where you left it.
+
+## [0.13.1] - 2026-08-09
 
 - Docker image publishing works again after the release smoke test tripped over temporary file permissions.
 

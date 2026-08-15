@@ -14,7 +14,7 @@
 
 {% if new_release_state.stale %}
 <div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
-  <span><strong>Refresh needed.</strong> {{ new_release_state.reason or "These saved New Releases results are not complete for the current Library generation." }} Your saved review remains available below. <a href="/library" class="ql-inline-link">Open Library &rarr;</a></span>
+  <span><strong>Refresh needed.</strong> {{ new_release_state.reason or "These saved New Releases results need a Library refresh." }} Your saved review remains available below. <a href="/library" class="ql-inline-link">Open Library &rarr;</a></span>
 </div>
 {% endif %}
 

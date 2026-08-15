@@ -182,7 +182,7 @@ def test_scan_isrc_repairs_truncation_gates(tmp_path):
 # ── Repair scan: resume from an interrupted sweep ──────────────────────
 
 def test_repair_scan_rechecks_legacy_checkpoint(tmp_path, monkeypatch):
-    """A legacy global Repair checkpoint is never reused as a health verdict."""
+    """Old Repair checkpoints are rescanned instead of reused."""
     from qobuz_librarian.library import scan_checkpoint
     from qobuz_librarian.web import flows
     monkeypatch.setattr("qobuz_librarian.config.SCAN_CHECKPOINT_FILE", tmp_path / "cp.json")
@@ -245,7 +245,7 @@ def test_repair_scan_rechecks_legacy_checkpoint(tmp_path, monkeypatch):
 
 def test_repair_resume_reuses_only_exact_current_artist_bundles(
         tmp_path, monkeypatch):
-    """Changed, removed, and malformed artists cannot ride a saved verdict."""
+    """Repair rescans changed, missing, and malformed checkpoint entries."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import scan_checkpoint
     from qobuz_librarian.web import flows

@@ -795,7 +795,7 @@ def _return_new_release_picks(picks):
 
 
 def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
-    """Return unfinished Upgrade or Repair picks to a durable living review."""
+    """Return unfinished Upgrade or Repair picks to the living review."""
     if not picks:
         return True
     folded = refold_into_living_review(picks, execute_kind=execute_kind)
@@ -1168,7 +1168,7 @@ _REPAIR_RESULT_VERSION = 1
 
 
 def _repair_checkpoint_signature():
-    """Settings and algorithm version needed to interpret a saved verdict."""
+    """Version the settings that affect saved Repair results."""
     return {
         "result_version": _REPAIR_RESULT_VERSION,
         "deep_decode": True,
@@ -1231,7 +1231,7 @@ def _validated_repair_checkpoint_bundle(artist_dir, value):
             for key in ("verified_ok", "unverified", "failed_albums")
         )
         # Failed albums were not fully checked. Retry their artist instead of
-        # promoting the partial verdict through a later clean completion.
+        # reusing an incomplete result in a later clean scan.
         or value["counts"]["failed_albums"]
     ):
         return None
@@ -1743,8 +1743,8 @@ def _scan_library_impl(
                     "as newer results."
                 )
         elif catalog_complete and scan_state_save_failed:
-            # Keep a complete resumable copy when the authoritative snapshot
-            # could not be published.
+            # Keep a complete resumable copy when the main review could not be
+            # saved.
             scan_checkpoint.save(
                 kind, scanned, job.candidates, baseline_seen, state_artists)
         elif catalog_complete and partial_only:
@@ -3291,8 +3291,8 @@ def scan_repairs(job, token):
     if not artists:
         _set_empty_library_summary(job)
         return
-    # Resume only per-artist verdicts whose exact byte proof still matches.
-    # Legacy/global checkpoints are deliberately treated as hints to rescan.
+    # Resume only artists whose saved file receipt still matches. Older global
+    # checkpoints are treated as hints to rescan.
     cp = scan_checkpoint.load("repair")
     checkpoint_artists = (
         cp.get("artists", {})

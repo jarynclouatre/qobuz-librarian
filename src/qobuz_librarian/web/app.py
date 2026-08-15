@@ -3243,7 +3243,7 @@ def _library_scan_state():
 
 
 def _truthful_library_generation():
-    """Expose an interrupted publication honestly even without write authority."""
+    """Show an interrupted review save before startup recovery can run."""
     from qobuz_librarian.library import generation_state
 
     state = generation_state.load()
@@ -3253,8 +3253,8 @@ def _truthful_library_generation():
     latest = state.setdefault("latest_attempt", {})
     latest["status"] = "incomplete"
     latest["message"] = (
-        "The completed catalogue crawl was interrupted before its Library "
-        "view was published."
+        "The Library scan finished checking the catalogue, but stopped "
+        "before its review was saved."
     )
     return state
 
@@ -8356,8 +8356,8 @@ async def job_approve(request: Request, job_id: str):
                 return RedirectResponse(
                     url=dest + "?error=" + urllib.parse.quote(
                         "The selected local files changed after this review "
-                        "was built, or the saved proof is too old. Refresh or "
-                        "rescan before trying again. Nothing changed."
+                        "was built, or the review is too old to verify. "
+                        "Refresh or rescan before trying again. Nothing changed."
                     ),
                     status_code=303,
                 )
@@ -8656,8 +8656,8 @@ async def job_approve(request: Request, job_id: str):
         return RedirectResponse(
             url=dest + "?error=" + urllib.parse.quote(
                 "The selected local files changed after this review was "
-                "built, or the saved proof is too old. Refresh or rescan "
-                "before trying again. Nothing changed."
+                "built, or the review is too old to verify. Refresh or "
+                "rescan before trying again. Nothing changed."
             ),
             status_code=303,
         )

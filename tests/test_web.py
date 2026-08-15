@@ -37,7 +37,7 @@ def _wait_for(predicate, timeout=5.0):
 
 
 def _allow_legacy_candidate_execution(monkeypatch):
-    """Let executor-only fixtures reach the behavior they were built to test."""
+    """Let older fixtures reach the executor behavior they exercise."""
     from qobuz_librarian.library import candidate_premise
 
     def allow(candidate):
@@ -51,7 +51,7 @@ def _allow_legacy_candidate_execution(monkeypatch):
 
 
 def _make_saved_surface_current(monkeypatch, surface, state):
-    """Bind a mocked saved snapshot to one authoritative test generation."""
+    """Give a mocked saved snapshot a current Library revision."""
     from qobuz_librarian.library import generation_state
 
     state["generation"] = 1
@@ -6828,44 +6828,6 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
     assert 'ql-repair-phase-label is-done">Review' not in phase
 
 
-def test_idle_repair_surface_explains_its_distinct_scan(client, monkeypatch):
-    from qobuz_librarian.web import app as webapp
-
-    monkeypatch.setattr(webapp, "_repair_current_job", lambda: None)
-    monkeypatch.setattr(webapp, "_qobuz_ready", lambda: True)
-
-    page = client.get("/repair")
-
-    assert page.status_code == 200
-    assert page.text.count(
-        "Repair reads every file end to end for damage. "
-        "Library builds the catalogue baseline. "
-        "Nothing is replaced until you review and approve a verified repair."
-    ) == 1
-
-
-def test_library_census_reclaim_sentence_uses_a_plain_period():
-    from qobuz_librarian.web import app as webapp
-
-    html = webapp.templates.env.get_template("_census.html").render(
-        census={
-            "bar": [],
-            "rows": [],
-            "top": [],
-            "total": "3 tracks · 157.2MB",
-            "reclaim": "117.9MB",
-        },
-        census_folded=False,
-    )
-
-    assert (
-        "about <b>117.9MB</b>. "
-        '<a href="/downsample" class="ql-inline-link">'
-        "Review candidates</a>"
-    ) in html
-    assert "—" not in html
-
-
 @pytest.mark.parametrize(
     ("status", "phase"),
     [
@@ -6936,7 +6898,7 @@ def test_interrupted_library_publication_stays_visible_without_write_authority(
 
     assert library.status_code == 200
     assert "The latest Library refresh did not finish" in library.text
-    assert "No complete baseline was published" in library.text
+    assert "No complete baseline was saved" in library.text
     assert "15 already checked, continues from there" in library.text
     assert dashboard.status_code == 200
     assert "A library scan was interrupted" in dashboard.text

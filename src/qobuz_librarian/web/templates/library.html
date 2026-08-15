@@ -13,13 +13,13 @@
   {% if library_notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ library_notice }}</span></div>{% endif %}
   {% set latest_attempt = library_generation.latest_attempt %}
   {% if latest_attempt.status in ('failed', 'cancelled', 'incomplete') %}
-  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}. {% if baseline_complete %}Your previous complete baseline remains current.{% else %}No complete baseline was published.{% endif %}</span></div>
+  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}. {% if baseline_complete %}Your previous complete baseline is still available.{% else %}No complete baseline was saved.{% endif %}</span></div>
   {% endif %}
   {% if library_generation.outputs.library.limited %}
-  <div class="ql-flash ql-flash-warning" data-flash><span>The current Library result hit its cap. The catalogue crawl completed, but the saved list is limited.</span></div>
+  <div class="ql-flash ql-flash-warning" data-flash><span>The Library scan finished, but this saved list stops at the configured result limit.</span></div>
   {% endif %}
   {% if library_job and library_job.status == JobStatus.AWAITING_REVIEW and library_baseline_exists and not baseline_complete %}
-  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results are not complete for the current Library generation." }} Your saved review remains available below.</span></div>
+  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.</span></div>
   {% endif %}
 
   {% if not qobuz_ready %}
@@ -72,7 +72,7 @@
 
   <div class="ql-scan-status">
     <span class="ql-status-chip {% if baseline_complete %}is-success{% else %}is-warning{% endif %}">{% if baseline_complete %}Baseline ready{% else %}Refresh needed{% endif %}</span>
-    <span class="ql-scan-status-meta">{% if not baseline_complete %}{{ library_generation.outputs.library.reason or "These saved results are not complete for the current Library generation." }}{% elif last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full baseline has finished{% endif %}</span>
+    <span class="ql-scan-status-meta">{% if not baseline_complete %}{{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }}{% elif last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full baseline has finished{% endif %}</span>
   </div>
 
   {% if library_resume and library_resume.kind == 'missing' %}

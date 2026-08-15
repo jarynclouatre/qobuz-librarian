@@ -10,6 +10,7 @@
 | `Volume not writable` (Settings → Diagnostics: FAIL) | `PUID`/`PGID` do not match the host owner. Run `chown -R $(id -u):$(id -g) ./music ./staging`, or set them in `.env`. |
 | Library scan says "no artist folders found" | `/music` is mounted at an empty or one-level-off directory. `QL_MUSIC_DIR` must point at the folder that contains the artist folders, not its parent. |
 | Token rejected (Save & connect) | Expired, copied with quotes, or trailing whitespace. Get a fresh token from play.qobuz.com (dev tools → Local Storage → `localuser` → `token`) and paste it cleanly. |
+| Token connects but downloads are disabled | Search and catalogue scans can use a token alone, but streamrip also needs the Qobuz email or numeric user ID. Add it on Settings. |
 | Downloads paused after one finished "couldn't be confirmed as finished cleanly" | Something the download staged was left behind, so the app can't call it finished and holds the queue rather than guessing. Open that job from Queue or History and press **Retry**: it clears the leftover and settles the job. |
 | Stalls in "Importing into beets…" | A beets plugin is loaded without its required config block (lastgenre key, replaygain backend). Disable it via `BEETS_PLUGINS` or add the block to `config.yaml`. |
 | `docker compose pull` 404 | Image not published under that tag yet. [Build from source](../README.md#development). |

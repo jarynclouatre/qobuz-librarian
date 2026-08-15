@@ -1,9 +1,8 @@
-"""Exact local evidence carried by file-changing review candidates.
+"""Tie saved review choices to the files that were actually scanned.
 
-Review rows can live for weeks and survive restarts.  A path or album id alone
-does not prove that the files under it are still the files the scan reviewed,
-so every new destructive candidate carries a closed, versioned tree receipt.
-Legacy or malformed rows deliberately fail closed and must be refreshed.
+A review may sit for weeks before it changes an album. Its saved tree receipt
+lets the app notice files that changed in the meantime. Older rows without a
+valid receipt must be refreshed.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ _KINDS = {
 
 
 class CandidateStale(Exception):
-    """A review row no longer proves the local files it would change."""
+    """The saved review no longer matches the local files."""
 
 
 def _canonical_receipt(value, *, origin: str):
@@ -48,7 +47,7 @@ def _canonical_receipt(value, *, origin: str):
 
 
 def canonical_premise(value) -> dict | None:
-    """Return one closed raw premise without needing a review-row wrapper."""
+    """Validate a saved premise outside its review-row wrapper."""
     if (
         type(value) is not dict
         or set(value) != {"version", "kind", "path", "receipt"}
@@ -72,7 +71,7 @@ def canonical_premise(value) -> dict | None:
 
 
 def capture(kind: str, path) -> dict | None:
-    """Capture one exact public music-tree premise, or ``None`` if uncertain."""
+    """Capture the current music tree, or return ``None`` if it is uncertain."""
     if kind not in _KINDS:
         raise ValueError("candidate premise kind is invalid")
     try:
@@ -148,7 +147,7 @@ def _durable_premises_match(saved: dict, current: dict | None) -> bool:
 
 
 def _durable_generations_match(saved, current) -> bool:
-    """Compare one path proof without weakening its mount-boundary shape."""
+    """Compare path generations while preserving mount boundaries."""
     def normalise(generations):
         mount_labels = {}
         result = []
@@ -196,7 +195,7 @@ def expected_path(candidate: dict, kind: str | None = None) -> str:
 
 
 def canonical(candidate: dict) -> dict | None:
-    """Return one candidate's closed premise, or ``None`` for legacy/stale."""
+    """Read and validate a candidate's saved premise."""
     payload = candidate.get("payload") or {}
     value = payload.get("_premise")
     kind = expected_kind(candidate)
@@ -212,12 +211,12 @@ def canonical(candidate: dict) -> dict | None:
 
 
 def validate_premise(value) -> dict:
-    """Re-capture and compare a raw queue or direct-action premise."""
+    """Check a queued or direct action against the current files."""
     premise = canonical_premise(value)
     if premise is None:
         raise CandidateStale(
-            "This queued action has no valid local file receipt. Refresh or "
-            "rescan before changing music files."
+            "This queued action is too old to verify against the current "
+            "files. Refresh or rescan before changing music files."
         )
     current = capture(premise["kind"], premise["path"])
     if not _durable_premises_match(premise, current):
@@ -256,7 +255,7 @@ def gap_fill_receipts(value) -> dict | None:
 
 
 def validate(candidate: dict) -> dict:
-    """Re-capture and compare exact bytes before a review can be consumed."""
+    """Check a saved review against the current files before using it."""
     premise = canonical(candidate)
     if premise is None:
         raise CandidateStale(
