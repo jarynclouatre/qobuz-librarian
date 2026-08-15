@@ -12,6 +12,102 @@
 
   var NAV_STATE_PREFIX = "ql-nav-state:";
   var NAV_RESTORE_KEY = "ql-nav-restore";
+  var pendingSearchRestoreY = null;
+  var SEARCH_STATE_PREFIX = "ql-search-state:";
+  var SEARCH_STATE_TTL = 30 * 60 * 1000;
+  var SEARCH_ASSET_VERSION = document.documentElement.dataset.assetVersion || "";
+  var searchPositionRestoring = false;
+  var searchRestoreFallback = null;
+  var searchSnapshotsInvalidated = false;
+
+  function searchStateId(kind, query, artistId) {
+    kind = ["artist", "album", "track"].indexOf(kind) >= 0 ? kind : "artist";
+    var state = kind + "|" + String(query || "").trim();
+    return artistId ? state + "|artist:" + String(artistId).trim() : state;
+  }
+
+  function searchStateFromUrl() {
+    if (location.pathname !== "/") return "";
+    try {
+      var params = new URL(location.href).searchParams;
+      var query = (params.get("q") || "").trim();
+      if (!query) return "";
+      return searchStateId(
+        params.get("kind") || "artist",
+        query,
+        params.get("artist_id") || ""
+      );
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function searchStorageKey(state) {
+    return SEARCH_STATE_PREFIX + state;
+  }
+
+  function readSearchRecord(state) {
+    if (!state) return null;
+    try {
+      var record = JSON.parse(sessionStorage.getItem(searchStorageKey(state)) || "null");
+      if (!record || record.assetVersion !== SEARCH_ASSET_VERSION
+          || typeof record.savedAt !== "number"
+          || Date.now() - record.savedAt > SEARCH_STATE_TTL) {
+        sessionStorage.removeItem(searchStorageKey(state));
+        return null;
+      }
+      return record;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function updateSearchRecord(state, values) {
+    if (!state) return null;
+    var record = readSearchRecord(state) || {};
+    Object.keys(values || {}).forEach(function (key) {
+      record[key] = values[key];
+    });
+    record.assetVersion = SEARCH_ASSET_VERSION;
+    record.savedAt = Date.now();
+    try {
+      sessionStorage.setItem(searchStorageKey(state), JSON.stringify(record));
+      return record;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function invalidateSearchSnapshots() {
+    searchSnapshotsInvalidated = true;
+    try {
+      for (var i = sessionStorage.length - 1; i >= 0; i--) {
+        var key = sessionStorage.key(i);
+        if (!key || key.indexOf(SEARCH_STATE_PREFIX) !== 0) continue;
+        var record = JSON.parse(sessionStorage.getItem(key) || "null");
+        if (!record) continue;
+        delete record.html;
+        record.savedAt = Date.now();
+        sessionStorage.setItem(key, JSON.stringify(record));
+      }
+    } catch (e) {}
+  }
+  window.qlInvalidateSearchSnapshots = invalidateSearchSnapshots;
+
+  var bootSearchState = searchStateFromUrl();
+  var bootSearchRecord = readSearchRecord(bootSearchState);
+  if (bootSearchRecord && typeof bootSearchRecord.html === "string"
+      && bootSearchRecord.html) {
+    searchPositionRestoring = true;
+    document.documentElement.classList.add("ql-search-restoring");
+    searchRestoreFallback = setTimeout(function () {
+      document.documentElement.classList.remove("ql-search-restoring");
+      searchPositionRestoring = false;
+    }, 2000);
+  }
+  if (bootSearchState && "scrollRestoration" in history) {
+    history.scrollRestoration = "manual";
+  }
   var NAV_DEFAULTS = {
     search: "/",
     library: "/library",
@@ -32,19 +128,18 @@
     return location.pathname + location.search + location.hash;
   }
 
-  function pathBelongsToTab(tab, path) {
+  function pathBelongsToTab(tab, path, owner) {
+    if (/^\/jobs\/[^/]+\/?$/.test(path)) return owner === tab;
     if (tab === "search") return path === "/";
     if (tab === "library") return /^\/library(?:\/hidden)?\/?$/.test(path);
     if (tab === "repair") return /^\/repair(?:\/history)?\/?$/.test(path);
     if (tab === "lyrics") return path === "/lyrics" || path === "/lyrics/";
     if (tab === "settings") return /^\/(?:settings|migrate)\/?$/.test(path);
     if (tab === "queue") {
-      return /^\/queue(?:\/history)?\/?$/.test(path)
-        || /^\/jobs\/[^/]+\/?$/.test(path);
+      return /^\/queue(?:\/history)?\/?$/.test(path);
     }
     if (tab === "upgrade" || tab === "downsample") {
-      return new RegExp("^/" + tab + "(?:/hidden)?/?$").test(path)
-        || /^\/jobs\/[^/]+\/?$/.test(path);
+      return new RegExp("^/" + tab + "(?:/hidden)?/?$").test(path);
     }
     return false;
   }
@@ -55,12 +150,13 @@
       var state = JSON.parse(sessionStorage.getItem(NAV_STATE_PREFIX + tab) || "null");
       var parsed = state && new URL(state.url, location.origin);
       if (!parsed || parsed.origin !== location.origin
-          || !pathBelongsToTab(tab, parsed.pathname)
+          || !pathBelongsToTab(tab, parsed.pathname, state.owner)
           || typeof state.y !== "number" || !isFinite(state.y)
           || state.y < 0 || state.y > 10000000) return null;
       return {
         url: parsed.pathname + parsed.search + parsed.hash,
         y: Math.round(state.y),
+        owner: state.owner || "",
       };
     } catch (e) {
       return null;
@@ -69,11 +165,20 @@
 
   function writeCurrentNavState() {
     var tab = activeNavTab();
-    if (!tab || !pathBelongsToTab(tab, location.pathname)) return;
+    if (!tab || !pathBelongsToTab(tab, location.pathname, tab)) return;
+    var url = currentNavUrl();
+    var y = Math.max(0, Math.round(window.scrollY || 0));
+    var job = /^\/jobs\/[^/]+\/?$/.test(location.pathname)
+      ? document.getElementById("job-content") : null;
+    if (job && !job.dataset.jobView && job.dataset.navReturn) {
+      url = job.dataset.navReturn;
+      y = 0;
+    }
     try {
       sessionStorage.setItem(NAV_STATE_PREFIX + tab, JSON.stringify({
-        url: currentNavUrl(),
-        y: Math.max(0, Math.round(window.scrollY || 0)),
+        url: url,
+        y: y,
+        owner: tab,
       }));
     } catch (e) {}
   }
@@ -119,45 +224,15 @@
 
   function restoreNavPosition(y) {
     if (!(y > 0) || document.getElementById("review-form")) return;
-    var stopped = false;
-    var deadline = Date.now() + 15000;
-    var timer = null;
-    var events = ["wheel", "touchmove", "pointerdown", "keydown"];
-    function stop() {
-      if (stopped) return;
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      document.removeEventListener("htmx:afterSwap", attempt);
-      window.removeEventListener("load", attempt);
-      events.forEach(function (name) {
-        window.removeEventListener(name, stop);
-      });
-    }
-    function attempt() {
-      if (stopped) return;
-      if (document.getElementById("review-form")) {
-        stop();
-        return;
-      }
+    requestAnimationFrame(function () {
+      if (document.getElementById("review-form")) return;
       var height = Math.max(
         document.documentElement.scrollHeight,
         document.body ? document.body.scrollHeight : 0
       );
       var limit = Math.max(0, height - window.innerHeight);
       window.scrollTo(0, Math.min(y, limit));
-      if (Math.abs(window.scrollY - y) <= 2 || Date.now() >= deadline) {
-        stop();
-        return;
-      }
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(attempt, 100);
-    }
-    events.forEach(function (name) {
-      window.addEventListener(name, stop, { passive: true });
     });
-    document.addEventListener("htmx:afterSwap", attempt);
-    window.addEventListener("load", attempt);
-    requestAnimationFrame(attempt);
   }
 
   function initNavState() {
@@ -178,6 +253,15 @@
       location.replace(NAV_DEFAULTS[restore.tab]);
       return;
     }
+    var restoredJob = /^\/jobs\/[^/]+\/?$/.test(location.pathname)
+      ? document.getElementById("job-content") : null;
+    if (active && restore && restore.tab === active && restore.url === current
+        && restoredJob && !restoredJob.dataset.jobView
+        && restoredJob.dataset.navReturn) {
+      writeCurrentNavState();
+      location.replace(restoredJob.dataset.navReturn);
+      return;
+    }
     if (active && (!saved || saved.url !== current)) writeCurrentNavState();
     links.forEach(function (link) {
       var tab = link.dataset.navTabLink;
@@ -186,7 +270,8 @@
     });
     if (active && restore && restore.tab === active && restore.url === current
         && typeof restore.y === "number") {
-      restoreNavPosition(restore.y);
+      if (active === "search") pendingSearchRestoreY = restore.y;
+      else restoreNavPosition(restore.y);
     }
   }
 
@@ -237,7 +322,18 @@
     var root = item && item.closest("[data-search-results-root]");
     var forms = [form];
     if (root && key) {
-      forms = Array.prototype.map.call(root.querySelectorAll("[data-search-item]"), function (peer) {
+      var peers = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"), function (peer) {
+        return peer.dataset.searchKey === key;
+      });
+      peers.forEach(function (peer) {
+        peer.dataset.queued = "1";
+        var checkbox = peer.querySelector("[data-search-select]");
+        if (!checkbox) return;
+        var label = checkbox.closest("label");
+        if (label) label.remove();
+        else checkbox.remove();
+      });
+      forms = peers.map(function (peer) {
         if (peer.dataset.searchKey !== key) return null;
         return peer.querySelector("[data-search-download-form]");
       }).filter(Boolean);
@@ -247,7 +343,9 @@
       if (!b) return;
       b.disabled = true;
       if (b.classList.contains("ql-download-icon-button")) {
-        b.setAttribute("aria-label", "Queued");
+        var label = b.getAttribute("aria-label") || "";
+        b.setAttribute("aria-label", label.indexOf("Download ") === 0
+          ? "Queued: " + label.slice(9) : "Queued");
         b.setAttribute("title", "Queued");
         b.classList.add("is-queued");
       } else {
@@ -259,6 +357,7 @@
         b.classList.add("ql-btn-secondary");
       }
     });
+    if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
   function markSearchDownloadOwned(form) {
@@ -289,6 +388,7 @@
         download.replaceWith(owned);
       }
     });
+    if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
   // Disable a search-result button only after a real queue success.
@@ -816,13 +916,95 @@
     });
   }
 
+  function searchResponseState(results) {
+    var marker = results && results.querySelector("[data-search-response-state]");
+    return marker ? marker.dataset.searchResponseState || "" : "";
+  }
+
+  function searchSnapshotHtml(results) {
+    var copy = results.cloneNode(true);
+    copy.querySelectorAll("[data-search-wired]").forEach(function (node) {
+      node.removeAttribute("data-search-wired");
+    });
+    copy.querySelectorAll("[data-cover-fallback-wired]").forEach(function (node) {
+      node.removeAttribute("data-cover-fallback-wired");
+    });
+    return copy.innerHTML;
+  }
+
+  function saveSearchSnapshot() {
+    if (searchSnapshotsInvalidated) return;
+    var results = document.getElementById("search-results");
+    var marker = results && results.querySelector("[data-search-response-state]");
+    var state = marker ? marker.dataset.searchResponseState || "" : "";
+    if (!results || !state) return;
+    var values = {
+      html: marker.dataset.searchCacheable === "0" ? "" : searchSnapshotHtml(results),
+    };
+    if (!searchPositionRestoring) values.scrollY = Math.max(0, Math.round(window.scrollY || 0));
+    updateSearchRecord(state, values);
+  }
+
+  function finishSearchRestore(record) {
+    var savedY = pendingSearchRestoreY;
+    if (savedY === null && record && typeof record.scrollY === "number") {
+      savedY = record.scrollY;
+    }
+    savedY = Math.max(0, Math.round(savedY || 0));
+    requestAnimationFrame(function () {
+      var height = Math.max(
+        document.documentElement.scrollHeight,
+        document.body ? document.body.scrollHeight : 0
+      );
+      window.scrollTo(0, Math.min(savedY, Math.max(0, height - window.innerHeight)));
+      pendingSearchRestoreY = null;
+      searchPositionRestoring = false;
+      document.documentElement.classList.remove("ql-search-restoring");
+      if (searchRestoreFallback) clearTimeout(searchRestoreFallback);
+      searchRestoreFallback = null;
+      if (searchExitSave) searchExitSave();
+    });
+  }
+
   var searchExitSave = null;
   window.addEventListener("pagehide", function () {
     if (searchExitSave) searchExitSave();
   });
-  window.addEventListener("beforeunload", function () {
-    if (searchExitSave) searchExitSave();
-  });
+
+  function initSearchPage() {
+    var form = document.querySelector(".ql-search-form");
+    var results = document.getElementById("search-results");
+    if (!form || !results) {
+      document.documentElement.classList.remove("ql-search-restoring");
+      return;
+    }
+    searchExitSave = saveSearchSnapshot;
+    if (bootSearchRecord && typeof bootSearchRecord.scrollY === "number"
+        && pendingSearchRestoreY === null) {
+      pendingSearchRestoreY = bootSearchRecord.scrollY;
+    }
+    if (bootSearchRecord && bootSearchState
+        && typeof bootSearchRecord.html === "string" && bootSearchRecord.html) {
+      results.innerHTML = bootSearchRecord.html;
+      if (window.htmx) window.htmx.process(results);
+      form.querySelectorAll("[data-deep-link]").forEach(function (node) {
+        node.remove();
+      });
+      finishSearchRestore(bootSearchRecord);
+      bootSearchRecord = null;
+      return;
+    }
+    document.documentElement.classList.remove("ql-search-restoring");
+    if (form.dataset.searchAuto === "1" && window.htmx) {
+      window.htmx.trigger(form, "submit");
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initSearchPage);
+  } else {
+    initSearchPage();
+  }
 
   function initSearchResults() {
     document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
@@ -835,23 +1017,24 @@
       // Keyed by the search itself, not the URL: results arrive by htmx swap,
       // so the URL reads "/" for every query and one search's picks would
       // haunt the next (ghost "3 selected" bars, phantom scroll jumps).
-      var stateKey = "ql-search-sel:" +
-        (root.dataset.searchState || location.pathname + location.search);
+      var state = root.dataset.searchState || location.pathname + location.search;
       function loadSelection() {
-        try { return JSON.parse(sessionStorage.getItem(stateKey) || "{}") || {}; }
-        catch (e) { return {}; }
+        return readSearchRecord(state) || {};
       }
       function saveSelection() {
-        try {
-          var live = {};
-          Object.keys(selected).forEach(function (k) { if (selected[k]) live[k] = 1; });
-          if (Object.keys(live).length) {
-            sessionStorage.setItem(stateKey, JSON.stringify(
-              { picks: live, scrollY: Math.round(window.scrollY) }));
-          } else {
-            sessionStorage.removeItem(stateKey);
-          }
-        } catch (e) { /* private mode */ }
+        var live = {};
+        Object.keys(selected).forEach(function (key) {
+          if (selected[key]) live[key] = 1;
+        });
+        var values = {
+          picks: live,
+          hideOwned: !!(hideOwnedButton
+            && hideOwnedButton.getAttribute("aria-pressed") === "true"),
+        };
+        if (!searchPositionRestoring) {
+          values.scrollY = Math.max(0, Math.round(window.scrollY || 0));
+        }
+        updateSearchRecord(state, values);
       }
       var restored = loadSelection();
       var selected = {};
@@ -862,6 +1045,10 @@
       var bulkButton = root.querySelector("[data-search-bulk-download]");
       var clearButton = root.querySelector("[data-search-clear-selection]");
       var hideOwnedButton = root.querySelector("[data-search-hide-owned]");
+      if (hideOwnedButton && restored.hideOwned) {
+        hideOwnedButton.setAttribute("aria-pressed", "true");
+        root.classList.add("is-filtering-owned");
+      }
 
       function selectedKeys() {
         return Object.keys(selected).filter(function (k) { return selected[k]; });
@@ -880,9 +1067,16 @@
       // separate downloads into one folder.
       function bulkSelectable(box) {
         return visibleItem(box.closest("[data-search-item]"))
-          && !box.closest("[data-version-panel]");
+          && !box.closest("[data-version-panel]")
+          && !!actionableFormForKey(box.dataset.searchKey);
+      }
+      function reconcileSelection() {
+        Object.keys(selected).forEach(function (key) {
+          if (!actionableFormForKey(key)) delete selected[key];
+        });
       }
       function syncBoxes() {
+        reconcileSelection();
         root.querySelectorAll("[data-search-select]").forEach(function (cb) {
           cb.checked = !!selected[cb.dataset.searchKey];
         });
@@ -1000,12 +1194,13 @@
         var m = document.querySelector('meta[name="csrf-token"]');
         return m ? m.content : "";
       }
-      function firstFormForKey(key) {
+      function actionableFormForKey(key) {
         var items = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"),
           function (item) { return item.dataset.searchKey === key; });
         for (var i = 0; i < items.length; i++) {
           var form = items[i].querySelector("[data-search-download-form]");
-          if (form) return form;
+          var button = form && form.querySelector("button[type=submit]");
+          if (form && button && !button.disabled) return form;
         }
         return null;
       }
@@ -1034,7 +1229,7 @@
       function bulkDownload() {
         var keys = selectedKeys();
         if (!keys.length || bulkButton.disabled) return;
-        var forms = keys.map(firstFormForKey).filter(Boolean);
+        var forms = keys.map(actionableFormForKey).filter(Boolean);
         if (!forms.length) return;
         // The key prefix supplies the correct track or album noun.
         var nTracks = keys.filter(function (k) { return k.indexOf("track-") === 0; }).length;
@@ -1152,14 +1347,12 @@
       }
       setView(savedSearchView());
       syncBoxes();
-      // Put them back where they were, once the restored rows are laid out.
-      if (restored.scrollY && selectedKeys().length) {
-        requestAnimationFrame(function () { window.scrollTo(0, restored.scrollY); });
-      }
-      // Hand the shared exit hook to this (the live) results root. The old
-      // per-root beforeunload listeners piled up across searches and iOS
-      // never fires beforeunload at all; pagehide does.
-      searchExitSave = saveSelection;
+      applyOwnedFilterCount();
+      root.addEventListener("qlSearchAvailabilityChanged", syncBoxes);
+      searchExitSave = function () {
+        saveSelection();
+        saveSearchSnapshot();
+      };
     });
   }
 
@@ -2423,6 +2616,7 @@
   document.addEventListener("htmx:beforeRequest", function (event) {
     var form = searchRequestForm(event);
     if (!form || !event.detail.xhr) return;
+    saveSearchSnapshot();
     var generation = parseInt(form.dataset.searchSubmission || "0", 10);
     if (!generation || activeSearchRequests.some(function (xhr) {
       return xhr.qlSearchSubmission === generation;
@@ -2443,6 +2637,18 @@
     var status = document.getElementById("search-status");
     if (results) results.setAttribute("aria-busy", "true");
     if (status) status.textContent = "Searching...";
+  });
+
+  document.addEventListener("htmx:beforeSwap", function (event) {
+    var target = event.detail && event.detail.target;
+    if (!target || target.id !== "search-results" || !(pendingSearchRestoreY > 0)) return;
+    searchPositionRestoring = true;
+    document.documentElement.classList.add("ql-search-restoring");
+    if (searchRestoreFallback) clearTimeout(searchRestoreFallback);
+    searchRestoreFallback = setTimeout(function () {
+      document.documentElement.classList.remove("ql-search-restoring");
+      searchPositionRestoring = false;
+    }, 2000);
   });
 
   function restoreSearchFormFromUrl() {
@@ -2554,8 +2760,22 @@
     if (status) status.textContent = "Diagnostics refreshed.";
   }
 
+  function rememberSearchSwap(event) {
+    var target = event.detail && event.detail.target;
+    if (!target || target.id !== "search-results") return;
+    if (!target.querySelector("[data-search-results-root]")) {
+      searchExitSave = saveSearchSnapshot;
+    }
+    searchSnapshotsInvalidated = false;
+    saveSearchSnapshot();
+    if (searchPositionRestoring || pendingSearchRestoreY !== null) {
+      finishSearchRestore(readSearchRecord(searchResponseState(target)));
+    }
+  }
+
   // Re-scan swapped content for flashes and streams.
   document.addEventListener("htmx:afterSwap", initAll);
+  document.addEventListener("htmx:afterSwap", rememberSearchSwap);
   document.addEventListener("htmx:afterSwap", restoreSearchFocus);
   document.addEventListener("htmx:afterSwap", revealSearchFeedback);
   document.addEventListener("htmx:afterSwap", announceDiagnosticsSwap);

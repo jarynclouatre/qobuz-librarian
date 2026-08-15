@@ -2,6 +2,7 @@
 
 <div id="job-content" class="ql-job-shell" data-job-id="{{ job.id }}"
   data-job-kind="{{ job.execute_kind }}"
+  data-nav-return="{{ job_return_href }}"
   {%- if embedded_surface|default(false) %} data-embedded="1"{% endif %}
   data-progress-item-singular="{{ labels.progress_item_singular(job) }}"
   data-progress-item-plural="{{ labels.progress_item_plural(job) }}"
@@ -55,24 +56,6 @@
   {% set _review_thing = labels.discard_review_label(job) %}
   {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair') %}
   {% set _review_qobuz_blocked = _review_needs_qobuz and not qobuz_ready %}
-  {# Back points at the surface that owns the job. #}
-  {% set _finished = s in ('done', 'failed', 'canceled') %}
-  {% if job.execute_kind == 'repair' %}
-  {% set _back_href, _back_label = '/repair', 'Back to Repair' %}
-  {% elif job.execute_kind in ('library', 'new_releases') %}
-  {% set _back_href, _back_label = '/library', 'Back to Library' %}
-  {% elif job.execute_kind == 'upgrade' and not upgrade_available %}
-  {% set _back_href, _back_label = '/queue/history', 'Back to History' %}
-  {% elif job.execute_kind in ('upgrade', 'downsample') %}
-  {% set _back_href, _back_label = '/' ~ job.execute_kind, 'Back to ' ~ job.execute_kind | capitalize %}
-  {% elif _finished %}
-  {% set _back_href, _back_label = '/queue/history', 'Back to History' %}
-  {% elif job.execute_kind == 'migration' %}
-  {% set _back_href, _back_label = '/migrate', 'Back to Migration' %}
-  {% else %}
-  {% set _back_href, _back_label = '/queue', 'Back to Queue' %}
-  {% endif %}
-
   {% if job.recoveries %}
   {% set kept = namespace(on_disk=false) %}
   {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
@@ -167,7 +150,7 @@
           {% set _discard_confirm = labels.discard_confirm(job) | trim %}
           <div class="ql-review-footer-secondary-group">
             {% if not embedded_surface|default(false) %}
-            <a href="{{ _back_href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ _back_label }}</a>
+            <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ job_return_label }}</a>
             {% endif %}
             <button type="submit" formaction="/jobs/{{ job.id }}/cancel"
                     class="ql-btn ql-btn-danger ql-btn-sm"
@@ -317,10 +300,8 @@
         <button type="submit" class="ql-btn ql-btn-danger ql-btn-sm">Undo (removes track)</button>
       </form>
       {% endif %}
-      {# On the tool's own page this reads "Back to Repair" while you are on
-         Repair. The header's copy is already gated the same way. #}
       {% if not embedded_surface|default(false) %}
-      <a href="{{ _back_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ _back_label }}</a>
+      <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ job_return_label }}</a>
       {% endif %}
     </div>
   {% endif %}

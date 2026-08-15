@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}History | Qobuz Librarian{% endblock %}
+{% block title %}History - Qobuz Librarian{% endblock %}
 {% block content %}
 
 {% import "_job_labels.html" as labels %}
@@ -14,6 +14,12 @@
 
 {% if error %}
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
+{% endif %}
+
+{% if attention_only %}
+<div class="ql-notice ql-notice-warning">
+  <span>Showing unresolved History items. Opening an ordinary warning acknowledges it; Recovery and Catalogue cleanup stay here until their action succeeds. <a href="/queue/history">Show all history</a>.</span>
+</div>
 {% endif %}
 
 {% macro job_side(job) -%}
@@ -75,13 +81,15 @@
 {% if bulk_jobs or jobs %}
 {% set history_count = bulk_total + total %}
 <div class="ql-activity-toolbar">
-  <p class="ql-mono-meta">{{ history_count }} item{% if history_count != 1 %}s{% endif %} in history</p>
+  <p class="ql-mono-meta">{{ history_count }} item{% if history_count != 1 %}s{% endif %}{% if attention_only %} need attention{% else %} in history{% endif %}</p>
+  {% if not attention_only %}
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
             data-confirm="Clear finished jobs from history? Active single-track Undo, parked reviews, and recovery records stay until resolved."
             data-confirm-action="Clear history" data-confirm-danger>Clear history</button>
   </form>
+  {% endif %}
 </div>
 
 {% if bulk_jobs %}
@@ -118,13 +126,13 @@
   {% if bulk_pages > 1 %}
   <nav class="ql-activity-pagination" aria-label="Job pages">
     {% if bulk_page > 1 %}
-    <a href="/queue/history?jp={{ bulk_page - 1 }}&amp;p={{ cur_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
+    <a href="/queue/history?jp={{ bulk_page - 1 }}&amp;p={{ cur_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
     {% else %}
     <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Newer</span>
     {% endif %}
     <span class="ql-activity-page-count tabular-nums">Page {{ bulk_page }} of {{ bulk_pages }}</span>
     {% if bulk_page < bulk_pages %}
-    <a href="/queue/history?jp={{ bulk_page + 1 }}&amp;p={{ cur_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
+    <a href="/queue/history?jp={{ bulk_page + 1 }}&amp;p={{ cur_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
     {% else %}
     <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
     {% endif %}
@@ -162,13 +170,13 @@
 {% if pages > 1 %}
 <nav class="ql-activity-pagination" aria-label="Download pages">
   {% if cur_page > 1 %}
-  <a href="/queue/history?p={{ cur_page - 1 }}&amp;jp={{ bulk_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
+  <a href="/queue/history?p={{ cur_page - 1 }}&amp;jp={{ bulk_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
   {% else %}
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Newer</span>
   {% endif %}
   <span class="ql-activity-page-count tabular-nums">Page {{ cur_page }} of {{ pages }}</span>
   {% if cur_page < pages %}
-  <a href="/queue/history?p={{ cur_page + 1 }}&amp;jp={{ bulk_page }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
+  <a href="/queue/history?p={{ cur_page + 1 }}&amp;jp={{ bulk_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
   {% else %}
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
   {% endif %}
@@ -183,10 +191,10 @@
       <path d="M20 12a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"/>
     </svg>
   </div>
-  <p class="font-medium text-base-content/70">No finished jobs yet.</p>
-  <p class="text-sm mt-1 text-base-content/50">Completed downloads, scans, and reviews appear here.</p>
+  <p class="font-medium text-base-content/70">{% if attention_only %}Nothing needs attention{% else %}No finished jobs yet{% endif %}.</p>
+  <p class="text-sm mt-1 text-base-content/50">{% if attention_only %}Unresolved warnings, recoveries, and catalogue cleanup appear here.{% else %}Completed downloads, scans, and reviews appear here.{% endif %}</p>
   <div class="ql-empty-actions">
-    <a href="/queue" class="ql-btn ql-btn-secondary w-full sm:w-auto">Back to Queue</a>
+    <a href="{% if attention_only %}/queue/history{% else %}/queue{% endif %}" class="ql-btn ql-btn-secondary w-full sm:w-auto">{% if attention_only %}Show all history{% else %}Back to Queue{% endif %}</a>
   </div>
 </div>
 {% endif %}

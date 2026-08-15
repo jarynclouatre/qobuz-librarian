@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Qobuz Librarian{% endblock %}
+{% block title %}Search - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
 
@@ -217,12 +217,11 @@
             hx-post="/search" hx-target="#search-results" hx-swap="innerHTML"
             hx-sync="this:replace"
             hx-indicator="#dashboard-search-spinner, #search-skeleton"
-            {% if auto_search %}hx-trigger="submit, load"{% endif %}
+            {% if auto_search %}data-search-auto="1"{% endif %}
             class="ql-search-form">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        {# Restoring /?kind=artist&q=…&artist_id=…: the artist's album list only
-           exists behind POST /search, so the form replays it once on load and
-           then drops these so the next search the user types is its own. #}
+        {# These fields restore a selected artist once, then the browser drops
+           them before the next search. #}
         {% if search_artist_id %}
         <input type="hidden" name="artist_id" value="{{ search_artist_id }}" data-deep-link>
         <input type="hidden" name="artist_name" value="{{ search_artist_name }}" data-deep-link>
@@ -278,8 +277,7 @@
     </div>
 
     <div id="search-results" class="ql-search-results" aria-busy="false" tabindex="-1">
-      {{ initial_search_results | safe }}
-      {% if creds_ok and creds_token_valid != False and not search_q and not initial_search_results %}
+      {% if creds_ok and creds_token_valid != False and not search_q %}
       <div class="ql-search-idle">
         <svg class="ql-search-idle-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
           <circle cx="44" cy="44" r="30" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5"/>

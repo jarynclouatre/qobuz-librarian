@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="night">
+<html lang="en" data-theme="night" data-asset-version="{{ asset_version }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -99,12 +99,20 @@
           </div>
 
           <div class="ql-nav-group">
-            <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}">
-              <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
-              Queue / History
-              <span class="js-queue-badge ql-queue-badge {% if queue_has_running %}is-warning{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
-              {% if history_attention %}<span class="ql-review-badge is-attention" data-attention-badge aria-label="A finished job needs your review"></span>{% endif %}
-            </a>
+            <div class="ql-nav-attention-row">
+              <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}">
+                <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
+                Queue / History
+                <span class="js-queue-badge ql-queue-badge {% if queue_has_running %}is-warning{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
+              </a>
+              {% if history_attention %}
+              <a href="{{ history_attention.href }}" class="ql-history-attention" data-attention-badge
+                 aria-label="Open {{ history_attention.count }} History item{% if history_attention.count != 1 %}s{% endif %} needing attention"
+                 title="{{ history_attention.count }} History item{% if history_attention.count != 1 %}s need{% else %} needs{% endif %} attention">
+                <span>{% if history_attention.count > 99 %}99+{% else %}{{ history_attention.count }}{% endif %}</span>
+              </a>
+              {% endif %}
+            </div>
           </div>
 
           <div class="ql-nav-group">
@@ -190,12 +198,19 @@
       <span>Library</span>
       {% if nav_review_badges.get('library') %}<span class="ql-tab-dot" data-review-badge="library" aria-label="Library review ready"></span>{% endif %}
     </a>
-    <a href="/queue" data-nav-tab-link="queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}">
-      <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
-      <span>Queue</span>
-      <span class="js-queue-badge ql-tabbar-count {% if queue_has_running %}is-warning{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
-      {% if history_attention %}<span class="ql-tab-dot is-attention" data-attention-badge aria-label="A finished job needs your review"></span>{% endif %}
-    </a>
+    <div class="ql-tab-slot">
+      <a href="/queue" data-nav-tab-link="queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}">
+        <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
+        <span>Queue</span>
+        <span class="js-queue-badge ql-tabbar-count {% if queue_has_running %}is-warning{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
+      </a>
+      {% if history_attention %}
+      <a href="{{ history_attention.href }}" class="ql-tab-attention" data-attention-badge
+         aria-label="Open {{ history_attention.count }} History item{% if history_attention.count != 1 %}s{% endif %} needing attention">
+        <span>{% if history_attention.count > 9 %}9+{% else %}{{ history_attention.count }}{% endif %}</span>
+      </a>
+      {% endif %}
+    </div>
     <a href="/settings" data-nav-tab-link="settings" class="ql-tab {% if page=='settings' %}is-active{% endif %}">
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h10"/><path d="M18 8h2"/><path d="M4 16h2"/><path d="M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>
       <span>Settings</span>
@@ -297,17 +312,52 @@
           b.classList.toggle('is-warning', !!running);
         });
       }
+      var inFlight = null;
+      var controller = null;
+      var queueSignatureKey = 'ql-queue-count-signature';
       function refresh() {
-        fetch('/api/queue/count', { headers: { 'Accept': 'application/json' } })
+        if (document.hidden || inFlight) return;
+        controller = typeof AbortController === 'function' ? new AbortController() : null;
+        var request = fetch('/api/queue/count', {
+          headers: { 'Accept': 'application/json' },
+          signal: controller ? controller.signal : undefined
+        });
+        inFlight = request;
+        request
           .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (d) { if (d) apply(d.count, d.running); })
-          .catch(function () {});
+          .then(function (d) {
+            if (!d || inFlight !== request || document.hidden) return;
+            var signature = d.signature
+              || String(d.count) + ':' + (d.running ? '1' : '0');
+            try {
+              var previous = sessionStorage.getItem(queueSignatureKey);
+              if (previous && previous !== signature
+                  && window.qlInvalidateSearchSnapshots) {
+                window.qlInvalidateSearchSnapshots();
+              }
+              sessionStorage.setItem(queueSignatureKey, signature);
+            } catch (e) {}
+            apply(d.count, d.running);
+          })
+          .catch(function () {})
+          .then(function () {
+            if (inFlight === request) {
+              inFlight = null;
+              controller = null;
+            }
+          });
       }
       refresh();
       setInterval(refresh, 12000);
-      // The queue view swaps itself the moment a job finishes; without this the
-      // badge kept claiming a queued job for up to a poll interval after the
-      // page it points at had gone empty.
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          if (controller) controller.abort();
+          controller = null;
+          inFlight = null;
+        } else {
+          refresh();
+        }
+      });
       window.qlRefreshQueueBadge = refresh;
     })();
   </script>

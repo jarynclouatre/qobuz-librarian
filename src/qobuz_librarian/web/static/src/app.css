@@ -102,6 +102,9 @@
 [data-theme="night"] body {
   background-color: var(--color-base-100);
 }
+.ql-search-restoring .ql-main {
+  visibility: hidden;
+}
 
 /* Keep heading metrics predictable across breakpoints. */
 h1, h2, h3 {
@@ -269,6 +272,41 @@ h1, h2, h3 {
   margin-top: 0.625rem;
   padding-top: 0.625rem;
   border-top: 1px solid var(--ql-line-soft);
+}
+.ql-nav-attention-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.25rem;
+}
+.ql-history-attention {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+  border-radius: 0.5rem;
+  color: var(--ql-warning);
+  text-decoration: none;
+}
+.ql-history-attention:hover,
+.ql-history-attention:focus-visible {
+  background-color: color-mix(in oklab, var(--ql-warning) 11%, transparent);
+  outline: none;
+}
+.ql-history-attention span,
+.ql-tab-attention span {
+  display: inline-grid;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--ql-warning);
+  color: var(--ql-gold-ink);
+  font-family: var(--ql-font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 1;
+  padding-inline: 0.2rem;
 }
 .ql-nav-link,
 .ql-sidebar-action {
@@ -462,6 +500,29 @@ h1, h2, h3 {
 }
 [data-theme="winter"] .ql-tabbar .ql-tab.is-active {
   color: var(--ql-gold-strong);
+}
+.ql-tab-slot {
+  position: relative;
+  min-width: 0;
+}
+.ql-tab-slot > .ql-tab {
+  height: 100%;
+}
+.ql-tab-attention {
+  position: absolute;
+  z-index: 2;
+  top: -0.35rem;
+  right: calc(50% + 0.2rem);
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 50%;
+  text-decoration: none;
+}
+.ql-tab-attention:focus-visible {
+  outline: 2px solid var(--ql-warning);
+  outline-offset: -2px;
 }
 .ql-tabbar .ql-tab-dot {
   position: absolute;
@@ -3725,11 +3786,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
   font-size: 0.71875rem;
-}
-.ql-review-badge.is-attention,
-.ql-tabbar .ql-tab-dot.is-attention {
-  background-color: var(--ql-warning);
-  box-shadow: 0 0 0.5rem color-mix(in oklab, var(--ql-warning) 65%, transparent);
 }
 .ql-page-header p {
   max-width: 42rem;

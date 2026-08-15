@@ -2615,12 +2615,19 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         badges = dict(badges)
         badges["upgrade"] = False
     context.setdefault("nav_review_badges", badges)
-    # Finished jobs flagged for review (e.g. a quality shortfall) keep a
-    # warning dot on the Queue nav until each flagged job page is opened.
     from qobuz_librarian.web import job_persistence
-    context.setdefault("history_attention", job_persistence.attention_count())
+    attention_count = job_persistence.attention_count()
+    context.setdefault(
+        "history_attention",
+        ({"count": attention_count, "href": "/queue/history?attention=1"}
+         if attention_count else None),
+    )
     if name in {"job.html", "_job_body.html"}:
         job = context.get("job")
+        nav_page, return_href, return_label = _job_nav_destination(job)
+        context.setdefault("job_nav_page", nav_page)
+        context.setdefault("job_return_href", return_href)
+        context.setdefault("job_return_label", return_label)
         context.setdefault(
             "downsample_originals_choice",
             (
@@ -2645,85 +2652,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
 
 def _is_htmx(request):
     return request.headers.get("HX-Request") == "true"
-
-
-async def _initial_artist_search_html(request: Request, query: str) -> str:
-    """Render artist-name search results for dashboard links with ?kind=artist&q=."""
-    query = str(query or "").strip()[:200]
-    if not query:
-        return ""
-    artist_results = []
-    error = None
-    try:
-        from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
-        from qobuz_librarian.api.client import call_within
-        from qobuz_librarian.api.search import search_artists
-        token = _get_token()
-        loop = asyncio.get_running_loop()
-        artist_raw = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: call_within(
-                    cfg.WEB_FETCH_TIMEOUT,
-                    search_artists,
-                    query,
-                    token,
-                    limit=cfg.ARTIST_LOOKUP_LIMIT,
-                ),
-            ),
-            timeout=cfg.WEB_FETCH_TIMEOUT,
-        )
-        for a in artist_raw:
-            if not a.get("id"):
-                continue
-            img = a.get("image") or {}
-            cover = ""
-            if isinstance(img, dict):
-                cover = img.get("small") or img.get("thumbnail") or ""
-            artist_results.append({
-                "id": a.get("id"),
-                "name": a.get("name") or "?",
-                "cover": cover if str(cover).startswith(
-                    "https://static.qobuz.com/") else "",
-            })
-    except (SystemExit, NoCredsError):
-        error = "No Qobuz credentials set. Visit Settings."
-    except AuthLost:
-        error = "Token is expired or invalid. Update it in Settings."
-    except QobuzUnavailable:
-        error = ("Qobuz is temporarily unavailable (network or rate limit). "
-                 "Try again shortly.")
-    except asyncio.TimeoutError:
-        error = "Timed out reaching the Qobuz API."
-    except QobuzError:
-        error = "Search failed. Try again."
-    except Exception:
-        import logging
-        logging.getLogger("qobuz_librarian").exception(
-            "initial artist search failed for %r", query)
-        error = "Search failed. Try again."
-    # This render bypasses _tr, and an absent writes_paused is falsey, which
-    # would offer a live Download control on a paused app the moment this path
-    # grows album results.
-    paused = _web_writes_paused()
-    notice = _writes_paused_notice() if paused else None
-    return templates.env.get_template("_search_results.html").render(
-        request=request,
-        q=query,
-        results=[],
-        album_groups=[],
-        artist_results=artist_results,
-        selected_artist=None,
-        error=error,
-        kind="artist",
-        creds_ok=bool(_read_creds().get("auth_token")),
-        qobuz_ready=_qobuz_ready(),
-        page="search",
-        writes_paused=paused,
-        writes_paused_reason=(
-            notice["reason"] if notice else "Downloads and scans are paused."
-        ),
-    )
 
 
 def render_error_page(request, code, title, msg):
@@ -2845,6 +2773,31 @@ def _duplicate_download_job(album_id: str, track_id: str = "",
                 return j
         return None
     return _find_job_touching_album(album_id, skip_single_track=True)
+
+
+def _active_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
+    albums = set()
+    tracks = set()
+    for job in job_mgr.registry.pending_and_running():
+        if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+            continue
+        single = getattr(job, "single", None) or {}
+        track_id = str(single.get("track_id") or "")
+        album_id = str(single.get("album_id") or job.album_id or "")
+        if album_id and track_id:
+            tracks.add((album_id, track_id))
+        elif album_id:
+            albums.add(album_id)
+        for candidate in list(job.candidates or []):
+            payload = candidate.get("payload") or {}
+            candidate_album = payload.get("album_id")
+            if not candidate_album:
+                candidate_album = (
+                    (payload.get("candidate") or {}).get("qobuz_album") or {}
+                ).get("id")
+            if candidate_album:
+                albums.add(str(candidate_album))
+    return albums, tracks
 
 
 def _same_edition_is_complete(album: dict) -> bool:
@@ -3490,9 +3443,6 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_q = str(q or "").strip()[:200]
     search_artist_id = str(artist_id or "").strip()[:64]
     search_artist_name = str(artist_name or "").strip()[:200]
-    initial_search_results = ""
-    if search_kind == "artist" and search_q and not search_artist_id:
-        initial_search_results = await _initial_artist_search_html(request, search_q)
     return _tr(request, "index.html", {
         "active_jobs": active_jobs,
         "pending": job_mgr.registry.pending_and_running(),
@@ -3502,13 +3452,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         "search_kind": search_kind,
         "search_artist_id": search_artist_id,
         "search_artist_name": search_artist_name,
-        # Album/track deep links can't be pre-rendered the way artist ones are
-        # (their pipeline lives in POST /search), so the form submits itself on
-        # load instead of sitting prefilled and inert. An artist's album list is
-        # the same case: it needs the artist id, which only that pipeline reads.
-        "auto_search": bool(search_q) and (
-            search_kind in ("album", "track") or bool(search_artist_id)),
-        "initial_search_results": initial_search_results,
+        "auto_search": bool(search_q),
         "page": "dashboard",
         **disk,
     })
@@ -3748,6 +3692,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."
 
+            queued_albums, queued_tracks = _active_search_downloads()
             _track_raws = []
             for t in (raw if kind == "track" else []):
                 alb = t.get("album") or {}
@@ -3775,6 +3720,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "cover":       _tcover if _tcover.startswith(
                         "https://static.qobuz.com/") else "",
                     "owned":       False,
+                    "queued":      (str(alb.get("id")), str(t.get("id")))
+                                   in queued_tracks,
                 })
                 _track_raws.append(t)
 
@@ -3864,6 +3811,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "cover":   _cover if _cover.startswith(
                         "https://static.qobuz.com/") else "",
                     "owned":   False,
+                    "queued":  str(a.get("id")) in queued_albums,
                 })
                 _album_raws.append(a)
 
@@ -3980,6 +3928,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         "sample_rate": res["sample_rate"],
                         "cover": res["cover"],
                         "owned": bool(res["owned"]),
+                        "queued": bool(res["queued"]),
                         "partial": bool(res.get("partial")),
                         "have_tracks": res.get("have_tracks"),
                         "want_tracks": res.get("want_tracks"),
@@ -4009,7 +3958,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     rep = eds[0]
                     for f in ("id", "title", "artist", "year", "tracks",
                               "quality", "hires", "lossy", "bit_depth",
-                              "sample_rate", "cover", "version"):
+                              "sample_rate", "cover", "version", "queued"):
                         g[f] = rep[f]
                     g["partial"] = rep["partial"] and not g["owned"]
                     g["have_tracks"] = rep["have_tracks"]
@@ -4030,9 +3979,13 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 "search failed for %r", query)
             error = "Search failed. Try again."
     creds_ok = bool(_read_creds().get("auth_token"))
+    search_state = f"{kind}|{query}"
+    if artist_id:
+        search_state += f"|artist:{artist_id}"
     ctx = {"q": query, "results": results, "album_groups": album_groups,
            "artist_results": artist_results, "selected_artist": selected_artist,
            "error": error, "kind": kind,
+           "search_state": search_state,
            "creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(), "page": "search"}
     if _is_htmx(request):
         resp = _tr(request, "_search_results.html", ctx)
@@ -8032,6 +7985,30 @@ async def migrate_scan(request: Request):
         return _scan_submission_failure_response(request, "/migrate")
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
+
+_JOB_NAV_SURFACES = {
+    "library": ("library", "/library", "Back to Library"),
+    "new_releases": ("library", "/library", "Back to Library"),
+    "upgrade": ("upgrade", "/upgrade", "Back to Upgrade"),
+    "downsample": ("downsample", "/downsample", "Back to Downsample"),
+    "repair": ("repair", "/repair", "Back to Repair"),
+    "lyrics": ("lyrics", "/lyrics", "Back to Lyrics"),
+    "migration": ("settings", "/migrate", "Back to Migration"),
+}
+
+
+def _job_nav_destination(job) -> tuple[str, str, str]:
+    destination = _JOB_NAV_SURFACES.get(getattr(job, "execute_kind", ""))
+    if destination is not None:
+        if destination[0] == "upgrade" and not _upgrade_available():
+            return "queue", "/queue/history", "Back to History"
+        return destination
+    status = getattr(getattr(job, "status", None), "value", "")
+    if status in {"done", "failed", "canceled"}:
+        return "queue", "/queue/history", "Back to History"
+    return "queue", "/queue", "Back to Queue"
+
+
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 async def job_page(request: Request, job_id: str, approved: bool = False,
                    stale: bool = False, noselection: bool = False, page: int = 1,
@@ -8047,12 +8024,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
                 status_code=303)
         historical = True
     review_badge_ack = _review_badge_ack_for(job)
-    # An upgrade/downsample job page is that tool's surface, so its nav item
-    # lights up. Candidate rendering handles the review badge separately.
-    nav_page = (job.execute_kind
-                if job.execute_kind in ("upgrade", "downsample") else "queue")
-    if nav_page == "upgrade" and not _upgrade_available():
-        nav_page = "queue"
+    nav_page, _return_href, _return_label = _job_nav_destination(job)
     if job.attention and job.attention not in ("recovery", "catalog"):
         # Opening the page is the acknowledgement: the History chip and the
         # nav's warning dot stand down once the user has seen the job.
@@ -10102,16 +10074,8 @@ async def job_cancel(
         )
     if return_to_queue:
         return RedirectResponse(url="/queue", status_code=303)
-    # Repair stays on its single surface either way (idle start form once the
-    # cancel lands).
-    if job.execute_kind == "repair":
-        dest = "/repair"
-    elif job.execute_kind in _LIBRARY_SURFACE_KINDS:
-        dest = "/library"
-    elif was_review and job.execute_kind in ("upgrade", "downsample"):
-        dest = f"/{job.execute_kind}"
-    elif was_review and job.execute_kind == "migration":
-        dest = "/migrate"
+    if job.execute_kind in _JOB_NAV_SURFACES:
+        dest = _job_nav_destination(job)[1]
     else:
         dest = "/queue" if (was_review or was_pending) else f"/jobs/{job_id}"
     return RedirectResponse(url=dest, status_code=303)
@@ -10150,6 +10114,7 @@ async def queue_history(
     p: int = 1,
     jp: int = 1,
     error: str = "",
+    attention: bool = False,
 ):
     """The History tab: every finished job, newest first, paged from jobs.db so
     the record outlives the in-memory cap (which only the Queue/SSE views use).
@@ -10168,9 +10133,13 @@ async def queue_history(
     def _load_page(page, bulk_page):
         # Two layers: meaningful jobs as cards, plain downloads as the table
         # underneath. Both walk the archive a page at a time.
-        recoveries = _stamp(job_persistence.recovery_history())
+        recoveries = (
+            job_persistence.recovery_history(attention_only=True)
+            if attention else job_persistence.recovery_history()
+        )
+        recoveries = _stamp(recoveries)
         bulk_rest = job_persistence.history_count(
-            bulk=True, exclude_recoveries=True)
+            bulk=True, exclude_recoveries=True, attention_only=attention)
         bulk_pages = max(
             1, (bulk_rest + _HISTORY_BULK_CAP - 1) // _HISTORY_BULK_CAP)
         bulk_page = min(max(1, bulk_page), bulk_pages)
@@ -10182,9 +10151,10 @@ async def queue_history(
                 (bulk_page - 1) * _HISTORY_BULK_CAP,
                 bulk=True,
                 exclude_recoveries=True,
+                attention_only=attention,
             ))
         total = job_persistence.history_count(
-            bulk=False, exclude_recoveries=True)
+            bulk=False, exclude_recoveries=True, attention_only=attention)
         # Count the archive, not the cards that happened to render: the card
         # layer is capped, so a headline built from it under-reported the
         # history by however much it had dropped.
@@ -10196,6 +10166,7 @@ async def queue_history(
             (page - 1) * _HISTORY_PER_PAGE,
             bulk=False,
             exclude_recoveries=True,
+            attention_only=attention,
         ))
         return (bulk, bulk_total, bulk_page, bulk_pages,
                 total, pages, page, rows)
@@ -10210,6 +10181,7 @@ async def queue_history(
         "bulk_total": bulk_total, "bulk_shown": len(bulk_jobs),
         "bulk_page": jp, "bulk_pages": bulk_pages,
         "cur_page": p, "pages": pages, "total": total,
+        "attention_only": attention,
         "error": error[:200],
     })
 
@@ -11349,9 +11321,14 @@ async def queue_count():
     you sat on another page."""
     active = [j for j in job_mgr.registry.pending_and_running()
               if j.status != job_mgr.JobStatus.AWAITING_REVIEW]
+    revision = "\n".join(sorted(
+        f"{j.id}:{len(j.candidates or [])}"
+        for j in active
+    ))
     return JSONResponse({
         "count": len(active),
         "running": any(j.status.value in ("running", "scanning") for j in active),
+        "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
     })
 
 

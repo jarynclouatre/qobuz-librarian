@@ -1427,11 +1427,14 @@ def _kind_clause(bulk):
 
 
 def history_count(
-        bulk: Optional[bool] = None, *, exclude_recoveries: bool = False) -> int:
+        bulk: Optional[bool] = None, *, exclude_recoveries: bool = False,
+        attention_only: bool = False) -> int:
     """How many finished jobs are on disk, for paginating the History view."""
     clause, params = _kind_clause(bulk)
     if exclude_recoveries:
         clause += "AND COALESCE(recoveries, '[]') = '[]' "
+    if attention_only:
+        clause += f"AND {_TERMINAL_SQL} AND attention != '' "
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -1447,7 +1450,8 @@ def history_count(
 def history_page(limit: int, offset: int,
                  bulk: Optional[bool] = None,
                  status: Optional[str] = None, *,
-                 exclude_recoveries: bool = False) -> list[dict]:
+                 exclude_recoveries: bool = False,
+                 attention_only: bool = False) -> list[dict]:
     """A page of finished jobs, newest first: the browsable record behind the
     History view. Lighter than ``load_all`` (no candidates/args): just what a
     history row shows, plus the id to open the full job. The ``id`` tiebreaker
@@ -1459,6 +1463,8 @@ def history_page(limit: int, offset: int,
     clause, params = _kind_clause(bulk)
     if exclude_recoveries:
         clause += "AND COALESCE(recoveries, '[]') = '[]' "
+    if attention_only:
+        clause += f"AND {_TERMINAL_SQL} AND attention != '' "
     if status:
         clause += "AND status = ? "
         params = (*params, status)
@@ -1498,19 +1504,24 @@ def history_page(limit: int, offset: int,
     return result
 
 
-def recovery_history() -> list[dict]:
-    """Every unresolved recovery obligation, outside ordinary History caps."""
+def recovery_history(*, attention_only: bool = False) -> list[dict]:
+    """Unresolved recoveries, optionally limited to terminal attention."""
     with _lock:
         conn = _get_conn()
         if conn is None:
             return []
         try:
+            attention_clause = (
+                f"AND {_TERMINAL_SQL} AND attention != '' "
+                if attention_only else ""
+            )
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
                 "execute_kind, execute_args, created_at, finished_at, "
                 "attention, recoveries, edition "
                 "FROM jobs "
                 "WHERE COALESCE(recoveries, '[]') != '[]' "
+                f"{attention_clause}"
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC"
             ).fetchall()
         except sqlite3.Error as exc:
@@ -1560,15 +1571,15 @@ def last_finished_at(execute_kind: str) -> Optional[float]:
 
 
 def attention_count() -> int:
-    """How many finished jobs still carry an attention marker. Drives the
-    warning dot on the Queue nav until each flagged job page has been opened."""
+    """How many terminal jobs still need attention in History."""
     with _lock:
         conn = _get_conn()
         if conn is None:
             return 0
         try:
             return conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE attention != ''"
+                f"SELECT COUNT(*) FROM jobs WHERE {_TERMINAL_SQL} "
+                "AND attention != ''"
             ).fetchone()[0]
         except sqlite3.Error:
             return 0

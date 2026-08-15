@@ -2,7 +2,17 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [0.13.2] - Unreleased
+## [0.13.3] - Unreleased
+
+This patch makes remembered interface state behave like remembered state.
+
+- Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, while active Queue changes and new assets invalidate the saved result snapshot.
+- Search selections are reconciled with the controls that still exist, Hide owned stays with its query, and albums or tracks covered by active work remain visibly queued and non-actionable.
+- Repair, Library, New Releases, Upgrade, Downsample, Lyrics, and Migration job pages use the same owning tool for navigation, back links, cancellation, and terminal return behavior. A completed or discarded child no longer pins a primary tab to its old job page.
+- Queue activity and unresolved History attention now have separate counted destinations. The History count covers terminal records only and opens a filtered view that explains how ordinary warnings, recoveries, and catalogue cleanup clear.
+- Queue polling pauses in hidden tabs and never overlaps. General scroll restoration runs once instead of polling, and page-title separators are consistent across the interface.
+
+## [0.13.2] - 2026-08-14
 
 This release tightens the handoff between saved reviews, Qobuz access, and the
 files those reviews describe.
