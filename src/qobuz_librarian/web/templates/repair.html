@@ -59,7 +59,6 @@
 </section>
 {% else %}
 {% if repair_job %}
-<p class="ql-tool-scan-distinction">Repair checks your existing files for damage; Library builds the catalogue baseline.</p>
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
 {% endif %}
 {% endif %}

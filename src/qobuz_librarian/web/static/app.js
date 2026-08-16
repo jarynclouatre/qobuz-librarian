@@ -14,7 +14,9 @@
   var NAV_RESTORE_KEY = "ql-nav-restore";
   var pendingSearchRestoreY = null;
   var SEARCH_STATE_PREFIX = "ql-search-state:";
+  var SEARCH_SNAPSHOT_PREFIX = "ql-search-snapshot:";
   var SEARCH_STATE_TTL = 30 * 60 * 1000;
+  var SEARCH_SNAPSHOT_MAX_CHARS = 750000;
   var SEARCH_ASSET_VERSION = document.documentElement.dataset.assetVersion || "";
   var searchPositionRestoring = false;
   var searchRestoreFallback = null;
@@ -46,19 +48,78 @@
     return SEARCH_STATE_PREFIX + state;
   }
 
+  function searchSnapshotStorageKey(state) {
+    return SEARCH_SNAPSHOT_PREFIX + state;
+  }
+
+  function validSearchRecord(record) {
+    return record && record.assetVersion === SEARCH_ASSET_VERSION
+      && typeof record.savedAt === "number"
+      && Date.now() - record.savedAt <= SEARCH_STATE_TTL;
+  }
+
   function readSearchRecord(state) {
     if (!state) return null;
     try {
       var record = JSON.parse(sessionStorage.getItem(searchStorageKey(state)) || "null");
-      if (!record || record.assetVersion !== SEARCH_ASSET_VERSION
-          || typeof record.savedAt !== "number"
-          || Date.now() - record.savedAt > SEARCH_STATE_TTL) {
+      if (!validSearchRecord(record)) {
         sessionStorage.removeItem(searchStorageKey(state));
         return null;
       }
       return record;
     } catch (e) {
       return null;
+    }
+  }
+
+  function readSearchSnapshot(state) {
+    if (!state) return "";
+    var key = searchSnapshotStorageKey(state);
+    try {
+      var record = JSON.parse(sessionStorage.getItem(key) || "null");
+      if (!validSearchRecord(record) || typeof record.html !== "string") {
+        sessionStorage.removeItem(key);
+        return "";
+      }
+      return record.html;
+    } catch (e) {
+      try { sessionStorage.removeItem(key); } catch (error) {}
+      return "";
+    }
+  }
+
+  function clearSearchSnapshots() {
+    try {
+      for (var i = sessionStorage.length - 1; i >= 0; i--) {
+        var key = sessionStorage.key(i);
+        if (key && key.indexOf(SEARCH_SNAPSHOT_PREFIX) === 0) {
+          sessionStorage.removeItem(key);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function removeSearchSnapshot(state) {
+    if (!state) return;
+    try { sessionStorage.removeItem(searchSnapshotStorageKey(state)); } catch (e) {}
+  }
+
+  function writeSearchSnapshot(state, html) {
+    if (!state || !html || html.length > SEARCH_SNAPSHOT_MAX_CHARS) {
+      removeSearchSnapshot(state);
+      return false;
+    }
+    clearSearchSnapshots();
+    try {
+      sessionStorage.setItem(searchSnapshotStorageKey(state), JSON.stringify({
+        html: html,
+        assetVersion: SEARCH_ASSET_VERSION,
+        savedAt: Date.now(),
+      }));
+      return true;
+    } catch (e) {
+      removeSearchSnapshot(state);
+      return false;
     }
   }
 
@@ -73,16 +134,24 @@
     });
     record.assetVersion = SEARCH_ASSET_VERSION;
     record.savedAt = preserveSavedAt ? savedAt : Date.now();
+    var serialized = JSON.stringify(record);
     try {
-      sessionStorage.setItem(searchStorageKey(state), JSON.stringify(record));
+      sessionStorage.setItem(searchStorageKey(state), serialized);
       return record;
     } catch (e) {
-      return null;
+      clearSearchSnapshots();
+      try {
+        sessionStorage.setItem(searchStorageKey(state), serialized);
+        return record;
+      } catch (error) {
+        return null;
+      }
     }
   }
 
   function invalidateSearchSnapshots() {
     searchSnapshotsInvalidated = true;
+    clearSearchSnapshots();
     var now = Date.now();
     try {
       for (var i = sessionStorage.length - 1; i >= 0; i--) {
@@ -94,10 +163,7 @@
               || typeof record.savedAt !== "number"
               || now - record.savedAt > SEARCH_STATE_TTL) {
             sessionStorage.removeItem(key);
-            continue;
           }
-          delete record.html;
-          sessionStorage.setItem(key, JSON.stringify(record));
         } catch (e) {
           sessionStorage.removeItem(key);
         }
@@ -111,8 +177,8 @@
 
   var bootSearchState = searchStateFromUrl();
   var bootSearchRecord = readSearchRecord(bootSearchState);
-  if (bootSearchRecord && typeof bootSearchRecord.html === "string"
-      && bootSearchRecord.html) {
+  var bootSearchHtml = readSearchSnapshot(bootSearchState);
+  if (bootSearchHtml) {
     searchPositionRestoring = true;
     document.documentElement.classList.add("ql-search-restoring");
     searchRestoreFallback = setTimeout(function () {
@@ -379,6 +445,16 @@
     }
   }
 
+  function searchResultItems(root) {
+    var items = Array.prototype.slice.call(root.querySelectorAll("[data-search-item]"));
+    root.querySelectorAll("template[data-search-view-template]").forEach(function (template) {
+      items = items.concat(Array.prototype.slice.call(
+        template.content.querySelectorAll("[data-search-item]")
+      ));
+    });
+    return items;
+  }
+
   function markSearchDownloadQueued(form) {
     if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
     var item = form.closest("[data-search-item]");
@@ -386,8 +462,9 @@
     var root = item && item.closest("[data-search-results-root]");
     var peers = item ? [item] : [];
     if (root && key) {
-      peers = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"),
-        function (peer) { return peer.dataset.searchKey === key; });
+      peers = searchResultItems(root).filter(function (peer) {
+        return peer.dataset.searchKey === key;
+      });
     }
     peers.forEach(function (peer) {
       setSearchItemAvailability(peer, "queued");
@@ -414,7 +491,7 @@
         var queued = new Set(data.queued || []);
         var scanning = new Set(data.scanning || []);
         document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
-          root.querySelectorAll("[data-search-item]").forEach(function (item) {
+          searchResultItems(root).forEach(function (item) {
             var key = item.dataset.searchKey || "";
             setSearchItemAvailability(item,
               queued.has(key) ? "queued" : scanning.has(key) ? "scanning" : "available");
@@ -443,8 +520,9 @@
     var root = item && item.closest("[data-search-results-root]");
     var peers = item ? [item] : [];
     if (root && key) {
-      peers = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"),
-        function (peer) { return peer.dataset.searchKey === key; });
+      peers = searchResultItems(root).filter(function (peer) {
+        return peer.dataset.searchKey === key;
+      });
     }
     peers.forEach(function (peer) {
       peer.dataset.owned = "1";
@@ -577,7 +655,7 @@
       b.disabled = true;
       b.classList.add("is-disabled");
       b.innerHTML =
-        '<span class="ql-spinner ql-inline-spinner" aria-hidden="true"></span> Starting...';
+        '<span class="ql-spinner ql-inline-spinner" aria-hidden="true"></span> Starting…';
     }, 0);
   });
 
@@ -1033,11 +1111,14 @@
     var marker = results && results.querySelector("[data-search-response-state]");
     var state = marker ? marker.dataset.searchResponseState || "" : "";
     if (!results || !state) return;
-    var values = {
-      html: marker.dataset.searchCacheable === "0" ? "" : searchSnapshotHtml(results),
-    };
+    var values = {};
     if (!searchPositionRestoring) values.scrollY = Math.max(0, Math.round(window.scrollY || 0));
     updateSearchRecord(state, values);
+    if (marker.dataset.searchCacheable === "0") {
+      removeSearchSnapshot(state);
+      return;
+    }
+    writeSearchSnapshot(state, searchSnapshotHtml(results));
   }
 
   function finishSearchRestore(record) {
@@ -1078,15 +1159,15 @@
         && pendingSearchRestoreY === null) {
       pendingSearchRestoreY = bootSearchRecord.scrollY;
     }
-    if (bootSearchRecord && bootSearchState
-        && typeof bootSearchRecord.html === "string" && bootSearchRecord.html) {
-      results.innerHTML = bootSearchRecord.html;
+    if (bootSearchHtml && bootSearchState) {
+      results.innerHTML = bootSearchHtml;
       if (window.htmx) window.htmx.process(results);
       form.querySelectorAll("[data-deep-link]").forEach(function (node) {
         node.remove();
       });
       finishSearchRestore(bootSearchRecord);
       bootSearchRecord = null;
+      bootSearchHtml = "";
       return;
     }
     document.documentElement.classList.remove("ql-search-restoring");
@@ -1121,10 +1202,19 @@
         Object.keys(selected).forEach(function (key) {
           if (selected[key]) live[key] = 1;
         });
+        root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
+          if (!panel.classList.contains("hidden")
+              && panel.querySelector("[data-search-item]")) {
+            viewScroll[panel.dataset.searchViewPanel] = Math.max(
+              0, Math.round(panel.scrollTop || 0)
+            );
+          }
+        });
         var values = {
           picks: live,
           hideOwned: !!(hideOwnedButton
             && hideOwnedButton.getAttribute("aria-pressed") === "true"),
+          viewScroll: viewScroll,
         };
         if (!searchPositionRestoring) {
           values.scrollY = Math.max(0, Math.round(window.scrollY || 0));
@@ -1138,6 +1228,11 @@
       var restored = loadSelection();
       var selected = {};
       Object.keys(restored.picks || {}).forEach(function (k) { selected[k] = true; });
+      var viewScroll = {};
+      Object.keys(restored.viewScroll || {}).forEach(function (name) {
+        var value = Number(restored.viewScroll[name]);
+        if (isFinite(value) && value >= 0) viewScroll[name] = Math.round(value);
+      });
       var bulkBar = root.querySelector("[data-search-bulk-bar]");
       var selectedCount = root.querySelector("[data-search-selected-count]");
       var selectAll = root.querySelector("[data-search-select-all]");
@@ -1204,17 +1299,19 @@
         var meta = root.querySelector("[data-search-count]");
         var empty = root.querySelector("[data-owned-empty]");
         var on = root.classList.contains("is-filtering-owned");
-        // Count what is actually on screen: both the table and the grid are in
-        // the DOM at once, so counting every [data-search-item] counts each
-        // album twice. Alternate pressings are rows, not albums, so they are
-        // left out too: with a versions fold open they made turning the filter
-        // ON raise the total, from "23 albums" to "25 albums not in your
-        // library".
-        var shown = Array.prototype.filter.call(
-          root.querySelectorAll("[data-search-item]"),
+        var activePanel = null;
+        root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
+          if (!panel.classList.contains("hidden")) activePanel = panel;
+        });
+        // Count the active view's primary records. Layout visibility is false
+        // while the htmx skeleton hides the whole result, even though these are
+        // the records that appear when the request settles.
+        var shown = activePanel ? Array.prototype.filter.call(
+          activePanel.querySelectorAll("[data-search-item]"),
           function (el) {
-            return visibleItem(el) && !el.closest("[data-version-panel]");
-          }).length;
+            return !el.closest("[data-version-panel]")
+              && !(on && el.dataset.owned === "1");
+          }).length : 0;
         if (meta) {
           if (on) {
             meta.textContent = shown + " album" + (shown === 1 ? "" : "s")
@@ -1225,15 +1322,52 @@
         }
         if (empty) empty.classList.toggle("hidden", !(on && shown === 0));
       }
+      function parkSearchView(panel) {
+        var template = panel.querySelector("template[data-search-view-template]");
+        if (!template) return;
+        if (panel.querySelector("[data-search-item]")) {
+          viewScroll[panel.dataset.searchViewPanel] = Math.max(
+            0, Math.round(panel.scrollTop || 0)
+          );
+        }
+        Array.prototype.slice.call(panel.childNodes).forEach(function (node) {
+          if (node !== template) template.content.appendChild(node);
+        });
+      }
+      function materializeSearchView(panel) {
+        var template = panel.querySelector("template[data-search-view-template]");
+        if (template && template.content.childNodes.length) {
+          panel.appendChild(template.content);
+        }
+        var savedScroll = viewScroll[panel.dataset.searchViewPanel];
+        if (typeof savedScroll === "number") {
+          panel.scrollTop = savedScroll;
+          requestAnimationFrame(function () { panel.scrollTop = savedScroll; });
+        }
+      }
       function setView(name) {
-        root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
-          panel.classList.toggle("hidden", panel.dataset.searchViewPanel !== name);
+        var panels = Array.prototype.slice.call(
+          root.querySelectorAll("[data-search-view-panel]")
+        );
+        panels.forEach(function (panel) {
+          if (panel.dataset.searchViewPanel !== name) parkSearchView(panel);
+        });
+        var activePanel = null;
+        panels.forEach(function (panel) {
+          var active = panel.dataset.searchViewPanel === name;
+          if (active) {
+            materializeSearchView(panel);
+            activePanel = panel;
+          }
+          panel.classList.toggle("hidden", !active);
         });
         root.querySelectorAll("[data-search-view]").forEach(function (btn) {
           var active = btn.dataset.searchView === name;
           btn.classList.toggle("is-active", active);
           btn.setAttribute("aria-pressed", active ? "true" : "false");
         });
+        if (activePanel && window.htmx) window.htmx.process(activePanel);
+        initCoverFallbacks();
         try { localStorage.setItem("ql-search-view", name); } catch (e) {}
       }
       function savedSearchView() {
@@ -1267,6 +1401,7 @@
           evt.preventDefault();
           setView(view.dataset.searchView || "table");
           syncBoxes();
+          applyOwnedFilterCount();
           return;
         }
         if (hideOwnedButton && evt.target.closest("[data-search-hide-owned]")) {
@@ -1366,7 +1501,7 @@
       function runBulkDownload(forms) {
         var original = bulkButton.textContent;
         bulkButton.disabled = true;
-        bulkButton.textContent = "Queueing...";
+        bulkButton.textContent = "Queueing…";
         var queued = 0;
         var queuedTracks = 0;
         var duplicates = 0;
@@ -2747,7 +2882,7 @@
     var results = document.getElementById("search-results");
     var status = document.getElementById("search-status");
     if (results) results.setAttribute("aria-busy", "true");
-    if (status) status.textContent = "Searching...";
+    if (status) status.textContent = "Searching…";
   });
 
   document.addEventListener("htmx:beforeSwap", function (event) {

@@ -3485,6 +3485,9 @@ async def lyric_retry(request: Request):
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
+_SEARCH_SNAPSHOT_RESULT_LIMIT = 150
+
+
 def _qobuz_quality_bits_rate(primary: dict | None,
                              fallback: dict | None = None) -> tuple[int, int]:
     """Return Qobuz source quality as (bits, sample_rate_hz)."""
@@ -3994,10 +3997,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     search_state = f"{kind}|{query}"
     if artist_id:
         search_state += f"|artist:{artist_id}"
+    search_result_count = len(results) if results else len(artist_results)
+    defer_search_views = search_result_count > _SEARCH_SNAPSHOT_RESULT_LIMIT
     ctx = {"q": query, "results": results, "album_groups": album_groups,
            "artist_results": artist_results, "selected_artist": selected_artist,
            "error": error, "kind": kind,
            "search_state": search_state,
+           "search_cacheable": not defer_search_views,
+           "defer_search_views": defer_search_views,
            "creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(), "page": "search"}
     if _is_htmx(request):
         resp = _tr(request, "_search_results.html", ctx)
@@ -8113,10 +8120,26 @@ def _review_context(job, page=1, query="", tab=""):
         "review_tab_counts": tab_counts,
         "review_hidden_count": hidden_mod.count(_hide_scope(job.execute_kind)),
         "review_counts": counts,
+        "embedded_review_summary": _embedded_review_summary(job),
         "review_reclaimable_label": (format_size(counts["reclaimable"])
                                      if counts["reclaimable"] else ""),
         "review_page_size": REVIEW_PAGE_ARTISTS,
     }
+
+
+def _embedded_review_summary(job) -> str:
+    summary = str(getattr(job, "summary", "") or "").strip()
+    if getattr(job, "execute_kind", "") != "library" or not summary:
+        return summary
+    count_only = re.fullmatch(
+        r"[0-9][0-9,]* to review across Missing Albums "
+        r"\([0-9][0-9,]*\) and Gap Fill \([0-9][0-9,]*\)"
+        r"(?:\.|, from your last library scan\.)?",
+        summary,
+    )
+    # Match the complete generated shape so stale counts stay suppressed, but
+    # any appended caveat remains visible on Library.
+    return "" if count_only else summary
 
 
 def _review_badge_ack_for(job):

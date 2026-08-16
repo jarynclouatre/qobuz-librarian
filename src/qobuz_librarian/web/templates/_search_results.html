@@ -101,7 +101,7 @@
 {%- endmacro %}
 
 <span hidden data-search-response-state="{{ search_state }}"
-      data-search-cacheable="{{ 0 if error else 1 }}"></span>
+      data-search-cacheable="{{ 1 if search_cacheable and not error else 0 }}"></span>
 
 {% if error %}
 <div class="ql-notice ql-notice-warning ql-search-error" data-flash>
@@ -158,6 +158,7 @@
     {{ bulk_bar() }}
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">
+      {% if defer_search_views %}<template data-search-view-template>{% endif %}
       <div class="ql-table ql-search-table ql-table--tracks" role="table" aria-label="Track search results">
         <div class="ql-table-head" role="row">
           <span role="columnheader"><span class="sr-only">Select</span></span><span role="columnheader">Track</span><span role="columnheader">Artist</span><span role="columnheader">Album</span><span class="ql-num" role="columnheader">Year</span><span role="columnheader">Quality</span><span role="columnheader"><span class="sr-only">Actions</span></span>
@@ -194,9 +195,11 @@
           {% endfor %}
         </div>
       </div>
+      {% if defer_search_views %}</template>{% endif %}
     </div>
 
     <div class="ql-grid-view hidden" data-search-view-panel="grid">
+      {% if defer_search_views %}<template data-search-view-template>{% endif %}
       {% for r in results %}
       {% set key = 'track-' ~ r.album_id ~ '-' ~ r.track_id %}
       <div class="ql-grid-tile{% if r.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}" data-scanning="{{ 1 if r.scanning else 0 }}">
@@ -207,7 +210,7 @@
                  aria-label="Select {{ release_title(r.title, r.version) }} by {{ r.artist }}">
         </label>
         {% endif %}
-        {% if r.cover %}<img src="{{ r.cover }}" alt="" loading="lazy" class="ql-grid-cover">
+        {% if r.cover %}<img src="{{ r.cover }}" alt="" loading="lazy" width="320" height="320" class="ql-grid-cover">
         {% else %}<span class="ql-grid-cover ql-cover-placeholder" aria-hidden="true"></span>{% endif %}
         <div class="ql-grid-copy">
           <p class="ql-grid-title">{{ release_title(r.title, r.version) }}</p>
@@ -221,6 +224,7 @@
         </div>
       </div>
       {% endfor %}
+      {% if defer_search_views %}</template>{% endif %}
     </div>
   </div>
 
@@ -266,6 +270,7 @@
     <p class="ql-review-page-empty hidden" data-owned-empty>Every result here is already in your library. Turn off &ldquo;Hide owned&rdquo; to see them.</p>
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">
+      {% if defer_search_views %}<template data-search-view-template>{% endif %}
       <div class="ql-table ql-search-table ql-table--albums" role="table" aria-label="Album search results">
         <div class="ql-table-head" role="row">
           <span role="columnheader"><span class="sr-only">Select</span></span><span role="columnheader">Album</span><span class="ql-num" role="columnheader">Year</span><span class="ql-num" role="columnheader">Tracks</span><span role="columnheader">Quality</span><span role="columnheader"><span class="sr-only">Actions</span></span>
@@ -347,9 +352,11 @@
           {% endfor %}
         </div>
       </div>
+      {% if defer_search_views %}</template>{% endif %}
     </div>
 
     <div class="ql-grid-view hidden" data-search-view-panel="grid">
+      {% if defer_search_views %}<template data-search-view-template>{% endif %}
       {% for g in album_groups %}
       {% set key = 'album-' ~ g.id %}
       <div class="ql-grid-tile{% if g.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
@@ -360,7 +367,7 @@
                  aria-label="Select {{ release_title(g.title, g.version) }} by {{ g.artist }}">
         </label>
         {% endif %}
-        {% if g.cover %}<img src="{{ g.cover }}" alt="" loading="lazy" class="ql-grid-cover">
+        {% if g.cover %}<img src="{{ g.cover }}" alt="" loading="lazy" width="320" height="320" class="ql-grid-cover">
         {% else %}<span class="ql-grid-cover ql-cover-placeholder" aria-hidden="true"></span>{% endif %}
         <div class="ql-grid-copy">
           <p class="ql-grid-title">{{ release_title(g.title, g.version) }}</p>
@@ -412,6 +419,7 @@
         </div>
       </div>
       {% endfor %}
+      {% if defer_search_views %}</template>{% endif %}
     </div>
   </div>
   {% endif %}

@@ -97,8 +97,13 @@
     {# The scan's own summary carries its caveats, an artist it couldn't check,
        a result cap it hit. Gating it on candidate_cap_hit meant a review whose
        sweep was incomplete presented its count as the whole answer. #}
-    {% if job.summary %}
-    <div class="ql-job-summary ql-job-summary--review"><span>{{ job.summary }}</span></div>
+    {% if embedded_surface|default(false) and job.execute_kind == 'library' and embedded_review_summary is defined %}
+    {% set _job_summary = embedded_review_summary %}
+    {% else %}
+    {% set _job_summary = job.summary %}
+    {% endif %}
+    {% if _job_summary %}
+    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}</span></div>
     {% endif %}
 
     {# Tab scoping: on a library review the bulk bar acts on the ACTIVE tab

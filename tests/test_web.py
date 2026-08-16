@@ -1000,6 +1000,49 @@ def test_artist_search_selected_artist_shows_discography(client, monkeypatch):
     assert "Download" in r.text
 
 
+def test_large_artist_catalog_keeps_results_without_caching_both_views(
+        client, monkeypatch):
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: None)
+    count = app_mod._SEARCH_SNAPSHOT_RESULT_LIMIT + 1
+    releases = [{
+        "id": f"catalog-{index}",
+        "title": f"Release {index:03d}",
+        "artist": {"name": "Large Catalog"},
+        "year": 2000 + index % 20,
+        "tracks_count": 10,
+        "maximum_bit_depth": 16,
+    } for index in range(count)]
+    monkeypatch.setattr(
+        search_mod,
+        "get_artist_albums",
+        lambda *_args, **_kwargs: (releases, count),
+    )
+
+    response = client.post(
+        "/search",
+        data={
+            "q": "Large Catalog",
+            "kind": "artist",
+            "artist_id": "large-catalog",
+            "artist_name": "Large Catalog",
+        },
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert f"{count} albums on Qobuz" in response.text
+    assert 'data-search-cacheable="0"' in response.text
+    assert response.text.count("<template data-search-view-template>") == 2
+    for index in (0, count - 1):
+        field = f'name="album_id" value="catalog-{index}"'
+        assert response.text.count(field) == 2
+
+
 
 
 def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path):
@@ -3073,6 +3116,55 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
         store = hidden.load()
         assert hidden.is_hidden(hidden.SCOPE_MISSING, "Portishead", "Third", store)
         assert not hidden.is_hidden(hidden.SCOPE_MISSING, "Portishead", "Dummy", store)
+    finally:
+        _remove_job(job)
+
+
+@pytest.mark.parametrize(
+    "summary_suffix",
+    [".", ", from your last library scan."],
+)
+def test_embedded_library_hides_only_the_duplicated_count_summary(
+        client, summary_suffix):
+    from qobuz_librarian.web import flows
+
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    job.add_candidate(
+        kind="album",
+        title="Third",
+        artist="Portishead",
+        payload={"year": "2008"},
+    )
+    job.add_candidate(
+        kind="album",
+        title="Dummy",
+        artist="Portishead",
+        detail="gap-fill: 2 missing of 11",
+        payload={"year": "1994", "gap_fill": 2},
+    )
+    count_summary = flows.library_review_summary(job.candidates) + summary_suffix
+    job.summary = count_summary
+    try:
+        embedded = client.get(f"/jobs/{job.id}/content?embedded=1")
+        assert embedded.status_code == 200
+        assert count_summary not in embedded.text
+        assert "Missing Albums" in embedded.text
+        assert "Gap Fill" in embedded.text
+
+        job.candidates.pop()
+        stale = client.get(f"/jobs/{job.id}/content?embedded=1")
+        assert stale.status_code == 200
+        assert count_summary not in stale.text
+
+        full_page = client.get(f"/jobs/{job.id}")
+        assert full_page.status_code == 200
+        assert count_summary in full_page.text
+
+        job.summary += " 2 artists couldn't be checked; scan again to finish."
+        caveat = client.get(f"/jobs/{job.id}/content?embedded=1")
+        assert count_summary in caveat.text
+        assert "scan again to finish" in caveat.text
     finally:
         _remove_job(job)
 
@@ -6835,7 +6927,7 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
         (jm.JobStatus.AWAITING_REVIEW, "review"),
     ],
 )
-def test_repair_owned_surface_repeats_scan_distinction(
+def test_repair_owned_surface_omits_page_explainer_subtitle(
         client, monkeypatch, status, phase):
     from qobuz_librarian.web import app as webapp
 
@@ -6853,10 +6945,10 @@ def test_repair_owned_surface_repeats_scan_distinction(
     page = client.get("/repair")
 
     assert page.status_code == 200
-    assert page.text.count(
+    assert (
         "Repair checks your existing files for damage; "
         "Library builds the catalogue baseline."
-    ) == 1
+    ) not in page.text
     assert "Start repair scan" not in page.text
 
 

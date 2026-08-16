@@ -195,19 +195,19 @@
 {% macro kind_tile(job, tile_class='') -%}
 <span class="ql-job-tile{% if tile_class %} {{ tile_class }}{% endif %}" aria-hidden="true">
   {% if job.execute_kind in ('library', 'new_releases') %}
-  <svg viewBox="0 0 24 24"><path d="M4 4v16M9 4v16M14 5.5l4.5 14"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16M9 4v16M14 5.5l4.5 14"/></svg>
   {% elif job.execute_kind == 'repair' %}
-  <svg viewBox="0 0 24 24"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>
   {% elif job.execute_kind == 'lyrics' %}
-  <svg viewBox="0 0 24 24"><path d="M9 18V6l8-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="14.5" cy="16" r="2.5"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l8-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="14.5" cy="16" r="2.5"/></svg>
   {% elif job.execute_kind == 'upgrade' %}
-  <svg viewBox="0 0 24 24"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>
   {% elif job.execute_kind == 'downsample' %}
-  <svg viewBox="0 0 24 24"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>
   {% elif job.execute_kind == 'migration' %}
-  <svg viewBox="0 0 24 24"><path d="M4 7h11M4 12h11M4 17h11"/><path d="M18 9l3 3-3 3"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h11M4 12h11M4 17h11"/><path d="M18 9l3 3-3 3"/></svg>
   {% else %}
-  <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
   {% endif %}
 </span>
 {%- endmacro %}
