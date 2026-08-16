@@ -72,7 +72,7 @@
       </div>
       {% endfor %}
       {% if kept.on_disk %}
-      <span>Review or restore {% if job.recoveries|length == 1 %}it{% else %}them{% endif %} under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</span>
+      <span>Review or restore {% if job.recoveries|length == 1 %}it{% else %}them{% endif %} under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</span>
       {% else %}
       <span>The kept cop{% if job.recoveries|length == 1 %}y is{% else %}ies are{% endif %} no longer on disk, restored or cleaned up outside this job, so there's nothing left to review.</span>
       {% if job.attention == 'recovery' %}

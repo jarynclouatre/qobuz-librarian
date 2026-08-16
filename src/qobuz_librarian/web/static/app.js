@@ -62,14 +62,17 @@
     }
   }
 
-  function updateSearchRecord(state, values) {
+  function updateSearchRecord(state, values, preserveSavedAt) {
     if (!state) return null;
-    var record = readSearchRecord(state) || {};
+    var record = readSearchRecord(state);
+    if (preserveSavedAt && !record) return null;
+    record = record || {};
+    var savedAt = record.savedAt;
     Object.keys(values || {}).forEach(function (key) {
       record[key] = values[key];
     });
     record.assetVersion = SEARCH_ASSET_VERSION;
-    record.savedAt = Date.now();
+    record.savedAt = preserveSavedAt ? savedAt : Date.now();
     try {
       sessionStorage.setItem(searchStorageKey(state), JSON.stringify(record));
       return record;
@@ -80,17 +83,29 @@
 
   function invalidateSearchSnapshots() {
     searchSnapshotsInvalidated = true;
+    var now = Date.now();
     try {
       for (var i = sessionStorage.length - 1; i >= 0; i--) {
         var key = sessionStorage.key(i);
         if (!key || key.indexOf(SEARCH_STATE_PREFIX) !== 0) continue;
-        var record = JSON.parse(sessionStorage.getItem(key) || "null");
-        if (!record) continue;
-        delete record.html;
-        record.savedAt = Date.now();
-        sessionStorage.setItem(key, JSON.stringify(record));
+        try {
+          var record = JSON.parse(sessionStorage.getItem(key) || "null");
+          if (!record || record.assetVersion !== SEARCH_ASSET_VERSION
+              || typeof record.savedAt !== "number"
+              || now - record.savedAt > SEARCH_STATE_TTL) {
+            sessionStorage.removeItem(key);
+            continue;
+          }
+          delete record.html;
+          sessionStorage.setItem(key, JSON.stringify(record));
+        } catch (e) {
+          sessionStorage.removeItem(key);
+        }
       }
     } catch (e) {}
+    if (window.qlRefreshSearchAvailability) {
+      window.qlRefreshSearchAvailability();
+    }
   }
   window.qlInvalidateSearchSnapshots = invalidateSearchSnapshots;
 
@@ -315,50 +330,111 @@
     if (done) setTimeout(done, 320);
   }
 
+  function setSearchItemAvailability(item, state) {
+    if (!item || item.dataset.owned === "1") return;
+    var unavailable = state !== "available";
+    item.dataset.queued = state === "queued" ? "1" : "0";
+    item.dataset.scanning = state === "scanning" ? "1" : "0";
+
+    var checkbox = item.querySelector("[data-search-select]");
+    if (checkbox) {
+      checkbox.disabled = unavailable;
+      if (unavailable) checkbox.checked = false;
+    }
+
+    var form = item.querySelector("[data-search-download-form]");
+    var button = form && form.querySelector("button[type=submit]");
+    if (!button) return;
+    var icon = button.classList.contains("ql-download-icon-button");
+    var title = form.dataset.searchTitle || "";
+    var artist = form.dataset.searchArtist || "";
+    var description = title + (artist ? " by " + artist : "");
+    var paused = form.dataset.searchWritesPaused === "1";
+    var pending = form.classList.contains("htmx-request");
+
+    button.classList.remove("is-queued", "is-scanning", "is-disabled");
+    if (state === "queued") button.classList.add("is-queued", "is-disabled");
+    if (state === "scanning") button.classList.add("is-scanning", "is-disabled");
+    button.disabled = unavailable || paused || pending;
+    if (button.disabled) button.setAttribute("aria-disabled", "true");
+    else button.removeAttribute("aria-disabled");
+
+    if (!icon) {
+      button.classList.toggle("ql-btn-primary", !unavailable);
+      button.classList.toggle("ql-btn-secondary", unavailable);
+      button.textContent = state === "queued" ? "Queued"
+        : state === "scanning" ? "In current scan" : "Download";
+    }
+    if (state === "queued") {
+      button.setAttribute("aria-label", "Queued: " + description);
+      button.setAttribute("title", "Queued");
+    } else if (state === "scanning") {
+      button.setAttribute("aria-label", "In current scan: " + description);
+      button.setAttribute("title", "In current scan");
+    } else {
+      button.setAttribute("aria-label", "Download " + description);
+      button.setAttribute("title", paused
+        ? form.dataset.searchWritesPausedReason || "Downloads are paused"
+        : "Download");
+    }
+  }
+
   function markSearchDownloadQueued(form) {
     if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
     var item = form.closest("[data-search-item]");
     var key = item && item.dataset.searchKey;
     var root = item && item.closest("[data-search-results-root]");
-    var forms = [form];
+    var peers = item ? [item] : [];
     if (root && key) {
-      var peers = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"), function (peer) {
-        return peer.dataset.searchKey === key;
-      });
-      peers.forEach(function (peer) {
-        peer.dataset.queued = "1";
-        var checkbox = peer.querySelector("[data-search-select]");
-        if (!checkbox) return;
-        var label = checkbox.closest("label");
-        if (label) label.remove();
-        else checkbox.remove();
-      });
-      forms = peers.map(function (peer) {
-        if (peer.dataset.searchKey !== key) return null;
-        return peer.querySelector("[data-search-download-form]");
-      }).filter(Boolean);
+      peers = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"),
+        function (peer) { return peer.dataset.searchKey === key; });
     }
-    forms.forEach(function (f) {
-      var b = f.querySelector("button[type=submit]");
-      if (!b) return;
-      b.disabled = true;
-      if (b.classList.contains("ql-download-icon-button")) {
-        var label = b.getAttribute("aria-label") || "";
-        b.setAttribute("aria-label", label.indexOf("Download ") === 0
-          ? "Queued: " + label.slice(9) : "Queued");
-        b.setAttribute("title", "Queued");
-        b.classList.add("is-queued");
-      } else {
-        b.textContent = "Queued";
-      }
-      b.classList.remove("ql-btn-primary");
-      b.classList.add("is-disabled");
-      if (!b.classList.contains("ql-download-icon-button")) {
-        b.classList.add("ql-btn-secondary");
-      }
+    peers.forEach(function (peer) {
+      setSearchItemAvailability(peer, "queued");
     });
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
+
+  var searchAvailabilityRequest = null;
+  var refreshSearchAvailabilityAgain = false;
+
+  function refreshSearchAvailability() {
+    if (!document.querySelector("[data-search-results-root]")) return;
+    if (searchAvailabilityRequest) {
+      refreshSearchAvailabilityAgain = true;
+      return;
+    }
+    var request = sessionFetch("/api/search/availability", {
+      headers: { "Accept": "application/json" },
+    });
+    searchAvailabilityRequest = request;
+    request
+      .then(function (response) { return response.ok ? response.json() : Promise.reject(); })
+      .then(function (data) {
+        var queued = new Set(data.queued || []);
+        var scanning = new Set(data.scanning || []);
+        document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
+          root.querySelectorAll("[data-search-item]").forEach(function (item) {
+            var key = item.dataset.searchKey || "";
+            setSearchItemAvailability(item,
+              queued.has(key) ? "queued" : scanning.has(key) ? "scanning" : "available");
+          });
+          root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
+        });
+        if (!refreshSearchAvailabilityAgain) {
+          searchSnapshotsInvalidated = false;
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        if (searchAvailabilityRequest === request) searchAvailabilityRequest = null;
+        if (refreshSearchAvailabilityAgain) {
+          refreshSearchAvailabilityAgain = false;
+          refreshSearchAvailability();
+        }
+      });
+  }
+  window.qlRefreshSearchAvailability = refreshSearchAvailability;
 
   function markSearchDownloadOwned(form) {
     if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
@@ -692,6 +768,21 @@
   });
 
   // Tap-driven drawer support for mobile browsers.
+  var drawerScrollY = null;
+  function lockDrawerPage() {
+    if (drawerScrollY !== null || !document.body) return;
+    drawerScrollY = Math.max(0, Math.round(window.scrollY || 0));
+    document.body.style.setProperty("--ql-drawer-page-top", -drawerScrollY + "px");
+    document.body.classList.add("ql-drawer-page-locked");
+  }
+  function unlockDrawerPage() {
+    if (drawerScrollY === null || !document.body) return;
+    var y = drawerScrollY;
+    drawerScrollY = null;
+    document.body.classList.remove("ql-drawer-page-locked");
+    document.body.style.removeProperty("--ql-drawer-page-top");
+    window.scrollTo(0, y);
+  }
   function closeDrawer(dd) {
     var hadFocus = dd.contains(document.activeElement);
     dd.classList.remove("ql-mobile-drawer-open");
@@ -706,6 +797,9 @@
       else if (document.activeElement && document.activeElement.blur) {
         document.activeElement.blur();
       }
+    }
+    if (!document.querySelector(".ql-mobile-drawer.ql-mobile-drawer-open")) {
+      unlockDrawerPage();
     }
   }
 
@@ -757,6 +851,7 @@
     if (drawerIsOpen(triggerDd)) {
       closeDrawer(triggerDd);
     } else {
+      lockDrawerPage();
       triggerDd.classList.add("ql-mobile-drawer-open");
       triggerDd.setAttribute("open", "");
       trigger.setAttribute("aria-expanded", "true");
@@ -1021,7 +1116,7 @@
       function loadSelection() {
         return readSearchRecord(state) || {};
       }
-      function saveSelection() {
+      function saveSelection(preserveSavedAt) {
         var live = {};
         Object.keys(selected).forEach(function (key) {
           if (selected[key]) live[key] = 1;
@@ -1034,7 +1129,11 @@
         if (!searchPositionRestoring) {
           values.scrollY = Math.max(0, Math.round(window.scrollY || 0));
         }
-        updateSearchRecord(state, values);
+        updateSearchRecord(
+          state,
+          values,
+          preserveSavedAt || searchSnapshotsInvalidated
+        );
       }
       var restored = loadSelection();
       var selected = {};
@@ -1348,12 +1447,24 @@
       setView(savedSearchView());
       syncBoxes();
       applyOwnedFilterCount();
-      root.addEventListener("qlSearchAvailabilityChanged", syncBoxes);
+      root.addEventListener("qlSearchAvailabilityChanged", function () {
+        if (searchSnapshotsInvalidated) {
+          var current = loadSelection();
+          selected = {};
+          Object.keys(current.picks || {}).forEach(function (key) {
+            selected[key] = true;
+          });
+        }
+        syncBoxes();
+      });
       searchExitSave = function () {
         saveSelection();
         saveSearchSnapshot();
       };
     });
+    if (document.querySelector("[data-search-results-root]")) {
+      refreshSearchAvailability();
+    }
   }
 
   // Live job and queue streams.

@@ -67,7 +67,7 @@
   --color-base-300: var(--ql-line);
   --color-base-content: var(--ql-text);
   --color-primary: var(--ql-gold);
-  --color-primary-content: var(--ql-gold-ink);
+  --color-primary-content: var(--ql-action-ink);
   --color-success: var(--ql-owned);
   --color-warning: var(--ql-warning);
   --color-error: var(--ql-danger);
@@ -288,10 +288,13 @@ h1, h2, h3 {
   color: var(--ql-warning);
   text-decoration: none;
 }
-.ql-history-attention:hover,
+.ql-history-attention:hover {
+  background-color: color-mix(in oklab, var(--ql-warning) 11%, transparent);
+}
 .ql-history-attention:focus-visible {
   background-color: color-mix(in oklab, var(--ql-warning) 11%, transparent);
-  outline: none;
+  outline: 2px solid var(--ql-warning);
+  outline-offset: 2px;
 }
 .ql-history-attention span,
 .ql-tab-attention span {
@@ -354,12 +357,12 @@ h1, h2, h3 {
 }
 [data-theme="winter"] .ql-nav-link.is-active {
   background: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
-  color: #fff8e9;
+  color: var(--ql-action-ink);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.28),
     inset 0 -1px 0 rgba(0, 0, 0, 0.14),
     0 4px 14px -6px rgba(168, 107, 18, 0.5);
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 [data-theme="winter"] .ql-nav-link.is-active::before {
   background: #a86b12;
@@ -587,6 +590,7 @@ h1, h2, h3 {
   gap: 0.25rem;
   max-height: 72vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--ql-line);
   border-radius: 16px;
   background: linear-gradient(180deg, #1d160d 0%, #191309 100%);
@@ -707,6 +711,15 @@ details.ql-mobile-drawer[open] > summary.ql-icon-button {
 .ql-mobile-drawer {
   position: static;
 }
+body.ql-drawer-page-locked {
+  position: fixed;
+  top: var(--ql-drawer-page-top);
+  left: 0;
+  right: 0;
+  width: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 details.ql-mobile-drawer[open]::before {
   content: "";
   position: fixed;
@@ -786,6 +799,17 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   flex: 1;
   padding: 0.9rem 0.7rem 1.75rem;
 }
+.ql-main:focus {
+  outline: none;
+}
+.ql-settings-section-copy > h2.ql-anchor-target {
+  width: fit-content;
+}
+.ql-settings-section-copy > h2.ql-anchor-target:focus-visible {
+  border-radius: 0.125rem;
+  outline: 2px solid var(--ql-gold-strong);
+  outline-offset: 0.2rem;
+}
 @media (min-width: 768px) {
   .ql-main {
     padding: 2.15rem 2.35rem 2.75rem;
@@ -796,6 +820,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 @media (max-width: 1023.98px) {
   .ql-main {
     padding-bottom: calc(6.5rem + env(safe-area-inset-bottom));
+  }
+  .ql-anchor-target {
+    scroll-margin-top: calc(var(--ql-mobilebar-h, 3.25rem) + 0.75rem);
+  }
+  #diagnostics-list {
+    scroll-margin-top: calc(var(--ql-mobilebar-h, 3.25rem) + 8.5rem);
   }
 }
 .ql-toast-host {
@@ -1115,7 +1145,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   border: 1px solid oklch(0% 0 0 / 0.3);
   border-radius: 0.6875rem;
   background: linear-gradient(180deg, #f4c473 0%, var(--ql-gold) 45%, #c98a28 100%);
-  color: var(--ql-gold-ink);
+  color: var(--ql-action-ink);
   font-size: 0.875rem;
   font-weight: 640;
   line-height: 1;
@@ -2280,12 +2310,27 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   color: var(--ql-gold);
   background-color: color-mix(in oklab, var(--ql-gold) 10%, transparent);
 }
-.ql-download-icon-button:disabled,
 .ql-download-icon-button.is-queued {
   border-color: color-mix(in oklab, var(--ql-owned) 36%, transparent);
   color: var(--ql-owned);
   background-color: color-mix(in oklab, var(--ql-owned) 10%, transparent);
   cursor: default;
+}
+.ql-download-icon-button.is-scanning {
+  border-color: color-mix(in oklab, var(--ql-info) 36%, transparent);
+  color: var(--ql-info);
+  background-color: color-mix(in oklab, var(--ql-info) 10%, transparent);
+  cursor: default;
+}
+.ql-download-icon-button:disabled:not(.is-queued):not(.is-scanning) {
+  border-color: color-mix(in oklab, var(--ql-text-3) 28%, transparent);
+  color: var(--ql-text-3);
+  background-color: color-mix(in oklab, var(--ql-text-3) 7%, transparent);
+}
+[data-search-item][data-queued="1"] [data-search-select-wrap],
+[data-search-item][data-scanning="1"] [data-search-select-wrap] {
+  visibility: hidden;
+  pointer-events: none;
 }
 .ql-download-icon {
   width: 0.9375rem;
@@ -2910,8 +2955,8 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 [data-theme="winter"] .ql-search-submit {
   background: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
-  color: #fff8e9;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+  color: var(--ql-action-ink);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 .ql-activity-row + .ql-activity-row {
   border-top: 1px solid var(--ql-line-soft);
@@ -6214,7 +6259,7 @@ details[open] > .ql-disclosure-summary::after {
 }
 .ql-inline-link,
 .ql-link,
-.ql-notice a {
+.ql-notice a:not(.ql-btn) {
   color: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-text));
   font-weight: 700;
   text-decoration: underline;
@@ -6222,7 +6267,7 @@ details[open] > .ql-disclosure-summary::after {
 }
 .ql-inline-link:hover,
 .ql-link:hover,
-.ql-notice a:hover {
+.ql-notice a:not(.ql-btn):hover {
   color: var(--ql-text);
 }
 .ql-inline-link.ql-review-dismissed-link {

@@ -765,7 +765,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                "Stop the other run first, then restart Qobuz Librarian.")
     elif (unwritable := _unwritable_volumes()):
         reason = "A folder Qobuz Librarian must write to is read-only."
-        action = {"href": "/settings#diagnostics-list", "label": "Open Diagnostics"}
+        action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
         msg = (f"Required {plural(len(unwritable), 'volume')} not "
                "writable: "
                f"{', '.join(unwritable)}. On a NAS, set "
@@ -2775,9 +2775,11 @@ def _duplicate_download_job(album_id: str, track_id: str = "",
     return _find_job_touching_album(album_id, skip_single_track=True)
 
 
-def _active_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
+def _active_search_downloads() -> tuple[
+        set[str], set[tuple[str, str]], set[str]]:
     albums = set()
     tracks = set()
+    scanning_albums = set()
     for job in job_mgr.registry.pending_and_running():
         if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
             continue
@@ -2796,8 +2798,13 @@ def _active_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
                     (payload.get("candidate") or {}).get("qobuz_album") or {}
                 ).get("id")
             if candidate_album:
-                albums.add(str(candidate_album))
-    return albums, tracks
+                candidate_album = str(candidate_album)
+                if job.status == job_mgr.JobStatus.SCANNING:
+                    scanning_albums.add(candidate_album)
+                elif candidate.get("selected"):
+                    albums.add(candidate_album)
+    scanning_albums.difference_update(albums)
+    return albums, tracks, scanning_albums
 
 
 def _same_edition_is_complete(album: dict) -> bool:
@@ -3692,7 +3699,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."
 
-            queued_albums, queued_tracks = _active_search_downloads()
+            queued_albums, queued_tracks, scanning_albums = (
+                _active_search_downloads())
             _track_raws = []
             for t in (raw if kind == "track" else []):
                 alb = t.get("album") or {}
@@ -3722,6 +3730,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "owned":       False,
                     "queued":      (str(alb.get("id")), str(t.get("id")))
                                    in queued_tracks,
+                    "scanning":    False,
                 })
                 _track_raws.append(t)
 
@@ -3812,6 +3821,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         "https://static.qobuz.com/") else "",
                     "owned":   False,
                     "queued":  str(a.get("id")) in queued_albums,
+                    "scanning": str(a.get("id")) in scanning_albums,
                 })
                 _album_raws.append(a)
 
@@ -3929,6 +3939,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         "cover": res["cover"],
                         "owned": bool(res["owned"]),
                         "queued": bool(res["queued"]),
+                        "scanning": bool(res["scanning"]),
                         "partial": bool(res.get("partial")),
                         "have_tracks": res.get("have_tracks"),
                         "want_tracks": res.get("want_tracks"),
@@ -3958,7 +3969,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     rep = eds[0]
                     for f in ("id", "title", "artist", "year", "tracks",
                               "quality", "hires", "lossy", "bit_depth",
-                              "sample_rate", "cover", "version", "queued"):
+                              "sample_rate", "cover", "version", "queued",
+                              "scanning"):
                         g[f] = rep[f]
                     g["partial"] = rep["partial"] and not g["owned"]
                     g["have_tracks"] = rep["have_tracks"]
@@ -11329,6 +11341,20 @@ async def queue_count():
         "count": len(active),
         "running": any(j.status.value in ("running", "scanning") for j in active),
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
+    })
+
+
+@app.get("/api/search/availability")
+async def search_availability():
+    albums, tracks, scanning_albums = _active_search_downloads()
+    return JSONResponse({
+        "queued": sorted(
+            [f"album-{album_id}" for album_id in albums]
+            + [f"track-{album_id}-{track_id}"
+               for album_id, track_id in tracks]
+        ),
+        "scanning": sorted(
+            f"album-{album_id}" for album_id in scanning_albums),
     })
 
 

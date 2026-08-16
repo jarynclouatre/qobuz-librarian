@@ -108,12 +108,12 @@
         {{ labels.kind_tile(job, 'ql-job-tile--done') }}
         <div class="ql-activity-main">
           <p class="ql-row-title">
-            <a href="{{ '/settings#diagnostics-list' if job.recovery_unreadable else '/jobs/' ~ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
+            <a href="{{ '/settings#diagnostics' if job.recovery_unreadable else '/jobs/' ~ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
           </p>
           {% if job.recovery_unreadable %}
-          <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+          <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% elif job.recoveries %}
-          <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics-list" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+          <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% endif %}
           {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
           {% if job.error %}<p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>{% endif %}

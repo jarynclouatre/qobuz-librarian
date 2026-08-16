@@ -15,6 +15,7 @@
   --ql-gold: #e4a94e;
   --ql-gold-strong: #c98d2c;
   --ql-gold-ink: #231604;
+  --ql-action-ink: #231604;
   --ql-gold-dim: #523d1b;
   --ql-owned: #a8bc7c;
   --ql-danger: #c8553d;
@@ -28,7 +29,7 @@
   --color-base-300: var(--ql-line);
   --color-base-content: var(--ql-text);
   --color-primary: var(--ql-gold);
-  --color-primary-content: var(--ql-gold-ink);
+  --color-primary-content: var(--ql-action-ink);
   --color-success: var(--ql-owned);
   --color-warning: var(--ql-warning);
   --color-error: var(--ql-danger);
@@ -48,13 +49,14 @@
   --ql-text-2: #6d5a41;
   --ql-text-3: #766446;
   --ql-gold: #b97e1e;
-  --ql-gold-strong: #a86b12;
+  --ql-gold-strong: #80500a;
   --ql-gold-ink: #fff8e9;
+  --ql-action-ink: #090603;
   --ql-gold-dim: #ead8b4;
-  --ql-owned: #64803a;
-  --ql-danger: #b84935;
+  --ql-owned: #526b2e;
+  --ql-danger: #a73f2d;
   --ql-warning: #9a551f;
-  --ql-info: #5e7f8d;
+  --ql-info: #3f6879;
   --ql-shadow: 0 14px 30px -20px rgb(84 56 15 / 0.4);
   --ql-shadow-soft: 0 8px 18px -14px rgb(84 56 15 / 0.28);
 
@@ -63,7 +65,7 @@
   --color-base-300: var(--ql-line);
   --color-base-content: var(--ql-text);
   --color-primary: var(--ql-gold);
-  --color-primary-content: var(--ql-gold-ink);
+  --color-primary-content: var(--ql-action-ink);
   --color-success: var(--ql-owned);
   --color-warning: var(--ql-warning);
   --color-error: var(--ql-danger);
@@ -108,7 +110,7 @@
   border-color: rgba(0, 0, 0, 0.3);
   background: linear-gradient(180deg, #f4c473 0%, var(--ql-gold) 45%, #c98a28 100%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -1px 0 rgba(0, 0, 0, 0.18), 0 6px 20px -8px color-mix(in oklab, var(--ql-gold) 55%, transparent);
-  color: var(--ql-gold-ink);
+  color: var(--ql-action-ink);
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
@@ -120,8 +122,8 @@
 [data-theme="winter"] .ql-btn-primary {
   background: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 0 -1px 0 rgba(0, 0, 0, 0.16), 0 6px 18px -8px rgba(168, 107, 18, 0.5);
-  color: #fff8e9;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+  color: var(--ql-action-ink);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 [data-theme="winter"] .ql-btn-primary:hover:not(:disabled):not(.is-disabled) {

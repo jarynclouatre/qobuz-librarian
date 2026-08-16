@@ -41,14 +41,17 @@
   {% endif %}
 {%- endmacro %}
 
-{% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False) -%}
+{% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False, scanning=False) -%}
   {% set display_title = release_title(title, version) %}
   <form method="post" action="/download" hx-post="/download" hx-target="#download-toast"
         hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]"
         hx-confirm='{% if as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% else %}Download "{{ display_title }}" by {{ artist }}?{% endif %}'
         data-confirm-action="Download"
         data-search-download-form data-search-title="{{ display_title }}"
-        data-search-artist="{{ artist }}" data-queue-button>
+        data-search-artist="{{ artist }}"
+        data-search-writes-paused="{{ 1 if writes_paused else 0 }}"
+        data-search-writes-paused-reason="{{ writes_paused_reason }}"
+        data-queue-button>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="album_id" value="{{ album_id }}">
     {% if track_id %}<input type="hidden" name="track_id" value="{{ track_id }}">{% endif %}
@@ -56,10 +59,10 @@
     {# Refuse at offer time, like every other tool page, rather than taking the
        press and answering with a 503. #}
     <button type="submit"
-            class="{% if icon %}ql-icon-button ql-download-icon-button{% else %}ql-btn ql-btn-primary ql-btn-sm{% if small %} ql-btn-compact{% endif %}{% endif %}{% if queued %} is-queued is-disabled{% endif %}"
-            aria-label="{% if queued %}Queued: {% else %}Download {% endif %}{{ display_title }} by {{ artist }}"
-            {% if queued %}disabled aria-disabled="true" title="Queued"{% elif writes_paused %}disabled aria-disabled="true" title="{{ writes_paused_reason }}"{% else %}title="Download"{% endif %}>
-      {% if icon %}{{ download_icon() }}{% else %}Download{% endif %}
+            class="{% if icon %}ql-icon-button ql-download-icon-button{% else %}ql-btn ql-btn-primary ql-btn-sm{% if small %} ql-btn-compact{% endif %}{% endif %}{% if queued %} is-queued is-disabled{% elif scanning %} is-scanning is-disabled{% endif %}"
+            aria-label="{% if queued %}Queued: {% elif scanning %}In current scan: {% else %}Download {% endif %}{{ display_title }} by {{ artist }}"
+            {% if queued %}disabled aria-disabled="true" title="Queued"{% elif scanning %}disabled aria-disabled="true" title="In current scan"{% elif writes_paused %}disabled aria-disabled="true" title="{{ writes_paused_reason }}"{% else %}title="Download"{% endif %}>
+      {% if icon %}{{ download_icon() }}{% elif queued %}Queued{% elif scanning %}In current scan{% else %}Download{% endif %}
     </button>
   </form>
 {%- endmacro %}
@@ -162,10 +165,11 @@
         <div class="ql-table-body">
           {% for r in results %}
           {% set key = 'track-' ~ r.album_id ~ '-' ~ r.track_id %}
-          <div class="ql-table-row ql-table-row--track{% if r.owned %} is-owned{% endif %}" role="row" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}">
-            <label class="ql-table-check" role="cell">
-              {% if not r.owned and not r.queued %}
+          <div class="ql-table-row ql-table-row--track{% if r.owned %} is-owned{% endif %}" role="row" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}" data-scanning="{{ 1 if r.scanning else 0 }}">
+            <label class="ql-table-check" role="cell" data-search-select-wrap>
+              {% if not r.owned %}
               <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"
+                     {% if r.queued or r.scanning %}disabled{% endif %}
                      aria-label="Select {{ release_title(r.title, r.version) }} by {{ r.artist }}">
               {% endif %}
             </label>
@@ -185,7 +189,7 @@
             <span class="ql-table-muted" role="cell">{{ r.album_title }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ r.year }}</span>
             <span role="cell">{% if r.owned %}<span class="ql-owned-label">In library</span>{% else %}{{ quality_badge(r) }}{% endif %}</span>
-            <span class="ql-table-action" role="cell">{% if not r.owned %}{{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued) }}{% endif %}</span>
+            <span class="ql-table-action" role="cell">{% if not r.owned %}{{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}</span>
           </div>
           {% endfor %}
         </div>
@@ -195,10 +199,11 @@
     <div class="ql-grid-view hidden" data-search-view-panel="grid">
       {% for r in results %}
       {% set key = 'track-' ~ r.album_id ~ '-' ~ r.track_id %}
-      <div class="ql-grid-tile{% if r.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}">
-        {% if not r.owned and not r.queued %}
-        <label class="ql-grid-check">
+      <div class="ql-grid-tile{% if r.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}" data-scanning="{{ 1 if r.scanning else 0 }}">
+        {% if not r.owned %}
+        <label class="ql-grid-check" data-search-select-wrap>
           <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"
+                 {% if r.queued or r.scanning %}disabled{% endif %}
                  aria-label="Select {{ release_title(r.title, r.version) }} by {{ r.artist }}">
         </label>
         {% endif %}
@@ -212,7 +217,7 @@
         <div class="ql-grid-footer">
           {% if r.owned %}<span class="ql-owned-label">In library</span>
           {% else %}{{ quality_badge(r) }}
-          {{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued) }}{% endif %}
+          {{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}
         </div>
       </div>
       {% endfor %}
@@ -269,10 +274,11 @@
           {% for g in album_groups %}
           {% set key = 'album-' ~ g.id %}
           <div class="ql-table-row ql-table-row--album{% if g.owned %} is-owned{% endif %}" role="row"
-               data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}">
-            <label class="ql-table-check" role="cell">
-              {% if not g.owned and not g.queued %}
+               data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
+            <label class="ql-table-check" role="cell" data-search-select-wrap>
+              {% if not g.owned %}
               <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"
+                     {% if g.queued or g.scanning %}disabled{% endif %}
                      aria-label="Select {{ release_title(g.title, g.version) }} by {{ g.artist }}">
               {% endif %}
             </label>
@@ -307,17 +313,18 @@
             <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
             <span role="cell">{{ album_quality_status(g) }}</span>
-            <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued) }}{% endif %}</span>
+            <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning) }}{% endif %}</span>
           </div>
           {% if g.others %}
           <div id="search-versions-{{ loop.index0 }}" class="ql-version-panel hidden"
                data-version-panel data-owned="{{ 1 if g.owned else 0 }}">
             {% for e in g.others %}
             <div class="ql-table-row ql-subrow{% if e.owned %} is-owned{% endif %}{% if loop.last %} ql-subrow-last{% endif %}" role="row"
-                 data-search-item data-search-key="album-{{ e.id }}" data-owned="{{ 1 if e.owned else 0 }}" data-queued="{{ 1 if e.queued else 0 }}">
-              <label class="ql-table-check" role="cell">
-                {% if not e.owned and not e.queued %}
+                 data-search-item data-search-key="album-{{ e.id }}" data-owned="{{ 1 if e.owned else 0 }}" data-queued="{{ 1 if e.queued else 0 }}" data-scanning="{{ 1 if e.scanning else 0 }}">
+              <label class="ql-table-check" role="cell" data-search-select-wrap>
+                {% if not e.owned %}
                 <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="album-{{ e.id }}"
+                       {% if e.queued or e.scanning %}disabled{% endif %}
                        aria-label="Select {{ release_title(e.title, e.version) }} by {{ e.artist }}">
                 {% endif %}
               </label>
@@ -332,7 +339,7 @@
               <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
               <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
               <span role="cell">{{ album_quality_status(e) }}</span>
-              <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued) }}{% endif %}</span>
+              <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning) }}{% endif %}</span>
             </div>
             {% endfor %}
           </div>
@@ -345,10 +352,11 @@
     <div class="ql-grid-view hidden" data-search-view-panel="grid">
       {% for g in album_groups %}
       {% set key = 'album-' ~ g.id %}
-      <div class="ql-grid-tile{% if g.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}">
-        {% if not g.owned and not g.queued %}
-        <label class="ql-grid-check">
+      <div class="ql-grid-tile{% if g.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
+        {% if not g.owned %}
+        <label class="ql-grid-check" data-search-select-wrap>
           <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"
+                 {% if g.queued or g.scanning %}disabled{% endif %}
                  aria-label="Select {{ release_title(g.title, g.version) }} by {{ g.artist }}">
         </label>
         {% endif %}
@@ -373,10 +381,11 @@
              data-version-panel>
           {% for e in g.others %}
           <div class="ql-grid-version-row{% if e.owned %} is-owned{% endif %}"
-               data-search-item data-search-key="album-{{ e.id }}" data-owned="{{ 1 if e.owned else 0 }}" data-queued="{{ 1 if e.queued else 0 }}">
-            {% if not e.owned and not e.queued %}
-            <label class="ql-grid-version-check">
+               data-search-item data-search-key="album-{{ e.id }}" data-owned="{{ 1 if e.owned else 0 }}" data-queued="{{ 1 if e.queued else 0 }}" data-scanning="{{ 1 if e.scanning else 0 }}">
+            {% if not e.owned %}
+            <label class="ql-grid-version-check" data-search-select-wrap>
               <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="album-{{ e.id }}"
+                     {% if e.queued or e.scanning %}disabled{% endif %}
                      aria-label="Select {{ release_title(e.title, e.version) }} by {{ e.artist }}">
             </label>
             {% else %}
@@ -390,7 +399,7 @@
               {% if e.owned %}<span class="ql-owned-label">In library</span>
               {% else %}
               {% if e.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ e.have_tracks }} of {{ e.want_tracks }}</span>{% endif %}
-              {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued) }}
+              {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning) }}
               {% endif %}
             </div>
           </div>
@@ -399,7 +408,7 @@
         {% endif %}
         <div class="ql-grid-footer">
           {{ album_quality_status(g) }}
-          {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued) }}{% endif %}
+          {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning) }}{% endif %}
         </div>
       </div>
       {% endfor %}
