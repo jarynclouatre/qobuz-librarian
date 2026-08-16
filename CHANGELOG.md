@@ -4,13 +4,15 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 
 ## [0.13.3] - Unreleased
 
-This patch makes remembered interface state behave like remembered state.
+This patch keeps remembered state and live interface state in step with what
+the app is actually doing.
 
-- Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, while active Queue changes and new assets invalidate the saved result snapshot.
-- Search selections are reconciled with the controls that still exist, Hide owned stays with its query, and albums or tracks covered by active work remain visibly queued and non-actionable.
+- Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, while new assets invalidate the saved result snapshot.
+- Search selections are reconciled with the controls that still exist, and Hide owned stays with its query. Real downloads read Queued, unapproved albums found by the current Library scan read In current scan, and open results update as the Queue changes. Queue updates no longer revive saved choices past the 30-minute limit.
 - Repair, Library, New Releases, Upgrade, Downsample, Lyrics, and Migration job pages use the same owning tool for navigation, back links, cancellation, and terminal return behavior. A completed or discarded child no longer pins a primary tab to its old job page.
 - Queue activity and unresolved History attention now have separate counted destinations. The History count covers terminal records only and opens a filtered view that explains how ordinary warnings, recoveries, and catalogue cleanup clear.
 - Queue polling pauses in hidden tabs and never overlaps. General scroll restoration runs once instead of polling, and page-title separators are consistent across the interface.
+- Primary actions, active navigation, and status text have stronger contrast in Winter. Mobile jump links clear the sticky header, the More sheet keeps the covered page still and restores its position, and the desktop History attention badge has an obvious keyboard focus ring.
 
 ## [0.13.2] - 2026-08-14
 
