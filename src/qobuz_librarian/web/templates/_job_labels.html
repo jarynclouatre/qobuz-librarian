@@ -22,26 +22,6 @@
   {%- endif -%}
 {%- endmacro %}
 
-{% macro review_detail(job, n) -%}
-  {%- if job.execute_kind == 'new_releases' -%}
-    {{ format_count(n) }} new release{{ 's' if n != 1 }} found
-  {%- elif job.execute_kind == 'upgrade' -%}
-    {{ format_count(n) }} quality upgrade{{ 's' if n != 1 }} found
-  {%- elif job.execute_kind == 'downsample' -%}
-    {{ format_count(n) }} album{{ 's' if n != 1 }} can be downsampled
-  {%- elif job.execute_kind == 'repair' -%}
-    {{ format_count(n) }} repair option{{ 's' if n != 1 }} found
-  {%- elif job.execute_kind == 'migration' -%}
-    Migration preview ready
-  {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
-    {{ format_count(n) }} Gap Fill candidate{{ 's' if n != 1 }} found
-  {%- elif job.execute_kind == 'library' -%}
-    {{ format_count(n) }} candidate{{ 's' if n != 1 }} found
-  {%- else -%}
-    {{ format_count(n) }} result{{ 's' if n != 1 }} found
-  {%- endif -%}
-{%- endmacro %}
-
 {% macro review_item_singular(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
     upgrade

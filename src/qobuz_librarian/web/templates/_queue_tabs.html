@@ -4,7 +4,7 @@
      {% if active_tab == 'queue' %}aria-current="page"{% endif %}>
     Queue
     {% set _qbadge = pending_job_count or 0 %}
-    {% if _qbadge > 0 %}<span class="ql-tab-count {% if queue_has_running %}is-warning{% endif %}">{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}</span>{% endif %}
+    {% if _qbadge > 0 %}<span class="ql-tab-count">{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}</span>{% endif %}
   </a>
   <a href="/queue/history"
      class="{% if active_tab == 'history' %}is-active{% endif %}"

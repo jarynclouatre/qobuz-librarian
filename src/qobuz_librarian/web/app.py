@@ -2529,7 +2529,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     can pass it as `pending` and the badge derives from that, with no second
     `pending_and_running()` call on the same render.
     """
-    if "pending_job_count" not in context or "queue_has_running" not in context:
+    if "pending_job_count" not in context:
         active = context.get("pending") or job_mgr.registry.pending_and_running()
         # The badge counts work in flight, not parked reviews; those sit for
         # weeks by design and have their own review-ready dots, so counting
@@ -2537,10 +2537,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         in_flight = [j for j in active
                      if j.status != job_mgr.JobStatus.AWAITING_REVIEW]
         context.setdefault("pending_job_count", len(in_flight))
-        context.setdefault(
-            "queue_has_running",
-            any(j.status.value in ('running', 'scanning') for j in in_flight),
-        )
     context.setdefault("cli_mode", _CLI_MODE)
     context.setdefault("lock_unenforceable", _LOCK_UNENFORCEABLE)
     # Every tool page offered its Start button while writes were paused and let
@@ -9993,9 +9989,11 @@ async def job_cancel(
 
 @app.get("/queue", response_class=HTMLResponse)
 async def queue_page(request: Request, error: str = "", notice: str = ""):
-    """The Queue tab: jobs in flight (pending / scanning / running / awaiting
-    review). Finished jobs live in the History tab, which reads the durable
-    archive rather than the capped in-memory set."""
+    """The Queue tab: jobs in flight (pending / scanning / running). Parked
+    reviews ride along in ``pending`` but the template and the badge both
+    filter them out; they render on their own surfaces. Finished jobs live in
+    the History tab, which reads the durable archive rather than the capped
+    in-memory set."""
     pending = job_mgr.registry.pending_and_running()
     protected_id = job_mgr.durable_recovery_job_id()
     return _tr(request, "queue.html", {

@@ -296,20 +296,15 @@ h1, h2, h3 {
   outline: 2px solid var(--ql-warning);
   outline-offset: 2px;
 }
-.ql-history-attention span,
-.ql-tab-attention span {
-  display: inline-grid;
-  min-width: 1.15rem;
-  height: 1.15rem;
-  place-items: center;
-  border-radius: 999px;
+/* History attention is a dot, like the review-ready dots: a number here sat
+   beside the queue count pill and read as a second, contradictory queue count.
+   The linked count lives in the title and aria-label. */
+.ql-attention-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 50%;
   background: var(--ql-warning);
-  color: var(--ql-gold-ink);
-  font-family: var(--ql-font-mono);
-  font-size: 0.6rem;
-  font-weight: 700;
-  line-height: 1;
-  padding-inline: 0.2rem;
+  box-shadow: 0 0 0.5rem color-mix(in oklab, var(--ql-warning) 65%, transparent);
 }
 .ql-nav-link,
 .ql-sidebar-action {
@@ -345,16 +340,6 @@ h1, h2, h3 {
     0 0 20px -6px color-mix(in oklab, var(--ql-gold) 40%, transparent);
   text-shadow: 0 0 14px color-mix(in oklab, var(--ql-gold) 45%, transparent);
 }
-.ql-nav-link.is-active::before {
-  content: "";
-  position: absolute;
-  left: -0.875rem;
-  top: 0.4375rem;
-  bottom: 0.4375rem;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--ql-gold);
-}
 [data-theme="winter"] .ql-nav-link.is-active {
   background: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
   color: var(--ql-action-ink);
@@ -363,9 +348,6 @@ h1, h2, h3 {
     inset 0 -1px 0 rgba(0, 0, 0, 0.14),
     0 4px 14px -6px rgba(168, 107, 18, 0.5);
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
-}
-[data-theme="winter"] .ql-nav-link.is-active::before {
-  background: #a86b12;
 }
 .ql-nav-link svg,
 .ql-sidebar-action svg,
@@ -403,9 +385,6 @@ h1, h2, h3 {
   line-height: 1.35rem;
   text-align: center;
   padding-inline: 0.4rem;
-}
-.ql-queue-badge.is-warning {
-  background-color: color-mix(in oklab, var(--color-warning) 24%, transparent);
 }
 /* Review-ready marker: a small glowing dot right after the label. It reads as
    "something new here", not as a stray bar at the row's far edge. */
@@ -564,10 +543,6 @@ h1, h2, h3 {
 }
 [data-theme="winter"] .ql-tabbar-count {
   box-shadow: 0 0 0 1.5px #efe6d4;
-}
-.ql-tabbar-count.is-warning {
-  background: var(--ql-warning);
-  color: var(--ql-gold-ink);
 }
 .ql-tab-more {
   position: static;
@@ -2967,10 +2942,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-activity-row.is-running {
   background-color: color-mix(in oklab, var(--ql-gold) 4%, transparent);
 }
-.ql-activity-row.is-review {
-  background-color: color-mix(in oklab, var(--ql-gold) 6%, transparent);
-  box-shadow: inset 3px 0 0 var(--ql-gold);
-}
 .ql-activity-row.is-error {
   background:
     linear-gradient(180deg,
@@ -3066,11 +3037,10 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   gap: 0.5rem;
   margin-top: 1rem;
 }
-.ql-activity-maintenance,
-.ql-queue-maintenance {
+.ql-activity-maintenance {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 1rem;
   padding: 0.5rem 0.25rem 0;
 }
@@ -3094,6 +3064,33 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   .ql-activity-actions .ql-btn {
     width: 100%;
     min-width: 5.25rem;
+  }
+  /* Queue rows keep the desktop shape: tile, text, one small action on the
+     right. The stacked-card fallback made two jobs fill a phone screen. */
+  .ql-activity-row--queue {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.6rem 0.75rem;
+    padding: 0.75rem 0.9rem;
+  }
+  .ql-activity-row--queue .ql-job-tile {
+    width: 34px;
+    height: 34px;
+  }
+  .ql-activity-row--queue .ql-job-tile svg {
+    width: 16px;
+    height: 16px;
+  }
+  .ql-activity-row--queue .ql-activity-actions {
+    width: auto;
+    justify-content: flex-end;
+  }
+  .ql-activity-row--queue .ql-activity-actions > form,
+  .ql-activity-row--queue .ql-activity-actions > .ql-btn {
+    flex: none;
+  }
+  .ql-activity-row--queue .ql-activity-actions .ql-btn {
+    width: auto;
+    min-width: 0;
   }
   .ql-activity-side {
     width: 100%;
@@ -3126,11 +3123,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   }
   .ql-empty-state--activity .ql-state-icon {
     margin-inline: 0;
-  }
-  .ql-activity-maintenance,
-  .ql-queue-maintenance {
-    align-items: stretch;
-    flex-direction: column;
   }
 }
 .ql-progress-panel {
@@ -3575,12 +3567,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   line-height: 1;
   color: var(--ql-text-3);
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
-}
-/* Filled, not tinted: warning ink on a warning tint reads at 3.7:1 in winter.
-   --ql-gold-ink already flips with the theme, so both halves stay legible. */
-.ql-tab-count.is-warning {
-  background-color: var(--ql-warning);
-  color: var(--ql-gold-ink);
 }
 .ql-review-tabs button.is-active .ql-tab-count {
   color: var(--ql-gold);
@@ -5669,6 +5655,10 @@ details[open] > .ql-disclosure-summary::after {
 .ql-job-cancel {
   flex: none;
 }
+.ql-job-import-chip {
+  flex: none;
+  align-self: center;
+}
 .ql-job-wait-note {
   display: flex;
   align-items: flex-start;
@@ -5859,6 +5849,11 @@ details[open] > .ql-disclosure-summary::after {
   .ql-job-actions .ql-btn,
   .ql-job-actions form {
     width: 100%;
+  }
+  /* The chip is a label, not a control, so it keeps its own width while the
+     buttons around it go full bleed. */
+  .ql-job-import-chip {
+    align-self: flex-start;
   }
 }
 @media (max-width: 639.98px) {

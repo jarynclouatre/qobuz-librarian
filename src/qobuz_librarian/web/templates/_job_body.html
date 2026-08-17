@@ -186,15 +186,19 @@
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
       </p>
       {% if not job.cancel_requested and not _cancel_protected %}
-      <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel">
+      <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel{% if job.importing %} hidden{% endif %}" data-cancel-form>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% set _pending = s == 'pending' %}
         <button type="submit" class="ql-btn ql-btn-sm{% if _pending %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-danger{% endif %}"
                 data-cancel-button
-                {% if job.importing %}disabled title="Import has started"{% endif %}
                 data-confirm="{% if _pending %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
                 data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-confirm-danger{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
       </form>
+      {# Beets runs to its own end, so Cancel would be a dead control here. Say
+         what is happening, the way the Queue rows do, instead of greying a
+         button whose reason only lives in hover text a phone cannot show. #}
+      <span class="ql-status-chip ql-job-import-chip{% if not job.importing %} hidden{% endif %}" data-import-chip
+            title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
       {% endif %}
     </div>
 

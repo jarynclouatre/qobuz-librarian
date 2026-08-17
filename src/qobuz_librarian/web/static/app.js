@@ -1864,11 +1864,12 @@
       if (typeof p.found === "number" || p.hit) showFound();
       // Beets runs to its own end, so withdraw Cancel while an album is going
       // into the library rather than take a stop the import will run past.
-      var cancelBtn = document.querySelector("[data-cancel-button]");
-      if (cancelBtn) {
-        cancelBtn.disabled = !!p.importing;
-        if (p.importing) cancelBtn.title = "Import has started";
-        else cancelBtn.removeAttribute("title");
+      // The chip that replaces it says so; a greyed button explains nothing.
+      var cancelForm = document.querySelector("[data-cancel-form]");
+      var importChip = document.querySelector("[data-import-chip]");
+      if (cancelForm && importChip) {
+        cancelForm.classList.toggle("hidden", !!p.importing);
+        importChip.classList.toggle("hidden", !p.importing);
       }
     });
     src.addEventListener("done", function () {

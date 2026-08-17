@@ -13,23 +13,17 @@
 </header>
 
 {% macro queue_job_row(job) -%}
-<article class="ql-activity-row ql-activity-row--queue{% if job.status.value == 'running' %} is-running{% endif %}{% if job.status.value == 'awaiting_review' %} is-review{% endif %}"
+<article class="ql-activity-row ql-activity-row--queue{% if job.status.value == 'running' %} is-running{% endif %}"
      {% if job.status.value in ('running', 'scanning', 'pending') %}data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}"{% endif %}>
   {{ labels.kind_tile(job, 'is-live' if job.status.value in ('running', 'scanning') else '') }}
 
   <div class="ql-activity-main">
     <p class="ql-row-title">
       <a href="/jobs/{{ job.id }}" class="ql-row-link">
-        {% if job.status.value == 'awaiting_review' %}
-          {{ labels.review_title(job) }}{% if job.artist %} · {{ job.artist }}{% endif %}
-        {% else %}
-          {% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}
-        {% endif %}
+        {% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}
       </a>
     </p>
-    {% if job.status.value == 'awaiting_review' and job.candidates %}
-    <p class="ql-row-meta">{{ labels.review_detail(job, job.candidates | length) }}.</p>
-    {% elif job.status.value == 'scanning' %}
+    {% if job.status.value == 'scanning' %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if job.progress_total > 0 -%}
       Scanning {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if job.progress_item %} · {{ job.progress_item }}{% endif %}
@@ -69,25 +63,19 @@
     {% endif %}
   </div>
 
-  {% if job.status.value == 'awaiting_review' %}
-  {% set _thing = labels.discard_review_label(job) %}
-  {% set _discard_confirm = labels.discard_confirm(job) | trim %}
-  <div class="ql-activity-actions">
-    <a href="/jobs/{{ job.id }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Review</a>
-    <form action="/jobs/{{ job.id }}/cancel" method="post">
-      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-      <input type="hidden" name="return_to" value="/queue">
-      <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
-              title="Discard {{ _thing }}" aria-label="Discard {{ _thing }}"
-              data-confirm="{{ _discard_confirm }}"
-              data-confirm-action="Discard" data-confirm-danger>Discard</button>
-    </form>
-  </div>
-  {% elif job.status.value in ('pending', 'running', 'scanning') %}
+  {% if job.status.value in ('pending', 'running', 'scanning') %}
   {% if job.id == cancel_protected_job_id %}
   <div class="ql-activity-actions">
     <span class="ql-status-chip is-warning"
           title="This interrupted-download recovery stays active until its saved step settles.">Recovery protected</span>
+  </div>
+  {% elif job.importing %}
+  {# Beets runs to its own end, so a Cancel here would be a dead control. Say
+     what is happening instead of greying a button whose reason only lives in
+     hover text a phone can't show. #}
+  <div class="ql-activity-actions">
+    <span class="ql-status-chip"
+          title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
   </div>
   {% else %}
   <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-activity-actions">
@@ -95,7 +83,7 @@
     <input type="hidden" name="return_to" value="/queue">
     {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
     <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-ghost-danger{% endif %}"
-            {% if job.importing %}disabled title="Import has started"{% else %}title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"{% endif %}
+            title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
             data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-confirm-danger{% endif %}>{{ _act }}</button>
@@ -155,11 +143,12 @@
   {% endif %}
 </div>
 {% if (active_jobs | length) + (waiting_jobs | length) > 1 %}
+{# What clearing does is spelled out by the confirm dialog the button opens;
+   repeating it here as standing text made two jobs read like a warning. #}
 <div class="ql-activity-maintenance">
-  <p class="ql-row-meta">Removes waiting jobs. Other running jobs stop after the current safe step.{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %}</p>
   <form action="/queue/cancel-pending" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-sm ql-btn-danger w-full sm:w-auto"
+    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
             data-confirm="Clear the queue? Waiting jobs are removed and other running jobs stop after their current step.{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %} Completed work and parked reviews are untouched."
             data-confirm-action="Clear queue" data-confirm-danger>Clear the queue</button>
   </form>
