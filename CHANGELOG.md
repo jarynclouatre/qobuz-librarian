@@ -7,12 +7,18 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 This patch keeps remembered state and live interface state in step with what
 the app is actually doing.
 
-- Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, while new assets invalidate the saved result snapshot.
+- Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, except for a catalogue too large to save, and new assets invalidate the saved result snapshot.
 - Search selections are reconciled with the controls that still exist, and Hide owned stays with its query. Real downloads read Queued, unapproved albums found by the current Library scan read In current scan, and open results update as the Queue changes. Queue updates no longer revive saved choices past the 30-minute limit.
 - Repair, Library, New Releases, Upgrade, Downsample, Lyrics, and Migration job pages use the same owning tool for navigation, back links, cancellation, and terminal return behavior. A completed or discarded child no longer pins a primary tab to its old job page.
 - Queue activity and unresolved History attention now have separate counted destinations. The History count covers terminal records only and opens a filtered view that explains how ordinary warnings, recoveries, and catalogue cleanup clear.
 - Queue polling pauses in hidden tabs and never overlaps. General scroll restoration runs once instead of polling, and page-title separators are consistent across the interface.
 - Primary actions, active navigation, and status text have stronger contrast in Winter. Mobile jump links clear the sticky header, the More sheet keeps the covered page still and restores its position, and the desktop History attention badge has an obvious keyboard focus ring.
+- Search keeps a large artist catalogue whole. A discography of several hundred releases survives Back and reload with its selections, view, and scroll position intact, and the album count matches the rows on screen whether Hide owned is on or off.
+- Back stays inside a Library review. Switching tabs is a history step of its own, a filter costs one Back press however long the query, and emptying the filter box steps back off it instead of leaving a dead entry to press through.
+- The Upgrade and Downsample navigation dots go out while their saved results are stale, so a dot never leads to a page with nothing on it but a refresh prompt. The Upgrade card names which change made the results stale instead of offering both causes, and no longer promises a refresh it cannot run.
+- Library drops the count line its review tabs already carry, while every scan caveat stays visible, and the refresh warning names the refresh control only when that control is really on offer. Dismissing a whole review now confirms the same way dismissing a single artist does.
+- The terminal agrees with the browser. An album dismissed on the review's Gap Fill tab is not offered again at the prompt, the Downsample preview reports what it found and what that would reclaim rather than signing off with nothing done, and the new-release check keeps its banner and its refusal in order when the run is piped. Settings shows the Mode section before credentials are saved, because the terminal's busy-lock message sends a fresh install there.
+- Decorative icons are hidden from screen readers, and cover art and the brand mark carry their dimensions so pages settle without shifting as images arrive.
 
 ## [0.13.2] - 2026-08-14
 

@@ -2286,20 +2286,22 @@ def _refresh_review_state_after_downloads(
     )
 
     try:
-        if hidden is None:
-            return
         for surface, state_module in (
             ("upgrade", upgrade_state),
             ("downsample", downsample_state),
         ):
-            review_badges.set_ready(
-                surface,
-                generation_state.output_is_current(surface)
-                and state_module.has_visible_candidates(
-                    state_module.load(),
-                    hidden,
-                ),
-            )
+            if not generation_state.output_is_current(surface):
+                # A stale view shows nothing, so its dot goes out even when the
+                # hidden list is what went missing.
+                review_badges.set_ready(surface, False)
+            elif hidden is not None:
+                review_badges.set_ready(
+                    surface,
+                    state_module.has_visible_candidates(
+                        state_module.load(),
+                        hidden,
+                    ),
+                )
     except Exception as exc:
         vlog(f"post-download review-badge refresh failed: {exc}")
 

@@ -1217,6 +1217,8 @@ def _upgrade_state_summary():
     authority = generation_state.load()
     generation = int(authority.get("generation") or 0)
     output = generation_state.output_state("upgrade", authority)
+    # Upgrade cannot answer without a scanned baseline. Downsample can, so its
+    # twin below deliberately leaves this term out.
     snapshot_current = bool(
         generation > 0
         and int(state.get("generation") or 0) == generation
@@ -1273,6 +1275,10 @@ def _downsample_state_summary():
     authority = generation_state.load()
     generation = int(authority.get("generation") or 0)
     output = generation_state.output_state("downsample", authority)
+    # No generation > 0 term here on purpose. A standalone Downsample refresh
+    # targets generation 0 when no baseline scan has ever run, and that is the
+    # whole point of Downsample working on its own. Do not harmonise this with
+    # the Upgrade twin above.
     snapshot_current = bool(
         int(state.get("generation") or 0) == generation
         and output.get("status") == "current"
@@ -1288,6 +1294,9 @@ def _downsample_state_summary():
         "candidates": candidates,
         "count": len(candidates),
         "generation": generation,
+        # Two statuses where Upgrade has three: needing no baseline, Downsample
+        # has no baseline_missing case to report. It has no quality signature to
+        # age out either, so a saved run is stale only when it did not finish.
         "status": "current" if complete else "stale",
         "stale": bool(state.get("updated_at") and not complete),
         "updated": _format_age(updated_at) if updated_at else None,
@@ -2617,6 +2626,18 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     if not context["upgrade_available"]:
         badges = dict(badges)
         badges["upgrade"] = False
+    if badges.get("upgrade") or badges.get("downsample"):
+        # A dot promises candidates are ready. A saved view the generation
+        # authority holds stale has none to show, so it must not carry one.
+        # Library keeps its dot: its review still renders, with a caveat.
+        from qobuz_librarian.library import generation_state
+        authority = generation_state.load()
+        badges = dict(badges)
+        for surface in ("upgrade", "downsample"):
+            if badges.get(surface) and not generation_state.output_is_current(
+                surface, state=authority
+            ):
+                badges[surface] = False
     context.setdefault("nav_review_badges", badges)
     from qobuz_librarian.web import job_persistence
     attention_count = job_persistence.attention_count()

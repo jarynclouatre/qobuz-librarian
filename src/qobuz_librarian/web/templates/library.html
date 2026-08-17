@@ -20,8 +20,10 @@
   {% endif %}
   {% if library_job and library_job.status == JobStatus.AWAITING_REVIEW and library_baseline_exists and not baseline_complete %}
   {# The control that fixes this is the refresh icon beside the page title, so
-     name it, but only when _library_refresh.html is actually rendering it. #}
-  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.{% if library_scan_state.ready %} Use the refresh button beside the page title to bring them up to date.{% endif %}</span></div>
+     name it, but only when _library_refresh.html is really offering it: a
+     crawl already under way swaps it for the "Refreshing…" note, and a lost
+     Qobuz connection leaves it disabled with its own notice above. #}
+  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title to bring them up to date.{% endif %}</span></div>
   {% endif %}
 
   {% if not qobuz_ready %}

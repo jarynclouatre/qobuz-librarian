@@ -124,12 +124,23 @@ def _record_unchecked_artists(job, count):
         job.execute_args.pop("_unchecked_artists", None)
 
 
-def _surface_has_candidates(surface):
+def _sync_surface_badge(surface):
+    """Point the nav dot at whatever that surface's own page would say.
+
+    A saved view the generation authority holds stale shows the user nothing,
+    so it has nothing to advertise however full its own store looks.
+    """
     if surface == "upgrade":
-        return upgrade_state.has_visible_candidates()
+        state_module = upgrade_state
     elif surface == "downsample":
-        return downsample_state.has_visible_candidates()
-    return False
+        state_module = downsample_state
+    else:
+        return
+    review_badges.set_ready(
+        surface,
+        generation_state.output_is_current(surface)
+        and state_module.has_visible_candidates(),
+    )
 
 
 def _artist_dir_from_result(album, result=None, fallback_artist=None):
@@ -158,9 +169,7 @@ def _refresh_downsample_artist_state(artist_dir):
     if artist_dir is None:
         return
     result = downsample_state.update_artist(artist_dir, hidden=hidden_mod.load())
-    if result.complete:
-        review_badges.set_ready("downsample", _surface_has_candidates("downsample"))
-    else:
+    if not result.complete:
         err = next(iter(result.errors.values()), "unknown error")
         generation_state.mark_output_status(
             "downsample",
@@ -168,6 +177,7 @@ def _refresh_downsample_artist_state(artist_dir):
             reason="Downsample could not refresh after a local album change.",
         )
         log.info(f"  downsample view refresh skipped for {artist_dir.name}: {err}")
+    _sync_surface_badge("downsample")
 
 
 def _refresh_upgrade_artist_state(artist_dir, token, args=None):
@@ -187,9 +197,7 @@ def _refresh_upgrade_artist_state(artist_dir, token, args=None):
         )
     except (AuthLost, QobuzUnavailable):
         raise
-    if result.complete:
-        review_badges.set_ready("upgrade", _surface_has_candidates("upgrade"))
-    else:
+    if not result.complete:
         err = next(iter(result.errors.values()), "unknown error")
         generation_state.mark_output_status(
             "upgrade",
@@ -197,6 +205,7 @@ def _refresh_upgrade_artist_state(artist_dir, token, args=None):
             reason="Upgrade could not refresh after a local album change.",
         )
         log.info(f"  upgrade view refresh skipped for {artist_dir.name}: {err}")
+    _sync_surface_badge("upgrade")
 
 
 def _refresh_after_local_album_change(
@@ -266,6 +275,8 @@ def _refresh_after_local_album_change(
                 "An album changed in the app, and its artist folder could "
                 "not be identified.",
             )
+            for surface in surfaces:
+                _sync_surface_badge(surface)
         return
     if upgrade:
         try:
@@ -276,6 +287,7 @@ def _refresh_after_local_album_change(
                 "stale",
                 reason="Upgrade could not refresh after a local album change.",
             )
+            _sync_surface_badge("upgrade")
             log.info(f"  upgrade view needs refresh: {exc}")
     if downsample:
         _refresh_downsample_artist_state(artist_dir)
@@ -1707,8 +1719,7 @@ def _scan_library_impl(
                     generation=scan_generation,
                 )
                 if not downsample_save_failed:
-                    review_badges.set_ready(
-                        "downsample", _surface_has_candidates("downsample"))
+                    _sync_surface_badge("downsample")
             if upgrade_refresh is not None and upgrade_refresh.complete:
                 upgrade_save_failed = not upgrade_state.save(
                     upgrade_refresh,
@@ -1718,8 +1729,7 @@ def _scan_library_impl(
                     generation=scan_generation,
                 )
                 if not upgrade_save_failed:
-                    review_badges.set_ready(
-                        "upgrade", _surface_has_candidates("upgrade"))
+                    _sync_surface_badge("upgrade")
             elif upgrade_refresh is None:
                 generation_state.mark_output_status(
                     "upgrade",
@@ -2454,7 +2464,7 @@ def scan_upgrades(job, token):
         pool_kwargs=pool_initializer_kwargs(),
     )
     if not job.cancel_requested and refresh.complete:
-        review_badges.set_ready("upgrade", _surface_has_candidates("upgrade"))
+        _sync_surface_badge("upgrade")
     if job.cancel_requested or not refresh.complete:
         log.info("Cancelled. Stopping scan.")
     if not job.cancel_requested:
@@ -2838,7 +2848,7 @@ def scan_downsamples(job):
     if not job.cancel_requested and unchecked:
         _record_unchecked_artists(job, unchecked)
     if not job.cancel_requested and refresh.complete:
-        review_badges.set_ready("downsample", _surface_has_candidates("downsample"))
+        _sync_surface_badge("downsample")
     if job.cancel_requested:
         log.info("Cancelled. Stopping scan.")
     elif unchecked:
@@ -2948,8 +2958,7 @@ def execute_downsamples(
                 _refresh_downsample_artist_state(album_dir.parent)
             else:
                 downsample_state.remove_artist(album_dir.parent.name)
-                review_badges.set_ready(
-                    "downsample", _surface_has_candidates("downsample"))
+                _sync_surface_badge("downsample")
             continue
         _note_staging_wait(job, "Downsampling albums", i, len(chosen))
         try:
