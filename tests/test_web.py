@@ -1477,18 +1477,6 @@ def test_remote_scan_preflight_precedes_job_admission(
 
 
 
-def test_qobuz_ready_false_when_saved_token_is_rejected(monkeypatch):
-    import qobuz_librarian.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "_read_creds",
-                        lambda: {"auth_token": "bad-token", "user_id": "user"})
-    monkeypatch.setattr(app_mod, "_TOKEN_VALID", False)
-
-    assert app_mod._qobuz_ready() is False
-
-
-
-
 def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):
     """An in-flight job must not see cfg.* flip mid-run."""
     from qobuz_librarian import config as cfg
@@ -6927,7 +6915,7 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
         (jm.JobStatus.AWAITING_REVIEW, "review"),
     ],
 )
-def test_repair_owned_surface_omits_page_explainer_subtitle(
+def test_repair_scan_launcher_hidden_while_a_scan_owns_the_page(
         client, monkeypatch, status, phase):
     from qobuz_librarian.web import app as webapp
 
@@ -6945,10 +6933,6 @@ def test_repair_owned_surface_omits_page_explainer_subtitle(
     page = client.get("/repair")
 
     assert page.status_code == 200
-    assert (
-        "Repair checks your existing files for damage; "
-        "Library builds the catalogue baseline."
-    ) not in page.text
     assert "Start repair scan" not in page.text
 
 

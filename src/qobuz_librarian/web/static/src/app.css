@@ -4438,12 +4438,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-work-status a:hover {
   color: var(--ql-gold);
 }
-.ql-tool-scan-distinction {
-  margin: 0;
-  color: var(--ql-text-2);
-  font-size: 0.8125rem;
-  line-height: 1.45;
-}
 .ql-work-status--bar {
   border: 1px solid color-mix(in oklab, var(--ql-text) 9%, transparent);
   border-radius: var(--ql-radius-sm);

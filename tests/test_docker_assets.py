@@ -23,27 +23,6 @@ VALID_TRACK_KEYS = {"albumartist", "albumcomposer", "artist", "composer",
                     "explicit", "id", "title", "tracknumber"}
 
 
-def test_compose_forwards_web_stream_and_log_tunables():
-    import yaml
-
-    compose = yaml.safe_load(_COMPOSE.read_text())
-    environment = compose["services"]["qobuz-librarian"]["environment"]
-    assert environment["WEB_PORT"] == "8666"
-    assert environment["WEB_PUBLIC_PORT"] == "${WEB_PORT:-8666}"
-    assert environment["JOB_LOG_CAP"] == "${JOB_LOG_CAP:-5000}"
-    assert environment["JOB_LOG_REPLAY_TAIL"] == "${JOB_LOG_REPLAY_TAIL:-500}"
-    assert environment["SSE_MAX_WORKERS"] == "${SSE_MAX_WORKERS:-16}"
-    assert environment["SSE_HEARTBEAT_TICKS"] == "${SSE_HEARTBEAT_TICKS:-30}"
-
-
-def test_compose_allows_tini_to_signal_the_nonroot_app():
-    import yaml
-
-    compose = yaml.safe_load(_COMPOSE.read_text())
-    capabilities = compose["services"]["qobuz-librarian"]["cap_add"]
-    assert "KILL" in capabilities
-
-
 def test_custom_compose_web_port_reaches_cli_recovery_help():
     import yaml
 

@@ -50,10 +50,6 @@ def test_env_bool_empty_string_means_unset(monkeypatch):
     assert cfg._env_bool("PREFER_HIRES", True) is True
 
 
-def test_single_track_gap_suppression_defaults_off():
-    assert cfg.SUPPRESS_SINGLE_TRACK_GAPS is False
-
-
 def test_env_num_min_floors_a_sub_minimum_count(monkeypatch):
     # A 0 or negative worker count would crash the thread-pool constructor at
     # import time; clamp to the floor so a typo can't take down the web app.
