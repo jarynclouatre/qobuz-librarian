@@ -1108,6 +1108,11 @@ def _finish_task_phase(job: Job) -> None:
     """Durably close one worker phase after its final status is known."""
     if job.status in TERMINAL and job.finished_at is None:
         job.finished_at = time.time()
+    if job.status is JobStatus.FAILED and not job.attention:
+        # Without this a failure is silent everywhere except the job's own
+        # page: the queue badge simply drops by one, and someone watching
+        # another page is left with whatever it said before.
+        job.attention = "failed"
     saved = True
     if registry.get(job.id) is not None:
         saved = job_persistence.persist(job)

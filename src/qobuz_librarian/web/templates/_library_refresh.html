@@ -20,6 +20,10 @@
   <span class="ql-refresh-note" role="status" title="Checking your folders for music added outside the app."
         hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML">{{ _note.label }}{% if _note.detail %} <span class="readout">{{ _note.detail }}</span>{% endif %}</span>
   {% else %}
+  {% if library_refresh_outcome %}
+  {# Said once, by the poll, at the moment the work ends. #}
+  <span class="ql-refresh-note ql-flash-info" role="status" data-flash>{{ library_refresh_outcome }}</span>
+  {% endif %}
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="missing_albums">

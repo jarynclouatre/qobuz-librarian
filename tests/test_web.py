@@ -6450,7 +6450,7 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
     r = client.get("/queue/history")
     assert r.status_code == 200
     assert "Below target quality" in r.text
-    assert "data-attention-badge" in r.text
+    assert "ql-history-attention hidden" not in r.text
 
     r = client.get(f"/api/jobs/{job.id}/status")
     assert r.status_code == 200
@@ -6477,7 +6477,7 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
     assert "Lowest delivered: 16-bit / 44.1 kHz" in r.text
     r = client.get("/queue/history")
     assert "Below target quality" not in r.text
-    assert "data-attention-badge" not in r.text
+    assert "ql-history-attention hidden" in r.text
 
 
 

@@ -2010,6 +2010,20 @@ async def _lifespan(_app: FastAPI):
                     await loop.run_in_executor(None, _maybe_auto_check_new_releases)
                 except Exception as e:
                     _log.warning("background new-release tick failed: %s", e)
+                if not run_startup_maintenance:
+                    continue
+                # Retention is a promise made in the diagnostics list ("cleared
+                # automatically after N days"), and a container that is never
+                # restarted would never keep it. The sweep stamps itself and
+                # returns early inside a day, so ticking it is nearly free.
+                try:
+                    swept = await loop.run_in_executor(
+                        None, _sweep_upgrade_backups)
+                    if swept:
+                        _log.info("Cleaned up %s.",
+                                  plural(swept, "stale upgrade backup"))
+                except Exception as e:
+                    _log.debug("upgrade-backup cleanup error: %s", e)
 
         # Always armed: the helper reads NEW_RELEASE_CHECK_INTERVAL live, so a
         # Settings change (off to on, or a new interval) takes effect at the next
@@ -2871,6 +2885,23 @@ def _begin_direct_library_operation(label):
         return "ok", token, lock
 
 
+def _sweep_upgrade_backups():
+    """Expire old upgrade backups when nothing else is writing to the library.
+
+    Gives up rather than waiting if the library is busy: the sweep only does
+    real work once a day, and the next tick is fifteen minutes away.
+    """
+    state, operation_token, lock = _begin_direct_library_operation(
+        "Backup retention")
+    if state != "ok":
+        return 0
+    try:
+        return backup_mod.cleanup_old_upgrade_backups()
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(operation_token)
+
+
 def _existing_new_release_check():
     """An active or awaiting-review new-release check, or None, so a second one
     isn't stacked on top of one already queued or waiting for review."""
@@ -3088,6 +3119,29 @@ def _library_header_note():
         if unit:
             detail += f" {unit}s"
     return {"label": "Refreshing…", "detail": detail}
+
+
+def _library_refresh_outcome():
+    """What the library work that just ended actually did, or "".
+
+    The parked review's own summary counts what is in it, which the tabs
+    already say, so Library suppresses it. That left a finished refresh with
+    no outcome anywhere on this page: the note simply disappeared, which
+    reads exactly like a press that did nothing. Only recent work is
+    reported, and only where the note itself was watching.
+    """
+    latest = None
+    for j in job_mgr.registry.all():
+        if getattr(j, "execute_kind", "") != "library":
+            continue
+        if j.status not in (job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED):
+            continue
+        if (latest is None
+                or (j.finished_at or 0) > (latest.finished_at or 0)):
+            latest = j
+    if latest is None or time.time() - (latest.finished_at or 0) > 300:
+        return ""
+    return str(latest.summary or latest.error or "").strip()
 
 
 def _library_current_job():
@@ -7169,6 +7223,9 @@ async def library_refresh_note(request: Request):
             "library_header_note": _library_header_note(),
             "library_refresh_scanning": _active_scan(
                 "library", statuses=("pending", "scanning")) is not None,
+            # Only the poll says this, so it lands once, when the work it was
+            # watching ends. A page load has the review itself to read.
+            "library_refresh_outcome": _library_refresh_outcome(),
         }
 
     ctx = await loop.run_in_executor(None, _context)
@@ -10279,21 +10336,26 @@ def _staging_leftovers():
             removable, note = True, ""
         elif inspection.owner is not None:
             removable = False
-            note = ("An unfinished download still claims these files. Settle "
-                    "that download first.")
+            note = ("It is tied to a download that never finished, so the app "
+                    "will not clear it on its own.")
+        elif inspection.status == "malformed":
+            removable = False
+            note = ("The app's record of what it holds can't be read, so it "
+                    "can't tell what is in there.")
         elif inspection.status == "incomplete":
             removable = False
             note = "Some of the files it recorded are already gone."
         else:
             removable = False
             note = ("Its contents changed since it was set aside, so the app "
-                    "will not touch it. Remove it by hand if you are sure.")
+                    "can't tell whether these are still the files it kept.")
         leftovers.append({
             "name": inspection.path.name,
             "label": f"{label}: {what}" if what else label,
             "reason": reason,
             "removable": removable,
             "note": note,
+            "path": str(inspection.path),
         })
     return leftovers
 
@@ -11031,9 +11093,8 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
         detail = html.escape(leftover["reason"])
         if leftover["note"]:
             detail += " " + html.escape(leftover["note"])
-        action = ""
+        name = html.escape(leftover["name"])
         if leftover["removable"]:
-            name = html.escape(leftover["name"])
             action = (
                 f'<form hx-post="/staging/discard" '
                 f'hx-target="#diagnostics-list" class="mt-2">'
@@ -11043,6 +11104,25 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
                 f'data-confirm="Delete these files? They are not in your '
                 f'library and this cannot be undone." '
                 f'data-confirm-action="Remove">Remove</button>'
+                f'</form>'
+            )
+        else:
+            # Nothing automatic will ever clear this row, so it needs the one
+            # place to look and a way to end it from here.
+            where, _is_host = _resolve_host_path(leftover["path"])
+            where = html.escape(where)
+            detail += f" Its folder is {where}."
+            action = (
+                f'<form hx-post="/staging/discard-unchecked" '
+                f'hx-target="#diagnostics-list" class="mt-2">'
+                f'<input type="hidden" name="_csrf_token" value="{tok}">'
+                f'<input type="hidden" name="group" value="{name}">'
+                f'<button type="submit" class="ql-btn ql-btn-sm" '
+                f'data-confirm="Delete the files at {where} without checking '
+                f'them? The app cannot confirm what they are, they are not in '
+                f'your library, and this cannot be undone." '
+                f'data-confirm-action="Delete anyway" '
+                f'data-confirm-danger>Delete anyway</button>'
                 f'</form>'
             )
         rows.append(
@@ -11064,6 +11144,99 @@ async def api_diagnostics(request: Request):
     loop = asyncio.get_running_loop()
     return HTMLResponse(await loop.run_in_executor(
         None, _diagnostics_fragment, request))
+
+
+def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
+    """A refusal that still leaves the user something they can do.
+
+    Restore and Remove each refuse for good reasons, and between them they
+    used to leave the row standing forever with an alarm beside it. Say what
+    happened, say where the files are so they can be looked at, and offer the
+    one action that is always truthful: delete them unchecked, on purpose.
+    """
+    location, _is_host = _resolve_host_path(str(target))
+    tok = html.escape(request.state.csrf_token)
+    name = html.escape(target.name)
+    return _ql_notice_html(
+        "error",
+        f"{headline} Its folder is {html.escape(location)}; look there "
+        "before deciding. If you do not want it, delete it."
+        f'<form hx-post="/backups/discard-unchecked" '
+        f'hx-target="#diagnostics-list" class="mt-2">'
+        f'<input type="hidden" name="_csrf_token" value="{tok}">'
+        f'<input type="hidden" name="backup" value="{name}">'
+        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'data-confirm="Delete this backup at {html.escape(location)} '
+        f'without checking it? The app cannot confirm your library already '
+        f'has these files, so this may be their only copy. It cannot be '
+        f'undone." '
+        f'data-confirm-action="Delete anyway" '
+        f'data-confirm-danger>Delete anyway</button>'
+        f'</form>',
+    )
+
+
+def _unreadable_record_notice(request: Request, target: Path) -> str:
+    return _stuck_backup_notice(
+        request, target,
+        "This backup's recovery record can't be read, so the app can't tell "
+        "what it holds or whether your library already has it. It was left "
+        "untouched.")
+
+
+def _restore_refused_notice(request: Request, target: Path, origin) -> str:
+    """Say why an upgrade restore refused, in the figures it refused on."""
+    backup_size = backup_mod.album_tree_size(target)
+    origin_size = backup_mod.album_tree_size(origin) if origin else None
+    if (backup_size and origin_size
+            and origin_size[1] >= backup_size[1] > 0):
+        headline = (
+            f"{html.escape(str(origin))} now holds "
+            f"{plural(origin_size[0], 'file')} "
+            f"({origin_size[1] / 1024 / 1024:.1f} MB) while this backup holds "
+            f"{plural(backup_size[0], 'file')} "
+            f"({backup_size[1] / 1024 / 1024:.1f} MB). Putting the backup "
+            "back would replace the larger album with the smaller one, so it "
+            "was left alone.")
+    else:
+        headline = ("The files couldn't be moved back automatically, so the "
+                    "backup was left untouched.")
+    return _stuck_backup_notice(request, target, headline)
+
+
+def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
+    name = (backup or "").strip()
+    base = Path(str(cfg.UPGRADE_BACKUP_DIR))
+    target = base / name
+    if (not name or name != Path(name).name or name.startswith(".")
+            or not target.is_dir()):
+        return (_ql_notice_html("error", "That backup isn't there anymore. "
+                                "It may already be restored or cleaned up.")
+                + _diagnostics_fragment(request))
+    state, operation_token, lock = _begin_direct_library_operation(
+        "Backup removal")
+    if state == "paused":
+        return (_ql_notice_html(
+                    "warning", "Library writes were paused before Delete "
+                    "could start. Resume the web app, then try again.")
+                + _diagnostics_fragment(request))
+    if state == "busy":
+        return (_ql_notice_html("warning", "A job is working in the library "
+                                "right now. Try again once it finishes.")
+                + _diagnostics_fragment(request))
+    try:
+        location, _is_host = _resolve_host_path(str(target))
+        if backup_mod.discard_backup_unchecked(target):
+            note = _ql_notice_html(
+                "success", "Deleted the backup without checking it, as asked.")
+        else:
+            note = _ql_notice_html(
+                "error", "The app couldn't delete the folder. Remove "
+                f"{html.escape(location)} outside the app.")
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(operation_token)
+    return note + _diagnostics_fragment(request)
 
 
 def _restore_backup_sync(request: Request, backup: str) -> str:
@@ -11097,9 +11270,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
         except (KeyError, TypeError, ValueError):
             carried = None
         if carried is None:
-            note = _ql_notice_html(
-                "error", "This backup changed or its recovery record is "
-                "invalid, so it was left untouched.")
+            note = _unreadable_record_notice(request, target)
         elif (
             resolution_plan := job_mgr.prepare_recovery_resolution(
                 str(carried.path), carried.receipt)
@@ -11174,9 +11345,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                     "flag the recovery; do not run Restore again until the "
                     "data volume has been checked.")
             else:
-                note = _ql_notice_html(
-                    "error", "Couldn't restore automatically. The backup "
-                    "is untouched; the log has the manual command.")
+                note = _restore_refused_notice(request, target, origin)
         else:
             note = _ql_notice_html(
                 "error", "This backup has an unsupported recovery record, so "
@@ -11221,9 +11390,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
     try:
         carried = backup_mod.load_backup_result(target)
         if carried is None or carried.receipt is None:
-            note = _ql_notice_html(
-                "error", "This backup changed or its recovery record is "
-                "invalid, so it was left untouched.")
+            note = _unreadable_record_notice(request, target)
         elif (
             resolution_plan := job_mgr.prepare_recovery_resolution(
                 str(carried.path), carried.receipt)
@@ -11274,6 +11441,11 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
                                 "right now. Try again once it finishes.")
                 + _diagnostics_fragment(request))
     try:
+        location, _is_host = _resolve_host_path(str(target))
+        stuck = _ql_notice_html(
+            "error", "The app couldn't remove them, so they were left where "
+            f"they are. The row below offers to delete {html.escape(location)} "
+            "without checking it.")
         inspection = staging_mod.inspect_retry_group(target)
         if inspection.status != "ready" or inspection.owner is not None:
             note = _ql_notice_html(
@@ -11282,19 +11454,59 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
         elif inspection.file_group is not None:
             removed = staging_mod.discard_file_group(inspection.file_group)
             note = (_ql_notice_html("success", "Removed the kept file.")
-                    if removed else _ql_notice_html(
-                        "error", "Couldn't remove them; they were left "
-                        "untouched. Check the log."))
+                    if removed else stuck)
         else:
             removed = staging_mod.discard_group(target)
             note = (_ql_notice_html("success", "Removed the kept files.")
-                    if removed else _ql_notice_html(
-                        "error", "Couldn't remove them; they were left "
-                        "untouched. Check the log."))
+                    if removed else stuck)
     finally:
         lock.release()
         job_mgr.end_library_operation(operation_token)
     return note + _diagnostics_fragment(request)
+
+
+def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
+    name = (group or "").strip()
+    target = Path(str(cfg.STAGING_DIR)) / cfg.BEETS_RETRY_DIR / name
+    if not name or name != Path(name).name or not target.is_dir():
+        return (_ql_notice_html("error", "Those files aren't there anymore.")
+                + _diagnostics_fragment(request))
+    state, operation_token, lock = _begin_direct_library_operation(
+        "Staging cleanup")
+    if state == "paused":
+        return (_ql_notice_html(
+                    "warning", "Library writes were paused before this could "
+                    "start. Resume the web app, then try again.")
+                + _diagnostics_fragment(request))
+    if state == "busy":
+        return (_ql_notice_html("warning", "A job is working in the library "
+                                "right now. Try again once it finishes.")
+                + _diagnostics_fragment(request))
+    try:
+        location, _is_host = _resolve_host_path(str(target))
+        if staging_mod.discard_group_unchecked(target):
+            note = _ql_notice_html(
+                "success", "Deleted the files without checking them, as asked.")
+        else:
+            note = _ql_notice_html(
+                "error", "The app couldn't delete the folder. Remove "
+                f"{html.escape(location)} outside the app.")
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(operation_token)
+    return note + _diagnostics_fragment(request)
+
+
+@app.post("/staging/discard-unchecked", response_class=HTMLResponse)
+async def discard_staging_group_unchecked(request: Request,
+                                          group: str = Form("")):
+    """Delete a held group no automatic route will touch, offered by the row."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    loop = asyncio.get_running_loop()
+    return HTMLResponse(await loop.run_in_executor(
+        None, _discard_staging_group_unchecked_sync, request, group))
 
 
 @app.post("/staging/discard", response_class=HTMLResponse)
@@ -11318,6 +11530,17 @@ async def discard_backup(request: Request, backup: str = Form("")):
     loop = asyncio.get_running_loop()
     return HTMLResponse(await loop.run_in_executor(
         None, _discard_backup_sync, request, backup))
+
+
+@app.post("/backups/discard-unchecked", response_class=HTMLResponse)
+async def discard_backup_unchecked(request: Request, backup: str = Form("")):
+    """Delete a backup no automatic route will touch, offered by the refusal."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    loop = asyncio.get_running_loop()
+    return HTMLResponse(await loop.run_in_executor(
+        None, _discard_unchecked_backup_sync, request, backup))
 
 
 @app.get("/api/jobs/{job_id}/stream")
@@ -11488,6 +11711,9 @@ async def queue_count():
         "count": len(active),
         "running": any(j.status.value in ("running", "scanning") for j in active),
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
+        # Carried on the same poll so the nav's warning dot appears the moment
+        # a job needs the user, not at their next full page load.
+        "attention": job_persistence.attention_count(),
     })
 
 

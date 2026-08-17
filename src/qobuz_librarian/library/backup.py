@@ -2067,6 +2067,41 @@ def _tree_matches_ignoring_ctime(current, expected) -> bool:
     return True
 
 
+def _tree_matches_a_copy_of_itself(current, expected) -> bool:
+    """Match a sealed tree against a byte-identical copy of the same files.
+
+    A NAS snapshot restore, an rsync, or a moved data volume rewrites every
+    inode and every timestamp while the bytes stay the same. What the receipt
+    has to prove is that these are the files the app put here, and the name,
+    size and sha256 prove exactly that; the inode only ever added "and the
+    same filesystem object", which no copy can preserve and no restore needs.
+
+    Only used when reading a receipt back off disk, where a copy is a real
+    possibility. The caller then adopts the live tree, so every later check in
+    that operation is exact again.
+    """
+    if type(current) is not dict or type(expected) is not dict:
+        return False
+    if (
+        type(current.get("directories")) is not dict
+        or type(expected.get("directories")) is not dict
+        or set(current["directories"]) != set(expected["directories"])
+        or type(current.get("files")) is not dict
+        or type(expected.get("files")) is not dict
+        or set(current["files"]) != set(expected["files"])
+    ):
+        return False
+    volatile = ("identity", "mtime_ns", "changed_ns")
+    for name, value in current["files"].items():
+        original = expected["files"][name]
+        if type(value) is not dict or type(original) is not dict:
+            return False
+        if (_fidelity_without(value, *volatile)
+                != _fidelity_without(original, *volatile)):
+            return False
+    return True
+
+
 def _receipt_matches_ignoring_ctime(current, expected) -> bool:
     """Equate receipts whose sealed trees differ only in file ctimes."""
     if type(current) is not dict or type(expected) is not dict:
@@ -3046,8 +3081,6 @@ def _read_backup_receipt(directory_fd):
         receipt = decode_recovery_json(raw)
         if (
             not _backup_receipt_value_schema_valid(receipt)
-            or receipt["receipt_identity"]
-                != list(_entry_identity(value))
             or not _named_entry_matches(
                 directory_fd, _RECEIPT_SIDECAR, descriptor)
         ):
@@ -3063,12 +3096,18 @@ def _read_backup_receipt(directory_fd):
             ignore_root_names=(
                 _RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS),
         )
-        if current != receipt["tree"]:
-            if not _tree_matches_ignoring_ctime(current, receipt["tree"]):
+        identity = list(_entry_identity(value))
+        if current != receipt["tree"] or receipt["receipt_identity"] != identity:
+            # The sidecar's own inode is part of the same self-reference the
+            # tree holds, so it moves with the rest of a copy; the sidecar
+            # being the file this name points at is proved above regardless.
+            if not _tree_matches_a_copy_of_itself(current, receipt["tree"]):
                 return None
-            # Ownership or permission fixes bump every ctime under the sealed
-            # values; adopt the live tree so exact checks bind to it from here.
+            # Ownership fixes bump every ctime, and a copied data volume
+            # rewrites every inode; adopt the live values so exact checks
+            # bind to them from here.
             receipt["tree"] = current
+            receipt["receipt_identity"] = identity
         return receipt
     except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
         return None
@@ -9657,10 +9696,72 @@ def discard_redundant_backup(path) -> bool:
     )
 
 
+def album_tree_size(path):
+    """(file count, byte total) for one album folder, or None if unreadable.
+
+    Restore refuses when the album folder already holds at least as much as
+    the backup, which is what an upgrade that already landed looks like. The
+    page needs the same two figures to say so in words instead of sending the
+    user to the log.
+    """
+    root = os.fspath(path)
+    files = 0
+    total = 0
+    try:
+        for parent, _dirs, names in os.walk(root):
+            for name in names:
+                # The app's own sidecars at the backup root are not tracks,
+                # and the guard's manifest does not count them either.
+                if parent == root and name in _SIDECARS:
+                    continue
+                try:
+                    value = os.stat(os.path.join(parent, name),
+                                    follow_symlinks=False)
+                except OSError:
+                    return None
+                if not stat.S_ISREG(value.st_mode):
+                    continue
+                files += 1
+                total += int(value.st_size)
+    except OSError:
+        return None
+    return files, total
+
+
+def discard_backup_unchecked(path) -> bool:
+    """Delete a kept backup without checking anything, because the user said so.
+
+    Every automatic route can refuse: an unreadable recovery record, files
+    that are not byte-identical at the origin, an album folder that now holds
+    more than the backup does. Each refusal is right, and together they left
+    the row a permanent dead end with a standing alarm beside it. This is the
+    deliberate override behind an explicit warning, not a shortcut anything
+    else may take.
+    """
+    target = Path(path)
+    opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, target)
+    if opened is None:
+        return False
+    _public, _root, parts, descriptors = opened
+    try:
+        if len(descriptors) < 2 or not parts:
+            return False
+        return _remove_exact_tree_at(
+            descriptors[-2],
+            parts[-1],
+            descriptors[-1],
+            prefix="ql-unverifiable-backup",
+        )
+    finally:
+        _close_descriptors(descriptors)
+
+
 def cleanup_old_upgrade_backups(retention_days: int | None = None,
                                 force: bool = False) -> int:
     """Sweep upgrade-backup dir of anything older than retention_days.
-    Called once at script startup. Returns count of dirs removed.
+    Called at startup and, in the Web app, on a background tick, so a
+    container that never restarts still expires them. Returns count of
+    dirs removed.
 
     Parses the timestamp prefix encoded in each backup dir's
     name (YYYYMMDD_HHMMSS_safe) instead of stat().st_mtime. shutil.move

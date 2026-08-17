@@ -57,7 +57,7 @@
         <span class="ql-status-chip is-warning" title="The import had already started, so the stop could not take effect.">Cancelled too late</span>
       {% elif job.attention == 'catalog' %}
         <span class="ql-status-chip is-warning" title="The deleted track still has a stale Beets catalogue entry.">Catalogue cleanup</span>
-      {% elif job.attention %}
+      {% elif job.attention == 'quality' %}
         <span class="ql-status-chip is-warning" title="Finished below your target quality; open it for details.">Below target quality</span>
       {% endif %}
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>

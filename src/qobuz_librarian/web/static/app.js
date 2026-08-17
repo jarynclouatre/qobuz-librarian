@@ -974,7 +974,7 @@
   function fade(el) { collapse(el, function () { if (el.parentNode) el.remove(); }); }
   function autoDismissFlashes() {
     // Keep warnings/errors visible; auto-clear low-risk notices and toasts.
-    document.querySelectorAll("[data-flash].ql-notice-success, [data-flash].ql-notice-info")
+    document.querySelectorAll("[data-flash].ql-notice-success, [data-flash].ql-notice-info, [data-flash].ql-flash-info")
       .forEach(function (el) { setTimeout(function () { fade(el); }, 6000); });
     document.querySelectorAll("#download-toast [data-flash]")
       .forEach(function (el) { setTimeout(function () { fade(el); }, 8000); });

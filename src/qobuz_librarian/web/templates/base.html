@@ -35,6 +35,7 @@
   </noscript>
 
   {% set _qbadge = pending_job_count or 0 %}
+  {% set _att = history_attention.count if history_attention else 0 %}
   {% set _show_qobuz_missing = health_qobuz_missing %}
   {% set _show_token = health_token_invalid %}
   {% set _show_qobuz = _show_qobuz_missing or _show_token %}
@@ -107,13 +108,12 @@
               </a>
               {# A dot, not a second number: a count here reads as more queued
                  work sitting right next to the real queue count. #}
-              {% if history_attention %}
-              <a href="{{ history_attention.href }}" class="ql-history-attention" data-attention-badge
-                 aria-label="Open {{ history_attention.count }} History item{% if history_attention.count != 1 %}s{% endif %} needing attention"
-                 title="{{ history_attention.count }} History item{% if history_attention.count != 1 %}s need{% else %} needs{% endif %} attention">
+              <a href="/queue/history?attention=1"
+                 class="ql-history-attention{% if not _att %} hidden{% endif %}" data-attention-badge
+                 aria-label="Open {{ _att }} History item{% if _att != 1 %}s{% endif %} needing attention"
+                 title="{{ _att }} History item{% if _att != 1 %}s need{% else %} needs{% endif %} attention">
                 <span class="ql-attention-dot" aria-hidden="true"></span>
               </a>
-              {% endif %}
             </div>
           </div>
 
@@ -206,12 +206,11 @@
         <span>Queue</span>
         <span class="js-queue-badge ql-tabbar-count{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
       </a>
-      {% if history_attention %}
-      <a href="{{ history_attention.href }}" class="ql-tab-attention" data-attention-badge
-         aria-label="Open {{ history_attention.count }} History item{% if history_attention.count != 1 %}s{% endif %} needing attention">
+      <a href="/queue/history?attention=1"
+         class="ql-tab-attention{% if not _att %} hidden{% endif %}" data-attention-badge
+         aria-label="Open {{ _att }} History item{% if _att != 1 %}s{% endif %} needing attention">
         <span class="ql-attention-dot" aria-hidden="true"></span>
       </a>
-      {% endif %}
     </div>
     <a href="/settings" data-nav-tab-link="settings" class="ql-tab {% if page=='settings' %}is-active{% endif %}">
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h10"/><path d="M18 8h2"/><path d="M4 16h2"/><path d="M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>
@@ -313,6 +312,21 @@
           b.textContent = n > 99 ? '99+' : String(n);
         });
       }
+      // A job that fails while this page sits open is the one thing the user
+      // most needs to hear about, and the dot was only ever rendered at load.
+      var attention = document.querySelectorAll('[data-attention-badge]');
+      function applyAttention(n) {
+        attention.forEach(function (a) {
+          a.classList.toggle('hidden', !n);
+          if (!n) return;
+          var items = n + ' History item' + (n === 1 ? '' : 's');
+          a.setAttribute('aria-label', 'Open ' + items + ' needing attention');
+          if (a.hasAttribute('title')) {
+            a.setAttribute('title', items + (n === 1 ? ' needs' : ' need')
+              + ' attention');
+          }
+        });
+      }
       var inFlight = null;
       var controller = null;
       var queueSignatureKey = 'ql-queue-count-signature';
@@ -339,6 +353,7 @@
               sessionStorage.setItem(queueSignatureKey, signature);
             } catch (e) {}
             apply(d.count);
+            applyAttention(d.attention || 0);
           })
           .catch(function () {})
           .then(function () {

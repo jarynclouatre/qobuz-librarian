@@ -331,6 +331,40 @@ def test_backup_receipt_survives_ctime_only_metadata_drift(tmp_path, monkeypatch
     assert bkmod.load_backup_result(owned, expected_owner=owner) is None
 
 
+def test_backup_receipt_survives_a_copied_data_volume(tmp_path, monkeypatch):
+    # Restoring a NAS snapshot, rsyncing the data volume or moving the disk
+    # gives every file a new inode while the bytes stay identical. The receipt
+    # used to bind those inodes, so all three left the backup unloadable, and
+    # Restore and Remove both refused it forever.
+    import shutil
+
+    import qobuz_librarian.library.backup as bkmod
+    monkeypatch.setattr(bkmod.cfg, "UPGRADE_BACKUP_DIR", tmp_path)
+    monkeypatch.setattr(bkmod.cfg, "MUSIC_ROOT", tmp_path)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "track1.flac").write_bytes(b"a" * 50_000)
+    (backup / "cover.jpg").write_bytes(b"art")
+    original = tmp_path / "Album"
+    _seal_test_backup(bkmod, backup, original, kind="upgrade")
+
+    moved = tmp_path / "moved"
+    shutil.copytree(backup, moved)
+    assert ((moved / "track1.flac").stat().st_ino
+            != (backup / "track1.flac").stat().st_ino)
+
+    carried = bkmod.load_backup_result(moved)
+    assert carried is not None and carried.complete
+    assert restore_upgrade_backup(carried, original) is True
+    assert (original / "track1.flac").read_bytes() == b"a" * 50_000
+
+    # A copy is forgiven; a content change is still not.
+    changed = tmp_path / "changed"
+    shutil.copytree(backup, changed)
+    (changed / "track1.flac").write_bytes(b"b" * 50_000)
+    assert bkmod.load_backup_result(changed) is None
+
+
 def test_retire_verified_repair_backup_needs_superseding_tracks(tmp_path, monkeypatch):
     # After a verified refill the originals' backup may be retired only when
     # every file it holds has, at the same path, a decode-clean track of at

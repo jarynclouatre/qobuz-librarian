@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 from dataclasses import dataclass
 from datetime import datetime
@@ -2529,6 +2530,36 @@ def _prune_tree_directories(receipt):
         if path.exists() and not _remove_empty_directory(path, directories[relative]):
             return False
     return not receipt.path.exists()
+
+
+def discard_group_unchecked(group) -> bool:
+    """Delete one retained group without proving what is in it, on the user's say-so.
+
+    Every other route refuses a group whose files no longer match the identities
+    recorded when they were set aside, and that refusal is right: the app must
+    not delete a file it cannot show it put there. But nothing here carries a
+    checksum, so a copied data volume, a restored snapshot or a moved disk (all
+    of which rewrite every inode) blocks the whole staging area for good, with
+    no way out of the app. This is the deliberate override behind an explicit
+    warning, not a shortcut anything else may take.
+    """
+    if not _is_private_retry_group(group):
+        return False
+    name = Path(os.path.abspath(os.fspath(group))).name
+    staging_fd = retry_fd = None
+    try:
+        staging_fd, retry_fd, _retry_root = _open_retry_root()
+        # Rooted at the retry directory's own descriptor, so the name cannot be
+        # walked out of it, and rmtree refuses to follow a symlinked entry.
+        shutil.rmtree(name, dir_fd=retry_fd)
+        os.fsync(retry_fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        for descriptor in (retry_fd, staging_fd):
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def discard_group(group, *, expected_owner=None):
