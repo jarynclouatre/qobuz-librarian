@@ -28,7 +28,7 @@ from qobuz_librarian.library.scanner import (
     clear_scan_caches,
     list_library_artists,
 )
-from qobuz_librarian.ui_cli.colors import C, fmt, section
+from qobuz_librarian.ui_cli.colors import C, banner, fmt, section
 from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, die, plural
 from qobuz_librarian.ui_cli.logging import log
 
@@ -41,10 +41,15 @@ def run_check_new_releases_mode(args):
     library records the baseline and surfaces nothing, matching the web's
     first-touch contract.
     """
+    banner("New releases: what Qobuz has added since your last check")
+
     if not new_releases_mod.is_baseline_complete():
-        die(fmt(C.YELLOW,
-            "No new-release baseline exists yet. Run a Library refresh first."),
-            EXIT_GENERAL)
+        # Same shape as the upgrade walk's refusal: the banner and the reason
+        # belong on one stream, so they stay in order when the run is piped.
+        log.warning(fmt(C.YELLOW,
+            "  No new-release baseline exists yet. Run a Library refresh "
+            "first."))
+        return EXIT_GENERAL
 
     try:
         token = authorize_qobuz_action(
@@ -52,16 +57,16 @@ def run_check_new_releases_mode(args):
         ).token
     except NoCredsError:
         die(fmt(C.RED,
-            "✗  No Qobuz credentials configured.\n"
-            f"   Paste your user_auth_token on the Settings page "
+            "  ✗  No Qobuz credentials configured.\n"
+            f"     Paste your user_auth_token on the Settings page "
             f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
-            "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
+            "     or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
             EXIT_AUTH)
 
     clear_scan_caches()
     artists = list_library_artists()
     if not artists:
-        log.info(fmt(C.YELLOW, "No artist folders found under MUSIC_ROOT."))
+        log.info(fmt(C.YELLOW, "  ⚠  No artist folders found under MUSIC_ROOT."))
         return 0
 
     state = new_releases_mod.load()

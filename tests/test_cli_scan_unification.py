@@ -533,6 +533,51 @@ def test_upgrade_walk_refuses_when_upgrade_disabled(monkeypatch, caplog):
     assert "Upgrade scanning is turned off." in caplog.text
 
 
+def test_library_walk_carries_web_dismissals_into_the_missing_step(
+        monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import hidden
+    from qobuz_librarian.modes import walk
+
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    monkeypatch.setattr(cfg, "WALK_SEEN_FILE", tmp_path / "walk_seen.txt")
+    hidden.hide(hidden.SCOPE_MISSING, [("Artist", "Dismissed", "")])
+
+    artist_dir = tmp_path / "Artist"
+    artist_dir.mkdir()
+    monkeypatch.setattr(walk, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(walk, "_flush_stdin", lambda: None)
+    handed = {}
+    monkeypatch.setattr(
+        walk, "run_artist_gap_fill",
+        lambda *a, **kw: handed.update(gaps=kw.get("hidden"))
+        or ([], {}, set(), set(), 1, []))
+    monkeypatch.setattr(
+        walk, "run_artist_missing_albums",
+        lambda *a, **kw: handed.update(missing=kw.get("hidden")) or (0, False))
+
+    answers = iter(["", "y"])
+
+    def _input(_prompt=""):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("builtins.input", _input)
+    args = SimpleNamespace(
+        yes=True, dry_run=False, consolidate=False, no_catalog=False,
+        prefer_hires=True, include_comps=False, include_singles=False,
+    )
+
+    walk.run_walk_queued_mode(args, "tok")
+
+    for step in ("gaps", "missing"):
+        assert hidden.is_hidden(
+            hidden.SCOPE_MISSING, "Artist", "Dismissed", handed[step])
+
+
 def test_cli_new_release_check_refuses_without_baseline(monkeypatch):
     from qobuz_librarian.modes import new_releases
 
@@ -549,9 +594,8 @@ def test_cli_new_release_check_refuses_without_baseline(monkeypatch):
                         lambda: (_ for _ in ()).throw(
                             AssertionError("new-release crawl should not start")))
 
-    with pytest.raises(SystemExit):
-        new_releases.run_check_new_releases_mode(
-            SimpleNamespace(dry_run=False))
+    assert new_releases.run_check_new_releases_mode(
+        SimpleNamespace(dry_run=False)) != 0
 
 
 @pytest.mark.parametrize(

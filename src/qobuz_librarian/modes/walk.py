@@ -6,6 +6,7 @@ import tempfile
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
+from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
     list_artist_album_dirs,
@@ -244,6 +245,7 @@ def run_album_walk_mode(args, token):
         if not artists:
             return 0
 
+    hidden = hidden_mod.load()
     seen = load_album_walk_seen()
     if seen:
         vlog(f"  {len(seen)} album decision(s) loaded from "
@@ -341,6 +343,7 @@ def run_album_walk_mode(args, token):
                     flush_callback=_flush_queue,
                     skip_predicate=_seen_pred,
                     save_callback=_save_now,
+                    hidden=hidden,
                 )
                 stopped = False
                 for r in (gap_fill_result[0] if gap_fill_result else []):
@@ -449,6 +452,11 @@ def run_walk_queued_mode(args, token):
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
         return 0
+
+    # The web review's dismissals and this walk's own per-artist record are two
+    # different decisions: one album you said no to, versus one artist you have
+    # already been through. Both apply here.
+    hidden = hidden_mod.load()
 
     seen = load_walk_seen()
     if seen:
@@ -581,6 +589,7 @@ def run_walk_queued_mode(args, token):
                             artist_query, d, args, token,
                             shared_queue=shared_queue,
                             save_callback=_save_now,
+                            hidden=hidden,
                         )
                         (_, owned_titles, handled_ids, resolved_dirs,
                          artist_id, prefetched_catalog) = gap_fill_result
@@ -593,6 +602,7 @@ def run_walk_queued_mode(args, token):
                                 resolved_dirs=resolved_dirs,
                                 prefetched_catalog=prefetched_catalog,
                                 shared_queue=shared_queue,
+                                hidden=hidden,
                             )
                             partial_completion = (
                                 partial_completion or step_two_attention

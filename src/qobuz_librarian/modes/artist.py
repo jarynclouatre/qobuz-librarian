@@ -16,6 +16,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
+from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
@@ -90,11 +91,16 @@ def _consolidation_disabled_notice(args, mode_name):
 
 def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                       shared_queue=None, flush_callback=None,
-                      skip_predicate=None, save_callback=None, fresh=False):
+                      skip_predicate=None, save_callback=None, fresh=False,
+                      hidden=None):
     """Walk every album dir under artist_dir, match each to Qobuz, prompt to fill
     gaps. The matching is library.discovery.match_album_dir; this function is
     the prompting + sibling cleanup around it. Returns (results, owned_titles,
     handled_ids, resolved_dirs, artist_id, catalog).
+
+    ``hidden`` is a loaded hidden-store from a whole-library walk, so an album
+    dismissed on the web review's Gap Fill tab stays dismissed here. Asking for
+    one artist by name leaves it None and is offered every gap.
     """
     album_dirs = list_artist_album_dirs(artist_dir)
     if not album_dirs:
@@ -387,7 +393,15 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             # did NO download (the folder was already complete).
             continue
 
-        # Partial: offer to fill the gap.
+        # Partial: offer to fill the gap, unless the web review already got a
+        # no for this album. Both of its tabs write the same dismissal scope.
+        if hidden is not None and hidden_mod.is_hidden(
+                hidden_mod.SCOPE_MISSING, artist_name,
+                album.get("title") or "", hidden, year=album_year(album)):
+            log.info(fmt(C.GRAY, "    Dismissed in the Library review; skipping."))
+            results.append({"dir": ad, "result": "dismissed"})
+            continue
+
         log.info(fmt(C.YELLOW,
             f"    {len(present)}/{n_total} present; {len(missing)} missing"))
         for _mt in missing[:8]:
@@ -520,7 +534,7 @@ def _gap_fill_result_bucket(result):
 
     if status in {"already_complete", "skipped_already_higher_quality"}:
         return "already_complete"
-    if status in {"user_skipped", "user_stopped"}:
+    if status in {"user_skipped", "user_stopped", "dismissed"}:
         return "skipped"
     if status == "no_qobuz_match":
         return "no_match"
@@ -551,11 +565,16 @@ def _gap_fill_result_bucket(result):
 
 def run_artist_missing_albums(artist_name, owned_titles, args, token,
                       artist_id=None, handled_ids=None, resolved_dirs=None,
-                      prefetched_catalog=None, *, shared_queue=None, fresh=False):
+                      prefetched_catalog=None, *, shared_queue=None, fresh=False,
+                      hidden=None):
     """List the artist's full Qobuz catalog with already-owned albums filtered
     out, prompt to download some. The matching is discovery.discover_fully_missing;
     this is the numbered-list presentation around it. Returns
     ``(count_downloaded_or_queued, needs_attention)``.
+
+    ``hidden`` is a loaded hidden-store from a whole-library walk, so albums
+    dismissed in the web review stay dismissed here. Asking for one artist by
+    name leaves it None and sees the whole catalogue.
     """
     section(f"Step 2: Missing albums by {artist_name}, not yet in your library")
 
@@ -598,6 +617,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                          include_singles=getattr(args, "include_singles", False))
     gaps = discover_fully_missing(
         artist_name, catalog, opts,
+        hidden=hidden,
         handled_ids=handled_ids or set(),
         resolved_dirs=resolved_dirs or set(),
         owned_titles=owned_titles or {}, token=token)

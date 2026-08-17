@@ -236,7 +236,9 @@
   </div>
 </section>
 
-{% if auth_token_set %}
+{# Shown before credentials are saved too: the terminal's lock-busy message
+   sends a fresh install here to switch modes, so the control it names has to
+   be on the page. #}
 <section class="ql-settings-section">
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
@@ -299,7 +301,6 @@
     {% endif %}
   </div>
 </section>
-{% endif %}
 
 <section class="ql-settings-section">
   <div class="ql-settings-section-body">

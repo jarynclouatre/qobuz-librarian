@@ -18,7 +18,7 @@ from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, format_size, tr
 from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
-from qobuz_librarian.web import review_badges
+from qobuz_librarian.web import review_badges, settings_store
 
 
 def run_downsample_walk_mode(args):
@@ -51,7 +51,9 @@ def run_downsample_walk_mode(args):
     if cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep":
         log.info(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. A "
-            "restorable copy of each original is kept for a while."))
+            "restorable copy of each original is kept for "
+            f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}; a rewrite "
+            "can be undone from the Settings page until then."))
     elif cfg.DOWNSAMPLE_KEEP_ORIGINALS == "delete":
         log.info(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. The "
@@ -91,7 +93,6 @@ def run_downsample_walk_mode(args):
     # (changeable later in Settings).
     if (refresh.candidates and not args.dry_run
             and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
-        from qobuz_librarian.web import settings_store
         _flush_stdin()
         keep = confirm(
             "  Keep a restorable backup of the hi-res originals? "
@@ -141,6 +142,10 @@ def run_downsample_walk_mode(args):
     n_scanned = len(refresh.artists_scanned) - unchecked
     n_albums_done = 0
     total_saved = 0
+    # A preview never reaches the counters below, so it keeps its own running
+    # total of what it listed and what that would reclaim.
+    n_albums_found = 0
+    est_total_saving = 0
     total_errors = 0
     total_flush_warns = 0
     state_refresh_warnings = 0
@@ -158,6 +163,8 @@ def run_downsample_walk_mode(args):
             log.info("")
             n_albums = len(candidates)
             est_total = sum(c.est_saving for c in candidates)
+            n_albums_found += n_albums
+            est_total_saving += est_total
             log.info(fmt(C.BOLD + C.WHITE, f"  {artist_name}"))
             log.info(fmt(C.MAGENTA,
                 f"  {plural(n_albums, 'album')} above CD rate, "
@@ -253,9 +260,15 @@ def run_downsample_walk_mode(args):
             "files left unchanged."))
     elif not total_flush_warns:
         log.info(fmt(C.GREEN, "  ✓  Downsample walk complete."))
-    log.info(fmt(C.GRAY,
-        f"     Checked {plural(n_scanned, 'artist')}; downsampled "
-        f"{plural(n_albums_done, 'album')}, reclaimed {format_size(total_saved)}."))
+    if args.dry_run:
+        log.info(fmt(C.GRAY,
+            f"     Checked {plural(n_scanned, 'artist')}; found "
+            f"{plural(n_albums_found, 'album')} to downsample, "
+            f"~{format_size(est_total_saving)} reclaimable."))
+    else:
+        log.info(fmt(C.GRAY,
+            f"     Checked {plural(n_scanned, 'artist')}; downsampled "
+            f"{plural(n_albums_done, 'album')}, reclaimed {format_size(total_saved)}."))
     if total_errors:
         log.info(fmt(C.YELLOW,
             f"     {plural(total_errors, 'file')} could not be downsampled "
