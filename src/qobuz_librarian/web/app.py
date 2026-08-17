@@ -10463,7 +10463,7 @@ def _resolve_host_path(container_path: str) -> tuple[str, bool]:
 
 def _settings_response(request, *, saved=False, queued=False, connected=False,
                        unverified=False, envchecked=False,
-                       focus_behaviour=False,
+                       rerendered=False,
                        error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
                        quality_note=False):
@@ -10517,7 +10517,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "connected": connected,
         "unverified": unverified,
         "envchecked": envchecked,
-        "focus_behaviour": focus_behaviour,
+        "rerendered": rerendered,
         "error": error,
         "warnings": warnings or [],
         "page": "settings",
@@ -10755,8 +10755,13 @@ async def save_behavior(request: Request):
     )
     ok, warnings = settings_store.save(values)
     if ok is None:
-        return RedirectResponse(
-            url="/settings?error=invalidsettings#behaviour", status_code=303)
+        # Re-render rather than redirect so the reason can name the field and
+        # say what to change; a redirect can only carry the generic code.
+        loop = asyncio.get_running_loop()
+        diags = await loop.run_in_executor(None, _diagnostics)
+        return _settings_response(request, error="invalidsettings",
+                                  warnings=warnings, diagnostics=diags,
+                                  rerendered=True)
     # A quality-policy change leaves a parked/saved Upgrade review promising
     # targets the settings no longer produce.
     quality_note = False
@@ -10778,14 +10783,13 @@ async def save_behavior(request: Request):
         # user-typed values through the redirect URL.
         loop = asyncio.get_running_loop()
         diags = await loop.run_in_executor(None, _diagnostics)
-        # This one re-renders instead of redirecting, so nothing scrolls the
-        # page for it. The outcome sits with the Behaviour controls now, so
-        # land the reader there.
+        # Re-rendering lands the reader at the top of the document, so the
+        # outcome is drawn there rather than down beside the controls.
         return _settings_response(request, saved=True,
                                   queued=settings_store._any_active_job(),
                                   warnings=warnings, diagnostics=diags,
                                   quality_note=quality_note,
-                                  focus_behaviour=True)
+                                  rerendered=True)
     suffix = "&queued=1" if settings_store._any_active_job() else ""
     if quality_note:
         suffix += "&quality_note=1"

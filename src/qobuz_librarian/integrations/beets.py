@@ -98,6 +98,23 @@ except Exception:
     HAVE_MUTAGEN = False
 
 
+def unsafe_path_template(value: str) -> str:
+    """Why a beets path template would write outside the music library, or ""
+    when it stays inside. beets joins these to the library folder, and it
+    parses almost anything, so nothing else catches an absolute template."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    parts = value.replace("\\", "/").split("/")
+    first = parts[0]
+    if (value.startswith(("/", "\\")) or first.startswith("~")
+            or (len(first) > 1 and first[1] == ":")):
+        return "absolute"
+    if any(part == ".." for part in parts):
+        return "climbs"
+    return ""
+
+
 def _yaml_sq(value):
     """Emit *value* as a safe YAML single-quoted scalar.
 
@@ -4525,13 +4542,22 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
     )
     # Path templates are deployer-supplied and can contain single quotes
     # (e.g. `$albumartist's stuff/$album`); _yaml_sq keeps the scalar safe.
+    # Settings refuses a template that files outside the library; one set in
+    # the environment never passed through that, so check here too and fall
+    # back to the user's own config.yaml rather than scattering the import.
     _paths = []
-    if cfg.BEETS_PATH_DEFAULT:
-        _paths.append(f"  default: {_yaml_sq(cfg.BEETS_PATH_DEFAULT)}\n")
-    if cfg.BEETS_PATH_SINGLETON:
-        _paths.append(f"  singleton: {_yaml_sq(cfg.BEETS_PATH_SINGLETON)}\n")
-    if cfg.BEETS_PATH_COMP:
-        _paths.append(f"  comp: {_yaml_sq(cfg.BEETS_PATH_COMP)}\n")
+    for _name, _template in (("default", cfg.BEETS_PATH_DEFAULT),
+                             ("singleton", cfg.BEETS_PATH_SINGLETON),
+                             ("comp", cfg.BEETS_PATH_COMP)):
+        if not _template:
+            continue
+        if unsafe_path_template(_template):
+            log.warning(
+                f"Ignoring the beets {_name} path template: it would file "
+                f"imports outside {cfg.MUSIC_ROOT}. Make it relative."
+            )
+            continue
+        _paths.append(f"  {_name}: {_yaml_sq(_template)}\n")
     if _paths:
         override_yaml += "paths:\n" + "".join(_paths)
 

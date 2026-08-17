@@ -1805,6 +1805,10 @@ def scan_new_releases(job, token):
     total = 0
     done = 0
     failed_count = 0
+    # Folders Qobuz has no artist for at all. Kept apart from failed_count:
+    # they are a settled answer, so they must not hold the baseline back or
+    # push the user towards a retry that returns the same result.
+    unresolved_names = []
     n = len(artists)
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # This run's reached artists; merged over the prior baseline at the end (so a
@@ -1839,9 +1843,11 @@ def scan_new_releases(job, token):
                 continue
             if result.artist_id and not getattr(result, "fetch_failed", False):
                 current_seen[result.artist_id] = result.current_ids
+            elif getattr(result, "unresolved", False):
+                unresolved_names.append(futures[fut].name)
             else:
-                # An unresolved artist and a short/failed catalogue fetch are
-                # both unchecked, not clean zero-release results.
+                # A short or failed catalogue fetch is unchecked, not a clean
+                # zero-release result.
                 failed_count += 1
             for gap in result.new_gaps:
                 # Leave new releases UN-ticked, like the library gap list: a
@@ -1880,6 +1886,9 @@ def scan_new_releases(job, token):
         )
     if failed_count:
         _record_unchecked_artists(job, failed_count)
+    # Not logged on its own: every summary below carries it, and the summary
+    # is the last line of the log.
+    skipped_note = new_releases_mod.unresolved_note(unresolved_names)
     if job.cancel_requested:
         # A cancelled crawl only reached a fraction of the artists, so it can't
         # claim "No new releases" or "First check recorded" definitively.
@@ -1890,6 +1899,8 @@ def scan_new_releases(job, token):
                 f" {plural(failed_count, 'artist')} couldn't be checked "
                 "before the stop."
             )
+        if skipped_note:
+            job.summary += f" {skipped_note}"
         log.info(job.summary)
         return
 
@@ -1933,6 +1944,8 @@ def scan_new_releases(job, token):
                        "be saved. Check again.")
     else:
         job.summary = "No new releases added to your saved baseline."
+    if skipped_note:
+        job.summary += f" {skipped_note}"
     if not total and (failed_count or saved is False):
         # With no reviewable finds, submit_scan would otherwise replace this
         # explicitly incomplete result with a green Done state. Keep partial

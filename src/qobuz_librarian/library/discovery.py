@@ -301,6 +301,11 @@ class NewReleaseResult:
     # True when the catalog fetch came back empty AND with no total - a
     # failed or empty 200, indistinguishable from a transient API hiccup.
     fetch_failed: bool = False
+    # True when Qobuz has no artist under this name at all. Permanent, unlike
+    # fetch_failed: a collaboration folder ("Bonobo, Joy Crookes"), a
+    # compilation, an artist Qobuz doesn't carry. Checking again returns the
+    # same answer, so callers must not count these as unchecked.
+    unresolved: bool = False
 
 
 def _record_owned_title(owned_titles, album_dir):
@@ -604,7 +609,10 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     opts = opts or DiscoveryOpts()
     artist_id, artist_name = resolve_artist(query, token)
     if not artist_id:
-        return NewReleaseResult(None, None)
+        # No id and no name is Qobuz answering "no such artist"; an id-less
+        # name is a partial response the next check may well resolve, so only
+        # the first is reported as permanently unresolvable.
+        return NewReleaseResult(None, artist_name, unresolved=artist_name is None)
     # The baseline is persisted as JSON (string keys), so key everything by a
     # string id - otherwise an int id from resolve never matches the reloaded
     # snapshot and every run silently re-baselines instead of diffing.

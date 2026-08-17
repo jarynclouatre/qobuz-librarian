@@ -94,6 +94,9 @@ def run_check_new_releases_mode(args):
     total_new = 0
     artists_with_news = 0
     failed_count = 0
+    # Folders Qobuz has no artist for. A settled answer, so they neither hold
+    # the baseline back nor earn the "run it again" advice below.
+    unresolved_names = []
 
     # A context manager would wait for running calls after cancellation.
     ex = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel")
@@ -115,6 +118,8 @@ def run_check_new_releases_mode(args):
                 continue
             if result.artist_id and not getattr(result, "fetch_failed", False):
                 current_seen[result.artist_id] = result.current_ids
+            elif getattr(result, "unresolved", False):
+                unresolved_names.append(ad.name)
             else:
                 failed_count += 1
             if result.new_gaps:
@@ -154,6 +159,9 @@ def run_check_new_releases_mode(args):
 
     flush_resolve_cache()
     log.info("")
+    skipped_note = new_releases_mod.unresolved_note(unresolved_names)
+    if skipped_note:
+        log.info(fmt(C.GRAY, f"  · {skipped_note}"))
     if rebaseline and seen:
         if args.dry_run:
             text = "  · Catalogue rebaseline previewed; no changes saved."

@@ -213,6 +213,31 @@ def _validate_list(key, items):
     return list(dict.fromkeys(i.strip() for i in items if i.strip())), []
 
 
+_PATH_TEMPLATE_KEYS = ("BEETS_PATH_DEFAULT", "BEETS_PATH_SINGLETON",
+                       "BEETS_PATH_COMP")
+_FIELD_LABELS = {key: label for key, label, *_ in TEXT_FIELDS}
+
+
+def _path_template_problem(key, value):
+    """Why a beets path template cannot be saved, in the user's words, or ""
+    when it is fine. The rule itself lives with the beets config writer, which
+    applies it to environment-supplied templates too."""
+    if key not in _PATH_TEMPLATE_KEYS or not value:
+        return ""
+    from qobuz_librarian.integrations.beets import unsafe_path_template
+
+    reason = unsafe_path_template(value)
+    if not reason:
+        return ""
+    label = _FIELD_LABELS.get(key, key)
+    if reason == "absolute":
+        return (f"\u201c{label}\u201d has to be relative to your music folder. "
+                "Remove what comes before the first folder name so albums land "
+                "inside it.")
+    return (f"\u201c{label}\u201d has to stay inside your music folder. "
+            "Remove the \u201c..\u201d parts.")
+
+
 def _dropped_warning(key, dropped):
     names = ", ".join(dropped)
     if key == "LYRICS_PROVIDERS":
@@ -409,7 +434,14 @@ def _save_locked(values: dict):
         else:
             # Match _apply's strip so an incidental trailing space doesn't
             # read as a change and pin the field.
-            clean[key] = str(values[key] or "").strip()
+            value = str(values[key] or "").strip()
+            problem = _path_template_problem(key, value)
+            if problem:
+                # Same rule as the enum branch: reject the whole submission
+                # rather than apply the siblings and leave a path that would
+                # quietly file music outside the library.
+                return None, [problem]
+            clean[key] = value
 
     persisted = _read_settings() or {}
     for k, v in clean.items():

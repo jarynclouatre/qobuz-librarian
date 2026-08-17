@@ -1134,19 +1134,23 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import flows
 
-    artists = [tmp_path / name for name in ("Good", "Unresolved", "Short", "Error")]
+    artists = [tmp_path / name for name in ("Good", "No Match", "Short", "Error")]
     for artist in artists:
         artist.mkdir()
 
     def fake_find(name, **_kwargs):
         if name == "Error":
             raise RuntimeError("temporary failure")
-        if name == "Unresolved":
+        if name == "No Match":
+            # Qobuz has no artist by that name: settled, so it belongs in the
+            # skipped note rather than the retryable count.
             return SimpleNamespace(artist_id=None, fetch_failed=False,
-                                   current_ids=[], new_gaps=[], artist_name=None)
+                                   unresolved=True, current_ids=[],
+                                   new_gaps=[], artist_name=None)
         return SimpleNamespace(
             artist_id=name,
             fetch_failed=name == "Short",
+            unresolved=False,
             current_ids=["album"],
             new_gaps=[],
             artist_name=name,
@@ -1171,10 +1175,58 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
 
     assert marked["complete"] is False
     assert marked["baseline_limit"] is None
-    assert "3 artists couldn't be checked" in job.summary
+    assert "2 artists couldn't be checked" in job.summary
+    assert "No Match" in job.summary
     assert "Recorded a fresh baseline" not in job.summary
     assert job.status is jm.JobStatus.FAILED
     assert job.error == "The New Releases check did not complete."
+
+
+def test_new_release_check_completes_past_a_folder_qobuz_has_no_artist_for(
+        tmp_path, monkeypatch):
+    # A collaboration folder Beets filed as "Bonobo, Joy Crookes" matches no
+    # Qobuz artist, and no later check ever will. Counting it as unchecked left
+    # every check Failed and the baseline permanently incomplete.
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows
+
+    artists = [tmp_path / name for name in ("Bonobo", "Bonobo, Joy Crookes")]
+    for artist in artists:
+        artist.mkdir()
+
+    def fake_find(name, **_kwargs):
+        if name == "Bonobo, Joy Crookes":
+            return SimpleNamespace(artist_id=None, fetch_failed=False,
+                                   unresolved=True, current_ids=[],
+                                   new_gaps=[], artist_name=None)
+        return SimpleNamespace(artist_id="386473", fetch_failed=False,
+                               unresolved=False, current_ids=["album"],
+                               new_gaps=[], artist_name=name)
+
+    marked = {}
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(flows, "find_new_releases_for_artist", fake_find)
+    monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
+        "seen": {"386473": ["album"]},
+        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
+    })
+    monkeypatch.setattr(
+        flows.new_releases_mod,
+        "mark_run",
+        lambda _seen, **kwargs: marked.update(kwargs) or True,
+    )
+    job = jm.Job(title="new releases")
+
+    flows.scan_new_releases(job, "tok")
+
+    assert job.status is not jm.JobStatus.FAILED
+    assert job.error is None
+    assert marked["complete"] is True
+    # Naming the folder is the only way the user learns why that artist never
+    # surfaces, so a silent skip would be its own fault.
+    assert "Bonobo, Joy Crookes" in job.summary
+    assert "couldn't be checked" not in job.summary
 
 
 def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
