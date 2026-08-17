@@ -72,6 +72,24 @@ from qobuz_librarian.ui_cli.logging import (
 _SYSTEM_POPEN = subprocess.Popen
 _MANAGED_CARRIER_RETIREMENT_LOCK = threading.RLock()
 
+# Told when the beets import starts and stops. The import runs to its own end,
+# so a stop asked for inside that window cannot be honoured; the Web UI uses
+# this to withdraw the offer rather than accept a cancel it will ignore.
+_import_window_reporter = None
+
+
+def set_import_window_reporter(fn):
+    global _import_window_reporter
+    _import_window_reporter = fn
+
+
+def _report_import_window(active):
+    if _import_window_reporter is not None:
+        try:
+            _import_window_reporter(bool(active))
+        except Exception:
+            pass
+
 try:
     from mutagen.flac import FLAC as _MutagenFLAC  # noqa: F401
 
@@ -6274,6 +6292,7 @@ def _beets_direct_guarded(
     wait_error = None
     retirement_error = None
     spawn_failed = False
+    _report_import_window(True)
     try:
         try:
 
@@ -6331,6 +6350,7 @@ def _beets_direct_guarded(
                 reader_start.set()
                 wait_error = exc
     finally:
+        _report_import_window(False)
         proc = process_owner.get("process")
         reader_stop.set()
         if "thread" in process_owner:

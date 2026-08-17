@@ -17,7 +17,8 @@
       <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}Library scan{% elif job.execute_kind == 'new_releases' %}New releases{% elif job.execute_kind == 'downsample' and job.status.value == 'awaiting_review' %}{{ labels.review_title(job) }}{% else %}{% if job.artist %}{{ job.artist }}, {% endif %}{{ job.display_title }}{% endif %}</h1>
     </div>
     <span id="job-status-badge" class="ql-status-chip ql-job-status
-      {%- if job.status.value == 'done' %} is-success
+      {%- if job.status.value == 'done' and job.attention == 'cancel_late' %} is-warning
+      {%- elif job.status.value == 'done' %} is-success
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
       {%- elif job.status.value == 'awaiting_review' %} is-info
@@ -189,6 +190,8 @@
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% set _pending = s == 'pending' %}
         <button type="submit" class="ql-btn ql-btn-sm{% if _pending %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-danger{% endif %}"
+                data-cancel-button
+                {% if job.importing %}disabled title="Import has started"{% endif %}
                 data-confirm="{% if _pending %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
                 data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-confirm-danger{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
       </form>
@@ -237,6 +240,14 @@
        what went wrong. Showing only the error threw away the outcome. #}
     {% if job.summary %}
     <div class="ql-job-summary ql-job-summary--terminal"><span>{{ job.summary }}</span></div>
+    {% endif %}
+    {% if job.attention == 'cancel_late' %}
+    <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
+      <div class="ql-notice-copy">
+        <strong>Cancelled too late</strong>
+        <div>The import had already started when you asked to stop, and it runs to the end once it begins. The album is in your library.</div>
+      </div>
+    </div>
     {% endif %}
     {% set catalog_cleanup = job.single.get('catalog_cleanup') if job.single else none %}
     {% if catalog_cleanup and catalog_cleanup.get('pending') %}
@@ -288,6 +299,16 @@
         <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
         {% endif %}
         <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm">Retry</button>
+      </form>
+      {% endif %}
+      {% if recovery_retry and job.attention == 'recovery' %}
+      <form action="/jobs/{{ job.id }}/give-up" method="post"
+            data-confirm="Discard this interrupted download? Nothing is added to your library, and you can start the album again whenever you like."
+            data-confirm-action="Give up" data-confirm-danger>
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
+        <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Give up on this album</button>
       </form>
       {% endif %}
       {% if s in ('done', 'failed') and catalog_cleanup and catalog_cleanup.get('pending') and not job._preserve_persisted_single and not job._single_undo_unavailable %}

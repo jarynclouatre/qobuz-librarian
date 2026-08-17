@@ -44,6 +44,7 @@ from qobuz_librarian.completion import (
     RecoveryOwner,
     normalise_album_id,
 )
+from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
 from qobuz_librarian.library import library_scan_state, new_releases
 from qobuz_librarian.library.candidate_premise import CandidateStale
@@ -205,6 +206,15 @@ def _report_progress_to_current_job(phase, current, total, item):
 set_progress_reporter(_report_progress_to_current_job)
 
 
+def _report_import_window_to_current_job(active):
+    j = getattr(_TLS, "current_job", None)
+    if j is not None:
+        j.set_importing(active)
+
+
+beets.set_import_window_reporter(_report_import_window_to_current_job)
+
+
 class JobStatus(str, Enum):
     PENDING         = "pending"
     SCANNING        = "scanning"
@@ -301,6 +311,10 @@ class Job:
     # file/directory ownership record, enough for /undo to cleanly reverse
     # it.
     single: dict      = field(default_factory=dict)
+    # Set once this download has put the whole album (or the requested track)
+    # on disk, so a search row that launched it can say "In library" the moment
+    # the job ends instead of offering the same download again.
+    landed_complete: bool = False
     kind: str         = "download"          # download | scan
     status: JobStatus = JobStatus.PENDING
     phase: str        = ""                  # "", scan, execute
@@ -338,6 +352,9 @@ class Job:
     execute_args: dict = field(default_factory=dict)
     execute_args_unreadable: bool = False
     cancel_requested: bool = False
+    # True only while beets is putting an album into the library. That runs to
+    # its own end, so a cancel arriving now cannot stop it.
+    importing: bool = False
     created_at: float = field(default_factory=time.time)
     # When the job actually started working (left the queue).
     started_at: Optional[float] = None
@@ -503,8 +520,11 @@ class Job:
             if hit and hit.get("albums"):
                 self.progress_found_artists += 1
             found_artists = self.progress_found_artists
+            importing = self.importing
         payload = {"phase": phase, "current": current, "total": total,
                    "item": item, "found": found}
+        if importing:
+            payload["importing"] = True
         # Optional keys mirror `hit`: kept out of the payload when unset so the
         # common case stays lean and existing consumers see no new field.
         if unit:
@@ -527,6 +547,20 @@ class Job:
         authoritative counts themselves."""
         self._fan_out(REVIEW_CHANGED + origin)
 
+    def set_importing(self, active: bool) -> None:
+        """Open or close the window where a cancel can no longer be honoured.
+
+        Re-sends the current progress line so an open page withdraws (or
+        restores) its Cancel button as the import starts and ends, rather than
+        offering a stop the import will run straight past.
+        """
+        with self._lock:
+            if self.importing == bool(active):
+                return
+            self.importing = bool(active)
+            snapshot = self._progress_snapshot()
+        self._fan_out(snapshot)
+
     def _progress_snapshot(self) -> str:
         snap = {
             "phase": self.progress_phase, "current": self.progress_current,
@@ -536,6 +570,8 @@ class Job:
             snap["unit"] = self.progress_unit
         if self.progress_found_artists:
             snap["found_artists"] = self.progress_found_artists
+        if self.importing:
+            snap["importing"] = True
         return PROGRESS_PREFIX + json.dumps(snap)
 
     # Cap replay so a late subscriber doesn't get thousands of historical
@@ -1113,6 +1149,10 @@ def _run_task(job: Job, fn):
         # only auto-complete a job that's still RUNNING.
         elif job.status == JobStatus.RUNNING:
             job.status = JobStatus.DONE
+        if job.cancel_requested and job.status == JobStatus.DONE:
+            # The work finished before the stop could take effect. Saying only
+            # "Done" would hide that a cancel was asked for and ignored.
+            job.attention = job.attention or "cancel_late"
     except BaseException as e:  # noqa: BLE001 - the worker must stay durable
         # SystemExit and other fatal boundaries must surface as failed jobs,
         # not escape after the still-RUNNING state was persisted.
@@ -2162,11 +2202,17 @@ def request_cancel(job: Job) -> bool:
     - pending          → finalized on the spot; it hasn't started, so there's
       nothing to unwind and it leaves the queue at once
 
-    Returns False if the job is finished or owns unsettled durable recovery.
+    Returns False if the job is finished, is already putting an album into the
+    library, or owns unsettled durable recovery.
     """
     # A durable retry must keep its original job identity until the saved
     # journal settles.
     if cancel_is_protected(job):
+        return False
+    # Beets runs to its own end, so accepting a cancel here would be a promise
+    # the job then breaks: it imports everything and finishes as if nothing was
+    # asked. Refuse it and say why instead.
+    if job.importing:
         return False
     if job.status == JobStatus.AWAITING_REVIEW:
         review_canceled = cancel_review(job)

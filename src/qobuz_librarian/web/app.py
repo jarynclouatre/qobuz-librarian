@@ -67,6 +67,7 @@ from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine, lyric_fetch
 from qobuz_librarian.integrations import lyrics as lyrics_mode
+from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     candidate_premise,
@@ -837,9 +838,9 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                        "settle this.")
             elif origin == "web-job":
                 msg = ("An interrupted download could not be verified safely. "
-                       + paused + "Open that download from Queue or History "
-                       "and use Retry to settle it; if it stays blocked, check "
-                       "the application log.")
+                       + paused + "Open that download from Queue or History. "
+                       "Retry settles it; if Retry keeps failing, Give up on "
+                       "this album discards it so everything else can run.")
             else:
                 msg = ("An interrupted download could not be verified safely. "
                        + paused + "Settle it from the interface it was started "
@@ -2781,6 +2782,31 @@ def _active_search_downloads() -> tuple[
     return albums, tracks, scanning_albums
 
 
+def _finished_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
+    """Albums and tracks a finished download has put on disk in full.
+
+    Search rows poll for their own state, and a row whose download has just
+    ended is no longer queued. Without this it falls back to offering the same
+    download again, on an album the app has just fetched. Only jobs that landed
+    everything count, so a partial fill keeps its download button.
+    """
+    albums = set()
+    tracks = set()
+    for job in job_mgr.registry.all():
+        if not job.landed_complete or job.status not in job_mgr.TERMINAL:
+            continue
+        single = getattr(job, "single", None) or {}
+        track_id = str(single.get("track_id") or "")
+        album_id = str(single.get("album_id") or job.album_id or "")
+        if not album_id:
+            continue
+        if track_id:
+            tracks.add((album_id, track_id))
+        else:
+            albums.add(album_id)
+    return albums, tracks
+
+
 def _same_edition_is_complete(album: dict) -> bool:
     """Prove that this exact release year is already complete on disk.
 
@@ -3960,6 +3986,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "lossy_only": "Qobuz only had lossy versions. Nothing downloaded.",
     "no_tracks": "Qobuz returned no tracks for this album.",
     "cancelled": "Cancelled. Nothing was imported.",
+    "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
     "not_imported": "Downloaded, but the import didn't land. Library unchanged.",
 }
@@ -4044,6 +4071,23 @@ def _summarize_download_result(r):
     elif r.get("auto_upgrade"):
         parts.append("auto-upgrade verified")
     return ", ".join(parts) + "."
+
+
+def _undeliverable_album_error(r):
+    """Say how short the album came, and what the user can do about it."""
+    landed = r.get("n_ok", 0)
+    short = (
+        r.get("n_fail", 0) + r.get("n_broken", 0) + r.get("n_lossy_only", 0)
+    )
+    if landed and short:
+        opening = f"Qobuz delivered {landed} of {plural(landed + short, 'track')}"
+    else:
+        opening = "Qobuz couldn't deliver every track"
+    return (
+        f"{opening}, so nothing was added to your library and the part that "
+        "downloaded was discarded. Try again later; if it stops at the same "
+        "track every time, Qobuz can't serve that track."
+    )
 
 
 def _mark_download_attention(job, result):
@@ -4260,9 +4304,12 @@ def _make_download_run(
                     and recovery_status == "clear"
                     and not refresh_failed
                 )
+                # A cancel and an undeliverable album both end with the partial
+                # download discarded and nothing left waiting on recovery, so
+                # neither is a durable failure.
                 cancelled_clean = (
                     result is not None
-                    and result.get("result") == "cancelled"
+                    and result.get("result") in ("cancelled", "incomplete")
                     and recovery_status == "clear"
                     and not refresh_failed
                 )
@@ -4318,7 +4365,8 @@ def _make_download_run(
                         j.error = (
                             "This download couldn't be confirmed as finished "
                             "cleanly, so downloads are paused. Use Retry on "
-                            "this job to settle it."
+                            "this job to settle it, or Give up on this album "
+                            "to discard it and carry on."
                         )
                     else:
                         # The recovery is held by a different job, so no Retry
@@ -4341,7 +4389,9 @@ def _make_download_run(
             _mark_download_attention(j, r)
         elif r.get("result") not in benign and not r.get("imported"):
             j.status = job_mgr.JobStatus.FAILED
-            if r.get("n_fail"):
+            if r.get("result") == "incomplete":
+                j.error = _undeliverable_album_error(r)
+            elif r.get("n_fail"):
                 j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
             elif r.get("n_ok"):
                 j.error = "Downloaded, but the import failed. See job log."
@@ -4370,7 +4420,10 @@ def _make_download_run(
             # A parked library review may still offer this album, so drop it
             # there so the stale review can't download it a second time.
             flows.prune_library_review_candidates(album)
-            retryable, _lossy_only = download_result.incomplete_track_counts(r)
+            retryable, lossy_only = download_result.incomplete_track_counts(r)
+            # Nothing missing at all is what search calls "In library"; a gap of
+            # either kind leaves the row offering the download it still needs.
+            j.landed_complete = not retryable and not lossy_only
             if retryable:
                 # Partial landing: the album is on disk with gaps.
                 flows._fold_partial_gap_fill(
@@ -6605,6 +6658,7 @@ def _make_single_track_run(album, track, token):
                 j.error = ("Couldn't retrieve the track. Qobuz may be rate-limiting "
                            "you, or it's unavailable. Try again shortly.")
             return
+        j.landed_complete = True
         # Only mark it a single when explicitly configured.
         marked = bool(cfg.SUPPRESS_SINGLE_TRACK_GAPS and len(missing) > 1)
         if marked:
@@ -6908,7 +6962,13 @@ def _census_view():
     a few minutes. None hides the panel (cache off, or nothing scanned yet)."""
     global _census_cache
     now = time.time()
-    if _census_cache is not None and now - _census_cache[0] < _CENSUS_TTL:
+    # A download or a downsample writes to the cache the moment it finishes, so
+    # the age of the memo is not enough on its own: hold it only while the rows
+    # behind it have not changed.
+    writes = flac_cache.write_count()
+    if (_census_cache is not None
+            and _census_cache[2] == writes
+            and now - _census_cache[0] < _CENSUS_TTL):
         return _census_cache[1]
     raw = flac_cache.census()
     view = None
@@ -6943,7 +7003,9 @@ def _census_view():
             "reclaim": (format_size(raw["reclaim_bytes"])
                         if raw["reclaim_bytes"] >= 100 * 1024 * 1024 else ""),
         }
-    _census_cache = (now, view)
+    # Re-read: census() drains any buffered writes first, so the count it was
+    # actually built from is the one after that flush.
+    _census_cache = (now, view, flac_cache.write_count())
     return view
 
 
@@ -9012,6 +9074,56 @@ async def job_acknowledge_recovery(request: Request, job_id: str):
     return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 
+@app.post("/jobs/{job_id}/give-up")
+async def job_give_up(request: Request, job_id: str):
+    """Abandon a blocked download so downloads and scans can run again.
+
+    Retry is the right first move, but a download can be stuck on something a
+    retry repeats exactly, and until it is settled every download and scan
+    stays paused. This throws the interrupted download away and leaves the
+    album to be started again whenever the user wants.
+    """
+    job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
+    if not job:
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(
+                "That job is no longer in the record."),
+            status_code=303)
+    form = await request.form()
+    if not _recovery_submission_matches(
+        job,
+        str(form.get("recovery_operation_id") or ""),
+        str(form.get("recovery_item_id") or ""),
+    ):
+        return _durable_recovery_response(
+            request,
+            "That interrupted download is no longer the one holding things "
+            "up. Nothing was changed. Reload the page.",
+        )
+    settled, reason = _settle_durable_web_recovery(
+        job,
+        BlockedItemSettlementAction.DISCARD,
+    )
+    logging.getLogger("qobuz_librarian").info(
+        "Give up %s: discarding the blocked download %s.", job.id,
+        "succeeded" if settled
+        else f"was refused: {(reason or 'no reason given').rstrip('.')}")
+    if not settled:
+        return _durable_recovery_response(
+            request,
+            reason or "The interrupted download could not be discarded.",
+        )
+    with job._lock:
+        job.attention = ""
+        job.error = (
+            "Abandoned. The interrupted download was discarded and nothing "
+            "was added to your library. Downloads and scans can run again, "
+            "and you can start this album whenever you like."
+        )
+    job_persistence.persist(job)
+    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
+
+
 @app.post("/jobs/{job_id}/retry")
 async def job_retry(request: Request, job_id: str):
     # Retry rebuilds the download from the persisted album_id, so it works as
@@ -9689,6 +9801,10 @@ async def job_undo(request: Request, job_id: str):
         single_mark_complete = undo_outcome.get(
             "single_mark_complete", True
         )
+        if removed is not None or cleanup_retry:
+            # The track is off the disk again, so search must stop calling it
+            # yours.
+            job.landed_complete = False
         refresh_needed = False
         if cleanup_retry:
             if catalog_complete and single_mark_complete:
@@ -9836,6 +9952,7 @@ async def job_cancel(
         return RedirectResponse(url="/queue", status_code=303)
     was_review = job.status == job_mgr.JobStatus.AWAITING_REVIEW
     was_pending = job.status == job_mgr.JobStatus.PENDING
+    importing = job.importing
     # Offload: cancelling a parked review runs cancel_review -> persist (a
     # json.dumps of the full candidate list + SQLite commit), which would block
     # the event loop and stall every SSE stream for a large review.
@@ -9849,6 +9966,11 @@ async def job_cancel(
             message = (
                 "This interrupted-download recovery cannot be canceled until "
                 "its saved step settles."
+            )
+        elif importing:
+            message = (
+                "Import has started, so this can't be stopped now. It will "
+                "finish in a moment."
             )
         else:
             message = (
@@ -9885,6 +10007,7 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
         "queue_has_cancel_protected": any(
             j.id == protected_id for j in pending
         ),
+        "writes_paused_notice": _writes_paused_notice(),
         "error": error[:200],
         "notice": notice[:200],
         "page": "queue",
@@ -10033,11 +10156,122 @@ async def queue_cancel_pending():
     return RedirectResponse(url="/queue", status_code=303)
 
 
+# What each kind of kept staging group is, in the user's terms. The keys are
+# the manifest kinds written by the download, import and recovery paths.
+_STAGING_LEFTOVER_KINDS = {
+    "rejected": (
+        "Lossy track set aside",
+        "Qobuz served this track in a lossy format, so it was kept out of "
+        "your library. It stays here in case a later attempt finds the "
+        "lossless version.",
+    ),
+    "legacy-rejected": (
+        "Lossy track set aside",
+        "Qobuz served this track in a lossy format, so it was kept out of "
+        "your library. It stays here in case a later attempt finds the "
+        "lossless version.",
+    ),
+    "untagged": (
+        "Untagged file set aside",
+        "This file arrived without an album or artist tag, so it could not "
+        "be filed.",
+    ),
+    "unimported": (
+        "File that never imported",
+        "The download finished but this file was not filed into the "
+        "library.",
+    ),
+    "unresolved": (
+        "File set aside",
+        "Kept out of the library because it could not be filed.",
+    ),
+    "beets": (
+        "Album waiting to be filed",
+        "The tracks are downloaded; filing them failed. The next download "
+        "run tries again on its own, with no re-download.",
+    ),
+    "interrupted": (
+        "Files from a stopped download",
+        "A download stopped part way and its files were kept so nothing "
+        "already fetched is thrown away.",
+    ),
+}
+
+
+def _staging_display_name(path):
+    """A staging path as something worth reading: artist, album and file, with
+    the app's own private run folders left out of it."""
+    try:
+        relative = Path(str(path)).relative_to(Path(str(cfg.STAGING_DIR)))
+    except ValueError:
+        relative = Path(str(path))
+    return " / ".join(
+        part for part in relative.parts if not part.startswith("."))
+
+
+def _staging_tree_contents(tree):
+    """The deepest album folders one retained tree holds."""
+    relatives = [rel for rel, _identity in tree.directories if rel]
+    leaves = sorted(
+        rel for rel in relatives
+        if not any(other != rel and other.startswith(rel + "/")
+                   for other in relatives)
+    )
+    if leaves:
+        return ", ".join(leaf.replace("/", " / ") for leaf in leaves)
+    return plural(len(tree.files), "file")
+
+
+def _staging_leftovers():
+    """Every group the app is holding in staging, as user-facing rows.
+
+    Downloads warn that files are being kept, and until this there was
+    nowhere to see what they are or get rid of them, so they accumulated
+    unseen. Read-only: removing one is always a deliberate click.
+    """
+    leftovers = []
+    for inspection in staging_mod.inspect_retry_groups():
+        kind = inspection.kind or "unresolved"
+        label, reason = _STAGING_LEFTOVER_KINDS.get(
+            kind, _STAGING_LEFTOVER_KINDS["unresolved"])
+        what = ""
+        if inspection.file_group is not None:
+            source = (inspection.file_group.original
+                      or inspection.file_group.retained)
+            what = _staging_display_name(source)
+        elif inspection.planned_trees:
+            what = ", ".join(
+                _staging_tree_contents(tree)
+                for tree in inspection.planned_trees
+            )
+        if inspection.status == "ready" and inspection.owner is None:
+            removable, note = True, ""
+        elif inspection.owner is not None:
+            removable = False
+            note = ("An unfinished download still claims these files. Settle "
+                    "that download first.")
+        elif inspection.status == "incomplete":
+            removable = False
+            note = "Some of the files it recorded are already gone."
+        else:
+            removable = False
+            note = ("Its contents changed since it was set aside, so the app "
+                    "will not touch it. Remove it by hand if you are sure.")
+        leftovers.append({
+            "name": inspection.path.name,
+            "label": f"{label}: {what}" if what else label,
+            "reason": reason,
+            "removable": removable,
+            "note": note,
+        })
+    return leftovers
+
+
 def _diagnostics():
     """Read-only health checks surfaced on the Settings page."""
     checks = []
 
-    def _dir_check(label, path, *, want_writable):
+    def _dir_check(label, path, *, want_writable, skip_names=()):
         p = Path(path)
         if not p.exists():
             checks.append({"label": label, "ok": False,
@@ -10053,7 +10287,7 @@ def _diagnostics():
                            "On a NAS, set PUID/PGID in .env to your media-share owner"})
             return
         try:
-            n = sum(1 for _ in p.iterdir())
+            n = sum(1 for entry in p.iterdir() if entry.name not in skip_names)
         except OSError as e:
             checks.append({"label": label, "ok": False,
                            "detail": f"{p} unreadable: {e}"})
@@ -10062,7 +10296,10 @@ def _diagnostics():
                        "detail": f"{p}: {n} entr{'y' if n == 1 else 'ies'}"})
 
     _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True)
-    _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True)
+    # The app's own recovery folder is not a staging entry; counting it made a
+    # pile of kept files read as one healthy item. It gets its own check below.
+    _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True,
+               skip_names={cfg.BEETS_RETRY_DIR})
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     if beets_db.exists():
@@ -10138,6 +10375,22 @@ def _diagnostics():
                                  "below."})
     else:
         checks.append({"label": "Backups needing review", "ok": True,
+                       "detail": "none"})
+
+    try:
+        leftovers = _staging_leftovers()
+    except Exception:
+        leftovers = []
+    if leftovers:
+        checks.append({
+            "label": "Files kept in staging",
+            "ok": False,
+            "detail": f"{plural(len(leftovers), 'item')} "
+                      f"{'is' if len(leftovers) == 1 else 'are'} being held "
+                      "outside your library. Review them below.",
+        })
+    else:
+        checks.append({"label": "Files kept in staging", "ok": True,
                        "detail": "none"})
     return checks
 
@@ -10704,6 +10957,38 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'data-confirm-action="Restore">Restore</button>'
             f'</form></div></div>'
         )
+    try:
+        leftovers = _staging_leftovers()
+    except Exception:
+        leftovers = []
+    for leftover in leftovers:
+        detail = html.escape(leftover["reason"])
+        if leftover["note"]:
+            detail += " " + html.escape(leftover["note"])
+        action = ""
+        if leftover["removable"]:
+            name = html.escape(leftover["name"])
+            action = (
+                f'<form hx-post="/staging/discard" '
+                f'hx-target="#diagnostics-list" class="mt-2">'
+                f'<input type="hidden" name="_csrf_token" value="{tok}">'
+                f'<input type="hidden" name="group" value="{name}">'
+                f'<button type="submit" class="ql-btn ql-btn-sm" '
+                f'data-confirm="Delete these files? They are not in your '
+                f'library and this cannot be undone." '
+                f'data-confirm-action="Remove">Remove</button>'
+                f'</form>'
+            )
+        rows.append(
+            f'<div class="ql-diagnostic-row">'
+            f'<span class="ql-diagnostic-status ql-diagnostic-status-error" '
+            f'aria-label="Needs attention">!</span>'
+            f'<div class="min-w-0">'
+            f'<div class="ql-diagnostic-label">'
+            f'{html.escape(leftover["label"])}</div>'
+            f'<div class="ql-diagnostic-detail">{detail}</div>'
+            f'{action}</div></div>'
+        )
     return "\n".join(rows)
 
 
@@ -10903,6 +11188,61 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
     return note + _diagnostics_fragment(request)
 
 
+def _discard_staging_group_sync(request: Request, group: str) -> str:
+    name = (group or "").strip()
+    target = Path(str(cfg.STAGING_DIR)) / cfg.BEETS_RETRY_DIR / name
+    # The form posts a bare directory name; anything path-shaped is someone
+    # probing, not a group this page listed.
+    if not name or name != Path(name).name or not target.is_dir():
+        return (_ql_notice_html("error", "Those files aren't there anymore.")
+                + _diagnostics_fragment(request))
+    state, operation_token, lock = _begin_direct_library_operation(
+        "Staging cleanup")
+    if state == "paused":
+        return (_ql_notice_html(
+                    "warning", "Library writes were paused before Remove "
+                    "could start. Resume the web app, then try again.")
+                + _diagnostics_fragment(request))
+    if state == "busy":
+        return (_ql_notice_html("warning", "A job is working in the library "
+                                "right now. Try again once it finishes.")
+                + _diagnostics_fragment(request))
+    try:
+        inspection = staging_mod.inspect_retry_group(target)
+        if inspection.status != "ready" or inspection.owner is not None:
+            note = _ql_notice_html(
+                "error", "These files changed since the app set them aside, "
+                "so they were left untouched.")
+        elif inspection.file_group is not None:
+            removed = staging_mod.discard_file_group(inspection.file_group)
+            note = (_ql_notice_html("success", "Removed the kept file.")
+                    if removed else _ql_notice_html(
+                        "error", "Couldn't remove them; they were left "
+                        "untouched. Check the log."))
+        else:
+            removed = staging_mod.discard_group(target)
+            note = (_ql_notice_html("success", "Removed the kept files.")
+                    if removed else _ql_notice_html(
+                        "error", "Couldn't remove them; they were left "
+                        "untouched. Check the log."))
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(operation_token)
+    return note + _diagnostics_fragment(request)
+
+
+@app.post("/staging/discard", response_class=HTMLResponse)
+async def discard_staging_group(request: Request, group: str = Form("")):
+    """Delete one group of files the app is holding in staging. The Remove
+    button on the diagnostics list."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    loop = asyncio.get_running_loop()
+    return HTMLResponse(await loop.run_in_executor(
+        None, _discard_staging_group_sync, request, group))
+
+
 @app.post("/backups/discard", response_class=HTMLResponse)
 async def discard_backup(request: Request, backup: str = Form("")):
     """Delete a kept backup once its files are verified home. The Remove button on the diagnostics list."""
@@ -11088,6 +11428,10 @@ async def queue_count():
 @app.get("/api/search/availability")
 async def search_availability():
     albums, tracks, scanning_albums = _active_search_downloads()
+    owned_albums, owned_tracks = _finished_search_downloads()
+    # A re-queued album is active work again, so it reads as queued, not owned.
+    owned_albums.difference_update(albums)
+    owned_tracks.difference_update(tracks)
     return JSONResponse({
         "queued": sorted(
             [f"album-{album_id}" for album_id in albums]
@@ -11096,6 +11440,11 @@ async def search_availability():
         ),
         "scanning": sorted(
             f"album-{album_id}" for album_id in scanning_albums),
+        "owned": sorted(
+            [f"album-{album_id}" for album_id in owned_albums]
+            + [f"track-{album_id}-{track_id}"
+               for album_id, track_id in owned_tracks]
+        ),
     })
 
 

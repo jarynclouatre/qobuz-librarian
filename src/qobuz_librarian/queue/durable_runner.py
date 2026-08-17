@@ -50,6 +50,7 @@ from qobuz_librarian.library.backup import (
 )
 from qobuz_librarian.quality.verify import verify_and_recover
 from qobuz_librarian.queue import journal as queue_state
+from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.queue.durable_album import (
     DurableNewAlbumPlan,
     advance_completion_sources,
@@ -87,6 +88,7 @@ class DurableAlbumStatus(str, Enum):
     RETRY = "retry"
     ATTENTION = "attention"
     CANCELLED = "cancelled"
+    INCOMPLETE = "incomplete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +489,41 @@ def _cancel_after_download(
     )
 
 
+def _abandon_blocked_item(
+    *,
+    operation_id: str,
+    item_id: str,
+    fallback: DurableAlbumResult,
+    authority: RunLockLease,
+) -> DurableAlbumResult:
+    """Discard a download that blocked and cannot be retried into anything new.
+
+    A block pauses every download and scan until someone settles it, and the
+    rip that caused this one already ran to its own end, so a retry repeats the
+    same request. Throw the partial away and clear the recovery instead of
+    waiting for a person to notice. This is the same settlement the interface
+    offers by hand, so a live library backup still keeps the item blocked
+    rather than losing what it holds.
+    """
+    try:
+        settled = startup_recovery.settle_blocked_item(
+            authority=authority,
+            operation_id=operation_id,
+            item_id=item_id,
+            action=startup_recovery.BlockedItemSettlementAction.DISCARD,
+        )
+    except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
+        return fallback
+    if settled.status is not startup_recovery.BlockedItemSettlementStatus.DISCARDED:
+        return fallback
+    return DurableAlbumResult(
+        DurableAlbumStatus.INCOMPLETE,
+        fallback.reason,
+        operation_id=operation_id,
+        item_id=item_id,
+    )
+
+
 def execute_durable_new_album(
     queue: list,
     item: dict,
@@ -835,13 +872,21 @@ def execute_durable_new_album(
             )
             if settled is not None:
                 return settled
-        return _retry_or_attention_after_download(
+        outcome = _retry_or_attention_after_download(
             operation_id=operation_id,
             item_id=item_id,
             result=item,
             owner=owner,
             checkpoint_group=checkpoint_group,
             reason="download-incomplete",
+            authority=authority,
+        )
+        if outcome.status is not DurableAlbumStatus.ATTENTION:
+            return outcome
+        return _abandon_blocked_item(
+            operation_id=operation_id,
+            item_id=item_id,
+            fallback=outcome,
             authority=authority,
         )
     _require_authority(authority)

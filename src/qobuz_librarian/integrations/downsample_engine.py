@@ -34,7 +34,7 @@ from qobuz_librarian.integrations.lyric_fetch import (
 )
 from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import backup as backup_mod
-from qobuz_librarian.library import flac_cache
+from qobuz_librarian.library import flac_cache, scanner
 
 
 def _discard_unused_stash(kept_dir, log):
@@ -1074,6 +1074,12 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                     f"day(s): restore from Settings → Diagnostics")
         else:
             _discard_unused_stash(kept_dir, log)
+
+    if resampled:
+        # The rewritten files are a different bit depth and size, so the tag
+        # cache the census reads still describes the hi-res originals. Re-read
+        # them here or "What's on disk" keeps reporting space that was freed.
+        scanner.cache_album_tags([directory])
 
     return {"resampled": resampled,
             "errors": errors_total,

@@ -33,8 +33,9 @@
     {% endif %}
 
     {# Any of the eight pause causes, in the same wording the 503 gives and
-       from the same place. #}
-    {% if writes_paused_notice %}
+       from the same place. Terminal mode has its own banner on every page, so
+       repeating it here only stutters. #}
+    {% if writes_paused_notice and not cli_mode %}
     <div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-warning" fill="none"
            viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">

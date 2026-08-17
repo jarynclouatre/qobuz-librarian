@@ -32,6 +32,32 @@ def test_census_buckets_tiers_and_reclaims_only_true_hires(tmp_path, monkeypatch
     flac_cache._reset_for_tests()
 
 
+def test_census_ignores_staging_and_backup_copies(tmp_path, monkeypatch):
+    # Every download and upgrade reads tags outside the library, so those paths
+    # get cache rows too. Counting them made "What's on disk" climb with every
+    # download and stay high for as long as an upgrade backup was kept.
+    from qobuz_librarian.library import flac_cache
+    monkeypatch.setattr("qobuz_librarian.config.FLAC_CACHE_ENABLED", True)
+    monkeypatch.setattr("qobuz_librarian.config.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("qobuz_librarian.config.MUSIC_ROOT", tmp_path / "music")
+    flac_cache._reset_for_tests()
+
+    for relative in ("music/A/Album/01.flac",
+                     "staging/.qobuz-run-1/A/Album/01.flac",
+                     "upgrade_backups/20260814_A_Album/01.flac"):
+        p = tmp_path / relative
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 16)
+        flac_cache.put(p, {"bits": 24, "sample_rate": 96000, "size": 1000,
+                           "path": str(p)})
+
+    c = flac_cache.census()
+    assert c["total_tracks"] == 1
+    assert c["total_bytes"] == 1000
+    assert c["top_hires_artists"] == [("A", 1000)]
+    flac_cache._reset_for_tests()
+
+
 def test_walk_error_does_not_cache_dir_as_audioless(tmp_path, monkeypatch):
     # A transient scandir failure is consumed by os.walk's error callback, so
     # the shortened walk finds nothing - that must not be cached as "contains
@@ -73,3 +99,27 @@ def test_album_listing_root_error_is_not_an_empty_artist(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "iterdir", unreadable)
     with pytest.raises(OSError, match="artist root EIO"):
         scanner.list_artist_album_dirs(tmp_path)
+
+
+def test_landed_album_is_cached_and_its_staging_copy_is_not(tmp_path, monkeypatch):
+    # A finished download used to leave no trace in the tag cache, so the census
+    # behind "What's on disk" stayed at whatever the last library scan found and
+    # fell further behind with every album. Caching the staging copy instead
+    # would bring back the opposite fault, a count that climbs on its own.
+    from qobuz_librarian.library import flac_cache, scanner
+    monkeypatch.setattr("qobuz_librarian.config.FLAC_CACHE_ENABLED", True)
+    monkeypatch.setattr("qobuz_librarian.config.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("qobuz_librarian.config.MUSIC_ROOT", tmp_path / "music")
+    flac_cache._reset_for_tests()
+
+    landed = tmp_path / "music" / "Artist" / "Album (2020)"
+    staged = tmp_path / "staging" / ".qobuz-run-1" / "Artist" / "Album (2020)"
+    for directory in (landed, staged):
+        directory.mkdir(parents=True)
+        (directory / "01 - Song.flac").write_bytes(b"x" * 16)
+
+    scanner.cache_album_tags([landed, staged])
+
+    assert flac_cache.get(landed / "01 - Song.flac") is not None
+    assert flac_cache.get(staged / "01 - Song.flac") is None
+    flac_cache._reset_for_tests()

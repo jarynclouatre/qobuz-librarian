@@ -421,6 +421,38 @@ def _list_artist_subdirs_cached(artist_dir: Path):
     return subdirs
 
 
+def cache_album_tags(album_dirs):
+    """Read the tags of albums that have just landed in the library.
+
+    The quality census aggregates this cache, and only a library scan fills
+    it. The app is meant to keep track of what it downloads without asking for
+    another scan, so an album that imports and is never read here leaves
+    "What's on disk" short by its own tracks for good. This is the same parse a
+    scan would do, minus the walk.
+
+    Only directories inside the library count: the census ignores everything
+    else, and a staging copy must never be cached as a library track.
+    """
+    music_root = os.path.abspath(os.fspath(config.MUSIC_ROOT)) + os.sep
+    seen = set()
+    for album_dir in album_dirs:
+        if album_dir is None:
+            continue
+        try:
+            resolved = os.path.abspath(os.fspath(album_dir))
+        except (TypeError, ValueError):
+            continue
+        if not resolved.startswith(music_root) or resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            read_album_dir(Path(resolved))
+        except OSError as e:
+            vlog(f"post-import tag cache failed for {resolved}: {e}")
+    if seen:
+        flac_cache.flush_pending()
+
+
 def clear_scan_caches():
     """Drop per-scan caches. Pure-function lru_caches (normalize / etc.)
     are left alone - deterministic and worth keeping warm.

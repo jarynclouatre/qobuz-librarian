@@ -7038,3 +7038,22 @@ def test_web_lock_recovery_reconciles_library_before_restoring_jobs(
         ("jobs", None),
     ]
     assert webapp._RUN_LOCK_HANDLE is lease
+
+
+def test_finished_download_marks_its_search_row_in_library(client):
+    """A search row that launched a download used to go back to offering the
+    same download the moment the job left the queue, because availability only
+    ever reported what was still running. A finished album that landed in full
+    is owned; one that came back with gaps is not."""
+    complete = _inject_job(jm.JobStatus.DONE, title="Third")
+    complete.album_id = "q123"
+    complete.landed_complete = True
+    partial = _inject_job(jm.JobStatus.DONE, title="Dummy")
+    partial.album_id = "q456"
+    try:
+        owned = client.get("/api/search/availability").json()["owned"]
+        assert "album-q123" in owned
+        assert "album-q456" not in owned
+    finally:
+        _remove_job(complete)
+        _remove_job(partial)

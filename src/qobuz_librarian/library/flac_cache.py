@@ -33,6 +33,10 @@ _local = threading.local()
 _PENDING_LOCK = threading.Lock()
 _PENDING_ROWS: dict[str, tuple] = {}  # path → (mtime_ns, size, payload_json)
 _PENDING_LIMIT = 500
+# Counts committed changes to the table. Anything holding a memoized view of
+# these rows (the Library page's census) reads it to tell whether its numbers
+# still describe what is stored.
+_writes = 0
 
 
 def _db_path():
@@ -264,6 +268,8 @@ def flush_pending() -> None:
         vlog(f"flac cache batch write failed: {e}")
         _handle_db_error(e)
         return  # keep the buffered rows so the next flush retries them
+    global _writes
+    _writes += 1
     # Commit succeeded: drop exactly the rows we wrote, preserving any a
     # concurrent put() has replaced in the meantime.
     with _PENDING_LOCK:
@@ -307,6 +313,8 @@ def prune_missing(force: bool = False) -> int:
         if gone:
             conn.executemany("DELETE FROM files WHERE path = ?", gone)
             conn.commit()
+            global _writes
+            _writes += 1
     except sqlite3.Error as e:
         vlog(f"flac cache prune failed: {e}")
         _handle_db_error(e)
@@ -319,10 +327,17 @@ def prune_missing(force: bool = False) -> int:
     return len(gone)
 
 
+def write_count() -> int:
+    """How many times the table has changed. A caller memoizing a view of these
+    rows compares this to know its numbers are still the stored ones."""
+    return _writes
+
+
 def census():
-    """Aggregate the cached tag rows into a quality census: per-tier track
-    counts and bytes, hi-res bytes per artist, and a rough downsample-reclaim
-    figure. Reads only rows the scanner already stored, so it costs one table
+    """Aggregate the cached tag rows under MUSIC_ROOT into a quality census:
+    per-tier track counts and bytes, hi-res bytes per artist, and a rough
+    downsample-reclaim figure. Reads only rows the scanner already stored,
+    so it costs one table
     walk and no file I/O; rows from before the cache carried sizes count
     toward their tier but not the byte totals. Returns None when the cache is
     off or holds nothing."""
@@ -341,6 +356,12 @@ def census():
         _handle_db_error(e)
         return None
     for path, payload in rows:
+        # Rows land for every file whose tags were read, which includes staging
+        # runs and upgrade backups. Only the library counts as what's on disk;
+        # without this a download or an upgrade inflates the census by its own
+        # working copies.
+        if not path.startswith(music_root):
+            continue
         try:
             meta = json.loads(payload)
         except (ValueError, TypeError):
@@ -366,10 +387,9 @@ def census():
             target = 44100 if sr % 44100 == 0 else 48000
             if sr > target:
                 reclaim += int(size * (1 - target / sr))
-            if path.startswith(music_root):
-                artist = path[len(music_root):].split("/", 1)[0]
-                if artist:
-                    artists[artist] = artists.get(artist, 0) + size
+            artist = path[len(music_root):].split("/", 1)[0]
+            if artist:
+                artists[artist] = artists.get(artist, 0) + size
     total_n = sum(v[0] for v in tiers.values())
     if not total_n:
         return None
@@ -383,7 +403,8 @@ def census():
 
 
 def _reset_for_tests() -> None:
-    global _initialized, _generation
+    global _initialized, _generation, _writes
+    _writes = 0
     conn = getattr(_local, "conn", None)
     if conn is not None:
         conn.close()

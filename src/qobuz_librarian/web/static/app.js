@@ -490,9 +490,14 @@
       .then(function (data) {
         var queued = new Set(data.queued || []);
         var scanning = new Set(data.scanning || []);
+        // A download that has finished putting the whole album on disk owns it
+        // now; without this the row would fall back to offering that same
+        // download again the moment its job left the queue.
+        var owned = new Set(data.owned || []);
         document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
           searchResultItems(root).forEach(function (item) {
             var key = item.dataset.searchKey || "";
+            if (owned.has(key)) { markSearchItemOwned(item); return; }
             setSearchItemAvailability(item,
               queued.has(key) ? "queued" : scanning.has(key) ? "scanning" : "available");
           });
@@ -513,6 +518,30 @@
   }
   window.qlRefreshSearchAvailability = refreshSearchAvailability;
 
+  function markSearchItemOwned(item) {
+    if (!item || item.dataset.owned === "1") return;
+    item.dataset.owned = "1";
+    // Owned replaces every other state; leaving queued set would let a filter
+    // count the same row as both waiting and already yours.
+    item.dataset.queued = "0";
+    item.dataset.scanning = "0";
+    item.classList.add("is-owned");
+    var checkbox = item.querySelector("[data-search-select]");
+    if (checkbox) {
+      checkbox.checked = false;
+      var label = checkbox.closest("label");
+      if (label) label.remove();
+      else checkbox.remove();
+    }
+    var download = item.querySelector("[data-search-download-form]");
+    if (download) {
+      var owned = document.createElement("span");
+      owned.className = "ql-owned-label";
+      owned.textContent = "In library";
+      download.replaceWith(owned);
+    }
+  }
+
   function markSearchDownloadOwned(form) {
     if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
     var item = form.closest("[data-search-item]");
@@ -524,24 +553,7 @@
         return peer.dataset.searchKey === key;
       });
     }
-    peers.forEach(function (peer) {
-      peer.dataset.owned = "1";
-      peer.classList.add("is-owned");
-      var checkbox = peer.querySelector("[data-search-select]");
-      if (checkbox) {
-        checkbox.checked = false;
-        var label = checkbox.closest("label");
-        if (label) label.remove();
-        else checkbox.remove();
-      }
-      var download = peer.querySelector("[data-search-download-form]");
-      if (download) {
-        var owned = document.createElement("span");
-        owned.className = "ql-owned-label";
-        owned.textContent = "In library";
-        download.replaceWith(owned);
-      }
-    });
+    peers.forEach(markSearchItemOwned);
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
@@ -1850,6 +1862,14 @@
         foundArtists = p.found_artists;
       }
       if (typeof p.found === "number" || p.hit) showFound();
+      // Beets runs to its own end, so withdraw Cancel while an album is going
+      // into the library rather than take a stop the import will run past.
+      var cancelBtn = document.querySelector("[data-cancel-button]");
+      if (cancelBtn) {
+        cancelBtn.disabled = !!p.importing;
+        if (p.importing) cancelBtn.title = "Import has started";
+        else cancelBtn.removeAttribute("title");
+      }
     });
     src.addEventListener("done", function () {
       src.close();

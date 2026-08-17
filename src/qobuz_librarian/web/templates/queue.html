@@ -95,7 +95,7 @@
     <input type="hidden" name="return_to" value="/queue">
     {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
     <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-ghost-danger{% endif %}"
-            title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
+            {% if job.importing %}disabled title="Import has started"{% else %}title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"{% endif %}
             aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
             data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-confirm-danger{% endif %}>{{ _act }}</button>
@@ -108,6 +108,19 @@
 {% if error %}
 {# Each sender supplies a complete error and its next action. #}
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
+{% endif %}
+
+{# Queue is where people look when nothing seems to be happening, so it has to
+   carry the pause. Without it an empty list read as "nothing to do" while
+   downloads and scans were held. Terminal mode already has its own banner on
+   every page, so only the other causes need saying again here. #}
+{% if writes_paused_notice and not cli_mode %}
+<div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
+  <span class="min-w-0 break-words text-sm">{{ writes_paused_notice.msg }}</span>
+  {% if writes_paused_notice.action %}
+  <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
+  {% endif %}
+</div>
 {% endif %}
 
 {# The queue is work in flight; parked reviews live on their own pages and in
@@ -162,8 +175,8 @@
       <path d="M6.5 6.75h11M6.5 12h11M6.5 17.25h7.5"/>
     </svg>
   </div>
-  <p class="font-medium text-base-content/70">Queue is empty.</p>
-  <p class="text-sm mt-1 text-base-content/50">Downloads and scans appear here while they run. Finished work and parked reviews live in History.</p>
+  <p class="font-medium text-base-content/70">{% if writes_paused %}Nothing is running.{% else %}Queue is empty.{% endif %}</p>
+  <p class="text-sm mt-1 text-base-content/50">{% if writes_paused %}Downloads and scans are paused, so nothing can start yet.{% else %}Downloads and scans appear here while they run.{% endif %} Finished work and parked reviews live in History.</p>
   <div class="ql-empty-actions">
     <a href="/" class="ql-btn ql-btn-primary w-full sm:w-auto">Search Qobuz</a>
     <a href="/queue/history" class="ql-btn ql-btn-secondary w-full sm:w-auto">View history</a>

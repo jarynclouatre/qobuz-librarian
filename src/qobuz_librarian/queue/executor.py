@@ -85,7 +85,7 @@ from qobuz_librarian.library.post_import_relocation import (
     RelocationKind,
     relocate_post_import_album,
 )
-from qobuz_librarian.library.scanner import clear_scan_caches
+from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches
 from qobuz_librarian.quality.decision import mark_local_album_capped
 from qobuz_librarian.quality.verify import (
     redownload_with_staged_fallback,
@@ -1970,14 +1970,14 @@ def _resolve_queue_item(
     n_fail = item.get("n_fail", 0)
     n_retryable, n_lossy_only = incomplete_track_counts(item)
     outcome_attention = _queue_outcome_needs_attention(item)
-    # A stop marker (cancel discarded the staged files; disk-full / I/O / auth
-    # stopped the batch) must keep its label. n_ok still counts the tracks that
-    # briefly landed, so the n_ok branch below would mislabel a discarded cancel
-    # as "downloaded" in the fetch log.
+    # A stop marker (cancel or an undeliverable album discarded the staged
+    # files; disk-full / I/O / auth stopped the batch) must keep its label.
+    # n_ok still counts the tracks that briefly landed, so the n_ok branch
+    # below would mislabel a discarded cancel as "downloaded" in the fetch log.
     _stop = item.get("result")
     if _stop in (
-            "cancelled", "interrupted", "disk_full", "io_error", "auth_lost",
-            "import_failed", "upgrade_aborted_backup_failed",
+            "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
+            "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
             "stale_candidate"):
         status = _stop
     elif n_ok and (n_retryable or n_lossy_only or outcome_attention):
@@ -3205,6 +3205,17 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 results.append(_resolve_queue_item(
                     item, args, False, authority=authority))
                 continue
+            if outcome.status is DurableAlbumStatus.INCOMPLETE:
+                # Qobuz could not serve the whole album. The partial download
+                # is gone and nothing is left waiting on recovery, so the rest
+                # of the queue carries on.
+                item["result"] = "incomplete"
+                log.info(fmt(C.YELLOW,
+                    "    ⚠  Qobuz didn't deliver every track; nothing was "
+                    "imported and the partial download was discarded."))
+                results.append(_resolve_queue_item(
+                    item, args, False, authority=authority))
+                continue
             if outcome.status is not DurableAlbumStatus.COMPLETE:
                 results.append({
                     "dir": outcome.post_dir,
@@ -3681,6 +3692,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 )
                 for item in items:
                     item.pop("_import_ownership_directory_changes", None)
+
+    # After the sidecar pass, because writing a sidecar can rewrite the audio
+    # file (embedded lyrics are stripped in sidecar mode) and that would leave
+    # every row just written already stale.
+    if any_imported:
+        cache_album_tags(_post_dirs + _parked_post_dirs)
 
     log.info(fmt(*_queue_done_line(results, n_items)))
 

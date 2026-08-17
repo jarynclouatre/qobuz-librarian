@@ -66,6 +66,7 @@ from qobuz_librarian.library.post_import_relocation import (
     RelocationKind,
 )
 from qobuz_librarian.library.scanner import (
+    cache_album_tags,
     clear_scan_caches,
     drop_artist_subdirs_cache,
     read_album_dir,
@@ -1715,6 +1716,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                 write_post_import_sidecars([post_dir, album_dir])
             except Exception as _e_sc:
                 vlog(f"post-import sidecar write raised: {_e_sc}")
+            # After the sidecars, because writing one can rewrite the audio
+            # file and leave the rows just cached already stale.
+            cache_album_tags([post_dir, album_dir])
     elif transient_lyric_sigs:
         # Import didn't succeed (beets failed, silent skip, or n_ok==0): the
         # files are still in STAGING_DIR.
