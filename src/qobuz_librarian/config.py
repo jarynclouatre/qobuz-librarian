@@ -143,6 +143,14 @@ def _env_unit_float(key, default):
     return val
 
 
+def in_container() -> bool:
+    """Whether we are running inside the Docker image. Read at call time, not
+    frozen at import: messages that name a compose file are wrong for a pipx
+    install, and messages that name an env var are wrong inside the image."""
+    return (os.path.exists("/.dockerenv")
+            or os.environ.get("QL_IN_CONTAINER") == "1")
+
+
 def _resolve_secret(key: str) -> str:
     """Value of `key`, falling back to the file named by `{key}_FILE`.
 

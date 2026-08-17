@@ -68,7 +68,7 @@
     <form action="/library" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="missing_albums">
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>Scan library</button>
+      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% elif not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>Scan library</button>
     </form>
   </section>
 

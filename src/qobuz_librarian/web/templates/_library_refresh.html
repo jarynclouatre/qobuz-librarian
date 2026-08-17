@@ -6,8 +6,8 @@
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="new_releases">
-    <button type="submit" class="ql-link-action"{% if not qobuz_ready %} disabled aria-disabled="true"{% endif %}
-            title="Skips your folders entirely - just asks Qobuz for albums newer than your last scan.">Check new releases</button>
+    <button type="submit" class="ql-link-action"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+            title="{% if writes_paused %}{{ writes_paused_reason }}{% else %}Skips your folders entirely - just asks Qobuz for albums newer than your last scan.{% endif %}">Check new releases</button>
   </form>
   {% else %}
   <span class="ql-refresh-note" role="status">Refresh the Library before checking new releases</span>
@@ -19,8 +19,8 @@
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="missing_albums">
-    <button type="submit" class="ql-header-refresh"{% if not qobuz_ready %} disabled aria-disabled="true"{% endif %}
-            title="{% if qobuz_ready %}Scan for music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
+    <button type="submit" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+            title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Scan for music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
             aria-label="Scan for music added outside the app">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
     </button>

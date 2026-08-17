@@ -430,7 +430,7 @@
       <form action="/library" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="mode" value="missing_albums">
-        <button type="submit" name="force_full" value="1" class="ql-btn ql-btn-sm ql-btn-secondary"
+        <button type="submit" name="force_full" value="1" class="ql-btn ql-btn-sm ql-btn-secondary"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                 data-confirm="Re-scan every artist folder from scratch? This ignores the unchanged-folder cache, so it takes as long as a first scan. Use it after large manual changes to your files."
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>

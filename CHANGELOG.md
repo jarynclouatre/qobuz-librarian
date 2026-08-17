@@ -20,6 +20,8 @@ the app is actually doing.
 - The terminal agrees with the browser. An album dismissed on the review's Gap Fill tab is not offered again at the prompt, the Downsample preview reports what it found and what that would reclaim rather than signing off with nothing done, and the new-release check keeps its banner and its refusal in order when the run is piped. Settings shows the Mode section before credentials are saved, because the terminal's busy-lock message sends a fresh install there.
 - Decorative icons are hidden from screen readers, and cover art and the brand mark carry their dimensions so pages settle without shifting as images arrive.
 - A password of nothing but spaces can no longer be set: length is measured after trimming, so spaces cannot pad a short password up to the minimum either. Five typos at the login now cost fifteen minutes rather than a full hour, while an attacker who keeps guessing keeps restarting that wait.
+- When the music folder is missing, empty, or not a folder, the message says where that path comes from: the container mount under Docker, or `MUSIC_ROOT` outside it. It used to name a path that does not exist on your machine and suggest choosing a location the app offers no way to choose.
+- Every library scan control goes grey while the terminal holds the library, and says so when you point at it. The baseline button, the refresh beside the Library title, Check new releases, and Force full rescan all stayed lit and answered with an error page when pressed.
 
 ## [0.13.2] - 2026-08-14
 

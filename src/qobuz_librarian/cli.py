@@ -543,8 +543,7 @@ def acquire_run_lock():
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
 
 def _in_container() -> bool:
-    import os
-    return os.path.exists("/.dockerenv") or os.environ.get("QL_IN_CONTAINER") == "1"
+    return cfg.in_container()
 
 
 def _missing_tool_hint(tool: str, install_hint: str) -> str:

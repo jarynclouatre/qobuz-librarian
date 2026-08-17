@@ -3818,10 +3818,14 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   cursor: pointer;
   transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
 }
-.ql-header-refresh:hover {
+.ql-header-refresh:hover:not(:disabled) {
   border-color: color-mix(in oklab, var(--ql-text) 26%, transparent);
   color: var(--ql-text);
   background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
+}
+.ql-header-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 .ql-header-refresh:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
@@ -4818,8 +4822,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   border-bottom: 1px dotted color-mix(in oklab, currentColor 55%, transparent);
   transition: color 150ms ease;
 }
-.ql-link-action:hover {
+.ql-link-action:hover:not(:disabled) {
   color: var(--ql-text);
+}
+.ql-link-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 /* App-drawn confirm dialog replaces the browser's native popup. */

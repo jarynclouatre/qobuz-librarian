@@ -112,10 +112,10 @@
       <a href="/settings" class="ql-btn ql-btn-primary ql-btn-sm w-full shrink-0 sm:ml-auto sm:w-auto">Open Settings</a>
       {% else %}
       <div class="flex gap-2 w-full shrink-0 sm:ml-auto sm:w-auto">
-        <form action="/library" method="post" class="flex-1 sm:flex-none">
+        <form action="/library" method="post" class="flex-1 sm:flex-none" data-busy-submit>
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="mode" value="missing_albums">
-          <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm w-full">{{ 'Resume scan' if library_resume else 'Scan library' }}</button>
+          <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm w-full"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>{{ 'Resume scan' if library_resume else 'Scan library' }}</button>
         </form>
         {% if not library_resume %}
         <form action="/library/skip-setup" method="post" class="flex-1 sm:flex-none">
@@ -141,7 +141,7 @@
       <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume.kind == 'partial' else 'missing_albums' }}">
-        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm">Resume scan</button>
+        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Resume scan</button>
       </form>
     </div>
     {% endif %}

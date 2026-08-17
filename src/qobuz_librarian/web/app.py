@@ -3134,24 +3134,31 @@ def _active_library_scan():
     return _active_scan("library")
 
 
+def _music_root_hint() -> str:
+    """Where the path in a music-folder message actually comes from. Inside the
+    image it is the mount point, not anything the user typed, so naming the path
+    alone sends them hunting for a folder their machine does not have."""
+    if cfg.in_container():
+        return ("That is the path inside the container: check which folder "
+                "QL_MUSIC_DIR maps onto it in your .env.")
+    return "Set MUSIC_ROOT to the folder that holds your artist folders."
+
+
 def _library_scan_state():
     """Whether a whole-library scan has something valid to scan."""
     root = Path(cfg.MUSIC_ROOT)
+    hint = _music_root_hint()
     if not root.exists():
         return {
             "ready": False,
             "count": 0,
-            "message": (
-                f"{root} does not exist. Choose the location that contains your artist folders."
-            ),
+            "message": f"{root} does not exist. {hint}",
         }
     if not root.is_dir():
         return {
             "ready": False,
             "count": 0,
-            "message": (
-                f"{root} is not a folder. Choose the location that contains your artist folders."
-            ),
+            "message": f"{root} is not a folder. {hint}",
         }
     artists = scanner.list_library_artists()
     if not artists:
@@ -3159,7 +3166,7 @@ def _library_scan_state():
             "ready": False,
             "count": 0,
             "message": (
-                f"No artist folders with audio were found in {root}. Choose the location that contains your artist folders."
+                f"No artist folders with audio were found in {root}. {hint}"
             ),
         }
     return {"ready": True, "count": len(artists), "message": ""}
