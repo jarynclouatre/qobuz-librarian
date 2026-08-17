@@ -1,5 +1,5 @@
 """Queue item construction."""
-
+from qobuz_librarian.library import candidate_premise
 
 _UNSET = object()
 
@@ -8,15 +8,13 @@ def _capture_source_premise(album_dir, *, upgrade_only, auto_upgrade,
                             force_track_by_track):
     if album_dir is None:
         return None
-    from qobuz_librarian.library.candidate_premise import capture
-
     if upgrade_only or auto_upgrade:
         kind = "upgrade"
     elif force_track_by_track:
         kind = "repair"
     else:
         kind = "gap-fill"
-    return capture(kind, album_dir)
+    return candidate_premise.capture(kind, album_dir)
 
 
 def _build_queue_item(*, album, album_dir, label, missing, present,
@@ -34,8 +32,6 @@ def _build_queue_item(*, album, album_dir, label, missing, present,
             auto_upgrade=auto_upgrade,
             force_track_by_track=force_track_by_track,
         )
-    from qobuz_librarian.library.candidate_premise import gap_fill_receipts
-
     return {
         "album": album,
         "album_dir": album_dir,
@@ -59,5 +55,5 @@ def _build_queue_item(*, album, album_dir, label, missing, present,
         "quality": quality,
         "force_track_by_track": bool(force_track_by_track),
         "_source_premise": source_premise,
-        "_gap_fill_receipts": gap_fill_receipts(source_premise),
+        "_gap_fill_receipts": candidate_premise.gap_fill_receipts(source_premise),
     }

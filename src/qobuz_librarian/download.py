@@ -30,6 +30,7 @@ from qobuz_librarian.completion import (
     authoritative_slots,
     normalise_album_id,
 )
+from qobuz_librarian.integrations import staging
 from qobuz_librarian.integrations.rip import (
     cleanup_lossy,
     files_added_since,
@@ -705,9 +706,7 @@ def validated_staged_album_dirs(result):
             parent = parent.parent
         album_dirs.add(parent)
     for directory in album_dirs:
-        from qobuz_librarian.integrations.staging import capture_tree
-
-        tree = capture_tree(directory)
+        tree = staging.capture_tree(directory)
         if tree is None:
             raise OSError("staged album changed before import")
         current_audio = {

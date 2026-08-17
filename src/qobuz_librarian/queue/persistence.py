@@ -1,7 +1,9 @@
 """Compatibility entry points and the CLI resume prompt for queue journals."""
 
+from qobuz_librarian import completion
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost
+from qobuz_librarian.completion import CompletionOriginKind, RecoveryOwner
 from qobuz_librarian.queue.journal import (
     JournalItem,
     QueueJournal,
@@ -71,12 +73,9 @@ def load_pending_queue():
 
 def _load_startup_recovery_queue(recovery):
     """Bind one typed CLI recovery result back to its exact journal."""
-    from qobuz_librarian.completion import (
-        CompletionOriginKind,
-        RecoveryOwner,
-        normalise_album_id,
-        parse_completion_input_record,
-    )
+    # cli.py imports this module at the top, so a startup-recovery import here
+    # would reach the web job store and its dependencies on every command.
+    # Only a resume needs them.
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryAction,
         StartupRecoveryItem,
@@ -153,7 +152,7 @@ def _load_startup_recovery_queue(recovery):
         )
     if recovery_bearing:
         queued = recovery_bearing[0]
-        completion_input = parse_completion_input_record(
+        completion_input = completion.parse_completion_input_record(
             queued.completion_input,
             expected_owner=RecoveryOwner(operation_id, queued.item_id),
         )
@@ -163,8 +162,8 @@ def _load_startup_recovery_queue(recovery):
             or completion_input.origin.kind is not CompletionOriginKind.CLI
             or completion_input.origin.reference != "download-queue"
             or not isinstance(planned_album, dict)
-            or normalise_album_id(planned_album.get("id"))
-            != normalise_album_id(completion_input.expectation.album_id)
+            or completion.normalise_album_id(planned_album.get("id"))
+            != completion.normalise_album_id(completion_input.expectation.album_id)
         ):
             raise QueueJournalBlocked(
                 "saved queue item does not belong to this CLI download"

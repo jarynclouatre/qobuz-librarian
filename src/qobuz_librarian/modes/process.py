@@ -6,6 +6,7 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock
+from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
     download_staged_files,
     retain_download_staging,
@@ -32,7 +33,7 @@ from qobuz_librarian.integrations.rip import (
     is_cancel_requested,
     snapshot_staging,
 )
-from qobuz_librarian.library import candidate_premise
+from qobuz_librarian.library import candidate_premise, post_import_relocation, tags
 from qobuz_librarian.library.backup import (
     backup_album_dir,
     capture_album_source_receipt,
@@ -58,6 +59,11 @@ from qobuz_librarian.library.catalog import (
     is_lossless_album,
     prompt_and_migrate_multi_artist_folder,
     track_signatures_for_album_dirs,
+)
+from qobuz_librarian.library.post_import_relocation import (
+    PostImportRelocationAttention,
+    PostImportRelocationUnavailable,
+    RelocationKind,
 )
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
@@ -510,10 +516,9 @@ def _replacement_audio_paths(replacement_path, receipt):
 def detect_sibling_album_groups(album_dirs):
     """Group album dirs whose names strip to the same bare title.
     Returns [(bare_title, [dirs])] for groups with 2+ members."""
-    from qobuz_librarian.library.tags import strip_album_decorations
     groups = {}
     for d in album_dirs:
-        bare = normalize(strip_album_decorations(d.name))
+        bare = normalize(tags.strip_album_decorations(d.name))
         if not bare:
             continue
         groups.setdefault(bare, []).append(d)
@@ -965,9 +970,7 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     expected_generation = getattr(token, "credential_generation", "")
     if expected_generation:
-        from qobuz_librarian.api.client import authorize_bound_download
-
-        token = authorize_bound_download(token)
+        token = api_client.authorize_bound_download(token)
 
     if source_premise is not None:
         current_premise = candidate_premise.capture(
@@ -1667,15 +1670,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                 post_dir_exact
                 and _is_split_album_merge(album_dir, post_dir, split_artist)
             ):
-                from qobuz_librarian.library.post_import_relocation import (
-                    PostImportRelocationAttention,
-                    PostImportRelocationUnavailable,
-                    RelocationKind,
-                    relocate_post_import_album,
-                )
-
                 try:
-                    relocation = relocate_post_import_album(
+                    relocation = post_import_relocation.relocate_post_import_album(
                         album_dir,
                         post_dir,
                         kind=RelocationKind.SPLIT_GAP_FILL,

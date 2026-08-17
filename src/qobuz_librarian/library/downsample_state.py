@@ -13,10 +13,11 @@ from typing import Callable, Iterable
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.library import generation_state
+from qobuz_librarian.library import candidate_premise, downsample, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.downsample import DownsampleCandidate
+from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
 _STATE_LOCK = threading.Lock()
@@ -52,8 +53,6 @@ def _empty_state():
 
 
 def _candidate_to_dict(c: DownsampleCandidate):
-    from qobuz_librarian.library.candidate_premise import capture
-
     value = {
         "album_dir": str(c.album_dir),
         "artist": c.artist,
@@ -65,7 +64,7 @@ def _candidate_to_dict(c: DownsampleCandidate):
         "est_saving": c.est_saving,
         "detail": c.detail,
     }
-    premise = capture("downsample", c.album_dir)
+    premise = candidate_premise.capture("downsample", c.album_dir)
     if premise is not None:
         value["_premise"] = premise
     return value
@@ -132,8 +131,7 @@ def _write_state(data):
     except OSError as e:
         # The Downsample view reads this snapshot; a failed write means it
         # shows stale candidates until the next scan.
-        from qobuz_librarian.ui_cli.logging import vlog
-        vlog(f"downsample state write failed ({e}); saved downsample view may be stale")
+        cli_logging.vlog(f"downsample state write failed ({e}); saved downsample view may be stale")
         return False
 
 
@@ -285,8 +283,7 @@ def update_artist(
 ):
     """Re-scan one artist and merge it into the saved downsample snapshot."""
     if scan_artist is None:
-        from qobuz_librarian.library.downsample import scan_artist_for_downsample
-        scan_artist = scan_artist_for_downsample
+        scan_artist = downsample.scan_artist_for_downsample
 
     name = artist_dir.name
     fingerprints: dict[str, str] = {}
@@ -417,8 +414,7 @@ def refresh_for_artists(
     refresh_started_at = time.time()
     refresh_started_revision = generation_state.revision()
     if scan_artist is None:
-        from qobuz_librarian.library.downsample import scan_artist_for_downsample
-        scan_artist = scan_artist_for_downsample
+        scan_artist = downsample.scan_artist_for_downsample
 
     artist_list = list(artists)
     candidates: list[DownsampleCandidate] = []

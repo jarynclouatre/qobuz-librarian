@@ -26,6 +26,7 @@ from qobuz_librarian.integrations.lyrics import _prune_lyric_state_orphans
 from qobuz_librarian.integrations.rip import HAVE_MUTAGEN
 from qobuz_librarian.library.backup import cleanup_old_upgrade_backups
 from qobuz_librarian.quality.tiers import streamrip_quality_cap
+from qobuz_librarian.queue import journal as queue_state
 from qobuz_librarian.queue.persistence import (
     offer_resume_pending_queue,
     offer_resume_startup_recovery,
@@ -98,7 +99,6 @@ def _cli_blocked_settlement_binding(result):
         normalise_album_id,
         parse_completion_input_record,
     )
-    from qobuz_librarian.queue import journal as queue_state
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryAction,
         StartupRecoveryStatus,
@@ -187,7 +187,6 @@ def _cli_blocked_settlement_binding(result):
 
 
 def _cli_retry_settlement_matches(result, target) -> bool:
-    from qobuz_librarian.queue import journal as queue_state
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryAction,
         StartupRecoveryStatus,
@@ -234,7 +233,6 @@ def _cli_retry_settlement_matches(result, target) -> bool:
 
 
 def _cli_discard_settlement_matches(result, target) -> bool:
-    from qobuz_librarian.queue import journal as queue_state
     from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
 
     if result.status not in {
@@ -274,8 +272,6 @@ def _cli_blocked_item_settled(result, target) -> bool:
     Clearing a staged leftover can leave the rest of the recovery to reconcile
     on the next pass, so the whole-recovery answer is not this item's answer.
     """
-    from qobuz_librarian.queue import journal as queue_state
-
     return all(
         item.operation_id != target.operation_id
         or item.item_id != target.item_id

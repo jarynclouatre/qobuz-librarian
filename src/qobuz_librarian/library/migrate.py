@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from qobuz_librarian import config
+from qobuz_librarian import config, file_exclusion
 from qobuz_librarian.library.tags import (
     VA_NORMALIZED,
     beets_sanitize,
@@ -1484,8 +1484,7 @@ def _open_file_receipt(binding: _RootBinding, receipt) -> _OpenedFile:
         file_fd = _open_regular_file(parts[-1], dir_fd=parent_fd)
         if not binding.entry_is_on_root_mount(file_fd):
             raise OSError("migration path crosses a nested filesystem mount")
-        from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-        exclusion = acquire_inode_write_exclusion(file_fd)
+        exclusion = file_exclusion.acquire_inode_write_exclusion(file_fd)
         if exclusion is None:
             raise OSError("migration source could not be protected from writers")
         verified_digest = _digest_fd(file_fd)
@@ -2211,8 +2210,7 @@ def _scan_file_from_descriptor(binding, parent_fd, parent_receipts,
         descriptor = _open_regular_file(name, dir_fd=parent_fd)
         if not binding.entry_is_on_root_mount(descriptor):
             raise OSError("migration source crosses a nested filesystem mount")
-        from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-        exclusion = acquire_inode_write_exclusion(descriptor)
+        exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
         if exclusion is None or not exclusion.intact():
             raise OSError("migration source could not be protected from writers")
         before = {
@@ -2633,9 +2631,7 @@ def collect_items(source_root: Path, *, use_acoustid: bool = False,
                   cancel_check: Optional[Callable[[], bool]] = None,
                   progress: Optional[Callable] = None,
                   min_score: float = ACOUSTID_MIN_SCORE) -> list:
-    from qobuz_librarian.file_exclusion import inode_write_exclusion_scope
-
-    with inode_write_exclusion_scope() as available:
+    with file_exclusion.inode_write_exclusion_scope() as available:
         if not available:
             raise OSError(
                 "migration scan could not initialise writer protection")
@@ -2792,9 +2788,7 @@ def verified_resume_entries(plan: MigrationPlan, *,
                             progress: Optional[Callable] = None,
                             cancel_check: Optional[Callable[[], bool]] = None
                             ) -> list:
-    from qobuz_librarian.file_exclusion import inode_write_exclusion_scope
-
-    with inode_write_exclusion_scope() as available:
+    with file_exclusion.inode_write_exclusion_scope() as available:
         if not available:
             return []
         return _verified_resume_entries(
@@ -3308,9 +3302,7 @@ def _discard_owned_publication(
     if not _published_file_still_exact(published):
         return False
     descriptor, _parents, parent_fd, name, _dest_rel, _binding = published
-    from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-
-    exclusion = acquire_inode_write_exclusion(descriptor)
+    exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
     if exclusion is None:
         return False
     quarantine_name = None
@@ -3828,9 +3820,7 @@ def _hold_published_destination(published, expected_receipt):
         raise OSError("migration destination changed before source retirement")
     descriptor, _parents, parent_fd, destination_name, _dest_rel, _binding = \
         published
-    from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-
-    exclusion = acquire_inode_write_exclusion(descriptor)
+    exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
     if exclusion is None:
         raise OSError("migration destination could not be protected from writers")
     private_name = None
@@ -4857,11 +4847,9 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                  cancel_check: Optional[Callable[[], bool]] = None,
                  progress: Optional[Callable] = None,
                  resume_entries=None) -> ExecResult:
-    from qobuz_librarian.file_exclusion import inode_write_exclusion_scope
-
     result = None
     try:
-        with inode_write_exclusion_scope() as available:
+        with file_exclusion.inode_write_exclusion_scope() as available:
             if not available:
                 result = _record_plan_refusal(
                     ExecResult(),

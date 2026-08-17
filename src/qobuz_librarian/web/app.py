@@ -9,6 +9,7 @@ import html
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -17,6 +18,7 @@ import threading
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -33,8 +35,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from qobuz_librarian import __version__, state_file
+from qobuz_librarian import (
+    __version__,
+    cli,
+    completion,
+    download_result,
+    repair_log,
+    run_lock,
+    state_file,
+)
 from qobuz_librarian import config as cfg
+from qobuz_librarian.api import auth as api_auth
+from qobuz_librarian.api import client as api_client
+from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import (
     AuthEvidence,
     AuthLost,
@@ -44,13 +57,53 @@ from qobuz_librarian.api.auth import (
     NoCredsError,
     QobuzAccess,
     QobuzEntitlementError,
+    QobuzError,
     QobuzUnavailable,
     credentials_from_values,
     qobuz_capability,
 )
+from qobuz_librarian.completion import CompletionOrigin, CompletionOriginKind, RecoveryOwner
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
+from qobuz_librarian.integrations import beets as beets_mod
+from qobuz_librarian.integrations import downsample_engine, lyric_fetch
+from qobuz_librarian.integrations import lyrics as lyrics_mode
+from qobuz_librarian.library import backup as backup_mod
+from qobuz_librarian.library import (
+    candidate_premise,
+    catalog,
+    downsample_state,
+    flac_cache,
+    generation_state,
+    library_scan_state,
+    new_releases,
+    post_import_relocation,
+    repair_cache,
+    scan_checkpoint,
+    scanner,
+    tags,
+)
+from qobuz_librarian.library import hidden as hidden_mod
+from qobuz_librarian.library import migrate as migrate_engine
+from qobuz_librarian.library.candidate_premise import CandidateStale
+from qobuz_librarian.library.post_import_relocation import PostImportRelocationAttention
+from qobuz_librarian.modes import process as process_mode
+from qobuz_librarian.quality import decision as quality_decision
+from qobuz_librarian.quality import upgrade_state
+from qobuz_librarian.quality.tiers import format_quality
+from qobuz_librarian.queue import builder as queue_builder
+from qobuz_librarian.queue import durable_album, startup_recovery
+from qobuz_librarian.queue import executor as queue_executor
+from qobuz_librarian.queue import journal as queue_state
+from qobuz_librarian.queue.startup_recovery import (
+    POST_IMPORT_RELOCATION_LOG_ENTRY,
+    BlockedItemSettlementAction,
+    BlockedItemSettlementStatus,
+)
+from qobuz_librarian.ui_cli import logging as cli_logging
+from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import auth as web_auth
+from qobuz_librarian.web import flows, job_persistence, review_badges, settings_store
 from qobuz_librarian.web import jobs as job_mgr
 from qobuz_librarian.web.csrf import (
     CSRFMiddleware,
@@ -98,8 +151,6 @@ def _run_lock_intact() -> bool:
 
 def _beets_runtime_diagnostic() -> tuple[str | None, str]:
     """Distinguish an absent launcher from a failed runtime verification."""
-    from qobuz_librarian.integrations import beets as beets_mod
-
     configured = getattr(cfg, "BEETS_PYTHON", "")
     discovered = None if configured else shutil.which("beet")
     try:
@@ -134,14 +185,6 @@ def _beets_runtime_diagnostic() -> tuple[str | None, str]:
 
 
 def _recover_startup_queue(authority):
-    from qobuz_librarian.completion import (
-        CompletionOrigin,
-        CompletionOriginKind,
-        RecoveryOwner,
-    )
-    from qobuz_librarian.queue.startup_recovery import recover_startup_state
-    from qobuz_librarian.web import job_persistence
-
     # COMPLETE/RESOLVING recovery retires its queue proof only after the exact
     # original Web job has durably acknowledged it.
     job_persistence.init()
@@ -155,7 +198,6 @@ def _recover_startup_queue(authority):
         planned,
         post_dir,
     ):
-        from qobuz_librarian.completion import normalise_album_id
 
         planned_album = (
             planned.get("album") if isinstance(planned, dict) else None
@@ -163,7 +205,7 @@ def _recover_startup_queue(authority):
         if (
             type(origin) is not CompletionOrigin
             or type(owner) is not RecoveryOwner
-            or normalise_album_id(
+            or completion.normalise_album_id(
                 planned_album.get("id")
                 if isinstance(planned_album, dict)
                 else None
@@ -188,7 +230,7 @@ def _recover_startup_queue(authority):
             completion_hash=completion_hash,
         )
 
-    return recover_startup_state(
+    return startup_recovery.recover_startup_state(
         authority=authority,
         acknowledge_completion=_acknowledge,
     )
@@ -238,12 +280,6 @@ def _startup_recovery_binding():
         return None
     recovery_item = items[0]
     try:
-        from qobuz_librarian.completion import (
-            RecoveryOwner,
-            parse_completion_input_record,
-        )
-        from qobuz_librarian.queue import journal as queue_state
-
         loaded = queue_state.load_queue_journal(recovery_item.operation_id)
         if (
             loaded.status is not queue_state.QueueLoadStatus.READY
@@ -272,7 +308,7 @@ def _startup_recovery_binding():
             ):
                 return recovery_item, loaded.journal, queued_item, None
             return None
-        completion_input = parse_completion_input_record(
+        completion_input = completion.parse_completion_input_record(
             queued_item.completion_input,
             expected_owner=RecoveryOwner(
                 recovery_item.operation_id,
@@ -281,12 +317,11 @@ def _startup_recovery_binding():
         )
         if completion_input is None:
             return None
-        from qobuz_librarian.completion import normalise_album_id
 
         planned_album = queued_item.planned.get("album")
-        if normalise_album_id(
+        if completion.normalise_album_id(
             planned_album.get("id") if isinstance(planned_album, dict) else None
-        ) != normalise_album_id(completion_input.expectation.album_id):
+        ) != completion.normalise_album_id(completion_input.expectation.album_id):
             return None
         return recovery_item, loaded.journal, queued_item, completion_input.origin
     except (AttributeError, OSError, TypeError, ValueError):
@@ -314,15 +349,12 @@ def _startup_recovery_web_job_id() -> str | None:
     if not job_id:
         return None
     try:
-        from qobuz_librarian.completion import normalise_album_id
-        from qobuz_librarian.web import job_persistence
-
         row = job_persistence.load_one(job_id)
         planned_album = queued_item.planned.get("album")
         if (
             row is None
-            or normalise_album_id(row.get("album_id"))
-            != normalise_album_id(
+            or completion.normalise_album_id(row.get("album_id"))
+            != completion.normalise_album_id(
                 planned_album.get("id")
                 if isinstance(planned_album, dict)
                 else None
@@ -358,17 +390,16 @@ def _durable_recovery_matches_job(job) -> bool:
         return False
     recovery_item, loaded_journal, queued_item, origin = binding
     try:
-        from qobuz_librarian.completion import normalise_album_id
         if (
             loaded_journal.mode != f"web-job:{job.id}"
             or len(loaded_journal.items) != 1
         ):
             return False
         planned_album = queued_item.planned.get("album")
-        planned_id = normalise_album_id(
+        planned_id = completion.normalise_album_id(
             planned_album.get("id") if isinstance(planned_album, dict) else None
         )
-        job_id = normalise_album_id(job.album_id)
+        job_id = completion.normalise_album_id(job.album_id)
         return (
             queued_item.item_id == recovery_item.item_id
             and planned_id is not None
@@ -399,8 +430,6 @@ def _durable_recovery_planned(job):
             return None
         queued_item = binding[2]
         try:
-            from qobuz_librarian.queue import journal as queue_state
-
             # Round-trip for a canonical copy, never a mutable reference
             # into cached recovery state.
             planned = queue_state._serialize_queue_item(
@@ -413,12 +442,6 @@ def _durable_recovery_planned(job):
 
 def _settle_durable_web_recovery(job, action):
     """Settle only the exact blocked recovery owned by one durable Web job."""
-    from qobuz_librarian.queue.startup_recovery import (
-        BlockedItemSettlementAction,
-        BlockedItemSettlementStatus,
-        settle_blocked_item,
-    )
-
     if type(action) is not BlockedItemSettlementAction:
         raise ValueError("a blocked-item settlement action is required")
     with _STARTUP_RECOVERY_LOCK:
@@ -438,7 +461,7 @@ def _settle_durable_web_recovery(job, action):
             return False, "The blocked recovery identity could not be verified."
         recovery_item = binding[0]
         try:
-            settled = settle_blocked_item(
+            settled = startup_recovery.settle_blocked_item(
                 authority=_RUN_LOCK_HANDLE,
                 operation_id=recovery_item.operation_id,
                 item_id=recovery_item.item_id,
@@ -480,8 +503,6 @@ def _durable_recovery_control():
         return None
     recovery_item, _journal, _queued_item, _origin = binding
     try:
-        from qobuz_librarian.web import job_persistence
-
         row = job_persistence.load_one(job_id)
         if row is None or job_persistence.durable_completion_acknowledged(
             job_id,
@@ -531,10 +552,7 @@ def _staging_entry_allowed(job) -> bool:
 
 def _durable_completion_status(job) -> bool | None:
     """Return the exact job/album acknowledgement state, or None on failure."""
-    from qobuz_librarian.completion import normalise_album_id
-    from qobuz_librarian.web import job_persistence
-
-    album_id = normalise_album_id(getattr(job, "album_id", None))
+    album_id = completion.normalise_album_id(getattr(job, "album_id", None))
     created_at = getattr(job, "created_at", None)
     if album_id is None or type(created_at) not in (int, float):
         return False
@@ -547,8 +565,6 @@ def _durable_completion_status(job) -> bool | None:
 
 def _reconcile_acknowledged_job(job, summary: str | None = None) -> bool:
     """Make an externally completed exact job terminal and non-retryable."""
-    from qobuz_librarian.web import job_persistence
-
     with job._lock:
         job.status = job_mgr.JobStatus.DONE
         job.phase = ""
@@ -642,11 +658,6 @@ def _download_fragment(kind: str, body: str, outcome: str) -> HTMLResponse:
 
 def _download_error_message(exc, fallback: str) -> str:
     """Give download preparation failures the same Web-facing diagnosis."""
-    from qobuz_librarian.api.auth import (
-        QobuzError,
-        friendly_qobuz_error,
-    )
-
     if isinstance(exc, asyncio.TimeoutError):
         return "Timed out reaching the Qobuz API. Try again."
     if isinstance(exc, QobuzUnavailable):
@@ -666,7 +677,7 @@ def _download_error_message(exc, fallback: str) -> str:
     if isinstance(exc, QobuzEntitlementError):
         return "Your Qobuz account cannot perform this download."
     if isinstance(exc, QobuzError):
-        if friendly_qobuz_error(exc).startswith("HTTP 404"):
+        if api_auth.friendly_qobuz_error(exc).startswith("HTTP 404"):
             return "No album with that id. Check the URL or use Search."
         return "Couldn't reach the Qobuz API. Check the container's network."
     return fallback
@@ -696,11 +707,9 @@ def _qobuz_action_error_message(exc, *, unchanged=False) -> str:
 
 def _authorize_qobuz_live(access: QobuzAccess, *, expected_generation=""):
     """Run the bounded uncached check used before a Web action is admitted."""
-    from qobuz_librarian.api.client import authorize_qobuz_action, call_within
-
-    return call_within(
+    return api_client.call_within(
         cfg.WEB_TEST_AUTH_TIMEOUT,
-        authorize_qobuz_action,
+        api_client.authorize_qobuz_action,
         access,
         expected_generation=expected_generation,
         auth_valid=_token_valid_for(),
@@ -723,9 +732,7 @@ async def _authorize_qobuz_for_web(access: QobuzAccess, *,
 
 
 def _credential_generation_is_active(generation: str) -> bool:
-    from qobuz_librarian.api.auth import read_qobuz_credentials
-
-    return bool(generation) and read_qobuz_credentials().generation == generation
+    return bool(generation) and api_auth.read_qobuz_credentials().generation == generation
 
 
 def _job_admission_response(request):
@@ -794,10 +801,6 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     elif (_startup_recovery_status_value() == "attention_required"):
         relocation = _post_import_relocation_recovery()
         if relocation is not None:
-            from qobuz_librarian.queue.startup_recovery import (
-                POST_IMPORT_RELOCATION_LOG_ENTRY,
-            )
-
             paths = "; ".join(str(path) for path in relocation.paths)
             # relocation.reason is str(exc) from the relocation code; an
             # internal diagnostic, not an explanation. It belongs in the log,
@@ -1052,7 +1055,6 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
     _RUN_LOCK_HANDLE = lease
     try:
         result = _record_startup_recovery(lease)
-        from qobuz_librarian.library import generation_state
 
         publication_recovery = (
             generation_state.reconcile_interrupted_library_publication(lease)
@@ -1075,7 +1077,7 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
         raise
 
 
-async def _retry_web_run_lock(run_lock, log, *, delay: float = 30) -> None:
+async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
     """Retry a busy lock and an acquired lease whose recovery read failed."""
     global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _LOCK_UNENFORCEABLE
     while _LOCK_BUSY_PID is not None or _STARTUP_RECOVERY_UNKNOWN:
@@ -1138,36 +1140,30 @@ def _review_download_token(job):
 
 def _run_review_with_live_download(job, chosen, execute):
     """Recheck both local receipts and the bound credential at worker start."""
-    from qobuz_librarian.library.candidate_premise import validate_all
-
-    validate_all(chosen)
+    candidate_premise.validate_all(chosen)
     token = _review_download_token(job)
     # The live request above can take long enough for a local edit to land.
     # Repeat the exact receipt check before the flow reaches its first backup.
-    validate_all(chosen)
+    candidate_premise.validate_all(chosen)
     return execute(job, chosen, token)
 
 
 def _resume_album_download(job, _args):
-    from qobuz_librarian.web import flows
     return lambda j, chosen: _run_review_with_live_download(
         j, chosen, flows.execute_albums)
 
 
 def _resume_upgrade(job, _args):
-    from qobuz_librarian.web import flows
     return lambda j, chosen: _run_review_with_live_download(
         j, chosen, flows.execute_upgrades)
 
 
 def _resume_repair(job, _args):
-    from qobuz_librarian.web import flows
     return lambda j, chosen: _run_review_with_live_download(
         j, chosen, flows.execute_repairs)
 
 
 def _resume_migration(job, args):
-    from qobuz_librarian.web import flows
     dest = args.get("dest", "")
     in_place = bool(args.get("in_place"))
     src = args.get("src")
@@ -1183,12 +1179,8 @@ def _job_downsample_keep_originals(job):
 
 
 def _resume_downsample(job, _args):
-    from qobuz_librarian.web import flows
-
     def execute(j, chosen):
-        from qobuz_librarian.library.candidate_premise import validate_all
-
-        validate_all(chosen)
+        candidate_premise.validate_all(chosen)
         return flows.execute_downsamples(
             j,
             chosen,
@@ -1204,15 +1196,11 @@ def _upgrade_available(creds_ok: bool | None = None) -> bool:
 
 
 def _upgrade_unavailable_response():
-    from qobuz_librarian.web import review_badges
     review_badges.clear_ready("upgrade")
     return RedirectResponse(url="/", status_code=303)
 
 
 def _upgrade_state_summary():
-    from qobuz_librarian.library import generation_state
-    from qobuz_librarian.quality import upgrade_state
-
     state = upgrade_state.load()
     authority = generation_state.load()
     generation = int(authority.get("generation") or 0)
@@ -1258,9 +1246,6 @@ def _upgrade_state_summary():
 
 
 def _effective_upgrade_quality_signature():
-    from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import settings_store
-
     values = settings_store.current()
     return upgrade_state.quality_signature(
         values.get("STREAMRIP_QUALITY"),
@@ -1269,8 +1254,6 @@ def _effective_upgrade_quality_signature():
 
 
 def _downsample_state_summary():
-    from qobuz_librarian.library import downsample_state, generation_state
-
     state = downsample_state.load()
     authority = generation_state.load()
     generation = int(authority.get("generation") or 0)
@@ -1305,13 +1288,11 @@ def _downsample_state_summary():
 
 def _visible_saved_review_candidates(surface, candidates):
     if surface == "upgrade":
-        from qobuz_librarian.quality import upgrade_state
         return upgrade_state.visible_candidates({
             "complete": True,
             "candidates": list(candidates or []),
         })
     if surface == "downsample":
-        from qobuz_librarian.library import downsample_state
         return downsample_state.visible_candidates({
             "complete": True,
             "candidates": list(candidates or []),
@@ -1553,7 +1534,6 @@ def _sync_saved_review_job(job, surface, state, signature):
                 f"{n} upgrade candidate{'s' if n != 1 else ''} ready to review.")
         return True
 
-    from qobuz_librarian.web import job_persistence
     saved, synced = job_persistence.persist_review_mutation(job, _sync)
     if not saved:
         job.notify_review_changed("save_failed")
@@ -1566,8 +1546,6 @@ def _sync_saved_review_job(job, surface, state, signature):
 
 def _publish_saved_review(job):
     """Admit one reconstructed review before exposing it in memory."""
-    from qobuz_librarian.web import job_persistence
-
     if _web_writes_paused():
         return False
     if not job_persistence.admit(job):
@@ -1649,7 +1627,6 @@ def _review_job_from_upgrade_state(state):
 
 
 def _review_job_from_downsample_state(state):
-
     with _SAVED_REVIEW_LOCK:
         claimed = _active_saved_review_claim("downsample", state)
         if claimed is not None:
@@ -1721,9 +1698,6 @@ def _review_job_from_library_state():
     the Upgrade/Downsample saved-state reconstruction; the live job stays
     primary (callers only reach here when _library_current_job() is None).
     """
-    from qobuz_librarian.library import hidden as hidden_mod
-    from qobuz_librarian.library import library_scan_state
-    from qobuz_librarian.web import flows
 
     with library_scan_state.review_state_lock(), _SAVED_REVIEW_LOCK:
         mstate = library_scan_state.kind_state("missing")
@@ -1784,7 +1758,6 @@ def _review_job_from_library_state():
                 selected=False,
             )
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
-        from qobuz_librarian.web import flows
         job.summary = (flows.library_review_summary(job.candidates)
                        + ", from your last library scan.")
         if not _publish_saved_review(job):
@@ -1830,9 +1803,6 @@ def _restore_jobs_once() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    import logging
-    import os
-    import shutil
     global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _CLI_MODE, _LOCK_UNENFORCEABLE
     global _SHUTTING_DOWN, _STARTUP_RECOVERY_RESULT, _STARTUP_RECOVERY_UNKNOWN
     global _JOBS_RESTORED
@@ -1843,8 +1813,7 @@ async def _lifespan(_app: FastAPI):
     _STARTUP_RECOVERY_UNKNOWN = False
     job_mgr.set_durable_recovery_job_id(None)
     _log = logging.getLogger("qobuz_librarian")
-    from qobuz_librarian.ui_cli.logging import attach_file_handler
-    attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL)
+    cli_logging.attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL)
     if web_auth.auth_disabled():
         _log.warning("[warn] WEB_AUTH=none: the web UI is unauthenticated, do not "
                      "expose to an untrusted network")
@@ -1885,9 +1854,6 @@ async def _lifespan(_app: FastAPI):
                 "account. Seed WEB_AUTH_USER / WEB_AUTH_PASSWORD (compose) to "
                 "close this window, and complete setup promptly on a trusted "
                 "network.")
-    from qobuz_librarian import run_lock
-    from qobuz_librarian.api.auth import sync_streamrip_creds_from_env
-    from qobuz_librarian.web import settings_store
     settings_store.load()
     try:
         cfg.validate_storage_roots()
@@ -1897,7 +1863,7 @@ async def _lifespan(_app: FastAPI):
     # config now so web-triggered downloads don't fail on streamrip's
     # interactive auth prompt (the env-var path doesn't otherwise reach
     # streamrip's own config file).
-    if sync_streamrip_creds_from_env() is False:
+    if api_auth.sync_streamrip_creds_from_env() is False:
         _log.warning("Couldn't write env credentials into the streamrip "
                      "config; web downloads may fail until creds are set "
                      "via the Settings page.")
@@ -1950,7 +1916,7 @@ async def _lifespan(_app: FastAPI):
     token_probe_task = None
     try:
         lock_retry_task = (
-            asyncio.create_task(_retry_web_run_lock(run_lock, _log))
+            asyncio.create_task(_retry_web_run_lock(_log))
             if _LOCK_BUSY_PID is not None
             else None
         )
@@ -1965,7 +1931,6 @@ async def _lifespan(_app: FastAPI):
         # the app from serving its first request.
         async def _bg_prune_flac_cache():
             try:
-                from qobuz_librarian.library import flac_cache
                 n_pruned = await asyncio.get_running_loop().run_in_executor(
                     None, flac_cache.prune_missing)
                 if n_pruned:
@@ -1973,7 +1938,6 @@ async def _lifespan(_app: FastAPI):
             except Exception as e:
                 _log.debug("flac-cache prune error: %s", e)
             try:
-                from qobuz_librarian.library import repair_cache
                 repair_cache.prune_expired()
             except Exception as e:
                 _log.debug("repair-cache prune error: %s", e)
@@ -1983,8 +1947,7 @@ async def _lifespan(_app: FastAPI):
             # The CLI runs these too. A browsing-only Web process must leave them
             # alone because the CLI or another Web process can own the library.
             try:
-                from qobuz_librarian.library.backup import cleanup_old_upgrade_backups
-                n = cleanup_old_upgrade_backups()
+                n = backup_mod.cleanup_old_upgrade_backups()
                 if n:
                     _log.info(
                         "Cleaned up %s at startup.",
@@ -1993,8 +1956,7 @@ async def _lifespan(_app: FastAPI):
             except Exception as e:
                 _log.debug("upgrade-backup cleanup error at startup: %s", e)
             try:
-                from qobuz_librarian.integrations.lyrics import _prune_lyric_state_orphans
-                _prune_lyric_state_orphans()
+                lyrics_mode._prune_lyric_state_orphans()
             except Exception as e:
                 _log.debug("lyric-state prune error at startup: %s", e)
         job_mgr.configure_staging_entry_guard(_staging_entry_allowed)
@@ -2033,8 +1995,7 @@ async def _lifespan(_app: FastAPI):
         # the API client flips _TOKEN_VALID to False here, so a token that expires
         # mid-session shows "saved token isn't authenticating" immediately instead
         # of leaving stale green until the user happens to retry the failed action.
-        from qobuz_librarian.api.auth import register_auth_state_listener
-        register_auth_state_listener(_on_auth_state)
+        api_auth.register_auth_state_listener(_on_auth_state)
 
         # The dashboard kicks off _maybe_auto_check_new_releases on load, but
         # a headless box nobody opens would never check at all, making
@@ -2066,9 +2027,7 @@ async def _lifespan(_app: FastAPI):
 
 def _classify_token(token):
     """Test a token without publishing evidence for an unsaved credential."""
-    from qobuz_librarian.api.client import probe_qobuz
-
-    return probe_qobuz(token, report_auth=False)
+    return api_client.probe_qobuz(token, report_auth=False)
 
 
 def _on_auth_state(evidence: AuthEvidence) -> None:
@@ -2139,11 +2098,10 @@ async def _probe_token():
     credentials = _credentials_snapshot()
     if not credentials.configured:
         return
-    from qobuz_librarian.api.client import call_within
     try:
         verdict = await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
-                None, lambda: call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
+                None, lambda: api_client.call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
                                           _classify_token,
                                           credentials.token)),
             timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
@@ -2182,8 +2140,6 @@ templates.env.globals["now_ts"] = time.time
 # Callable, not a snapshot: the toggle lives in Settings and the downsample
 # warnings have to describe whichever mode is active when the page renders.
 def _downsample_originals_choice():
-    from qobuz_librarian.web import settings_store
-
     return settings_store.current().get("DOWNSAMPLE_KEEP_ORIGINALS")
 
 
@@ -2222,7 +2178,6 @@ templates.env.globals["recovery_on_disk"] = _recovery_on_disk
 
 
 def _fmt_clock(ts):
-    from datetime import datetime
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
 
 
@@ -2537,8 +2492,7 @@ async def setup_submit(request: Request, username: str = Form(""),
     # First-run setup is unauthenticated by necessity (no creds exist yet), so
     # whoever reaches the open port first claims admin.
     _ip = (request.client.host if request.client else "") or "unknown"
-    import logging as _logging
-    _logging.getLogger("qobuz_librarian").warning(
+    logging.getLogger("qobuz_librarian").warning(
         "First-run /setup creating admin account from %s (username=%r).",
         _ip, user)
     if not web_auth.set_credentials(user, password):
@@ -2616,7 +2570,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     )
     context.setdefault("health_lock_busy", bool(_LOCK_BUSY_PID))
     context.setdefault("upgrade_available", _upgrade_available(creds_ok))
-    from qobuz_librarian.web import review_badges
     if review_badge_ack:
         surface, generation = review_badge_ack
         if (surface in review_badges.SURFACES
@@ -2630,7 +2583,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         # A dot promises candidates are ready. A saved view the generation
         # authority holds stale has none to show, so it must not carry one.
         # Library keeps its dot: its review still renders, with a caveat.
-        from qobuz_librarian.library import generation_state
         authority = generation_state.load()
         badges = dict(badges)
         for surface in ("upgrade", "downsample"):
@@ -2639,7 +2591,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             ):
                 badges[surface] = False
     context.setdefault("nav_review_badges", badges)
-    from qobuz_librarian.web import job_persistence
     attention_count = job_persistence.attention_count()
     context.setdefault(
         "history_attention",
@@ -2721,7 +2672,6 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     """An uncaught route error renders the styled page for browser paths instead
     of FastAPI's bare JSON 500. API routes keep JSON. The detail is logged, never
     shown, since it can carry internals."""
-    import logging
     logging.getLogger("qobuz_librarian").exception(
         "Unhandled error on %s", request.scope.get("path", "?"))
     if not request.scope["path"].startswith("/api/"):
@@ -2839,26 +2789,19 @@ def _same_edition_is_complete(album: dict) -> bool:
     deliberate second edition. Require the submitted release year to match
     the resolved folder before comparing its complete track list.
     """
-    from qobuz_librarian.library.catalog import (
-        _dir_year,
-        album_year,
-        compute_missing,
-        find_album_dir_filesystem,
-        find_existing_tracks,
-    )
 
     try:
-        folder = find_album_dir_filesystem(album)
-        release_year = album_year(album)
+        folder = catalog.find_album_dir_filesystem(album)
+        release_year = catalog.album_year(album)
         if (
             folder is None
             or not release_year
-            or str(_dir_year(folder.name) or "") != str(release_year)
+            or str(catalog._dir_year(folder.name) or "") != str(release_year)
         ):
             return False
-        existing, _ = find_existing_tracks(album, album_dir=folder)
+        existing, _ = catalog.find_existing_tracks(album, album_dir=folder)
         wanted = (album.get("tracks") or {}).get("items") or []
-        return bool(existing and wanted) and not compute_missing(
+        return bool(existing and wanted) and not catalog.compute_missing(
             wanted, existing)[0]
     except Exception:
         return False
@@ -2927,7 +2870,6 @@ def _start_new_release_check(credentials):
         existing = _existing_new_release_check()
         if existing is not None:
             return existing
-        from qobuz_librarian.web import flows
         job = job_mgr.Job(title="New-release check")
         job.execute_kind = "new_releases"
 
@@ -2967,7 +2909,6 @@ def _maybe_auto_check_new_releases():
     # Qobuz is rejecting; it would just fail on the first call every load.
     if not _qobuz_ready():
         return
-    from qobuz_librarian.library import new_releases
     # Only after a full library scan has established the baseline; otherwise the
     # check would crawl every artist just to record a starting point and surface
     # nothing. A completed library scan seeds it (flows.scan_library).
@@ -2976,7 +2917,6 @@ def _maybe_auto_check_new_releases():
     # And never ahead of an interrupted library scan waiting to resume: finishing
     # that takes priority (it's what the user's resume needs the scan lane for),
     # and a delta check can wait until the library is whole again.
-    from qobuz_librarian.library import scan_checkpoint
     if scan_checkpoint.pending() is not None:
         return
     # Avoid a network probe until the interval says a run is due. This first
@@ -3213,8 +3153,7 @@ def _library_scan_state():
                 f"{root} is not a folder. Choose the location that contains your artist folders."
             ),
         }
-    from qobuz_librarian.library.scanner import list_library_artists
-    artists = list_library_artists()
+    artists = scanner.list_library_artists()
     if not artists:
         return {
             "ready": False,
@@ -3228,8 +3167,6 @@ def _library_scan_state():
 
 def _truthful_library_generation():
     """Show an interrupted review save before startup recovery can run."""
-    from qobuz_librarian.library import generation_state
-
     state = generation_state.load()
     if not generation_state.library_publication_incomplete(state):
         return state
@@ -3259,7 +3196,6 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
         existing = _active_library_scan()
         if existing is not None:
             return existing
-        from qobuz_librarian.web import flows
         title = "Gap Fill scan" if partial_only else "Library scan"
         job = job_mgr.Job(title=title)
         job.execute_kind = "library"
@@ -3299,7 +3235,6 @@ def _fold_into_parked_library_review(job):
             parked = other
     if parked is None:
         return
-    from qobuz_librarian.web import flows, review_badges
     with job._lock:
         cands = list(job.candidates)
     folded = flows.fold_new_candidates(
@@ -3375,7 +3310,6 @@ def _maybe_resume_library_scan():
         return
     if not _qobuz_ready():
         return
-    from qobuz_librarian.library import generation_state, scan_checkpoint
     if generation_state.baseline_complete():
         return
     try:
@@ -3403,7 +3337,6 @@ def _maybe_resume_library_scan():
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, q: str = "", kind: str = "artist",
                     artist_id: str = "", artist_name: str = ""):
-    from qobuz_librarian import config as _cfg
     active_jobs = [j for j in job_mgr.registry.pending_and_running()
                    if j.status.value in ('running', 'scanning')]
 
@@ -3411,13 +3344,11 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     # the fetch log, the creds file, the lyric-retry file, and a staging
     # iterdir().
     def _gather_disk_state():
-        from qobuz_librarian.integrations.lyrics import load_lyric_retry
-        from qobuz_librarian.library import generation_state, new_releases, scan_checkpoint
         # These read state files and may submit a background job, so they run
         # here (off the event loop) alongside the other disk work.
         _maybe_resume_library_scan()
         _maybe_auto_check_new_releases()
-        library_scan_state = _library_scan_state()
+        scan_state = _library_scan_state()
         library_generation = _truthful_library_generation()
         return {
             "new_release_review": _new_release_review(),
@@ -3430,7 +3361,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # seeded the new-release baseline.
             "baseline_complete": generation_state.baseline_complete(),
             "setup_scanning": _active_library_scan() is not None,
-            "library_scan_state": library_scan_state,
+            "library_scan_state": scan_state,
             # An interrupted gap-scan, surfaced on the dashboard the way
             # /library already does, gated on no scan running.
             "library_resume": (
@@ -3456,7 +3387,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             "creds_ok": bool(_read_creds().get("auth_token")),
             "qobuz_ready": _qobuz_ready(),
             "lyric_retry_count":
-                len(load_lyric_retry()) if _cfg.LYRIC_RETRY_FILE.exists() else 0,
+                len(lyrics_mode.load_lyric_retry()) if cfg.LYRIC_RETRY_FILE.exists() else 0,
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
             # A store that couldn't be read was kept aside and the run fell back
             # to defaults, and only the container log said so, which nobody reads.
@@ -3501,7 +3432,6 @@ async def lyric_retry(request: Request):
     existing = _active_scan("lyrics", statuses=("pending", "running"))
     if existing is not None:
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
-    from qobuz_librarian.web import flows
     job = job_mgr.Job(title="Lyric retry")
     job.execute_kind = "lyrics"
     if job_mgr.submit(job, lambda j: flows.run_lyric_retry(j)) is None:
@@ -3538,7 +3468,6 @@ def _qobuz_quality_short_label(primary: dict | None,
     bits, rate = _qobuz_quality_bits_rate(primary, fallback)
     if not bits or not rate:
         return ""
-    from qobuz_librarian.quality.tiers import format_quality
     return format_quality(bits, rate)
 
 
@@ -3562,22 +3491,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     if query:
         # Imported before the try so the except clauses below can always name
         # them, even if a failure happens before the request reaches the API.
-        from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
         try:
             token = _get_token()
-            from qobuz_librarian.api.search import (
-                get_album,
-                get_artist_albums,
-                get_track,
-                search_albums,
-                search_artists,
-                search_tracks,
-            )
-            from qobuz_librarian.cli import parse_qobuz_url
-            from qobuz_librarian.library.catalog import (
-                album_year,
-                find_album_dir_filesystem,
-            )
 
             # If the user pasted a Qobuz URL, the placeholder says we
             # handle it, so actually do so by fetching the album directly
@@ -3590,10 +3505,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                                      or netloc.endswith(".qobuz.com")))
             except ValueError:
                 is_qobuz_url = False
-            parsed = parse_qobuz_url(query) if is_qobuz_url else None
+            parsed = cli.parse_qobuz_url(query) if is_qobuz_url else None
             raw = []
             loop = asyncio.get_running_loop()
-            from qobuz_librarian.api.client import call_within
             if parsed and parsed[0] == "album" and kind == "track":
                 # An album URL only resolves in Album mode; in Track mode it
                 # would fetch the album and then be dropped as not-a-track,
@@ -3606,8 +3520,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 try:
                     raw = [await asyncio.wait_for(
                         loop.run_in_executor(
-                            None, lambda: call_within(
-                                cfg.WEB_FETCH_TIMEOUT, get_album, parsed[1], token)
+                            None, lambda: api_client.call_within(
+                                cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, parsed[1], token)
                         ),
                         timeout=cfg.WEB_FETCH_TIMEOUT,
                     )]
@@ -3618,7 +3532,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except QobuzError:
                     error = "Couldn't fetch that album. Check the URL."
                 except Exception:
-                    import logging
                     logging.getLogger("qobuz_librarian").exception(
                         "album fetch failed for %r", query)
                     error = "Couldn't fetch that album. Check the URL."
@@ -3627,8 +3540,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 # the track-results loop below renders it for a one-track download.
                 try:
                     _t = await asyncio.wait_for(
-                        loop.run_in_executor(None, lambda: call_within(
-                            cfg.WEB_FETCH_TIMEOUT, get_track, parsed[1], token)),
+                        loop.run_in_executor(None, lambda: api_client.call_within(
+                            cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_track, parsed[1], token)),
                         timeout=cfg.WEB_FETCH_TIMEOUT)
                     raw = [_t] if _t else []
                     if not raw:
@@ -3664,9 +3577,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     raw, artist_total = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda: call_within(
+                            lambda: api_client.call_within(
                                 cfg.WEB_FETCH_TIMEOUT,
-                                get_artist_albums,
+                                qobuz_search.get_artist_albums,
                                 artist_id,
                                 token,
                                 limit=cfg.ARTIST_CATALOG_LIMIT,
@@ -3687,9 +3600,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     artist_raw = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda: call_within(
+                            lambda: api_client.call_within(
                                 cfg.WEB_FETCH_TIMEOUT,
-                                search_artists,
+                                qobuz_search.search_artists,
                                 query,
                                 token,
                                 limit=cfg.ARTIST_LOOKUP_LIMIT,
@@ -3713,12 +3626,12 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."
             else:
-                _search_fn = search_tracks if kind == "track" else search_albums
+                _search_fn = qobuz_search.search_tracks if kind == "track" else qobuz_search.search_albums
                 try:
                     raw = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda: call_within(cfg.WEB_FETCH_TIMEOUT, _search_fn,
+                            lambda: api_client.call_within(cfg.WEB_FETCH_TIMEOUT, _search_fn,
                                                 query, token, limit=cfg.SEARCH_LIMIT),
                         ),
                         timeout=cfg.WEB_FETCH_TIMEOUT,
@@ -3744,7 +3657,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "version":     t.get("version") or alb.get("version") or "",
                     "artist":      (alb.get("artist") or {}).get("name") or _perf or "?",
                     "album_title": alb.get("title") or "?",
-                    "year":        album_year(alb) or "?",
+                    "year":        catalog.album_year(alb) or "?",
                     "track_n":     t.get("track_number") or "?",
                     "total":       alb.get("tracks_count") or "?",
                     "quality":     _qobuz_quality_short_label(t, alb),
@@ -3763,11 +3676,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
 
             if _track_raws:
                 def _annotate_owned_tracks():
-                    from qobuz_librarian.library.catalog import (
-                        compute_missing,
-                        find_existing_tracks,
-                    )
-
                     albums = {}
                     for res, track in zip(results, _track_raws):
                         album = track.get("album") or {}
@@ -3778,12 +3686,12 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
 
                     for album_id, group in albums.items():
                         try:
-                            folder = find_album_dir_filesystem(group["album"])
+                            folder = catalog.find_album_dir_filesystem(group["album"])
                             if folder is None:
                                 continue
-                            exact_album = call_within(
+                            exact_album = api_client.call_within(
                                 cfg.WEB_FETCH_TIMEOUT,
-                                get_album,
+                                qobuz_search.get_album,
                                 album_id,
                                 token,
                             )
@@ -3793,11 +3701,11 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                             )
                             if not qobuz_tracks:
                                 continue
-                            existing, _ = find_existing_tracks(
+                            existing, _ = catalog.find_existing_tracks(
                                 exact_album, album_dir=folder)
                             if not existing:
                                 continue
-                            _missing, present = compute_missing(
+                            _missing, present = catalog.compute_missing(
                                 qobuz_tracks, existing)
                             present_ids = {
                                 str(track.get("id"))
@@ -3814,7 +3722,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         loop.run_in_executor(None, _annotate_owned_tracks),
                         timeout=_own_timeout)
                 except asyncio.TimeoutError:
-                    import logging
                     logging.getLogger("qobuz_librarian").warning(
                         "track ownership annotation timed out (%ss) for %r; "
                         "results shown without In-library marks",
@@ -3822,7 +3729,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         query,
                     )
                 except Exception:
-                    import logging
                     logging.getLogger("qobuz_librarian").exception(
                         "track ownership annotation failed for %r", query)
             _album_raws = []
@@ -3837,7 +3743,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "id":      a.get("id"),
                     "title":   a.get("title") or "?",
                     "artist":  (a.get("artist") or {}).get("name") or "?",
-                    "year":    album_year(a) or "?",
+                    "year":    catalog.album_year(a) or "?",
                     "tracks":  a.get("tracks_count") or "?",
                     "quality": _qual,
                     "hires":   _bd >= 24,
@@ -3862,19 +3768,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     # a part-finished album reading "In library" loses both its
                     # checkbox and its download button, which is the gap-fill
                     # case this app exists for.
-                    from qobuz_librarian.library.catalog import (
-                        _dir_year,
-                        compute_missing,
-                        find_existing_tracks,
-                    )
                     for res, alb in zip(results, _album_raws):
                         try:
-                            folder = find_album_dir_filesystem(alb)
+                            folder = catalog.find_album_dir_filesystem(alb)
                             if folder is None:
                                 continue
-                            exact_album = call_within(
+                            exact_album = api_client.call_within(
                                 cfg.WEB_FETCH_TIMEOUT,
-                                get_album,
+                                qobuz_search.get_album,
                                 alb["id"],
                                 token,
                             )
@@ -3884,13 +3785,13 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                             )
                             if not qobuz_tracks:
                                 continue
-                            existing, _ = find_existing_tracks(
+                            existing, _ = catalog.find_existing_tracks(
                                 exact_album, album_dir=folder)
                             if not existing:
                                 continue
-                            missing, present = compute_missing(
+                            missing, present = catalog.compute_missing(
                                 qobuz_tracks, existing)
-                            res["disk_year"] = _dir_year(folder.name)
+                            res["disk_year"] = catalog._dir_year(folder.name)
                             if missing:
                                 res["partial"] = True
                                 res["have_tracks"] = len(present)
@@ -3908,12 +3809,10 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         loop.run_in_executor(None, _annotate_owned),
                         timeout=_own_timeout)
                 except asyncio.TimeoutError:
-                    import logging
                     logging.getLogger("qobuz_librarian").warning(
                         "ownership annotation timed out (%ss) for %r; results "
                         "shown without In-library marks", _own_timeout, query)
                 except Exception:
-                    import logging
                     logging.getLogger("qobuz_librarian").exception(
                         "ownership annotation failed for %r", query)
 
@@ -3922,16 +3821,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             # with the alternates tucked under the main row, instead of the
             # same album scattering down the page.
             if _album_raws:
-                from qobuz_librarian.library.hidden import album_fingerprint
-                from qobuz_librarian.library.tags import strip_leading_article
                 by_key = {}
                 for res, alb in zip(results, _album_raws):
                     ver = alb.get("version") or ""
                     identity_title = res["title"]
                     if ver:
                         identity_title += f" ({ver})"
-                    fingerprint = album_fingerprint(
-                        res["artist"], strip_leading_article(identity_title)
+                    fingerprint = hidden_mod.album_fingerprint(
+                        res["artist"], tags.strip_leading_article(identity_title)
                     )
                     # Unknown identity must fail open into its own result.
                     # Sharing an empty fuzzy key hides unrelated releases.
@@ -4013,7 +3910,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         except QobuzError:
             error = "Search failed. Try again."
         except Exception:
-            import logging
             logging.getLogger("qobuz_librarian").exception(
                 "search failed for %r", query)
             error = "Search failed. Try again."
@@ -4068,9 +3964,6 @@ def _summarize_download_result(r):
     Picks a phrase per result kind for the documented non-success branches,
     or builds the "N tracks downloaded" tally for an actual rip. Returns
     "" if there's nothing useful to say (process_album returned None / {})."""
-    from qobuz_librarian.download_result import incomplete_track_counts
-    from qobuz_librarian.ui_cli.errors import plural
-
     if not r:
         return ""
     kind = r.get("result")
@@ -4119,7 +4012,7 @@ def _summarize_download_result(r):
                 parts.append("post-download downsample stopped early")
             if r.get("consolidation_interrupted"):
                 parts.append("duplicate cleanup stopped early")
-            retryable, lossy_only = incomplete_track_counts(r)
+            retryable, lossy_only = download_result.incomplete_track_counts(r)
             if r.get("siblings_preserved") and not (retryable or lossy_only):
                 parts.append("sibling cleanup needs review")
         return ", ".join(parts) + "."
@@ -4148,14 +4041,8 @@ def _summarize_download_result(r):
 
 def _mark_download_attention(job, result):
     """Mark a job failed when download details still need attention."""
-    from qobuz_librarian.download_result import (
-        download_attention_kind,
-        incomplete_track_counts,
-    )
-    from qobuz_librarian.ui_cli.errors import plural
-
-    retryable, lossy_only = incomplete_track_counts(result)
-    kind = download_attention_kind(result)
+    retryable, lossy_only = download_result.incomplete_track_counts(result)
+    kind = download_result.download_attention_kind(result)
     job.status = job_mgr.JobStatus.FAILED
     if kind == "backup":
         job.attention = "backup"
@@ -4254,30 +4141,10 @@ def _make_download_run(
     treat_as_new downloads the album as a brand-new one even if a different
     edition is already owned: the "get this edition too" path.
     """
-    from qobuz_librarian.api.auth import token_credential_generation
 
-    expected_generation = token_credential_generation(token)
+    expected_generation = api_auth.token_credential_generation(token)
 
     def run(j):
-        from qobuz_librarian.download_result import (
-            download_attention_kind,
-            incomplete_track_counts,
-        )
-        from qobuz_librarian.library.catalog import (
-            compute_missing,
-            find_existing_tracks,
-            is_lossless_album,
-        )
-        from qobuz_librarian.modes.process import process_album
-        from qobuz_librarian.queue.builder import _build_queue_item
-        from qobuz_librarian.queue.durable_album import plan_durable_new_album
-        from qobuz_librarian.queue.executor import _execute_download_queue
-        from qobuz_librarian.ui_cli.errors import plural
-        from qobuz_librarian.web.flows import (
-            _note_staging_wait,
-            _refresh_after_local_album_change,
-            build_args,
-        )
         active = None
         active_token = token
         if getattr(token, "credential_generation", ""):
@@ -4286,8 +4153,8 @@ def _make_download_run(
                 expected_generation=expected_generation,
             )
             active_token = active.token
-        args = build_args()
-        _note_staging_wait(j, "Downloading", 0, 1)
+        args = flows.build_args()
+        flows._note_staging_wait(j, "Downloading", 0, 1)
         durable_failure = False
         durable_completion_settled = False
         with job_mgr.staging_lock():
@@ -4300,8 +4167,6 @@ def _make_download_run(
                     )
             durable_item = None
             if durable_planned is not None:
-                from qobuz_librarian.queue import journal as queue_state
-
                 if treat_as_new:
                     raise ValueError(
                         "a saved durable retry cannot change edition intent"
@@ -4313,11 +4178,11 @@ def _make_download_run(
                     raise ValueError(
                         "the saved durable retry album changed before execution"
                     )
-            elif not treat_as_new and is_lossless_album(album):
+            elif not treat_as_new and catalog.is_lossless_album(album):
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-                existing, album_dir = find_existing_tracks(album)
-                missing, present = compute_missing(qobuz_tracks, existing)
-                candidate = _build_queue_item(
+                existing, album_dir = catalog.find_existing_tracks(album)
+                missing, present = catalog.compute_missing(qobuz_tracks, existing)
+                candidate = queue_builder._build_queue_item(
                     album=album,
                     album_dir=album_dir,
                     label=(
@@ -4329,15 +4194,15 @@ def _make_download_run(
                     upgrade_only=False,
                     auto_upgrade=False,
                 )
-                if plan_durable_new_album(candidate, args) is not None:
+                if durable_album.plan_durable_new_album(candidate, args) is not None:
                     durable_item = candidate
             if durable_item is None:
-                r = process_album(album, args, allow_force=False,
+                r = process_mode.process_album(album, args, allow_force=False,
                                   already_confirmed=True, token=active_token,
                                   treat_as_new=treat_as_new) or {}
             else:
                 try:
-                    results, drained = _execute_download_queue(
+                    results, drained = queue_executor._execute_download_queue(
                         [durable_item],
                         args,
                         active_token,
@@ -4463,7 +4328,7 @@ def _make_download_run(
                   "lossy_only", "no_tracks", "cancelled"}
         if durable_failure:
             pass
-        elif download_attention_kind(r) == "backup":
+        elif download_result.download_attention_kind(r) == "backup":
             _mark_download_attention(j, r)
         elif r.get("result") == "partial" and r.get("imported"):
             _mark_download_attention(j, r)
@@ -4486,7 +4351,7 @@ def _make_download_run(
         # Claiming/completing the album the normal way graduates it out of the
         # "downloaded single" state, so the rest stops being suppressed in scans.
         if r.get("imported"):
-            _refresh_after_local_album_change(
+            flows._refresh_after_local_album_change(
                 album,
                 r,
                 fallback_artist=(album.get("artist") or {}).get("name"),
@@ -4497,18 +4362,13 @@ def _make_download_run(
             )
             # A parked library review may still offer this album, so drop it
             # there so the stale review can't download it a second time.
-            from qobuz_librarian.web.flows import (
-                _fold_partial_gap_fill,
-                prune_library_review_candidates,
-            )
-            prune_library_review_candidates(album)
-            retryable, _lossy_only = incomplete_track_counts(r)
+            flows.prune_library_review_candidates(album)
+            retryable, _lossy_only = download_result.incomplete_track_counts(r)
             if retryable:
                 # Partial landing: the album is on disk with gaps.
-                _fold_partial_gap_fill(
+                flows._fold_partial_gap_fill(
                     album, (album.get("artist") or {}).get("name") or "",
                     retryable)
-            from qobuz_librarian.library import hidden as hidden_mod
             hidden_mod.unmark_single(
                 (album.get("artist") or {}).get("name") or "?",
                 album.get("title") or "?",
@@ -6387,15 +6247,6 @@ def _persist_single_download_undo(
     destination_single=None,
 ) -> None:
     """Commit a single-track Undo proof before its relocation can be retired."""
-    from qobuz_librarian import run_lock
-    from qobuz_librarian.completion import normalise_album_id
-    from qobuz_librarian.library.post_import_relocation import (
-        PostImportRelocationAttention,
-        acknowledge_post_import_relocation,
-        seal_post_import_relocation_handoff,
-    )
-    from qobuz_librarian.web import job_persistence
-
     operation_key = "_post_import_relocation_operation_id"
     if operation_key not in queue_item:
         with job._lock:
@@ -6438,12 +6289,12 @@ def _persist_single_download_undo(
 
     authority = run_lock.current_lease()
     operation_id = queue_item.get(operation_key)
-    album_id = normalise_album_id(job.album_id)
+    album_id = completion.normalise_album_id(job.album_id)
     planned_album = queue_item.get("album")
-    planned_album_id = normalise_album_id(
+    planned_album_id = completion.normalise_album_id(
         planned_album.get("id") if isinstance(planned_album, dict) else None
     )
-    single_album_id = normalise_album_id(
+    single_album_id = completion.normalise_album_id(
         single_snapshot.get("album_id")
         if isinstance(single_snapshot, dict)
         else None
@@ -6468,7 +6319,7 @@ def _persist_single_download_undo(
         "album_id": album_id,
     }
     try:
-        handoff_hash = seal_post_import_relocation_handoff(
+        handoff_hash = post_import_relocation.seal_post_import_relocation_handoff(
             operation_id,
             consumer=consumer,
             payload=single_snapshot,
@@ -6534,7 +6385,7 @@ def _persist_single_download_undo(
     queue_item["_post_import_relocation_final_proven"] = True
 
     try:
-        acknowledge_post_import_relocation(
+        post_import_relocation.acknowledge_post_import_relocation(
             operation_id,
             handoff_hash,
             authority=authority,
@@ -6550,31 +6401,9 @@ def _persist_single_download_undo(
 def _make_single_track_run(album, track, token):
     """Run a single-track download: download just ``track`` via the per-track
     queue path (the same isolation repair uses, never a whole-album rip)."""
-    from qobuz_librarian.api.auth import token_credential_generation
-
-    expected_generation = token_credential_generation(token)
+    expected_generation = api_auth.token_credential_generation(token)
 
     def run(j):
-        from qobuz_librarian.library import hidden as hidden_mod
-        from qobuz_librarian.library.catalog import (
-            album_year,
-            compute_missing,
-            find_existing_tracks,
-            prompt_and_migrate_multi_artist_folder,
-        )
-        from qobuz_librarian.queue.builder import _build_queue_item
-        from qobuz_librarian.queue.executor import (
-            _advance_import_ownership_after_relocation,
-            _execute_download_queue,
-            _reunite_split_album,
-        )
-        from qobuz_librarian.ui_cli.errors import plural
-        from qobuz_librarian.web import job_persistence
-        from qobuz_librarian.web.flows import (
-            _note_staging_wait,
-            _refresh_after_local_album_change,
-            build_args,
-        )
         active = None
         active_token = token
         if getattr(token, "credential_generation", ""):
@@ -6583,20 +6412,20 @@ def _make_single_track_run(album, track, token):
                 expected_generation=expected_generation,
             )
             active_token = active.token
-        args = build_args()
+        args = flows.build_args()
         artist = (album.get("artist") or {}).get("name") or "?"
         title = album.get("title") or "?"
         t_title = track.get("title") or "?"
         qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-        existing, album_dir = find_existing_tracks(album)
-        missing, _present = compute_missing(qobuz_tracks, existing)
+        existing, album_dir = catalog.find_existing_tracks(album)
+        missing, _present = catalog.compute_missing(qobuz_tracks, existing)
         missing_ids = {str(t.get("id")) for t in missing}
         # Already own this exact track? Don't re-rip it; that just lands a beets
         # ".1.flac" duplicate beside the copy you have, and don't mark anything.
         if str(track.get("id")) not in missing_ids:
             j.summary = f"You already have “{t_title}”. Nothing downloaded."
             return
-        qi = _build_queue_item(
+        qi = queue_builder._build_queue_item(
             album=album, album_dir=album_dir,
             label=f"{artist}, {t_title}  [single]",
             missing=[track], present=existing,
@@ -6605,7 +6434,7 @@ def _make_single_track_run(album, track, token):
         )
         qi["_capture_import_ownership"] = True
         qi["_defer_post_import_relocation_handoff"] = True
-        _note_staging_wait(j, "Downloading", 0, 1)
+        flows._note_staging_wait(j, "Downloading", 0, 1)
         owned_path = None
         source_single = None
         with job_mgr.staging_lock():
@@ -6617,7 +6446,7 @@ def _make_single_track_run(album, track, token):
                         "Qobuz credentials changed before the download began."
                     )
             try:
-                _execute_download_queue([qi], args, active_token)
+                queue_executor._execute_download_queue([qi], args, active_token)
                 landed_dir = qi.get("_resolved_post_dir") or album_dir
                 download_succeeded = (
                     qi.get("n_ok", 0) > 0
@@ -6648,7 +6477,6 @@ def _make_single_track_run(album, track, token):
                         qi.get("_post_import_relocation_pending") is True
                         and owned_path is not None
                     ):
-                        from qobuz_librarian import run_lock
 
                         authority = run_lock.current_lease()
                         if authority is None:
@@ -6661,7 +6489,7 @@ def _make_single_track_run(album, track, token):
                         operation_capture = {}
                         split_ownership_advanced = False
                         try:
-                            migrated = _reunite_split_album(
+                            migrated = queue_executor._reunite_split_album(
                                 qi,
                                 album_dir,
                                 original_landed_dir,
@@ -6676,7 +6504,7 @@ def _make_single_track_run(album, track, token):
                                 not split_ownership_advanced
                                 and getattr(args, "migrate_multi_artist", False)
                             ):
-                                migrated = prompt_and_migrate_multi_artist_folder(
+                                migrated = catalog.prompt_and_migrate_multi_artist_folder(
                                     album,
                                     args,
                                     ownership_move_out=ownership_move,
@@ -6699,7 +6527,7 @@ def _make_single_track_run(album, track, token):
                             landed_dir = migrated
                             qi["_resolved_post_dir"] = landed_dir
                             if not split_ownership_advanced:
-                                _advance_import_ownership_after_relocation(
+                                queue_executor._advance_import_ownership_after_relocation(
                                     qi,
                                     ownership_move,
                                 )
@@ -6741,7 +6569,6 @@ def _make_single_track_run(album, track, token):
                     qi.get("_post_import_relocation_pending") is True
                     or "_post_import_relocation_operation_id" in qi
                 ):
-                    from qobuz_librarian import run_lock
 
                     _refresh_post_import_relocation_recovery(
                         run_lock.current_lease()
@@ -6775,7 +6602,7 @@ def _make_single_track_run(album, track, token):
         marked = bool(cfg.SUPPRESS_SINGLE_TRACK_GAPS and len(missing) > 1)
         if marked:
             try:
-                hidden_mod.mark_single(artist, title, album_year(album),
+                hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
                 j.summary = (f"Got “{t_title}”, filed under {artist} / {title}. "
                              "The rest of the album stays out of scans.")
@@ -6790,7 +6617,7 @@ def _make_single_track_run(album, track, token):
             hidden_mod.unmark_single(
                 artist,
                 title,
-                year=album_year(album),
+                year=catalog.album_year(album),
                 album_id=album.get("id"),
             )
             j.summary = (f"Got “{t_title}”, filed under {artist} / {title}. "
@@ -6802,14 +6629,13 @@ def _make_single_track_run(album, track, token):
             hidden_mod.unmark_single(
                 artist,
                 title,
-                year=album_year(album),
+                year=catalog.album_year(album),
                 album_id=album.get("id"),
             )
             j.summary = (f"Got “{t_title}”; that completed {title}, so it's "
                          "filed as a full album.")
             # Complete means any parked Gap Fill candidate for it is stale.
-            from qobuz_librarian.web.flows import prune_library_review_candidates
-            prune_library_review_candidates(album)
+            flows.prune_library_review_candidates(album)
         with j._lock:
             j.single["marked"] = marked
         if owned_path is None:
@@ -6818,7 +6644,7 @@ def _make_single_track_run(album, track, token):
                 "couldn't be verified."
             )
         job_persistence.persist(j)
-        _refresh_after_local_album_change(
+        flows._refresh_after_local_album_change(
             album,
             {"dir": landed_dir},
             fallback_artist=artist,
@@ -6868,13 +6694,11 @@ async def queue_download(request: Request, album_id: str = Form(""),
             QobuzAccess.DOWNLOAD_ACTION
         )
         token = credentials.token
-        from qobuz_librarian.api.client import call_within
-        from qobuz_librarian.api.search import get_album
         loop = asyncio.get_running_loop()
         album = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: call_within(cfg.WEB_FETCH_TIMEOUT, get_album, album_id, token)),
+                lambda: api_client.call_within(cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)),
             timeout=cfg.WEB_FETCH_TIMEOUT,
         )
         if download_as_new_edition and await loop.run_in_executor(
@@ -6891,25 +6715,20 @@ async def queue_download(request: Request, album_id: str = Form(""),
             # checked whether that track was already on disk before fetching it
             # again. Ask about the one track, not the whole album.
             def _track_already_there():
-                from qobuz_librarian.library.catalog import (
-                    compute_missing,
-                    find_album_dir_filesystem,
-                    find_existing_tracks,
-                )
                 try:
-                    album_dir = find_album_dir_filesystem(album)
+                    album_dir = catalog.find_album_dir_filesystem(album)
                 except Exception:
                     return False
                 if album_dir is None:
                     return False
                 try:
-                    existing_tracks, _ = find_existing_tracks(album, album_dir=album_dir)
+                    existing_tracks, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
                 except Exception:
                     return False
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
                 if not (existing_tracks and qobuz_tracks):
                     return False
-                _missing, present = compute_missing(qobuz_tracks, existing_tracks)
+                _missing, present = catalog.compute_missing(qobuz_tracks, existing_tracks)
                 return any(str(t.get("id") or "") == track_id for t in present)
 
             if await loop.run_in_executor(None, _track_already_there):
@@ -6922,13 +6741,8 @@ async def queue_download(request: Request, album_id: str = Form(""),
 
         if not download_as_new_edition and not track_id:
             def _already_complete():
-                from qobuz_librarian.library.catalog import (
-                    compute_missing,
-                    find_album_dir_filesystem,
-                    find_existing_tracks,
-                )
                 try:
-                    album_dir = find_album_dir_filesystem(album)
+                    album_dir = catalog.find_album_dir_filesystem(album)
                 except Exception:
                     return False
                 if album_dir is None:
@@ -6936,13 +6750,13 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 try:
                     # Already resolved above; pass it through so we don't repeat
                     # the cached-subdir scan + fuzzy fallback for the same album.
-                    existing_tracks, _ = find_existing_tracks(album, album_dir=album_dir)
+                    existing_tracks, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
                 except Exception:
                     existing_tracks = []
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
                 # Only count it complete when nothing's missing.
                 return bool(existing_tracks and qobuz_tracks) and not (
-                    compute_missing(qobuz_tracks, existing_tracks)[0])
+                    catalog.compute_missing(qobuz_tracks, existing_tracks)[0])
 
             # Resolving the album folder walks the (often NAS-mounted) library,
             # so keep it off the event loop; otherwise a large library stalls
@@ -7089,8 +6903,6 @@ def _census_view():
     now = time.time()
     if _census_cache is not None and now - _census_cache[0] < _CENSUS_TTL:
         return _census_cache[1]
-    from qobuz_librarian.library import flac_cache
-    from qobuz_librarian.ui_cli.colors import format_size
     raw = flac_cache.census()
     view = None
     if raw:
@@ -7130,12 +6942,8 @@ def _census_view():
 
 @app.get("/library", response_class=HTMLResponse)
 async def library_page(request: Request, page: int = 1, tab: str = ""):
-    from qobuz_librarian.library import hidden as hidden_mod
-    from qobuz_librarian.library import scan_checkpoint
-    from qobuz_librarian.web import review_badges
     badge_generation = review_badges.ready_generation("library")
     creds_ok = bool(_read_creds().get("auth_token"))
-    from qobuz_librarian.library import generation_state, new_releases
     notice_bits = []
     _skipped = request.query_params.get("skipped", "")
     if _skipped.isdigit() and int(_skipped):
@@ -7217,7 +7025,6 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
         # Finished-state copy: the "Review complete" vs "Review discarded"
         # card keys off why the review retired.
         if ctx["library_baseline_exists"]:
-            from qobuz_librarian.library import library_scan_state
             ctx["library_review_retired_reason"] = (
                 library_scan_state.load().get("review_retired_reason") or "")
     # The census renders whenever the page is calm (no job, or a parked
@@ -7240,7 +7047,6 @@ async def library_refresh_note(request: Request):
     polls this while a refresh runs, so it swaps back to the idle icon when
     the scan ends instead of sitting there forever; the idle icon itself
     never polls."""
-    from qobuz_librarian.library import generation_state, new_releases
     loop = asyncio.get_running_loop()
     def _context():
         library_generation = generation_state.load()
@@ -7292,8 +7098,7 @@ async def library_scan(
         # so it would crawl every artist, surface nothing, and (the old bug) flip
         # the baseline "done", stranding an interrupted library scan's resume.
         # Refuse and point at a library scan instead of running that empty crawl.
-        from qobuz_librarian.library import new_releases as _nr
-        if not _nr.is_baseline_complete():
+        if not new_releases.is_baseline_complete():
             msg = "Run a full library scan first."
             if _is_htmx(request):
                 return HTMLResponse(
@@ -7392,14 +7197,12 @@ async def skip_baseline_setup(request: Request):
     """Dismiss the first-run baseline-scan offer on the dashboard. The scan stays
     available any time from the Library page; this just stops the dashboard from
     offering it on every load."""
-    from qobuz_librarian.library import new_releases
     new_releases.note_auto_scan_attempted()
     return RedirectResponse(url="/", status_code=303)
 
 
 def _hidden_view(request, scope, *, page, restore_action, back_url,
                  restore_all_action=None):
-    from qobuz_librarian.library import hidden as hidden_mod
     groups = hidden_mod.hidden_by_artist(scope)
     total_entries = sum(len(g["albums"]) for g in groups)
 
@@ -7460,7 +7263,6 @@ async def _restore_hidden_all(request, scope, dest, what):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    from qobuz_librarian.library import hidden as hidden_mod
     loop = asyncio.get_running_loop()
     try:
         changed = await loop.run_in_executor(
@@ -7480,7 +7282,6 @@ async def _restore_hidden(request, scope, redirect):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    from qobuz_librarian.library import hidden as hidden_mod
     form = await request.form()
     artists = form.getlist("artist")[:10000]
     fingerprints = form.getlist("fingerprint")[:10000]
@@ -7498,8 +7299,6 @@ async def _restore_hidden(request, scope, redirect):
     if scope == hidden_mod.SCOPE_MISSING and (artists or fingerprints):
         # Upgrade/Downsample re-derive their reviews from saved state at read
         # time, so restore takes effect there on its own.
-        from qobuz_librarian.library import library_scan_state
-        from qobuz_librarian.web import flows
         loop = asyncio.get_running_loop()
         rejoined = await loop.run_in_executor(
             None, lambda: flows.refold_restored_missing(artists, fingerprints))
@@ -7525,7 +7324,6 @@ async def _restore_hidden(request, scope, redirect):
 
 @app.get("/library/hidden", response_class=HTMLResponse)
 async def library_hidden(request: Request):
-    from qobuz_librarian.library import hidden as hidden_mod
     return _hidden_view(request, hidden_mod.SCOPE_MISSING, page="library",
                         restore_action="/library/hidden/restore", back_url="/library",
                         restore_all_action="/library/hidden/restore-all")
@@ -7533,7 +7331,6 @@ async def library_hidden(request: Request):
 
 @app.post("/library/hidden/restore")
 async def library_hidden_restore(request: Request):
-    from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden(request, hidden_mod.SCOPE_MISSING, "/library/hidden")
 
 
@@ -7547,9 +7344,6 @@ async def library_hidden_restore_all(request: Request):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    from qobuz_librarian.library import hidden as hidden_mod
-    from qobuz_librarian.library import library_scan_state
-    from qobuz_librarian.web import flows
     loop = asyncio.get_running_loop()
 
     try:
@@ -7594,8 +7388,6 @@ async def library_bring_back_all(request: Request):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    from qobuz_librarian.library import hidden as hidden_mod
-    from qobuz_librarian.library import library_scan_state
     loop = asyncio.get_running_loop()
 
     def _bring_back():
@@ -7617,7 +7409,6 @@ async def library_bring_back_all(request: Request):
 
 @app.get("/upgrade", response_class=HTMLResponse)
 async def upgrade_page(request: Request):
-    from qobuz_librarian.library import hidden as hidden_mod
     creds_ok = bool(_read_creds().get("auth_token"))
     # Without credentials the page still renders, showing the connect card,
     # bouncing to Search reads as a broken button.
@@ -7635,7 +7426,6 @@ async def upgrade_page(request: Request):
 async def upgrade_hidden(request: Request):
     if not _upgrade_available():
         return _upgrade_unavailable_response()
-    from qobuz_librarian.library import hidden as hidden_mod
     return _hidden_view(request, hidden_mod.SCOPE_UPGRADE, page="upgrade",
                         restore_action="/upgrade/hidden/restore", back_url="/upgrade",
                         restore_all_action="/upgrade/hidden/restore-all")
@@ -7645,7 +7435,6 @@ async def upgrade_hidden(request: Request):
 async def upgrade_hidden_restore(request: Request):
     if not _upgrade_available():
         return _upgrade_unavailable_response()
-    from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden(request, hidden_mod.SCOPE_UPGRADE, "/upgrade/hidden")
 
 
@@ -7653,7 +7442,6 @@ async def upgrade_hidden_restore(request: Request):
 async def upgrade_hidden_restore_all(request: Request):
     if not _upgrade_available():
         return _upgrade_unavailable_response()
-    from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden_all(
         request, hidden_mod.SCOPE_UPGRADE, "/upgrade/hidden",
         "dismissed album")
@@ -7676,8 +7464,6 @@ async def upgrade_review(request: Request):
 
 @app.get("/downsample", response_class=HTMLResponse)
 async def downsample_page(request: Request):
-    from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
-    from qobuz_librarian.library import hidden as hidden_mod
     state = _downsample_state_summary()
     # A fresh scan supersedes the parked review (see _submit_scan_deduped), so
     # the Refresh confirm must say so instead of quietly dropping the user's
@@ -7687,7 +7473,7 @@ async def downsample_page(request: Request):
         for j in job_mgr.registry.awaiting_review())
     return _tr(request, "downsample.html", {
         "page": "downsample",
-        "have_downsample": HAVE_DOWNSAMPLE,
+        "have_downsample": downsample_engine.HAVE_DOWNSAMPLE,
         "creds_ok": bool(_read_creds().get("auth_token")),
         "downsample_state": state,
         "review_parked": review_parked,
@@ -7701,7 +7487,6 @@ async def downsample_page(request: Request):
 
 @app.get("/downsample/hidden", response_class=HTMLResponse)
 async def downsample_hidden(request: Request):
-    from qobuz_librarian.library import hidden as hidden_mod
     return _hidden_view(request, hidden_mod.SCOPE_DOWNSAMPLE, page="downsample",
                         restore_action="/downsample/hidden/restore",
                         back_url="/downsample",
@@ -7710,14 +7495,12 @@ async def downsample_hidden(request: Request):
 
 @app.post("/downsample/hidden/restore")
 async def downsample_hidden_restore(request: Request):
-    from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden(request, hidden_mod.SCOPE_DOWNSAMPLE,
                                  "/downsample/hidden")
 
 
 @app.post("/downsample/hidden/restore-all")
 async def downsample_hidden_restore_all(request: Request):
-    from qobuz_librarian.library import hidden as hidden_mod
     return await _restore_hidden_all(
         request, hidden_mod.SCOPE_DOWNSAMPLE, "/downsample/hidden",
         "album kept hi-res")
@@ -7743,7 +7526,6 @@ async def downsample_scan(request: Request):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    from qobuz_librarian.web import flows
     job = job_mgr.Job(title="Downsample scan")
     job.execute_kind = "downsample"
     job.review_verb = "Downsample"  # the action rewrites files, not a download
@@ -7764,8 +7546,6 @@ async def downsample_scan(request: Request):
 
 @app.get("/repair", response_class=HTMLResponse)
 async def repair_page(request: Request, page: int = 1):
-    from qobuz_librarian.library import scan_checkpoint
-    from qobuz_librarian.web import review_badges
     badge_generation = review_badges.ready_generation("repair")
     creds_ok = bool(_read_creds().get("auth_token"))
     # /repair is the SINGLE authoritative repair surface.
@@ -7830,7 +7610,6 @@ async def repair_scan(request: Request):
         msg = _qobuz_action_error_message(exc, unchanged=True)
         return RedirectResponse(
             url="/repair?error=" + urllib.parse.quote(msg), status_code=303)
-    from qobuz_librarian.web import flows
     job = job_mgr.Job(title="Repair scan")
     job.execute_kind = "repair"
     job.review_verb = "Repair"  # the action refills damaged tracks, not a download
@@ -7859,19 +7638,17 @@ async def repair_history(request: Request):
     """Show what Repair has refilled in place, so the user knows which albums
     to refresh on an offline-sync client that may still serve the old broken
     file. The log itself is append-only on disk (DATA_DIR); this is read-only."""
-    from qobuz_librarian.repair_log import read_repair_log_entries
     # Walks lines on the data volume, so offload to match the dashboard's pattern
     # and keep the event loop free if the file is sizable.
     loop = asyncio.get_running_loop()
     entries = await loop.run_in_executor(
-        None, lambda: read_repair_log_entries(limit=500))
+        None, lambda: repair_log.read_repair_log_entries(limit=500))
     return _tr(request, "repair_history.html",
                {"page": "repair", "entries": entries})
 
 
 @app.get("/lyrics", response_class=HTMLResponse)
 async def lyrics_page(request: Request):
-    from qobuz_librarian.integrations.lyric_fetch import AVAILABLE
     providers = ", ".join(cfg.LYRICS_PROVIDERS) or "Lrclib, NetEase, Musixmatch"
     lyrics_format = (cfg.LYRICS_FORMAT or "embed").lower()
     lyrics_format_label = {
@@ -7895,7 +7672,7 @@ async def lyrics_page(request: Request):
     )
     return _tr(request, "lyrics.html", {
         "page": "lyrics",
-        "have_lyrics": AVAILABLE,
+        "have_lyrics": lyric_fetch.AVAILABLE,
         "creds_ok": bool(_read_creds().get("auth_token")),
         "last_run": _tool_last_run_age("lyrics"),
         # A library-wide lyrics scan in flight, so the page says so instead of
@@ -7928,7 +7705,6 @@ async def lyrics_scan(request: Request):
     existing = _active_scan("lyrics", statuses=("pending", "running"))
     if existing is not None:
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
-    from qobuz_librarian.web import flows
     job = job_mgr.Job(title="Lyrics scan")
     job.execute_kind = "lyrics"
     submitted = job_mgr.submit(
@@ -7941,9 +7717,6 @@ async def lyrics_scan(request: Request):
 
 
 def _migrate_checks(src, dest):
-    import os
-
-    from qobuz_librarian.library.migrate import _existing_ancestor
     checks = []
     for label, path in (("Source folder", src), ("Destination folder", dest)):
         if not path:
@@ -7954,7 +7727,7 @@ def _migrate_checks(src, dest):
         if not p.exists():
             # The migration creates the destination tree, so a not-yet-created
             # dest is fine as long as a writable ancestor exists to land it in.
-            anc = _existing_ancestor(p) if is_dest else None
+            anc = migrate_engine._existing_ancestor(p) if is_dest else None
             if is_dest and anc and os.access(str(anc), os.W_OK):
                 checks.append({"label": label, "ok": True,
                                "detail": f"{p} (will be created under {anc})"})
@@ -7993,7 +7766,6 @@ async def migrate_scan(request: Request):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
-    from qobuz_librarian.library import migrate as engine
     src, dest = cfg.MIGRATE_SRC, cfg.MIGRATE_DEST
     form = await request.form()
     use_acoustid = form.get("acoustid") == "on"
@@ -8002,13 +7774,12 @@ async def migrate_scan(request: Request):
         err = ("Set MIGRATE_SRC and MIGRATE_DEST: the source library and "
                "the destination for the organised copy, then try again.")
     else:
-        err = engine.validate_paths(Path(src), Path(dest), in_place=in_place)
+        err = migrate_engine.validate_paths(Path(src), Path(dest), in_place=in_place)
     if err:
         return _tr(request, "migrate.html", {
             "page": "settings",
             "configured": bool(src and dest), "error": err,
             "migrate_checks": _migrate_checks(src, dest)})
-    from qobuz_librarian.web import flows
     job = job_mgr.Job(title="Library migration")
     job.review_verb = "Move" if in_place else "Copy"
     job.execute_kind = "migration"
@@ -8072,7 +7843,6 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
         # Opening the page is the acknowledgement: the History chip and the
         # nav's warning dot stand down once the user has seen the job.
         attention = job.attention
-        from qobuz_librarian.web import job_persistence
         loop = asyncio.get_running_loop()
         acknowledged = await loop.run_in_executor(
             None,
@@ -8087,7 +7857,6 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
         job.execute_kind == "new_releases"
         and job.status == job_mgr.JobStatus.AWAITING_REVIEW
     ):
-        from qobuz_librarian.library import generation_state, new_releases
 
         output = generation_state.output_state("new_releases")
         current = new_releases.is_baseline_complete()
@@ -8116,7 +7885,6 @@ def _review_context(job, page=1, query="", tab=""):
     Fill, and ``tab`` picks one. With no explicit pick, land on Missing Albums
     unless it's empty and Gap Fill isn't. Other review kinds render untabbed.
     """
-    from qobuz_librarian.ui_cli.colors import format_size
     tab_counts = None
     if job.execute_kind == "library":
         totals = _review_tab_totals(job)
@@ -8131,7 +7899,6 @@ def _review_context(job, page=1, query="", tab=""):
     groups = _review_artist_groups(job, query, tab)
     page_groups, page, n_pages = _paginate_groups(groups, page)
     counts = job.selection_counts()
-    from qobuz_librarian.library import hidden as hidden_mod
     return {
         "review_groups": page_groups,
         "review_page": page,
@@ -8167,8 +7934,6 @@ def _embedded_review_summary(job) -> str:
 
 
 def _review_badge_ack_for(job):
-    from qobuz_librarian.web import review_badges
-
     if (job.execute_kind not in review_badges.SURFACES
             or job.status != job_mgr.JobStatus.AWAITING_REVIEW
             or not job.selection_counts()["total"]):
@@ -8240,7 +8005,6 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
     and durably admits both jobs before publishing either transition. Returns
     the new unpublished parked job, or None when every candidate is being
     used."""
-    from qobuz_librarian.web import flows
     tab_scoped = tab in ("missing", "gaps")
     gap_active = tab == "gaps"
     keep, split = [], []
@@ -8287,8 +8051,7 @@ async def job_approve(request: Request, job_id: str):
     if job.execute_kind == "upgrade" and not _upgrade_available():
         return _upgrade_unavailable_response()
     if job.execute_kind == "downsample":
-        from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
-        if not HAVE_DOWNSAMPLE:
+        if not downsample_engine.HAVE_DOWNSAMPLE:
             return RedirectResponse(url="/downsample", status_code=303)
     # Repair and Library stay on their single surfaces through the executing
     # phase; every other kind (new-release checks included) keeps using the
@@ -8341,7 +8104,6 @@ async def job_approve(request: Request, job_id: str):
     downsample_keep_originals = None
     downsample_choice_to_save = ""
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-        from qobuz_librarian.web import flows
         if tab:
             gap_active = tab == "gaps"
             with job._lock:
@@ -8365,16 +8127,11 @@ async def job_approve(request: Request, job_id: str):
             return RedirectResponse(url=f"{dest}?noselection=1",
                                     status_code=303)
         if job.execute_kind in _PREMISE_REVIEW_KINDS:
-            from qobuz_librarian.library.candidate_premise import (
-                CandidateStale,
-                validate_all,
-            )
-
             def _stale_candidate_ids(candidates):
                 stale = set()
                 for candidate in candidates:
                     try:
-                        validate_all([candidate])
+                        candidate_premise.validate_all([candidate])
                     except CandidateStale:
                         stale.add(candidate.get("cid"))
                 return stale
@@ -8397,8 +8154,6 @@ async def job_approve(request: Request, job_id: str):
         # anything checks that an album is ticked lets a no-op approve change
         # what every future downsample does with your originals.
         if job.execute_kind == "downsample":
-            from qobuz_librarian.web import settings_store
-
             # current() includes a saved value waiting for another lane to
             # finish. Bind that value to this approval below.
             choice = _downsample_originals_choice()
@@ -8457,8 +8212,6 @@ async def job_approve(request: Request, job_id: str):
                 status_code=303,
             )
         if job.execute_kind in _LIBRARY_SURFACE_KINDS:
-            from qobuz_librarian.web import flows
-
             stale_owned_candidate_ids = await loop.run_in_executor(
                 None,
                 lambda: flows.owned_missing_candidate_ids(
@@ -8478,8 +8231,6 @@ async def job_approve(request: Request, job_id: str):
     # form.
     def _split_and_approve():
         nonlocal stale_premise_candidate_ids
-
-        from qobuz_librarian.completion import normalise_album_id
 
         # Atomic recheck right before anything is consumed: the route's
         # opening gate ran before several awaits (form parsing, disk probes),
@@ -8567,7 +8318,7 @@ async def job_approve(request: Request, job_id: str):
                         admission_decisions[key] = False
                         return False
                 if job.execute_kind in ("library", "new_releases"):
-                    album_id = normalise_album_id(
+                    album_id = completion.normalise_album_id(
                         (candidate.get("payload") or {}).get("album_id")
                     )
                     if album_id is None:
@@ -8771,7 +8522,6 @@ _SELECTABLE_KINDS = _TRIAGE_KINDS + ("repair", "migration")
 
 
 def _hide_scope(execute_kind):
-    from qobuz_librarian.library import hidden as hidden_mod
     if execute_kind == "upgrade":
         return hidden_mod.SCOPE_UPGRADE
     if execute_kind == "downsample":
@@ -8802,7 +8552,6 @@ def _review_artist_groups(job, query="", tab=""):
     WHOLE set (artist name or any album title), so the filter spans pages, not
     just the one on screen. ``tab`` narrows a library review to one side of its
     Missing Albums / Gap Fill split. Returns a list of (artist, items) pairs."""
-    from qobuz_librarian.web import flows
     with job._lock:
         cands = list(job.candidates)
     q = (query or "").strip().lower()
@@ -8876,7 +8625,6 @@ def _get_reviewable_job(job_id):
 def _selection_payload(job, *, persist_failed=False):
     """JSON the selection/hide endpoints return so every open tab can refresh
     its counts from the server instead of recounting a partial DOM."""
-    from qobuz_librarian.ui_cli.colors import format_size
     c = job.selection_counts()
     payload = {
         "selected": c["selected"],
@@ -8913,7 +8661,6 @@ def _review_tab_totals(job):
     Albums / Gap Fill tabs, ignoring the page filter so the tab labels stay
     truthful. Selected counts feed the tab-scoped bulk bar: what the user sees
     on the active tab is exactly what Download/Dismiss will act on."""
-    from qobuz_librarian.web import flows
     gaps = gaps_sel = missing_sel = 0
     with job._lock:
         total = len(job.candidates)
@@ -8997,7 +8744,6 @@ async def job_select_all(request: Request, job_id: str):
     tab_scoped = (job.execute_kind == "library" and tab in ("missing", "gaps"))
     if (scope == "artist" or (scope == "page" and page_artists)
             or (cids is None and (tab_scoped or q))):
-        from qobuz_librarian.web import flows
         gap_active = tab == "gaps"
         with job._lock:
             cids = [c["cid"] for c in job.candidates
@@ -9018,7 +8764,6 @@ async def job_select_all(request: Request, job_id: str):
     if changed:
         # Unlike a single tap, a bulk choice is one infrequent operation whose
         # success needs to mean its complete result is durable.
-        from qobuz_librarian.web import job_persistence
         loop = asyncio.get_running_loop()
         saved = await loop.run_in_executor(
             None, lambda: job_persistence.persist(job))
@@ -9066,7 +8811,6 @@ async def job_hide(request: Request, job_id: str):
         return HTMLResponse("", status_code=404)
     if (job.execute_kind in _TRIAGE_KINDS and job.status in (
             job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)):
-        from qobuz_librarian.web import flows
         form = await request.form()
         artist = (form.get("artist") or "").strip()
         # A library review split into Missing Albums / Gap Fill tabs scopes the
@@ -9135,13 +8879,11 @@ async def job_hide(request: Request, job_id: str):
         if n:
             # Carry the fresh authoritative counts so the page updates the
             # summary/selected/reclaimable without recounting a partial DOM.
-            import json as _json
 
-            from qobuz_librarian.library import hidden as hidden_mod
             counts = _selection_payload(job)
             counts["hidden_total"] = hidden_mod.count(
                 _hide_scope(job.execute_kind))
-            resp.headers["HX-Trigger"] = _json.dumps(
+            resp.headers["HX-Trigger"] = json.dumps(
                 {"qlHidden": {"n": n, "counts": counts}})
         return resp
     return HTMLResponse("")
@@ -9158,7 +8900,6 @@ async def job_dismiss_rest(request: Request, job_id: str):
             job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)):
         return JSONResponse({"error": "not reviewable"}, status_code=404)
 
-    from qobuz_librarian.web import flows
     scope = _hide_scope(job.execute_kind)
     # Tab scoping: "Dismiss unselected" on a library review only drops the
     # active tab's unselected candidates.
@@ -9241,7 +8982,6 @@ async def job_dismiss_rest(request: Request, job_id: str):
         )
     if hidden_count:
         job.notify_review_changed(_review_origin(request))
-    from qobuz_librarian.library import hidden as hidden_mod
     payload = _selection_payload(job)
     payload["hidden"] = hidden_count
     payload["hidden_total"] = hidden_mod.count(scope)
@@ -9255,7 +8995,6 @@ async def job_dismiss_rest(request: Request, job_id: str):
 @app.post("/jobs/{job_id}/acknowledge-recovery")
 async def job_acknowledge_recovery(request: Request, job_id: str):
     """Retire exact Repair recovery records whose folders are confirmed gone."""
-    from qobuz_librarian.web import job_persistence
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return RedirectResponse(
@@ -9434,9 +9173,6 @@ async def job_retry(request: Request, job_id: str):
         recovery_status == "attention_required"
         and _durable_recovery_matches_job(job)
     ):
-        from qobuz_librarian.queue.startup_recovery import (
-            BlockedItemSettlementAction,
-        )
 
         with _CREDENTIAL_LOCK:
             if not _credential_generation_is_active(credentials.generation):
@@ -9513,16 +9249,13 @@ async def job_retry(request: Request, job_id: str):
         token = credentials.token
         album = None
         if not durable_resume:
-            from qobuz_librarian.api.client import call_within
-            from qobuz_librarian.api.search import get_album
-
             loop = asyncio.get_running_loop()
             album = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: call_within(
+                    lambda: api_client.call_within(
                         cfg.WEB_FETCH_TIMEOUT,
-                        get_album,
+                        qobuz_search.get_album,
                         album_id,
                         token,
                     ),
@@ -9832,10 +9565,6 @@ async def job_undo(request: Request, job_id: str):
             url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
 
     def _refresh_after_undo():
-        import logging
-
-        from qobuz_librarian.web import flows
-
         artist = info.get("artist") or ""
         album = {
             "title": info.get("album") or "",
@@ -9861,7 +9590,6 @@ async def job_undo(request: Request, job_id: str):
         """Return only after the exact suppression mark is durably absent."""
         if not info.get("marked"):
             return True
-        from qobuz_librarian.library import hidden as hidden_mod
         try:
             hidden_mod.unmark_single(
                 info.get("artist") or "",
@@ -9881,12 +9609,8 @@ async def job_undo(request: Request, job_id: str):
             return False
 
     def _reverse():
-        from pathlib import Path
-
-        from qobuz_librarian.integrations.beets import forget_beets_entries
-        from qobuz_librarian.web import job_persistence
         if cleanup_retry:
-            catalog_result = forget_beets_entries(
+            catalog_result = beets_mod.forget_beets_entries(
                 [Path(catalog_cleanup["path"])]
             )
             undo_outcome["single_mark_complete"] = (
@@ -9920,7 +9644,7 @@ async def job_undo(request: Request, job_id: str):
         )
         catalog_result = None
         if removed is not None:
-            catalog_result = forget_beets_entries([removed])
+            catalog_result = beets_mod.forget_beets_entries([removed])
             undo_outcome["single_mark_complete"] = (
                 _clear_deliberate_single_mark()
             )
@@ -10014,10 +9738,9 @@ async def job_undo(request: Request, job_id: str):
         else:
             # If the whole recorded directory is gone, clearing the single
             # mark cannot delete anything.
-            from pathlib import Path as _Path
             dir_gone = (
                 info.get("owned_root") is None
-                and not _Path(info["dir"]).exists()
+                and not Path(info["dir"]).exists()
             )
             if dir_gone:
                 single_mark_complete = await loop.run_in_executor(
@@ -10062,7 +9785,6 @@ async def job_undo(request: Request, job_id: str):
         # Persist while the direct-operation registration still holds the web
         # run lock; a restart must not resurrect an Undo that already removed a
         # file or cleared its single mark.
-        from qobuz_librarian.web import job_persistence
         saved = await loop.run_in_executor(
             None, lambda: job_persistence.persist(job)
         )
@@ -10179,7 +9901,6 @@ async def queue_history(
     the record outlives the in-memory cap (which only the Queue/SSE views use).
     ``p`` walks the downloads table, ``jp`` the job cards above it, and each
     pager's links carry the other's page."""
-    from qobuz_librarian.web import job_persistence
     p = max(1, p)
     jp = max(1, jp)
 
@@ -10249,7 +9970,6 @@ async def queue_history(
 async def queue_clear(request: Request):
     """Clear the History: drop finished/canceled/failed jobs from the registry
     and the full on-disk archive. In-flight jobs are untouched."""
-    from qobuz_librarian.web import job_persistence
     with _STARTUP_RECOVERY_LOCK:
         if _startup_recovery_status_value() != "clear":
             return _durable_recovery_response(
@@ -10308,9 +10028,6 @@ async def queue_cancel_pending():
 
 def _diagnostics():
     """Read-only health checks surfaced on the Settings page."""
-    import os
-    import shutil as _sh
-
     checks = []
 
     def _dir_check(label, path, *, want_writable):
@@ -10354,7 +10071,7 @@ def _diagnostics():
                        "detail": f"{beets_db.parent} does not exist"})
 
     for binary in ("rip", "ffmpeg", "flac"):
-        found = _sh.which(binary)
+        found = shutil.which(binary)
         checks.append({"label": f"{binary} binary",
                        "ok": bool(found),
                        "detail": found or f"{binary} not on PATH. "
@@ -10386,8 +10103,7 @@ def _diagnostics():
     # Backups whose original is still missing the tracks they hold: orphaned
     # by a hard kill that skipped the restore/delete.
     try:
-        from qobuz_librarian.library.backup import find_only_copy_backups
-        orphans = find_only_copy_backups()
+        orphans = backup_mod.find_only_copy_backups()
     except Exception:
         orphans = []
     interrupted_disposals = [
@@ -10458,13 +10174,10 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        unverified=False, error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
                        quality_note=False):
-    from qobuz_librarian.ui_cli.colors import format_size
-    from qobuz_librarian.web import settings_store
     creds = _read_creds()
     values = settings_store.current()
     # If credentials come from environment or a secret-file declaration,
     # anything saved via the form lacks authority, so let the user know.
-    import os
     creds_from_env = _qobuz_token_is_env_owned()
     cli_only_env = os.environ.get("QL_CLI_ONLY", "").strip().lower() in (
         "1", "true", "yes", "on")
@@ -10554,9 +10267,7 @@ def _streamrip_has_userid() -> bool:
     actually authenticate a download. A token-only env (QOBUZ_USER_AUTH_TOKEN set,
     QOBUZ_USER_ID unset) has none until the id is set or creds are saved, even
     though the app's own Qobuz API calls work from the token alone."""
-    from qobuz_librarian.api.auth import read_qobuz_credentials
-
-    return read_qobuz_credentials().downloader_ready
+    return api_auth.read_qobuz_credentials().downloader_ready
 
 
 def _qobuz_token_is_env_owned() -> bool:
@@ -10620,7 +10331,6 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
     # Check the token with Qobuz *before* writing it.
     verdict = AuthOutcome.TEMPORARY
     if new_token:
-        from qobuz_librarian.api.client import call_within
         probe = credentials_from_values(
             new_uid,
             new_token,
@@ -10629,7 +10339,7 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
         try:
             verdict = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
+                    None, lambda: api_client.call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
                                               _classify_token, probe.token)),
                 timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
             )
@@ -10702,7 +10412,6 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
 
 @app.post("/settings/behavior", response_class=HTMLResponse)
 async def save_behavior(request: Request):
-    from qobuz_librarian.web import settings_store
     form = await request.form()
     def _posted_bool(key):
         return form.get(key, "").strip().lower() not in (
@@ -10738,7 +10447,6 @@ async def save_behavior(request: Request):
         str(effective_after.get("STREAMRIP_QUALITY", "")),
         bool(effective_after.get("PREFER_HIRES", False)),
     ):
-        from qobuz_librarian.quality import upgrade_state
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, upgrade_state.load)
         quality_note = bool((state or {}).get("candidates"))
@@ -10771,7 +10479,6 @@ async def set_mode(request: Request, target: str = Form("")):
     """
     global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _CLI_MODE, _creds_cache, \
         _LOCK_UNENFORCEABLE
-    from qobuz_librarian import run_lock
     want = (target or "").strip().lower()
     if want == "cli":
         # Flip to CLI mode first so a /download or scan POST landing during
@@ -10899,11 +10606,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'</div>'
         )
     try:
-        from qobuz_librarian.library.backup import (
-            backup_keep_markers_present,
-            find_only_copy_backups,
-        )
-        orphans = find_only_copy_backups()
+        orphans = backup_mod.find_only_copy_backups()
     except Exception:
         orphans = []
     tok = html.escape(request.state.csrf_token)
@@ -10939,7 +10642,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             )
             continue
         try:
-            pinned = backup_keep_markers_present(path)
+            pinned = backup_mod.backup_keep_markers_present(path)
         except OSError:
             pinned = False
         reason = (
@@ -10972,8 +10675,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'</div></div></div>'
         )
     try:
-        from qobuz_librarian.library.backup import list_undo_copies
-        undo = list_undo_copies()
+        undo = backup_mod.list_undo_copies()
     except Exception:
         undo = []
     for path, origin in undo:
@@ -11007,11 +10709,6 @@ async def api_diagnostics(request: Request):
 
 
 def _restore_backup_sync(request: Request, backup: str) -> str:
-    from qobuz_librarian.library.backup import (
-        load_backup_result,
-        restore_gap_fill_backup,
-        restore_upgrade_backup,
-    )
     name = (backup or "").strip()
     base = Path(str(cfg.UPGRADE_BACKUP_DIR))
     target = base / name
@@ -11034,7 +10731,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                                 "right now. Try again once it finishes.")
                 + _diagnostics_fragment(request))
     try:
-        carried = load_backup_result(target)
+        carried = backup_mod.load_backup_result(target)
         receipt = carried.receipt if carried is not None else None
         try:
             origin = Path(receipt["origin"])
@@ -11056,27 +10753,24 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
         elif kind in {"gap-fill", "downsample"}:
             # These backups hold the good originals; the destination may hold a
             # partial or a rewritten copy, so the backup always wins the swap.
-            n = restore_gap_fill_backup(
+            n = backup_mod.restore_gap_fill_backup(
                 carried, origin, keep_larger_dst=False)
             if n and kind == "downsample":
                 # Undoing a downsample has to undo everything it recorded, not
                 # just the files: the album is no longer shrunk, so the cap that
                 # hides it from Upgrade must go, and the saved candidate counts
                 # for that artist are now wrong on both tool pages.
-                from qobuz_librarian.quality.decision import clear_local_album_cap
                 try:
-                    clear_local_album_cap(origin)
+                    quality_decision.clear_local_album_cap(origin)
                 except OSError:
                     logging.getLogger("qobuz_librarian").exception(
                         "couldn't clear the downsample cap for %s", origin)
                 try:
-                    from qobuz_librarian.web import flows
                     flows._refresh_downsample_artist_state(Path(origin).parent)
                 except Exception:
                     logging.getLogger("qobuz_librarian").exception(
                         "downsample state refresh failed after undo")
                 try:
-                    from qobuz_librarian.library import generation_state
                     if generation_state.output_is_current("upgrade"):
                         generation_state.mark_output_status(
                             "upgrade",
@@ -11110,7 +10804,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                     "error", "Nothing could be restored. The backup is "
                     "untouched; check the log.")
         elif kind == "upgrade":
-            ok = restore_upgrade_backup(carried, origin)
+            ok = backup_mod.restore_upgrade_backup(carried, origin)
             if ok and job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _ql_notice_html(
                     "success", f"Restored the album to "
@@ -11147,10 +10841,6 @@ async def restore_backup(request: Request, backup: str = Form("")):
 
 
 def _discard_backup_sync(request: Request, backup: str) -> str:
-    from qobuz_librarian.library.backup import (
-        discard_redundant_backup,
-        load_backup_result,
-    )
     name = (backup or "").strip()
     base = Path(str(cfg.UPGRADE_BACKUP_DIR))
     target = base / name
@@ -11171,7 +10861,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                                 "right now. Try again once it finishes.")
                 + _diagnostics_fragment(request))
     try:
-        carried = load_backup_result(target)
+        carried = backup_mod.load_backup_result(target)
         if carried is None or carried.receipt is None:
             note = _ql_notice_html(
                 "error", "This backup changed or its recovery record is "
@@ -11184,7 +10874,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "error", "The saved recovery records could not be checked, "
                 "so this backup was left untouched. Check that the data "
                 "volume is writable, then try again.")
-        elif discard_redundant_backup(target):
+        elif backup_mod.discard_redundant_backup(target):
             dest = html.escape(str(carried.receipt.get("origin", "")))
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _ql_notice_html(
@@ -11224,8 +10914,6 @@ async def job_stream(job_id: str):
         return JSONResponse({"error": "not found"}, status_code=404)
 
     async def _generator():
-        import logging as _logging
-        import queue as _queue
         # Reconnect quickly so a backgrounded tab's progress bar catches up to
         # the live count soon after it's brought back to the foreground.
         yield "retry: 750\n\n"
@@ -11261,7 +10949,7 @@ async def job_stream(job_id: str):
                         continue  # review-sync nudge, handled by the review stream
                     escaped = line.replace("\n", " ").replace("\r", "")
                     yield f"data: {escaped}\n\n"
-                except _queue.Empty:
+                except queue.Empty:
                     if (job.status in job_mgr.TERMINAL
                             or job.status == job_mgr.JobStatus.AWAITING_REVIEW):
                         yield f"event: done\ndata: {job.status.value}\n\n"
@@ -11273,7 +10961,7 @@ async def job_stream(job_id: str):
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    _logging.getLogger("qobuz_librarian").exception(
+                    logging.getLogger("qobuz_librarian").exception(
                         "SSE stream error for job %s", job.id)
                     break
         finally:
@@ -11298,7 +10986,6 @@ async def job_review_stream(job_id: str):
     job = job_mgr.registry.get(job_id)
 
     async def _generator():
-        import queue as _queue
         yield "retry: 1000\n\n"
         if job is None or job.status != job_mgr.JobStatus.AWAITING_REVIEW:
             yield "event: closed\ndata: inactive\n\n"
@@ -11319,7 +11006,7 @@ async def job_review_stream(job_id: str):
                         yield f"event: review\ndata: {origin or 'changed'}\n\n"
                     # All other fanned-out lines (log/progress/end) are ignored
                     # here; this channel only carries review-sync nudges.
-                except _queue.Empty:
+                except queue.Empty:
                     if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
                         yield f"event: closed\ndata: {job.status.value}\n\n"
                         break
@@ -11439,7 +11126,6 @@ async def jobs_list(status: str = "", limit: int = 50):
     # The registry only holds the newest MAX_FINISHED terminal jobs; the
     # archive keeps far more.
     if want_terminal and len(matching) < cap:
-        from qobuz_librarian.web import job_persistence
         # Filter in SQL: fetching the newest `cap` rows and filtering here
         # would return too few (or none) whenever those rows are mostly other
         # statuses, even though older matching history exists.
@@ -11468,8 +11154,7 @@ async def jobs_list(status: str = "", limit: int = 50):
 
 
 def _get_token():
-    from qobuz_librarian.api.auth import load_qobuz_token
-    return load_qobuz_token()[1]
+    return api_auth.load_qobuz_token()[1]
 
 
 def _get_optional_token():
@@ -11483,8 +11168,7 @@ def _get_optional_token():
 
 def _format_age(ts: float) -> str:
     """Human-readable age of a past timestamp."""
-    import time as _time
-    age = _time.time() - ts
+    age = time.time() - ts
     if age < 120:
         return "just now"
     if age < 3600:
@@ -11500,7 +11184,6 @@ def _when_label(ts) -> tuple[str, str]:
     (matching the "1 hr ago" the tool pages already speak), a short date once
     it isn't. The exact stamp goes in a tooltip for anyone who needs the
     minute."""
-    from datetime import datetime
     if not ts:
         return "", ""
     exact = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
@@ -11526,7 +11209,6 @@ def _last_new_release_check_age() -> str | None:
     """Human-readable age of the last new-release check, or None. Gives the
     dashboard a sibling indicator to the existing 'last library scan' line so
     the user can see how fresh the auto-check's signal is."""
-    from qobuz_librarian.library import new_releases
     ts = new_releases.last_run()
     return _format_age(ts) if ts is not None else None
 
@@ -11535,7 +11217,6 @@ def _tool_last_run_age(execute_kind: str) -> str | None:
     """Age of the last clean run of a tool scan, or None if it's never
     finished, so a tool page can show "Last scan 3 days ago" instead of
     looking identical to a first visit."""
-    from qobuz_librarian.web import job_persistence
     ts = job_persistence.last_finished_at(execute_kind)
     return _format_age(ts) if ts is not None else None
 
@@ -11554,9 +11235,7 @@ def _no_creds_response(request):
 
 
 def _read_creds():
-    from qobuz_librarian.api.auth import read_qobuz_credentials
-
-    credentials = read_qobuz_credentials()
+    credentials = api_auth.read_qobuz_credentials()
     if not credentials.configured:
         return {}
     return {
@@ -11583,8 +11262,7 @@ def _write_creds(user_id, auth_token) -> bool:
 
     Delegates to qobuz_librarian.api.auth.write_streamrip_creds so the web
     Settings path and the env-var sync share one credential writer."""
-    from qobuz_librarian.api.auth import write_streamrip_creds
-    return write_streamrip_creds(user_id, auth_token)
+    return api_auth.write_streamrip_creds(user_id, auth_token)
 
 
 def start():

@@ -21,12 +21,14 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.interrupts import run_sigint_deferred
+from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
 from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
     recovery_owner_matches,
 )
+from qobuz_librarian.ui_cli import errors as errors_mod
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log, vlog
 
@@ -6454,11 +6456,10 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 raise
             except OSError as exc:
                 if exc.errno != errno.EXDEV:
-                    from qobuz_librarian.ui_cli.errors import oserr_hint
                     log.info(fmt(
                         C.RED,
                         f"  ✗  Could not back up {public}: "
-                        f"{exc}.{oserr_hint(exc)}"))
+                        f"{exc}.{errors_mod.oserr_hint(exc)}"))
                     if _named_directory_matches(
                             backup_root_fd, bp.name, source_fd):
                         return _upgrade_recovery_carrier(
@@ -9526,8 +9527,6 @@ def restore_upgrade_backup(
 def _audio_duration_seconds(path: Path):
     """Read media duration without consulting the public-path metadata cache."""
     try:
-        from qobuz_librarian.library import scanner
-
         if not scanner.HAVE_MUTAGEN:
             return None
         parsed = scanner.mutagen.File(os.fspath(path), easy=True)

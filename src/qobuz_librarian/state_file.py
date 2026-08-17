@@ -21,6 +21,8 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from qobuz_librarian import config as cfg
+
 log = logging.getLogger("qobuz_librarian")
 
 
@@ -157,8 +159,6 @@ def preserved_corrupt_stores():
     reverts to defaults instead. Listing the kept copies lets the UI say so,
     and deleting them clears it, since the list is the whole state.
     """
-    from qobuz_librarian import config as cfg
-
     try:
         return sorted(
             entry.name

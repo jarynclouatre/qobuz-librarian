@@ -28,6 +28,16 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
+from qobuz_librarian import config as cfg
+from qobuz_librarian.api.auth import (
+    AuthLost,
+    CredentialChanged,
+    DownloaderNotReady,
+    NoCredsError,
+    QobuzEntitlementError,
+    QobuzError,
+    QobuzUnavailable,
+)
 from qobuz_librarian.completion import (
     CompletionOrigin,
     CompletionOriginKind,
@@ -35,6 +45,8 @@ from qobuz_librarian.completion import (
     normalise_album_id,
 )
 from qobuz_librarian.integrations import rip as rip_module
+from qobuz_librarian.library import library_scan_state, new_releases
+from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
 from qobuz_librarian.web import job_persistence, review_badges
@@ -407,9 +419,7 @@ class Job:
     # Read from config at class-definition time so env overrides on startup
     # take effect (set JOB_LOG_CAP to lower for tight-memory NAS boxes, or
     # higher for long artist walks).
-    from qobuz_librarian import config as _cfg
-    LOG_CAP = _cfg.JOB_LOG_CAP
-    del _cfg
+    LOG_CAP = cfg.JOB_LOG_CAP
 
     _LOG_SLACK = 1000
     _TRUNCATION_MARKER = "[… earlier output truncated to bound memory …]"
@@ -531,9 +541,7 @@ class Job:
     # Cap replay so a late subscriber doesn't get thousands of historical
     # lines blasted at them (and so the bounded queue isn't filled by history
     # alone, which would silently drop live lines).
-    from qobuz_librarian import config as _cfg2
-    REPLAY_TAIL = _cfg2.JOB_LOG_REPLAY_TAIL
-    del _cfg2
+    REPLAY_TAIL = cfg.JOB_LOG_REPLAY_TAIL
 
     def subscribe(self) -> "queue.Queue[str]":
         """Return a queue that replays the recent history then receives
@@ -574,9 +582,7 @@ class Job:
                 pass
 
     # ── candidates ───────────────────────────────────────────────────────────
-    from qobuz_librarian import config as _cfg3
-    CANDIDATE_CAP = _cfg3.JOB_CANDIDATE_CAP
-    del _cfg3
+    CANDIDATE_CAP = cfg.JOB_CANDIDATE_CAP
 
     def add_candidate(self, kind, title, artist="", detail="", payload=None,
                       selected=True):
@@ -1026,13 +1032,6 @@ def _friendly_job_error(exc, fallback: str) -> str:
 
     The raw error text remains in job.log_lines for the expandable log;
     job.error is what the red banner shows."""
-    from qobuz_librarian.api.auth import (
-        AuthLost,
-        NoCredsError,
-        QobuzError,
-        QobuzUnavailable,
-    )
-    from qobuz_librarian.library.candidate_premise import CandidateStale
     if isinstance(exc, NoCredsError):
         return "No Qobuz credentials set. Visit Settings."
     if isinstance(exc, AuthLost):
@@ -1142,7 +1141,6 @@ def _run_post_job_hook(payload: dict) -> None:
     cmd = os.environ.get("POST_JOB_HOOK", "").strip()
     if not cmd:
         return
-    from qobuz_librarian import config as _cfg
     try:
         proc = subprocess.Popen(
             ["sh", "-c", cmd],
@@ -1158,7 +1156,7 @@ def _run_post_job_hook(payload: dict) -> None:
         return
     try:
         proc.communicate(json.dumps(payload).encode("utf-8"),
-                         timeout=_cfg.POST_JOB_HOOK_TIMEOUT)
+                         timeout=cfg.POST_JOB_HOOK_TIMEOUT)
     except subprocess.TimeoutExpired:
         # Kill and reap the whole pipeline, including the shell process.
         try:
@@ -1238,9 +1236,7 @@ def _start_post_job_hook(payload):
 
 def _wait_for_post_job_hooks():
     """Wait at most one hook timeout for notifications already in flight."""
-    from qobuz_librarian import config as _cfg
-
-    deadline = time.monotonic() + float(_cfg.POST_JOB_HOOK_TIMEOUT) + 1.0
+    deadline = time.monotonic() + float(cfg.POST_JOB_HOOK_TIMEOUT) + 1.0
     while True:
         with _post_job_hook_threads_lock:
             threads = tuple(_post_job_hook_threads)
@@ -1515,7 +1511,6 @@ def _library_review_state_guard(job: Job):
     """Serialize Library retirement with saved-state reconstruction."""
     if job.execute_kind != "library":
         return nullcontext()
-    from qobuz_librarian.library import library_scan_state
     return library_scan_state.review_state_lock()
 
 
@@ -1571,7 +1566,6 @@ def finalize_review_if_empty(job: Job) -> Optional[bool]:
         if job.execute_kind == "library":
             # Worked through to empty. Retire the baseline's review so the
             # saved-state reconstruction doesn't rebuild it from stale scan state.
-            from qobuz_librarian.library import library_scan_state
             if not library_scan_state.mark_review_retired(
                     reason="worked_through", generation=review_generation):
                 with job._lock:
@@ -1755,14 +1749,6 @@ def approve(
             # Qobuz went away before ANYTHING landed: put the review back
             # exactly as it was instead of burying the picks in a failed job.
             # a months-old review's ticks would otherwise be gone for good.
-            from qobuz_librarian.api.auth import (
-                AuthLost,
-                CredentialChanged,
-                DownloaderNotReady,
-                QobuzEntitlementError,
-                QobuzUnavailable,
-            )
-            from qobuz_librarian.library.candidate_premise import CandidateStale
             if (j._imported_any or j.cancel_requested or j.recoveries
                     or not isinstance(e, (AuthLost, QobuzUnavailable,
                                           CredentialChanged,
@@ -1822,7 +1808,6 @@ def cancel_review(job: Job) -> Optional[bool]:
         if job.execute_kind == "library":
             # Discarded. Retire the baseline's review so the saved-state
             # reconstruction doesn't immediately rebuild what was discarded.
-            from qobuz_librarian.library import library_scan_state
             if not library_scan_state.mark_review_retired(
                 reason="discarded",
                 generation=review_generation,
@@ -2027,7 +2012,6 @@ def restore_jobs(
                 # Only a pre-baseline scan auto-resumes; after the baseline the
                 # affordance is the dashboard's manual resume notice; don't
                 # promise an auto-resume that never comes.
-                from qobuz_librarian.library import new_releases
                 if new_releases.is_baseline_complete():
                     job.summary = ("Interrupted by a restart. Resume it from "
                                    "the notice on the Search page.")

@@ -33,6 +33,7 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import get_album, search_albums
+from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
     _list_artist_subdirs_cached,
     iter_tree_no_symlinks,
@@ -363,8 +364,6 @@ def track_signatures_for_album_dirs(album_dirs):
     These signatures survive beets moving/renaming files, so callers can find
     the imported folder when Qobuz's artist/title prediction misses.
     """
-    from qobuz_librarian.integrations.rip import _flac_signature
-
     signatures = []
     seen = set()
     for album_dir in album_dirs or []:
@@ -376,7 +375,7 @@ def track_signatures_for_album_dirs(album_dirs):
         except OSError:
             continue
         for fp in flacs:
-            sig = _flac_signature(fp)
+            sig = rip._flac_signature(fp)
             if sig is None or sig in seen:
                 continue
             signatures.append(sig)
@@ -427,8 +426,6 @@ def find_album_dir_by_track_signatures(signatures):
     if not wanted:
         return None
 
-    from qobuz_librarian.integrations.rip import _flac_signature
-
     matches = {}
     for artist_dir in _artist_dirs_for_track_signatures(wanted):
         try:
@@ -436,7 +433,7 @@ def find_album_dir_by_track_signatures(signatures):
         except OSError:
             continue
         for fp in flacs:
-            sig = _flac_signature(fp)
+            sig = rip._flac_signature(fp)
             if sig not in wanted:
                 continue
             album_dir = fp.parent

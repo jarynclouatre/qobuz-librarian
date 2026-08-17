@@ -33,6 +33,7 @@ from qobuz_librarian.integrations.lyric_fetch import (
     _unlink_held_name,
 )
 from qobuz_librarian.integrations.rip import flac_audio_offset
+from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache
 
 
@@ -46,8 +47,7 @@ def _discard_unused_stash(kept_dir, log):
     if kept_dir is None:
         return
     try:
-        from qobuz_librarian.library.backup import discard_redundant_backup
-        discard_redundant_backup(kept_dir)
+        backup_mod.discard_redundant_backup(kept_dir)
     except OSError:
         log("  ⚠ downsample: couldn't clear the unused safety copy; "
             "it will expire on its own.")
@@ -802,8 +802,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # The swap overwrites the only lossless master, so a flush that
         # genuinely fails (ENOSPC/EIO, not a mount that can't fsync) must
         # refuse the replace: the encode may exist only in the page cache.
-        from qobuz_librarian.library.backup import _fsync
-        if not _fsync(temp_path):
+        if not backup_mod._fsync(temp_path):
             return (rel, sr, rate, None,
                     "resampled copy couldn't be flushed to disk; "
                     "left the original untouched")
@@ -837,8 +836,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # valid file either way, but a directory flush that genuinely fails
         # means the swap may quietly revert on a crash while the run reports
         # it done. Nothing here can be undone; say so instead of staying quiet.
-        from qobuz_librarian.library.backup import _fsync
-        if not _fsync(_descriptor_path(binding.parent_fd)):
+        if not backup_mod._fsync(_descriptor_path(binding.parent_fd)):
             return (rel, sr, rate, in_size - out_size,
                     "resampled, but the folder couldn't be flushed to disk; "
                     "the swap may not survive a power loss; check the drive")
@@ -938,8 +936,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     source_receipts = {}
     kept_dir = None
     if keep_originals:
-        from qobuz_librarian.library.backup import stash_downsample_originals
-        kept_dir, copied, receipts = stash_downsample_originals(
+        kept_dir, copied, receipts = backup_mod.stash_downsample_originals(
             [_bd / rel for rel, _, _ in candidates],
             directory,
             include_identity_receipts=True,

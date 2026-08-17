@@ -6,12 +6,14 @@ import sys
 from urllib.parse import urlsplit
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.library import scanner
 from qobuz_librarian.library.catalog import (
     album_quality_label,
     album_year,
     album_year_int,
     is_lossless_album,
 )
+from qobuz_librarian.quality import decision as quality_decision
 from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.colors import C, fmt, section, term_width, truncate
@@ -510,7 +512,6 @@ def print_consolidation_overview(summaries):
     log.info(fmt(C.GRAY,
         "  Bonus tracks (no match) will be left in place."))
 
-    from qobuz_librarian.quality.decision import quality_change_summary
     for i, s in enumerate(summaries, 1):
         sib_dir = s["dir"]
         n_total = len(s["all_tracks"])
@@ -528,7 +529,7 @@ def print_consolidation_overview(summaries):
             log.info(fmt(C.GREEN, "      → nothing to consolidate"))
             continue
 
-        qc = quality_change_summary(s["overlap"])
+        qc = quality_decision.quality_change_summary(s["overlap"])
         if qc["losing_hires"]:
             log.info(fmt(C.RED + C.BOLD,
                 f"      ⚠  {qc['losing_hires']} track(s) here are HIGHER quality than primary."))
@@ -540,8 +541,6 @@ def print_consolidation_overview(summaries):
 
 def print_per_track_consolidation(summary):
     """Mobile-friendly per-track display: stacked, not tabular."""
-    from qobuz_librarian.quality.decision import _track_quality_cmp
-
     sib_dir = summary["dir"]
     print()
     log.info(fmt(C.BOLD + C.WHITE, f"  Per-track detail: {truncate(sib_dir.name, 50)}"))
@@ -553,7 +552,7 @@ def print_per_track_consolidation(summary):
         sib_q = format_quality(st.get("bits", 0), st.get("sample_rate", 0))
         pri_q = format_quality(pt.get("bits", 0), pt.get("sample_rate", 0))
 
-        comparison = _track_quality_cmp(st, pt)
+        comparison = quality_decision._track_quality_cmp(st, pt)
         if comparison is None:
             badge = fmt(C.RED + C.BOLD, "delete (quality uncertain)")
         elif comparison > 0:
@@ -572,8 +571,6 @@ def print_per_track_consolidation(summary):
 
 def prompt_artist_name():
     """Interactive prompt for artist name; offers to list available artists."""
-    from qobuz_librarian.library.scanner import list_library_artists
-
     print()
     while True:
         try:
@@ -583,7 +580,7 @@ def prompt_artist_name():
         if not name or name.lower() in ("q", "quit", "exit"):
             return None
         if name == "?":
-            artists = list_library_artists()
+            artists = scanner.list_library_artists()
             if not artists:
                 log.info(fmt(C.YELLOW, "  No artist directories found."))
                 continue

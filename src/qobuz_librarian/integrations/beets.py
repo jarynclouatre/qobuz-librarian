@@ -45,7 +45,10 @@ from qobuz_librarian.completion import (
     RecoveryOwner,
 )
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
+from qobuz_librarian.integrations import lyric_fetch
+from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.interrupts import run_sigint_deferred
+from qobuz_librarian.library import tags as tags_mod
 from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.library.sqlite_atomic import (
     AtomicSQLiteWrite,
@@ -56,6 +59,7 @@ from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
 )
+from qobuz_librarian.ui_cli import errors
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, die
 from qobuz_librarian.ui_cli.logging import (
@@ -837,13 +841,6 @@ def _prepare_staging_tags(
         return moved
     from mutagen.flac import FLAC
 
-    from qobuz_librarian.integrations.lyric_fetch import save_flac_tags
-    from qobuz_librarian.integrations.staging import (
-        capture_file,
-        quarantine_file,
-    )
-    from qobuz_librarian.library.tags import clean_qobuz_string
-
     managed_by_path = None
     refreshed = []
     if managed_bindings is not None:
@@ -867,7 +864,7 @@ def _prepare_staging_tags(
         managed = managed_by_path.get(str(Path(f))) if managed_by_path is not None else None
         if managed_by_path is not None and managed is None:
             raise OSError("managed beets preflight found unbound audio")
-        receipt = capture_file(
+        receipt = staging_mod.capture_file(
             f,
             expected=(tuple(managed["identity"]) if managed is not None else None),
         )
@@ -924,7 +921,7 @@ def _prepare_staging_tags(
             if managed is not None:
                 raise OSError("managed beets source failed tag preflight")
             try:
-                dest = quarantine_file(receipt, ".untagged")
+                dest = staging_mod.quarantine_file(receipt, ".untagged")
                 if dest is not None:
                     moved.append(f)
                     if not dest.durable:
@@ -939,7 +936,7 @@ def _prepare_staging_tags(
             vals = tags.get(key)
             if not vals:
                 continue
-            cleaned = [clean_qobuz_string(v) for v in vals]
+            cleaned = [tags_mod.clean_qobuz_string(v) for v in vals]
             if cleaned != list(vals):
                 tags[key] = cleaned
                 changed = True
@@ -965,7 +962,7 @@ def _prepare_staging_tags(
 
                 if authority_check is not None:
                     authority_check()
-                save_flac_tags(
+                lyric_fetch.save_flac_tags(
                     tags,
                     f,
                     expected_identity=expected_identity,
@@ -978,7 +975,7 @@ def _prepare_staging_tags(
                     raise OSError("managed beets tag-clean rewrite failed") from e
                 vlog(f"couldn't rewrite cleaned tags on {f.name}: {e}")
         if managed is not None:
-            refreshed_receipt = capture_file(
+            refreshed_receipt = staging_mod.capture_file(
                 f,
                 expected=None if changed else receipt.identity,
             )
@@ -1014,7 +1011,7 @@ def _prepare_staging_tags(
         for record in managed_by_path.values():
             if Path(record["path"]).suffix.lower() == ".flac":
                 continue
-            receipt = capture_file(record["path"], expected=tuple(record["identity"]))
+            receipt = staging_mod.capture_file(record["path"], expected=tuple(record["identity"]))
             if receipt is None:
                 raise OSError("managed beets source changed during preflight")
             refreshed.append(
@@ -1191,8 +1188,6 @@ def _normalise_managed_roots(album_dirs):
 
 
 def _normalise_managed_bindings(bindings, roots):
-    from qobuz_librarian.integrations.staging import capture_file, capture_tree
-
     if not isinstance(bindings, (list, tuple)) or not bindings:
         raise ValueError("managed beets bindings are unavailable")
     records = []
@@ -1203,7 +1198,7 @@ def _normalise_managed_bindings(bindings, roots):
         if not _valid_managed_binding(value):
             raise ValueError("managed beets binding is malformed")
         frozen = tuple(value["identity"])
-        receipt = capture_file(value["path"], expected=frozen)
+        receipt = staging_mod.capture_file(value["path"], expected=frozen)
         if receipt is None or receipt.identity != frozen:
             raise OSError("managed beets source changed")
         record = {
@@ -1221,7 +1216,7 @@ def _normalise_managed_bindings(bindings, roots):
 
     audio = {}
     for root in roots:
-        tree = capture_tree(root)
+        tree = staging_mod.capture_tree(root)
         if tree is None:
             raise OSError("managed beets source tree changed")
         for relative, identity in tree.files:
@@ -4629,8 +4624,6 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
     _prepare_staging_tags(roots=roots)
 
     if source_files_out is not None:
-        from qobuz_librarian.integrations.staging import capture_file
-
         source_files_out.clear()
         explicit_roots = bool(roots)
         scan_roots = roots if roots else [cfg.STAGING_DIR]
@@ -4643,7 +4636,7 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
                     if path.is_file() and (explicit_roots or not _under_retry_dir(path))
                 )
             for path in candidates:
-                receipt = capture_file(path)
+                receipt = staging_mod.capture_file(path)
                 if receipt is not None:
                     source_files_out.append(receipt)
         except OSError:
@@ -4687,9 +4680,7 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
             handle.flush()
             os.fsync(handle.fileno())
     except OSError as e:
-        from qobuz_librarian.ui_cli.errors import oserr_hint
-
-        log.info(fmt(C.YELLOW, f"  ⚠  Couldn't write beets override config: {e}.{oserr_hint(e)}"))
+        log.info(fmt(C.YELLOW, f"  ⚠  Couldn't write beets override config: {e}.{errors.oserr_hint(e)}"))
         if override_path is not None:
             try:
                 override_path.unlink(missing_ok=True)
@@ -6107,13 +6098,11 @@ def _beets_direct_guarded(
         paths = [str(cfg.STAGING_DIR)]
     audio_before = _count_audio_under(paths, include_retry=explicit_paths)
     if intended_audio is not None:
-        from qobuz_librarian.integrations.staging import capture_file
-
         intended_audio = tuple(intended_audio)
         if managed_capture is not None:
             intended_valid = bool(intended_audio) and all(
                 _valid_managed_binding(record)
-                and capture_file(
+                and staging_mod.capture_file(
                     record["path"],
                     expected=tuple(record["identity"]),
                 )
@@ -6122,7 +6111,7 @@ def _beets_direct_guarded(
             )
         else:
             intended_valid = bool(intended_audio) and all(
-                capture_file(receipt.path, expected=receipt.identity) is not None
+                staging_mod.capture_file(receipt.path, expected=receipt.identity) is not None
                 for receipt in intended_audio
             )
         if not intended_valid:

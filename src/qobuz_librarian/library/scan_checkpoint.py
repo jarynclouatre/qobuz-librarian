@@ -19,6 +19,7 @@ import time
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.ui_cli import logging as cli_logging
 
 # The library gap-scan kinds pending() surfaces for the dashboard resume
 # prompt.
@@ -45,8 +46,7 @@ def _write(data) -> bool:
         # Surface (verbose) rather than fail completely silent. On a full or
         # read-only data volume an hours-long scan would otherwise save no
         # resumable checkpoint with zero signal.
-        from qobuz_librarian.ui_cli.logging import vlog
-        vlog(f"scan checkpoint write failed ({e}); resume won't be available")
+        cli_logging.vlog(f"scan checkpoint write failed ({e}); resume won't be available")
         return False
 
 
@@ -104,9 +104,7 @@ def clear(kind) -> bool:
         except FileNotFoundError:
             return True
         except OSError as e:
-            from qobuz_librarian.ui_cli.logging import vlog
-
-            vlog(f"scan checkpoint clear failed ({e}); stale resume data remains")
+            cli_logging.vlog(f"scan checkpoint clear failed ({e}); stale resume data remains")
             return False
 
 

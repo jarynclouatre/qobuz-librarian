@@ -11,7 +11,8 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import beets as beets_integration
-from qobuz_librarian.library import scanner
+from qobuz_librarian.library import backup as backup_mod
+from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.scanner import parse_track_num
 from qobuz_librarian.library.sqlite_atomic import (
     AtomicSQLiteWrite,
@@ -1299,8 +1300,6 @@ def execute_consolidation(summary):
     recording with no way back. Routing removals through the gap-fill backup dir
     lets the retention sweep recover them, matching every other destructive
     mode's keep-a-backup stance."""
-    from qobuz_librarian.library.backup import backup_gap_fill_files
-
     binding = summary.get("_binding")
     attempted = len(summary.get("overlap") or ())
     if not isinstance(binding, _ConsolidationBinding) or binding.used:
@@ -1314,7 +1313,7 @@ def execute_consolidation(summary):
     paths = [item.path for item in binding.files]
 
     def move_to_backup():
-        return backup_gap_fill_files(
+        return backup_mod.backup_gap_fill_files(
             paths,
             binding.sibling.path,
             expected_receipts=binding.expected_receipts,
@@ -1361,8 +1360,6 @@ def execute_consolidation(summary):
 
 def consolidate_albums(album, args):
     """Top-level consolidation flow. Always interactive - --yes does NOT silence it."""
-    from qobuz_librarian.library.catalog import find_album_dir_filesystem
-
     section("Consolidate similar album folders")
     # Consolidation deletes overlapping sibling tracks, so it must never run
     # under --dry-run - including on the "already complete" album path, which
@@ -1372,7 +1369,7 @@ def consolidate_albums(album, args):
             "  --dry-run: skipping consolidation (it would delete overlapping tracks)."))
         return 0
 
-    primary_dir = find_album_dir_filesystem(album)
+    primary_dir = catalog.find_album_dir_filesystem(album)
     if primary_dir is None:
         log.info(fmt(C.YELLOW, "  ⚠  Couldn't locate primary album folder after import."))
         log.info(fmt(C.GRAY,   "     Skipping consolidation."))

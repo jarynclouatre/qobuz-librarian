@@ -64,6 +64,7 @@ from qobuz_librarian.queue.post_import_finalizer import (
     plan_post_import_action,
 )
 from qobuz_librarian.run_lock import RunLockLease
+from qobuz_librarian.web import job_persistence
 
 _STAGING_RUN_KIND = "download-staging-run"
 _STAGING_GROUP_KIND = "staging-group"
@@ -156,8 +157,6 @@ class _SettlementJournalFailure(RuntimeError):
 def _post_import_relocation_handoff_matches(operation_id, handoff):
     """Consult jobs.db without making the UI persistence layer a hard import."""
     try:
-        from qobuz_librarian.web import job_persistence
-
         job_persistence.init()
         return job_persistence.post_import_relocation_handoff_persisted(
             operation_id,

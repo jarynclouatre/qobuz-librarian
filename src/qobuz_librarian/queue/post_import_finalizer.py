@@ -14,6 +14,7 @@ from qobuz_librarian.completion import (
     parse_completion_input_record,
     parse_completion_record,
 )
+from qobuz_librarian.library import scanner
 from qobuz_librarian.library.catalog import (
     _is_split_album_merge,
     multi_artist_migration_destination,
@@ -307,9 +308,7 @@ def finalize_carrier_retirement(
             errno.EBUSY, "the post-import action did not settle"
         )
     if action_was_pending:
-        from qobuz_librarian.library.scanner import clear_scan_caches
-
-        clear_scan_caches()
+        scanner.clear_scan_caches()
     journal = _acknowledge_completion(
         journal,
         retirement,

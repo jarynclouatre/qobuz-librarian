@@ -19,6 +19,7 @@ from qobuz_librarian.integrations.staging import (
     quarantine_file,
     reconcile_legacy_file_groups,
 )
+from qobuz_librarian.library import scanner
 from qobuz_librarian.recovery import normalise_recovery_owner
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log, vlog, wrap_thread_target
@@ -76,13 +77,12 @@ def _flac_signature(path: Path):
                 return str(v[0]).strip()
         return ""
 
-    from qobuz_librarian.library.scanner import parse_track_num
     try:
-        disc = int(parse_track_num(_g("discnumber", "DISCNUMBER")) or 1) or 1
+        disc = int(scanner.parse_track_num(_g("discnumber", "DISCNUMBER")) or 1) or 1
     except (TypeError, ValueError):
         disc = 1
     try:
-        track = int(parse_track_num(_g("tracknumber", "TRACKNUMBER")) or 0)
+        track = int(scanner.parse_track_num(_g("tracknumber", "TRACKNUMBER")) or 0)
     except (TypeError, ValueError):
         track = 0
 

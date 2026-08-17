@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-from qobuz_librarian.integrations import lyric_fetch
+from qobuz_librarian.integrations import lyric_fetch, rip
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
 
@@ -184,8 +184,6 @@ def _resolve_signatures_to_paths(signatures, search_dirs):
     signatures_needed = Counter(sig for sig, _ in signatures)
     found = []
     seen = set()
-    from qobuz_librarian.integrations.rip import _flac_signature
-
     for d in search_dirs:
         if not signatures_needed:
             break
@@ -204,7 +202,7 @@ def _resolve_signatures_to_paths(signatures, search_dirs):
             for fp in d.rglob("*.flac"):
                 if not fp.is_file():
                     continue
-                sig = _flac_signature(fp)
+                sig = rip._flac_signature(fp)
                 if sig is not None and signatures_needed.get(sig, 0) > 0:
                     found.append(str(fp))
                     signatures_needed[sig] -= 1

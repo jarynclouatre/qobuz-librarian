@@ -35,6 +35,7 @@ from qobuz_librarian.integrations.staging import (
     _staging_group_reference_parameters,
     staging_run_from_record,
 )
+from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.backup import (
     canonical_album_source_receipt,
     canonical_library_backup_disposal_record,
@@ -449,9 +450,7 @@ def _validate_planned(value: Any) -> dict[str, Any]:
     if value["quality"] is not None and type(value["quality"]) is not int:
         raise ValueError("planned quality must be an integer or null")
     if value["source_premise"] is not None:
-        from qobuz_librarian.library.candidate_premise import canonical_premise
-
-        premise = canonical_premise(value["source_premise"])
+        premise = candidate_premise.canonical_premise(value["source_premise"])
         if premise is None or premise != value["source_premise"]:
             raise ValueError("planned source premise is malformed")
         if value["album_dir"] is None or premise["path"] != os.path.abspath(
@@ -599,11 +598,11 @@ def _parse_post_import_action(value: Any) -> PostImportAction:
     )
     if source == destination:
         raise ValueError("post-import action paths are identical")
-    from qobuz_librarian.library.post_import_relocation import (
-        canonical_post_import_relocation_expectation,
-    )
+    # Late: cli.py loads this module on every command, and this one reaches the
+    # catalogue and the Qobuz client. Only a post-import action needs it.
+    from qobuz_librarian.library import post_import_relocation
 
-    expectation = canonical_post_import_relocation_expectation(
+    expectation = post_import_relocation.canonical_post_import_relocation_expectation(
         value["expectation"],
         source=source,
         destination=destination,
@@ -3726,12 +3725,12 @@ def process_carrier_retirement(
             "carrier retirement must settle its post-import completion first"
         )
 
-    from qobuz_librarian.integrations.beets import (
-        ManagedCarrierRetirementOutcome,
-        retire_managed_carrier,
-    )
+    # Late for the same reason: beets is the heaviest import in the package and
+    # nothing but a carrier retirement wants it.
+    from qobuz_librarian.integrations import beets as beets_mod
+    from qobuz_librarian.integrations.beets import ManagedCarrierRetirementOutcome
 
-    result = retire_managed_carrier(
+    result = beets_mod.retire_managed_carrier(
         retirement.reference.data,
         RecoveryOwner(previous.operation_id, retirement.item_id),
         retirement.manifest_hash,

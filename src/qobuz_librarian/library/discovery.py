@@ -30,6 +30,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums, search_artists
 from qobuz_librarian.library import hidden as hidden_mod
+from qobuz_librarian.library import tags
 from qobuz_librarian.library.catalog import (
     _dir_year,
     _paths_equal,
@@ -303,8 +304,7 @@ class NewReleaseResult:
 
 
 def _record_owned_title(owned_titles, album_dir):
-    from qobuz_librarian.library.tags import strip_album_decorations
-    key = normalize(strip_leading_article(strip_album_decorations(album_dir.name)))
+    key = normalize(strip_leading_article(tags.strip_album_decorations(album_dir.name)))
     if key:
         owned_titles.setdefault(key, set()).add(_dir_year(album_dir.name))
 

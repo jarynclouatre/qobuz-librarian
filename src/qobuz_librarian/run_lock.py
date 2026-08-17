@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Optional, TextIO
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.ui_cli import colors
+from qobuz_librarian.ui_cli import logging as cli_logging
+from qobuz_librarian.ui_cli.colors import C
 
 
 class LockBusy(Exception):
@@ -340,8 +343,7 @@ def _warn_lockless(detail: str) -> None:
     """Explain that writes remain paused without the run-lock boundary."""
     import logging
 
-    from qobuz_librarian.ui_cli.colors import C, fmt
-    logging.getLogger("qobuz_librarian").warning(fmt(
+    logging.getLogger("qobuz_librarian").warning(colors.fmt(
         C.YELLOW,
         f"  ⚠  {detail}; the single-instance lock is unavailable. Writes "
         "remain paused until the data folder supports file locking and the "
@@ -426,8 +428,7 @@ def acquire() -> Optional[RunLockLease]:
         os.fsync(stream.fileno())
         os.fsync(parent_descriptor)
     except OSError as exc:
-        from qobuz_librarian.ui_cli.logging import vlog
-        vlog(f"run-lock: couldn't record PID ({exc}); lock is held regardless")
+        cli_logging.vlog(f"run-lock: couldn't record PID ({exc}); lock is held regardless")
 
     lease = RunLockLease(stream, path, leaf, chain, names)
     if lease.intact():

@@ -8,6 +8,7 @@ import time
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
 SURFACES = ("library", "upgrade", "downsample", "new_releases")
@@ -130,9 +131,7 @@ def _write(data) -> bool:
         state_file.write_json(cfg.LIBRARY_GENERATION_STATE_FILE, data)
         return True
     except OSError as exc:
-        from qobuz_librarian.ui_cli.logging import vlog
-
-        vlog(f"Library generation state write failed ({exc})")
+        cli_logging.vlog(f"Library generation state write failed ({exc})")
         return False
 
 

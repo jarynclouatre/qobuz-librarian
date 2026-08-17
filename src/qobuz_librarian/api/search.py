@@ -10,6 +10,7 @@ This strictness is load-bearing: a loose match would silently replace
 a user's file with the wrong recording.
 """
 from qobuz_librarian import config
+from qobuz_librarian.api import album_cache
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.client import qobuz_get
 from qobuz_librarian.library.tags import clean_qobuz_string
@@ -126,7 +127,6 @@ def search_artists(query, token, limit=10):
 
 
 def get_album(album_id, token):
-    from qobuz_librarian.api import album_cache
     cached = album_cache.get(album_id)
     if (
         isinstance(cached, dict)
@@ -214,7 +214,6 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     result (fewer than Qobuz's own total) is used for this run but NOT cached,
     so the next scan re-fetches rather than trust it."""
     limit = limit if limit is not None else config.ARTIST_CATALOG_LIMIT
-    from qobuz_librarian.api import album_cache
     cache_key = f"{artist_id}:{limit}"
     if not fresh:
         cached = album_cache.get_catalog(cache_key, config.ARTIST_CATALOG_CACHE_TTL)

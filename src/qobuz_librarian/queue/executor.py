@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock
+from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.completion import (
     CompletionOrigin,
@@ -28,6 +29,7 @@ from qobuz_librarian.download import (
     validated_staged_album_dirs,
 )
 from qobuz_librarian.download_result import incomplete_track_counts
+from qobuz_librarian.integrations import rip
 from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
     beets_import_albums,
@@ -1004,9 +1006,7 @@ def _admit_new_queue_items(items, token):
     for item in items:
         _validate_queue_item_premise(item)
     if items:
-        from qobuz_librarian.api.client import authorize_bound_download
-
-        token = authorize_bound_download(token)
+        token = api_client.authorize_bound_download(token)
     for item in items:
         _validate_queue_item_premise(item)
     return token
@@ -1085,9 +1085,8 @@ def _run_pre_import_hooks_for_dirs(
             # album dir so the post-import resolution still has a shot. Recording
             # staging paths here would go stale once beets moves the files.
             try:
-                from qobuz_librarian.integrations.rip import _flac_signature
                 for p in sorted(d.rglob("*.flac")):
-                    sig = _flac_signature(p)
+                    sig = rip._flac_signature(p)
                     if sig is not None:
                         sigs.append((sig, str(p)))
             except Exception:

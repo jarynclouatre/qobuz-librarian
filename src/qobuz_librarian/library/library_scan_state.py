@@ -7,6 +7,7 @@ import time
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
 
@@ -127,8 +128,7 @@ def _write_state(data):
     except OSError as e:
         # Losing this file only costs a slower next scan, but say so (verbose)
         # rather than going stale with zero signal on a full/read-only volume.
-        from qobuz_librarian.ui_cli.logging import vlog
-        vlog(f"library scan state write failed ({e}); next scan re-crawls")
+        cli_logging.vlog(f"library scan state write failed ({e}); next scan re-crawls")
         return False
 
 

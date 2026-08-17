@@ -9,6 +9,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError
 from qobuz_librarian.api.search import get_artist_albums, search_artists
+from qobuz_librarian.library import catalog as catalog_mod
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.catalog import (
     album_quality_label,
@@ -409,8 +410,6 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
       • No bonus tracks would be lost (extras block wipe-and-replace)
       • --no-upgrade is not set
     """
-    from qobuz_librarian.library.catalog import find_expanded_edition, find_qobuz_album_for_dir
-
     # Invalidate only THIS artist's cached subdir listing, not the whole cache.
     # This runs once per artist inside the bulk-upgrade loop; clear_scan_caches()
     # would wipe every other artist's warm listing (and force a flac_cache disk
@@ -439,7 +438,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
     candidates = []
     for album_dir in album_dirs:
         try:
-            qobuz_album = find_qobuz_album_for_dir(
+            qobuz_album = catalog_mod.find_qobuz_album_for_dir(
                 album_dir, artist_name, token,
                 prefer_hires=args.prefer_hires,
                 catalog=catalog,
@@ -507,7 +506,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
         # to find an alternate Qobuz edition that covers everything on disk.
         extras = find_extras_in_existing(qobuz_tracks, existing)
         if extras:
-            cands = find_expanded_edition(qobuz_album, album_dir,
+            cands = catalog_mod.find_expanded_edition(qobuz_album, album_dir,
                                           existing, token, args)
             swapped = False
             for full, new_extras in cands:

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.library.tags import strip_album_decorations_strict
+from qobuz_librarian.ui_cli import logging as cli_logging
 
 SCOPE_MISSING = "missing"
 SCOPE_UPGRADE = "upgrade"
@@ -165,8 +166,7 @@ def save(store):
         state_file.write_json(cfg.HIDDEN_FILE, store, ensure_ascii=False)
         return True
     except OSError as e:
-        from qobuz_librarian.ui_cli.logging import vlog
-        vlog(f"hidden-store write failed ({e}); the change may not persist")
+        cli_logging.vlog(f"hidden-store write failed ({e}); the change may not persist")
         return False
 
 

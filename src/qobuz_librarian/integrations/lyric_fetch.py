@@ -36,6 +36,7 @@ from typing import Callable, Iterable, Optional
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
+from qobuz_librarian.library import backup as backup_mod
 
 # mutagen and syncedlyrics are decoupled on purpose: tag-only operations
 # (classify/read/write embedded lyrics, .lrc sidecars) need only mutagen,
@@ -1030,8 +1031,6 @@ def save_flac_tags(
         directory_mutation_out=None, parent_fd=None,
         parent_guard=None, expected_identity=None, commit_guard=None) -> None:
     """Save changed FLAC tags through a durable same-directory replacement."""
-    from qobuz_librarian.library.backup import _fsync
-
     path = Path(path)
     if isinstance(identity_change_out, dict):
         identity_change_out.clear()
@@ -1088,7 +1087,7 @@ def save_flac_tags(
         if temp_identity is None or _named_identity(
                 owned_parent_fd, temp_name) != temp_identity:
             raise OSError(f"{path.name}: temporary replacement changed")
-        if not _fsync(temp_path):
+        if not backup_mod._fsync(temp_path):
             raise OSError(
                 f"{path.name}: replacement couldn't be flushed to disk; "
                 "original left untouched")
@@ -1127,7 +1126,7 @@ def save_flac_tags(
             "before": before,
             "after": after,
         })
-        if not _fsync(Path(f"/proc/self/fd/{owned_parent_fd}")):
+        if not backup_mod._fsync(Path(f"/proc/self/fd/{owned_parent_fd}")):
             raise OSError(
                 f"{path.name}: replacement completed, but the folder couldn't "
                 "be flushed to disk; the change may not survive a power loss")
@@ -1172,8 +1171,6 @@ def write_sidecar(
     recognises the sidecar before any provider fetch, while this final check
     stops a plain result from overwriting a hand-synced .lrc. Return True when a
     sidecar was written and False when the better existing file was kept."""
-    from qobuz_librarian.library.backup import _fsync
-
     path = Path(path)
     target = path.with_suffix(".lrc")
     if isinstance(creation_out, dict):
@@ -1248,7 +1245,7 @@ def write_sidecar(
         intended_content = content.encode("utf-8")
         _write_all(temp_fd, intended_content)
         temp_path = Path(f"/proc/self/fd/{owned_parent_fd}/{temp_name}")
-        if not _fsync(temp_path):
+        if not backup_mod._fsync(temp_path):
             raise OSError(
                 f"{target.name}: replacement couldn't be flushed to disk; "
                 "original left untouched")
@@ -1341,7 +1338,7 @@ def write_sidecar(
                     f"{target.name}: replacement identity couldn't be proved")
             published_identity = replaced
 
-        if not _fsync(Path(f"/proc/self/fd/{owned_parent_fd}")):
+        if not backup_mod._fsync(Path(f"/proc/self/fd/{owned_parent_fd}")):
             raise OSError(
                 f"{target.name}: replacement completed, but the folder couldn't "
                 "be flushed to disk; the change may not survive a power loss")

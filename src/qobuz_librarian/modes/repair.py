@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.library import candidate_premise
@@ -1800,9 +1801,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
 
         expected_generation = getattr(token, "credential_generation", "")
         if expected_generation:
-            from qobuz_librarian.api.client import authorize_bound_download
-
-            token = authorize_bound_download(token)
+            token = api_client.authorize_bound_download(token)
 
         # ── Back up the truncated originals (plan in hand) ───────────────
         broken_paths = [b["path"] for b in verified_truncated]

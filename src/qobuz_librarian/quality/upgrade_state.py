@@ -9,10 +9,12 @@ from typing import Callable, Iterable
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.library import generation_state
+from qobuz_librarian.library import candidate_premise, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.catalog import album_year
+from qobuz_librarian.quality import decision as quality_decision
+from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
 _STATE_LOCK = threading.Lock()
@@ -65,8 +67,6 @@ def _album_cover(album):
 
 
 def _candidate_spec(artist_name: str, candidate: dict):
-    from qobuz_librarian.library.candidate_premise import capture
-
     album = candidate["qobuz_album"]
     title = album.get("title") or "?"
     n_present = candidate.get("n_present", 0)
@@ -83,7 +83,7 @@ def _candidate_spec(artist_name: str, candidate: dict):
         "needed_edition_swap": bool(candidate.get("_needed_edition_swap")),
         "title_similarity": float(candidate.get("_title_similarity") or 0.0),
     }
-    premise = capture("upgrade", album_dir) if album_dir else None
+    premise = candidate_premise.capture("upgrade", album_dir) if album_dir else None
     if premise is not None:
         payload["_premise"] = premise
     return {
@@ -145,8 +145,7 @@ def _write_state(data):
         # The Upgrade view reads this snapshot; a failed write means it shows
         # stale candidates until the next scan. Surface it (verbose) instead
         # of staying silent on a full/read-only volume.
-        from qobuz_librarian.ui_cli.logging import vlog
-        vlog(f"upgrade state write failed ({e}); saved upgrade view may be stale")
+        cli_logging.vlog(f"upgrade state write failed ({e}); saved upgrade view may be stale")
         return False
 
 
@@ -270,10 +269,8 @@ def save(
 
 
 def _default_scan_artist(token, args, capped):
-    from qobuz_librarian.quality.decision import scan_artist_for_upgrades
-
     def scan_artist(artist_dir):
-        return scan_artist_for_upgrades(
+        return quality_decision.scan_artist_for_upgrades(
             artist_dir.name, artist_dir, token, args, capped=capped)
 
     return scan_artist

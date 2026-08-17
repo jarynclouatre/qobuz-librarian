@@ -92,6 +92,12 @@ def _isolate_data_dir():
     from qobuz_librarian.web import job_persistence
     job_persistence._disabled = True
 
+    # settings_store builds its path off DATA_DIR when it is imported, which
+    # happens at collection time, before this fixture runs. Re-derive it here
+    # so the suite never reads the dev machine's real saved Settings.
+    from qobuz_librarian.web import settings_store
+    settings_store.SETTINGS_FILE = tmp_root / ".qobuz_settings.json"
+
     # Set the matching env vars too, so a test that importlib.reload(cfg) (to
     # exercise env parsing) recomputes these into the temp dir / off, rather than
     # reverting to the real HOME paths and a live auto-check for the rest of the

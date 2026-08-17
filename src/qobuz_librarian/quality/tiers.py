@@ -1,5 +1,6 @@
 """streamrip quality-tier constants and cap detection."""
 from qobuz_librarian import config as cfg
+from qobuz_librarian.integrations import downsample_engine
 
 # Highest (bit_depth, sample_rate_hz) streamrip delivers per quality tier:
 # 2=16/44.1, 3=24-bit up to 96kHz, 4=24-bit up to 192kHz. 320kbps MP3 is not
@@ -37,8 +38,7 @@ def downsample_target_rate(sr_hz):
     this returns the input for the no-change case rather than None, so callers
     can chain it without a guard.
     """
-    from qobuz_librarian.integrations.downsample_engine import target_rate
-    return target_rate(sr_hz) or sr_hz
+    return downsample_engine.target_rate(sr_hz) or sr_hz
 
 
 def format_quality(bits, rate):
