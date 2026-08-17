@@ -18,11 +18,13 @@
   {% if library_generation.outputs.library.limited %}
   <div class="ql-flash ql-flash-warning" data-flash><span>The Library scan finished, but this saved list stops at the configured result limit.</span></div>
   {% endif %}
-  {% if library_job and library_job.status == JobStatus.AWAITING_REVIEW and library_baseline_exists and not baseline_complete %}
-  {# The control that fixes this is the refresh icon beside the page title, so
-     name it, but only when _library_refresh.html is really offering it: a
-     crawl already under way swaps it for the "Refreshing…" note, and a lost
-     Qobuz connection leaves it disabled with its own notice above. #}
+  {% if library_job and library_job.status == JobStatus.AWAITING_REVIEW and library_baseline_exists and not baseline_complete and not library_refresh_scanning %}
+  {# Held back while a refresh is actually crawling: telling the user a refresh
+     is needed beside a header that says it is already running is two answers to
+     the same question. The control that fixes it is the refresh icon beside the
+     page title, so name it, but only when _library_refresh.html is really
+     offering it: a lost Qobuz connection leaves it disabled with its own notice
+     above. #}
   <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title to bring them up to date.{% endif %}</span></div>
   {% endif %}
 

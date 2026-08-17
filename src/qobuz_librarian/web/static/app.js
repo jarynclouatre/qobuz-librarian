@@ -3120,6 +3120,21 @@
     if (e.detail && e.detail.successful === false) return;
     form.querySelectorAll("[data-deep-link]").forEach(function (el) { el.remove(); });
   });
+  // One album downloaded from a search row gets the same treatment as a bulk
+  // download: bring up the Background-work strip. Its toast clears after a few
+  // seconds, and without the strip the page the user is standing on stops
+  // mentioning the download at all.
+  document.addEventListener("htmx:afterRequest", function (e) {
+    var source = e.target;
+    if (!source || !source.closest) return;
+    if (!source.closest("[data-search-download-form]")) return;
+    if (e.detail && e.detail.successful === false) return;
+    if (window.htmx && document.getElementById("dashboard-active")) {
+      window.htmx.ajax("GET", "/",
+        { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
+    }
+    if (window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
+  });
   cleanFlashUrl();
   // The sticky chrome (review summary row, review footer, toasts, search bar)
   // offsets itself by the header and tab-bar heights. Those vary with the

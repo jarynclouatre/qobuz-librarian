@@ -6,6 +6,7 @@ re-rip must keep the backup rather than lose the only good copy.
 """
 import json
 import os
+import threading
 from argparse import Namespace
 from unittest.mock import patch
 
@@ -1027,7 +1028,9 @@ def test_walk_seen_records_idempotently_and_survives_a_crashed_rename(tmp_path, 
 def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(monkeypatch):
     # A whole-album re-download that imported but failed the completeness check
     # keeps the backup and must not render "Repaired 1/1"; the active copy is
-    # an unverified, possibly incomplete replacement.
+    # an unverified, possibly incomplete replacement. It is not a failure
+    # either: the album on disk really was replaced, so calling it one told the
+    # user nothing had happened and offered a retry that would fetch it again.
     from qobuz_librarian.web import flows
     from qobuz_librarian.web import jobs as job_mgr
 
@@ -1039,7 +1042,9 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
         _imported_any = False
         summary = ""
         error = ""
+        title = "Repair scan"
         status = job_mgr.JobStatus.RUNNING
+        _lock = threading.RLock()
 
         def push_progress(self, *a, **k):
             pass
@@ -1075,8 +1080,9 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
 
     assert callback_seen
     assert "Repaired 0/1" in job.summary
-    assert job.error
-    assert job.status == job_mgr.JobStatus.FAILED
+    assert "could not be proven complete" in job.summary
+    assert not job.error
+    assert job.status != job_mgr.JobStatus.FAILED
 
 
 

@@ -3063,6 +3063,33 @@ _QOBUZ_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair")
 _PREMISE_REVIEW_KINDS = _QOBUZ_REVIEW_KINDS + ("downsample",)
 
 
+def _library_header_note():
+    """What the header note beside the Library title should say, or None when
+    nothing library-side is in flight.
+
+    A parked review keeps the /library surface (see _library_current_job), so
+    work crawling behind it has nowhere to show its progress card. This note
+    carries it instead: without it a refresh that takes a quarter of an hour
+    showed the word "Refreshing…" and nothing else, and the download phase that
+    follows an approved review said "Refreshing…" as well.
+    """
+    job = _active_scan(
+        "library", statuses=("pending", "scanning", "running"))
+    if job is None:
+        return None
+    if job.status.value == "running":
+        return {"label": "Downloading…", "detail": ""}
+    total = int(getattr(job, "progress_total", 0) or 0)
+    current = int(getattr(job, "progress_current", 0) or 0)
+    unit = str(getattr(job, "progress_unit", "") or "").strip()
+    detail = ""
+    if total:
+        detail = f"{current:,} of {total:,}"
+        if unit:
+            detail += f" {unit}s"
+    return {"label": "Refreshing…", "detail": detail}
+
+
 def _library_current_job():
     """The baseline scan that owns the /library surface right now (still
     pending / scanning / awaiting-review / running), or None when the surface
@@ -7049,6 +7076,9 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
         # review; a bare scan shows its own progress body).
         "library_refresh_running": _active_scan(
             "library", statuses=("pending", "scanning", "running")) is not None,
+        "library_header_note": _library_header_note(),
+        "library_refresh_scanning": _active_scan(
+            "library", statuses=("pending", "scanning")) is not None,
     }
     # Single-surface rule (same as /repair): a scan in flight or a parked
     # review renders inline right here, so results never hide behind the
@@ -7136,6 +7166,9 @@ async def library_refresh_note(request: Request):
                 "library",
                 statuses=("pending", "scanning", "running"),
             ) is not None,
+            "library_header_note": _library_header_note(),
+            "library_refresh_scanning": _active_scan(
+                "library", statuses=("pending", "scanning")) is not None,
         }
 
     ctx = await loop.run_in_executor(None, _context)

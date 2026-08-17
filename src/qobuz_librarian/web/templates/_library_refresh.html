@@ -1,7 +1,7 @@
 {% if library_baseline_exists and library_scan_state.ready and (not library_job or library_job.status == JobStatus.AWAITING_REVIEW) %}
 {# Both stay visible while a review is parked. New Releases skips the folders;
    refresh compares externally-added files with the Qobuz catalogue. #}
-<div class="flex items-center gap-3">
+<div id="library-refresh" class="flex items-center gap-3">
   {% if new_release_baseline_complete %}
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -13,8 +13,12 @@
   <span class="ql-refresh-note" role="status">Refresh the Library before checking new releases</span>
   {% endif %}
   {% if library_refresh_running %}
+  {% set _note = library_header_note or {'label': 'Refreshing…', 'detail': ''} %}
+  {# The poll replaces the whole row, not just this note: the response is this
+     same partial, and swapping it in over the note alone stacked a fresh copy
+     of the row every four seconds. #}
   <span class="ql-refresh-note" role="status" title="Checking your folders for music added outside the app."
-        hx-get="/library/refresh-note" hx-trigger="every 4s" hx-swap="outerHTML">Refreshing…</span>
+        hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML">{{ _note.label }}{% if _note.detail %} <span class="readout">{{ _note.detail }}</span>{% endif %}</span>
   {% else %}
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

@@ -1957,6 +1957,10 @@ def execute_albums(job, chosen, token):
     # a previous job would otherwise be reused even though folders may
     # have moved since.
     clear_scan_caches()
+    if getattr(job, "execute_kind", "") == "library":
+        # Same job carries the scan and the downloads it was approved for, so
+        # stop calling this phase a scan on the Queue and in History.
+        job.title = "Library download"
     args = build_args()
     _benign = {"already_complete", "skipped_already_higher_quality", "dry_run",
                "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras",
@@ -3360,7 +3364,10 @@ def scan_repairs(job, token):
             n_unverified += agg["unverified"]
             n_failed_albums += agg["failed"]
             for spec in agg["specs"]:
-                job.add_candidate(**spec)
+                # Unticked by default, like Upgrade and Downsample: Repair
+                # deletes and refills files, so one click on a whole-library
+                # sweep must not start replacing albums nobody looked at.
+                job.add_candidate(selected=False, **spec)
                 total += 1
             if not agg["failed"]:
                 scanned.add(name)
@@ -3702,7 +3709,12 @@ def execute_repairs(job, chosen, token):
     whose damage couldn't be ID-verified, depending on each candidate."""
     clear_scan_caches()
     args = build_args()
+    # The scan job carries the run through this phase, so rename it: a Queue or
+    # History row reading "Repair scan" while files are being replaced names
+    # the wrong half of the job.
+    job.title = "Repair"
     fixed = 0
+    unverified = 0
     failed = 0
     failed_cands = []
     interrupted = 0
@@ -3812,7 +3824,16 @@ def execute_repairs(job, chosen, token):
             unfinished_start = processed - 1
         elif (result and result.get("n_ok", 0) > 0 and result.get("imported")
                 and result.get("n_fail", 0) == 0
-                and not result.get("repair_unverified")):
+                and result.get("repair_unverified")):
+            # Its own outcome, neither repaired nor failed: the replacement
+            # landed and the originals are held as a recovery backup, so
+            # "repaired" would vouch for files nothing has proven complete,
+            # and "couldn't be repaired" claimed the album was untouched when
+            # it had just been replaced.
+            unverified += 1
+            job._imported_any = True
+        elif (result and result.get("n_ok", 0) > 0 and result.get("imported")
+                and result.get("n_fail", 0) == 0):
             fixed += 1
             job._imported_any = True
         else:
@@ -3839,6 +3860,8 @@ def execute_repairs(job, chosen, token):
         retry_count = len(failed_cands) + len(chosen[unfinished_start:])
         retry_saved = return_unfinished(unfinished_start)
         parts = [f"{fixed} repaired"]
+        if unverified:
+            parts.append(f"{unverified} replaced but unproven")
         if interrupted:
             parts.append(f"{interrupted} interrupted")
         if recovery_count:
@@ -3857,9 +3880,15 @@ def execute_repairs(job, chosen, token):
         return
     kept = (f" {plural(recovery_count, 'backup')} kept for recovery."
             if recovery_count else "")
-    job.summary = (f"{'Finished. ' if not failed else ''}"
+    unproven = (
+        f" {plural(unverified, 'album')} "
+        f"{'was' if unverified == 1 else 'were'} replaced but could not be "
+        "proven complete, so your original files were kept."
+        if unverified else ""
+    )
+    job.summary = (f"{'Finished. ' if not (failed or unverified) else ''}"
                    f"Repaired {fixed}/{plural(len(chosen), 'album')}."
-                   f"{kept}")
+                   f"{kept}{unproven}")
     log.info(job.summary)
     retry_saved = _return_qobuz_review_picks(
         failed_cands,

@@ -3096,11 +3096,31 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     width: 100%;
     justify-items: start;
   }
+  /* History follows the Queue rows: the icon sits beside the text instead of
+     taking a row of its own, and the chips line up beneath it. The stacked
+     card per job ran the page to nineteen phone screens. */
+  .ql-history-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.4rem 0.7rem;
+    padding: 0.7rem 0.9rem;
+  }
+  .ql-history-row .ql-job-tile {
+    width: 34px;
+    height: 34px;
+    align-self: start;
+  }
+  .ql-history-row .ql-job-tile svg {
+    width: 16px;
+    height: 16px;
+  }
   .ql-history-row .ql-activity-side {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.7rem;
+    grid-column: 2;
+    /* Tight enough that a status chip, a warning chip, the time and Open sit
+       on one line at 390 px; anything busier still wraps. */
+    gap: 0.4rem;
   }
   .ql-history-row .ql-activity-side .ql-activity-actions {
     width: auto;
