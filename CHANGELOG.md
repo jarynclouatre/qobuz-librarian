@@ -19,6 +19,7 @@ the app is actually doing.
 - Library drops the count line its review tabs already carry, while every scan caveat stays visible, and the refresh warning names the refresh control only when that control is really on offer. Dismissing a whole review now confirms the same way dismissing a single artist does.
 - The terminal agrees with the browser. An album dismissed on the review's Gap Fill tab is not offered again at the prompt, the Downsample preview reports what it found and what that would reclaim rather than signing off with nothing done, and the new-release check keeps its banner and its refusal in order when the run is piped. Settings shows the Mode section before credentials are saved, because the terminal's busy-lock message sends a fresh install there.
 - Decorative icons are hidden from screen readers, and cover art and the brand mark carry their dimensions so pages settle without shifting as images arrive.
+- A password of nothing but spaces can no longer be set: length is measured after trimming, so spaces cannot pad a short password up to the minimum either. Five typos at the login now cost fifteen minutes rather than a full hour, while an attacker who keeps guessing keeps restarting that wait.
 
 ## [0.13.2] - 2026-08-14
 

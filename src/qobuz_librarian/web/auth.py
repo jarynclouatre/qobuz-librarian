@@ -125,6 +125,11 @@ _login_failures: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
 _LOGIN_MAX = 5
 _LOGIN_WINDOW = 3600
+# Failures are counted over _LOGIN_WINDOW, but the door reopens _LOGIN_LOCKOUT
+# after the last one rather than after the oldest ages out. A typo run costs the
+# owner fifteen minutes instead of an hour, while an attacker who keeps guessing
+# keeps pushing the lockout forward: five tries, then one every fifteen minutes.
+_LOGIN_LOCKOUT = 900
 # Backstop against a flood of distinct (or spoofed) source IPs filling the
 # table; stale buckets are pruned continuously, this caps the live set.
 _MAX_TRACKED_IPS = 2048
@@ -217,8 +222,11 @@ def _password_key(value: str) -> str:
 
 
 def new_password_error(username: str, password: str) -> str:
-    if len(password) < MIN_PASSWORD_LEN:
-        return f"Use a password of at least {MIN_PASSWORD_LEN} characters."
+    # Measure the trimmed password so spaces cannot pad a short one up to the
+    # minimum, and so a password of nothing but spaces is refused outright.
+    if len(password.strip()) < MIN_PASSWORD_LEN:
+        return (f"Use a password of at least {MIN_PASSWORD_LEN} characters, "
+                "not counting spaces at the ends.")
     password_key = _password_key(password)
     username_key = _password_key(username)
     username_variants = ({username_key, username_key * 2, username_key * 3}
@@ -528,6 +536,11 @@ def _norm_user(username: str) -> str:
     return (username or "").strip().casefold()
 
 
+def _locked(times: list[float], limit: int, now: float) -> bool:
+    """Whether these in-window failures still hold the door shut."""
+    return len(times) >= limit and now - max(times) < _LOGIN_LOCKOUT
+
+
 def check_login_rate_limit(ip: str, username: str = "") -> bool:
     """True if BOTH this IP and this account may attempt a login. The per-account
     counter (keyed on the submitted username) blocks an attacker who rotates
@@ -540,7 +553,7 @@ def check_login_rate_limit(ip: str, username: str = "") -> bool:
             _login_failures[ip] = times
         else:
             _login_failures.pop(ip, None)
-        if len(times) >= _LOGIN_MAX:
+        if _locked(times, _LOGIN_MAX, now):
             return False
         if uname:
             utimes = [t for t in _user_failures.get(uname, [])
@@ -549,7 +562,7 @@ def check_login_rate_limit(ip: str, username: str = "") -> bool:
                 _user_failures[uname] = utimes
             else:
                 _user_failures.pop(uname, None)
-            if len(utimes) >= _USER_LOGIN_MAX:
+            if _locked(utimes, _USER_LOGIN_MAX, now):
                 return False
         return True
 
@@ -567,13 +580,13 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
     with _login_lock:
         waits = []
         times = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
-        if len(times) >= _LOGIN_MAX:
-            waits.append(_LOGIN_WINDOW - (now - min(times)))
+        if _locked(times, _LOGIN_MAX, now):
+            waits.append(_LOGIN_LOCKOUT - (now - max(times)))
         if uname:
             utimes = [t for t in _user_failures.get(uname, [])
                       if now - t < _LOGIN_WINDOW]
-            if len(utimes) >= _USER_LOGIN_MAX:
-                waits.append(_LOGIN_WINDOW - (now - min(utimes)))
+            if _locked(utimes, _USER_LOGIN_MAX, now):
+                waits.append(_LOGIN_LOCKOUT - (now - max(utimes)))
     return int(max(0, max(waits))) if waits else 0
 
 

@@ -5498,6 +5498,17 @@ def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path)
         assert "at least 15 characters" in short.text
         assert not cfg.WEB_AUTH_FILE.exists()
 
+        # Spaces used to satisfy the length rule on their own, so a lean on the
+        # space bar could set the admin password.
+        spaces = client.post(
+            "/setup",
+            data={"username": "admin", "password": " " * 20,
+                  "confirm": " " * 20, "_csrf_token": token},
+            headers={"X-CSRF-Token": token}, follow_redirects=False,
+        )
+        assert spaces.status_code == 400
+        assert not cfg.WEB_AUTH_FILE.exists()
+
         common = client.post(
             "/setup",
             data={"username": "admin", "password": "QOBUZ LIBRARIAN",
