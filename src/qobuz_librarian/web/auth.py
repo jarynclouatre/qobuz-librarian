@@ -13,6 +13,7 @@ revive stale sessions; a session also ends on logout or expiry.
 """
 import hashlib
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -25,6 +26,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from qobuz_librarian import config as cfg
+
+log = logging.getLogger("qobuz_librarian")
 
 SESSION_COOKIE = "ql_session"
 LOGIN_PATH = "/login"
@@ -523,6 +526,25 @@ def auth_active() -> bool:
     return not auth_disabled() and credentials_configured()
 
 
+def signed_out_target(request) -> str:
+    """Where an error page should send this visitor when it must not show them
+    the app shell, or "" when the shell is theirs to see.
+
+    Mirrors AuthMiddleware's own decision. It has to live outside the
+    middleware because the CSRF refusal is raised before the gate runs: a
+    tokenless POST to the sign-in form was answering with the whole nav, a
+    Settings link and a Log out button, and no route back to signing in.
+    """
+    if auth_disabled():
+        return ""
+    if not credentials_configured():
+        return SETUP_PATH
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie and verify_session(cookie):
+        return ""
+    return LOGIN_PATH
+
+
 def _prune_failures(now: float) -> None:
     """Drop buckets with no in-window failures left. Caller holds _login_lock."""
     for bucket in (_login_failures, _user_failures):
@@ -536,9 +558,57 @@ def _norm_user(username: str) -> str:
     return (username or "").strip().casefold()
 
 
+_warned_untrusted_proxy = False
+
+
+def client_ip(request) -> str:
+    """The address the login throttle counts against.
+
+    uvicorn resolves this from X-Forwarded-For already, but only for proxies
+    FORWARDED_ALLOW_IPS names, and its default (127.0.0.1) never matches a
+    proxy on a Docker network. Left unset, every visitor arrives as the proxy
+    and the per-address throttle becomes one bucket for the whole deployment,
+    so a stranger's wrong guesses lock the owner out too. Say so once, naming
+    the address to trust, rather than throttling everyone as one in silence.
+    """
+    global _warned_untrusted_proxy
+    peer = (request.client.host if request.client else "") or ""
+    chain = {p.strip() for p in
+             request.headers.get("x-forwarded-for", "").split(",") if p.strip()}
+    # A resolved address is one of the forwarded entries; the raw peer is not,
+    # because a proxy appends the client it saw rather than itself.
+    if chain and peer and peer not in chain and not _warned_untrusted_proxy:
+        _warned_untrusted_proxy = True
+        log.warning(
+            "Sign-ins are arriving through a proxy at %s whose forwarded "
+            "address isn't trusted, so the failed-login limit counts every "
+            "visitor as one and a stranger's wrong guesses can lock you out. "
+            "Set FORWARDED_ALLOW_IPS=%s in .env and restart.", peer, peer)
+    return peer or "unknown"
+
+
 def _locked(times: list[float], limit: int, now: float) -> bool:
     """Whether these in-window failures still hold the door shut."""
     return len(times) >= limit and now - max(times) < _LOGIN_LOCKOUT
+
+
+# A locked bucket still gets its password checked: someone who already knows it
+# was never stopped by a wait, and behind a proxy the wait can be triggered by a
+# stranger, leaving the owner with a container restart as the only way back in.
+# What a flood would be spending is the 600k round KDF, so only a couple of
+# those checks run at once and the rest are refused rather than queued. That
+# caps the CPU an attacker can take however many connections they open, while a
+# person retrying one attempt at a time never meets it.
+_LOCKED_CHECKS = threading.BoundedSemaphore(2)
+
+
+def take_locked_check_slot() -> bool:
+    """Claim one of the concurrent password checks allowed while locked."""
+    return _LOCKED_CHECKS.acquire(blocking=False)
+
+
+def release_locked_check_slot() -> None:
+    _LOCKED_CHECKS.release()
 
 
 def check_login_rate_limit(ip: str, username: str = "") -> bool:

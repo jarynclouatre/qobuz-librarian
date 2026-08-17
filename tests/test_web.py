@@ -1498,6 +1498,41 @@ def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):
     assert cfg.DOWNSAMPLE_HIRES_ENABLED is True  # idempotent
 
 
+def test_clearing_a_field_goes_back_to_the_compose_value(tmp_path, monkeypatch):
+    """Emptying a text field means "use the environment again", not "save a
+    blank". Saving the blank pinned it, so the Compose value was gone for good
+    and the settings file had to be edited by hand to get it back."""
+    import json
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    store = tmp_path / "s.json"
+    monkeypatch.setattr(ss, "SETTINGS_FILE", store)
+    monkeypatch.setattr(cfg, "BEETS_PATH_DEFAULT", "$albumartist/$album")
+    monkeypatch.setitem(ss._ENV_DEFAULTS, "BEETS_PATH_DEFAULT",
+                        "$albumartist/$album")
+    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
+    monkeypatch.setattr(ss, "_pending_apply", None)
+
+    ok, _ = ss.save({"BEETS_PATH_DEFAULT": "Mine/$album"})
+    assert ok is True
+    assert cfg.BEETS_PATH_DEFAULT == "Mine/$album"
+
+    ok, warnings = ss.save({"BEETS_PATH_DEFAULT": ""})
+    assert ok is True
+    assert cfg.BEETS_PATH_DEFAULT == "$albumartist/$album"
+    assert "BEETS_PATH_DEFAULT" not in json.loads(store.read_text())
+    # The box refills itself on the next render, so the save has to say why.
+    assert any("BEETS_PATH_DEFAULT" in w for w in warnings)
+
+    # A store already carrying a pinned blank recovers on the next start.
+    store.write_text(json.dumps({"BEETS_PATH_DEFAULT": ""}))
+    ss.load()
+    assert cfg.BEETS_PATH_DEFAULT == "$albumartist/$album"
+    assert "BEETS_PATH_DEFAULT" not in json.loads(store.read_text())
+
+
 def test_worker_does_not_apply_settings_while_other_lane_runs(monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import settings_store as ss
@@ -5440,6 +5475,98 @@ def _enable_auth(monkeypatch, tmp_path, *, configure=True):
     return _SameThreadASGIClient(app_mod.app)
 
 
+def test_login_page_says_so_while_locked_out(monkeypatch, tmp_path):
+    """The lockout was invisible on the form: it looked normal until you filled
+    it in and submitted again."""
+    from qobuz_librarian.web import auth as web_auth
+
+    # The failure counters are module state; give this test its own so the
+    # lockout it deliberately triggers doesn't follow the rest of the suite.
+    monkeypatch.setattr(web_auth, "_login_failures", {})
+    monkeypatch.setattr(web_auth, "_user_failures", {})
+
+    with _enable_auth(monkeypatch, tmp_path) as c:
+        for _ in range(6):
+            c.get("/login")
+            tok = c.cookies.get("ql_csrf")
+            last = c.post("/login",
+                          data={"username": "admin", "password": "nope",
+                                "_csrf_token": tok},
+                          headers={"X-CSRF-Token": tok}, follow_redirects=False)
+        assert last.status_code == 401
+
+        assert "ql-notice-error" in c.get("/login").text
+
+
+def test_an_untrusted_proxy_address_is_called_out(monkeypatch, caplog):
+    """Left unnamed in FORWARDED_ALLOW_IPS, a proxy makes every visitor arrive
+    as one address and the failed-login limit silently covers the whole
+    deployment, so a stranger's wrong guesses lock the owner out."""
+    from qobuz_librarian.web import auth as web_auth
+
+    def req(peer, forwarded):
+        return SimpleNamespace(client=SimpleNamespace(host=peer),
+                               headers={"x-forwarded-for": forwarded})
+
+    monkeypatch.setattr(web_auth, "_warned_untrusted_proxy", False)
+    with caplog.at_level("WARNING"):
+        assert web_auth.client_ip(req("172.30.0.1", "203.0.113.7")) == "172.30.0.1"
+    assert "FORWARDED_ALLOW_IPS=172.30.0.1" in caplog.text
+
+    # Resolved by uvicorn: the address is one of the forwarded entries.
+    monkeypatch.setattr(web_auth, "_warned_untrusted_proxy", False)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert web_auth.client_ip(req("203.0.113.7", "203.0.113.7")) == "203.0.113.7"
+    assert "FORWARDED_ALLOW_IPS" not in caplog.text
+
+
+def test_a_correct_password_still_works_while_locked_out(monkeypatch, tmp_path):
+    """The throttle used to refuse before checking the password, so behind a
+    proxy a stranger's wrong guesses locked the owner out of their own library
+    with a container restart as the only way back in."""
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(web_auth, "_login_failures", {})
+    monkeypatch.setattr(web_auth, "_user_failures", {})
+
+    with _enable_auth(monkeypatch, tmp_path) as c:
+        for _ in range(6):
+            c.get("/login")
+            tok = c.cookies.get("ql_csrf")
+            c.post("/login", data={"username": "admin", "password": "nope",
+                                   "_csrf_token": tok},
+                   headers={"X-CSRF-Token": tok}, follow_redirects=False)
+
+        c.get("/login")
+        tok = c.cookies.get("ql_csrf")
+        r = c.post("/login",
+                   data={"username": "admin", "password": "hunter2hunter2!",
+                         "_csrf_token": tok},
+                   headers={"X-CSRF-Token": tok}, follow_redirects=False)
+        assert r.status_code == 303
+        assert c.get("/", follow_redirects=False).status_code == 200
+
+
+def test_signed_out_error_page_keeps_the_app_shell_hidden(monkeypatch, tmp_path):
+    """A tokenless POST is refused before the auth gate runs, so its error page
+    was handing a signed-out visitor the whole nav and a Log out button with no
+    route back to the sign-in form."""
+    with _enable_auth(monkeypatch, tmp_path) as client:
+        client.cookies.clear()
+        response = client.post("/login", data={"username": "a", "password": "b"},
+                               follow_redirects=False)
+        assert response.status_code == 403
+        assert "ql-sidebar-nav" not in response.text
+        assert "/login" in response.text
+
+        # A missing static file is outside the gate too, and reached the same
+        # renderer.
+        response = client.get("/static/does-not-exist.css", follow_redirects=False)
+        assert response.status_code == 404
+        assert "ql-sidebar-nav" not in response.text
+
+
 def _mutation_paths(app):
     """Concrete inert paths for every unsafe route in the live route table."""
     return sorted(
@@ -6841,10 +6968,9 @@ def test_lockout_says_how_long_is_left_and_keeps_the_username(client, monkeypatc
     r = client.post("/login", data={"username": "dink", "password": "x"},
                     follow_redirects=False)
 
-    assert r.status_code == 429
-    assert "Try again in 16 minutes" in r.text
-    assert "restart Qobuz Librarian to clear it" in r.text
-    assert "Wait an hour" not in r.text
+    assert r.status_code == 401
+    # The wait names what is actually left, not a fixed hour.
+    assert "16 minutes" in r.text
     assert 'value="dink"' in r.text
 
 

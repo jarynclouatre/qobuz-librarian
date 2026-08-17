@@ -155,7 +155,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 **Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory is unavailable, the single-writer lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
 
-**Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address so the failed-login throttle counts attempts per real client, not per the shared proxy IP. Point it at your proxy, not `*`.
+**Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address so the failed-login throttle counts attempts per real client, not per the shared proxy IP. Point it at your proxy, not `*`. The default, `127.0.0.1`, does not cover a proxy on a Docker network, so leaving it unset there throttles every visitor as one; the log names the address to use the first time a sign-in arrives that way.
 
 **Keeping the token out of the environment.** `docker inspect` exposes environment variables, so to keep the Qobuz token out of them, point `QOBUZ_USER_AUTH_TOKEN_FILE` at a file containing only the token (a [Docker secret](https://docs.docker.com/engine/swarm/secrets/) or read-only bind mount) instead of setting `QOBUZ_USER_AUTH_TOKEN`. The web-login password supports the same pattern with `WEB_AUTH_PASSWORD_FILE`.
 

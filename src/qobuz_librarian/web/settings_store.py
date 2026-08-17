@@ -98,6 +98,12 @@ TEXT_FIELDS = [
 ]
 TEXT_KEYS = [k for k, *_ in TEXT_FIELDS]
 
+# What the environment (Compose, .env) supplies for each of those fields,
+# captured at import - before load() layers the saved settings over cfg. A
+# field the user empties goes back to tracking this value, so it has to be
+# kept somewhere the save path can still read it.
+_ENV_DEFAULTS = {key: getattr(cfg, key, "") for key, *_ in TEXT_FIELDS}
+
 # Enum fields whose value is an int on cfg (the form/JSON carry strings).
 _INT_ENUM_KEYS = {"STREAMRIP_QUALITY", "ARTIST_CATALOG_CACHE_TTL",
                   "NEW_RELEASE_CHECK_INTERVAL"}
@@ -216,6 +222,7 @@ def _validate_list(key, items):
 _PATH_TEMPLATE_KEYS = ("BEETS_PATH_DEFAULT", "BEETS_PATH_SINGLETON",
                        "BEETS_PATH_COMP")
 _FIELD_LABELS = {key: label for key, label, *_ in TEXT_FIELDS}
+_FIELD_KINDS = {key: kind for key, _, _, kind, _, _ in TEXT_FIELDS}
 
 
 def _path_template_problem(key, value):
@@ -236,6 +243,14 @@ def _path_template_problem(key, value):
                 "inside it.")
     return (f"\u201c{label}\u201d has to stay inside your music folder. "
             "Remove the \u201c..\u201d parts.")
+
+
+def _restored_default_warning(key, value):
+    """Said when emptying a field hands it back to a value the environment
+    supplies, so the box refilling itself doesn't read as a save that failed."""
+    label = _FIELD_LABELS.get(key, key)
+    return (f"\u201c{label}\u201d comes from your Compose file, so clearing the "
+            f"box put {value} back. Remove {key} there to stop using it.")
 
 
 def _dropped_warning(key, dropped):
@@ -315,22 +330,46 @@ def _read_settings():
         SETTINGS_FILE, "the settings file", "your saved Settings")
 
 
+def _blank_overrides(data) -> list:
+    """Keys in a saved settings dict that hold nothing. An empty text or list
+    field means "use whatever the environment gives me", which is what having
+    no key at all does, so a blank one is only ever left over from a save that
+    wrote it. Keeping it would hide the Compose value for good. Enums are
+    excluded: none of them offers an empty choice."""
+    return [key for key, _, _, kind, _, _ in TEXT_FIELDS
+            if kind != "enum" and key in data
+            and not str(data[key] or "").strip()]
+
+
+def _normalise(data) -> bool:
+    """Correct a saved settings dict in place. True when something changed."""
+    changed = False
+    # A persisted lossy STREAMRIP_QUALITY (0/1) is a tier the FLAC pipeline
+    # discards; _apply already coerces it to 2 in cfg.
+    if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
+        data["STREAMRIP_QUALITY"] = "2"
+        changed = True
+    for key in _blank_overrides(data):
+        del data[key]
+        changed = True
+    return changed
+
+
 def load():
     """Apply the persisted settings file over env defaults, if present."""
     data = _read_settings()
     if data is None:
         return
+    stale = _normalise(data)
     _apply(data)
-    # _apply coerces a persisted lossy STREAMRIP_QUALITY (0/1) to 2 in cfg;
-    # normalise it on disk too so the stale value doesn't linger and get
-    # re-coerced on every load. Under the store lock: this is a boot-time
-    # read-modify-write and the other process may be mid-save.
-    if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
+    # Correct the file too, so a value this loader had to fix doesn't linger
+    # and get fixed again on every start. Under the store lock: this is a
+    # boot-time read-modify-write and the other process may be mid-save.
+    if stale:
         with state_file.store_lock(SETTINGS_FILE):
-            data = _read_settings() or data
-            if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
-                data["STREAMRIP_QUALITY"] = "2"
-                _atomic_write_settings(data)
+            fresh = _read_settings()
+            if fresh is not None and _normalise(fresh):
+                _atomic_write_settings(fresh)
 
 
 def _any_active_job() -> bool:
@@ -444,9 +483,24 @@ def _save_locked(values: dict):
             clean[key] = value
 
     persisted = _read_settings() or {}
+    cleared = _blank_overrides(clean)
     for k, v in clean.items():
-        if k in persisted or v != baseline.get(k):
+        if k in cleared:
+            # Emptied: the field goes back to tracking whatever the environment
+            # supplies, or the beets config file when it supplies nothing. That
+            # is what carrying no key means, so the key leaves the store rather
+            # than pinning a blank over the Compose value for good.
+            persisted.pop(k, None)
+        elif k in persisted or v != baseline.get(k):
             persisted[k] = v
+
+    # cfg has to follow in this session, not only after the next restart.
+    applied = dict(clean)
+    for k in cleared:
+        applied[k] = _ENV_DEFAULTS.get(k, "")
+        shown = _field_str(applied[k], _FIELD_KINDS.get(k, "text"))
+        if shown:
+            warnings.append(_restored_default_warning(k, shown))
 
     from qobuz_librarian.web import jobs as job_mgr
 
@@ -461,12 +515,12 @@ def _save_locked(values: dict):
         if _any_active_job():
             # Merge onto any change still waiting, so this save can't drop an
             # earlier deferred one.
-            _pending_apply = {**(_pending_apply or {}), **clean}
+            _pending_apply = {**(_pending_apply or {}), **applied}
         else:
             # Fold in any deferred change and clear the slot under the lock,
             # so a drain firing right after can't roll these fields back to
             # the old deferred copy.
-            merged = {**(_pending_apply or {}), **clean}
+            merged = {**(_pending_apply or {}), **applied}
             _pending_apply = None
             _apply(merged)
 

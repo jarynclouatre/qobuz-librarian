@@ -2363,6 +2363,23 @@ async def settings_head():
     return Response(status_code=200)
 
 
+def _lockout_notice(ip, username="", *, after_failure=False) -> str:
+    """How long the login throttle still refuses wrong guesses, or "" when it
+    doesn't.
+
+    The GET and the POST share it: a locked-out visitor was shown a normal
+    form and only found out by filling it in and submitting again.
+    """
+    left = web_auth.login_lockout_remaining(ip, username)
+    if left <= 0:
+        return ""
+    mins = max(1, (left + 59) // 60)
+    lead = "" if after_failure else "Too many failed attempts. "
+    return (f"{lead}Wrong guesses stay blocked for another "
+            f"{mins} minute{'s' if mins != 1 else ''}, but your correct "
+            "password still gets you in.")
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if web_auth.auth_disabled():
@@ -2374,7 +2391,7 @@ async def login_page(request: Request):
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(
         request=request, name="login.html",
-        context={"error": "",
+        context={"error": _lockout_notice(web_auth.client_ip(request)),
                  "next_path": web_auth.safe_next_path(
                      request.query_params.get("next"))})
 
@@ -2390,27 +2407,16 @@ async def login_submit(request: Request, username: str = Form(""),
     # through failed attempts and re-validated so the form can't smuggle in an
     # off-site redirect.
     next_path = web_auth.safe_next_path(next)
-    ip = (request.client.host if request.client else "") or "unknown"
+    ip = web_auth.client_ip(request)
     # A request already carrying a valid session is provably the logged-in user,
     # not the brute-forcer the throttle exists to stop, so exempt it so a remote
     # flood of failed logins for the admin username can't lock the real admin out.
     cookie = request.cookies.get(web_auth.SESSION_COOKIE)
     has_session = bool(cookie) and web_auth.verify_session(cookie)
-    if not has_session and not web_auth.check_login_rate_limit(ip, username):
-        # The throttle is checked before the password is verified on purpose, so
-        # a correct password can't clear it. Say how long is actually left, and
-        # name the way out: the counters live in memory, so a restart clears
-        # them and the owner of the box can always do that.
-        left = web_auth.login_lockout_remaining(ip, username)
-        mins = max(1, (left + 59) // 60)
-        return templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": f"Too many failed attempts. Try again in "
-                              f"{mins} minute{'s' if mins != 1 else ''}, or "
-                              f"restart Qobuz Librarian to clear it.",
-                     "username": username.strip(),
-                     "next_path": next_path},
-            status_code=429)
+    # A locked bucket no longer refuses outright: the password is still checked,
+    # so a correct one always gets in.
+    throttled = (not has_session
+                 and not web_auth.check_login_rate_limit(ip, username))
     # A submission that could never succeed shouldn't cost a strike: an empty
     # field is a slip, not an attempt, and five of them locked the owner out.
     if not username.strip() or not password:
@@ -2420,17 +2426,33 @@ async def login_submit(request: Request, username: str = Form(""),
                      "username": username.strip(),
                      "next_path": next_path},
             status_code=400)
+    # While locked, only a couple of these checks run at once, so a flood of
+    # connections can't spend the box's CPU on KDFs. Refused, not queued.
+    if throttled and not web_auth.take_locked_check_slot():
+        return templates.TemplateResponse(
+            request=request, name="login.html",
+            context={"error": "Sign-in attempts are coming in faster than they "
+                              "can be checked. Try again in a moment.",
+                     "username": username.strip(),
+                     "next_path": next_path},
+            status_code=429)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
     loop = asyncio.get_running_loop()
-    ok = await loop.run_in_executor(
-        None, web_auth.verify_login, username.strip(), password)
+    try:
+        ok = await loop.run_in_executor(
+            None, web_auth.verify_login, username.strip(), password)
+    finally:
+        if throttled:
+            web_auth.release_locked_check_slot()
     if not ok:
         web_auth.record_login_failure(ip, username)
+        wait = _lockout_notice(ip, username, after_failure=True)
         return templates.TemplateResponse(
             request=request, name="login.html",
-            context={"error": "Incorrect username or password.",
+            context={"error": ("Incorrect username or password."
+                               + (f" {wait}" if wait else "")),
                      # Keep what they typed, as the setup screen already does.
                      "username": username.strip(),
                      "next_path": next_path},
@@ -2641,7 +2663,23 @@ def _is_htmx(request):
 
 
 def render_error_page(request, code, title, msg):
-    """Render the app's styled error page from routes or middleware."""
+    """Render the app's styled error page from routes or middleware.
+
+    A visitor with no session gets the sign-in shell instead: the app shell
+    would hand them the full nav and a Log out button with no way back to the
+    login form. Every error render goes through here so the choice is made
+    once, including the CSRF refusal, which is raised before the auth gate
+    runs and so is the one page that can reach a signed-out browser.
+    """
+    target = web_auth.signed_out_target(request)
+    if target:
+        return templates.TemplateResponse(
+            request=request, name="error_auth.html",
+            context={"title": title, "msg": msg, "target": target,
+                     "action": ("Set up your login"
+                                if target == web_auth.SETUP_PATH
+                                else "Back to sign in")},
+            status_code=code)
     return _tr(request, "error.html",
                {"code": code, "title": title, "msg": msg}, status_code=code)
 
@@ -2652,12 +2690,10 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
     ``{"detail": "Not Found"}``. API routes and every non-404 status keep the
     JSON shape callers expect."""
     if exc.status_code == 404 and not request.scope["path"].startswith("/api/"):
-        return _tr(request, "error.html", {
-            "code": 404,
-            "title": "Page not found",
-            "msg": "That page doesn't exist. The link may have moved or been "
-                   "mistyped.",
-        }, status_code=404)
+        return render_error_page(
+            request, 404, "Page not found",
+            "That page doesn't exist. The link may have moved or been "
+            "mistyped.")
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
                         headers=getattr(exc, "headers", None))
 
@@ -2669,12 +2705,10 @@ async def _validation_exception_handler(request: Request,
     page instead of dumping framework validation JSON into the browser. API
     routes keep the JSON detail machine callers want."""
     if not request.scope["path"].startswith("/api/"):
-        return _tr(request, "error.html", {
-            "code": 400,
-            "title": "Bad request",
-            "msg": "That address has an invalid value in it. Check the link "
-                   "and try again.",
-        }, status_code=400)
+        return render_error_page(
+            request, 400, "Bad request",
+            "That address has an invalid value in it. Check the link and try "
+            "again.")
     return JSONResponse({"detail": exc.errors()}, status_code=422)
 
 
@@ -2686,12 +2720,10 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     logging.getLogger("qobuz_librarian").exception(
         "Unhandled error on %s", request.scope.get("path", "?"))
     if not request.scope["path"].startswith("/api/"):
-        return _tr(request, "error.html", {
-            "code": 500,
-            "title": "Something went wrong",
-            "msg": "An unexpected error happened on the server. Try again, or "
-                   "check the container logs if it keeps happening.",
-        }, status_code=500)
+        return render_error_page(
+            request, 500, "Something went wrong",
+            "An unexpected error happened on the server. Try again, or check "
+            "the container logs if it keeps happening.")
     return JSONResponse({"detail": "internal server error"}, status_code=500)
 
 

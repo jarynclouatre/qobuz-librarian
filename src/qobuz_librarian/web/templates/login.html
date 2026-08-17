@@ -43,6 +43,16 @@
         </div>
         <button type="submit" class="ql-btn ql-btn-primary w-full">Sign in</button>
       </form>
+
+      <details class="ql-auth-details">
+        <summary class="ql-auth-details-summary">Forgotten your password?</summary>
+        <p class="ql-auth-details-copy">
+          Set <code>WEB_AUTH_USER</code> and <code>WEB_AUTH_PASSWORD</code> in
+          <code>.env</code> or <code>compose.yaml</code> and restart the
+          container. A changed password replaces the login and signs every
+          browser out. At least 15 characters.
+        </p>
+      </details>
     </div>
   </main>
 </body>

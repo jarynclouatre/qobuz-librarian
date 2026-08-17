@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="night">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{{ title }} | Qobuz Librarian</title>
+  {% include "_app_head.html" %}
+  <link href="/static/dist/app.css?v={{ asset_version }}" rel="stylesheet">
+  <script src="/static/app.js?v={{ asset_version }}"></script>
+</head>
+<body class="ql-auth-page">
+  <main class="ql-auth-panel ql-auth-panel-login">
+    <div class="ql-auth-body">
+      <div class="ql-auth-brand">
+        <img src="/static/qobuz-librarian-mark.png?v={{ asset_version }}" alt="" class="ql-auth-logo">
+        <div class="ql-auth-title">
+          <h1>{{ title }}</h1>
+        </div>
+      </div>
+
+      <div class="ql-notice ql-notice-error"><span>{{ msg }}</span></div>
+
+      <a href="{{ target }}" class="ql-btn ql-btn-primary w-full">{{ action }}</a>
+    </div>
+  </main>
+</body>
+</html>
