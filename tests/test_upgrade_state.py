@@ -52,7 +52,6 @@ def test_update_artist_replaces_only_that_artists_upgrade_candidates(
         token="tok",
         args=SimpleNamespace(),
         capped={},
-        hidden=None,
         scan_artist=lambda _ad: [_upgrade_candidate(album_id="new", title="New Album")],
     )
 
@@ -101,7 +100,6 @@ def test_parallel_update_artist_keeps_both_upgrade_refreshes(
             token="tok",
             args=SimpleNamespace(),
             capped={},
-            hidden=None,
             scan_artist=lambda ad: [
                 _upgrade_candidate(album_id=ad.name, title=f"{ad.name} Album")
             ],
@@ -213,7 +211,6 @@ def test_full_save_preserves_newer_targeted_upgrade_refresh_with_same_fingerprin
         token="tok",
         args=SimpleNamespace(),
         capped={},
-        hidden=None,
         scan_artist=lambda _ad: [],
     )
     upgrade_state.save(

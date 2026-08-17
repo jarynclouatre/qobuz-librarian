@@ -529,7 +529,6 @@ def test_baseline_scan_refreshes_shared_upgrade_state(tmp_path, monkeypatch):
             artists_scanned=[],
             errors={},
             fingerprints={},
-            hidden_signature="",
         )
 
     def fake_upgrade_refresh(artists, **kwargs):
@@ -844,7 +843,6 @@ def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
         "payload": {"album_id": "saved", "_artist_dir": "Artist"},
         "selected": False,
     }
-    hidden = hidden_mod.load()
     library_scan_state.save_kind(
         "missing",
         artists={
@@ -856,8 +854,6 @@ def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
             },
         },
         complete=True,
-        hidden_signature=library_scan_state.hidden_signature(
-            hidden, hidden_mod.SCOPE_MISSING),
         quality_sig=library_scan_state.quality_signature(),
     )
     downsample_skip = []
@@ -871,7 +867,6 @@ def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
             artists_scanned=[],
             errors={},
             fingerprints={},
-            hidden_signature="",
         )
 
     def fake_upgrade_refresh(artists, **kwargs):
@@ -882,7 +877,6 @@ def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
             artists_scanned=[],
             errors={},
             fingerprints={},
-            hidden_signature="",
         )
 
     monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
@@ -914,6 +908,82 @@ def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
     assert [c["title"] for c in job.candidates] == ["Saved Album"]
 
 
+def test_dismissed_album_survives_a_refresh_without_a_rescan(
+        tmp_path, monkeypatch):
+    """Dismissing used to invalidate the whole snapshot, so the next refresh
+    re-crawled every artist against Qobuz, and it dropped the dismissed album
+    from the saved scan so Restore had nothing to bring back."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import hidden as hidden_mod
+    from qobuz_librarian.library import library_scan_state
+    from qobuz_librarian.web import flows
+
+    monkeypatch.setattr(
+        cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    artist_dir = tmp_path / "Artist"
+    (artist_dir / "Album").mkdir(parents=True)
+    candidates = [
+        {
+            "kind": "album",
+            "title": title,
+            "artist": "Artist",
+            "detail": "2024 · CD quality · 10 tracks",
+            "payload": {"album_id": title, "_artist_dir": "Artist"},
+            "selected": False,
+        }
+        for title in ("Kept Album", "Dismissed Album")
+    ]
+    library_scan_state.save_kind(
+        "missing",
+        artists={
+            "Artist": {
+                "fingerprint": "same",
+                "candidates": candidates,
+                "artist_id": "artist-id",
+                "catalog_ids": ["Kept Album", "Dismissed Album"],
+            },
+        },
+        complete=True,
+        quality_sig=library_scan_state.quality_signature(),
+    )
+    hidden_mod.hide(hidden_mod.SCOPE_MISSING, [("Artist", "Dismissed Album", "")])
+
+    def fake_refresh(artists, **kwargs):
+        return SimpleNamespace(
+            complete=True, candidates=[], artists_scanned=[], errors={},
+            fingerprints={},
+        )
+
+    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "same",
+                        raising=False)
+    monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_refresh)
+    monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists", fake_refresh)
+    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
+    monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
+    monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda _kind: None)
+    monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
+    monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
+    monkeypatch.setattr(flows, "flush_resolve_cache", lambda: None)
+    monkeypatch.setattr(flows.new_releases_mod, "is_baseline_complete", lambda: True)
+    monkeypatch.setattr(
+        flows,
+        "_scan_library_artist",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("a dismissal must not force a rescan")),
+    )
+    job = jm.Job(title="refresh")
+
+    flows.scan_library(job, "tok")
+
+    assert [c["title"] for c in job.candidates] == ["Kept Album"]
+    saved = library_scan_state.kind_state("missing")["artists"]["Artist"]
+    assert sorted(c["title"] for c in saved["candidates"]) == [
+        "Dismissed Album", "Kept Album",
+    ]
+
+
 def test_scan_library_force_full_ignores_saved_artist_snapshot(
         tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
@@ -925,7 +995,6 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
         cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
     artist_dir = tmp_path / "Artist"
     artist_dir.mkdir()
-    hidden = hidden_mod.load()
     library_scan_state.save_kind(
         "missing",
         artists={
@@ -937,8 +1006,6 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
             },
         },
         complete=True,
-        hidden_signature=library_scan_state.hidden_signature(
-            hidden, hidden_mod.SCOPE_MISSING),
         quality_sig=library_scan_state.quality_signature(),
     )
     downsample_skip = []
@@ -958,8 +1025,7 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
                 artists_scanned=[],
                 errors={},
                 fingerprints={},
-                hidden_signature="",
-            ),
+                ),
     )
     monkeypatch.setattr(
         flows.upgrade_state,
@@ -971,8 +1037,7 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
                 artists_scanned=[],
                 errors={},
                 fingerprints={},
-                hidden_signature="",
-            ),
+                ),
     )
     monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
     monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)

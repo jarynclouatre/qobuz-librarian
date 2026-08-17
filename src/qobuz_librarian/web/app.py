@@ -10462,7 +10462,9 @@ def _resolve_host_path(container_path: str) -> tuple[str, bool]:
 
 
 def _settings_response(request, *, saved=False, queued=False, connected=False,
-                       unverified=False, error="", mode="", user_id=None,
+                       unverified=False, envchecked=False,
+                       focus_behaviour=False,
+                       error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
                        quality_note=False):
     creds = _read_creds()
@@ -10514,6 +10516,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "quality_note": quality_note,
         "connected": connected,
         "unverified": unverified,
+        "envchecked": envchecked,
+        "focus_behaviour": focus_behaviour,
         "error": error,
         "warnings": warnings or [],
         "page": "settings",
@@ -10543,12 +10547,14 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, saved: bool = False,
                         queued: bool = False, connected: bool = False,
-                        unverified: bool = False, error: str = "",
+                        unverified: bool = False, envchecked: bool = False,
+                        error: str = "",
                         mode: str = "", quality_note: bool = False):
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, _diagnostics)
     return _settings_response(request, saved=saved, queued=queued,
                               connected=connected, unverified=unverified,
+                              envchecked=envchecked,
                               error=error, mode=mode, diagnostics=diags,
                               quality_note=quality_note)
 
@@ -10573,6 +10579,22 @@ def _qobuz_token_is_env_owned() -> bool:
         or os.environ.get("QOBUZ_USER_AUTH_TOKEN", "").strip()
         or os.environ.get("QOBUZ_USER_AUTH_TOKEN_FILE", "").strip()
     )
+
+
+async def _classify_token_async(loop, token):
+    """Ask Qobuz whether a token still works, within the page's time budget.
+    A timeout is TEMPORARY, the same as an unreachable API."""
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: api_client.call_within(
+                    cfg.WEB_TEST_AUTH_TIMEOUT, _classify_token, token),
+            ),
+            timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return AuthOutcome.TEMPORARY
 
 
 @app.post("/settings", response_class=HTMLResponse)
@@ -10610,8 +10632,21 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
     # Blank means "keep the existing value": the fields are not pre-filled,
     # so an empty submission must not wipe a previously-saved credential.
     if not auth_token.strip() and not user_id.strip() and cfg.QOBUZ_USER_AUTH_TOKEN:
-        # Blank submit with an env token = "keep the env creds".
-        return RedirectResponse(url="/settings?connected=1", status_code=303)
+        # Blank submit with the credential coming from the environment: there
+        # is nothing this page can write, so check the token actually in use
+        # and report that. Reporting a save here told someone with a dead
+        # environment token that everything was fine.
+        verdict = await _classify_token_async(loop, cfg.QOBUZ_USER_AUTH_TOKEN)
+        if verdict == AuthOutcome.REJECTED:
+            return RedirectResponse(url="/settings?error=envrejected",
+                                    status_code=303)
+        if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
+            _on_auth_state(
+                AuthEvidence(_credentials_snapshot().generation, verdict))
+            return RedirectResponse(url="/settings?envchecked=1",
+                                    status_code=303)
+        return RedirectResponse(url="/settings?error=envunreachable",
+                                status_code=303)
     new_token = auth_token.strip() or existing.get("auth_token", "")
     new_uid = user_id.strip() or existing.get("user_id", "")
     if new_uid and not new_token:
@@ -10627,15 +10662,7 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
             new_token,
             source="env" if env_owned else "streamrip",
         )
-        try:
-            verdict = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, lambda: api_client.call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
-                                              _classify_token, probe.token)),
-                timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            verdict = AuthOutcome.TEMPORARY
+        verdict = await _classify_token_async(loop, probe.token)
     if verdict == AuthOutcome.REJECTED:
         # Re-render with the real token still in the (password-type, so
         # visually masked) field so the user can fix a paste slip without
@@ -10751,10 +10778,14 @@ async def save_behavior(request: Request):
         # user-typed values through the redirect URL.
         loop = asyncio.get_running_loop()
         diags = await loop.run_in_executor(None, _diagnostics)
+        # This one re-renders instead of redirecting, so nothing scrolls the
+        # page for it. The outcome sits with the Behaviour controls now, so
+        # land the reader there.
         return _settings_response(request, saved=True,
                                   queued=settings_store._any_active_job(),
                                   warnings=warnings, diagnostics=diags,
-                                  quality_note=quality_note)
+                                  quality_note=quality_note,
+                                  focus_behaviour=True)
     suffix = "&queued=1" if settings_store._any_active_job() else ""
     if quality_note:
         suffix += "&quality_note=1"

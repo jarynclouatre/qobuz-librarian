@@ -180,7 +180,7 @@ def _artist_dir_from_result(album, result=None, fallback_artist=None):
 def _refresh_downsample_artist_state(artist_dir):
     if artist_dir is None:
         return
-    result = downsample_state.update_artist(artist_dir, hidden=hidden_mod.load())
+    result = downsample_state.update_artist(artist_dir)
     if not result.complete:
         err = next(iter(result.errors.values()), "unknown error")
         generation_state.mark_output_status(
@@ -204,7 +204,6 @@ def _refresh_upgrade_artist_state(artist_dir, token, args=None):
             token=token,
             args=args or build_args(),
             capped=quality_decision.load_capped(),
-            hidden=hidden_mod.load(),
         )
     except (AuthLost, QobuzUnavailable):
         raise
@@ -354,6 +353,19 @@ def _add_candidate_spec(job, spec):
         detail=spec.get("detail") or "",
         payload=spec.get("payload") or {},
         selected=bool(spec.get("selected")),
+    )
+
+
+def _spec_dismissed(spec, hidden):
+    """Is this saved candidate on the dismissed list right now? The snapshot
+    keeps dismissed albums so Restore has something to bring back, so every
+    path that shows saved candidates filters here instead."""
+    return hidden_mod.is_hidden(
+        hidden_mod.SCOPE_MISSING,
+        spec.get("artist"),
+        spec.get("title"),
+        hidden,
+        year=(spec.get("payload") or {}).get("year"),
     )
 
 
@@ -1131,13 +1143,17 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
     session); returns plain data so the caller adds candidates serially,
     keeping job.candidates single-writer. Also returns the artist's id and its
     lossless catalog ids so the caller can seed the new-release baseline (the
-    discography is already fetched here)."""
+    discography is already fetched here).
+
+    Dismissed albums come back too. The caller keeps them out of the review but
+    saves them in the snapshot, so dismissing costs no rescan and Restore has a
+    record to bring back."""
     result = find_missing_for_artist(
         artist_dir.name, token=token,
         opts=DiscoveryOpts(prefer_hires=cfg.PREFER_HIRES),
         artist_dir=artist_dir, hidden=hidden,
         single_store=hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None,
-        want_missing=not partial_only)
+        want_missing=not partial_only, include_hidden=True)
     artist_id = str(result.artist_id) if result.artist_id else None
     # None signals "don't seed a baseline", a transient short-page fetch
     # isn't the whole discography, so seeding it would later dump the dropped
@@ -1345,15 +1361,16 @@ def _scan_library_impl(
     # albums the user dismissed since the interruption are not re-added, and
     # so the parallel workers below see the same consistent view.
     hidden = hidden_mod.load()
-    hidden_sig = library_scan_state.hidden_signature(
-        hidden, hidden_mod.SCOPE_MISSING)
     quality_sig = library_scan_state.quality_signature()
     previous_scan = library_scan_state.kind_state(kind)
+    # Dismissing and restoring deliberately do NOT bar the cheap path. The
+    # snapshot holds every candidate the last crawl found, dismissed or not, so
+    # both directions are a filter over saved data, not a reason to ask Qobuz
+    # about the whole library again.
     cheap_refresh = (
         not force_full
         and not resuming
         and previous_scan.get("complete")
-        and previous_scan.get("hidden_signature", "") == hidden_sig
         # Saved candidates computed under a different quality policy must not
         # carry forward, a settings change re-derives even unchanged folders.
         and previous_scan.get("quality_signature", "") == quality_sig
@@ -1443,16 +1460,7 @@ def _scan_library_impl(
             catalog_ids = saved.get("catalog_ids")
             if catalog_ids is None:
                 continue
-            candidates = [
-                c for c in saved.get("candidates", [])
-                if not hidden_mod.is_hidden(
-                    hidden_mod.SCOPE_MISSING,
-                    c.get("artist"),
-                    c.get("title"),
-                    hidden,
-                    year=(c.get("payload") or {}).get("year"),
-                )
-            ]
+            candidates = list(saved.get("candidates") or [])
             state_artists[name] = {
                 "fingerprint": saved.get("fingerprint") or fingerprints.get(name, ""),
                 "candidates": candidates or restored_by_artist.get(name, []),
@@ -1481,17 +1489,9 @@ def _scan_library_impl(
             and saved.get("fingerprint") == fingerprints.get(artist_dir.name)
             and (saved.get("artist_id") or not saved.get("candidates"))
         ):
-            candidates = [
-                c for c in saved.get("candidates", [])
-                if not hidden_mod.is_hidden(
-                    hidden_mod.SCOPE_MISSING,
-                    c.get("artist"),
-                    c.get("title"),
-                    hidden,
-                    year=(c.get("payload") or {}).get("year"),
-                )
-            ]
-            for c in candidates:
+            candidates = list(saved.get("candidates") or [])
+            visible = [c for c in candidates if not _spec_dismissed(c, hidden)]
+            for c in visible:
                 _readd_candidate(job, c)
                 total += 1
             scanned.add(artist_dir.name)
@@ -1505,8 +1505,8 @@ def _scan_library_impl(
                 "artist_id": saved.get("artist_id") or "",
                 "catalog_ids": list(saved_catalog_ids or []),
             }
-            hit = ({"artist": artist_dir.name, "albums": len(candidates)}
-                   if candidates else None)
+            hit = ({"artist": artist_dir.name, "albums": len(visible)}
+                   if visible else None)
             job.push_progress("Scanning library", done, n, artist_dir.name,
                               found=total, hit=hit, unit="artist")
         else:
@@ -1551,14 +1551,21 @@ def _scan_library_impl(
             if artist_id and catalog_ids is not None:
                 baseline_seen[artist_id] = catalog_ids
             artist_candidates = []
+            shown = 0
             for gap in gaps:
                 # Library is a discovery list, leave candidates unticked so a
                 # single click can't queue hundreds nobody reviewed.
                 spec = _gap_candidate_spec(
                     gap, artist_name or name, selected=False, artist_key=name)
+                if _spec_dismissed(spec, hidden):
+                    # Saved but not reviewed: the snapshot is the record
+                    # Restore brings back from.
+                    artist_candidates.append(spec)
+                    continue
                 if _add_candidate_spec(job, spec) is not None:
                     artist_candidates.append(spec)
                     total += 1
+                    shown += 1
             if catalog_ids is not None:
                 state_artists[name] = {
                     "fingerprint": fingerprints.get(name, ""),
@@ -1568,13 +1575,13 @@ def _scan_library_impl(
                 }
             # Add the albums before the progress tick so a hit lands the live
             # preview the same moment the running total moves.
-            hit = ({"artist": artist_name or name, "albums": len(gaps)}
-                   if gaps else None)
+            hit = ({"artist": artist_name or name, "albums": shown}
+                   if shown else None)
             job.push_progress("Scanning library", done, n, artist_name or name,
                               found=total, hit=hit, unit="artist")
-            if gaps:
+            if shown:
                 tail = "with Gap Fill candidates" if partial_only else "to fill"
-                log.info(f"  {artist_name} - {plural(len(gaps), 'album')} {tail}")
+                log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
             since_save += 1
             if since_save >= _CHECKPOINT_EVERY:
                 since_save = 0
@@ -1626,7 +1633,6 @@ def _scan_library_impl(
                     kind,
                     artists=state_artists,
                     complete=True,
-                    hidden_signature=hidden_sig,
                     quality_sig=quality_sig,
                     revision=partial_revision,
                 )
@@ -1649,7 +1655,6 @@ def _scan_library_impl(
                     kind,
                     artists=state_artists,
                     complete=True,
-                    hidden_signature=hidden_sig,
                     quality_sig=quality_sig,
                     generation=scan_generation,
                     revision=scan_revision,

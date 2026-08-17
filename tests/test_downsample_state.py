@@ -56,14 +56,20 @@ def test_refresh_for_artists_uses_downsample_hidden_scope(tmp_path, monkeypatch)
         "title": "Album",
     }
 
+    offered = []
     result = downsample_state.refresh_for_artists(
         [artist_dir],
         hidden=hidden_store,
         scan_artist=lambda _ad: [candidate],
+        on_artist=lambda _ad, found, _err, _i, _n: offered.extend(found),
     )
 
-    assert result.candidates == []
-    assert downsample_state.load()["candidates"] == []
+    # Kept hi-res albums stay in the snapshot so bringing one back has a record
+    # to restore from, but nothing offers them.
+    assert offered == []
+    assert downsample_state.visible_candidates(hidden=hidden_store) == []
+    assert [c["title"] for c in downsample_state.load()["candidates"]] == ["Album"]
+    assert [c.title for c in result.candidates] == ["Album"]
 
 
 def test_update_artist_replaces_only_that_artists_downsample_candidates(
@@ -92,7 +98,6 @@ def test_update_artist_replaces_only_that_artists_downsample_candidates(
 
     result = downsample_state.update_artist(
         old_artist,
-        hidden=None,
         scan_artist=lambda _ad: [
             _candidate(new_album, artist="Artist", title="New Album")
         ],

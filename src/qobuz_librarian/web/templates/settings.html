@@ -27,12 +27,14 @@
 {% endif %}
 {% endif %}
 
-{% if saved %}
-<div class="ql-notice {% if queued %}ql-notice-info{% else %}ql-notice-success{% endif %} mb-6" data-flash>
+{% if envchecked %}
+<div class="ql-notice ql-notice-success mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>{% if queued %}Saved. Takes effect after the current job finishes.{% else %}Settings saved.{% endif %}</span>
+  <span>Qobuz accepted your token. It comes from your environment, so there was
+    nothing to save here.
+    <a href="/" class="ql-link font-semibold">Go to Search</a></span>
 </div>
 {% endif %}
 
@@ -47,24 +49,6 @@
     unreadable copy is kept in your data folder as
     {% for name in corrupt_stores %}<code>{{ name }}</code>{{ ', ' if not loop.last }}{% endfor %};
     delete {{ 'it' if corrupt_stores | length == 1 else 'them' }} to clear this notice.</span>
-</div>
-{% endif %}
-
-{% if quality_note %}
-<div class="ql-notice ql-notice-info mb-6" data-flash>
-  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-  </svg>
-  <span>Quality setting changed. Run a Library refresh after it takes effect. Until then, the saved Upgrade review cannot be approved.</span>
-</div>
-{% endif %}
-
-{% if warnings %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
-  </svg>
-  <span>{% for w in warnings %}{{ w }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span>
 </div>
 {% endif %}
 
@@ -90,6 +74,18 @@
   and the one you already have is still in use. Try again when you&rsquo;re back
   online.</span>
 </div>
+{% elif error == "envrejected" %}
+<div class="ql-notice ql-notice-error mb-6" data-flash>
+  <span>Qobuz rejected the token that comes from your environment, so nothing on
+  this page can fix it. Get a fresh token from play.qobuz.com, set it where you
+  set the last one, then restart Qobuz Librarian.</span>
+</div>
+{% elif error == "envunreachable" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>Qobuz couldn&rsquo;t be reached, so your token could not be checked.
+  Nothing was changed; it comes from your environment. Try again when
+  you&rsquo;re back online.</span>
+</div>
 {% elif error == "empty" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <span>Token cannot be empty. Paste the <code>token</code> value from
@@ -106,17 +102,7 @@
   <span>The account was not changed because Qobuz work is already running.
   Wait for that album or scan to finish, then try again.</span>
 </div>
-{% elif error == "invalidsettings" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Nothing changed because one or more submitted settings were invalid.
-  Reload this page and try again.</span>
-</div>
-{% elif error == "persist" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Nothing changed because the settings could not be saved. Give the data
-  folder write access, then try again.</span>
-</div>
-{% elif error %}
+{% elif error and error not in ("invalidsettings", "persist") %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
@@ -229,7 +215,7 @@
       </div>
 
       <div class="ql-settings-actions">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save &amp; connect</button>
+        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">{% if creds_from_env and env_user_id_set %}Check connection{% else %}Save &amp; connect{% endif %}</button>
       </div>
     </form>
     {% if auth_token_set %}</details>{% endif %}
@@ -306,10 +292,49 @@
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="behaviour" tabindex="-1" class="ql-anchor-target">Behaviour</h2>
+        <h2 id="behaviour" tabindex="-1" class="ql-anchor-target"{% if focus_behaviour %} autofocus{% endif %}>Behaviour</h2>
         <p>These settings apply to new jobs. Saved values override Compose defaults.</p>
       </div>
     </div>
+{% if saved %}
+<div class="ql-notice {% if queued %}ql-notice-info{% else %}ql-notice-success{% endif %} mb-6" data-flash>
+  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+  <span>{% if queued %}Saved. Takes effect after the current job finishes.{% else %}Settings saved.{% endif %}</span>
+</div>
+{% endif %}
+
+{% if quality_note %}
+<div class="ql-notice ql-notice-info mb-6" data-flash>
+  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+  <span>Quality setting changed. Run a Library refresh after it takes effect. Until then, the saved Upgrade review cannot be approved.</span>
+</div>
+{% endif %}
+
+{% if warnings %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
+  </svg>
+  <span>{% for w in warnings %}{{ w }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span>
+</div>
+{% endif %}
+
+{% if error == "invalidsettings" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>Nothing changed because one or more submitted settings were invalid.
+  Reload this page and try again.</span>
+</div>
+{% elif error == "persist" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>Nothing changed because the settings could not be saved. Give the data
+  folder write access, then try again.</span>
+</div>
+{% endif %}
+
     <form action="/settings/behavior" method="post">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="form_complete" value="1">

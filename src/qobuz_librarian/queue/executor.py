@@ -2212,6 +2212,8 @@ def _refresh_review_state_after_downloads(
             seen_artists.add(key)
             artist_dirs.append(artist_dir)
 
+    # Only the review dots below need the dismissed list; the saved snapshots
+    # keep every candidate and filter when they are shown.
     try:
         hidden = hidden_mod.load()
     except Exception as exc:
@@ -2225,11 +2227,7 @@ def _refresh_review_state_after_downloads(
 
     capped = None
     upgrade_inputs_ready = True
-    if (
-        hidden is not None
-        and was_current["upgrade"]
-        and allow_upgrade_refresh
-    ):
+    if was_current["upgrade"] and allow_upgrade_refresh:
         try:
             capped = load_capped()
         except Exception as exc:
@@ -2237,42 +2235,37 @@ def _refresh_review_state_after_downloads(
             stale.add("upgrade")
             vlog(f"post-download Upgrade policy input unavailable: {exc}")
 
-    if hidden is not None:
-        for artist_dir in artist_dirs:
-            if was_current["upgrade"]:
-                if not allow_upgrade_refresh:
-                    stale.add("upgrade")
-                elif upgrade_inputs_ready:
-                    try:
-                        result = upgrade_state.update_artist(
-                            artist_dir,
-                            token=token,
-                            args=args,
-                            capped=capped,
-                            hidden=hidden,
-                        )
-                        if not result.complete:
-                            stale.add("upgrade")
-                    except Exception as exc:
-                        stale.add("upgrade")
-                        vlog(
-                            f"post-download Upgrade refresh failed for "
-                            f"{artist_dir}: {exc}"
-                        )
-            if was_current["downsample"]:
+    for artist_dir in artist_dirs:
+        if was_current["upgrade"]:
+            if not allow_upgrade_refresh:
+                stale.add("upgrade")
+            elif upgrade_inputs_ready:
                 try:
-                    result = downsample_state.update_artist(
+                    result = upgrade_state.update_artist(
                         artist_dir,
-                        hidden=hidden,
+                        token=token,
+                        args=args,
+                        capped=capped,
                     )
                     if not result.complete:
-                        stale.add("downsample")
+                        stale.add("upgrade")
                 except Exception as exc:
-                    stale.add("downsample")
+                    stale.add("upgrade")
                     vlog(
-                        f"post-download Downsample refresh failed for "
+                        f"post-download Upgrade refresh failed for "
                         f"{artist_dir}: {exc}"
                     )
+        if was_current["downsample"]:
+            try:
+                result = downsample_state.update_artist(artist_dir)
+                if not result.complete:
+                    stale.add("downsample")
+            except Exception as exc:
+                stale.add("downsample")
+                vlog(
+                    f"post-download Downsample refresh failed for "
+                    f"{artist_dir}: {exc}"
+                )
 
     if artist_unknown:
         stale.update(

@@ -1,7 +1,5 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
 import copy
-import hashlib
-import json
 import threading
 import time
 
@@ -47,7 +45,6 @@ def _empty_kind():
         "revision": 0,
         "complete": False,
         "limited": False,
-        "hidden_signature": "",
         "quality_signature": "",
         "artists": {},
     }
@@ -68,15 +65,6 @@ def quality_signature() -> str:
             f"|{getattr(cfg, 'ARTIST_CATALOG_LIMIT', '')}"
             f"|{getattr(cfg, 'MISSING_ALBUMS_MIN_TRACKS', '')}"
             f"|{bool(getattr(cfg, 'EXCLUDE_LIVE_ALBUMS', False))}")
-
-
-def hidden_signature(store, scope: str) -> str:
-    bucket = (store or {}).get(scope) if isinstance(store, dict) else {}
-    if not isinstance(bucket, dict):
-        bucket = {}
-    raw = json.dumps(bucket, sort_keys=True, ensure_ascii=True,
-                     separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
 
 
 def load():
@@ -114,7 +102,6 @@ def kind_state(kind: str):
         "revision": int(bucket.get("revision") or 0),
         "complete": bool(bucket.get("complete")),
         "limited": bool(bucket.get("limited")),
-        "hidden_signature": str(bucket.get("hidden_signature") or ""),
         "quality_signature": str(bucket.get("quality_signature") or ""),
         "artists": artists,
     })
@@ -147,7 +134,7 @@ def _clean_artist_state(entry):
 
 
 def save_kind(kind: str, *, artists: dict, complete: bool,
-              hidden_signature: str = "", quality_sig: str = "",
+              quality_sig: str = "",
               generation: int = 0, revision: int = 0,
               limited: bool = False):
     with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
@@ -161,7 +148,6 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
             "revision": int(revision or 0),
             "complete": bool(complete),
             "limited": bool(limited),
-            "hidden_signature": str(hidden_signature or ""),
             "quality_signature": str(quality_sig or ""),
             "artists": {
                 str(name): _clean_artist_state(entry)

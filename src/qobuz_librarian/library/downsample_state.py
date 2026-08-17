@@ -4,7 +4,6 @@ The downsample pass is local-only, so both the standalone Downsample scan and
 the baseline Library scan can refresh the same candidate state without mixing
 downsample items into the Library review list.
 """
-import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -30,7 +29,6 @@ class RefreshResult:
     errors: dict[str, str]
     complete: bool
     fingerprints: dict[str, str] = field(default_factory=dict)
-    hidden_signature: str = ""
     refresh_started_at: float = 0.0
     refresh_started_revision: int = 0
 
@@ -47,7 +45,6 @@ def _empty_state():
         "fingerprints": {},
         "artist_updated_at": {},
         "artist_revision": {},
-        "hidden_signature": "",
         "candidates": [],
     }
 
@@ -83,16 +80,6 @@ def _candidate_from_dict(data):
     )
 
 
-def _hidden_signature(hidden):
-    if hidden is None:
-        return ""
-    bucket = hidden.get(hidden_mod.SCOPE_DOWNSAMPLE) if isinstance(hidden, dict) else {}
-    if not isinstance(bucket, dict):
-        bucket = {}
-    return json.dumps(bucket, sort_keys=True, ensure_ascii=True,
-                      separators=(",", ":"))
-
-
 def load():
     data = state_file.load_json_object(
         cfg.DOWNSAMPLE_STATE_FILE, "the saved downsample scan",
@@ -117,7 +104,6 @@ def load():
         "artist_revision": (data.get("artist_revision")
                             if isinstance(data.get("artist_revision"), dict)
                             else {}),
-        "hidden_signature": str(data.get("hidden_signature") or ""),
         "candidates": (data.get("candidates")
                        if isinstance(data.get("candidates"), list) else []),
     })
@@ -150,7 +136,6 @@ def _state_from_result(result: RefreshResult, *, generation: int, revision: int)
         "artist_revision": {
             name: int(revision) for name in result.artists_scanned
         },
-        "hidden_signature": result.hidden_signature,
         "candidates": [_candidate_to_dict(c) for c in result.candidates],
     }
 
@@ -248,15 +233,16 @@ def save(
         )
 
 
-def _scan_artist(artist_dir: Path, scan_artist, hidden):
-    found = scan_artist(artist_dir)
-    filtered: list[DownsampleCandidate] = []
-    for cand in found:
-        if hidden is not None and hidden_mod.is_hidden(
-                hidden_mod.SCOPE_DOWNSAMPLE, cand.artist, cand.title, hidden):
-            continue
-        filtered.append(cand)
-    return filtered
+def visible_of(candidates, hidden=None):
+    """The candidates a user should see. The snapshot keeps kept-hi-res albums
+    so bringing one back has a record to restore from, so every path that shows
+    scan results filters here."""
+    hidden = hidden_mod.load() if hidden is None else hidden
+    return [
+        cand for cand in candidates
+        if not hidden_mod.is_hidden(
+            hidden_mod.SCOPE_DOWNSAMPLE, cand.artist, cand.title, hidden)
+    ]
 
 
 def visible_candidates(state=None, hidden=None):
@@ -278,7 +264,6 @@ def has_visible_candidates(state=None, hidden=None):
 def update_artist(
     artist_dir: Path,
     *,
-    hidden=None,
     scan_artist: Callable[[Path], list[DownsampleCandidate]] | None = None,
 ):
     """Re-scan one artist and merge it into the saved downsample snapshot."""
@@ -290,7 +275,7 @@ def update_artist(
     try:
         fingerprint = artist_fingerprint(artist_dir)
         fingerprints[name] = fingerprint
-        filtered = _scan_artist(artist_dir, scan_artist, hidden)
+        filtered = list(scan_artist(artist_dir))
     except Exception as exc:
         return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
 
@@ -327,7 +312,6 @@ def update_artist(
             "fingerprints": fingerprints,
             "artist_updated_at": artist_updated_at,
             "artist_revision": artist_revision,
-            "hidden_signature": state.get("hidden_signature", ""),
             "candidates": kept,
         })
         authority_saved = saved and generation_state.mark_output_current(
@@ -380,7 +364,6 @@ def remove_artist(name: str):
             "fingerprints": fingerprints,
             "artist_updated_at": artist_updated_at,
             "artist_revision": artist_revision,
-            "hidden_signature": state.get("hidden_signature", ""),
             "candidates": [
                 c for c in state.get("candidates") or []
                 if c.get("artist") != name
@@ -423,13 +406,10 @@ def refresh_for_artists(
     complete = True
     total = len(artist_list)
     fingerprints: dict[str, str] = {}
-    hidden_sig = _hidden_signature(hidden)
     previous = load()
-    can_reuse = (
-        skip_unchanged
-        and previous.get("complete")
-        and previous.get("hidden_signature", "") == hidden_sig
-    )
+    # Keeping or bringing back a hi-res album is a filter over the saved
+    # candidates, not a reason to re-read every artist's files.
+    can_reuse = skip_unchanged and previous.get("complete")
 
     for idx, artist_dir in enumerate(artist_list, 1):
         if cancel_check is not None and cancel_check():
@@ -441,18 +421,20 @@ def refresh_for_artists(
             fingerprint = artist_fingerprint(artist_dir)
             fingerprints[artist_dir.name] = fingerprint
             if can_reuse and (previous.get("fingerprints") or {}).get(artist_dir.name) == fingerprint:
-                filtered = [
+                found = [
                     _candidate_from_dict(c)
                     for c in previous.get("candidates", [])
                     if c.get("artist") == artist_dir.name
                 ]
-                candidates.extend(filtered)
+                candidates.extend(found)
+                filtered = visible_of(found, hidden)
                 artists_scanned.append(artist_dir.name)
                 if on_artist is not None:
                     on_artist(artist_dir, filtered, error, idx, total)
                 continue
-            filtered = _scan_artist(artist_dir, scan_artist, hidden)
-            candidates.extend(filtered)
+            found = list(scan_artist(artist_dir))
+            candidates.extend(found)
+            filtered = visible_of(found, hidden)
             artists_scanned.append(artist_dir.name)
         except Exception as exc:
             error = exc
@@ -463,7 +445,7 @@ def refresh_for_artists(
             on_artist(artist_dir, filtered, error, idx, total)
 
     result = RefreshResult(
-        candidates, artists_scanned, errors, complete, fingerprints, hidden_sig,
+        candidates, artists_scanned, errors, complete, fingerprints,
         refresh_started_at, refresh_started_revision)
     # A cancelled refresh only contains the artists reached before the cancel.
     if persist and result.complete:

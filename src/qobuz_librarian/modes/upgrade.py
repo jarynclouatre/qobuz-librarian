@@ -102,7 +102,6 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
         token=token,
         args=args,
         capped=load_capped(),
-        hidden=hidden,
     )
     if not upgrade_result.complete:
         generation_state.mark_output_status(
@@ -115,7 +114,7 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
         "upgrade",
         upgrade_state.has_visible_candidates(upgrade_saved, hidden),
     )
-    downsample_result = downsample_state.update_artist(artist_dir, hidden=hidden)
+    downsample_result = downsample_state.update_artist(artist_dir)
     if not downsample_result.complete:
         generation_state.mark_output_status(
             "downsample",

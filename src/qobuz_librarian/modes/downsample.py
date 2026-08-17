@@ -84,14 +84,17 @@ def run_downsample_walk_mode(args):
         persist=not args.dry_run,
     )
     unchecked = len(refresh.errors)
+    # The snapshot keeps albums the user chose to keep at hi-res; this run only
+    # offers the ones still on the list.
+    offered = downsample_state.visible_of(refresh.candidates, hidden)
     candidates_by_artist = {}
-    for candidate in refresh.candidates:
+    for candidate in offered:
         candidates_by_artist.setdefault(candidate.artist, []).append(candidate)
 
     # First downsample with the keep-vs-delete choice unmade: ask once. The
     # web UI asks the same thing and saves it as the standing default
     # (changeable later in Settings).
-    if (refresh.candidates and not args.dry_run
+    if (offered and not args.dry_run
             and cfg.DOWNSAMPLE_KEEP_ORIGINALS not in ("keep", "delete")):
         _flush_stdin()
         keep = confirm(
@@ -127,7 +130,7 @@ def run_downsample_walk_mode(args):
     # Auto-accept gate. Skipped under --yes, which has already answered it;
     # otherwise an unattended run stalls here and then declines every artist.
     auto_accept_all = False
-    if refresh.candidates and not args.dry_run and not args.yes:
+    if offered and not args.dry_run and not args.yes:
         try:
             _r = input(fmt(C.CYAN,
                 "\n  Auto-accept every artist and run unattended? [y/N]: "
@@ -225,7 +228,7 @@ def run_downsample_walk_mode(args):
                 total_errors += res.get("errors", 0)
                 total_flush_warns += res.get("flush_warnings", 0)
             if artist_attempted:
-                downsample_state.update_artist(artist_dir, hidden=hidden)
+                downsample_state.update_artist(artist_dir)
                 saved_state = downsample_state.load()
                 review_badges.set_ready(
                     "downsample",

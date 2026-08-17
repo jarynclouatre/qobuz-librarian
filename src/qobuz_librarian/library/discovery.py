@@ -430,7 +430,7 @@ def match_album_dir(album_dir, artist_name, token, *, catalog, prefer_hires):
 def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                            handled_ids=frozenset(), resolved_dirs=frozenset(),
                            owned_titles=None, token=None, quick=False,
-                           single_store=None):
+                           single_store=None, include_hidden=False):
     """Catalog albums the owned-album pass didn't account for: fully-missing
     releases, plus a collaboration filed under another artist's folder that
     still has track gaps. Shared by the CLI missing-albums step and the web
@@ -439,6 +439,10 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
 
     quick=True is the new-release path: only fully-missing albums are returned
     and no track lists are fetched, so the cost stays at the catalog list alone.
+
+    include_hidden=True still consults ``hidden`` for the collecting/singles
+    rules but returns dismissed albums as gaps, so a caller that saves a
+    snapshot can record the whole truth and filter when it displays.
     """
     owned_titles = owned_titles or {}
     handled_id_keys = {
@@ -464,7 +468,7 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
         # it as a gap.
         if _is_single(single_store, artist_name, album):
             continue
-        if _is_hidden(hidden, artist_name, album):
+        if not include_hidden and _is_hidden(hidden, artist_name, album):
             continue
         existing, album_dir = find_existing_tracks(album)
         if album_dir is not None and str(album_dir) in resolved_dirs:
@@ -512,7 +516,7 @@ def _catalog_fetch_incomplete(catalog, total, limit) -> bool:
 
 def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                             hidden=None, single_store=None, want_missing=True,
-                            skip_dir=None, fresh=False):
+                            skip_dir=None, fresh=False, include_hidden=False):
     """Find what's missing for one artist.
 
     query        - artist name (or folder name) used to resolve the Qobuz artist.
@@ -526,6 +530,9 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                    unmatched (the album-fill walk skips already-decided albums).
     fresh        - bypass the catalog cache so an explicit single-artist scan
                    sees just-released albums; the bulk walk leaves it off.
+    include_hidden - return dismissed albums among the gaps anyway. The bulk
+                   scan uses this so its saved snapshot keeps every candidate
+                   and a later restore has something to bring back.
     """
     opts = opts or DiscoveryOpts()
     artist_id, artist_name = resolve_artist(query, token)
@@ -559,7 +566,8 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
         m = match_album_dir(ad, artist_name, token,
                             catalog=catalog, prefer_hires=opts.prefer_hires)
         classify_owned_match(result, m, hidden, single_store, artist_name,
-                             handled_ids, resolved_dirs)
+                             handled_ids, resolved_dirs,
+                             include_hidden=include_hidden)
 
     # Skip the catalog walk for an artist you own only downloaded singles by - they
     # aren't one you're collecting, so their back catalogue shouldn't surface.
@@ -569,7 +577,7 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
         result.gaps.extend(discover_fully_missing(
             artist_name, catalog, opts, hidden=hidden, handled_ids=handled_ids,
             resolved_dirs=resolved_dirs, owned_titles=owned_titles, token=token,
-            single_store=single_store))
+            single_store=single_store, include_hidden=include_hidden))
 
     vlog(f"  discovery({artist_name!r}): {len(result.partials)} partial, "
          f"{len(result.fully_missing)} fully-missing, "
@@ -659,7 +667,7 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
 
 
 def classify_owned_match(result, m, hidden, single_store, artist_name,
-                         handled_ids, resolved_dirs):
+                         handled_ids, resolved_dirs, include_hidden=False):
     """Fold one DirMatch into the running DiscoveryResult, recording which
     catalog ids and folders the owned pass has now accounted for. A false or
     track-less match still counts as accounted-for (its folder fuzz-resolved
@@ -701,7 +709,7 @@ def classify_owned_match(result, m, hidden, single_store, artist_name,
             result.singles.append({"dir": ad, "qobuz_album": m.qobuz_album,
                                    "present": m.present, "missing": m.missing})
             return
-        if _is_hidden(hidden, artist_name, m.qobuz_album):
+        if not include_hidden and _is_hidden(hidden, artist_name, m.qobuz_album):
             return
         result.gaps.append(AlbumGap(m.qobuz_album, ad, m.missing, m.present))
     else:

@@ -1,5 +1,4 @@
 """Shared upgrade scan state."""
-import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,7 +26,6 @@ class RefreshResult:
     errors: dict[str, str]
     complete: bool
     fingerprints: dict[str, str] = field(default_factory=dict)
-    hidden_signature: str = ""
     refresh_started_at: float = 0.0
     quality_signature: str = ""
     refresh_started_revision: int = 0
@@ -54,7 +52,6 @@ def _empty_state():
         "fingerprints": {},
         "artist_updated_at": {},
         "artist_revision": {},
-        "hidden_signature": "",
         "quality_signature": "",
         "candidates": [],
     }
@@ -95,16 +92,6 @@ def _candidate_spec(artist_name: str, candidate: dict):
     }
 
 
-def _hidden_signature(hidden):
-    if hidden is None:
-        return ""
-    bucket = hidden.get(hidden_mod.SCOPE_UPGRADE) if isinstance(hidden, dict) else {}
-    if not isinstance(bucket, dict):
-        bucket = {}
-    return json.dumps(bucket, sort_keys=True, ensure_ascii=True,
-                      separators=(",", ":"))
-
-
 def load():
     data = state_file.load_json_object(
         cfg.UPGRADE_STATE_FILE, "the saved upgrade scan",
@@ -129,7 +116,6 @@ def load():
         "artist_revision": (data.get("artist_revision")
                             if isinstance(data.get("artist_revision"), dict)
                             else {}),
-        "hidden_signature": str(data.get("hidden_signature") or ""),
         "quality_signature": str(data.get("quality_signature") or ""),
         "candidates": (data.get("candidates")
                        if isinstance(data.get("candidates"), list) else []),
@@ -164,7 +150,6 @@ def _state_from_result(result: RefreshResult, *, generation: int, revision: int)
         "artist_revision": {
             name: int(revision) for name in result.artists_scanned
         },
-        "hidden_signature": result.hidden_signature,
         "quality_signature": (
             getattr(result, "quality_signature", "") or quality_signature()
         ),
@@ -276,37 +261,32 @@ def _default_scan_artist(token, args, capped):
     return scan_artist
 
 
-def _candidate_specs(artist_dir: Path, found, hidden):
-    filtered = []
-    for candidate in found:
-        spec = _candidate_spec(artist_dir.name, candidate)
-        if hidden is not None and hidden_mod.is_hidden(
-                hidden_mod.SCOPE_UPGRADE,
-                artist_dir.name,
-                spec["title"],
-                hidden,
-                year=(spec.get("payload") or {}).get("year"),
-        ):
-            continue
-        filtered.append(spec)
-    return filtered
+def _candidate_specs(artist_dir: Path, found):
+    return [_candidate_spec(artist_dir.name, candidate) for candidate in found]
+
+
+def visible_of(specs, hidden=None):
+    """The candidates a user should see. The snapshot keeps dismissed upgrades
+    so bringing one back has a record to restore from, so every path that shows
+    scan results filters here."""
+    hidden = hidden_mod.load() if hidden is None else hidden
+    return [
+        spec for spec in specs
+        if not hidden_mod.is_hidden(
+            hidden_mod.SCOPE_UPGRADE,
+            spec.get("artist"),
+            spec.get("title"),
+            hidden,
+            year=(spec.get("payload") or {}).get("year"),
+        )
+    ]
 
 
 def visible_candidates(state=None, hidden=None):
     state = load() if state is None else state
     if not state.get("complete"):
         return []
-    hidden = hidden_mod.load() if hidden is None else hidden
-    return [
-        c for c in state.get("candidates") or []
-        if not hidden_mod.is_hidden(
-            hidden_mod.SCOPE_UPGRADE,
-            c.get("artist"),
-            c.get("title"),
-            hidden,
-            year=(c.get("payload") or {}).get("year"),
-        )
-    ]
+    return visible_of(state.get("candidates") or [], hidden)
 
 
 def has_visible_candidates(state=None, hidden=None):
@@ -365,7 +345,6 @@ def update_artist(
     token,
     args,
     capped,
-    hidden=None,
     scan_artist: Callable[[Path], list[dict]] | None = None,
 ):
     """Re-scan one artist and merge it into the saved upgrade snapshot."""
@@ -378,7 +357,7 @@ def update_artist(
     try:
         fingerprint = artist_fingerprint(artist_dir)
         fingerprints[name] = fingerprint
-        specs = _candidate_specs(artist_dir, scan_artist(artist_dir), hidden)
+        specs = _candidate_specs(artist_dir, scan_artist(artist_dir))
     except Exception as exc:
         return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
 
@@ -416,7 +395,6 @@ def update_artist(
             "fingerprints": fingerprints,
             "artist_updated_at": artist_updated_at,
             "artist_revision": artist_revision,
-            "hidden_signature": state.get("hidden_signature", ""),
             "quality_signature": (
                 scan_quality_signature
                 if state.get("quality_signature") == scan_quality_signature
@@ -476,12 +454,12 @@ def refresh_for_artists(
     complete = True
     total = len(artist_list)
     fingerprints: dict[str, str] = {}
-    hidden_sig = _hidden_signature(hidden)
     previous = load()
+    # Dismissing or bringing back an upgrade is a filter over the saved
+    # candidates, not a reason to ask Qobuz about every artist again.
     can_reuse = (
         skip_unchanged
         and previous.get("complete")
-        and previous.get("hidden_signature", "") == hidden_sig
         and previous.get("quality_signature", "") == scan_quality_signature
     )
     to_scan: list[Path] = []
@@ -506,19 +484,19 @@ def refresh_for_artists(
         else:
             to_scan.append(artist_dir)
 
-    def _handle_result(artist_dir, found, error, done, prefiltered=False):
+    def _handle_result(artist_dir, found, error, done, saved=False):
         nonlocal complete
-        filtered = []
+        visible = []
         if error is None:
-            filtered = list(found) if prefiltered else _candidate_specs(
-                artist_dir, found, hidden)
-            specs.extend(filtered)
+            scanned = list(found) if saved else _candidate_specs(artist_dir, found)
+            specs.extend(scanned)
+            visible = visible_of(scanned, hidden)
         else:
             errors[artist_dir.name] = str(error)
             complete = False
         artists_scanned.append(artist_dir.name)
         if on_artist is not None:
-            on_artist(artist_dir, filtered, error, done, total)
+            on_artist(artist_dir, visible, error, done, total)
 
     done_count = 0
     for artist_dir, error in fingerprint_failures:
@@ -526,7 +504,7 @@ def refresh_for_artists(
         _handle_result(artist_dir, [], error, done_count)
     for artist_dir, existing in reused:
         done_count += 1
-        _handle_result(artist_dir, existing, None, done_count, prefiltered=True)
+        _handle_result(artist_dir, existing, None, done_count, saved=True)
 
     if workers <= 1:
         for artist_dir in to_scan:
@@ -557,7 +535,7 @@ def refresh_for_artists(
                     _handle_result(artist_dir, [], exc, done_count)
 
     result = RefreshResult(
-        specs, artists_scanned, errors, complete, fingerprints, hidden_sig,
+        specs, artists_scanned, errors, complete, fingerprints,
         refresh_started_at, scan_quality_signature, refresh_started_revision)
     # A cancelled refresh only contains the artists reached before the cancel.
     # Keep the last complete snapshot instead of turning a partial crawl into a
