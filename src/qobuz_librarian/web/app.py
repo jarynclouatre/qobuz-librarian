@@ -1248,6 +1248,9 @@ def _upgrade_state_summary():
                 or saved_quality_signature != current_quality_signature
             )
         ),
+        # Which of the two staleness causes applies, so the page can name it
+        # instead of offering the user both and letting them guess.
+        "stale_cause": "quality" if complete else "library",
         "updated": _format_age(updated_at) if updated_at else None,
     }
 

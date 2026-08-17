@@ -6,17 +6,14 @@
 <header class="ql-page-header ql-page-header--actions">
   <div>
     <h1>Repair history</h1>
-    <p>
-      Tracks repaired in place. Re-sync the album on offline devices to pick up
-      the fixed file.
-    </p>
   </div>
   <a href="/repair" class="ql-page-action ql-inline-link">Back to Repair</a>
 </header>
 
 {% if entries %}
 <p class="ql-repair-history-summary">
-  {{ entries | length }} most recent (newest first)
+  {{ entries | length }} most recent (newest first). Repaired in place, so
+  re-sync the album on offline devices to pick up the fixed file.
 </p>
 <ul class="ql-repair-history-list">
   {% for e in entries %}

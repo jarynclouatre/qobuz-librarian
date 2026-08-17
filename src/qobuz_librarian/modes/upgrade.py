@@ -92,7 +92,8 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
         if surfaces:
             generation_state.invalidate(
                 surfaces,
-                "A CLI replacement could not be tied to one artist folder.",
+                "An album was replaced from the terminal, and its artist "
+                "folder could not be identified.",
             )
         return
     hidden = hidden_mod.load()

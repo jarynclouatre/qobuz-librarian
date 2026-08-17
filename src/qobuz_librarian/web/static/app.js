@@ -2448,13 +2448,46 @@
       });
     }
 
+    // The address bar follows the review, so Back has to come back into it
+    // rather than leave the page. A tab switch is a history step of its own;
+    // the filter is a single step however long the query grows. `mode` picks
+    // which: "push" for a tab, "filter" for the filter box, "none" when the
+    // browser has already moved us, and "replace" for a reload that did not
+    // change where the user is standing.
+    function reviewEntry(tab, query, filter) {
+      return { ql: { review: id, tab: tab || "", q: query || "", filter: !!filter } };
+    }
+    function onFilterEntry() {
+      var st = window.history.state && window.history.state.ql;
+      return !!(st && st.review === id && st.filter);
+    }
+    function syncUrl(tab, query, mode) {
+      if (mode === "none") return;
+      if (typeof URL !== "function" || !window.history.replaceState) return;
+      var url;
+      try { url = new URL(window.location.href); } catch (e) { return; }
+      if (tab) url.searchParams.set("tab", tab);
+      else url.searchParams.delete("tab");
+      if (query) url.searchParams.set("q", query);
+      else url.searchParams.delete("q");
+      url.searchParams.delete("page");
+      var onFilter = onFilterEntry();
+      var filterStep = mode === "filter" ? !!query : (mode !== "push" && onFilter);
+      var push = mode === "push" || (filterStep && !onFilter);
+      if (push && window.history.pushState) {
+        window.history.pushState(reviewEntry(tab, query, filterStep), "", url);
+      } else {
+        window.history.replaceState(reviewEntry(tab, query, filterStep), "", url);
+      }
+    }
+
     // Fetch and swap one review page. Requests are generation-tagged and only
     // the newest response may render: a tab click while a fetch is in flight
     // issues its own request instead of being dropped, and the slow old-tab
     // response is discarded on arrival. Otherwise its rows would paint under
     // the newly selected tab while the hidden approval field already points
     // at the new tab.
-    function loadPage(page, query, tab) {
+    function loadPage(page, query, tab, mode) {
       var gen = ++loadGen;
       var requestedQuery = (query || "").trim();
       var requestedTab = tab === undefined ? curTab() : tab;
@@ -2494,15 +2527,7 @@
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
             }
-            try {
-              var nextUrl = new URL(window.location.href);
-              if (requestedTab) nextUrl.searchParams.set("tab", requestedTab);
-              else nextUrl.searchParams.delete("tab");
-              if (requestedQuery) nextUrl.searchParams.set("q", requestedQuery);
-              else nextUrl.searchParams.delete("q");
-              nextUrl.searchParams.delete("page");
-              window.history.replaceState({}, "", nextUrl);
-            } catch (e) { /* no URL support: the in-page switch still works */ }
+            syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;
             if (filterInput) filterInput.value = requestedQuery;
             host.innerHTML = txt;
@@ -2567,7 +2592,8 @@
         loadPage(
           1,
           inputQuery(),
-          tabBtn.getAttribute("data-review-tab") || ""
+          tabBtn.getAttribute("data-review-tab") || "",
+          "push"
         );
         return;
       }
@@ -2603,6 +2629,10 @@
           : dismissConfirm(rest);
         window.qlConfirm(confirmMsg, {
           action: isDownsampleReview ? "Keep hi-res" : "Dismiss",
+          // Same red accept as the per-artist button in _review_group.html.
+          // This one clears the whole list, so it cannot look the safer of
+          // the two.
+          danger: true,
         }).then(function (ok) {
           if (!ok) return;
           var prev = dismissRest.textContent;
@@ -2654,33 +2684,68 @@
 
     // Filter across the full server-side result set.
     var filterTimer = null;
+    function cancelFilter() {
+      if (filterTimer) clearTimeout(filterTimer);
+      filterTimer = null;
+    }
+    function applyFilter() {
+      var query = inputQuery();
+      // Emptying the box steps back off the entry the filter pushed, so one
+      // Back press undoes the query whatever its length.
+      if (!query && onFilterEntry()) { window.history.back(); return; }
+      loadPage(1, query, pendingTab === null ? curTab() : pendingTab, "filter");
+    }
     if (filterInput) {
       filterInput.addEventListener("input", function () {
-        if (filterTimer) clearTimeout(filterTimer);
+        cancelFilter();
         loadGen += 1;
         filterTimer = setTimeout(function () {
-          loadPage(
-            1,
-            inputQuery(),
-            pendingTab === null ? curTab() : pendingTab
-          );
+          filterTimer = null;
+          applyFilter();
         }, 250);
       });
       // A search input's Escape-clear and its native ✕ change the value
       // without firing `input`, which left the box empty and the list filtered.
       filterInput.addEventListener("search", function () {
-        if (filterTimer) clearTimeout(filterTimer);
+        cancelFilter();
         loadGen += 1;
-        loadPage(
-          1,
-          inputQuery(),
-          pendingTab === null ? curTab() : pendingTab
-        );
+        applyFilter();
       });
       // Enter should filter, not submit the review form.
       filterInput.addEventListener("keydown", function (e) {
         if (e.key === "Enter") e.preventDefault();
       });
+    }
+
+    // Back and Forward move between the entries above. The browser has set
+    // the address already, so this only has to make the page match it.
+    function onPopState(e) {
+      // A queued keystroke is the newer intent; let its load land instead.
+      if (filterTimer) return;
+      var st = e.state && e.state.ql;
+      var tab, query;
+      if (st && st.review === id) {
+        tab = st.tab || "";
+        query = st.q || "";
+      } else {
+        var params;
+        try { params = new URL(window.location.href).searchParams; }
+        catch (err) { return; }
+        tab = params.get("tab") || "";
+        query = (params.get("q") || "").trim();
+      }
+      var here = pendingTab === null ? curTab() : pendingTab;
+      if (tab === here && query === loadedQuery) return;
+      if (filterInput) filterInput.value = query;
+      loadPage(1, query, tab, "none");
+    }
+    window.addEventListener("popstate", onPopState);
+    // Tag the entry the user arrived on, without touching the address they
+    // arrived with, so a Back press onto it can be restored like any other.
+    if (window.history.replaceState) {
+      window.history.replaceState(
+        reviewEntry(curTab(), loadedQuery, false), "", window.location.href
+      );
     }
 
     // Refresh counts and reload a page if hiding empties it.
@@ -2787,6 +2852,7 @@
       form.removeEventListener("submit", beginReviewNavigation);
       document.body.removeEventListener("qlHidden", onQlHidden);
       document.removeEventListener("htmx:beforeSwap", onReviewSwap);
+      window.removeEventListener("popstate", onPopState);
       window.removeEventListener("scroll", savePlace);
       window.removeEventListener("pagehide", recordPlace);
       if (placeTimer) clearTimeout(placeTimer);

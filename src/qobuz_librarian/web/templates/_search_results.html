@@ -247,14 +247,14 @@
         {% endif %}
         <h2 class="ql-search-context-title">{{ selected_artist.name }}</h2>
         <span class="ql-search-context-meta" data-search-count
-              data-full-label="{%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases{%- elif selected_artist.shown and selected_artist.shown > n_albums -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz{%- else -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz{%- endif -%}">
+              data-full-label="{%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases{%- elif selected_artist.shown and selected_artist.shown > n_albums -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz, alternate versions included{%- else -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz{%- endif -%}">
           {%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}
           {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases
           {%- elif selected_artist.shown and selected_artist.shown > n_albums -%}
           {# Editions fold into their album's version tree, so this can be a
              smaller number than the release count the artist row promised;
              say both so they don't read as a contradiction. #}
-          {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz
+          {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz, alternate versions included
           {%- else -%}
           {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz
           {%- endif -%}

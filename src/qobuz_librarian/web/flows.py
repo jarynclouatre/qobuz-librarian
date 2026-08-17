@@ -234,11 +234,13 @@ def _refresh_after_local_album_change(
         for surface, reason in (
             (
                 "library",
-                "The changed album could not be tied to one Library result.",
+                "An album changed in the app, and it could not be matched "
+                "to anything in these saved results.",
             ),
             (
                 "new_releases",
-                "The changed album could not be tied to one New Releases result.",
+                "An album changed in the app, and it could not be matched "
+                "to anything in these saved New Releases results.",
             ),
         ):
             if generation_state.output_is_current(surface, state=authority):
@@ -261,7 +263,8 @@ def _refresh_after_local_album_change(
         if surfaces:
             generation_state.invalidate(
                 surfaces,
-                "The changed album could not be tied to one artist folder.",
+                "An album changed in the app, and its artist folder could "
+                "not be identified.",
             )
         return
     if upgrade:

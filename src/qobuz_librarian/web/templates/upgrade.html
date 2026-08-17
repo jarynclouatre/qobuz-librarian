@@ -23,7 +23,7 @@
       {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}No upgrades found{% else %}Baseline not run{% endif %}
     </span>
     <span>
-      {% if upgrade_state.stale %}These results need a Library refresh or were built under different quality settings.{% elif upgrade_state.updated %}Baseline refreshed {{ upgrade_state.updated }}.{% elif last_run %}Last library scan {{ last_run }}.{% else %}Scan library on the Library page to build upgrade candidates.{% endif %}
+      {% if upgrade_state.stale %}{% if upgrade_state.stale_cause == 'quality' %}Your quality settings changed after these results were built.{% else %}Your Library changed after these results were built.{% endif %}{% elif upgrade_state.updated %}Baseline refreshed {{ upgrade_state.updated }}.{% elif last_run %}Last library scan {{ last_run }}.{% else %}Scan library on the Library page to build upgrade candidates.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/upgrade/hidden">
@@ -35,8 +35,11 @@
   {% if upgrade_state.stale %}
   <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
     <div class="ql-work-card-copy">
-      <p class="ql-work-card-title">Refresh Upgrade candidates</p>
-      <p class="ql-work-card-text">Run a Library refresh before choosing albums. These results are incomplete or were built before the latest Library or quality change.</p>
+      {# Upgrade has no scan of its own by contract, so this card describes the
+         situation and hands off. Naming it after a refresh would promise an
+         action the page cannot perform. #}
+      <p class="ql-work-card-title">Upgrade results need a Library refresh</p>
+      <p class="ql-work-card-text">Upgrade has no scan of its own; the Library refresh rebuilds these candidates. Come back here once it finishes.</p>
     </div>
     <div class="ql-work-card-actions">
       <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>

@@ -3829,8 +3829,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-refresh-note {
   color: var(--ql-text-3);
-  font-family: var(--ql-font-mono);
-  font-size: 0.71875rem;
+  font-size: 0.8rem;
 }
 .ql-page-header p {
   max-width: 42rem;
