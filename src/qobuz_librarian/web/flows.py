@@ -23,7 +23,6 @@ from qobuz_librarian.download_result import (
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.integrations import lyrics as lyrics_mode
-from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
 from qobuz_librarian.integrations.lyrics import lyric_fetch
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
@@ -54,7 +53,6 @@ from qobuz_librarian.library.discovery import (
     flush_resolve_cache,
     resolve_artist_dir,
 )
-from qobuz_librarian.library.lyrics import HAVE_LYRICS
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
     list_artist_album_dirs,
@@ -2818,7 +2816,9 @@ def execute_downsamples(
     if type(keep_originals) is not bool:
         keep_originals = cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
 
-    if not HAVE_DOWNSAMPLE:
+    # Read through the module: ffmpeg is a property of the server, not of the
+    # moment this file was imported.
+    if not downsample_engine.HAVE_DOWNSAMPLE:
         job.error = "Downsampling isn't available on this server."
         job.summary = job.error
         _mark_job_failed(job)
@@ -3994,7 +3994,7 @@ def run_lyric_retry(job):
 
 def run_library_lyrics(job, *, rescan=False, synced_only=False):
     """Fetch lyrics for every library track that's missing them."""
-    if not HAVE_LYRICS:
+    if not lyrics.HAVE_LYRICS:
         job.summary = "Lyric fetching isn't available; the syncedlyrics library isn't installed."
         job.error = job.summary
         _mark_job_failed(job)
