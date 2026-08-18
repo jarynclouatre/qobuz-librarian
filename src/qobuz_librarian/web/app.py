@@ -7336,6 +7336,12 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
                            "Nothing is selected on that tab yet.")
     elif request.query_params.get("approved"):
         notice_bits.append("Download started. It's running in the queue.")
+    # Bring all back redirects here with what happened, a store-write failure
+    # included. Without this the page dropped the message and a restore that
+    # never ran looked exactly like one that worked.
+    _notice = (request.query_params.get("notice") or "").strip()[:300]
+    if _notice:
+        notice_bits.append(_notice)
     notice = " ".join(notice_bits)
     library_generation = _truthful_library_generation()
     ctx = {
@@ -7600,27 +7606,44 @@ async def skip_baseline_setup(request: Request):
     return RedirectResponse(url="/", status_code=303)
 
 
+def _hidden_filter(request):
+    return (request.query_params.get("q") or "").strip()[:200]
+
+
+def _hidden_matching(groups, q):
+    """The Dismissed page's filter applied to its artist groups.
+
+    The page and every Bring back button on it go through here, so what the
+    filter shows is exactly what those buttons take.
+    """
+    needle = (q or "").strip().lower()
+    if not needle:
+        return groups
+    matched = []
+    for g in groups:
+        if needle in g["artist"].lower():
+            matched.append(g)
+            continue
+        albums = [a for a in g["albums"]
+                  if needle in a["title"].lower()
+                  or any(needle in t.lower() for t in a["others"])]
+        if albums:
+            matched.append({
+                "artist": g["artist"], "albums": albums,
+                "rows": sum(1 + len(a["others"]) for a in albums)})
+    return matched
+
+
 def _hidden_view(request, scope, *, page, restore_action, back_url,
                  restore_all_action=None):
-    groups = hidden_mod.hidden_by_artist(scope)
-    total_entries = sum(len(g["albums"]) for g in groups)
-
-    q = (request.query_params.get("q") or "").strip()[:200]
-    if q:
-        needle = q.lower()
-        matched = []
-        for g in groups:
-            if needle in g["artist"].lower():
-                matched.append(g)
-                continue
-            albums = [a for a in g["albums"]
-                      if needle in a["title"].lower()
-                      or any(needle in t.lower() for t in a["others"])]
-            if albums:
-                matched.append({
-                    "artist": g["artist"], "albums": albums,
-                    "rows": sum(1 + len(a["others"]) for a in albums)})
-        groups = matched
+    q = _hidden_filter(request)
+    groups = _hidden_matching(hidden_mod.hidden_by_artist(scope), q)
+    # Review rows, not fingerprints. One fingerprint can hold several editions
+    # of an album, and every page that counts dismissals elsewhere (the review
+    # link, the Library, Upgrade and Downsample cards) counts rows. Counting
+    # keys here made the same set read as two different sizes one click apart.
+    # Counted after the filter, because the button below acts on what is shown.
+    total_rows = sum(g["rows"] for g in groups)
 
     # Whole artists per page, same budgets as the review pages; this page
     # once shipped its entire set as one 639 KB document.
@@ -7646,7 +7669,7 @@ def _hidden_view(request, scope, *, page, restore_action, back_url,
         "page": page, "scope": scope, "back_url": back_url,
         "restore_action": restore_action,
         "restore_all_action": restore_all_action,
-        "restore_all_count": total_entries,
+        "restore_all_count": total_rows,
         "notice": request.query_params.get("notice", ""),
         "hidden_q": q,
         "hidden_total_artists": len(groups),
@@ -7654,25 +7677,54 @@ def _hidden_view(request, scope, *, page, restore_action, back_url,
         "groups": pages[pg - 1] if pages else []})
 
 
-async def _restore_hidden_all(request, scope, dest, what):
-    """Scope-wide Bring all back for the Dismissed pages. The library scope
-    has its own richer endpoint (it also lifts a retired review); this covers
-    the Upgrade and Downsample scopes, whose reviews re-derive from saved
-    state at read time."""
+async def _restore_hidden_filter(request, scope):
+    """The filter a Bring back button was pressed under, and the fingerprints
+    it covers. Empty filter means the whole scope, and None fingerprints say
+    so, which lets the caller take the cheaper clear-the-bucket path."""
+    form = await request.form()
+    q = (form.get("q") or "").strip()[:200]
+    if not q:
+        return "", None
+    groups = _hidden_matching(hidden_mod.hidden_by_artist(scope), q)
+    return q, [a["fp"] for g in groups for a in g["albums"]]
+
+
+async def _restore_hidden_all(request, scope, dest, what, what_plural):
+    """Bring back for the Dismissed pages, scoped to the page's filter. The
+    library scope has its own richer endpoint (it also lifts a retired
+    review); this covers the Upgrade and Downsample scopes, whose reviews
+    re-derive from saved state at read time."""
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
+    q, fingerprints = await _restore_hidden_filter(request, scope)
     loop = asyncio.get_running_loop()
     try:
-        changed = await loop.run_in_executor(
-            None, lambda: hidden_mod.restore_all(scope))
+        if fingerprints is None:
+            changed = await loop.run_in_executor(
+                None, lambda: hidden_mod.restore_all(scope))
+        else:
+            changed = await loop.run_in_executor(
+                None, lambda: hidden_mod.restore_albums(scope, fingerprints))
     except OSError as e:
         return RedirectResponse(
-            url=dest + "?notice=" + urllib.parse.quote(str(e)),
-            status_code=303)
-    msg = f"Brought every {what} back." if changed else "Nothing to bring back."
-    return RedirectResponse(
-        url=dest + "?notice=" + urllib.parse.quote(msg), status_code=303)
+            url=dest + _hidden_query(q, str(e)), status_code=303)
+    if not changed:
+        msg = "Nothing to bring back."
+    elif q:
+        msg = f"Brought back {changed} {what if changed == 1 else what_plural}."
+    else:
+        msg = f"Brought every {what} back."
+    return RedirectResponse(url=dest + _hidden_query(q, msg), status_code=303)
+
+
+def _hidden_query(q, notice):
+    """Back to the Dismissed page with its filter still on, so a restore under
+    a filter does not silently widen the list the next click acts on."""
+    parts = "?notice=" + urllib.parse.quote(notice)
+    if q:
+        parts += "&q=" + urllib.parse.quote(q)
+    return parts
 
 
 async def _restore_hidden(request, scope, redirect):
@@ -7684,6 +7736,7 @@ async def _restore_hidden(request, scope, redirect):
     form = await request.form()
     artists = form.getlist("artist")[:10000]
     fingerprints = form.getlist("fingerprint")[:10000]
+    q = (form.get("q") or "").strip()[:200]
     try:
         if artists:
             hidden_mod.restore(scope, artists)
@@ -7693,8 +7746,7 @@ async def _restore_hidden(request, scope, redirect):
         # Store write failed; nothing was restored; say so instead of
         # rendering the rows gone until the next reload.
         return RedirectResponse(
-            url=redirect + "?notice=" + urllib.parse.quote(str(e)),
-            status_code=303)
+            url=redirect + _hidden_query(q, str(e)), status_code=303)
     if scope == hidden_mod.SCOPE_MISSING and (artists or fingerprints):
         # Upgrade/Downsample re-derive their reviews from saved state at read
         # time, so restore takes effect there on its own.
@@ -7716,9 +7768,10 @@ async def _restore_hidden(request, scope, redirect):
         else:
             msg = "Restored. Nothing needs adding to the Library review."
         return RedirectResponse(
-            url=redirect + "?notice=" + urllib.parse.quote(msg),
-            status_code=303)
-    return RedirectResponse(url=redirect, status_code=303)
+            url=redirect + _hidden_query(q, msg), status_code=303)
+    return RedirectResponse(
+        url=redirect + ("?q=" + urllib.parse.quote(q) if q else ""),
+        status_code=303)
 
 
 @app.get("/library/hidden", response_class=HTMLResponse)
@@ -7744,37 +7797,47 @@ async def library_hidden_restore_all(request: Request):
     if busy is not None:
         return busy
     loop = asyncio.get_running_loop()
+    q, fingerprints = await _restore_hidden_filter(
+        request, hidden_mod.SCOPE_MISSING)
 
     try:
-        artists = await loop.run_in_executor(
-            None, lambda: hidden_mod.take_all(hidden_mod.SCOPE_MISSING))
+        if fingerprints is None:
+            artists = await loop.run_in_executor(
+                None, lambda: hidden_mod.take_all(hidden_mod.SCOPE_MISSING))
+            restored = bool(artists)
+        else:
+            artists = []
+            restored = await loop.run_in_executor(
+                None, lambda: hidden_mod.restore_albums(
+                    hidden_mod.SCOPE_MISSING, fingerprints))
     except OSError as e:
         return RedirectResponse(
-            url="/library/hidden?notice=" + urllib.parse.quote(str(e)),
-            status_code=303)
-    if not artists:
+            url="/library/hidden" + _hidden_query(q, str(e)), status_code=303)
+    if not restored:
         return RedirectResponse(
-            url="/library/hidden?notice=" + urllib.parse.quote(
-                "Nothing to bring back."), status_code=303)
+            url="/library/hidden" + _hidden_query(q, "Nothing to bring back."),
+            status_code=303)
     rejoined = await loop.run_in_executor(
-        None, lambda: flows.refold_restored_missing(artists, []))
+        None, lambda: flows.refold_restored_missing(artists, fingerprints or []))
+    # Under a filter only part of the set moved, so the message says how much
+    # rather than claiming everything came back.
+    what = ("Brought everything back" if fingerprints is None else
+            f"Brought back {restored} "
+            f"{'album' if restored == 1 else 'albums'}")
     if rejoined is False:
-        msg = ("Brought everything back, but the open Library review couldn't "
+        msg = (f"{what}, but the open Library review couldn't "
                "be saved. Check the data folder, then refresh the review.")
     elif rejoined is None:
         lifted = await loop.run_in_executor(
             None, library_scan_state.clear_review_retired)
-        msg = ("Brought everything back to the Library review." if lifted
-               else "Brought everything back. It returns the next time the "
-                    "library scans.")
+        msg = (f"{what} to the Library review." if lifted
+               else f"{what}. They return the next time the library scans.")
     elif rejoined:
-        msg = "Brought everything back to the Library review."
+        msg = f"{what} to the Library review."
     else:
-        msg = ("Brought everything back. Nothing needs adding to the "
-               "Library review.")
+        msg = f"{what}. Nothing needs adding to the Library review."
     return RedirectResponse(
-        url="/library/hidden?notice=" + urllib.parse.quote(msg),
-        status_code=303)
+        url="/library/hidden" + _hidden_query(q, msg), status_code=303)
 
 
 @app.post("/library/bring-back-all")
@@ -7843,7 +7906,7 @@ async def upgrade_hidden_restore_all(request: Request):
         return _upgrade_unavailable_response()
     return await _restore_hidden_all(
         request, hidden_mod.SCOPE_UPGRADE, "/upgrade/hidden",
-        "dismissed album")
+        "dismissed album", "dismissed albums")
 
 
 @app.post("/upgrade/review")
@@ -7902,7 +7965,7 @@ async def downsample_hidden_restore(request: Request):
 async def downsample_hidden_restore_all(request: Request):
     return await _restore_hidden_all(
         request, hidden_mod.SCOPE_DOWNSAMPLE, "/downsample/hidden",
-        "album kept hi-res")
+        "album kept hi-res", "albums kept hi-res")
 
 
 @app.post("/downsample/review")
@@ -8312,26 +8375,37 @@ def _review_context(job, page=1, query="", tab=""):
         "review_tab_counts": tab_counts,
         "review_hidden_count": hidden_mod.count(_hide_scope(job.execute_kind)),
         "review_counts": counts,
-        "embedded_review_summary": _embedded_review_summary(job),
+        "review_summary_line": _review_summary_line(job),
         "review_reclaimable_label": (format_size(counts["reclaimable"])
                                      if counts["reclaimable"] else ""),
         "review_page_size": REVIEW_PAGE_ARTISTS,
     }
 
 
-def _embedded_review_summary(job) -> str:
+# The generated summaries that say nothing but the size of the review. A
+# review screen carries its own counts row, which is live; a summary that only
+# restates the count contradicts it the moment a row is dismissed and keeps
+# the old number until the job is rebuilt from disk. Matching the complete
+# shape means anything appended to one (a result cap, artists that could not
+# be checked) still reaches the screen.
+_COUNT_ONLY_SUMMARY = re.compile(
+    r"(?:[0-9][0-9,]* to review across Missing Albums \([0-9][0-9,]*\)"
+    r" and Gap Fill \([0-9][0-9,]*\)(?:, from your last library scan)?"
+    r"|[0-9][0-9,]* upgrade candidates? ready to review"
+    r"|[0-9][0-9,]* upgradeable albums? Qobuz can serve at higher quality"
+    r"|[0-9][0-9,]* albums? can be downsampled"
+    r"|[0-9][0-9,]* albums? stored above CD rate"
+    r"|[0-9][0-9,]* new releases? found across the library)\."
+)
+
+
+def _review_summary_line(job) -> str:
+    """The scan's own summary as a review screen should show it: its caveats
+    kept, its bare count dropped in favour of the live counts row."""
     summary = str(getattr(job, "summary", "") or "").strip()
-    if getattr(job, "execute_kind", "") != "library" or not summary:
+    if getattr(job, "execute_kind", "") not in _TRIAGE_KINDS or not summary:
         return summary
-    count_only = re.fullmatch(
-        r"[0-9][0-9,]* to review across Missing Albums "
-        r"\([0-9][0-9,]*\) and Gap Fill \([0-9][0-9,]*\)"
-        r"(?:\.|, from your last library scan\.)?",
-        summary,
-    )
-    # Match the complete generated shape so stale counts stay suppressed, but
-    # any appended caveat remains visible on Library.
-    return "" if count_only else summary
+    return "" if _COUNT_ONLY_SUMMARY.fullmatch(summary) else summary
 
 
 def _review_badge_ack_for(job):

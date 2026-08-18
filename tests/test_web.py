@@ -3191,7 +3191,7 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
     "summary_suffix",
     [".", ", from your last library scan."],
 )
-def test_embedded_library_hides_only_the_duplicated_count_summary(
+def test_review_hides_only_the_duplicated_count_summary(
         client, summary_suffix):
     from qobuz_librarian.web import flows
 
@@ -3226,7 +3226,7 @@ def test_embedded_library_hides_only_the_duplicated_count_summary(
 
         full_page = client.get(f"/jobs/{job.id}")
         assert full_page.status_code == 200
-        assert count_summary in full_page.text
+        assert count_summary not in full_page.text
 
         job.summary += " 2 artists couldn't be checked; scan again to finish."
         caveat = client.get(f"/jobs/{job.id}/content?embedded=1")

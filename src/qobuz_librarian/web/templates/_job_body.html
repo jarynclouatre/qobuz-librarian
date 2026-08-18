@@ -98,8 +98,8 @@
     {# The scan's own summary carries its caveats, an artist it couldn't check,
        a result cap it hit. Gating it on candidate_cap_hit meant a review whose
        sweep was incomplete presented its count as the whole answer. #}
-    {% if embedded_surface|default(false) and job.execute_kind == 'library' and embedded_review_summary is defined %}
-    {% set _job_summary = embedded_review_summary %}
+    {% if review_summary_line is defined %}
+    {% set _job_summary = review_summary_line %}
     {% else %}
     {% set _job_summary = job.summary %}
     {% endif %}

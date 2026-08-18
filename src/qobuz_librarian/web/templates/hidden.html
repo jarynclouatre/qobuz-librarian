@@ -40,11 +40,15 @@
   </form>
   {% endif %}
   {% if restore_all_action and restore_all_count %}
+  {# Under a filter the button takes what the filter shows, so its label and
+     its confirm name that number, not the whole dismissed set. #}
+  {% set _all_noun = restore_all_label if restore_all_count == 1 else restore_all_label_plural %}
   <form action="{{ restore_all_action }}" method="post" class="ql-hidden-restore-all">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% endif %}
     <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
-            data-confirm="{% if is_downsample %}Bring every album kept hi-res back to Downsample?{% else %}Bring every dismissed album back to the review?{% endif %}"
-            data-confirm-action="Bring all back">Bring all back ({{ labels.format_count(restore_all_count) }})</button>
+            data-confirm="{% if hidden_q %}Bring back the {{ labels.format_count(restore_all_count) }} {{ _all_noun }} matching &ldquo;{{ hidden_q }}&rdquo;?{% elif is_downsample %}Bring all {{ labels.format_count(restore_all_count) }} {{ _all_noun }} back to Downsample?{% else %}Bring all {{ labels.format_count(restore_all_count) }} dismissed {{ 'album' if restore_all_count == 1 else 'albums' }} back to the review?{% endif %}"
+            data-confirm-action="Bring back">{% if hidden_q %}Bring back these{% else %}Bring all back{% endif %} ({{ labels.format_count(restore_all_count) }})</button>
   </form>
   {% endif %}
 </div>
@@ -56,9 +60,10 @@
     <summary class="ql-hidden-summary">
       <span class="ql-hidden-summary-copy">
         <span class="ql-hidden-artist">{{ g.artist }}</span>
-        {# The list shows one row per entry (editions fold into it), so the
-           count uses the same unit as the rows and the page-level button. #}
-        <span class="ql-hidden-count">{{ labels.format_count(g.albums | length) }} album{% if g.albums | length != 1 %}s{% endif %}</span>
+        {# Review rows, the unit the review and the page button count. A line
+           that folded several editions says so ("with ..."), so the count can
+           be larger than the number of lines. #}
+        <span class="ql-hidden-count">{{ labels.format_count(g.rows) }} album{% if g.rows != 1 %}s{% endif %}</span>
       </span>
       <svg class="ql-hidden-chevron" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12h14"/>
@@ -70,13 +75,16 @@
         {% if not is_upgrade and not is_downsample %}
         <a href="/?kind=artist&q={{ g.artist | urlencode }}" class="ql-btn ql-btn-secondary ql-btn-sm">Search artist</a>
         {% endif %}
+        {# Same rule one level down: with a filter on, this takes the rows
+           listed under it, not every album the artist has dismissed. #}
+        {% set _g_noun = restore_all_label if g.rows == 1 else restore_all_label_plural %}
         <form action="{{ restore_action }}" method="post">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <input type="hidden" name="artist" value="{{ g.artist }}">
+          {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% for a in g.albums %}<input type="hidden" name="fingerprint" value="{{ a.fp }}">{% endfor %}{% else %}<input type="hidden" name="artist" value="{{ g.artist }}">{% endif %}
           <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
-                  data-confirm="Bring every {{ restore_all_label }} by {{ g.artist }} back?"
+                  data-confirm="{% if hidden_q %}Bring back the {{ labels.format_count(g.rows) }} {{ _g_noun }} by {{ g.artist }} matching &ldquo;{{ hidden_q }}&rdquo;?{% else %}Bring all {{ labels.format_count(g.rows) }} {{ _g_noun }} by {{ g.artist }} back?{% endif %}"
                   data-confirm-action="Bring back"
-                  aria-label="Bring all {{ restore_all_label_plural }} by {{ g.artist }} back">Bring all back</button>
+                  aria-label="Bring back {{ labels.format_count(g.rows) }} {{ _g_noun }} by {{ g.artist }}">{% if hidden_q %}Bring back these{% else %}Bring all back{% endif %} ({{ labels.format_count(g.rows) }})</button>
         </form>
       </div>
       <ul class="ql-hidden-list">
@@ -87,6 +95,7 @@
           <span class="ql-hidden-also">with {{ a.others | join(', ') }}</span>{% endif %}</span>
         <form action="{{ restore_action }}" method="post" class="ql-hidden-restore">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+          {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% endif %}
           <input type="hidden" name="fingerprint" value="{{ a.fp }}">
           <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
                   aria-label="Bring back {{ a.title }}{% if a.others %} and {{ a.others | length }} more edition{{ 's' if a.others | length != 1 }}{% endif %} by {{ g.artist }}">Bring back</button>

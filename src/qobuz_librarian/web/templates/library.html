@@ -113,7 +113,11 @@
       {% endif %}
       <form action="/library/bring-back-all" method="post" data-busy-submit style="margin-top:0">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-ghost">Bring all back</button>
+        {# It restores the whole dismissed set in one press, so it asks first,
+           naming the number, the same as the button on the Dismissed page. #}
+        <button type="submit" class="ql-btn ql-btn-ghost"
+                data-confirm="{% if hidden_count %}Bring all {{ hidden_count }} dismissed album{% if hidden_count != 1 %}s{% endif %} back to the review?{% else %}Bring the discarded review back?{% endif %}"
+                data-confirm-action="Bring all back">Bring all back</button>
       </form>
     </div>
     {% endif %}
