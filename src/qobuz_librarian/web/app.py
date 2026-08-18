@@ -337,6 +337,27 @@ def _startup_recovery_origin_value() -> str | None:
     return binding[3].kind.value
 
 
+def _startup_recovery_album_label() -> str:
+    """Name the album whose interrupted download is holding everything else.
+
+    The pause notice knew the pause existed but never what it was about, so a
+    user reading it had no way to tell which download the terminal would offer
+    to settle, or whether it was one they still wanted.
+    """
+    binding = _startup_recovery_binding()
+    if binding is None:
+        return ""
+    planned = getattr(binding[2], "planned", None) or {}
+    album = planned.get("album")
+    if not isinstance(album, dict):
+        return str(planned.get("label") or "")
+    title = str(album.get("title") or "").strip()
+    artist = str(((album.get("artist") or {}) or {}).get("name") or "").strip()
+    if title and artist:
+        return f"{artist} - {title}"
+    return title or str(planned.get("label") or "")
+
+
 def _startup_recovery_web_job_id() -> str | None:
     binding = _startup_recovery_binding()
     if binding is None:
@@ -828,42 +849,49 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             # row and no Retry button. Point each origin at the surface that
             # can settle it, the way the resume_required branch below does.
             origin = _startup_recovery_origin_value()
+            named = _startup_recovery_album_label()
+            of_album = f" of “{named}”" if named else ""
             paused = ("Downloads and scans are paused, and its saved queue and "
                       "staged files were left unchanged. ")
             if origin == "cli":
                 action = {"href": "/settings#mode", "label": "Open Settings"}
-                msg = ("An interrupted terminal download could not be verified "
-                       "safely. " + paused + "Switch to terminal mode in "
-                       "Settings and run Qobuz Librarian there; it offers to "
-                       "settle this.")
+                msg = (f"An interrupted terminal download{of_album} could not "
+                       "be verified safely. " + paused + "Switch to terminal "
+                       "mode in Settings and run Qobuz Librarian there; it "
+                       "offers to settle this.")
             elif origin == "web-job":
-                msg = ("An interrupted download could not be verified safely. "
-                       + paused + "Open that download from Queue or History. "
-                       "Retry settles it; if Retry keeps failing, Give up on "
-                       "this album discards it so everything else can run.")
+                msg = (f"An interrupted download{of_album} could not be "
+                       "verified safely. " + paused + "Open that download from "
+                       "Queue or History. Retry settles it; if Retry keeps "
+                       "failing, Give up on this album discards it so "
+                       "everything else can run.")
             else:
-                msg = ("An interrupted download could not be verified safely. "
-                       + paused + "Settle it from the interface it was started "
-                       "in; if it stays blocked, check the application log.")
+                msg = (f"An interrupted download{of_album} could not be "
+                       "verified safely. " + paused + "Settle it from the "
+                       "interface it was started in; if it stays blocked, "
+                       "check the application log.")
     elif (
         _startup_recovery_status_value() == "resume_required"
         and not _durable_resume_allowed(durable_resume_job_id or "")
     ):
         reason = "An interrupted download is waiting to be settled."
         origin = _startup_recovery_origin_value()
+        named = _startup_recovery_album_label()
+        of_album = f" of “{named}”" if named else ""
         if origin == "cli":
             action = {"href": "/settings#mode", "label": "Open Settings"}
-            msg = ("An interrupted terminal download has saved recovery state. "
-                   "Other library changes are paused. Switch to terminal mode "
-                   "in Settings, then resume that download there.")
+            msg = (f"An interrupted terminal download{of_album} has saved "
+                   "recovery state. Other library changes are paused. Switch "
+                   "to terminal mode in Settings, then resume that download "
+                   "there.")
         elif origin == "web-job":
-            msg = ("An interrupted download has saved recovery state. Other "
-                   "library changes are paused until that exact download is "
-                   "retried from Queue or History.")
+            msg = (f"An interrupted download{of_album} has saved recovery "
+                   "state. Other library changes are paused until that exact "
+                   "download is retried from Queue or History.")
         else:
-            msg = ("An interrupted download has saved recovery state. Other "
-                   "library changes are paused until that exact download is "
-                   "resumed from the interface where it started.")
+            msg = (f"An interrupted download{of_album} has saved recovery "
+                   "state. Other library changes are paused until that exact "
+                   "download is resumed from the interface where it started.")
     else:
         return None
     return {"reason": reason, "msg": msg, "action": action}
@@ -10424,6 +10452,17 @@ def _diagnostics():
             return
         checks.append({"label": label, "ok": True,
                        "detail": f"{p}: {n} entr{'y' if n == 1 else 'ies'}"})
+
+    # The panel exists to say what stops a scan or a download before one is
+    # started, and a pause is the most direct reason there is. It was the one
+    # thing missing: every row could read OK while nothing could run at all.
+    paused = _writes_paused_notice()
+    if paused is not None:
+        checks.append({"label": "Downloads and scans", "ok": False,
+                       "detail": paused["msg"]})
+    else:
+        checks.append({"label": "Downloads and scans", "ok": True,
+                       "detail": "Ready to run"})
 
     _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True)
     # The app's own recovery folder is not a staging entry; counting it made a

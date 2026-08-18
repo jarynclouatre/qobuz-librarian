@@ -212,6 +212,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                             # same album doesn't re-surface them as missing
 
     section(f"Step 1: Gap fill ({len(album_dirs)} album(s) for {artist_name})")
+    # Asking for one artist by name shows the whole catalogue, dismissals
+    # included. Read the store anyway so each one can say why it is here.
+    shown_dismissed = hidden_mod.load() if hidden is None else None
     vlog("  For each, querying Qobuz and offering to fill missing tracks.")
     vlog("  Press 's' at any prompt to stop the scan.")
 
@@ -392,12 +395,18 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
 
         # Partial: offer to fill the gap, unless the web review already got a
         # no for this album. Both of its tabs write the same dismissal scope.
-        if hidden is not None and hidden_mod.is_hidden(
-                hidden_mod.SCOPE_MISSING, artist_name,
-                album.get("title") or "", hidden, year=album_year(album)):
+        store = hidden if hidden is not None else shown_dismissed
+        dismissed = hidden_mod.is_hidden(
+            hidden_mod.SCOPE_MISSING, artist_name,
+            album.get("title") or "", store, year=album_year(album))
+        if dismissed and hidden is not None:
             log.info(fmt(C.GRAY, "    Dismissed in the Library review; skipping."))
             results.append({"dir": ad, "result": "dismissed"})
             continue
+        if dismissed:
+            log.info(fmt(C.GRAY,
+                "    Dismissed in the Library review; offered because you "
+                "asked for this artist."))
 
         log.info(fmt(C.YELLOW,
             f"    {len(present)}/{n_total} present; {len(missing)} missing"))
@@ -632,6 +641,19 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     header = f"  {len(ordered)} album(s) you don't have"
     if n_partial:
         header += f"  ({n_partial} partially present; listed first)"
+    if hidden is None:
+        # Nothing filtered this list, so say how much of it the Library review
+        # had already been told to stop showing.
+        store = hidden_mod.load()
+        n_dismissed = sum(
+            1 for gap in ordered
+            if hidden_mod.is_hidden(
+                hidden_mod.SCOPE_MISSING, artist_name,
+                gap.qobuz_album.get("title") or "", store,
+                year=album_year(gap.qobuz_album)))
+        if n_dismissed:
+            header += (f"  ({n_dismissed} dismissed in the Library review, "
+                       "listed because you asked for this artist)")
     log.info(fmt(C.BOLD + C.WHITE, header + ":"))
     print()
     for i, gap in enumerate(ordered, 1):
