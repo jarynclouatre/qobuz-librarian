@@ -297,10 +297,6 @@
   </dialog>
 
   <script nonce="{{ request.state.csp_nonce }}">
-    if ('serviceWorker' in navigator) {
-      // The content hash invalidates the service-worker cache.
-      navigator.serviceWorker.register('/sw.js?v={{ asset_version }}');
-    }
     // Keep the nav Queue badge in sync without a page reload.
     (function () {
       var badges = document.querySelectorAll('.js-queue-badge');

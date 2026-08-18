@@ -11142,8 +11142,11 @@ async def set_mode(request: Request, target: str = Form("")):
     return RedirectResponse(url="/settings", status_code=303)
 
 
-# Empty 500ms ticks before we emit a `: ping` heartbeat to keep reverse
-# proxies from dropping the EventSource on a quiet scan.
+# Empty 500ms ticks before we emit a ping heartbeat. It keeps reverse proxies
+# from dropping the EventSource on a quiet scan, and it is a named event rather
+# than an SSE comment so the browser can see it: a socket that dies without
+# closing raises no error, and silence between pings is the only signal the
+# page has that the stream is gone.
 _SSE_HEARTBEAT_TICKS = cfg.SSE_HEARTBEAT_TICKS
 
 # Dedicated thread pool for SSE waits so a long-running scan with many
@@ -11775,7 +11778,7 @@ async def job_stream(job_id: str):
                     empty_ticks += 1
                     if empty_ticks >= _SSE_HEARTBEAT_TICKS:
                         empty_ticks = 0
-                        yield ": ping\n\n"
+                        yield "event: ping\ndata: 1\n\n"
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -11831,7 +11834,7 @@ async def job_review_stream(job_id: str):
                     empty_ticks += 1
                     if empty_ticks >= _SSE_HEARTBEAT_TICKS:
                         empty_ticks = 0
-                        yield ": ping\n\n"
+                        yield "event: ping\ndata: 1\n\n"
                 except asyncio.CancelledError:
                     raise
                 except Exception:

@@ -15,6 +15,15 @@
     } catch (e) {}
   })();
 </script>
+<script nonce="{{ request.state.csp_nonce }}">
+  // Registered from the shared head rather than the app shell. Sign-in and
+  // setup are standalone pages, and registering only in the shell left anyone
+  // who had not signed in yet with no cached offline page to fall back on.
+  if ('serviceWorker' in navigator) {
+    // The content hash invalidates the service-worker cache.
+    navigator.serviceWorker.register('/sw.js?v={{ asset_version }}');
+  }
+</script>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">

@@ -69,8 +69,8 @@ _BLOCKED_PASSWORD_KEYS = frozenset({
 })
 
 # Reachable without a session: the auth pages handle their own gating, the
-# health probes must answer monitors, and the login page pulls in static
-# assets + the service worker before the user is signed in.
+# health probes must answer monitors, and the sign-in and setup pages register
+# the service worker and pull its static assets before anyone has signed in.
 _OPEN_PATHS = {"/healthz", "/readyz", "/sw.js", "/favicon.ico"}
 _OPEN_PREFIXES = ("/static/",)
 

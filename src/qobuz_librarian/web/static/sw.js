@@ -20,10 +20,15 @@ const PRECACHE = [
 ];
 
 self.addEventListener('install', event => {
+  // cache: 'reload' on every entry. The unversioned URLs in the list (the
+  // offline page, its script, the icons) carry no Cache-Control, so without
+  // this the browser's own heuristic cache can hand back the copy it already
+  // has and a new release precaches the previous release's files.
+  const fresh = PRECACHE.map(url => new Request(url, { cache: 'reload' }));
   // skipWaiting is chained inside waitUntil so a failed precache aborts the
   // install rather than activating a worker with a half-populated cache.
   event.waitUntil(
-    caches.open(CACHE).then(cache => cache.addAll(PRECACHE))
+    caches.open(CACHE).then(cache => cache.addAll(fresh))
       .then(() => self.skipWaiting())
   );
 });

@@ -567,17 +567,29 @@
     markSearchDownloadQueued(form);
   });
 
+  // Requests the page makes on its own, on a timer. They report nothing to the
+  // user when they fail: the status line they feed simply stops moving, where a
+  // red toast every few seconds would blame the user for something they never
+  // did and bury the flash that matters.
+  function fromBackgroundPoll(evt) {
+    var elt = evt.detail && evt.detail.elt;
+    var trigger = elt && elt.getAttribute && elt.getAttribute("hx-trigger");
+    return !!trigger && /(^|[\s,])every\s/.test(trigger);
+  }
+
   // Surface failed htmx requests instead of failing silently. A short
   // plain-text body is the route speaking (e.g. "couldn't save that
   // dismissal"); anything longer or HTML-shaped gets the generic line.
   document.addEventListener("htmx:responseError", function (evt) {
+    if (fromBackgroundPoll(evt)) return;
     var xhr = evt.detail && evt.detail.xhr;
     var body = (xhr && xhr.responseText || "").trim();
     var msg = (body && body.length <= 200 && body.indexOf("<") === -1)
       ? body : "That didn't go through. Try again in a moment.";
     showToast(msg, "error");
   });
-  document.addEventListener("htmx:sendError", function () {
+  document.addEventListener("htmx:sendError", function (evt) {
+    if (fromBackgroundPoll(evt)) return;
     showToast("Couldn't reach the server. Check your connection and try again.", "error");
   });
 
@@ -1054,13 +1066,35 @@
   }
   window.qlShowToast = showToast;
 
+  // Did the request fail because nothing could be reached, rather than because
+  // the server answered with an error? fetch() rejects with a TypeError when
+  // the connection never completes, and navigator.onLine covers a drop that
+  // happened while the answer was in flight.
+  function serverUnreachable(why) {
+    return why instanceof TypeError || !navigator.onLine;
+  }
+
+  // Reloading is how the raw fetch() paths recover from a failed action, and
+  // with the connection down it is the worst thing they can do: the service
+  // worker answers the navigation with the offline page, so the view the user
+  // was working in disappears along with the message explaining why.
+  function reloadToRecover() {
+    if (!navigator.onLine) return false;
+    setTimeout(function () { window.location.reload(); }, 900);
+    return true;
+  }
+
   // A stale or missing CSRF token is refused and answered with a fresh cookie,
   // so nothing was written and a retry can't succeed until the page reloads
   // carrying the token that matches it. htmx handles this on its own; the raw
   // fetch() paths have to say so and reload.
   function pageWentStale() {
-    showToast("That page went stale. Reloading.", "error");
-    setTimeout(function () { window.location.reload(); }, 900);
+    if (reloadToRecover()) {
+      showToast("That page went stale. Reloading.", "error");
+      return;
+    }
+    showToast("That page went stale, and the server can't be reached to reload it."
+      + " Reconnect, then reload the page.", "error");
   }
 
   // Raw fetch does not understand htmx's navigation headers. Mark these
@@ -1657,9 +1691,18 @@
     var containerId = surface === "dashboard" ? "dashboard-active"
                     : "queue-body";
     var reconnect = surface === "dashboard" ? document.getElementById("dash-reconnect-" + id) : null;
-    var src = new EventSource("/api/jobs/" + id + "/stream");
+    // Same silent-stream problem as the job page: a socket that dies without
+    // closing never raises an error, so watch the gap since the last event.
+    var SILENT_STREAM_MS = 25000;
+    var src = null;
+    var finished = false;
+    var warnDelay = null;
+    var silenceTimer = null;
+    var lastEvent = Date.now();
     function shut() {
-      try { src.close(); } catch (e) {}
+      if (src) { try { src.close(); } catch (e) {} }
+      if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
+      window.removeEventListener("online", onOnline);
       document.removeEventListener("htmx:beforeSwap", onSwap);
     }
     function onSwap(e) {
@@ -1667,32 +1710,69 @@
       if (e.detail.target.id === containerId) shut();
     }
     document.addEventListener("htmx:beforeSwap", onSwap);
-    if (reconnect) {
-      var warnDelay = null;
-      src.onopen = function () {
-        if (warnDelay) { clearTimeout(warnDelay); warnDelay = null; }
-        reconnect.classList.add("hidden");
-      };
+    function showGap(text, isError) {
+      if (!reconnect) return;
+      reconnect.textContent = text;
+      reconnect.classList.toggle("is-error", !!isError);
+      reconnect.classList.toggle("is-warning", !isError);
+      reconnect.classList.remove("hidden");
+    }
+    function streamAlive() {
+      lastEvent = Date.now();
+      if (warnDelay) { clearTimeout(warnDelay); warnDelay = null; }
+      if (reconnect) reconnect.classList.add("hidden");
+    }
+    function watchStream() {
+      if (!document.body.contains(card)) { shut(); return; }
+      if (finished || Date.now() - lastEvent < SILENT_STREAM_MS) return;
+      showGap("Reconnecting", false);
+      openStream();
+    }
+    function onOnline() {
+      openStream();
+    }
+    // The card is redrawn by a fetch once the run ends, so a connection that
+    // is down at that moment leaves a finished job sitting there as running.
+    function refreshSurface() {
+      if (!window.htmx) { reloadToRecover(); return; }
+      if (!navigator.onLine) {
+        showGap("Connection lost. Reload to see the latest.", true);
+        window.addEventListener("online", refreshSurface, { once: true });
+        return;
+      }
+      if (surface === "dashboard") {
+        window.htmx.ajax("GET", "/",
+          { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
+      } else {
+        window.htmx.ajax("GET", "/queue",
+          { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
+      }
+    }
+    function openStream() {
+      if (src) { try { src.close(); } catch (e) {} }
+      lastEvent = Date.now();
+      src = new EventSource("/api/jobs/" + id + "/stream");
+      src.onmessage = streamAlive;
+      src.addEventListener("ping", streamAlive);
+      src.onopen = streamAlive;
       src.onerror = function () {
         if (src.readyState === EventSource.CLOSED) {
           if (warnDelay) { clearTimeout(warnDelay); warnDelay = null; }
-          reconnect.textContent = "Connection lost. Reload to see the latest.";
-          reconnect.classList.remove("is-warning");
-          reconnect.classList.add("is-error");
-          reconnect.classList.remove("hidden");
-        } else if (!warnDelay) {
+          showGap("Connection lost. Reload to see the latest.", true);
+        } else if (reconnect && !warnDelay) {
           // Phones drop the stream the moment the tab backgrounds; only warn
           // when a reconnect still hasn't landed after a real wait.
           warnDelay = setTimeout(function () {
             warnDelay = null;
-            reconnect.classList.remove("is-error");
-            reconnect.classList.add("is-warning");
-            reconnect.classList.remove("hidden");
+            showGap("Reconnecting", false);
           }, 5000);
         }
       };
+      src.addEventListener("progress", onProgress);
+      src.addEventListener("done", onDone);
     }
-    src.addEventListener("progress", function (e) {
+    function onProgress(e) {
+      streamAlive();
       var p; try { p = JSON.parse(e.data); } catch (_) { return; }
       // Re-render once a pending queue card starts.
       if (surface === "queue" && status === "pending" && !flippedFromPending) {
@@ -1714,8 +1794,9 @@
         var fill = bar.querySelector("i");
         if (fill) fill.style.width = Math.min(100, (p.current / p.total) * 100) + "%";
       }
-    });
-    src.addEventListener("done", function (e) {
+    }
+    function onDone(e) {
+      finished = true;
       shut();
       var endStatus = (e && e.data) ? ("" + e.data).trim() : "";
       if (endStatus === "failed") {
@@ -1723,17 +1804,12 @@
         var label = ((t && t.textContent) || "A job").replace(/\s+/g, " ").trim();
         showToast(label + " failed. Open History for details.", "error");
       }
-      if (surface === "dashboard") {
-        if (window.htmx) {
-          window.htmx.ajax("GET", "/",
-            { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
-        } else { location.reload(); }
-      } else if (window.htmx) {
-        window.htmx.ajax("GET", "/queue",
-          { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
-      } else { location.reload(); }
+      refreshSurface();
       if (window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
-    });
+    }
+    openStream();
+    silenceTimer = setInterval(watchStream, 5000);
+    window.addEventListener("online", onOnline);
   }
 
   function initStreamCards() {
@@ -1768,6 +1844,10 @@
     // Server-relative elapsed clock for long-running scans.
     var elapsedEl = document.getElementById("scan-elapsed");
     var elapsedTimer = null;
+    function stopElapsed() {
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+    }
+    var startElapsed = function () {};
     if (elapsedEl && elapsedEl.dataset.start) {
       var serverStart = parseFloat(elapsedEl.dataset.start);
       var serverNow = parseFloat(elapsedEl.dataset.now);
@@ -1775,13 +1855,19 @@
       if (!(elapsedAtLoad >= 0)) elapsedAtLoad = 0;
       var clientBase = Date.now();
       var tickElapsed = function () {
-        if (!document.body.contains(elapsedEl)) { if (elapsedTimer) clearInterval(elapsedTimer); return; }
+        if (!document.body.contains(elapsedEl)) { stopElapsed(); return; }
         var secs = Math.max(0, Math.floor(elapsedAtLoad + (Date.now() - clientBase) / 1000));
         var mm = Math.floor(secs / 60), ss = secs % 60;
         elapsedEl.textContent = "· " + mm + ":" + (ss < 10 ? "0" : "") + ss + " elapsed";
       };
-      tickElapsed();
-      elapsedTimer = setInterval(tickElapsed, 1000);
+      // The clock reads off the server's start time, so a stream that dropped
+      // and came back picks the count straight back up.
+      startElapsed = function () {
+        if (elapsedTimer) return;
+        tickElapsed();
+        elapsedTimer = setInterval(tickElapsed, 1000);
+      };
+      startElapsed();
     }
     var baseTitle = document.title;
     var titleSet = false;
@@ -1801,88 +1887,165 @@
         activity.textContent = jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning";
       }
     }
-    var src = new EventSource("/api/jobs/" + id + "/stream");
+    // A stream that dies without closing is invisible to EventSource: no
+    // error fires, the last progress line just stays on screen and a finished
+    // scan goes on reading as a running one. The server pings a quiet stream,
+    // so the time since anything last arrived is what tells us it is gone.
+    var SILENT_STREAM_MS = 25000;
+    var STALE_NOTE = "Connection lost. This is the last progress the app received.";
+    var src = null;
     var opened = false;
-    src.onmessage = function (e) {
-      if (!titleSet) { document.title = "▶ " + baseTitle; titleSet = true; }
-      clearQueuedState();
-      if (logEl) { logEl.appendChild(document.createTextNode(e.data + "\n")); logEl.scrollTop = logEl.scrollHeight; }
-    };
+    var finished = false;
     var reconnectDelay = null;
-    src.onopen = function () {
+    var silenceTimer = null;
+    var lastEvent = Date.now();
+
+    function showGap(text, isError) {
+      if (!reconnect) return;
+      reconnect.textContent = text;
+      reconnect.classList.toggle("is-error", !!isError);
+      reconnect.classList.toggle("is-warning", !isError);
+      reconnect.classList.remove("hidden");
+    }
+    function hideGap() {
       if (reconnectDelay) { clearTimeout(reconnectDelay); reconnectDelay = null; }
       if (reconnect) reconnect.classList.add("hidden");
-      // Reconnect replays recent lines, so reset before appending them again.
-      if (opened) {
-        if (logEl) logEl.textContent = "";
-        foundAlbums = 0;
-        foundArtists = 0;
-      }
-      opened = true;
-    };
-    src.onerror = function () {
-      if (src.readyState === EventSource.CLOSED) {
-        if (reconnectDelay) { clearTimeout(reconnectDelay); reconnectDelay = null; }
-        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
-        if (reconnect) {
-          reconnect.textContent = "Connection lost. Reload to see the latest.";
-          reconnect.classList.remove("is-warning");
-          reconnect.classList.add("is-error");
-          reconnect.classList.remove("hidden");
+    }
+    function streamAlive() {
+      lastEvent = Date.now();
+      hideGap();
+      startElapsed();
+    }
+    function stopWatching() {
+      if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("online", onOnline);
+    }
+
+    function openStream() {
+      if (src) { try { src.close(); } catch (e) {} }
+      lastEvent = Date.now();
+      src = new EventSource("/api/jobs/" + id + "/stream");
+      src.onmessage = function (e) {
+        streamAlive();
+        if (!titleSet) { document.title = "\u25b6 " + baseTitle; titleSet = true; }
+        clearQueuedState();
+        if (logEl) { logEl.appendChild(document.createTextNode(e.data + "\n")); logEl.scrollTop = logEl.scrollHeight; }
+      };
+      src.addEventListener("ping", streamAlive);
+      src.onopen = function () {
+        streamAlive();
+        // Reconnect replays recent lines, so reset before appending them again.
+        if (opened) {
+          if (logEl) logEl.textContent = "";
+          foundAlbums = 0;
+          foundArtists = 0;
         }
-      } else if (reconnect && !reconnectDelay) {
-        // Backgrounding the tab on a phone kills the stream every time; hold
-        // the banner back until a reconnect has genuinely failed to land.
-        reconnectDelay = setTimeout(function () {
-          reconnectDelay = null;
-          reconnect.classList.remove("is-error");
-          reconnect.classList.add("is-warning");
-          reconnect.classList.remove("hidden");
-        }, 5000);
-      }
-    };
-    src.addEventListener("progress", function (e) {
-      var p; try { p = JSON.parse(e.data); } catch (_) { return; }
-      clearQueuedState();
-      if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
-      if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== p.phase) {
-        activity.textContent = p.phase;
-      }
-      if (card) card.classList.remove("hidden");
-      if (label) label.textContent = p.phase || (activity && activity.textContent !== "Queued" ? activity.textContent : "Running");
-      var ct = p.total > 0 ? p.current + " / " + p.total + unitSuffix(p) : (p.current ? String(p.current) : "");
-      if (count) count.textContent = ct;
-      if (bar) { if (p.total > 0) { bar.max = 100; bar.value = Math.round(p.current / p.total * 100); } else { bar.removeAttribute("value"); } }
-      if (item) item.textContent = p.item || "";
-      if (typeof p.found === "number" && p.found > foundAlbums) foundAlbums = p.found;
-      // Both tallies come cumulative from the server (found_artists rides the
-      // reconnect snapshot too), so a dropped-and-reopened stream picks the
-      // line back up instead of restarting the artist count at zero.
-      if (typeof p.found_artists === "number" && p.found_artists > foundArtists) {
-        foundArtists = p.found_artists;
-      }
-      if (typeof p.found === "number" || p.hit) showFound();
-      // Beets runs to its own end, so withdraw Cancel while an album is going
-      // into the library rather than take a stop the import will run past.
-      // The chip that replaces it says so; a greyed button explains nothing.
-      var cancelForm = document.querySelector("[data-cancel-form]");
-      var importChip = document.querySelector("[data-import-chip]");
-      if (cancelForm && importChip) {
-        cancelForm.classList.toggle("hidden", !!p.importing);
-        importChip.classList.toggle("hidden", !p.importing);
-      }
-    });
-    src.addEventListener("done", function () {
-      src.close();
-      if (elapsedTimer) clearInterval(elapsedTimer);
+        opened = true;
+      };
+      src.onerror = function () {
+        if (src.readyState === EventSource.CLOSED) {
+          if (reconnectDelay) { clearTimeout(reconnectDelay); reconnectDelay = null; }
+          stopElapsed();
+          showGap("Connection lost. Reload to see the latest.", true);
+        } else if (reconnect && !reconnectDelay) {
+          // Backgrounding the tab on a phone kills the stream every time; hold
+          // the banner back until a reconnect has genuinely failed to land.
+          reconnectDelay = setTimeout(function () {
+            reconnectDelay = null;
+            showGap(STALE_NOTE, false);
+          }, 5000);
+        }
+      };
+      src.addEventListener("progress", function (e) {
+        streamAlive();
+        var p; try { p = JSON.parse(e.data); } catch (_) { return; }
+        clearQueuedState();
+        if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
+        if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== p.phase) {
+          activity.textContent = p.phase;
+        }
+        if (card) card.classList.remove("hidden");
+        if (label) label.textContent = p.phase || (activity && activity.textContent !== "Queued" ? activity.textContent : "Running");
+        var ct = p.total > 0 ? p.current + " / " + p.total + unitSuffix(p) : (p.current ? String(p.current) : "");
+        if (count) count.textContent = ct;
+        if (bar) { if (p.total > 0) { bar.max = 100; bar.value = Math.round(p.current / p.total * 100); } else { bar.removeAttribute("value"); } }
+        if (item) item.textContent = p.item || "";
+        if (typeof p.found === "number" && p.found > foundAlbums) foundAlbums = p.found;
+        // Both tallies come cumulative from the server (found_artists rides the
+        // reconnect snapshot too), so a dropped-and-reopened stream picks the
+        // line back up instead of restarting the artist count at zero.
+        if (typeof p.found_artists === "number" && p.found_artists > foundArtists) {
+          foundArtists = p.found_artists;
+        }
+        if (typeof p.found === "number" || p.hit) showFound();
+        // Beets runs to its own end, so withdraw Cancel while an album is going
+        // into the library rather than take a stop the import will run past.
+        // The chip that replaces it says so; a greyed button explains nothing.
+        var cancelForm = document.querySelector("[data-cancel-form]");
+        var importChip = document.querySelector("[data-import-chip]");
+        if (cancelForm && importChip) {
+          cancelForm.classList.toggle("hidden", !!p.importing);
+          importChip.classList.toggle("hidden", !p.importing);
+        }
+      });
+      src.addEventListener("done", onDone);
+    }
+
+    function watchStream() {
+      if (reconnect && !document.body.contains(reconnect)) { stopWatching(); return; }
+      if (finished || Date.now() - lastEvent < SILENT_STREAM_MS) return;
+      showGap(STALE_NOTE, false);
+      openStream();
+    }
+    function onOffline() {
+      if (!finished) showGap(STALE_NOTE, false);
+    }
+    function onOnline() {
+      if (finished) { finishJob(); return; }
+      openStream();
+    }
+
+    function onDone() {
+      finished = true;
+      if (src) { try { src.close(); } catch (e) {} }
+      stopElapsed();
       document.title = baseTitle;
       if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
-      if (window.htmx) {
-        var jc = document.getElementById("job-content");
-        var embedded = jc && jc.dataset.embedded ? "?embedded=1" : "";
-        window.htmx.ajax("GET", "/jobs/" + id + "/content" + embedded, { target: "#job-content", swap: "outerHTML" });
-      } else { location.reload(); }
-    });
+      finishJob();
+    }
+
+    // The finished job body is fetched, not pushed. With nothing reachable at
+    // the moment the run ends, the page would sit on a scan that stopped
+    // running minutes ago, so say where it stands and ask again on reconnect.
+    function finishJob() {
+      var body = document.getElementById("job-content");
+      if (!body) { stopWatching(); return; }
+      if (!window.htmx) { reloadToRecover(); return; }
+      var embedded = body.dataset.embedded ? "?embedded=1" : "";
+      sessionFetch("/jobs/" + id + "/content" + embedded)
+        .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+        .then(function (html) {
+          var target = document.getElementById("job-content");
+          if (!target) return;
+          stopWatching();
+          hideGap();
+          window.htmx.swap(target, html, { swapStyle: "outerHTML" });
+        })
+        .catch(function (why) {
+          if (why === "navigation") return;
+          if (navigator.onLine) {
+            showGap("This run has finished. Reload to see the result.", true);
+            return;
+          }
+          showGap("This run has finished. It will load when you are back online.", false);
+        });
+    }
+
+    openStream();
+    silenceTimer = setInterval(watchStream, 5000);
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", onOnline);
   }
 
   // Paginated, server-backed review. Selection is saved server-side.
@@ -2249,8 +2412,16 @@
             return { ok: false, busy: false, navigating: true };
           }
           flashSelectError();
+          if (serverUnreachable(why)) {
+            // Nothing was saved, and a reload would only reach the offline
+            // page, so put the boxes back to the server's last answer.
+            applyCounts(lastCounts);
+            showToast("Couldn't reach the server, so those choices weren't saved."
+              + " Check your connection, then try again.", "error");
+            return { ok: false, busy: false, unreachable: true };
+          }
           showToast("Couldn't confirm those choices. Reloading the review.", "error");
-          setTimeout(function () { location.reload(); }, 900);
+          reloadToRecover();
           return { ok: false, busy: false };
         });
     }
@@ -2289,7 +2460,7 @@
             if (index < previousRows.length) cb.checked = previousRows[index];
           });
           restoreGroupHeader(det);
-          if (!result.busy) {
+          if (!result.busy && !result.unreachable) {
             loadGroupItems(det, true).then(function (loaded) {
               if (loaded) delete det.dataset.selectionRecovering;
               updateHideLabels();
@@ -2685,6 +2856,13 @@
             .catch(function (why) {
               if (why === "navigation") return;
               if (why === "stale") { pageWentStale(); return; }
+              if (serverUnreachable(why)) {
+                dismissRest.disabled = false;
+                dismissRest.textContent = prev;
+                showToast("Couldn't reach the server, so nothing was dismissed."
+                  + " Check your connection, then try again.", "error");
+                return;
+              }
               dismissRest.disabled = true;
               dismissRest.textContent = "Reloading…";
               var hidden = why && why.dismissFailure
@@ -2697,7 +2875,7 @@
                   : "Couldn't confirm those dismissals. Reloading the review.",
                 "error"
               );
-              setTimeout(function () { location.reload(); }, 900);
+              reloadToRecover();
             });
         });
       });

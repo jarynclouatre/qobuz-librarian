@@ -65,12 +65,12 @@
       justify-content: center;
       min-height: 100dvh;
     }
-    .card {
+    .ql-offline-card {
       text-align: center;
       max-width: 380px;
       padding: 2.5rem 2rem;
     }
-    .mark {
+    .ql-offline-mark {
       width: 64px;
       height: 64px;
       border-radius: 14px;
@@ -84,10 +84,24 @@
       margin-bottom: 0.75rem;
     }
     p { line-height: 1.6; color: var(--ql-text-2); }
-    .retry-btn {
-      display: inline-block;
+    p + p { margin-top: 0.75rem; }
+    .ql-offline-status {
+      margin-top: 1rem;
+      font-size: 0.85rem;
+      min-height: 1.2em;
+    }
+    .ql-offline-retry {
+      /* Flex, not inline-block, so min-height can hold the 44px touch target
+         without the label drifting off centre. */
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
       margin-top: 1.75rem;
       padding: 0.55rem 1.75rem;
+      /* Wide enough for the "Checking…" label, so the button does not jump
+         width the moment it is tapped. */
+      min-width: 9.5rem;
       background: var(--btn-grad);
       color: var(--ql-action-ink);
       border: 1px solid rgba(0, 0, 0, 0.3);
@@ -106,12 +120,16 @@
        The service worker serves this page UNDER the URL that failed, so an
        empty href retries that exact page instead of dumping the user on /.
        No JS needed, works offline, stays within the CSP. -->
-  <div class="card">
-    <img class="mark" src="/static/icon-192.png" alt="">
+  <div class="ql-offline-card">
+    <img class="ql-offline-mark" src="/static/icon-192.png" alt="">
     <h1>Qobuz Librarian</h1>
     <p>Can't reach Qobuz Librarian. You may be off the network - check your
        connection, or that the server is running.</p>
-    <a href="" class="retry-btn">Retry</a>
+    <p>Downloads and your Library review live on the server, not in this
+       browser. If it is only this device that is offline, they carry on
+       there and nothing is lost.</p>
+    <a href="" class="ql-offline-retry" data-retry>Retry</a>
+    <p class="ql-offline-status" role="status" aria-live="polite" data-retry-status></p>
   </div>
 </body>
 </html>
