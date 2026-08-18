@@ -2733,6 +2733,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         context.setdefault("job_nav_page", nav_page)
         context.setdefault("job_return_href", return_href)
         context.setdefault("job_return_label", return_label)
+        context.setdefault("job_pending_review", _pending_new_release_review(job))
         context.setdefault(
             "downsample_originals_choice",
             (
@@ -3038,6 +3039,28 @@ def _existing_new_release_check():
         if getattr(j, "execute_kind", "") == "new_releases":
             return j
     return None
+
+
+def _pending_new_release_review(job):
+    """The new-release review still parked after a partial download, for the
+    finished job page to point at. New releases have no home surface of their
+    own, so a review split off the batch the user approved was reachable only
+    from the dashboard notice or History: the page they were standing on gave
+    them no way back to the rest of their own results."""
+    if getattr(job, "execute_kind", "") != "new_releases":
+        return None
+    if getattr(getattr(job, "status", None), "value", "") not in (
+            "done", "failed", "canceled"):
+        return None
+    other = _existing_new_release_check()
+    if other is None or other.id == job.id:
+        return None
+    if other.status != job_mgr.JobStatus.AWAITING_REVIEW:
+        return None
+    return {
+        "href": f"/jobs/{other.id}",
+        "label": f"{plural(len(other.candidates), 'new release')} still to review",
+    }
 
 
 def _start_new_release_check(credentials):
@@ -7426,7 +7449,11 @@ async def library_scan(
                 url="/library?error=" + urllib.parse.quote(msg), status_code=303)
         existing = _existing_new_release_check()
         if existing is not None:
-            return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
+            # Landing on the parked review without a word said made the button
+            # look broken: the check the user asked for did not run, and the
+            # page they arrived at was the one they had already seen.
+            return RedirectResponse(
+                url=f"/jobs/{existing.id}?waiting=1", status_code=303)
         try:
             credentials = await _authorize_qobuz_for_web(
                 QobuzAccess.CATALOGUE_ACTION
@@ -8144,7 +8171,8 @@ def _job_nav_destination(job) -> tuple[str, str, str]:
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 async def job_page(request: Request, job_id: str, approved: bool = False,
                    stale: bool = False, noselection: bool = False, page: int = 1,
-                   error: str = "", q: str = "", tab: str = ""):
+                   error: str = "", q: str = "", tab: str = "",
+                   waiting: bool = False):
     job = job_mgr.registry.get(job_id)
     historical = False
     if not job:
@@ -8184,6 +8212,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
         }
     ctx = {"job": job, "page": nav_page,
            "approved": approved, "stale": stale, "noselection": noselection,
+           "waiting": waiting,
            "error": error, "historical": historical,
            "new_release_state": new_release_state,
            "queue_wait": _queue_wait(job),
@@ -8345,6 +8374,7 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
                         review_verb=job.review_verb,
                         status=job_mgr.JobStatus.AWAITING_REVIEW)
     other.candidates = split  # cids, seqs, and saved ticks ride along
+    other.summary = flows.split_review_summary(other.execute_kind, split)
     other.sync_cand_seq()
     factory = _RESUME_EXECUTE.get(other.execute_kind)
     if factory is not None:

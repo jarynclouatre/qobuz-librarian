@@ -331,6 +331,9 @@
       </form>
       {% endif %}
       {% if not embedded_surface|default(false) %}
+      {% if job_pending_review %}
+      <a href="{{ job_pending_review.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ job_pending_review.label }}</a>
+      {% endif %}
       <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ job_return_label }}</a>
       {% endif %}
     </div>

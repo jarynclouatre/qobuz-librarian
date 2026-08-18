@@ -3396,6 +3396,9 @@ def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch)
                      and j.status == jm.JobStatus.AWAITING_REVIEW)
         titles = {c["title"]: c["selected"] for c in split.candidates}
         assert titles == {"Dummy": True, "Untrue": False}
+        # History lists a parked review by its summary, and the split used to
+        # carry none, so the row arrived with nothing in it.
+        assert split.summary
         assert split._execute_fn is not None
     finally:
         _remove_job(job)

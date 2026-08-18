@@ -968,7 +968,7 @@
   // One-shot flash flags should not stay in the URL after first paint.
   var FLASH_PARAMS = ["approved", "stale", "saved", "queued", "connected",
                       "unverified", "mode", "error", "noselection", "skipped",
-                      "notice", "quality_note"];
+                      "notice", "quality_note", "waiting"];
   function cleanFlashUrl() {
     if (typeof URL !== "function" || !history.replaceState) return;
     try {

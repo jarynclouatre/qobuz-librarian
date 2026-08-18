@@ -463,6 +463,30 @@ def library_review_summary(candidates):
             f"({missing:,}) and Gap Fill ({gaps:,})")
 
 
+def split_review_summary(execute_kind, candidates):
+    """The one-line count for a review split off a partial download, recounted
+    for the candidates left behind. The split copies the parked review but not
+    its summary, so its History card had nothing where the count belongs.
+    Shapes match what each scan writes when it parks, so a review screen
+    treats it exactly as it treats the original's.
+
+    Repair is left out on purpose: its summary is caveat-driven, and a bare
+    count would drop what the scan could not check."""
+    n = len(candidates)
+    if not n:
+        return ""
+    if execute_kind == "library":
+        return library_review_summary(candidates) + "."
+    if execute_kind == "new_releases":
+        return f"{plural(n, 'new release')} found across the library."
+    if execute_kind == "upgrade":
+        return (f"{plural(n, 'upgradeable album')} Qobuz can serve at "
+                "higher quality.")
+    if execute_kind == "downsample":
+        return f"{plural(n, 'album')} stored above CD rate."
+    return ""
+
+
 def fold_key(c):
     """A candidate's merge identity: Qobuz album id, falling back to
     artist+title for keyless carry-overs. Shared by the fold and its caller's
@@ -694,11 +718,20 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
     if parked is None:
         return None
     specs = [dict(c, selected=True) if ticked else dict(c) for c in picks]
+    # A count we wrote ourselves has to be rewritten once the review grows, or
+    # the History card keeps the number it had at the split and disagrees with
+    # the review it points at. A scan's own summary is left alone: it carries
+    # caveats a bare count would throw away.
+    ours = (parked.summary or "") == split_review_summary(
+        getattr(parked, "execute_kind", ""), parked.candidates)
     folded = fold_new_candidates(parked, specs)
     if folded is False:
         return False
     if folded is None:
         return None
+    if ours:
+        parked.summary = split_review_summary(
+            getattr(parked, "execute_kind", ""), parked.candidates)
     parked.notify_review_changed()
     return folded[0]
 

@@ -150,8 +150,11 @@
   {%- endif -%}
 {%- endmacro %}
 
+{# A new-release check downloads what the user ticks, so its kind alone does
+   not say what it is doing; testing it before the status made the chip read
+   "Checking Qobuz" while the page underneath said "Downloading album". #}
 {% macro job_activity(job) -%}
-  {%- if job.execute_kind == 'new_releases' -%}
+  {%- if job.execute_kind == 'new_releases' and job.status.value == 'scanning' -%}
     Checking Qobuz
   {%- elif job.status.value == 'scanning' -%}
     Scanning
@@ -165,7 +168,7 @@
     Fetching lyrics
   {%- elif job.execute_kind == 'migration' -%}
     Migrating
-  {%- elif job.kind == 'download' or job.execute_kind == 'library' -%}
+  {%- elif job.kind == 'download' or job.execute_kind in ('library', 'new_releases') -%}
     Downloading
   {%- else -%}
     Running
