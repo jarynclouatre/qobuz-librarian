@@ -10429,7 +10429,8 @@ def _diagnostics():
     """Read-only health checks surfaced on the Settings page."""
     checks = []
 
-    def _dir_check(label, path, *, want_writable, skip_names=()):
+    def _dir_check(label, path, *, want_writable, skip_names=(),
+                   unit=("entry", "entries")):
         p = Path(path)
         if not p.exists():
             checks.append({"label": label, "ok": False,
@@ -10451,7 +10452,7 @@ def _diagnostics():
                            "detail": f"{p} unreadable: {e}"})
             return
         checks.append({"label": label, "ok": True,
-                       "detail": f"{p}: {n} entr{'y' if n == 1 else 'ies'}"})
+                       "detail": f"{p}: {plural(n, *unit)}"})
 
     # The panel exists to say what stops a scan or a download before one is
     # started, and a pause is the most direct reason there is. It was the one
@@ -10466,9 +10467,12 @@ def _diagnostics():
 
     _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True)
     # The app's own recovery folder is not a staging entry; counting it made a
-    # pile of kept files read as one healthy item. It gets its own check below.
+    # pile of kept files read as one healthy item. It gets its own check below,
+    # so this row says what it counted rather than "0 entries", which read as
+    # an empty staging folder next to a warning about the files kept in it.
     _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True,
-               skip_names={cfg.BEETS_RETRY_DIR})
+               skip_names={cfg.BEETS_RETRY_DIR},
+               unit=("album waiting to import", "albums waiting to import"))
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     if beets_db.exists():
@@ -10658,6 +10662,10 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "rerendered": rerendered,
         "error": error,
         "warnings": warnings or [],
+        # Every warning a save can raise is about a field in the collapsed
+        # defaults section, and it re-rendered closed: the notice named a
+        # value the reader could not see or correct without hunting for it.
+        "defaults_open": bool(warnings) or error == "invalidsettings",
         "page": "settings",
         "library_paths": [
             {"label": label, "container": cp,
@@ -10671,6 +10679,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
             for host, resolved in [_resolve_host_path(cp)]
         ],
         "behavior_fields": settings_store.BEHAVIOR_FIELDS,
+        "inert_notes": settings_store.inert_behaviour_notes(values),
         "text_fields": settings_store.TEXT_FIELDS,
         "option_labels": settings_store.ENUM_OPTION_LABELS,
         "behavior": values,
@@ -11125,7 +11134,10 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Move these files back to {dest}?" '
+            f'data-confirm="Put these files back at {dest}? Any file of the '
+            f'same name there is replaced and cannot be brought back, so an '
+            f'upgrade or re-download of this album since the backup was made '
+            f'is undone." '
             f'data-confirm-action="Restore">Restore</button>'
             f'</form>'
             f'<form hx-post="/backups/discard" hx-target="#diagnostics-list">'

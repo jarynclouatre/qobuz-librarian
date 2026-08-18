@@ -350,16 +350,19 @@
           <div class="ql-setting-main">
             <span class="ql-setting-title">{{ label }}</span>
             <div id="help-{{ key }}" class="ql-setting-help">{{ help }}</div>
+            {% if (inert_notes|default({})).get(key) %}
+            <div id="note-{{ key }}" class="ql-setting-help"><strong>{{ inert_notes[key] }}</strong></div>
+            {% endif %}
           </div>
           <input type="checkbox" name="{{ key }}" id="cb-{{ key }}"
                  class="ql-toggle shrink-0"
-                 aria-describedby="help-{{ key }}"
+                 aria-describedby="help-{{ key }}{% if (inert_notes|default({})).get(key) %} note-{{ key }}{% endif %}"
                  {% if behavior[key] %}checked{% endif %}>
         </label>
         {% endfor %}
       </div>
 
-      <details class="ql-settings-details ql-settings-defaults">
+      <details class="ql-settings-details ql-settings-defaults"{% if defaults_open %} open{% endif %}>
         <summary class="ql-disclosure-summary">
           <span class="ql-settings-summary-row">
             <span>Download and import defaults</span>

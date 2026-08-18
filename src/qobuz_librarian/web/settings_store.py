@@ -32,7 +32,9 @@ BEHAVIOR_FIELDS = [
      "album artist instead of a combined artist folder."),
     ("DOWNSAMPLE_HIRES_ENABLED", "Downsample new hi-res downloads",
      "Before import, reduce newly downloaded hi-res FLACs to 44.1 or 48 kHz. "
-     "The hi-res files are not kept."),
+     "The hi-res version is not kept, whatever Keep originals when "
+     "downsampling is set to; that choice covers the Downsample page. "
+     "Download the album again if you want hi-res back."),
     ("SUPPRESS_SINGLE_TRACK_GAPS", "Treat track downloads as singles",
      "Hide the rest of an album from gap scans after you download one track. "
      "Leave this off if a track download should not affect future album offers."),
@@ -93,7 +95,9 @@ TEXT_FIELDS = [
      "Whether the Downsample page parks a restorable copy of each hi-res "
      "original before rewriting it (undo from Settings until the backup "
      "retention window ends; uses that much extra disk) or deletes it to save "
-     "space. You're asked to choose the first time you downsample.",
+     "space. You're asked to choose the first time you downsample. New "
+     "downloads are not covered: downsampling one never keeps the hi-res "
+     "version.",
      "enum", ["keep", "delete"], ""),
 ]
 TEXT_KEYS = [k for k, *_ in TEXT_FIELDS]
@@ -144,6 +148,31 @@ ENUM_OPTION_LABELS = {
         "delete": "Delete to save space",
     },
 }
+
+
+def inert_behaviour_notes(values) -> dict:
+    """What a saved combination has switched off, keyed by the setting it hits.
+
+    Download quality is the cap streamrip is invoked with, so at 16-bit /
+    44.1 kHz nothing can arrive above CD rate. That leaves the downsample
+    toggle on screen with nothing to act on, and hi-res edition picking still
+    deciding the edition but no longer the quality. Neither is refused, so the
+    page has to say which one still does something.
+    """
+    notes = {}
+    if str(values.get("STREAMRIP_QUALITY", "")) != "2":
+        return notes
+    quality = ENUM_OPTION_LABELS["STREAMRIP_QUALITY"]["2"]
+    if values.get("DOWNSAMPLE_HIRES_ENABLED"):
+        notes["DOWNSAMPLE_HIRES_ENABLED"] = (
+            f"Your download quality is {quality}, so nothing arrives above CD "
+            "rate and this never runs.")
+    if values.get("PREFER_HIRES"):
+        notes["PREFER_HIRES"] = (
+            f"Your download quality is {quality}, so every edition arrives at "
+            "that rate. This still chooses which edition you get, not its "
+            "quality.")
+    return notes
 
 
 def _list_to_str(v) -> str:
