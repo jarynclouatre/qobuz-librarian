@@ -35,8 +35,11 @@
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
       <input type="hidden" name="keep_choice" value="delete">
-      <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Delete, save space</button>
+      <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto" data-irreversible>Delete, save space</button>
     </form>
+    {# The way out. Nothing has been decided yet, and the review this came from
+       still holds every tick, so it is the one place worth going back to. #}
+    <a href="/jobs/{{ job.id }}" class="ql-btn ql-btn-ghost w-full sm:w-auto">Back to the review</a>
   </div>
 </div>
 

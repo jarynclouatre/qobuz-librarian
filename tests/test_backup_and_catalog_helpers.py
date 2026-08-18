@@ -1035,6 +1035,23 @@ def test_downsample_stash_copies_and_marks_the_undo_window(tmp_path, monkeypatch
     assert f1.read_bytes() == b"HIRES-1"
 
 
+def test_release_undo_copy_refuses_anything_but_an_undo_copy(tmp_path, monkeypatch):
+    """Deleting kept originals early skips the age half of retention. It must
+    not become a way past the proof an ordinary backup has to pass first."""
+    from qobuz_librarian.library import backup as bk
+    monkeypatch.setattr("qobuz_librarian.config.UPGRADE_BACKUP_DIR", tmp_path / "bk")
+    monkeypatch.setattr("qobuz_librarian.config.MUSIC_ROOT", tmp_path)
+    album = tmp_path / "music" / "A" / "Album (2020)"
+    album.mkdir(parents=True)
+    (album / "01.flac").write_bytes(b"HIRES-1")
+
+    carried = backup_album_dir(album)
+    assert carried is not None
+    assert not (carried.path / bk._REAP_AFTER_RETENTION_SENTINEL).exists()
+    assert bk.release_undo_copy(carried.path) is False
+    assert (carried.path / "01.flac").read_bytes() == b"HIRES-1"
+
+
 def test_cross_fs_backup_refuses_when_flush_fails(tmp_path, monkeypatch):
     from qobuz_librarian.library import backup as bkmod
 

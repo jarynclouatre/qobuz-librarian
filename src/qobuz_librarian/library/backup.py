@@ -9637,6 +9637,25 @@ def _dispose_retention_candidate(candidate, *, allow_smaller_audio=False):
     )
 
 
+def release_undo_copy(path) -> bool:
+    """Drop a downsample's kept originals now, because the user asked.
+
+    Retention has two conditions: the album must still hold every file the
+    copies do, and enough days must have passed. This applies the first one,
+    exactly as the sweep does, and lets the user waive the second. It refuses
+    anything that is not one of those deliberate undo copies, so it can never
+    stand in for the proof a real backup has to pass.
+    """
+    target = Path(path)
+    if not (target / _REAP_AFTER_RETENTION_SENTINEL).is_file():
+        return False
+    candidate = load_backup_result(target)
+    if (candidate is None or not isinstance(candidate.receipt, dict)
+            or not candidate.receipt.get("origin")):
+        return False
+    return _dispose_retention_candidate(candidate, allow_smaller_audio=True)
+
+
 def retire_verified_repair_backup(backup) -> bool:
     """Dispose a repair's originals once each is verifiably superseded.
 

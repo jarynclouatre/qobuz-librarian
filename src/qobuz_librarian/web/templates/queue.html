@@ -82,11 +82,11 @@
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="return_to" value="/queue">
     {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
-    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-ghost-danger{% endif %}"
+    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-ghost{% endif %}"
             title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
-            data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-confirm-danger{% endif %}>{{ _act }}</button>
+            data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-irreversible{% endif %}>{{ _act }}</button>
   </form>
   {% endif %}
   {% endif %}
@@ -144,9 +144,9 @@
 <div class="ql-activity-maintenance">
   <form action="/queue/cancel-pending" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
+    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
             data-confirm="Clear the queue? Waiting jobs are removed and other running jobs stop after their current step.{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %} Completed work and parked reviews are untouched."
-            data-confirm-action="Clear queue" data-confirm-danger>Clear the queue</button>
+            data-confirm-action="Clear queue" data-irreversible>Clear the queue</button>
   </form>
 </div>
 {% endif %}

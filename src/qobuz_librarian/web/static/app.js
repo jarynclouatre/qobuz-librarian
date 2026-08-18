@@ -695,6 +695,15 @@
     });
   });
 
+  // Whether the control being confirmed does something that cannot be undone.
+  // The marker sits on the button the user presses; when the confirmation is
+  // attached to the form around it, the form asks its own button.
+  function isIrreversible(el) {
+    if (!el || !el.hasAttribute) return false;
+    if (el.hasAttribute("data-irreversible")) return true;
+    return !!(el.querySelector && el.querySelector("[data-irreversible]"));
+  }
+
   // Styled confirm prompt (the app-drawn <dialog>, not the browser's popup),
   // falling back to window.confirm where <dialog> is unsupported.
   window.qlConfirm = function (msg, opts) {
@@ -707,8 +716,8 @@
       d.querySelector("[data-confirm-text]").textContent = msg;
       var okButton = d.querySelector("[data-confirm-ok]");
       okButton.textContent = opts.action || "Continue";
-      okButton.classList.toggle("ql-btn-danger", !!opts.danger);
-      okButton.classList.toggle("ql-btn-primary", !opts.danger);
+      okButton.toggleAttribute("data-irreversible", !!opts.irreversible);
+      okButton.classList.toggle("ql-btn-primary", !opts.irreversible);
       var choice = false;
       okButton.onclick = function () { choice = true; d.close(); };
       d.querySelector("[data-confirm-cancel]").onclick = function () { choice = false; d.close(); };
@@ -744,7 +753,7 @@
     }
     window.qlConfirm(msg, {
       action: el.getAttribute("data-confirm-action") || "",
-      danger: el.hasAttribute("data-confirm-danger"),
+      irreversible: isIrreversible(el),
     }).then(function (ok) {
       if (!ok) return;
       if (el.tagName === "FORM") {
@@ -768,7 +777,7 @@
     var source = evt.detail && evt.detail.elt;
     window.qlConfirm(q, {
       action: (source && source.getAttribute("data-confirm-action")) || "",
-      danger: !!(source && source.hasAttribute("data-confirm-danger")),
+      irreversible: isIrreversible(source),
     }).then(function (ok) {
       if (ok) evt.detail.issueRequest(true);
     });
@@ -2526,7 +2535,6 @@
             artistDismissConfirm(det.dataset.artist || "this artist", rest));
           btn.setAttribute("data-confirm-action",
             isDownsampleReview ? "Keep hi-res" : "Dismiss");
-          btn.setAttribute("data-confirm-danger", "");
         } else {
           btn.removeAttribute("data-confirm");
         }
@@ -2832,10 +2840,6 @@
           : dismissConfirm(rest);
         window.qlConfirm(confirmMsg, {
           action: isDownsampleReview ? "Keep hi-res" : "Dismiss",
-          // Same red accept as the per-artist button in _review_group.html.
-          // This one clears the whole list, so it cannot look the safer of
-          // the two.
-          danger: true,
         }).then(function (ok) {
           if (!ok) return;
           var prev = dismissRest.textContent;

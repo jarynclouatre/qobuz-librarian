@@ -165,21 +165,49 @@
   color: var(--ql-text);
 }
 
-.ql-btn-danger {
+/* One marker for "this cannot be undone", set from what the action does to
+   the user's files, never from how loud the button should look. It dresses
+   the button and, through qlConfirm, the button in the confirmation, so the
+   two can never disagree about whether the thing is reversible. */
+.ql-btn[data-irreversible] {
   border-color: color-mix(in oklab, var(--ql-danger) 44%, transparent);
   background-color: color-mix(in oklab, var(--ql-danger) 12%, transparent);
   color: color-mix(in oklab, var(--ql-danger) 86%, var(--ql-text));
 }
 
-.ql-btn-ghost-danger {
+.ql-btn-ghost[data-irreversible] {
   border-color: transparent;
   background: transparent;
   color: color-mix(in oklab, var(--ql-danger) 72%, var(--ql-text));
 }
 
-.ql-btn-ghost-danger:hover:not(:disabled):not(.is-disabled) {
+.ql-btn-ghost[data-irreversible]:hover:not(:disabled):not(.is-disabled) {
   border-color: color-mix(in oklab, var(--ql-danger) 30%, transparent);
   background-color: color-mix(in oklab, var(--ql-danger) 9%, transparent);
+}
+
+/* A destructive main action keeps a main action's weight. The page still has
+   one obvious button to press; it just stops wearing the colour of a safe
+   one. Disabled stays with the primary's own disabled treatment. */
+.ql-btn-primary[data-irreversible]:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
+  border-color: rgba(0, 0, 0, 0.32);
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--ql-danger) 90%, #000) 0%,
+    color-mix(in oklab, var(--ql-danger) 82%, #000) 55%,
+    color-mix(in oklab, var(--ql-danger) 74%, #000) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 6px 20px -8px color-mix(in oklab, var(--ql-danger) 55%, transparent);
+  color: #fdf3ef;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.24);
+}
+
+.ql-btn-primary[data-irreversible]:hover:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--ql-danger) 96%, #000) 0%,
+    color-mix(in oklab, var(--ql-danger) 88%, #000) 55%,
+    color-mix(in oklab, var(--ql-danger) 80%, #000) 100%);
 }
 
 .ql-btn-sm {

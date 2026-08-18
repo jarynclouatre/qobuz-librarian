@@ -3,11 +3,16 @@
   <input type="checkbox" class="ql-checkbox cb" name="cid"
          value="{{ c.cid }}" data-seq="{{ c.seq }}"
          {% if c.selected %}checked{% endif %}>
-  {% if c.payload.cover %}
-  <img src="{{ c.payload.cover }}" alt="" loading="lazy" width="46" height="46"
+  {% set _cover = review_cover(job, c) %}
+  {% if _cover %}
+  <img src="{{ _cover }}" alt="" loading="lazy" width="46" height="46"
        class="ql-review-cover">
   {% else %}
-  <span class="ql-review-cover ql-review-cover--empty" aria-hidden="true"></span>
+  {# A record, so a row with no artwork reads as an album the app found no
+     cover for rather than a picture that failed to load. #}
+  <span class="ql-review-cover ql-review-cover--empty" aria-hidden="true">
+    <svg viewBox="0 0 24 24" class="ql-review-cover-mark"><circle cx="12" cy="12" r="7.5" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="1.9" fill="currentColor"/></svg>
+  </span>
   {% endif %}
   <span class="ql-review-candidate-body">
     <span class="ql-review-candidate-heading">

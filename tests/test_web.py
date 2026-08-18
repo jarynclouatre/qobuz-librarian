@@ -2649,7 +2649,7 @@ def test_downsample_confirmation_matches_a_deferred_delete_policy(
         updated = client.get(f"/jobs/{job.id}")
         assert "hi-res originals are not kept" in updated.text
         assert 'name="downsample_policy" value="delete"' in updated.text
-        assert "data-confirm-danger" in updated.text
+        assert "data-irreversible" in updated.text
 
         response = client.post(
             f"/jobs/{job.id}/approve",

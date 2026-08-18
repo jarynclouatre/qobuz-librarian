@@ -146,10 +146,10 @@
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
             {%- else %} data-confirm="Download selected albums ({count})? They queue now and import into your library."
             {%- endif %}
-            {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-confirm-danger{% endif %}
-            {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-confirm-danger{% endif %}
+            {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-irreversible{% endif %}
+            {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-irreversible{% endif %}
             {%- elif job.execute_kind == 'repair' %} data-confirm-action="Repair"
-            {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-confirm-danger
+            {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-irreversible
             {%- else %} data-confirm-action="Download"
             {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
           {% set _result_count = review_counts.total %}
@@ -158,11 +158,15 @@
             {% if not embedded_surface|default(false) %}
             <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ job_return_label }}</a>
             {% endif %}
+            {# Marked only where discarding actually loses something. A
+               new-release review is the one list the app cannot rebuild, since
+               those releases are already recorded as seen; every other review
+               comes back from its own page with a refresh. #}
             <button type="submit" formaction="/jobs/{{ job.id }}/cancel"
-                    class="ql-btn ql-btn-danger ql-btn-sm"
+                    class="ql-btn ql-btn-sm{% if job.execute_kind != 'new_releases' %} ql-btn-secondary{% endif %}"
                     formnovalidate
                     data-confirm="{{ _discard_confirm }}"
-                    data-confirm-action="Discard" data-confirm-danger>Discard {{ _review_thing }}</button>
+                    data-confirm-action="Discard"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ _review_thing }}</button>
           </div>
         </div>
       </div>
@@ -189,10 +193,10 @@
       <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel{% if job.importing %} hidden{% endif %}" data-cancel-form>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% set _pending = s == 'pending' %}
-        <button type="submit" class="ql-btn ql-btn-sm{% if _pending %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-danger{% endif %}"
+        <button type="submit" class="ql-btn ql-btn-sm{% if _pending %} ql-btn-secondary ql-secondary-action{% endif %}"
                 data-cancel-button
                 data-confirm="{% if _pending %}Remove this waiting job from the queue?{% else %}Cancel this job? It will stop after the current safe step.{% endif %}"
-                data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-confirm-danger{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
+                data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-irreversible{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
       </form>
       {# Beets runs to its own end, so Cancel would be a dead control here. Say
          what is happening, the way the Queue rows do, instead of greying a
@@ -313,7 +317,7 @@
       {% if recovery_retry and job.attention == 'recovery' %}
       <form action="/jobs/{{ job.id }}/give-up" method="post"
             data-confirm="Discard this interrupted download? Nothing is added to your library, and you can start the album again whenever you like."
-            data-confirm-action="Give up" data-confirm-danger>
+            data-confirm-action="Give up">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
         <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
@@ -330,9 +334,9 @@
       <form action="/jobs/{{ job.id }}/undo" method="post"
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML"
             data-confirm="Remove the downloaded track and undo the single?"
-            data-confirm-action="Remove track" data-confirm-danger>
+            data-confirm-action="Remove track">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-danger ql-btn-sm">Undo (removes track)</button>
+        <button type="submit" class="ql-btn ql-btn-sm" data-irreversible>Undo (removes track)</button>
       </form>
       {% endif %}
       {% if not embedded_surface|default(false) %}

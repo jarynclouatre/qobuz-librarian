@@ -5953,11 +5953,18 @@ details[open] > .ql-disclosure-summary::after {
     0 0.3125rem 0.75rem -0.25rem oklch(0% 0 0 / 0.8);
 }
 .ql-review-cover--empty {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background:
     linear-gradient(135deg,
       color-mix(in oklab, var(--ql-gold) 16%, transparent),
       color-mix(in oklab, var(--ql-text) 7%, transparent));
+}
+.ql-review-cover-mark {
+  width: 55%;
+  height: 55%;
+  color: color-mix(in oklab, var(--ql-text) 26%, transparent);
 }
 .ql-review-candidate .ql-checkbox {
   margin-top: 0;

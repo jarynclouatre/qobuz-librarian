@@ -8340,6 +8340,54 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
     )
 
 
+# Cover files, in the order the app trusts them. beets writes cover.jpg for
+# both sidecar and embed modes, and the rest are what libraries built by other
+# tools carry.
+_COVER_FILENAMES = ("cover.jpg", "cover.jpeg", "cover.png",
+                    "folder.jpg", "folder.jpeg", "folder.png",
+                    "front.jpg", "front.jpeg", "front.png")
+
+
+def _local_album_art(album_dir):
+    """The cover file sitting in an album folder, or None.
+
+    Matched without regard to case, because a library built on a case-sensitive
+    filesystem is full of Cover.jpg and Folder.jpg.
+    """
+    try:
+        entries = {entry.name.lower(): entry
+                   for entry in os.scandir(str(album_dir))
+                   if entry.is_file()}
+    except OSError:
+        return None
+    for filename in _COVER_FILENAMES:
+        entry = entries.get(filename)
+        if entry is not None:
+            return Path(entry.path)
+    return None
+
+
+def _review_cover(job, candidate):
+    """Where a review row's thumbnail comes from.
+
+    Qobuz results carry a cover URL. Albums already on disk carry no URL at
+    all, and the app was showing an empty tile for music whose artwork is
+    sitting right there in the folder, so those are served from the folder.
+    """
+    payload = candidate.get("payload") or {}
+    cover = payload.get("cover")
+    if cover:
+        return str(cover)
+    album_dir = payload.get("album_dir")
+    cid = candidate.get("cid")
+    if album_dir and cid and _local_album_art(album_dir) is not None:
+        return f"/jobs/{job.id}/art/{cid}"
+    return ""
+
+
+templates.env.globals["review_cover"] = _review_cover
+
+
 def _review_context(job, page=1, query="", tab=""):
     """Template vars for a paginated awaiting-review body: the current page's
     artist groups, the page number/count, and the authoritative whole-set
@@ -9320,6 +9368,39 @@ async def job_review_group_items(request: Request, job_id: str,
     return _tr(request, "_review_group_items.html", {
         "job": job, "items": items, "review_tab": tab,
     })
+
+
+@app.get("/jobs/{job_id}/art/{cid}")
+async def job_candidate_art(job_id: str, cid: str):
+    """The cover file of a review row's album, straight from its folder.
+
+    Only ever a path the app itself put in the candidate, and only ever a file
+    inside the music library, so nothing here can be steered from outside.
+    """
+    job = job_mgr.registry.get(job_id)
+    if not job:
+        return Response(status_code=404)
+    with job._lock:
+        album_dir = next(
+            ((c.get("payload") or {}).get("album_dir")
+             for c in job.candidates if c.get("cid") == cid),
+            None,
+        )
+    art = _local_album_art(album_dir) if album_dir else None
+    if art is None:
+        return Response(status_code=404)
+    try:
+        inside = art.resolve().is_relative_to(Path(cfg.MUSIC_ROOT).resolve())
+    except OSError:
+        inside = False
+    if not inside:
+        return Response(status_code=404)
+    return FileResponse(
+        art,
+        # Covers change when the album is re-imported, which also changes the
+        # review it is shown in, so a few minutes of caching costs nothing.
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 @app.post("/jobs/{job_id}/hide", response_class=HTMLResponse)
@@ -10703,6 +10784,19 @@ _STAGING_LEFTOVER_KINDS = {
 }
 
 
+def _album_name_from_path(path):
+    """An album folder read back as a name: artist, then album.
+
+    A row offering to change files has to say which album it would change, and
+    for music already on disk the folder path is the only name the app holds.
+    The library is filed artist over album, so those two folders are the name.
+    """
+    parts = [part for part in Path(str(path)).parts if part not in ("/", "")]
+    if len(parts) >= 2:
+        return f"{parts[-2]} - {parts[-1]}"
+    return parts[-1] if parts else ""
+
+
 def _staging_display_name(path):
     """A staging path as something worth reading: artist, album and file, with
     the app's own private run folders left out of it."""
@@ -10740,9 +10834,9 @@ def _staging_leftovers():
         label, reason = _STAGING_LEFTOVER_KINDS.get(
             kind, _STAGING_LEFTOVER_KINDS["unresolved"])
         what = ""
-        if inspection.file_group is not None:
-            source = (inspection.file_group.original
-                      or inspection.file_group.retained)
+        held = inspection.file_group or inspection.planned_file
+        if held is not None:
+            source = held.original or held.retained
             what = _staging_display_name(source)
         elif inspection.planned_trees:
             what = ", ".join(
@@ -10902,6 +10996,22 @@ def _diagnostics():
     else:
         checks.append({"label": "Backups needing review", "ok": True,
                        "detail": "none"})
+
+    # Counted separately from the backups above, which are a fault. These are
+    # the undo copies a downsample was asked to keep, and leaving them out of
+    # every count made the restore rows below look like unexplained extras.
+    try:
+        undo_copies = backup_mod.list_undo_copies()
+    except Exception:
+        undo_copies = []
+    if undo_copies:
+        checks.append({
+            "label": "Hi-res originals kept",
+            "ok": True,
+            "detail": f"{plural(len(undo_copies), 'downsampled album')} can be "
+                      f"put back, listed below. Cleared automatically after "
+                      f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}.",
+        })
 
     try:
         leftovers = _staging_leftovers()
@@ -11560,7 +11670,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'<button type="submit" class="ql-btn ql-btn-sm" '
             f'data-confirm="Remove this backup? It is deleted only after '
             f'every file it holds is verified byte-for-byte back at {dest}." '
-            f'data-confirm-action="Remove">Remove</button>'
+            f'data-confirm-action="Remove" data-irreversible>Remove</button>'
             f'</form>'
             f'</div></div></div>'
         )
@@ -11571,21 +11681,38 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
     for path, origin in undo:
         name = html.escape(path.name)
         dest = html.escape(str(origin)) if origin else "its album folder"
+        album = html.escape(_album_name_from_path(origin)) if origin else ""
         rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-ok" aria-label="OK">OK</span>'
-            f'<div class="min-w-0"><div class="ql-diagnostic-label">Downsample originals retained</div>'
-            f'<div class="ql-diagnostic-detail">Hi-res copies kept so the rewrite '
-            f'can be undone; cleared automatically after '
+            f'<div class="min-w-0"><div class="ql-diagnostic-label">'
+            f'Hi-res originals kept{f": {album}" if album else ""}</div>'
+            f'<div class="ql-diagnostic-detail">Copies of the files this album '
+            f'had before it was downsampled, so the rewrite can be undone; '
+            f'cleared automatically after '
             f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.</div>'
-            f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" class="mt-2">'
+            f'<div class="mt-2 flex gap-2">'
+            f'<form hx-post="/backups/restore" hx-target="#diagnostics-list">'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Put the hi-res originals back at {dest}? '
-            f'This undoes the downsample." '
+            f'data-confirm="Put the hi-res originals of '
+            f'{album or dest} back? This undoes the downsample." '
             f'data-confirm-action="Restore">Restore</button>'
-            f'</form></div></div>'
+            f'</form>'
+            f'<form hx-post="/backups/release-originals" '
+            f'hx-target="#diagnostics-list">'
+            f'<input type="hidden" name="_csrf_token" value="{tok}">'
+            f'<input type="hidden" name="backup" value="{name}">'
+            f'<button type="submit" class="ql-btn ql-btn-sm" '
+            f'data-confirm="Delete the hi-res originals of '
+            f'{album or dest}? They are the only copies left at the original '
+            f'quality, the album keeps its downsampled files, and the '
+            f'downsample can no longer be undone." '
+            f'data-confirm-action="Delete originals" data-irreversible>'
+            f'Delete originals</button>'
+            f'</form>'
+            f'</div></div></div>'
         )
     try:
         leftovers = _staging_leftovers()
@@ -11605,7 +11732,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
                 f'<button type="submit" class="ql-btn ql-btn-sm" '
                 f'data-confirm="Delete these files? They are not in your '
                 f'library and this cannot be undone." '
-                f'data-confirm-action="Remove">Remove</button>'
+                f'data-confirm-action="Remove" data-irreversible>Remove</button>'
                 f'</form>'
             )
         else:
@@ -11624,7 +11751,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
                 f'them? The app cannot confirm what they are, they are not in '
                 f'your library, and this cannot be undone." '
                 f'data-confirm-action="Delete anyway" '
-                f'data-confirm-danger>Delete anyway</button>'
+                f'data-irreversible>Delete anyway</button>'
                 f'</form>'
             )
         rows.append(
@@ -11673,7 +11800,7 @@ def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
         f'has these files, so this may be their only copy. It cannot be '
         f'undone." '
         f'data-confirm-action="Delete anyway" '
-        f'data-confirm-danger>Delete anyway</button>'
+        f'data-irreversible>Delete anyway</button>'
         f'</form>',
     )
 
@@ -11923,6 +12050,57 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
     return note + _diagnostics_fragment(request)
 
 
+def _release_undo_copy_sync(request: Request, backup: str) -> str:
+    name = (backup or "").strip()
+    base = Path(str(cfg.UPGRADE_BACKUP_DIR))
+    target = base / name
+    if (not name or name != Path(name).name or name.startswith(".")
+            or not target.is_dir()):
+        return (_ql_notice_html("error", "Those originals aren't there "
+                                "anymore. They may already be restored or "
+                                "cleared.")
+                + _diagnostics_fragment(request))
+    state, operation_token, lock = _begin_direct_library_operation(
+        "Backup removal")
+    if state == "paused":
+        return (_ql_notice_html(
+                    "warning", "Library writes were paused before Delete "
+                    "could start. Resume the web app, then try again.")
+                + _diagnostics_fragment(request))
+    if state == "busy":
+        return (_ql_notice_html("warning", "A job is working in the library "
+                                "right now. Try again once it finishes.")
+                + _diagnostics_fragment(request))
+    try:
+        carried = backup_mod.load_backup_result(target)
+        if carried is None or carried.receipt is None:
+            note = _unreadable_record_notice(request, target)
+        elif (
+            resolution_plan := job_mgr.prepare_recovery_resolution(
+                str(carried.path), carried.receipt)
+        ) is None:
+            note = _ql_notice_html(
+                "error", "The saved recovery records could not be checked, "
+                "so these originals were left untouched. Check that the data "
+                "volume is writable, then try again.")
+        elif backup_mod.release_undo_copy(target):
+            album = html.escape(
+                _album_name_from_path(carried.receipt.get("origin", "")))
+            job_mgr.resolve_recovery_resolution(resolution_plan)
+            note = _ql_notice_html(
+                "success", f"Deleted the hi-res originals of {album}. That "
+                "downsample can no longer be undone.")
+        else:
+            note = _ql_notice_html(
+                "error", "Couldn't confirm the album still holds every one of "
+                "these files, so the originals were left where they are. "
+                "Restore them instead if the album is incomplete.")
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(operation_token)
+    return note + _diagnostics_fragment(request)
+
+
 def _discard_staging_group_sync(request: Request, group: str) -> str:
     name = (group or "").strip()
     target = Path(str(cfg.STAGING_DIR)) / cfg.BEETS_RETRY_DIR / name
@@ -12032,6 +12210,17 @@ async def discard_backup(request: Request, backup: str = Form("")):
     loop = asyncio.get_running_loop()
     return HTMLResponse(await loop.run_in_executor(
         None, _discard_backup_sync, request, backup))
+
+
+@app.post("/backups/release-originals", response_class=HTMLResponse)
+async def release_backup_originals(request: Request, backup: str = Form("")):
+    """Delete a downsample's kept originals before their days run out."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    loop = asyncio.get_running_loop()
+    return HTMLResponse(await loop.run_in_executor(
+        None, _release_undo_copy_sync, request, backup))
 
 
 @app.post("/backups/discard-unchecked", response_class=HTMLResponse)

@@ -17,7 +17,7 @@
     <input type="hidden" name="recovery_item_id" value="{{ writes_paused_notice.settle.item_id }}">
     <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
             data-confirm="Give up on this download? The interrupted attempt and its staged files are thrown away and nothing is added to your library. Downloads and scans can run again, and the album is still there to download again from the Library review or a search."
-            data-confirm-action="Give up" data-confirm-danger>Give up on it</button>
+            data-confirm-action="Give up" data-irreversible>Give up on it</button>
   </form>
   <a href="/settings#mode" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>
   {% elif writes_paused_notice.action %}

@@ -385,6 +385,11 @@ class RetryGroupInspection:
     planned_trees: tuple[TreeReceipt, ...] = ()
     current_trees: tuple[TreeReceipt | None, ...] = ()
     file_group: FileGroup | None = None
+    # What the manifest says this group holds, kept even when the group is
+    # blocked or incomplete. Tree groups always carried their plan; single
+    # files dropped theirs, which left every stuck row on the diagnostics
+    # list unable to say which track it was holding.
+    planned_file: FileGroup | None = None
     reason: str = ""
 
 
@@ -2242,7 +2247,11 @@ def _inspect_retry_group(group, expected_owner):
         return RetryGroupInspection(group, "malformed", reason="manifest")
     plan = tree_plan if tree_plan is not None else file_plan
     if expected_owner is not None and not recovery_owner_matches(plan.owner, expected_owner):
-        return RetryGroupInspection(group, "blocked", kind=plan.kind, reason="owner")
+        return RetryGroupInspection(
+            group, "blocked", kind=plan.kind, reason="owner",
+            planned_trees=tree_plan.trees if tree_plan is not None else (),
+            planned_file=file_plan,
+        )
 
     if tree_plan is not None:
         current = []
@@ -2283,6 +2292,7 @@ def _inspect_retry_group(group, expected_owner):
             status,
             kind=file_plan.kind,
             owner=file_plan.owner,
+            planned_file=file_plan,
             reason="" if status == "incomplete" else "changed",
         )
     if not _same_file_after_move(file_plan.retained.identity, current.identity):
@@ -2291,6 +2301,7 @@ def _inspect_retry_group(group, expected_owner):
             "blocked",
             kind=file_plan.kind,
             owner=file_plan.owner,
+            planned_file=file_plan,
             reason="changed",
         )
     ready = FileGroup(group, file_plan.kind, current, file_plan.original, file_plan.owner)

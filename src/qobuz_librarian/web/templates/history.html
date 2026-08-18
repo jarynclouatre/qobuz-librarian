@@ -87,9 +87,9 @@
   {% if not attention_only %}
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost-danger"
+    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
             data-confirm="Clear finished jobs from history? Active single-track Undo, parked reviews, and recovery records stay until resolved."
-            data-confirm-action="Clear history" data-confirm-danger>Clear history</button>
+            data-confirm-action="Clear history" data-irreversible>Clear history</button>
   </form>
   {% endif %}
 </div>
