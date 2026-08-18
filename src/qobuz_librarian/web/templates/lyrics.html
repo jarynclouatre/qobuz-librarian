@@ -10,6 +10,14 @@
 
   {% include "_writes_paused_notice.html" %}
 
+  {# Same reason as the Downsample page: this describes a job it does not
+     watch, so it kept saying a scan was running after the scan had ended.
+     Poll while there is one, and the replacement stops polling once there
+     isn't. #}
+  <div id="lyrics-body"{% if lyrics_running %} hx-get="/lyrics"
+       hx-trigger="every 3s" hx-target="#lyrics-body"
+       hx-select="#lyrics-body" hx-swap="outerHTML"{% endif %}>
+
   <div class="ql-work-status">
     <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
       {% if lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif have_lyrics %}Ready{% else %}Unavailable{% endif %}
@@ -79,6 +87,8 @@
     </div>
   </section>
   {% endif %}
+
+  </div>
 </div>
 
 {% endblock %}

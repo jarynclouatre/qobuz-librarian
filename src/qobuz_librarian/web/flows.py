@@ -2166,8 +2166,8 @@ def execute_albums(job, chosen, token):
         album_id = cand["payload"].get("album_id")
         label = f"[{i}/{len(chosen)}] {cand.get('artist','')} - {cand['title']}"
         log.info(label)
-        job._progress_scope = (i, len(chosen), "album")
-        job.push_progress("Downloading albums", i, len(chosen),
+        job._progress_scope = (i - 1, len(chosen), "album")
+        job.push_progress("Downloading albums", i - 1, len(chosen),
                           f"{cand.get('artist','')} - {cand['title']}", unit="album")
         try:
             full = get_album(album_id, token)
@@ -2179,7 +2179,7 @@ def execute_albums(job, chosen, token):
             failed += 1
             failed_cands.append(cand)
             continue
-        _note_staging_wait(job, "Downloading albums", i, len(chosen))
+        _note_staging_wait(job, "Downloading albums", i - 1, len(chosen))
         try:
             with job_mgr.staging_lock():
                 if candidate_premise.expected_kind(cand) == "missing":
@@ -2591,8 +2591,8 @@ def execute_upgrades(job, chosen, token):
         album_id = cand["payload"].get("album_id")
         log.info(f"[{i}/{len(chosen)}] {cand.get('artist','')} - "
                  f"{cand.get('title') or '?'}")
-        job._progress_scope = (i, len(chosen), "album")
-        job.push_progress("Upgrading albums", i, len(chosen),
+        job._progress_scope = (i - 1, len(chosen), "album")
+        job.push_progress("Upgrading albums", i - 1, len(chosen),
                           f"{cand.get('artist','')} - {cand.get('title') or '?'}", unit="album")
         try:
             album = get_album(album_id, token)
@@ -2609,7 +2609,7 @@ def execute_upgrades(job, chosen, token):
             failed += 1
             failed_cands.append(cand)
             continue
-        _note_staging_wait(job, "Upgrading albums", i, len(chosen))
+        _note_staging_wait(job, "Upgrading albums", i - 1, len(chosen))
         try:
             with job_mgr.staging_lock():
                 premise = candidate_premise.validate(cand)
@@ -2812,6 +2812,17 @@ def execute_upgrades(job, chosen, token):
 
 # ── Downsample flow ─────────────────────────────────────────────────────────────
 
+def _note_scan_wrap_up(job, done, total):
+    """Say what a scan is doing once its walk is over.
+
+    Saving the results and building the review take a moment more, and leaving
+    the card on a full bar and "32 / 32 artists" made that read as a stall on
+    finished work.
+    """
+    if done >= total and not job.cancel_requested:
+        job.push_progress("Saving results")
+
+
 def scan_downsamples(job):
     """Scan the library for FLACs stored above CD rate.
 
@@ -2837,6 +2848,7 @@ def scan_downsamples(job):
             log.info(f"    skipped {name}: {error}")
             job.push_progress("Scanning for hi-res files", done, n, name,
                               found=total, unit="artist")
+            _note_scan_wrap_up(job, done, n)
             return
         added = 0
         current_hidden = hidden_mod.load()
@@ -2868,6 +2880,7 @@ def scan_downsamples(job):
                           found=total, hit=hit, unit="artist")
         if added:
             log.info(f"  {name} - {plural(added, 'album')} above CD rate")
+        _note_scan_wrap_up(job, done, n)
 
     refresh = downsample_state.refresh_for_artists(
         artists,
@@ -2928,6 +2941,9 @@ def execute_downsamples(
         job.summary = job.error
         _mark_job_failed(job)
         return
+    # The same job carried the scan and now rewrites files, so stop calling it
+    # a scan on its own page, in the Queue and in History.
+    job.title = "Downsample run"
     shrunk = 0
     total_saved = 0
     interrupted_saved = 0
@@ -2940,6 +2956,9 @@ def execute_downsamples(
     failed_albums = 0
     interrupted = 0
     processed = 0
+    resampled_files = 0
+    failed_files = []
+    flushed_files = []
     stopped_early = False
 
     def skip_parts():
@@ -2974,8 +2993,8 @@ def execute_downsamples(
         album_dir = Path(raw_album_dir)
         title = cand.get("title") or album_dir.name
         log.info(f"[{i}/{len(chosen)}] {cand.get('artist', '')} - {title}")
-        job._progress_scope = (i, len(chosen), "album")
-        job.push_progress("Downsampling albums", i, len(chosen),
+        job._progress_scope = (i - 1, len(chosen), "album")
+        job.push_progress("Downsampling albums", i - 1, len(chosen),
                           f"{cand.get('artist', '')} - {title}", unit="album")
         if not album_dir.is_dir():
             log.info("  skipped: folder no longer exists")
@@ -2986,7 +3005,7 @@ def execute_downsamples(
                 downsample_state.remove_artist(album_dir.parent.name)
                 _sync_surface_badge("downsample")
             continue
-        _note_staging_wait(job, "Downsampling albums", i, len(chosen))
+        _note_staging_wait(job, "Downsampling albums", i - 1, len(chosen))
         try:
             with job_mgr.staging_lock():
                 candidate_premise.validate(cand)
@@ -3030,6 +3049,12 @@ def execute_downsamples(
         _refresh_downsample_artist_state(album_dir.parent)
         total_errors += res.get("errors", 0)
         total_flush_warns += res.get("flush_warnings", 0)
+        resampled_files += res.get("resampled", 0)
+        album_label = f"{cand.get('artist', '')} - {title}".strip(" -")
+        for entry in res.get("failed_files") or []:
+            failed_files.append(dict(entry, album=album_label))
+        for entry in res.get("flushed_files") or []:
+            flushed_files.append(dict(entry, album=album_label))
     job._progress_scope = None
     if stopped_early:
         parts = [
@@ -3052,7 +3077,7 @@ def execute_downsamples(
         parts.extend(skip_parts())
         parts.append(f"{plural(len(chosen) - processed, 'album')} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
-        job.summary += _kept_originals_note()
+        job.summary += _kept_originals_note(resampled_files)
         log.info(job.summary)
         with job._lock:
             if job.status is job_mgr.JobStatus.RUNNING:
@@ -3061,8 +3086,18 @@ def execute_downsamples(
     # "Reclaimed" is a claim about free space. When the originals are kept, a
     # full copy of every one of them is written to the backup folder, so the
     # run costs MORE disk than it saves until that retention expires.
-    summary = (f"Finished. Downsampled {plural(shrunk, 'album')}, "
-               f"{format_size(total_saved)} smaller." + _kept_originals_note())
+    #
+    # A run that hit an error ends on the red Failed chip, so opening the
+    # summary with "Finished" put a contradiction on one line. Lead with what
+    # the run actually managed instead.
+    went_wrong = bool(total_errors or total_flush_warns)
+    if shrunk:
+        summary = (f"{'Partly done' if went_wrong else 'Finished'}. "
+                   f"Downsampled {plural(shrunk, 'album')}, "
+                   f"{format_size(total_saved)} smaller."
+                   + _kept_originals_note(resampled_files))
+    else:
+        summary = "Nothing was downsampled."
     for part in skip_parts():
         summary += f" {part}."
     if state_refresh_warnings:
@@ -3073,23 +3108,67 @@ def execute_downsamples(
     job.summary = summary
     log.info(summary)
     if total_errors:
-        job.error = (f"{plural(total_errors, 'file')} couldn't be downsampled "
-                     "(left unchanged); see the log.")
+        detail = _named_files(failed_files, total_errors)
+        reason = _lone_reason(failed_files, total_errors)
+        job.error = (
+            f"Couldn't downsample {detail}: {reason}" if reason else
+            f"Couldn't downsample {detail}. "
+            f"{'It was' if total_errors == 1 else 'They were'} left unchanged."
+        )
     if total_flush_warns:
         # These files WERE rewritten, only the folder flush failed
         # afterwards, so the swap may not survive a power loss.
-        note = (f"{plural(total_flush_warns, 'file')} resampled but couldn't "
-                f"be flushed to disk, check the drive; see the log.")
+        detail = _named_files(flushed_files, total_flush_warns)
+        reason = _lone_reason(flushed_files, total_flush_warns)
+        note = (
+            f"Resampled {detail} but couldn't flush "
+            f"{'it' if total_flush_warns == 1 else 'them'} to disk, so the "
+            "change may not survive a power cut. Check the drive."
+            + (f" ({reason})" if reason else "")
+        )
         job.error = f"{job.error} {note}" if job.error else note
-    if total_errors or total_flush_warns:
+    if went_wrong:
         _mark_job_failed(job)
     else:
         _close_completed_job(job)
 
 
-def _kept_originals_note():
-    """The sentence that stops a downsample summary overstating what it freed."""
-    if cfg.DOWNSAMPLE_KEEP_ORIGINALS != "keep":
+def _named_files(entries, total, limit=3):
+    """Name the files a downsample could not handle.
+
+    A bare count plus "see the log" leaves the person no album to open and
+    nothing to act on, so name each file with the album it sits in.
+    """
+    named = [e for e in entries if e.get("name")][:limit]
+    if not named:
+        return f"{plural(total, 'file')} (see the log)"
+    parts = []
+    for entry in named:
+        album = entry.get("album")
+        parts.append(f"{album}, {entry['name']}" if album else entry["name"])
+    detail = "; ".join(parts)
+    if total == 1:
+        return detail
+    if total > len(named):
+        return f"{plural(total, 'file')}: {detail} and {total - len(named)} more"
+    return f"{plural(total, 'file')}: {detail}"
+
+
+def _lone_reason(entries, total):
+    """The per-file reason, only when a single file carries the whole story."""
+    if total != 1 or not entries:
+        return ""
+    return entries[0].get("reason") or ""
+
+
+def _kept_originals_note(resampled_files):
+    """The sentence that stops a downsample summary overstating what it freed.
+
+    Originals are only stashed for files that were actually rewritten; a run
+    that converted nothing keeps nothing, so it must not promise a restore
+    that has nothing behind it.
+    """
+    if not resampled_files or cfg.DOWNSAMPLE_KEEP_ORIGINALS != "keep":
         return ""
     days = cfg.UPGRADE_BACKUP_RETENTION_DAYS
     return (f" Your hi-res originals are kept for {plural(days, 'day')}, so "
@@ -3859,11 +3938,11 @@ def execute_repairs(job, chosen, token):
         # Pin the progress card to album-level scope so the inner per-album
         # phases (download / import / downsample) read "album i / N" instead of
         # resetting it to 1 / 1, the card now reflects the whole batch.
-        job._progress_scope = (i, len(chosen), "album")
-        job.push_progress("Repairing damaged albums", i, len(chosen),
+        job._progress_scope = (i - 1, len(chosen), "album")
+        job.push_progress("Repairing damaged albums", i - 1, len(chosen),
                           f"{p['artist_name']} - {cand['title']}", unit="album")
         log.info(f"[{i}/{len(chosen)}] {p['artist_name']} - {cand['title']}")
-        _note_staging_wait(job, "Repairing damaged albums", i, len(chosen))
+        _note_staging_wait(job, "Repairing damaged albums", i - 1, len(chosen))
         try:
             if cand.get("kind") == "redownload":
                 premise = candidate_premise.validate(cand)

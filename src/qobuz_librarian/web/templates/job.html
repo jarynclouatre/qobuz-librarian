@@ -44,7 +44,10 @@
 </div>
 {% endif %}
 
-{% if approved %}
+{# Only true while the job really is waiting its turn. A job that has already
+   started says so itself, in the status chip and the progress line, and the
+   green "queued" banner beside them was a second, wrong answer. #}
+{% if approved and job.status.value == 'pending' %}
 <div class="ql-notice ql-notice-success ql-job-banner" data-flash>
   <span>Queued. It'll start shortly.</span>
 </div>

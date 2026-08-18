@@ -382,7 +382,7 @@ class Job:
     _durability_required: bool = field(default=False, repr=False)
     # When set to (current, total, unit), push_progress reports THESE counts
     # in place of the caller's, so a multi-item execute (repairing 16 albums)
-    # keeps the progress card on "album 3 / 16" even while each album's inner
+    # keeps the progress card on "3 / 16 albums" even while each album's inner
     # phases (download, import, downsample) report their own 1 / 1.
     _progress_scope: Optional[tuple] = field(default=None, repr=False)
 
@@ -506,8 +506,11 @@ class Job:
         It is deliberately left out of the stored snapshot so a reconnect
         replay doesn't duplicate a preview row. ``unit`` names what current/total
         count ("artist"/"album"/"track") so the UI can label the bare numbers."""
-        # An execute loop can pin the counts to an overall scope (e.g. album
-        # 3/16) so inner per-album phases don't reset the card to 1/1.
+        # An execute loop can pin the counts to an overall scope (e.g. 3 of 16
+        # albums finished) so inner per-album phases don't reset the card to
+        # 1/1. The count is work completed, never work begun: counting the
+        # album being written left the card reading "2 / 2" for the whole of
+        # the second album.
         scope = self._progress_scope
         if scope is not None:
             current, total, unit = scope
@@ -1714,6 +1717,17 @@ def approve(
         # start and folds in however long the results sat awaiting review, making
         # "Downloading · 1:17" read as download time when it was mostly browsing.
         job.started_at = time.time()
+        # Drop the scan's last progress snapshot for the same reason. Left in
+        # place it stood in for the execute phase until its first push, so a
+        # page opened on a running downsample described the scan that ended
+        # ("Scanning for hi-res files, 32 / 32 artists") instead of the run.
+        job.progress_phase = ""
+        job.progress_current = 0
+        job.progress_total = 0
+        job.progress_item = ""
+        job.progress_found = 0
+        job.progress_unit = ""
+        job.progress_found_artists = 0
         related = (parked,) if parked is not None else ()
         if not job_persistence.admit_review_transition(job, related):
             for name, value in previous.items():

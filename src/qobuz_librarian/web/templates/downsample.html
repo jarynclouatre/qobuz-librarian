@@ -19,6 +19,15 @@
   {% set refresh_confirm = "Refresh local downsample candidates? You review and choose what to downsample before anything changes." %}
   {% endif %}
 
+  {# While a downsample is in flight this page describes a job it does not
+     watch, so it kept saying "Downsampling now" long after the run ended and
+     only a manual reload put it right. Poll while there is a run to follow;
+     the replacement drops these attributes once there isn't, so the polling
+     stops on its own. #}
+  <div id="downsample-body"{% if downsample_running %} hx-get="/downsample"
+       hx-trigger="every 3s" hx-target="#downsample-body"
+       hx-select="#downsample-body" hx-swap="outerHTML"{% endif %}>
+
   <div class="ql-work-status ql-work-status--bar ql-quality-status">
     <span class="ql-status-chip {% if downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
       {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No downsample candidates{% else %}Not refreshed yet{% endif %}
@@ -100,6 +109,8 @@
     </div>
   </section>
   {% endif %}
+
+  </div>
 </div>
 
 {% endblock %}

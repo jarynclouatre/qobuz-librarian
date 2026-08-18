@@ -217,14 +217,19 @@
     </div>
     {% endif %}
 
-    <div id="progress-card" class="ql-progress-panel ql-progress-panel--job hidden">
+    {# Render the card from the snapshot the server already holds. Waiting for
+       the first live event meant a page opened part-way through a long album
+       showed a running job with no album and no count. #}
+    {% set _pc = job.progress_current %}
+    {% set _pt = job.progress_total %}
+    <div id="progress-card" class="ql-progress-panel ql-progress-panel--job{% if not job.progress_phase and not _pt %} hidden{% endif %}">
       <div>
         <div class="ql-progress-panel-head">
-          <span id="prog-label" class="ql-progress-label"></span>
-          <span id="prog-count" class="ql-progress-count readout"></span>
+          <span id="prog-label" class="ql-progress-label">{{ job.progress_phase }}</span>
+          <span id="prog-count" class="ql-progress-count readout">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span>
         </div>
-        <progress id="prog-bar" class="ql-progress-bar" aria-labelledby="prog-label"></progress>
-        <p id="prog-item" class="ql-progress-item"></p>
+        <progress id="prog-bar" class="ql-progress-bar" aria-labelledby="prog-label"{% if _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
+        <p id="prog-item" class="ql-progress-item">{{ job.progress_item }}</p>
       </div>
     </div>
 

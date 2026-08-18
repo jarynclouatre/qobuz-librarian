@@ -492,6 +492,7 @@ def test_downsample_cancelled_during_safety_copy_starts_no_rewrite(tmp_path, mon
         "resampled": 0,
         "errors": 0,
         "saved_bytes": 0,
+        "failed_files": [],
         "cancelled": True,
     }
     assert rewrites == []

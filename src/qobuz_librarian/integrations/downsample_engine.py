@@ -933,6 +933,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                 "cancelled": True}
 
     n_uncopied = 0
+    uncopied_files = []
     source_receipts = {}
     kept_dir = None
     if keep_originals:
@@ -952,6 +953,13 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         }
         n_uncopied = len(candidates) - len(protected)
         if n_uncopied:
+            unprotected = [c for c in candidates if c not in protected]
+            uncopied_files = [
+                {"name": Path(rel).name,
+                 "reason": "no safety copy could be made, so it was left "
+                           "untouched"}
+                for rel, _, _ in unprotected
+            ]
             log(f"  ⚠ downsample: {n_uncopied} file(s) have no safety copy; "
                 "left untouched.")
         candidates = protected
@@ -964,6 +972,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                 "resampled": 0,
                 "errors": n_uncopied,
                 "saved_bytes": 0,
+                "failed_files": uncopied_files,
                 "cancelled": True,
             }
         if not candidates:
@@ -971,12 +980,18 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             # safety net for anything, so don't leave them parked as a 7-day
             # "undo" for a run that changed nothing.
             _discard_unused_stash(kept_dir, log)
-            return {"resampled": 0, "errors": n_uncopied, "saved_bytes": 0}
+            return {"resampled": 0, "errors": n_uncopied, "saved_bytes": 0,
+                    "failed_files": uncopied_files}
 
     saved_total = 0
     errors = 0
     resampled = 0
     flush_warnings = 0
+    # Which files went wrong, not just how many. The caller reports the run,
+    # and "1 file couldn't be downsampled, see the log" names nothing the
+    # person can act on.
+    failed_files = []
+    flushed_files = []
 
     cancelled = False
     tallied = set()
@@ -993,10 +1008,12 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             resampled += 1
             saved_total += saved
             flush_warnings += 1
+            flushed_files.append({"name": Path(rel).name, "reason": str(err)})
             if verbose:
                 log(f"  ⚠ {Path(rel).name}: {err}")
         elif err is not None:
             errors += 1
+            failed_files.append({"name": Path(rel).name, "reason": str(err)})
             if verbose:
                 log(f"  ✗ {Path(rel).name}: {err}")
         else:
@@ -1085,4 +1102,6 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             "errors": errors_total,
             "saved_bytes": saved_total,
             "flush_warnings": flush_warnings,
+            "failed_files": uncopied_files + failed_files,
+            "flushed_files": flushed_files,
             "cancelled": cancelled}
