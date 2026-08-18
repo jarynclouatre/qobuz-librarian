@@ -8,6 +8,8 @@
     <h1>Lyrics</h1>
   </header>
 
+  {% include "_writes_paused_notice.html" %}
+
   <div class="ql-work-status">
     <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
       {% if lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif have_lyrics %}Ready{% else %}Unavailable{% endif %}

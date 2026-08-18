@@ -147,6 +147,14 @@ def run_migrate_mode(args):
 
     progress = _progress_printer()
     items = engine.collect_items(src, use_acoustid=use_acoustid, progress=progress)
+    if not items:
+        # Same as the Web scan: an empty source means the wrong folder or an
+        # unmounted share, not a library with nothing worth moving.
+        log.warning(fmt(C.RED,
+            f"  ✗  No music files were found in {src}. Check that it is the "
+            "folder you meant and that its drive or share is attached, then "
+            "run this again."))
+        return EXIT_GENERAL
     plan = engine.build_plan(items, dest)
     resume_entries = engine.verified_resume_entries(plan, progress=progress)
 

@@ -9,12 +9,11 @@
     {% include "_library_refresh.html" %}
   </header>
 
+  {% include "_writes_paused_notice.html" %}
+  {% include "_library_refresh_failure.html" %}
+
   {% if error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
   {% if library_notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ library_notice }}</span></div>{% endif %}
-  {% set latest_attempt = library_generation.latest_attempt %}
-  {% if latest_attempt.status in ('failed', 'cancelled', 'incomplete') %}
-  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}. {% if baseline_complete %}Your previous complete baseline is still available.{% else %}No complete baseline was saved.{% endif %}</span></div>
-  {% endif %}
   {% if library_generation.outputs.library.limited %}
   <div class="ql-flash ql-flash-warning" data-flash><span>The Library scan finished, but this saved list stops at the configured result limit.</span></div>
   {% endif %}

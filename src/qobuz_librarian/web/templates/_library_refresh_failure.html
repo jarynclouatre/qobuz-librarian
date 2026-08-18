@@ -1,0 +1,15 @@
+{# What the last refresh left behind: a scan that could not run, and a scan
+   that ran without saving everything. Both stay put until a refresh gets
+   somewhere; they are the answer to "did that button do anything", and the
+   passing note they used to share with a successful refresh was gone before
+   it could be read. Rendered on load, and swapped in by the header poll the
+   moment the scan stops, so they land either way. #}
+<div id="library-refresh-failure"{% if refresh_failure_oob %} hx-swap-oob="true"{% endif %}>
+  {% if library_refresh_failure %}
+  <div class="ql-notice ql-notice-error"><span>{{ library_refresh_failure }}</span></div>
+  {% endif %}
+  {% set latest_attempt = library_generation.latest_attempt %}
+  {% if latest_attempt.status in ('failed', 'cancelled', 'incomplete') %}
+  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}.{% if latest_attempt.message %} {{ latest_attempt.message }}{% endif %} {% if baseline_complete %}Your previous complete baseline is still available.{% else %}No complete baseline was saved.{% endif %}</span></div>
+  {% endif %}
+</div>

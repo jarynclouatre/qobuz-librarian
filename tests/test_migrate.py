@@ -314,7 +314,7 @@ def test_scan_migration_requires_a_review_ack_for_a_short_in_place_move(
     from qobuz_librarian.web import jobs as jm
 
     plan = _placed_plan(tmp_path)
-    monkeypatch.setattr(engine, "collect_items", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(engine, "collect_items", lambda *_args, **_kwargs: ["item"])
     monkeypatch.setattr(engine, "build_plan", lambda _items, _dest: plan)
     monkeypatch.setattr(engine, "verified_resume_entries", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
@@ -434,11 +434,15 @@ def test_migrate_dry_run_leaves_destination_untouched(tmp_path, monkeypatch):
     destination = tmp_path / "destination"
     source.mkdir()
     destination.mkdir()
+    track = source / "track.flac"
+    track.write_bytes(b"audio-bytes")
     existing = destination / "keep.txt"
     existing.write_text("unchanged", encoding="utf-8")
     monkeypatch.setattr(migrate_mode, "HAVE_MUTAGEN", True)
     monkeypatch.setattr(
-        migrate_mode.engine, "collect_items", lambda *_args, **_kwargs: []
+        migrate_mode.engine,
+        "collect_items",
+        lambda *_args, **_kwargs: [(track, _meta(title="Song 0", track=1), "tags")],
     )
     args = SimpleNamespace(
         migrate_src=str(source),

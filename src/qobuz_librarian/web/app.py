@@ -844,6 +844,17 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                "run writing the library at the same time would go unnoticed. "
                "Downloads and scans are paused. Move the data folder to a "
                "writable filesystem that supports file locking, then restart.")
+    elif not _data_dir_available():
+        # The folder was fine at startup, so the lock checks above all pass and
+        # nothing else notices. Without this branch the readiness check knows
+        # the app cannot save anything while every page still looks normal.
+        reason = "Qobuz Librarian can't write to its data folder."
+        action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
+        msg = ("Qobuz Librarian can't write to its data folder, so downloads "
+               "and scans are paused and nothing new can be saved. Your music "
+               "and your saved review are untouched. Check that the folder "
+               "still exists and that Qobuz Librarian can write to it; the "
+               "app picks it up again on its own.")
     elif _STARTUP_RECOVERY_UNKNOWN:
         reason = "Interrupted work could not be checked safely."
         msg = (
@@ -966,7 +977,9 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
                 "action": notice["action"],
                 # "Try again" only helps where retrying can succeed; the rest
                 # need something fixed first and the button was false comfort.
-                "can_retry": _LOCK_BUSY_PID is not None or bool(unwritable_now)},
+                "can_retry": (_LOCK_BUSY_PID is not None
+                              or bool(unwritable_now)
+                              or not _data_dir_available())},
                status_code=503)
 
 
@@ -981,6 +994,7 @@ def _web_writes_paused() -> bool:
         or _CLI_MODE
         or _LOCK_BUSY_PID is not None
         or bool(_unwritable_volumes())
+        or not _data_dir_available()
         or _LOCK_UNENFORCEABLE
         or not _run_lock_intact()
         or _startup_recovery_status_value() in {
@@ -2658,11 +2672,15 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     # the POST bounce the user onto a 503. Refuse at offer time, not submit time.
     context.setdefault("writes_paused", _web_writes_paused())
     # Terminal mode is one of eight causes, so carry the true one rather than
-    # letting each gated control name the same guess.
-    if context["writes_paused"] and "writes_paused_reason" not in context:
+    # letting each gated control name the same guess. The full notice travels
+    # with it: a greyed button explains itself in a title attribute, which a
+    # phone never shows, so every page that greys something can say why.
+    if context["writes_paused"]:
         paused = _writes_paused_notice()
-        context["writes_paused_reason"] = (
-            paused["reason"] if paused else "Downloads and scans are paused."
+        context.setdefault("writes_paused_notice", paused)
+        context.setdefault(
+            "writes_paused_reason",
+            paused["reason"] if paused else "Downloads and scans are paused.",
         )
     # Error/utility renders (e.g. the 404 page) don't name a nav section; an
     # explicit empty page just leaves every nav link inactive instead of
@@ -3232,15 +3250,8 @@ def _library_header_note():
     return {"label": "Refreshing…", "detail": detail}
 
 
-def _library_refresh_outcome():
-    """What the library work that just ended actually did, or "".
-
-    The parked review's own summary counts what is in it, which the tabs
-    already say, so Library suppresses it. That left a finished refresh with
-    no outcome anywhere on this page: the note simply disappeared, which
-    reads exactly like a press that did nothing. Only recent work is
-    reported, and only where the note itself was watching.
-    """
+def _last_finished_library_job():
+    """The most recent library scan that has stopped, or None."""
     latest = None
     for j in job_mgr.registry.all():
         if getattr(j, "execute_kind", "") != "library":
@@ -3250,9 +3261,40 @@ def _library_refresh_outcome():
         if (latest is None
                 or (j.finished_at or 0) > (latest.finished_at or 0)):
             latest = j
-    if latest is None or time.time() - (latest.finished_at or 0) > 300:
+    return latest
+
+
+def _library_refresh_outcome():
+    """What the library work that just ended actually did, or "".
+
+    The parked review's own summary counts what is in it, which the tabs
+    already say, so Library suppresses it. That left a finished refresh with
+    no outcome anywhere on this page: the note simply disappeared, which
+    reads exactly like a press that did nothing. Only recent work is
+    reported, and only where the note itself was watching. A failure is not
+    reported here; it is not a passing note, so it has its own notice.
+    """
+    latest = _last_finished_library_job()
+    if latest is None or latest.status is job_mgr.JobStatus.FAILED:
         return ""
-    return str(latest.summary or latest.error or "").strip()
+    if time.time() - (latest.finished_at or 0) > 300:
+        return ""
+    return str(latest.summary or "").strip()
+
+
+def _library_refresh_failure():
+    """Why the last library scan stopped, while that is still the last thing
+    a refresh did, or "".
+
+    Library owns its whole lifecycle, so a refresh that could not run has to
+    say so on this page. It used to arrive as the same passing note a
+    successful refresh uses, which meant it faded after six seconds, never
+    survived a reload, and existed in full only as a History row.
+    """
+    latest = _last_finished_library_job()
+    if latest is None or latest.status is not job_mgr.JobStatus.FAILED:
+        return ""
+    return str(latest.error or latest.summary or "").strip()
 
 
 def _library_current_job():
@@ -3615,7 +3657,6 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             "corrupt_stores": state_file.preserved_corrupt_stores(),
             # Says the pause here rather than leaving it to the 503 a press
             # earns. It probes the volumes, so it belongs off the event loop.
-            "writes_paused_notice": _writes_paused_notice(),
         }
 
     loop = asyncio.get_running_loop()
@@ -7249,6 +7290,7 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
         "library_header_note": _library_header_note(),
         "library_refresh_scanning": _active_scan(
             "library", statuses=("pending", "scanning")) is not None,
+        "library_refresh_failure": _library_refresh_failure(),
     }
     # Single-surface rule (same as /repair): a scan in flight or a parked
     # review renders inline right here, so results never hide behind the
@@ -7342,6 +7384,11 @@ async def library_refresh_note(request: Request):
             # Only the poll says this, so it lands once, when the work it was
             # watching ends. A page load has the review itself to read.
             "library_refresh_outcome": _library_refresh_outcome(),
+            # A failure is not a passing note, so the poll delivers it out of
+            # band into the page body and the page renders it on every load
+            # until a refresh actually gets somewhere.
+            "library_refresh_failure": _library_refresh_failure(),
+            "refresh_failure_oob": True,
         }
 
     ctx = await loop.run_in_executor(None, _context)
@@ -8773,10 +8820,12 @@ async def job_approve(request: Request, job_id: str):
     local_stale = len(stale_premise_candidate_ids)
     local_stale_q = ""
     if local_stale:
+        one = local_stale == 1
         local_stale_q = "&error=" + urllib.parse.quote(
             f"Started the valid choices. {local_stale} selected "
-            f"album{'s' if local_stale != 1 else ''} changed since this "
-            "review and remain selected for a fresh scan."
+            f"album{'' if one else 's'} changed on disk since this review, so "
+            f"{'it was' if one else 'they were'} left out and "
+            f"{'stays' if one else 'stay'} selected for a fresh scan."
         )
     return RedirectResponse(
         url=f"{dest}?{flag}{_skip_q}{local_stale_q}",
@@ -10254,7 +10303,6 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
         "queue_has_cancel_protected": any(
             j.id == protected_id for j in pending
         ),
-        "writes_paused_notice": _writes_paused_notice(),
         "error": error[:200],
         "notice": notice[:200],
         "page": "queue",
@@ -10567,6 +10615,7 @@ def _diagnostics():
     _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True,
                skip_names={cfg.BEETS_RETRY_DIR},
                unit=("album waiting to import", "albums waiting to import"))
+    _dir_check("Data folder", cfg.DATA_DIR, want_writable=True)
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     if beets_db.exists():

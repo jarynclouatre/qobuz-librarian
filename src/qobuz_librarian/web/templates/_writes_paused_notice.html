@@ -1,0 +1,27 @@
+{# One pause, one sentence, wherever the user is standing. Every tool page
+   greys its own Start button and put the reason in a title attribute, which a
+   phone never shows, so the page said only "no" and never why. Terminal mode
+   already has its own banner on every page, so repeating it here stutters. #}
+{% if writes_paused_notice and not cli_mode %}
+<div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
+  {# No headline: each message already opens by naming its cause and says
+     downloads and scans are paused, so anything above it stutters. #}
+  <span class="min-w-0 break-words text-sm">{{ writes_paused_notice.msg }}</span>
+  {# An interrupted terminal download is the one pause the web can lift on its
+     own, so it carries its own control instead of the generic link. Giving up
+     lands on Queue wherever it was clicked from. #}
+  {% if writes_paused_notice.settle %}
+  <form action="/queue/interrupted/discard" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <input type="hidden" name="recovery_operation_id" value="{{ writes_paused_notice.settle.operation_id }}">
+    <input type="hidden" name="recovery_item_id" value="{{ writes_paused_notice.settle.item_id }}">
+    <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+            data-confirm="Give up on this download? The interrupted attempt and its staged files are thrown away and nothing is added to your library. Downloads and scans can run again, and the album is still there to download again from the Library review or a search."
+            data-confirm-action="Give up" data-confirm-danger>Give up on it</button>
+  </form>
+  <a href="/settings#mode" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>
+  {% elif writes_paused_notice.action %}
+  <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
+  {% endif %}
+</div>
+{% endif %}

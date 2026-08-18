@@ -1810,6 +1810,19 @@ def _scan_library_impl(
     if scan_state_save_failed:
         job.summary += (" The saved scan state couldn't be written; scan again "
                         "before restarting the app.")
+    # The crawl is stamped complete before its saved views are written, so a
+    # view that never landed left the attempt reading "complete" and the page
+    # showing a clean review. Correct the record with what is missing, which is
+    # what puts the warning on Library at all.
+    unsaved = list(stale_tabs)
+    if baseline_save_failed:
+        unsaved.append("New Releases")
+    if (unsaved and attempt_id is not None and publication is not None
+            and not scan_state_save_failed and not job.cancel_requested):
+        named = (" and ".join(unsaved) if len(unsaved) < 3
+                 else ", ".join(unsaved[:-1]) + " and " + unsaved[-1])
+        generation_state.finish_attempt(
+            attempt_id, "incomplete", f"{named} results were not updated.")
     log.info(job.summary)
 
 
@@ -4199,6 +4212,17 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         n = len(items) if items else 0
         job.summary = (f"Stopped early. {plural(n, 'file')} scanned so far."
                        if n else "Stopped before anything was scanned.")
+        return
+    if not items:
+        # An empty source is nearly always the wrong folder or a share that
+        # did not mount. Reporting it as a finished scan with a manifest of
+        # nothing sent people away believing their library had been read.
+        job.error = (
+            "No music files were found in the source folder. Check that it is "
+            "the folder you meant and that its drive or share is attached, "
+            "then scan again. Nothing was copied and no plan was written.")
+        job.summary = job.error
+        _mark_job_failed(job)
         return
     plan = engine.build_plan(items, dest)
     resume_entries = engine.verified_resume_entries(

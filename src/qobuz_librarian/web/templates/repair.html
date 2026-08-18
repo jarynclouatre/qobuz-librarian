@@ -8,6 +8,8 @@
     <h1>Repair</h1>
   </header>
 
+  {% include "_writes_paused_notice.html" %}
+
 {% if error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
 
 {% if not qobuz_ready %}

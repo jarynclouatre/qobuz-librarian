@@ -1036,9 +1036,20 @@
       }, 1600);
     });
   });
-  // Clear stale flashes after a job moves on.
+  // Escape is the user asking for a clear screen, so it takes everything.
   window.qlDismissAllFlashes = function () {
     document.querySelectorAll("[data-flash]").forEach(fade);
+  };
+  // What a job's own progress replaces: "Queued", "Saved", and the like.
+  // A warning is not replaced by a job starting. "Started the valid choices,
+  // 1 selected album changed since this review" is the only place the user is
+  // told something was left out, and the first progress tick used to wipe it
+  // a second after it appeared.
+  window.qlDismissSupersededFlashes = function () {
+    document.querySelectorAll(
+      "[data-flash].ql-notice-success, [data-flash].ql-notice-info,"
+      + " [data-flash].ql-flash-info"
+    ).forEach(fade);
   };
 
   // Programmatic toast for async failures and review actions.
@@ -1961,7 +1972,7 @@
         streamAlive();
         var p; try { p = JSON.parse(e.data); } catch (_) { return; }
         clearQueuedState();
-        if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
+        if (window.qlDismissSupersededFlashes) window.qlDismissSupersededFlashes();
         if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== p.phase) {
           activity.textContent = p.phase;
         }
@@ -2011,7 +2022,7 @@
       if (src) { try { src.close(); } catch (e) {} }
       stopElapsed();
       document.title = baseTitle;
-      if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
+      if (window.qlDismissSupersededFlashes) window.qlDismissSupersededFlashes();
       finishJob();
     }
 
