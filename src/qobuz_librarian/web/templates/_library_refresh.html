@@ -6,7 +6,7 @@
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="new_releases">
-    <button type="submit" class="ql-link-action"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+    <button type="submit" class="ql-link-action ql-inline-link-hit"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
             title="{% if writes_paused %}{{ writes_paused_reason }}{% elif not qobuz_ready %}Connect Qobuz before checking new releases.{% else %}Skips your folders entirely, just asks Qobuz for albums newer than your last scan.{% endif %}">Check new releases</button>
   </form>
   {% else %}

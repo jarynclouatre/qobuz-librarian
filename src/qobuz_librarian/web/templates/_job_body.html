@@ -295,10 +295,16 @@
     <div class="ql-notice ql-notice-error ql-job-error"><span>{{ job.error | strip_log_pointer(job.log_lines) }}</span></div>
     {% endif %}
     {% if job.log_lines %}
-    <div class="log-console">
-      {%- for line in job.log_lines %}{{ line }}
+    {# Collapsed by default: job.summary and job.error above already carry
+       the plain outcome, so the raw per-step lines (endpoint names, ids)
+       are here for whoever wants them, not the first thing on the page. #}
+    <details class="ql-job-log-details">
+      <summary class="ql-disclosure-summary">Activity log</summary>
+      <div class="log-console">
+        {%- for line in job.log_lines %}{{ line }}
 {% endfor -%}
-    </div>
+      </div>
+    </details>
     {% else %}
     <p class="ql-job-muted">No log output was retained for this job.</p>
     {% endif %}

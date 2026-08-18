@@ -3666,12 +3666,12 @@ def test_dismiss_rest_reports_partial_durable_progress(client, monkeypatch,
     real_hide = hidden.hide
     hide_calls = 0
 
-    def fail_second_hide(scope, items):
+    def fail_second_hide(scope, items, gap_fill=None):
         nonlocal hide_calls
         hide_calls += 1
         if hide_calls == 2:
             raise OSError("inert hidden-store failure")
-        return real_hide(scope, items)
+        return real_hide(scope, items, gap_fill=gap_fill)
 
     monkeypatch.setattr(hidden, "hide", fail_second_hide)
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
@@ -6891,7 +6891,7 @@ def test_dismiss_honours_a_tick_saved_during_the_store_write(monkeypatch):
     cand = job.candidates[0]
     restored = []
 
-    def hide_and_race(scope, specs):
+    def hide_and_race(scope, specs, gap_fill=None):
         # The user's tick lands while the store write is in flight.
         cand["selected"] = True
         return len(list(specs))

@@ -2933,8 +2933,14 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 item["result"] = "disk_full"
                 disk_full = True
             else:
+                from qobuz_librarian.ui_cli.errors import oserr_hint
+                # oserr_hint already ends the sentence for a permissions or
+                # read-only mount; only an unclassified errno falls back to
+                # the raw exception, which at least says something.
+                hint = oserr_hint(exc)
+                detail = hint if hint else f" ({exc})."
                 log.info(fmt(C.RED,
-                    f"\n    Storage error ({exc}). Stopping the queue; "
+                    f"\n    Storage error{detail} Stopping the queue; "
                     "restoring backups and keeping the rest for a retry."))
                 item["result"] = "io_error"
                 io_error = True

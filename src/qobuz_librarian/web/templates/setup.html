@@ -42,18 +42,19 @@
       {% endif %}
 
       {% from "_secret_toggle.html" import secret_toggle %}
-      <form action="/setup" method="post" class="ql-auth-form">
+      <form action="/setup" method="post" class="ql-auth-form" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <div class="ql-field">
           <label class="ql-field-label" for="username">Username</label>
           <input type="text" name="username" id="username" value="{{ username | default('') }}"
-                 autocomplete="username" autofocus class="ql-input">
+                 autocomplete="username" required
+                 {% if not error %}autofocus{% endif %} class="ql-input">
         </div>
         <div class="ql-field">
           <label class="ql-field-label" for="password">Password</label>
           <div class="relative">
-            <input type="password" name="password" id="password"
-                   autocomplete="new-password" class="ql-input pr-12">
+            <input type="password" name="password" id="password" required
+                   autocomplete="new-password" {% if error %}autofocus{% endif %} class="ql-input pr-12">
             {{ secret_toggle("password", "password") }}
           </div>
           <p class="ql-field-help">At least 15 characters. Spaces are fine.</p>
@@ -61,7 +62,7 @@
         <div class="ql-field">
           <label class="ql-field-label" for="confirm">Confirm password</label>
           <div class="relative">
-            <input type="password" name="confirm" id="confirm"
+            <input type="password" name="confirm" id="confirm" required
                    autocomplete="new-password" class="ql-input pr-12">
             {{ secret_toggle("confirm", "password") }}
           </div>

@@ -79,7 +79,12 @@
               class="ql-review-tool{% if _rest_selected >= _rest_total %} hidden{% endif %}">{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }} ({{ labels.format_count(_rest_total - _rest_selected) }})</button>
       {% endif %}
       {% if triage %}
-      <a href="{{ _hidden_url }}" class="ql-inline-link ql-review-dismissed-link" data-hidden-label="{{ _hidden_label }}">{{ _hidden_label }} ({{ labels.format_count(review_hidden_count) }})</a>
+      {# "Keep hi-res" (the button just above) and "Kept hi-res" read as the
+         same word one letter apart; this link goes to what's already kept,
+         so it gets its own verb rather than sitting a letter away from the
+         action beside it. #}
+      {% set _hidden_toolbar_label = 'View kept hi-res' if job.execute_kind == 'downsample' else _hidden_label %}
+      <a href="{{ _hidden_url }}" class="ql-inline-link ql-review-dismissed-link" data-hidden-label="{{ _hidden_toolbar_label }}">{{ _hidden_toolbar_label }} ({{ labels.format_count(review_hidden_count) }})</a>
       {% endif %}
     </div>
   </div>

@@ -1179,7 +1179,9 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
     assert "No Match" in job.summary
     assert "Recorded a fresh baseline" not in job.summary
     assert job.status is jm.JobStatus.FAILED
-    assert job.error == "The New Releases check did not complete."
+    # job.summary above already names the reason and the remedy; job.error
+    # would only restate it.
+    assert not job.error
 
 
 def test_new_release_check_completes_past_a_folder_qobuz_has_no_artist_for(
@@ -1258,7 +1260,9 @@ def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
 
     assert "couldn't be saved" in job.summary
     assert job.status is jm.JobStatus.FAILED
-    assert job.error == "The New Releases check did not complete."
+    # job.summary above already names the reason and the remedy; job.error
+    # would only restate it.
+    assert not job.error
 
 
 def test_partial_new_release_find_stays_reviewable(tmp_path, monkeypatch):

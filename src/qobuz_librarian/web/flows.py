@@ -1159,6 +1159,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
             return 0
         specs = [(c.get("artist"), c.get("title"),
                   (c.get("payload") or {}).get("year")) for c in to_hide]
+        gap_flags = [is_gap_candidate(c) for c in to_hide]
     # Record the dismissals durably FIRST, outside the lock (disk I/O mustn't
     # stall the scan thread's next add_candidate).
     hidden_before = hidden_mod.load()
@@ -1166,7 +1167,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
         spec for spec in specs
         if not hidden_mod.is_hidden_row(scope, *spec, hidden_before)
     ]
-    hidden_mod.hide(scope, specs)
+    hidden_mod.hide(scope, specs, gap_fill=gap_flags)
     drop = {c["cid"] for c in to_hide}
 
     def _drop():
@@ -2026,17 +2027,19 @@ def scan_new_releases(job, token):
         job.summary = ("No new releases found, but the updated baseline couldn't "
                        "be saved. Check again.")
     else:
-        job.summary = "No new releases added to your saved baseline."
+        job.summary = "No new releases since your last check."
     if skipped_note:
         job.summary += f" {skipped_note}"
     if not total and (failed_count or saved is False):
         # With no reviewable finds, submit_scan would otherwise replace this
         # explicitly incomplete result with a green Done state. Keep partial
         # success reviewable when it found albums, but never present an
-        # unchecked or unsaved zero as a completed zero.
-        job.error = "The New Releases check did not complete."
+        # unchecked or unsaved zero as a completed zero. job.summary above
+        # already names the reason and the remedy; a separate job.error would
+        # only restate it, and the FAILED status carries its own marker.
         _mark_job_failed(job)
-    log.info(job.summary)
+    # Not logged here: job.summary already renders on the job page, and the
+    # activity log below it would otherwise repeat the exact same sentence.
 
 
 # ── Execute ───────────────────────────────────────────────────────────────────
@@ -2073,6 +2076,10 @@ def execute_albums(job, chosen, token):
         "partial": 0,
     }
     failed = 0
+    # Failed at the fetch step specifically, before any of process_album's own
+    # attention reasons could apply. Tracked apart so the summary can give a
+    # plain reason instead of leaving it to the raw exception in the log.
+    fetch_failed = 0
     skipped = 0
     processed = 0
     # Picks that didn't land (never fetched, errored, or came back empty).
@@ -2173,6 +2180,7 @@ def execute_albums(job, chosen, token):
         except Exception as e:
             log.info(f"  could not fetch album {album_id}: {e}")
             failed += 1
+            fetch_failed += 1
             failed_cands.append(cand)
             continue
         _note_staging_wait(job, "Downloading albums", i - 1, len(chosen))
@@ -2415,9 +2423,20 @@ def execute_albums(job, chosen, token):
         else:
             pronoun = "It is" if failed == 1 else "They are"
             outcome = f"{pronoun} selected in {destination} for retry."
+        # A fetch failure has no useful detail beyond "Qobuz didn't answer for
+        # it"; the raw exception (endpoint name, ids) stays in the activity
+        # log for anyone who needs it, not in the sentence the user reads.
+        if fetch_failed == failed:
+            reason = (" Qobuz couldn't be reached for it."
+                      if failed == 1 else
+                      " Qobuz couldn't be reached for them.")
+        elif fetch_failed:
+            reason = f" Qobuz couldn't be reached for {fetch_failed} of them."
+        else:
+            reason = ""
         failure_message = (
-            f"{failed} of {plural(len(chosen), 'album')} didn't finish. "
-            f"{outcome}"
+            f"{failed} of {plural(len(chosen), 'album')} didn't finish."
+            f"{reason} {outcome}"
         )
         job.error = " ".join(part for part in (job.error, failure_message) if part)
     if review_save_failed:
@@ -4442,7 +4461,8 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     manifest_display, _ = _resolve_host_path(str(manifest))
     job.summary = ("; ".join(parts) + ". Unidentified and skipped files stay "
                    f"where they are. Full plan written to {manifest_display}.")
-    log.info(job.summary)
+    # Not logged here: job.summary already renders on the job page, and the
+    # activity log below it would otherwise repeat the exact same sentence.
 
 
 def execute_migration(job, chosen, dest, *, in_place, src=None,

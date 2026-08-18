@@ -62,8 +62,10 @@ def test_hide_is_scoped_durable_and_restorable(monkeypatch, tmp_path):
     assert groups[0]["artist"] == "Portishead"
     assert groups[0]["rows"] == 2
     assert [(a["title"], a["year"]) for a in groups[0]["albums"]] == [("Dummy", "1994")]
-    # The page says what else the one Restore button will bring back.
-    assert groups[0]["albums"][0]["others"] == ["Dummy (Remaster)"]
+    # The page says what else the one Restore button will bring back, with
+    # each other edition's own year so two same-named editions stay tellable
+    # apart.
+    assert groups[0]["albums"][0]["others"] == [{"title": "Dummy (Remaster)", "year": ""}]
 
     assert hidden.restore(hidden.SCOPE_MISSING, ["Portishead"]) == 2
     assert hidden.count(hidden.SCOPE_MISSING) == 0

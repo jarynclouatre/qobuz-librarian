@@ -169,6 +169,28 @@ def preserved_corrupt_stores():
         return []
 
 
+def clear_corrupt_stores() -> bool:
+    """Delete every `….corrupt` copy preserved_corrupt_stores lists.
+
+    The notice already tells the operator to do exactly this; a web app with
+    no shell access needs a button that does it, not just the sentence.
+    Returns False if a copy could not be removed (the notice then stays up
+    for what's left).
+    """
+    try:
+        entries = list(Path(cfg.DATA_DIR).iterdir())
+    except OSError:
+        return False
+    ok = True
+    for entry in entries:
+        if entry.is_file() and _CORRUPT_SUFFIX_RE.search(entry.name):
+            try:
+                entry.unlink()
+            except OSError:
+                ok = False
+    return ok
+
+
 def load_json_object(path, what, lost):
     """Return the JSON object, or None for a missing or preserved corrupt file.
 

@@ -16,6 +16,7 @@ const PRECACHE = [
   '/static/icon.png',
   '/static/icon-192.png',
   '/static/icon-maskable.png',
+  '/static/icon-maskable-192.png',
   '/static/manifest.json',
   '/static/offline.html',
 ];

@@ -34,13 +34,13 @@
           <label class="ql-field-label" for="username">Username</label>
           <input type="text" name="username" id="username" autocomplete="username"
                  value="{{ username | default('', true) }}" required
-                 autofocus class="ql-input">
+                 {% if not error %}autofocus{% endif %} class="ql-input">
         </div>
         <div class="ql-field">
           <label class="ql-field-label" for="password">Password</label>
           <div class="relative">
             <input type="password" name="password" id="password" required
-                   autocomplete="current-password" class="ql-input pr-12">
+                   autocomplete="current-password" {% if error %}autofocus{% endif %} class="ql-input pr-12">
             {{ secret_toggle("password", "password") }}
           </div>
         </div>

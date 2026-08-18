@@ -65,28 +65,33 @@
 <section class="ql-tool-panel ql-migrate-panel">
   <div class="ql-tool-panel-body">
     <p class="ql-panel-copy">
-      Set both paths to preview a one-time copy or move into <code>Artist/Album (Year)</code>.
+      Bringing over an existing collection, kept somewhere else on disk? Migration
+      copies or moves it into <code>Artist/Album (Year)</code> for you, as a
+      one-time, reviewed step. This needs two folder paths set up on the
+      server first, so it can't be done from this page or a phone; whoever
+      manages this server (maybe that's you) sets them once in the
+      configuration file.
     </p>
 
     <dl class="ql-definition-list ql-migrate-definitions">
       <div>
-        <dt>Source path</dt>
-        <dd>Existing library to organise. Uses <code>MIGRATE_SRC</code>.</dd>
+        <dt>Source path (<code>MIGRATE_SRC</code>)</dt>
+        <dd>The existing library to organise, e.g. <code>/mnt/old-library</code>.</dd>
       </div>
       <div>
-        <dt>Destination path</dt>
-        <dd>Organised library output. Uses <code>MIGRATE_DEST</code>.</dd>
+        <dt>Destination path (<code>MIGRATE_DEST</code>)</dt>
+        <dd>Where the organised copy goes, e.g. <code>/mnt/music</code>.</dd>
       </div>
     </dl>
 
     <ol class="ql-step-list">
       <li>
         <span class="ql-step-number">1</span>
-        <span>Mount both locations into the container.</span>
+        <span>Add both folders to the container's Compose file.</span>
       </li>
       <li>
         <span class="ql-step-number">2</span>
-        <span>Set both path values in <code>.env</code> or Compose.</span>
+        <span>Set <code>MIGRATE_SRC</code> and <code>MIGRATE_DEST</code> to those folders in <code>.env</code> or Compose.</span>
       </li>
       <li>
         <span class="ql-step-number">3</span>

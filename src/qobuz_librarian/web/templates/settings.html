@@ -83,16 +83,21 @@
 {% endif %}
 
 {% if corrupt_stores %}
-<div class="ql-notice ql-notice-warning mb-6">
+<div class="ql-notice ql-notice-warning mb-6 flex items-start flex-wrap gap-3">
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
   </svg>
-  <span>A saved file couldn't be read, so anything it held is showing its default
+  <span class="min-w-0">A saved file couldn't be read, so anything it held is showing its default
     here rather than what you chose. Check download quality and downsampling
     below before saving, or this page will write the defaults back. The
     unreadable copy is kept in your data folder as
-    {% for name in corrupt_stores %}<code>{{ name }}</code>{{ ', ' if not loop.last }}{% endfor %};
-    delete {{ 'it' if corrupt_stores | length == 1 else 'them' }} to clear this notice.</span>
+    {% for name in corrupt_stores %}<code>{{ name }}</code>{{ ', ' if not loop.last }}{% endfor %}.</span>
+  <form action="/settings/corrupt-stores/clear" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+            data-confirm="Delete the unreadable {{ 'copy' if corrupt_stores | length == 1 else 'copies' }}? This can't be undone; whatever it held stays reset to its defaults."
+            data-confirm-action="Delete" data-irreversible>Delete and clear this notice</button>
+  </form>
 </div>
 {% endif %}
 
@@ -442,7 +447,7 @@
     </div>
     {% endif %}
     <p class="ql-form-note">
-      Bringing over an existing collection? <a href="/migrate" class="ql-inline-link">Library migration</a>
+      Bringing over an existing collection? <a href="/migrate" class="ql-inline-link ql-inline-link-hit">Library migration</a>
       copies or moves it into the <code>Artist/Album (Year)</code> layout as a one-time, reviewed step.
     </p>
   </div>

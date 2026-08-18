@@ -23,6 +23,7 @@ Explicit single-artist scans do NOT consult this store. Typing a name is a
 conscious request to see everything by that artist. Only the bulk walks filter
 on it.
 """
+import re
 import threading
 import unicodedata
 from contextlib import contextmanager
@@ -62,6 +63,24 @@ def _fingerprint_text(value):
         char for char in text
         if char.isalnum() or unicodedata.category(char).startswith("S")
     )
+
+
+_TRAILING_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
+
+
+def _split_stored_year(title, year):
+    """Pull a bare trailing "(YYYY)" out of `title` when `year` arrived
+    empty. The downsample scope names its candidates from the album's own
+    folder, so its title carries the year baked in where every other scope
+    keeps them apart; the Dismissed page can only style the year like a
+    year once the two are split.
+    """
+    if year or not title:
+        return title, year
+    m = _TRAILING_YEAR_RE.match(title.strip())
+    if not m:
+        return title, year
+    return m.group(1).strip(), m.group(2)
 
 
 def album_fingerprint(artist, title):
@@ -217,23 +236,33 @@ def is_hidden(scope, artist, title, store, *, year=None):
                for stored_year in stored_years)
 
 
-def hide(scope, items):
+def hide(scope, items, gap_fill=None):
     """Record dismissals. `items` is an iterable of (artist, title, year).
+
+    `gap_fill`, when given, is a matching list of booleans marking which rows
+    are a Gap Fill dismissal (an album already owned, missing tracks) rather
+    than a fully missing one, so the Dismissed page can say so. Missing
+    entirely for an older caller, every row is treated as not Gap Fill.
 
     Returns the number of rows newly recorded, matching the review rows removed.
     This may exceed the number of fingerprints when multiple editions of one
     album appear in the review.
     """
+    items = list(items)
+    flags = list(gap_fill) if gap_fill is not None else [False] * len(items)
     with _store_lock():
         store = load()
         bucket = store.setdefault(scope, {})
         now = datetime.now(timezone.utc).isoformat()
         added = 0
-        for artist, title, year in items:
+        for (artist, title, year), is_gap in zip(items, flags):
+            title, year = _split_stored_year(title, year)
             fp = album_fingerprint(artist, title)
             if fp is None:
                 continue
             row = {"title": title or "", "year": str(year or ""), "ts": now}
+            if is_gap:
+                row["gap_fill"] = True
             entry = bucket.get(fp)
             if entry is None:
                 bucket[fp] = {"artist": artist or "", "title": title or "",
@@ -411,7 +440,12 @@ def hidden_by_artist(scope, store=None):
             "year": first.get("year") or "",
             "ts": first.get("ts") or e.get("ts") or "",
             "fp": fp,
-            "others": [r.get("title") or "?" for r in rows[1:]],
+            "gap_fill": bool(first.get("gap_fill")),
+            # Year travels with each title: two editions sharing one name
+            # (a self-titled album and its reissue) are otherwise identical
+            # text on screen.
+            "others": [{"title": r.get("title") or "?", "year": r.get("year") or ""}
+                       for r in rows[1:]],
         })
     out = []
     for artist in sorted(groups, key=str.lower):

@@ -4141,6 +4141,11 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-size: 0.78125rem;
   text-overflow: ellipsis;
 }
+.ql-hidden-title .ql-hidden-when {
+  display: block;
+  color: var(--ql-text-3);
+  font-size: 0.78125rem;
+}
 .ql-hidden-overview {
   margin: -0.2rem 0 0;
   color: var(--ql-text-2);
@@ -5378,11 +5383,19 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-diagnostic-detail {
   margin-top: 0.15rem;
+  color: color-mix(in oklab, var(--color-base-content) 72%, transparent);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+/* The row's own path-and-count line ("/ql-test/music: 32 entries"), not the
+   sentence explaining what the row means. Small monospace fits that data;
+   it read as a system log when the whole card was set in it. */
+.ql-diagnostic-detail-mono {
   color: color-mix(in oklab, var(--color-base-content) 58%, transparent);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 0.7rem;
   line-height: 1.45;
-  overflow-wrap: anywhere;
 }
 [data-theme="night"] .ql-diagnostic-row {
   border-top-color: oklch(100% 0 0 / 0.09);
@@ -6172,6 +6185,15 @@ details[open] > .ql-disclosure-summary::after {
 .ql-form-note {
   margin-top: 0.55rem;
   font-size: 0.78rem;
+}
+/* An inline link mid-sentence: the drawn text stays its normal size, the
+   padding plus matching negative margin grows the tap target to 44px without
+   moving anything around it, same trick as .ql-review-artist-hit. */
+.ql-inline-link-hit {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.85rem 0.2rem;
+  margin: -0.85rem -0.2rem;
 }
 .ql-page-error {
   margin: 0 auto 1rem;
