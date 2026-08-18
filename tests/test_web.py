@@ -5207,6 +5207,30 @@ def test_settings_save_rejects_out_of_enum_quality(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "s.json").read_text())["STREAMRIP_QUALITY"] == "2"
 
 
+def test_downsample_keep_choice_can_go_back_to_unchosen(tmp_path, monkeypatch):
+    """Unset is a real answer for this one: the choice starts unset, the first
+    downsample asks for it, and picking the unset entry again is the only way
+    to be asked a second time."""
+    import json
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
+    monkeypatch.setattr(ss, "_pending_apply", None)
+    monkeypatch.setitem(ss._ENV_DEFAULTS, "DOWNSAMPLE_KEEP_ORIGINALS", None)
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", None)
+
+    assert ss.save({"DOWNSAMPLE_KEEP_ORIGINALS": "keep"})[0] is True
+    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
+
+    assert ss.save({"DOWNSAMPLE_KEEP_ORIGINALS": ""})[0] is True
+    assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
+    saved = json.loads((tmp_path / "s.json").read_text())
+    assert "DOWNSAMPLE_KEEP_ORIGINALS" not in saved
+
+
 def test_environment_qobuz_credentials_cannot_be_shadowed_by_the_form(client, monkeypatch):
     """The form must not claim to replace an environment-owned credential."""
     import qobuz_librarian.web.app as app_mod

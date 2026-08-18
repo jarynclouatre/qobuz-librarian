@@ -8619,9 +8619,7 @@ async def job_approve(request: Request, job_id: str):
             if selected_candidate_ids <= stale_premise_candidate_ids:
                 return RedirectResponse(
                     url=dest + "?error=" + urllib.parse.quote(
-                        "The selected local files changed after this review "
-                        "was built, or the review is too old to verify. "
-                        "Refresh or rescan before trying again. Nothing changed."
+                        _all_candidates_stale_message(job.execute_kind)
                     ),
                     status_code=303,
                 )
@@ -8654,12 +8652,11 @@ async def job_approve(request: Request, job_id: str):
                 if choice in ("keep", "delete"):
                     downsample_choice_to_save = choice
                 else:
-                    with job._lock:
-                        picked = sum(
-                            1 for c in job.candidates if c.get("selected")
-                        )
                     return _tr(request, "downsample_keep_choice.html", {
-                        "job": job, "page": "downsample", "picked": picked,
+                        "job": job, "page": "downsample",
+                        "picked": len(selected_candidate_snapshot),
+                        "picked_albums":
+                            _named_albums(selected_candidate_snapshot),
                         "downsample_originals_choice": current_choice,
                         "backup_retention_days":
                             cfg.UPGRADE_BACKUP_RETENTION_DAYS})
@@ -8913,9 +8910,7 @@ async def job_approve(request: Request, job_id: str):
     if approved == "all_candidates_stale":
         return RedirectResponse(
             url=dest + "?error=" + urllib.parse.quote(
-                "The selected local files changed after this review was "
-                "built, or the review is too old to verify. Refresh or "
-                "rescan before trying again. Nothing changed."
+                _all_candidates_stale_message(job.execute_kind)
             ),
             status_code=303,
         )
@@ -8977,16 +8972,24 @@ async def job_approve(request: Request, job_id: str):
     flag = "approved=1" if approved else "stale=1"
     local_stale = len(stale_premise_candidate_ids)
     local_stale_q = ""
-    if local_stale:
-        one = local_stale == 1
+    if local_stale and approved:
+        skipped_names = _named_albums([
+            c for c in selected_candidate_snapshot
+            if c.get("cid") in stale_premise_candidate_ids
+        ])
         local_stale_q = "&error=" + urllib.parse.quote(
-            f"Started the valid choices. {local_stale} selected "
-            f"album{'' if one else 's'} changed on disk since this review, so "
-            f"{'it was' if one else 'they were'} left out and "
-            f"{'stays' if one else 'stay'} selected for a fresh scan."
+            f"Started the rest. {skipped_names} changed on disk after this "
+            f"review was built, so "
+            f"{'it was' if local_stale == 1 else 'they were'} skipped and "
+            "left ticked."
         )
+        # One answer, not two: the green "Queued" banner said the same thing
+        # this sentence opens with, stacked above it. Only when this click is
+        # the one that started the work; if another click got there first, that
+        # is what the page has to say instead.
+        flag = ""
     return RedirectResponse(
-        url=f"{dest}?{flag}{_skip_q}{local_stale_q}",
+        url=f"{dest}?{flag}{_skip_q}{local_stale_q}".replace("?&", "?"),
         status_code=303,
     )
 
@@ -8997,6 +9000,55 @@ _TRIAGE_KINDS = ("library", "upgrade", "new_releases", "downsample")
 
 # Kinds whose review screen has server-backed per-candidate selection.
 _SELECTABLE_KINDS = _TRIAGE_KINDS + ("repair", "migration")
+
+
+def _rebuild_results_hint(execute_kind):
+    """Where the results behind a review are rebuilt.
+
+    The review screen itself carries no refresh control, so a message telling
+    the user to refresh has to name the page that does, or it sends them back
+    to press the same button for the same failure.
+    """
+    if execute_kind == "downsample":
+        return "Refresh candidates on the Downsample page, then try again."
+    if execute_kind in ("library", "upgrade"):
+        return ("Refresh the Library, which rebuilds these results, then try "
+                "again.")
+    if execute_kind == "repair":
+        return "Start a new scan on the Repair page, then try again."
+    if execute_kind == "new_releases":
+        return "Run Check new releases on the Library page, then try again."
+    return "Rebuild these results before trying again."
+
+
+def _all_candidates_stale_message(execute_kind):
+    return ("Every selected album changed on disk after this review was "
+            "built, or the review is too old to check. Nothing was started. "
+            + _rebuild_results_hint(execute_kind))
+
+
+def _album_label(candidate):
+    """One album named the way the review names it."""
+    artist = (candidate.get("artist") or "").strip()
+    title = (candidate.get("title") or "?").strip()
+    return f"{artist} - {title}" if artist else title
+
+
+def _named_albums(candidates, limit=3):
+    """Up to ``limit`` album names, with a count standing in for the rest.
+
+    A message about particular albums has to say which ones. A bare number
+    leaves the user reading a review of hundreds looking for the one that
+    moved.
+    """
+    names = [_album_label(c) for c in candidates]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) <= limit:
+        return ", ".join(names[:-1]) + " and " + names[-1]
+    return f"{', '.join(names[:limit])} and {len(names) - limit} more"
 
 
 def _hide_scope(execute_kind):
@@ -10991,6 +11043,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "inert_notes": settings_store.inert_behaviour_notes(values),
         "text_fields": settings_store.TEXT_FIELDS,
         "option_labels": settings_store.ENUM_OPTION_LABELS,
+        # Which dropdowns keep their unset entry after something is picked, so
+        # a choice the app asks for once can still be handed back to it.
+        "unset_enum_keys": settings_store.UNSET_ENUM_KEYS,
         "behavior": values,
         # The worst store to lose without being told: quality tier and
         # downsample policy revert to the env defaults and this page then shows

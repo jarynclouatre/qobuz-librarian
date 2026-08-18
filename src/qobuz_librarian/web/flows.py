@@ -2058,10 +2058,6 @@ def execute_albums(job, chosen, token):
     # a previous job would otherwise be reused even though folders may
     # have moved since.
     clear_scan_caches()
-    if getattr(job, "execute_kind", "") == "library":
-        # Same job carries the scan and the downloads it was approved for, so
-        # stop calling this phase a scan on the Queue and in History.
-        job.title = "Library download"
     args = build_args()
     _benign = {"already_complete", "skipped_already_higher_quality", "dry_run",
                "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras",
@@ -2941,9 +2937,6 @@ def execute_downsamples(
         job.summary = job.error
         _mark_job_failed(job)
         return
-    # The same job carried the scan and now rewrites files, so stop calling it
-    # a scan on its own page, in the Queue and in History.
-    job.title = "Downsample run"
     shrunk = 0
     total_saved = 0
     interrupted_saved = 0
@@ -3172,7 +3165,8 @@ def _kept_originals_note(resampled_files):
         return ""
     days = cfg.UPGRADE_BACKUP_RETENTION_DAYS
     return (f" Your hi-res originals are kept for {plural(days, 'day')}, so "
-            "nothing is freed until they expire or you remove them in Settings.")
+            "nothing is freed until they expire. Until then you can put them "
+            "back from Settings.")
 
 # ── Repair flow ───────────────────────────────────────────────────────────────
 
@@ -3889,10 +3883,6 @@ def execute_repairs(job, chosen, token):
     whose damage couldn't be ID-verified, depending on each candidate."""
     clear_scan_caches()
     args = build_args()
-    # The scan job carries the run through this phase, so rename it: a Queue or
-    # History row reading "Repair scan" while files are being replaced names
-    # the wrong half of the job.
-    job.title = "Repair"
     fixed = 0
     unverified = 0
     failed = 0

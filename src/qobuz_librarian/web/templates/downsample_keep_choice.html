@@ -11,29 +11,32 @@
   <section class="ql-work-card ql-work-card-primary">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">Keep a backup of your hi-res originals?</p>
-      <p class="ql-work-card-text">{% if picked %}You picked {{ picked }} album{{ 's' if picked != 1 }}. {% endif %}Downsampling rewrites your files in place to save space. Choose what happens to the hi-res originals - you can change it later in Settings.</p>
-    </div>
-    <div class="ql-work-card-actions gap-3">
-      <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
-        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
-        <input type="hidden" name="keep_choice" value="keep">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Keep a backup</button>
-      </form>
-      <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
-        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
-        <input type="hidden" name="keep_choice" value="delete">
-        <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Delete, save space</button>
-      </form>
+      <p class="ql-work-card-text">{% if picked_albums %}About to downsample {{ picked_albums }}. {% endif %}Downsampling rewrites your files in place to save space. Choose what happens to the hi-res originals - you can change it later in Settings.</p>
     </div>
   </section>
 
+  {# Above the buttons, not below them: this is what the two words on the
+     buttons mean, so it has to be read before they are pressed. #}
   <div class="ql-tool-note ql-tool-note-info">
     <p class="ql-tool-note-title">Keep a backup</p>
     <p>A verified copy of each original is parked for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}, restorable from Settings. It uses that much extra disk while the copies last.</p>
     <p class="ql-tool-note-title">Delete, save space</p>
     <p>The hi-res originals are removed as each file is downsampled. This can’t be undone.</p>
+  </div>
+
+  <div class="ql-work-card-actions gap-3 mt-4">
+    <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
+      <input type="hidden" name="keep_choice" value="keep">
+      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Keep a backup</button>
+    </form>
+    <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">
+      <input type="hidden" name="keep_choice" value="delete">
+      <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Delete, save space</button>
+    </form>
   </div>
 </div>
 

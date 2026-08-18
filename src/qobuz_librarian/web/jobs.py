@@ -255,6 +255,16 @@ PROGRESS_PREFIX = "\x00PROGRESS\x00"
 REVIEW_CHANGED = "\x00REVIEW\x00"
 _MISSING = object()
 
+# What each kind of job is called once its review is approved and it starts
+# doing the work. One job carries the scan and the run it was approved for, so
+# a page open on the run must not still be headed with the scan's name.
+RUN_TITLES = {
+    "library": "Library download",
+    "upgrade": "Upgrade run",
+    "downsample": "Downsample run",
+    "repair": "Repair",
+}
+
 
 def _quality_pair(value):
     if not isinstance(value, (list, tuple)) or len(value) != 2:
@@ -1712,6 +1722,13 @@ def approve(
                 raise TypeError("split_review must return a Job or None")
         job.status = JobStatus.PENDING
         job.finished_at = None
+        # Renamed here rather than by the worker: the worker gets there
+        # milliseconds after the redirect has already rendered, so the tab
+        # that pressed the button kept the scan's heading for the whole run
+        # while every other tab, and a reload, showed the right one.
+        run_title = RUN_TITLES.get(getattr(job, "execute_kind", ""))
+        if run_title:
+            job.title = run_title
         # Restart the elapsed clock at approve so the execute phase (downloading /
         # repairing) times itself; otherwise it keeps counting from the scan
         # start and folds in however long the results sat awaiting review, making

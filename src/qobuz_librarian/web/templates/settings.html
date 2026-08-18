@@ -376,8 +376,8 @@
             <div class="ql-default-control">
               {% if kind == 'enum' %}
               <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select text-base sm:max-w-sm sm:text-xs">
-                {% if not behavior[key] %}
-                <option value="" selected>Not chosen yet</option>
+                {% if key in unset_enum_keys or not behavior[key] %}
+                <option value="" {% if not behavior[key] %}selected{% endif %}>Not chosen yet</option>
                 {% endif %}
                 {% for c in choices %}
                 <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>

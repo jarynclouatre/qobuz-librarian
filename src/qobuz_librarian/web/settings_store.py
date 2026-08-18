@@ -112,6 +112,11 @@ _ENV_DEFAULTS = {key: getattr(cfg, key, "") for key, *_ in TEXT_FIELDS}
 _INT_ENUM_KEYS = {"STREAMRIP_QUALITY", "ARTIST_CATALOG_CACHE_TTL",
                   "NEW_RELEASE_CHECK_INTERVAL"}
 
+# Enum fields with a real unset state. The keep-or-delete answer starts unset
+# and the first downsample asks for it, so Settings has to offer that state
+# back as a choice, not only show it until something else is picked.
+UNSET_ENUM_KEYS = ("DOWNSAMPLE_KEEP_ORIGINALS",)
+
 # Friendlier dropdown text for enum values whose bare value isn't self-explaining;
 # falls back to the raw value for anything not listed.
 ENUM_OPTION_LABELS = {
@@ -333,6 +338,9 @@ def _apply(values: dict):
             setattr(cfg, key, items)
         elif kind == "enum":
             v = str(raw or "").strip().lower()
+            if not v and key in UNSET_ENUM_KEYS:
+                setattr(cfg, key, None)
+                continue
             if key == "STREAMRIP_QUALITY" and v in ("0", "1"):
                 # 0/1 are lossy MP3 tiers the FLAC-only pipeline discards.
                 v = "2"
@@ -363,10 +371,11 @@ def _blank_overrides(data) -> list:
     """Keys in a saved settings dict that hold nothing. An empty text or list
     field means "use whatever the environment gives me", which is what having
     no key at all does, so a blank one is only ever left over from a save that
-    wrote it. Keeping it would hide the Compose value for good. Enums are
-    excluded: none of them offers an empty choice."""
+    wrote it. Keeping it would hide the Compose value for good. Most enums are
+    excluded, having no empty choice to make; the ones in UNSET_ENUM_KEYS do
+    have one and clear the same way."""
     return [key for key, _, _, kind, _, _ in TEXT_FIELDS
-            if kind != "enum" and key in data
+            if (kind != "enum" or key in UNSET_ENUM_KEYS) and key in data
             and not str(data[key] or "").strip()]
 
 
@@ -480,9 +489,12 @@ def _save_locked(values: dict):
         # on-disk file stays consistent with cfg.
         if kind == "enum" and choices:
             v = str(values[key] or "").strip().lower()
-            if key == "DOWNSAMPLE_KEEP_ORIGINALS" and not v:
-                # This choice stays unset until the first downsample asks.
-                # The full Settings form still posts its empty placeholder.
+            if not v and key in UNSET_ENUM_KEYS:
+                # Unset is an answer here, not a missing one: the first
+                # downsample asks for this choice, and the form posts an empty
+                # value both when nothing has been chosen yet and when the user
+                # picks that entry again. It clears below like an emptied box.
+                clean[key] = ""
                 continue
             if key == "STREAMRIP_QUALITY" and v in ("0", "1"):
                 v = "2"  # lossy tiers the FLAC pipeline discards (see _apply)
