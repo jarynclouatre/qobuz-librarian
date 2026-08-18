@@ -92,101 +92,6 @@ def _startup_recovery_status():
     return getattr(_STARTUP_RECOVERY_RESULT, "status", None)
 
 
-def _cli_blocked_settlement_binding(result):
-    """Bind one settleable block to its frozen CLI completion owner."""
-    from qobuz_librarian.completion import (
-        CompletionOriginKind,
-        RecoveryOwner,
-        normalise_album_id,
-        parse_completion_input_record,
-    )
-    from qobuz_librarian.queue.startup_recovery import (
-        StartupRecoveryAction,
-        StartupRecoveryStatus,
-        settleable_block_kind,
-    )
-
-    items = tuple(getattr(result, "items", ()))
-    blocked = tuple(
-        item
-        for item in items
-        if item.phase is queue_state.QueuePhase.BLOCKED
-        and item.action is StartupRecoveryAction.BLOCKED
-    )
-    if (
-        result.status is not StartupRecoveryStatus.ATTENTION_REQUIRED
-        or result.reason != "queue-item-blocked"
-        or len(blocked) != 1
-        or not items
-        or any(
-            item.operation_id != blocked[0].operation_id
-            or item.mode != blocked[0].mode
-            or (
-                item is not blocked[0]
-                and (
-                    item.phase is not queue_state.QueuePhase.PENDING
-                    or item.action is not StartupRecoveryAction.PENDING
-                )
-            )
-            for item in items
-        )
-    ):
-        return None
-    target = blocked[0]
-    if target.mode.startswith("web-job:"):
-        return None
-    loaded = queue_state.load_queue_journal(target.operation_id)
-    journal = loaded.journal
-    if (
-        loaded.status is not queue_state.QueueLoadStatus.READY
-        or journal is None
-        or journal.operation_id != target.operation_id
-        or journal.mode != target.mode
-        or journal.retirements
-        or len(journal.items) != len(items)
-    ):
-        return None
-    classified = {item.item_id: item for item in items}
-    if len(classified) != len(items):
-        return None
-    for queued in journal.items:
-        recovered = classified.get(queued.item_id)
-        if recovered is None or recovered.phase is not queued.phase:
-            return None
-        expected_action = (
-            StartupRecoveryAction.BLOCKED
-            if queued.item_id == target.item_id
-            else StartupRecoveryAction.PENDING
-        )
-        if recovered.action is not expected_action:
-            return None
-    queued = next(
-        (item for item in journal.items if item.item_id == target.item_id),
-        None,
-    )
-    if queued is None:
-        return None
-    settleable = settleable_block_kind(queued)
-    if settleable is None:
-        return None
-    completion_input = parse_completion_input_record(
-        queued.completion_input,
-        expected_owner=RecoveryOwner(target.operation_id, target.item_id),
-    )
-    planned_album = queued.planned.get("album")
-    if (
-        completion_input is None
-        or completion_input.origin.kind is not CompletionOriginKind.CLI
-        or completion_input.origin.reference != "download-queue"
-        or not isinstance(planned_album, dict)
-        or normalise_album_id(planned_album.get("id"))
-        != normalise_album_id(completion_input.expectation.album_id)
-    ):
-        return None
-    label = planned_album.get("title") or queued.planned.get("label") or "download"
-    return target, str(label), settleable
-
-
 def _cli_retry_settlement_matches(result, target) -> bool:
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryAction,
@@ -287,10 +192,11 @@ def _offer_blocked_cli_settlement(authority, result):
         SETTLEABLE_STAGED_LEFTOVER,
         BlockedItemSettlementAction,
         BlockedItemSettlementStatus,
+        blocked_settlement_binding,
         settle_blocked_item,
     )
 
-    binding = _cli_blocked_settlement_binding(result)
+    binding = blocked_settlement_binding(result)
     if binding is None:
         return result, False, None
     item, label, settleable = binding

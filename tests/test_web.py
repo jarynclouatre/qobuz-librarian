@@ -2919,6 +2919,50 @@ def test_retry_finishes_a_download_whose_settlement_refused_after_clearing_it(
     _remove_job(job)
 
 
+def test_giving_up_refuses_a_download_a_web_job_still_owns(client, monkeypatch):
+    """Give up exists for a terminal download, which has no job page to settle
+    it from. Letting it settle a job-owned recovery would settle it behind that
+    job's back, leaving its own record still saying the download is blocked."""
+    from types import SimpleNamespace
+
+    from qobuz_librarian.queue import startup_recovery
+    from qobuz_librarian.queue.startup_recovery import (
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+    from qobuz_librarian.web import app as webapp
+
+    def _record(_authority):
+        result = StartupRecoveryResult(StartupRecoveryStatus.ATTENTION_REQUIRED)
+        webapp._STARTUP_RECOVERY_RESULT = result
+        return result
+
+    settled = []
+    monkeypatch.setattr(webapp, "_record_startup_recovery", _record)
+    monkeypatch.setattr(webapp, "_run_lock_intact", lambda: True)
+    monkeypatch.setattr(webapp, "_terminal_recovery_offer", lambda: {
+        "operation_id": "op-1", "item_id": "item-1", "album": "Autechre - Amber",
+    })
+    monkeypatch.setattr(webapp, "_startup_recovery_web_job_id", lambda: "job-7")
+    monkeypatch.setattr(webapp, "_startup_recovery_binding", lambda: (
+        SimpleNamespace(operation_id="op-1", item_id="item-1"), None, None, None,
+    ))
+    def _settle(**kwargs):
+        settled.append(kwargs)
+        return SimpleNamespace(status=None, reason="")
+
+    monkeypatch.setattr(startup_recovery, "settle_blocked_item", _settle)
+
+    r = client.post(
+        "/queue/interrupted/discard",
+        data={"recovery_operation_id": "op-1", "recovery_item_id": "item-1"},
+        follow_redirects=False,
+    )
+
+    assert r.status_code == 303
+    assert settled == []
+
+
 def test_undo_keeps_failed_catalog_cleanup_retryable_in_the_archive(
         client, monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg

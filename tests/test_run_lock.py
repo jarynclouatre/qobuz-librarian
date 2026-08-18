@@ -299,8 +299,8 @@ def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
     monkeypatch.setattr(run_lock, "acquire", lambda: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
-        cli,
-        "_cli_blocked_settlement_binding",
+        startup_recovery,
+        "blocked_settlement_binding",
         lambda result: (
             item,
             "Autechre - Anvil Vapre",
@@ -365,8 +365,8 @@ def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
     monkeypatch.setattr(run_lock, "acquire", lambda: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
-        cli,
-        "_cli_blocked_settlement_binding",
+        startup_recovery,
+        "blocked_settlement_binding",
         lambda result: (
             item,
             "Agalloch - The White EP",
@@ -454,8 +454,8 @@ def test_clearing_a_leftover_is_not_reported_as_a_failure(
     monkeypatch.setattr(run_lock, "acquire", lambda: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
-        cli,
-        "_cli_blocked_settlement_binding",
+        startup_recovery,
+        "blocked_settlement_binding",
         lambda result: (
             item,
             "Agalloch - The Serpent & The Sphere",
@@ -535,8 +535,8 @@ def test_a_settled_leftover_does_not_report_the_stale_verdict(
     monkeypatch.setattr(run_lock, "acquire", lambda: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
-        cli,
-        "_cli_blocked_settlement_binding",
+        startup_recovery,
+        "blocked_settlement_binding",
         lambda result: (
             item,
             "Aphex Twin - Music From The Merch Desk",

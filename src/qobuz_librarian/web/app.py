@@ -358,6 +358,29 @@ def _startup_recovery_album_label() -> str:
     return title or str(planned.get("label") or "")
 
 
+def _terminal_recovery_offer():
+    """The blocked terminal download the web may settle, or None.
+
+    A download started in the terminal never became a web job, so nothing on
+    these pages could act on it and the notice could only send the reader back
+    to a terminal. The identity comes from the same binding the terminal
+    settles against, so the web can only ever offer this on the exact block the
+    terminal would have offered.
+    """
+    if _post_import_relocation_recovery() is not None:
+        return None
+    binding = startup_recovery.blocked_settlement_binding(
+        _STARTUP_RECOVERY_RESULT)
+    if binding is None:
+        return None
+    item, label, _settleable = binding
+    return {
+        "operation_id": item.operation_id,
+        "item_id": item.item_id,
+        "album": _startup_recovery_album_label() or label,
+    }
+
+
 def _startup_recovery_web_job_id() -> str | None:
     binding = _startup_recovery_binding()
     if binding is None:
@@ -464,6 +487,18 @@ def _durable_recovery_planned(job):
 
 def _settle_durable_web_recovery(job, action):
     """Settle only the exact blocked recovery owned by one durable Web job."""
+    return _settle_blocked_recovery(action, job=job)
+
+
+def _settle_blocked_recovery(action, *, job=None):
+    """Settle the one blocked download, proving who owns it first.
+
+    A Web job proves ownership by matching the saved queue entry exactly. A
+    terminal download has no Web job to match, so the proof there is that no
+    Web job claims it and the posted identity is still the blocked one. Both
+    routes end in the same settlement call the terminal uses; there is only
+    ever one way to settle.
+    """
     if type(action) is not BlockedItemSettlementAction:
         raise ValueError("a blocked-item settlement action is required")
     with _STARTUP_RECOVERY_LOCK:
@@ -473,11 +508,13 @@ def _settle_durable_web_recovery(job, action):
             recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
         except Exception:
             return False, "The saved recovery state could not be checked safely."
-        if (
-            _recovery_status_value(recovery) != "attention_required"
-            or not _durable_recovery_matches_job(job)
-        ):
+        if _recovery_status_value(recovery) != "attention_required":
             return False, "The blocked recovery does not match this exact download."
+        if job is not None and not _durable_recovery_matches_job(job):
+            return False, "The blocked recovery does not match this exact download."
+        if job is None and _startup_recovery_web_job_id() is not None:
+            return False, ("That download belongs to a job you can settle from "
+                           "Queue or History.")
         binding = _startup_recovery_binding()
         if binding is None:
             return False, "The blocked recovery identity could not be verified."
@@ -507,9 +544,8 @@ def _settle_durable_web_recovery(job, action):
         except Exception:
             return False, "The settled recovery could not be verified safely."
         if action is BlockedItemSettlementAction.RETRY:
-            if (
-                _recovery_status_value(refreshed) != "resume_required"
-                or not _durable_recovery_matches_job(job)
+            if _recovery_status_value(refreshed) != "resume_required" or (
+                job is not None and not _durable_recovery_matches_job(job)
             ):
                 return False, "The settled download is not safe to resume."
         elif _recovery_status_value(refreshed) != "clear":
@@ -782,6 +818,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     """
     reason = ""
     action = None
+    settle = None
     if _CLI_MODE:
         reason = "Terminal mode is holding the library."
         msg = ("Terminal (CLI) mode is on, so downloads and scans are paused "
@@ -854,11 +891,25 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             paused = ("Downloads and scans are paused, and its saved queue and "
                       "staged files were left unchanged. ")
             if origin == "cli":
-                action = {"href": "/settings#mode", "label": "Open Settings"}
-                msg = (f"An interrupted terminal download{of_album} could not "
-                       "be verified safely. " + paused + "Switch to terminal "
-                       "mode in Settings and run Qobuz Librarian there; it "
-                       "offers to settle this.")
+                settle = _terminal_recovery_offer()
+                if settle is not None:
+                    # Not everyone who starts a download in a terminal wants to
+                    # go back to one to get out of it, and giving up on the
+                    # album is the one decision that lifts the pause on its own.
+                    action = {"href": "/queue", "label": "Settle it"}
+                    msg = (f"An interrupted terminal download{of_album} could "
+                           "not be verified safely. " + paused + "Giving up on "
+                           "it clears the pause, and because nothing reached "
+                           "your library the album is still there to download "
+                           "again from the Library review or a search. Trying "
+                           "that same download again needs terminal mode in "
+                           "Settings.")
+                else:
+                    action = {"href": "/settings#mode", "label": "Open Settings"}
+                    msg = (f"An interrupted terminal download{of_album} could "
+                           "not be verified safely. " + paused + "Switch to "
+                           "terminal mode in Settings and run Qobuz Librarian "
+                           "there; it offers to settle this.")
             elif origin == "web-job":
                 msg = (f"An interrupted download{of_album} could not be "
                        "verified safely. " + paused + "Open that download from "
@@ -894,7 +945,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                    "download is resumed from the interface where it started.")
     else:
         return None
-    return {"reason": reason, "msg": msg, "action": action}
+    return {"reason": reason, "msg": msg, "action": action, "settle": settle}
 
 
 def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
@@ -9273,6 +9324,49 @@ async def job_give_up(request: Request, job_id: str):
         )
     job_persistence.persist(job)
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
+
+
+@app.post("/queue/interrupted/discard")
+async def discard_interrupted_terminal_download(request: Request):
+    """Give up on an interrupted terminal download from the web.
+
+    The download it settles was started in a terminal, so there is no job page
+    to carry the usual controls and the reader was told to go and use a
+    terminal instead. Giving up is the one decision that lifts the pause
+    without a resume, and a resume can only be run by the interface that owns
+    the saved queue, so that is what is offered here.
+    """
+    form = await request.form()
+    offer = _terminal_recovery_offer()
+    if offer is None or (
+        str(form.get("recovery_operation_id") or "") != offer["operation_id"]
+        or str(form.get("recovery_item_id") or "") != offer["item_id"]
+    ):
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(
+                "That interrupted download is no longer the one holding things "
+                "up. Nothing was changed. Reload the page."),
+            status_code=303)
+    settled, reason = _settle_blocked_recovery(
+        BlockedItemSettlementAction.DISCARD)
+    logging.getLogger("qobuz_librarian").info(
+        "Give up on the interrupted terminal download: %s.",
+        "succeeded" if settled
+        else f"refused: {(reason or 'no reason given').rstrip('.')}")
+    if not settled:
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(
+                reason or "The interrupted download could not be discarded."),
+            status_code=303)
+    # No album name here: the banner it was clicked from names it, and the
+    # query the queue page reads is capped, so a long title cut the sentence
+    # off mid-word.
+    return RedirectResponse(
+        url="/queue?notice=" + urllib.parse.quote(
+            "Gave up on the interrupted download. Nothing reached your "
+            "library, downloads and scans can run again, and the album is "
+            "still there to download again."),
+        status_code=303)
 
 
 @app.post("/jobs/{job_id}/retry")

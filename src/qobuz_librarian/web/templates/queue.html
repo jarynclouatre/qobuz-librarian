@@ -98,6 +98,13 @@
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
+{# Outside the activity list: the outcomes that send one here (clearing the
+   queue, giving up on an interrupted download) usually leave nothing running,
+   and inside the list the notice went unseen in exactly those cases. #}
+{% if notice %}
+<div class="ql-notice ql-notice-warning" data-flash><span>{{ notice }}</span></div>
+{% endif %}
+
 {# Queue is where people look when nothing seems to be happening, so it has to
    carry the pause. Without it an empty list read as "nothing to do" while
    downloads and scans were held. Terminal mode already has its own banner on
@@ -105,7 +112,17 @@
 {% if writes_paused_notice and not cli_mode %}
 <div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
   <span class="min-w-0 break-words text-sm">{{ writes_paused_notice.msg }}</span>
-  {% if writes_paused_notice.action %}
+  {% if writes_paused_notice.settle %}
+  <form action="/queue/interrupted/discard" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <input type="hidden" name="recovery_operation_id" value="{{ writes_paused_notice.settle.operation_id }}">
+    <input type="hidden" name="recovery_item_id" value="{{ writes_paused_notice.settle.item_id }}">
+    <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+            data-confirm="Give up on this download? The interrupted attempt and its staged files are thrown away and nothing is added to your library. Downloads and scans can run again, and the album is still there to download again from the Library review or a search."
+            data-confirm-action="Give up" data-confirm-danger>Give up on it</button>
+  </form>
+  <a href="/settings#mode" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>
+  {% elif writes_paused_notice.action %}
   <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
   {% endif %}
 </div>
@@ -153,9 +170,6 @@
             data-confirm-action="Clear queue" data-confirm-danger>Clear the queue</button>
   </form>
 </div>
-{% endif %}
-{% if notice %}
-<div class="ql-notice ql-notice-warning" data-flash><span>{{ notice }}</span></div>
 {% endif %}
 {% else %}
 <div class="ql-empty-state ql-empty-state--activity">
