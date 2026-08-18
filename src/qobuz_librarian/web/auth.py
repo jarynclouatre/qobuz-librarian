@@ -286,6 +286,12 @@ def _read() -> dict:
         return {}
 
 
+def current_username() -> str:
+    """The configured login name, for a page that needs to name it or a check
+    that has to run against it rather than against whatever was typed."""
+    return str(_read().get("username") or "")
+
+
 def credentials_configured() -> bool:
     d = _read()
     return bool(d.get("username") and d.get("password_hash")
@@ -305,7 +311,8 @@ def creds_file_present_but_unreadable() -> bool:
     return present and not credentials_configured()
 
 
-def set_credentials(username: str, password: str) -> bool:
+def set_credentials(username: str, password: str, *,
+                    env_password_hash: str = "") -> bool:
     """Persist username + password hash + a fresh session secret, atomically
     and 0600. Returns False if the data volume isn't writable so callers can
     show a clear message instead of 500ing. The new session secret rotates on
@@ -326,6 +333,8 @@ def set_credentials(username: str, password: str) -> bool:
         "password_hash": hash_password(password),
         "session_secret": secrets.token_urlsafe(32),
     }
+    if env_password_hash:
+        payload["env_password_hash"] = env_password_hash
     try:
         cfg.WEB_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(cfg.WEB_AUTH_FILE.parent),
@@ -390,17 +399,33 @@ def _env_password() -> str:
     return password
 
 
+def env_override_hash() -> str:
+    """A hash of the environment password as it stands now, recorded when the
+    owner sets their own password from Settings. The next start compares the
+    environment against this rather than against the stored password, so
+    editing Compose still resets a forgotten login while an in-app change
+    survives an ordinary restart."""
+    try:
+        password = _env_password()
+    except CredentialSeedError:
+        return ""
+    if not password:
+        return ""
+    return hash_password(password)
+
+
 def apply_env_credentials() -> str:
     """Seed the web login from WEB_AUTH_USER / WEB_AUTH_PASSWORD so a deployment
     comes up already locked down instead of exposing the open setup screen to
     whoever reaches it first, and so the password can be reset by editing the
     environment and restarting.
 
-    The env values win when present: a changed password re-seeds (rotating the
-    session secret, which logs existing browsers out, as a password change
-    should); an unchanged one is left alone so a plain restart doesn't churn the
-    secret. Returns a status for the caller to log: 'noop', 'partial',
-    'applied', 'unchanged', or 'failed'.
+    A CHANGED env value wins: it re-seeds, rotating the session secret, which
+    logs existing browsers out as a password change should. An unchanged one is
+    left alone, both when it still matches the stored password and when the
+    owner has since set their own from Settings, so an ordinary restart does
+    not quietly hand the login back to Compose. Returns a status for the caller
+    to log: 'noop', 'partial', 'applied', 'unchanged', 'kept', or 'failed'.
     """
     if auth_disabled():
         return "noop"
@@ -411,10 +436,16 @@ def apply_env_credentials() -> str:
     if not user or not password:
         return "partial"
     d = _read()
-    if (d.get("password_hash")
-            and _constant_time_eq(user, d.get("username") or "")
-            and _verify_hash(d.get("password_hash"), password)):
-        return "unchanged"
+    same_user = _constant_time_eq(user, d.get("username") or "")
+    if d.get("password_hash") and same_user:
+        if _verify_hash(d.get("password_hash"), password):
+            return "unchanged"
+        override = d.get("env_password_hash") or ""
+        if override and _verify_hash(override, password):
+            # The owner replaced this password from Settings and the
+            # environment has not moved since, so it is their password that is
+            # current, not the one Compose is still carrying.
+            return "kept"
     if not set_credentials(user, password):
         return "failed"
     return "applied"

@@ -472,6 +472,70 @@
   </div>
 </section>
 
+{% if web_login_available %}
+<section class="ql-settings-section">
+  <div class="ql-settings-section-body">
+    <div class="ql-settings-section-head">
+      <div class="ql-settings-section-copy">
+        <h2 id="web-login" tabindex="-1" class="ql-anchor-target">Web login</h2>
+        <p>
+          Signed in as <strong>{{ web_login_username }}</strong>. Changing the
+          password signs out every browser, including this one.
+        </p>
+      </div>
+    </div>
+
+    {% if password_error %}
+    <div class="ql-notice ql-notice-error mb-6">
+      <span>{{ password_error }}</span>
+    </div>
+    {% endif %}
+
+    <form action="/settings/password" method="post" class="ql-settings-form" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="username" value="{{ web_login_username }}" autocomplete="username">
+      <div class="ql-field">
+        <label class="ql-field-label" for="current_password">Current password</label>
+        <div class="relative max-w-lg">
+          <input type="password" name="current_password" id="current_password"
+                 autocomplete="current-password" required
+                 class="ql-input pr-12 text-base sm:text-sm">
+          {{ secret_toggle("current_password", "password") }}
+        </div>
+      </div>
+      <div class="ql-field">
+        <label class="ql-field-label" for="new_password">New password</label>
+        <div class="relative max-w-lg">
+          <input type="password" name="new_password" id="new_password"
+                 autocomplete="new-password" required minlength="15"
+                 class="ql-input pr-12 text-base sm:text-sm">
+          {{ secret_toggle("new_password", "new password") }}
+        </div>
+        <p class="ql-field-help">At least 15 characters.</p>
+      </div>
+      <div class="ql-field">
+        <label class="ql-field-label" for="confirm_password">Confirm new password</label>
+        <div class="relative max-w-lg">
+          <input type="password" name="confirm_password" id="confirm_password"
+                 autocomplete="new-password" required minlength="15"
+                 class="ql-input pr-12 text-base sm:text-sm">
+          {{ secret_toggle("confirm_password", "confirmation") }}
+        </div>
+      </div>
+      {% if web_login_env_managed %}
+      <p class="ql-field-help">
+        A password set here is kept across restarts. If you forget it, change
+        <code>WEB_AUTH_PASSWORD</code> in your container settings and restart.
+      </p>
+      {% endif %}
+      <div class="ql-settings-actions">
+        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Change password</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% endif %}
+
 <section class="ql-settings-section">
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head ql-settings-section-head-actions">

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import repair_log, state_file
+from qobuz_librarian import redaction, repair_log, state_file
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzAccess, QobuzUnavailable, load_qobuz_token
 from qobuz_librarian.api.search import get_album
@@ -4066,7 +4066,8 @@ def run_lyric_retry(job):
             finally:
                 job_mgr.set_staging_holder(None)
     except Exception as e:
-        job.error = f"Lyric retry failed: {e}; manifest preserved."
+        job.error = redaction.redact(
+            f"Lyric retry failed: {e}; manifest preserved.")
         job.summary = "Lyric retry failed. Manifest preserved, will retry next time."
         _mark_job_failed(job)
         log.info(job.error)

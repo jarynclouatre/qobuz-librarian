@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import redaction
 from qobuz_librarian.api.auth import (
     AuthLost,
     CredentialChanged,
@@ -464,7 +465,10 @@ class Job:
 
     def push_line(self, line: str):
         """Append a real log line and stream it to live subscribers."""
-        line = self._CTRL_RE.sub("", line)
+        # Masked here as well as in the logger filter: a line pushed straight
+        # in never passes through logging, and this is the funnel every one of
+        # them reaches before it is streamed, stored or replayed.
+        line = redaction.redact(self._CTRL_RE.sub("", line))
         # Mutate log_lines under the lock: subscribe()/the status API read it
         # under the same lock from request threads, and the truncation `del`
         # below would otherwise tear a concurrent reader's slice.
@@ -1162,7 +1166,9 @@ def _run_task(job: Job, fn):
         # SystemExit and other fatal boundaries must surface as failed jobs,
         # not escape after the still-RUNNING state was persisted.
         raw = str(e) or e.__class__.__name__
-        cleaned = JobLogHandler._ANSI.sub("", raw).strip()
+        # The failure text becomes job.error, which is stored and shown; an
+        # aiohttp error names the signed-in URL it could not reach.
+        cleaned = redaction.redact(JobLogHandler._ANSI.sub("", raw).strip())
         job.status = JobStatus.FAILED
         job.error = _friendly_job_error(e, cleaned)
         job.push_line(f"[ERROR] {cleaned}")

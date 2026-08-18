@@ -40,6 +40,7 @@ from qobuz_librarian import (
     cli,
     completion,
     download_result,
+    redaction,
     repair_log,
     run_lock,
     state_file,
@@ -1895,6 +1896,54 @@ def _restore_jobs_once() -> None:
             _JOBS_RESTORED = True
 
 
+def _scrub_stored_credentials(logger) -> None:
+    """One pass over everything written before the masking existed. A Qobuz
+    error names the URL it called, and that URL carries the account email and
+    the auth token, so stored job records and the app's own log files can still
+    hold a working credential after an upgrade. Runs before the log handler is
+    attached, so rewriting a log file cannot cut a handler off from it, and the
+    marker keeps it to one pass: nothing written afterwards can carry a secret.
+    """
+    marker = cfg.DATA_DIR / ".credential_scrub"
+    try:
+        if marker.exists():
+            return
+    except OSError:
+        return
+    try:
+        # Reading them registers the live values, so a token logged with no
+        # parameter name beside it is masked too.
+        api_auth.read_qobuz_credentials()
+    except Exception:
+        pass
+    rows = 0
+    try:
+        job_persistence.init()
+        rows = job_persistence.scrub_stored_secrets()
+    except Exception:
+        pass
+    files = 0
+    try:
+        targets = list(cfg.DATA_DIR.glob("qobuz-librarian*.log*"))
+    except OSError:
+        targets = []
+    targets.append(cfg.FETCH_LOG_FILE)
+    for path in targets:
+        try:
+            if redaction.scrub_file(path):
+                files += 1
+        except Exception:
+            continue
+    if rows or files:
+        logger.info(
+            f"Masked account details in {rows} stored job record(s) and "
+            f"{files} log file(s) written by an earlier version.")
+    try:
+        marker.touch()
+    except OSError:
+        pass
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _CLI_MODE, _LOCK_UNENFORCEABLE
@@ -1907,6 +1956,7 @@ async def _lifespan(_app: FastAPI):
     _STARTUP_RECOVERY_UNKNOWN = False
     job_mgr.set_durable_recovery_job_id(None)
     _log = logging.getLogger("qobuz_librarian")
+    _scrub_stored_credentials(_log)
     cli_logging.attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL)
     if web_auth.auth_disabled():
         _log.warning("[warn] WEB_AUTH=none: the web UI is unauthenticated, do not "
@@ -1935,6 +1985,9 @@ async def _lifespan(_app: FastAPI):
         if cred_status == "applied":
             _log.info("Configured the web login from WEB_AUTH_USER / "
                       "WEB_AUTH_PASSWORD.")
+        elif cred_status == "kept":
+            _log.info("Kept the password set in Settings. Change "
+                      "WEB_AUTH_PASSWORD and restart to reset it.")
         elif cred_status == "partial":
             _log.warning("Set both WEB_AUTH_USER and WEB_AUTH_PASSWORD to seed "
                          "the web login from the environment: only one was set.")
@@ -2485,6 +2538,7 @@ async def login_page(request: Request):
     return templates.TemplateResponse(
         request=request, name="login.html",
         context={"error": _lockout_notice(web_auth.client_ip(request)),
+                 "changed": request.query_params.get("changed") == "1",
                  "next_path": web_auth.safe_next_path(
                      request.query_params.get("next"))})
 
@@ -6924,8 +6978,8 @@ def _make_single_track_run(album, track, token):
                 # the exclusion stuck either.
                 marked = False
                 j.summary = (f"Got “{t_title}”, filed under {artist} / {title}.")
-                j.error = (f"{e} The rest of the album may still show "
-                           "in scans.")
+                j.error = redaction.redact(
+                    f"{e} The rest of the album may still show in scans.")
         elif len(missing) > 1:
             hidden_mod.unmark_single(
                 artist,
@@ -10776,12 +10830,20 @@ def _resolve_host_path(container_path: str) -> tuple[str, bool]:
     return host_path, True
 
 
+def _web_login_env_managed() -> bool:
+    """Whether Compose is still carrying a web password. It no longer overrides
+    a password set here on every restart, but changing it there is still the
+    way back in when this one is forgotten, so the page has to say so."""
+    return bool(os.environ.get("WEB_AUTH_PASSWORD", "").strip()
+                or os.environ.get("WEB_AUTH_PASSWORD_FILE", "").strip())
+
+
 def _settings_response(request, *, saved=False, queued=False, connected=False,
                        unverified=False, envchecked=False,
                        rerendered=False,
                        error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
-                       quality_note=False):
+                       quality_note=False, password_error=""):
     creds = _read_creds()
     values = settings_store.current()
     # If credentials come from environment or a secret-file declaration,
@@ -10861,6 +10923,11 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         # them as if they were chosen.
         "corrupt_stores": state_file.preserved_corrupt_stores(),
         "diagnostics_html": _diagnostics_fragment(request, diagnostics),
+        "web_login_available": (not web_auth.auth_disabled()
+                                and web_auth.credentials_configured()),
+        "web_login_username": web_auth.current_username(),
+        "web_login_env_managed": _web_login_env_managed(),
+        "password_error": password_error,
     })
 
 
@@ -11114,6 +11181,48 @@ async def save_behavior(request: Request):
     if quality_note:
         suffix += "&quality_note=1"
     return RedirectResponse(url=f"/settings?saved=1{suffix}#behaviour", status_code=303)
+
+
+@app.post("/settings/password", response_class=HTMLResponse)
+async def change_web_password(request: Request):
+    """Change the password this app is signed in with. Every browser is signed
+    out by the change, this one included, so it ends at the sign-in page."""
+    if web_auth.auth_disabled() or not web_auth.credentials_configured():
+        return RedirectResponse(url="/settings", status_code=303)
+    form = await request.form()
+    current = str(form.get("current_password") or "")
+    fresh = str(form.get("new_password") or "")
+    confirm = str(form.get("confirm_password") or "")
+    username = web_auth.current_username()
+    loop = asyncio.get_running_loop()
+    # The KDF is deliberately slow, so it runs off the event loop; on the loop
+    # it would stall every other request for the length of the hash.
+    holder = await loop.run_in_executor(
+        None, lambda: web_auth.verify_login(username, current))
+    if not holder:
+        error = "That is not your current password."
+    elif fresh != confirm:
+        error = "The two new passwords don't match."
+    else:
+        error = web_auth.new_password_error(username, fresh)
+    if not error:
+        try:
+            stored = await loop.run_in_executor(
+                None,
+                lambda: web_auth.set_credentials(
+                    username, fresh,
+                    env_password_hash=web_auth.env_override_hash()),
+            )
+        except web_auth.PasswordRejected as exc:
+            stored, error = False, str(exc)
+        if not stored and not error:
+            error = ("The new password couldn't be saved. Check that the data "
+                     "folder is writable, then try again.")
+    if error:
+        diags = await loop.run_in_executor(None, _diagnostics)
+        return _settings_response(request, password_error=error,
+                                  diagnostics=diags, rerendered=True)
+    return RedirectResponse(url="/login?changed=1", status_code=303)
 
 
 @app.post("/settings/mode")

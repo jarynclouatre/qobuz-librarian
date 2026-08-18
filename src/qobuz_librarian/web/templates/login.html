@@ -19,6 +19,9 @@
         </div>
       </div>
 
+      {% if changed %}
+      <div class="ql-notice ql-notice-success"><span>Password changed. Sign in again.</span></div>
+      {% endif %}
       {% if error %}
       <div class="ql-notice ql-notice-error"><span>{{ error }}</span></div>
       {% endif %}
@@ -47,9 +50,9 @@
       <details class="ql-auth-details">
         <summary class="ql-auth-details-summary">Forgotten your password?</summary>
         <p class="ql-auth-details-copy">
-          Set <code>WEB_AUTH_USER</code> and <code>WEB_AUTH_PASSWORD</code> in
-          <code>.env</code> or <code>compose.yaml</code> and restart the
-          container. A changed password replaces the login and signs every
+          Change <code>WEB_AUTH_USER</code> and <code>WEB_AUTH_PASSWORD</code>
+          in <code>.env</code> or <code>compose.yaml</code> and restart the
+          container. A changed value replaces the login and signs every
           browser out. At least 15 characters.
         </p>
       </details>

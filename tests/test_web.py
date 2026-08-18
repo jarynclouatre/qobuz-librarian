@@ -5733,6 +5733,30 @@ def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path)
     assert not cfg.WEB_AUTH_FILE.exists()
 
 
+def test_a_password_set_in_settings_survives_a_restart(monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(cfg, "WEB_AUTH_FILE", tmp_path / "auth.json")
+    monkeypatch.delenv("WEB_AUTH", raising=False)
+    monkeypatch.setenv("WEB_AUTH_USER", "admin")
+    monkeypatch.setenv("WEB_AUTH_PASSWORD", "ember orbit atlas")
+    monkeypatch.delenv("WEB_AUTH_PASSWORD_FILE", raising=False)
+    assert web_auth.apply_env_credentials() == "applied"
+
+    web_auth.set_credentials("admin", "quiet harbour lantern",
+                             env_password_hash=web_auth.env_override_hash())
+    assert web_auth.apply_env_credentials() == "kept"
+    assert web_auth.verify_login("admin", "quiet harbour lantern")
+    assert not web_auth.verify_login("admin", "ember orbit atlas")
+
+    # Editing the environment is still the way back in after a forgotten
+    # password, so a new value there has to win.
+    monkeypatch.setenv("WEB_AUTH_PASSWORD", "distant meadow signal")
+    assert web_auth.apply_env_credentials() == "applied"
+    assert web_auth.verify_login("admin", "distant meadow signal")
+
+
 @pytest.mark.parametrize(
     ("seed_status", "message"),
     [

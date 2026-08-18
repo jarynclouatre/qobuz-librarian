@@ -15,7 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable
 
-from qobuz_librarian import config
+from qobuz_librarian import config, redaction
 from qobuz_librarian.ui_cli.colors import C, fmt
 
 
@@ -200,6 +200,10 @@ def credentials_from_values(user_id: str = "", token: str = "", *,
                             source: str = "settings") -> QobuzCredentials:
     user_id = str(user_id or "").strip()
     token = str(token or "").strip()
+    # Registered as they are read, so a token printed with no parameter name
+    # beside it is still masked out of the logs and the job records.
+    redaction.register_secret(token)
+    redaction.register_secret(user_id)
     generation = credential_generation(user_id, token, source=source)
     return QobuzCredentials(
         user_id=user_id,

@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import redaction
 from qobuz_librarian.completion import RecoveryOwner, normalise_album_id
 
 _log = logging.getLogger("qobuz_librarian")
@@ -238,6 +239,38 @@ CREATE TABLE IF NOT EXISTS post_import_relocation_handoffs (
 
 
 _SCHEMA_VERSION = 7
+
+
+def scrub_stored_secrets() -> int:
+    """Mask account secrets in rows written before the masking existed, and
+    report how many rows changed. A provider error carrying the signed-in URL
+    reached job.error, job.summary and the stored activity log, so an upgrade
+    that only fixed new writes would leave every existing archive readable."""
+    columns = ("summary", "error", "log_lines", "phase", "candidates",
+               "execute_args", "single", "recoveries")
+    changed = 0
+    with _lock:
+        conn = _get_conn()
+        if conn is None or not _schema_ready:
+            return 0
+        try:
+            rows = conn.execute(
+                f"SELECT id, {', '.join(columns)} FROM jobs").fetchall()
+            for row in rows:
+                cleaned = [redaction.redact(value) if isinstance(value, str)
+                           else value for value in row[1:]]
+                if list(row[1:]) == cleaned:
+                    continue
+                assignments = ", ".join(f"{c}=?" for c in columns)
+                conn.execute(f"UPDATE jobs SET {assignments} WHERE id=?",
+                             (*cleaned, row[0]))
+                changed += 1
+            if changed:
+                conn.commit()
+        except sqlite3.Error:
+            _rollback_failed_write(conn)
+            return 0
+    return changed
 
 
 def init() -> None:

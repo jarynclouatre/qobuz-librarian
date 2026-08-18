@@ -7,10 +7,28 @@ import logging
 import re
 import sys
 
+from qobuz_librarian import redaction
 from qobuz_librarian.ui_cli.colors import C, fmt
+
+
+class _RedactFilter(logging.Filter):
+    """Mask account secrets before any handler sees the record. A provider
+    error names the URL it called, and a Qobuz URL carries the account email
+    and the auth token, so this has to run once for the console, the log file
+    and the job log rather than at each of them."""
+
+    def filter(self, record):
+        try:
+            record.msg = redaction.redact(record.getMessage())
+            record.args = ()
+        except Exception:
+            pass
+        return True
+
 
 log = logging.getLogger("qobuz_librarian")
 log.setLevel(logging.INFO)
+log.addFilter(_RedactFilter())
 _sh = logging.StreamHandler(sys.stdout)
 _sh.setFormatter(logging.Formatter("%(message)s"))
 # Pin the console to INFO so lowering the LOGGER to DEBUG for the file handler

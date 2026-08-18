@@ -102,3 +102,42 @@ def test_restore_split_review_replaces_main_and_removes_remnant(
         "Picked", "Left parked",
     ]
     assert job_persistence.load_one(remnant.id) is None
+
+
+def test_a_provider_error_never_reaches_the_stored_job_record(
+        monkeypatch, tmp_path):
+    """A Qobuz call carries the account email and the auth token in its query
+    string, so a failed call reported as the URL it called would put a working
+    credential in the activity log and the archive. Records written before the
+    masking existed are cleaned on the next start."""
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    leak = ("Cannot connect to https://example.test/api/user/login"
+            "?user_id=nobody@example.test&user_auth_token=NOT-A-REAL-TOKEN-0000")
+    job = Job(title="Download")
+    job.push_line(leak)
+    assert "NOT-A-REAL-TOKEN-0000" not in "\n".join(job.log_lines)
+    assert "nobody@example.test" not in "\n".join(job.log_lines)
+
+    job.status = JobStatus.FAILED
+    assert _REAL_ADMIT(job) is True
+    observer = sqlite3.connect(cfg.DATA_DIR / "jobs.db")
+    try:
+        observer.execute("UPDATE jobs SET error=?, summary=? WHERE id=?",
+                         (leak, leak, job.id))
+        observer.commit()
+    finally:
+        observer.close()
+
+    assert job_persistence.scrub_stored_secrets() == 1
+    observer = sqlite3.connect(cfg.DATA_DIR / "jobs.db")
+    try:
+        stored = observer.execute(
+            "SELECT error, summary FROM jobs WHERE id=?", (job.id,)).fetchone()
+    finally:
+        observer.close()
+    assert "NOT-A-REAL-TOKEN-0000" not in "".join(stored)
+    assert "nobody@example.test" not in "".join(stored)
