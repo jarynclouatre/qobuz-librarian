@@ -24,6 +24,7 @@ from qobuz_librarian.quality.decision import (
     load_capped,
     mark_album_capped,
 )
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -236,12 +237,8 @@ def run_upgrade_walk_mode(args, token):
     try:
         if (not args.yes and not getattr(args, "auto_safe", False)
                 and not getattr(args, "dry_run", False)):
-            try:
-                _r = input(fmt(C.CYAN,
-                    "\n  Auto-accept all upgrades and run unattended? [y/N]: "
-                )).strip().lower()
-            except EOFError:
-                _r = ""
+            _r = ask(
+                "\n  Auto-accept all upgrades and run unattended? [y/N]: ") or ""
             if _r in ("y", "yes"):
                 auto_accept_all = True
                 log.info(fmt(C.GREEN,

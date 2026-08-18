@@ -123,3 +123,35 @@ def test_landed_album_is_cached_and_its_staging_copy_is_not(tmp_path, monkeypatc
     assert flac_cache.get(landed / "01 - Song.flac") is not None
     assert flac_cache.get(staged / "01 - Song.flac") is None
     flac_cache._reset_for_tests()
+
+
+def test_store_stamp_moves_when_another_process_writes(tmp_path, monkeypatch):
+    # A terminal download writes this cache from its own process, so the web
+    # app's memoized census held pre-download totals until its timer expired.
+    import sqlite3
+
+    from qobuz_librarian.library import flac_cache
+    monkeypatch.setattr("qobuz_librarian.config.FLAC_CACHE_ENABLED", True)
+    monkeypatch.setattr("qobuz_librarian.config.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("qobuz_librarian.config.MUSIC_ROOT", tmp_path / "music")
+    flac_cache._reset_for_tests()
+
+    track = tmp_path / "music" / "A" / "Album" / "cd.flac"
+    track.parent.mkdir(parents=True, exist_ok=True)
+    track.write_bytes(b"x" * 16)
+    flac_cache.put(track, {"bits": 16, "sample_rate": 44100, "size": 100,
+                           "path": str(track)})
+    flac_cache.census()
+    before = flac_cache.store_stamp()
+
+    other = sqlite3.connect(str(tmp_path / "data" / "flac_cache.db"))
+    other.execute(
+        "INSERT OR REPLACE INTO files (path, mtime_ns, size, payload) "
+        "VALUES (?,?,?,?)",
+        (str(track.parent / "second.flac"), 0, 0, "{}"),
+    )
+    other.commit()
+    other.close()
+
+    assert flac_cache.store_stamp() != before
+    flac_cache._reset_for_tests()

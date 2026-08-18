@@ -27,6 +27,7 @@ from qobuz_librarian.queue.journal import (
     save_queue_journal,
     transition_journal_item,
 )
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log
 
@@ -219,10 +220,9 @@ def offer_resume_startup_recovery(args, token_source, recovery):
         choices = "[Y]es / [k]eep for later"
         if not recovery_bearing:
             choices += " / [d]iscard"
-        try:
-            ans = input(fmt(C.CYAN, f"  Resume now? {choices}: ")).strip().lower()
-        except EOFError:
-            ans = ""
+        ans = ask(f"  Resume now? {choices}: ")
+        if ans is None:
+            return False
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN,
                 f"\n  ⟳  Resuming {len(items)} saved album(s)…"))
@@ -284,12 +284,11 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                 "  Keeping the saved queue. It'll prompt again next launch."))
             return False
         if not recovery_bearing and ans in ("d", "discard"):
-            try:
-                conf = input(fmt(C.YELLOW,
-                    f"  Really discard {len(items)} queued album(s)? "
-                    "Type DISCARD to confirm: ")).strip()
-            except EOFError:
-                conf = ""
+            conf = ask(
+                f"  Really discard {len(items)} queued album(s)? "
+                "Type DISCARD to confirm: ",
+                colour=C.YELLOW, lower=False,
+            )
             if conf == "DISCARD":
                 clear_queue_journal(operation_id, explicit_discard=True)
                 log.info(fmt(C.GRAY, "  Pending queue cleared."))
@@ -331,12 +330,9 @@ def offer_resume_pending_queue(args, token_source):
     print()
 
     while True:
-        try:
-            ans = input(fmt(C.CYAN,
-                "  Resume now? [Y]es / [k]eep for later / [d]iscard: "
-            )).strip().lower()
-        except EOFError:
-            ans = ""
+        ans = ask("  Resume now? [Y]es / [k]eep for later / [d]iscard: ")
+        if ans is None:
+            return False
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN,
                 f"\n  ⟳  Resuming flush of {len(items)} album(s)…"))
@@ -386,12 +382,11 @@ def offer_resume_pending_queue(args, token_source):
             log.info(fmt(C.GRAY, "  Keeping the pending queue. It'll prompt again next launch."))
             return False
         if ans in ("d", "discard"):
-            try:
-                conf = input(fmt(C.YELLOW,
-                    f"  Really discard {len(items)} queued album(s)? "
-                    "Type DISCARD to confirm: ")).strip()
-            except EOFError:
-                conf = ""
+            conf = ask(
+                f"  Really discard {len(items)} queued album(s)? "
+                "Type DISCARD to confirm: ",
+                colour=C.YELLOW, lower=False,
+            )
             if conf == "DISCARD":
                 clear_pending_queue(explicit_discard=True)
                 log.info(fmt(C.GRAY, "  Pending queue cleared."))

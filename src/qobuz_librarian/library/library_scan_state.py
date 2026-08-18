@@ -236,7 +236,13 @@ def clear_review_retired() -> bool:
 
 
 def remove_album(album_id) -> bool:
-    """Remove one exact Qobuz album from the saved living Library snapshot."""
+    """Remove one exact Qobuz album from the saved living Library snapshot.
+
+    The open review is a separate copy, held in memory by whichever process is
+    serving the web UI, so a terminal download cannot edit it directly. The
+    removal is recorded for that process to apply, which keeps the snapshot and
+    the review from disagreeing about an album already on disk.
+    """
     album_id = str(album_id or "").strip()
     if not album_id:
         return False
@@ -264,7 +270,7 @@ def remove_album(album_id) -> bool:
             cleaned["candidates"] = candidates
             rebuilt[name] = cleaned
         if not changed:
-            return True
+            return generation_state.note_review_removal(album_id)
         revision = generation_state.reserve_revision()
         if revision is None:
             return False
@@ -287,4 +293,4 @@ def remove_album(album_id) -> bool:
             limited=bool(bucket.get("limited")),
             policy_signature=str(bucket.get("quality_signature") or ""),
             preserve_noncurrent=True,
-        )
+        ) and generation_state.note_review_removal(album_id)

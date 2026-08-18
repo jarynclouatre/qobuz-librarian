@@ -31,6 +31,7 @@ from qobuz_librarian.queue.persistence import (
     offer_resume_pending_queue,
     offer_resume_startup_recovery,
 )
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import (
     C,
     banner,
@@ -319,8 +320,10 @@ def _offer_blocked_cli_settlement(authority, result):
         again = "  Enter r to retry, d to discard, or press Enter to keep it: "
     while True:
         try:
-            choice = input(fmt(C.CYAN, prompt)).strip().lower()
-        except (EOFError, KeyboardInterrupt):
+            choice = ask(prompt)
+        except KeyboardInterrupt:
+            choice = None
+        if choice is None:
             choice = ""
         if choice in {"", "k", "keep"}:
             return result, True, None
@@ -330,11 +333,10 @@ def _offer_blocked_cli_settlement(authority, result):
             break
         if not leftover and choice in {"d", "discard"}:
             try:
-                confirmed = input(fmt(
-                    C.RED,
+                confirmed = ask(
                     "  Type DISCARD to remove this saved queue entry: ",
-                )).strip()
-            except (EOFError, KeyboardInterrupt):
+                    colour=C.RED, lower=False) or ""
+            except KeyboardInterrupt:
                 confirmed = ""
             if confirmed != "DISCARD":
                 return result, True, None
@@ -343,8 +345,12 @@ def _offer_blocked_cli_settlement(authority, result):
             break
         prompt = again
 
-    cleared = fmt(C.GREEN,
-                  "  ✓ Cleared the leftover that was blocking this download.")
+    if leftover:
+        settled_line = f"Cleared the leftover that was blocking “{label}”."
+    elif action is BlockedItemSettlementAction.DISCARD:
+        settled_line = f"Removed the saved queue entry for “{label}”."
+    else:
+        settled_line = f"Queued “{label}” to download again."
     try:
         settled = settle_blocked_item(
             authority=authority,
@@ -355,34 +361,50 @@ def _offer_blocked_cli_settlement(authority, result):
         fresh = _record_startup_recovery(authority)
     except Exception:
         return result, False, None
-    if settled.status is not expected:
-        # A refusal still parks the item's stranded staging, and for a download
-        # that already imported that is the whole of what was outstanding.
-        # Reporting the refusal over a recovery it just cleared would strand the
-        # run behind a stale verdict.
-        if _cli_settlement_cleared_recovery(fresh, item):
-            log.info(cleared)
-            return fresh, False, None
-        if _cli_blocked_item_settled(fresh, item):
-            # The blocker is gone but the rest of the recovery reconciles on
-            # the next pass, so one more read can still come back clear.
-            rechecked = _record_startup_recovery(authority)
-            if _cli_settlement_cleared_recovery(rechecked, item):
-                log.info(cleared)
-                return rechecked, False, None
-            return rechecked, False, (
-                f"\n✓  Cleared the leftover that was blocking “{label}”.\n"
-                "   Restart Qobuz Librarian to finish settling it. Nothing "
-                "else was started.\n"
-            )
-        log.info(fmt(C.YELLOW, f"  {settled.reason}"))
-        return result, False, None
-    verified = (
-        _cli_retry_settlement_matches(fresh, item)
+    matches = (
+        _cli_retry_settlement_matches
         if action is BlockedItemSettlementAction.RETRY
-        else _cli_discard_settlement_matches(fresh, item)
+        else _cli_discard_settlement_matches
     )
-    return (fresh, False, None) if verified else (result, False, None)
+    refused = settled.status is not expected
+    # A refusal still parks the item's stranded staging, and for a download that
+    # already imported that is the whole of what was outstanding. Reporting the
+    # refusal over a recovery it just cleared would strand the run behind a
+    # stale verdict.
+    if refused:
+        took_effect = (
+            _cli_settlement_cleared_recovery(fresh, item)
+            or _cli_blocked_item_settled(fresh, item)
+        )
+    else:
+        took_effect = matches(fresh, item)
+    current = fresh
+    if not took_effect:
+        # The rest of the recovery can reconcile a pass behind the settlement,
+        # so read once more and report from that read. Falling back to the
+        # verdict from before the decision printed "could not be verified
+        # safely" over a choice that had just succeeded.
+        current = _record_startup_recovery(authority)
+        took_effect = (
+            matches(current, item)
+            or _cli_settlement_cleared_recovery(current, item)
+            or _cli_blocked_item_settled(current, item)
+        )
+    if not took_effect:
+        if refused:
+            log.info(fmt(C.YELLOW, f"  {settled.reason}"))
+            return result, False, None
+        return current, False, None
+    # Say the choice took effect whether or not the run can carry on: the
+    # warning that may follow is about the rest of the recovery, and on its own
+    # it read as though the decision had been refused.
+    log.info(fmt(C.GREEN, f"  ✓ {settled_line}"))
+    if _cli_settlement_cleared_recovery(current, item):
+        return current, False, None
+    return current, False, (
+        "\n   Restart Qobuz Librarian to finish settling it. Nothing else was "
+        "started.\n"
+    )
 
 
 def _die_unsettled_startup_recovery(
@@ -437,14 +459,32 @@ def _die_unsettled_startup_recovery(
         print(fmt(C.RED, block(outro)), file=sys.stderr)
         raise SystemExit(EXIT_GENERAL)
     else:
+        from qobuz_librarian.queue.startup_recovery import (
+            BLOCKED_DOWNLOAD_LOG_ENTRY,
+        )
+
+        # The block reason is an internal diagnostic, so it goes to the log the
+        # message names. Nothing else writes it, and the message used to point
+        # at a log entry that was never recorded.
+        detail = "; ".join(
+            f"{entry.item_id}: {entry.block_reason or 'reason not reported'}"
+            for entry in getattr(result, "items", ())
+            if entry.phase is queue_state.QueuePhase.BLOCKED
+        )
+        log.error(
+            "%s: %s.",
+            BLOCKED_DOWNLOAD_LOG_ENTRY,
+            detail or (getattr(result, "reason", "") or "reason not reported"),
+        )
         # A state this stop is reached in survives a restart, so the message
         # names where the outstanding work is instead of prescribing one.
         message = (
             "\n✗  An interrupted download could not be verified safely.\n"
             "   The saved queue and staged files were left unchanged, and no "
             "other work was started.\n"
-            f"   What is still outstanding is under {cfg.STAGING_DIR}, and the "
-            "application log names the exact blocked recovery reason.\n"
+            f"   What is still outstanding is under {cfg.STAGING_DIR}. The "
+            f"“{BLOCKED_DOWNLOAD_LOG_ENTRY}” entry in the application "
+            "log has the technical detail.\n"
         )
         color = C.RED
     die(fmt(color, message), EXIT_GENERAL)

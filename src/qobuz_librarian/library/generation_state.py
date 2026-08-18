@@ -48,6 +48,7 @@ def _empty_state():
             "message": "",
         },
         "outputs": {surface: _empty_output() for surface in SURFACES},
+        "pending_review_removals": [],
     }
 
 
@@ -76,6 +77,17 @@ def _normalise_output(value):
         "reason": str(value.get("reason") or ""),
     })
     return base
+
+
+def _normalise_removals(value):
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for entry in value:
+        album_id = str(entry or "").strip()
+        if album_id and album_id not in cleaned:
+            cleaned.append(album_id)
+    return cleaned
 
 
 def load():
@@ -122,6 +134,9 @@ def load():
             surface: _normalise_output(outputs.get(surface))
             for surface in SURFACES
         },
+        "pending_review_removals": _normalise_removals(
+            data.get("pending_review_removals")
+        ),
     })
     return base
 
@@ -133,6 +148,53 @@ def _write(data) -> bool:
     except OSError as exc:
         cli_logging.vlog(f"Library generation state write failed ({exc})")
         return False
+
+
+def pending_review_removals(state=None) -> list[str]:
+    """Albums the app downloaded that an open review may still be listing."""
+    data = load() if state is None else state
+    return list(data.get("pending_review_removals") or [])
+
+
+def note_review_removal(album_id) -> bool:
+    """Record an album taken off the saved missing list for a review that this
+    process cannot reach.
+
+    A terminal run holds no web job, so it cannot edit the living review the
+    web process keeps in memory. The web applies these the next time it builds
+    the Library page and clears them again; nothing else reads them, and the
+    list stays as short as the number of downloads since that page was open.
+    """
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        return False
+    with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
+        data = load()
+        pending = [
+            entry for entry in data["pending_review_removals"]
+            if entry != album_id
+        ]
+        pending.append(album_id)
+        data["pending_review_removals"] = pending
+        return _write(data)
+
+
+def clear_review_removals(album_ids) -> bool:
+    """Forget removals no open review carries any more."""
+    done = {str(entry or "").strip() for entry in album_ids}
+    done.discard("")
+    if not done:
+        return True
+    with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
+        data = load()
+        pending = [
+            entry for entry in data["pending_review_removals"]
+            if entry not in done
+        ]
+        if pending == data["pending_review_removals"]:
+            return True
+        data["pending_review_removals"] = pending
+        return _write(data)
 
 
 def revision() -> int:

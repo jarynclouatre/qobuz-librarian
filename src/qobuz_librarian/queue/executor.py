@@ -2050,6 +2050,7 @@ def _resolve_queue_item(
         "siblings_preserved": item.get("_siblings_preserved", []),
         "imported": imported_globally,
         "auto_upgrade": item["auto_upgrade"],
+        "elapsed_s": int(item.get("elapsed", 0)),
     }
 
 
@@ -2066,6 +2067,45 @@ def _sleep_unless_cancelled(seconds, cancel_check, step=0.5):
         if remaining <= 0:
             return False
         time.sleep(min(step, remaining))
+
+
+def _record_terminal_downloads(successful):
+    """Give the terminal's finished downloads their row in the activity record.
+
+    Queue and History read the job archive, which only the web writes, so
+    terminal downloads left no trace on the record at all. Bookkeeping never
+    changes an already-completed download, so a failure to write is logged for
+    --verbose and nothing else.
+    """
+    from qobuz_librarian.ui_cli.errors import plural
+    from qobuz_librarian.web import job_persistence
+
+    finished = time.time()
+    for change in successful:
+        album = change.get("album") or {}
+        album_id = str(album.get("id") or "").strip()
+        if not album_id:
+            continue
+        parts = [f"{plural(change.get('n_ok', 0), 'track')} downloaded"]
+        if change.get("n_fail"):
+            parts.append(f"{change['n_fail']} failed")
+        if change.get("n_lossy"):
+            parts.append(f"{change['n_lossy']} lossy-dropped")
+        try:
+            saved = job_persistence.record_terminal_download(
+                album_id=album_id,
+                artist=(album.get("artist") or {}).get("name") or "",
+                title=album.get("title") or "",
+                summary=", ".join(parts) + ".",
+                started_at=finished - float(change.get("elapsed_s", 0) or 0),
+                finished_at=finished,
+                edition=album.get("version") or "",
+            )
+        except Exception as exc:
+            saved = False
+            vlog(f"activity record write failed: {exc}")
+        if not saved:
+            vlog(f"activity record write failed for album {album_id}")
 
 
 def _refresh_review_state_after_downloads(
@@ -2090,6 +2130,8 @@ def _refresh_review_state_after_downloads(
     ]
     if not successful:
         return
+
+    _record_terminal_downloads(successful)
 
     try:
         from qobuz_librarian.library import generation_state
@@ -2651,6 +2693,7 @@ def _durable_completed_result(item, post_dir):
         "siblings_preserved": [],
         "imported": True,
         "auto_upgrade": bool(item.get("auto_upgrade")),
+        "elapsed_s": int(item.get("elapsed", 0)),
     }
 
 

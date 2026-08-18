@@ -21,6 +21,7 @@ from qobuz_librarian.modes.artist import (
 from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.queue.journal import QueueJournalBlocked
 from qobuz_librarian.queue.persistence import clear_pending_queue, save_pending_queue
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -232,12 +233,9 @@ def run_album_walk_mode(args, token):
         return 0
 
     vlog(f"  {plural(len(all_artists), 'artist')} in library.")
-    try:
-        flt = input(fmt(C.CYAN,
-            "  Filter artists (substring, case-insensitive; blank = all): "
-        )).strip().lower()
-    except EOFError:
-        flt = ""
+    flt = ask("  Filter artists (substring, case-insensitive; blank = all): ")
+    if flt is None:
+        return 0
     artists = all_artists
     if flt:
         artists = [a for a in all_artists if flt in a.name.lower()]
@@ -395,13 +393,10 @@ def run_album_walk_mode(args, token):
         args.consolidate = saved_consolidate
 
     if shared_queue and not interrupted and not args.dry_run:
-        try:
-            _q = input(fmt(C.CYAN,
-                f"\n  Walk done. {len(shared_queue)} album(s) still queued."
-                " Download now? [Y/n]: ")).strip().lower()
-        except EOFError:
-            _q = "y"
-        if _q in ("", "y", "yes"):
+        _q = ask(
+            f"\n  Walk done. {len(shared_queue)} album(s) still queued."
+            " Download now? [Y/n]: ")
+        if _q is not None and _q in ("", "y", "yes"):
             try:
                 _flush_queue()
             except KeyboardInterrupt:
@@ -470,12 +465,9 @@ def run_walk_queued_mode(args, token):
         return 0
 
     vlog(f"  {len(all_artists)} artist(s) to walk.")
-    try:
-        flt = input(fmt(C.CYAN,
-            "  Filter (substring, case-insensitive; blank = all): "
-        )).strip().lower()
-    except EOFError:
-        flt = ""
+    flt = ask("  Filter (substring, case-insensitive; blank = all): ")
+    if flt is None:
+        return 0
     artists = all_artists
     if flt:
         artists = [a for a in all_artists if flt in a.name.lower()]
@@ -537,13 +529,10 @@ def run_walk_queued_mode(args, token):
             _flush_stdin()
             qsize = len(shared_queue)
             qhint = f" [queue: {qsize}]" if qsize else ""
-            try:
-                r = input(fmt(C.CYAN,
-                    f"  [{i + 1}/{len(artists)}] {truncate(d.name, 50)}"
-                    f"{qhint}: scan? [y/N/p/s/f]: "
-                )).strip()
-            except EOFError:
-                log.info(fmt(C.GRAY, "\n  EOF; stopping walk."))
+            r = ask(
+                f"  [{i + 1}/{len(artists)}] {truncate(d.name, 50)}"
+                f"{qhint}: scan? [y/N/p/s/f]: ", lower=False)
+            if r is None:
                 break
             rl = r.lower()
 

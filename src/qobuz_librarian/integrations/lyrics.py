@@ -11,6 +11,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import lyric_fetch, rip
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
 
@@ -1195,14 +1196,9 @@ def offer_resume_lyric_retry(args):
     print()
 
     while True:
-        try:
-            ans = (
-                input(fmt(C.CYAN, "  Retry lyrics now? [Y]es / [k]eep for later / [d]iscard: "))
-                .strip()
-                .lower()
-            )
-        except EOFError:
-            ans = ""
+        ans = ask("  Retry lyrics now? [Y]es / [k]eep for later / [d]iscard: ")
+        if ans is None:
+            return False
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN, f"\n  ⟳  Retrying lyrics on {len(existing)} file(s)…"))
             counts = {}
@@ -1273,16 +1269,11 @@ def offer_resume_lyric_retry(args):
             )
             return False
         if ans in ("d", "discard"):
-            try:
-                conf = input(
-                    fmt(
-                        C.YELLOW,
-                        f"  Really discard {len(existing)} retry-queued file(s)? "
-                        "Type DISCARD to confirm: ",
-                    )
-                ).strip()
-            except EOFError:
-                conf = ""
+            conf = ask(
+                f"  Really discard {len(existing)} retry-queued file(s)? "
+                "Type DISCARD to confirm: ",
+                colour=C.YELLOW, lower=False,
+            )
             if conf == "DISCARD":
                 if save_lyric_retry([]):
                     log.info(fmt(C.GRAY, "  Lyric retry manifest cleared."))

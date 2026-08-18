@@ -339,6 +339,27 @@ def test_resume_keeps_pending_file_when_not_drained(tmp_path, monkeypatch):
     assert load_pending_queue()[0]  # albums left to retry must survive the resume
 
 
+def test_a_closed_input_does_not_resume_the_saved_queue(tmp_path, monkeypatch):
+    """The prompt defaults to yes on Enter, and a closed input was read as
+    Enter, so a cron or piped run started downloading a saved queue nobody had
+    asked it to."""
+    qfile = tmp_path / "queue.json"
+    monkeypatch.setattr("qobuz_librarian.config.PENDING_QUEUE_FILE", qfile)
+    monkeypatch.setattr("qobuz_librarian.config.QUEUE_JOURNAL_DIR", tmp_path / "journals")
+    save_pending_queue([_qitem()], mode="walk_queue")
+    started = []
+    monkeypatch.setattr("qobuz_librarian.queue.executor._execute_download_queue",
+                        lambda items, args, token, **kw: (started.append(items), ([], False))[1])
+
+    def _closed(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _closed)
+    assert offer_resume_pending_queue(Namespace(), "tok") is False
+    assert started == []
+    assert load_pending_queue()[0]
+
+
 def test_executor_gap_fill_backup_restored_when_track_returns_lossy(monkeypatch, tmp_path):
     """Queue-mode gap-fill backs up present tracks before re-ripping."""
     from qobuz_librarian.library import backup as bkmod

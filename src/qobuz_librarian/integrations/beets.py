@@ -60,6 +60,7 @@ from qobuz_librarian.recovery import (
     normalise_recovery_owner,
 )
 from qobuz_librarian.ui_cli import errors
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, die
 from qobuz_librarian.ui_cli.logging import (
@@ -7947,9 +7948,8 @@ def staging_preflight(args):
     log.info(fmt(C.WHITE, "    1) Run beets now to clear staging, then proceed"))
     log.info(fmt(C.WHITE, "    2) Abort"))
     log.info(fmt(C.WHITE, "    3) Proceed anyway (leave leftovers untouched)"))
-    try:
-        r = input(fmt(C.CYAN, "  Choice [1/2/3]: ")).strip()
-    except EOFError:
+    r = ask("  Choice [1/2/3]: ", lower=False)
+    if r is None:
         r = "2"
     if r == "1":
         # Snapshot each directory that directly holds public audio. Isolated

@@ -7071,12 +7071,12 @@ def _census_view():
     a few minutes. None hides the panel (cache off, or nothing scanned yet)."""
     global _census_cache
     now = time.time()
-    # A download or a downsample writes to the cache the moment it finishes, so
-    # the age of the memo is not enough on its own: hold it only while the rows
-    # behind it have not changed.
-    writes = flac_cache.write_count()
+    # A download or a downsample writes to the cache the moment it finishes,
+    # here or in a terminal run, so the age of the memo is not enough on its
+    # own: hold it only while the rows behind it have not changed.
+    stamp = flac_cache.store_stamp()
     if (_census_cache is not None
-            and _census_cache[2] == writes
+            and _census_cache[2] == stamp
             and now - _census_cache[0] < _CENSUS_TTL):
         return _census_cache[1]
     raw = flac_cache.census()
@@ -7114,13 +7114,18 @@ def _census_view():
         }
     # Re-read: census() drains any buffered writes first, so the count it was
     # actually built from is the one after that flush.
-    _census_cache = (now, view, flac_cache.write_count())
+    _census_cache = (now, view, flac_cache.store_stamp())
     return view
 
 
 @app.get("/library", response_class=HTMLResponse)
 async def library_page(request: Request, page: int = 1, tab: str = ""):
     badge_generation = review_badges.ready_generation("library")
+    # Albums a terminal run downloaded are still listed by the review this
+    # process holds in memory until they are applied. Do it before anything
+    # reads the review, so the counts and the tabs agree with the library.
+    await asyncio.get_running_loop().run_in_executor(
+        None, flows.apply_pending_review_removals)
     creds_ok = bool(_read_creds().get("auth_token"))
     notice_bits = []
     _skipped = request.query_params.get("skipped", "")

@@ -1188,3 +1188,95 @@ def test_cli_album_failure_returns_nonzero(monkeypatch):
                         })
 
     assert album.run_album_mode(args, "tok") == 1
+
+
+def test_a_terminal_download_leaves_the_living_library_review(
+        tmp_path, monkeypatch):
+    """The living review is held in memory by whichever process serves the web
+    UI, so a terminal download could not reach it: the same page counted the
+    album's tracks as on disk while the review still offered to download it.
+    """
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import generation_state, library_scan_state
+    from qobuz_librarian.web import flows, job_persistence
+    from qobuz_librarian.web import jobs as job_mgr
+
+    # The suite runs without the job archive, so review saves report failure
+    # and every mutation rolls back.
+    monkeypatch.setattr(
+        job_persistence,
+        "persist_review_mutation",
+        lambda _job, mutate: (True, mutate()),
+    )
+    monkeypatch.setattr(
+        cfg, "LIBRARY_GENERATION_STATE_FILE", tmp_path / "generation.json")
+    monkeypatch.setattr(
+        cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library.json")
+
+    attempt = generation_state.begin_attempt()
+    generation = generation_state.commit_catalog_generation(
+        attempt)["generation"]
+    assert library_scan_state.save_kind(
+        "missing",
+        artists={
+            "Artist": {
+                "fingerprint": "baseline",
+                "candidates": [{
+                    "artist": "Artist",
+                    "title": "Album",
+                    "payload": {"album_id": "album-id"},
+                }],
+                "artist_id": "artist-id",
+                "catalog_ids": ["album-id"],
+            },
+        },
+        complete=True,
+        generation=generation,
+        revision=generation_state.reserve_revision(),
+    )
+
+    review = job_mgr.Job(title="Library scan")
+    review.kind = "scan"
+    review.execute_kind = "library"
+    review.status = job_mgr.JobStatus.AWAITING_REVIEW
+    review._execute_fn = lambda _job, _chosen: None
+    review.add_candidate(
+        "album", "Album", "Artist", payload={"album_id": "album-id"})
+    review.add_candidate(
+        "album", "Other", "Artist", payload={"album_id": "other-id"})
+    job_mgr.registry.add(review)
+
+    assert library_scan_state.remove_album("album-id")
+    assert flows.apply_pending_review_removals() == 1
+
+    assert [c["payload"]["album_id"] for c in review.candidates] == ["other-id"]
+    assert generation_state.pending_review_removals() == []
+
+
+def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
+    """Queue and History read the job archive, which only the web writes, so a
+    finished terminal download left no trace on the activity record at all."""
+    from qobuz_librarian.queue import executor
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+
+    executor._record_terminal_downloads([{
+        "album": {
+            "id": "terminal-album",
+            "title": "GAK",
+            "artist": {"name": "Aphex Twin"},
+        },
+        "imported": True,
+        "n_ok": 4,
+        "elapsed_s": 18,
+    }])
+
+    rows = [
+        row for row in job_persistence.history_page(50, 0, bulk=False)
+        if row["album_id"] == "terminal-album"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["artist"] == "Aphex Twin"
+    assert rows[0]["status"] == "done"
+    assert rows[0]["finished_at"] - rows[0]["created_at"] == 18

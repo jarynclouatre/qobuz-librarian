@@ -53,6 +53,7 @@ from qobuz_librarian.queue.executor import (
     _execute_download_queue,
     _refresh_review_state_after_downloads,
 )
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -178,12 +179,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                     f"(siblings preserved; deletion needs interactive confirm)"))
             else:
                 while True:
-                    try:
-                        rr = input(fmt(C.CYAN,
-                            f"    Pick [1-{len(dirs)}, enter=skip]: "
-                        )).strip()
-                    except EOFError:
-                        rr = ""
+                    rr = ask(f"    Pick [1-{len(dirs)}, enter=skip]: ",
+                             lower=False)
                     if not rr:
                         break
                     if rr.isdigit() and 1 <= int(rr) <= len(dirs):
@@ -429,9 +426,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 _q = (f"    Download {len(missing)} missing track(s)? "
                       f"[y/N/a=yes-rest{_flush_hint}/s=stop]: ")
                 _flush_stdin()
-                try:
-                    answer = input(fmt(C.CYAN, _q)).strip().lower()
-                except EOFError:
+                answer = ask(_q)
+                if answer is None:
                     answer = "n"
                     break
                 if answer == "d" and flush_callback is not None:
@@ -662,11 +658,9 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         return 0, False
 
     _flush_stdin()
-    try:
-        raw = input(fmt(C.CYAN,
-            "  Pick numbers to download (e.g. 1,3,5-7 / a=all / blank=skip): ")).strip()
-    except EOFError:
-        raw = ""
+    raw = ask(
+        "  Pick numbers to download (e.g. 1,3,5-7 / a=all / blank=skip): ",
+        lower=False) or ""
     picks = parse_number_list(raw, len(ordered))
     if not picks:
         return 0, False

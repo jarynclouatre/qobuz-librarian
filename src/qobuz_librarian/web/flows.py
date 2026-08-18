@@ -889,6 +889,43 @@ def prune_library_review_candidates(album):
     return dropped
 
 
+def _library_review_lists(album_id):
+    states = (job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)
+    for job in job_mgr.registry.all():
+        if (getattr(job, "execute_kind", "") not in ("library", "new_releases")
+                or job.status not in states):
+            continue
+        if any(str((c.get("payload") or {}).get("album_id") or "") == album_id
+               for c in list(job.candidates)):
+            return True
+    return False
+
+
+def apply_pending_review_removals(state=None):
+    """Take albums downloaded in the terminal off the living Library review.
+
+    A terminal run shares the library, the settings and the run lock, but the
+    review is held in memory by whichever process serves the web UI, so it
+    cannot reach it. It records what it took off the saved missing list; this
+    applies those records, so the page cannot report an album as both on disk
+    and missing. Records are cleared once no review carries the album, which
+    also covers the web's own downloads: they pruned their review as they ran,
+    so the first pass here just clears them.
+    """
+    pending = generation_state.pending_review_removals(state)
+    if not pending:
+        return 0
+    dropped = 0
+    settled = []
+    for album_id in pending:
+        dropped += prune_library_review_candidates({"id": album_id})
+        if not _library_review_lists(album_id):
+            settled.append(album_id)
+    if settled:
+        generation_state.clear_review_removals(settled)
+    return dropped
+
+
 def owned_missing_candidate_ids(job, token, candidate_ids=None):
     """Return selected missing albums whose exact edition is already complete.
 

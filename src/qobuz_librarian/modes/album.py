@@ -32,6 +32,7 @@ from qobuz_librarian.queue.persistence import (
     clear_pending_queue,
     save_pending_queue,
 )
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt
 from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, auth_lost_msg, die
 from qobuz_librarian.ui_cli.logging import log
@@ -260,11 +261,9 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                 f"  ({len(album_queue)} album(s) already in queue; "
                 "enter 'f' to download all)"))
         flush_opt = "  [f]lush queue" if album_queue else ""
-        try:
-            r = input(fmt(C.CYAN,
-                f"  [d]ownload now (default)  [q]ueue for later"
-                f"{flush_opt}  [s]kip: ")).strip().lower()
-        except EOFError:
+        r = ask(f"  [d]ownload now (default)  [q]ueue for later"
+                f"{flush_opt}  [s]kip: ")
+        if r is None:
             r = "s"
 
         if r in ("q", "queue") or (r in ("f", "flush") and album_queue):

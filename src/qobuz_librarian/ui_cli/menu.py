@@ -1,6 +1,7 @@
 """Interactive session mode picker."""
 import textwrap
 
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, text_width, wrap
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.sentinels import Mode
@@ -62,9 +63,8 @@ def interactive_session_mode():
     _print_choices()
     log.info(fmt(C.WHITE, "    q) Quit"))
     while True:
-        try:
-            r = input(fmt(C.CYAN, "  Choice (Enter = 1): ")).strip().lower()
-        except EOFError:
+        r = ask("  Choice (Enter = 1): ")
+        if r is None:
             return Mode.QUIT
         if r in ("q", "quit", "exit"):
             return Mode.QUIT

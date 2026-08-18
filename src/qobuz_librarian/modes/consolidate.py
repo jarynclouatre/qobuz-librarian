@@ -27,6 +27,7 @@ from qobuz_librarian.library.tags import (
     strip_album_decorations,
 )
 from qobuz_librarian.quality.decision import quality_change_summary
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -1482,11 +1483,10 @@ def consolidate_albums(album, args):
             log.info(fmt(C.WHITE, "    [q] stop consolidation entirely"))
 
             while True:
-                try:
-                    choice = input(fmt(
-                        C.CYAN, "    Choice [d]: ")).strip().lower() or "d"
-                except EOFError:
+                choice = ask("    Choice [d]: ")
+                if choice is None:
                     choice = "k"
+                choice = choice or "d"
                 if choice == "s":
                     print_per_track_consolidation(summary)
                     continue
@@ -1503,10 +1503,7 @@ def consolidate_albums(album, args):
                             "    Type 'DELETE' to confirm a possible quality "
                             f"loss on {risky} track(s):",
                         ))
-                        try:
-                            typed = input(fmt(C.CYAN, "    > ")).strip()
-                        except EOFError:
-                            typed = ""
+                        typed = ask("    > ", lower=False)
                         if typed != "DELETE":
                             log.info(fmt(
                                 C.GRAY, "    Confirmation not given. Skipped."))

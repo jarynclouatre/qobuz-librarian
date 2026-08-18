@@ -327,10 +327,23 @@ def prune_missing(force: bool = False) -> int:
     return len(gone)
 
 
-def write_count() -> int:
-    """How many times the table has changed. A caller memoizing a view of these
-    rows compares this to know its numbers are still the stored ones."""
-    return _writes
+def store_stamp():
+    """A value that changes whenever the stored rows may have.
+
+    A caller memoizing a view of these rows compares this to know its numbers
+    are still the stored ones. This process's own write count is not enough on
+    its own: a terminal run writes the same file from another process, and
+    SQLite's data_version is what moves when it does.
+    """
+    version = 0
+    if _ensure():
+        try:
+            row = _conn().execute("PRAGMA data_version").fetchone()
+            version = row[0] if row else 0
+        except sqlite3.Error as e:
+            vlog(f"flac cache stamp read failed: {e}")
+            _handle_db_error(e)
+    return (_writes, version)
 
 
 def census():

@@ -393,7 +393,8 @@ def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
     assert "Cleared the leftover" in caplog.text
 
 
-def test_clearing_a_leftover_is_not_reported_as_a_failure(monkeypatch, capsys):
+def test_clearing_a_leftover_is_not_reported_as_a_failure(
+        monkeypatch, capsys, caplog):
     """Clearing a staged leftover can leave the rest of the recovery to
     reconcile on the next pass. Judging that by the process-wide status printed
     "could not be verified safely" over a decision that had just succeeded, and
@@ -467,8 +468,86 @@ def test_clearing_a_leftover_is_not_reported_as_a_failure(monkeypatch, capsys):
     with _pytest.raises(SystemExit) as stopped:
         cli.acquire_run_lock()
 
-    said = " ".join(capsys.readouterr().err.split())
+    said = " ".join((capsys.readouterr().err + " " + caplog.text).split())
     assert stopped.value.code == 1
     assert "Cleared the leftover" in said
     assert "Restart Qobuz Librarian to finish settling it" in said
     assert "could not be verified safely" not in said
+
+
+def test_a_settled_leftover_does_not_report_the_stale_verdict(
+        monkeypatch, caplog):
+    """Clearing a staged leftover succeeds, then the whole recovery reconciles
+    a pass later. Judging the run by the read taken before the settlement
+    printed "could not be verified safely" and exited 1 over a clear that had
+    just worked, pointing the user at a recovery reason nothing had recorded.
+    """
+    from types import SimpleNamespace
+
+    from qobuz_librarian import cli, run_lock
+    from qobuz_librarian.queue import journal as queue_state
+    from qobuz_librarian.queue import startup_recovery
+    from qobuz_librarian.queue.startup_recovery import (
+        BlockedItemSettlementResult,
+        BlockedItemSettlementStatus,
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+
+    class Lease:
+        closed = False
+
+        def intact(self):
+            return not self.closed
+
+        def close(self):
+            self.closed = True
+
+    lease = Lease()
+    item = SimpleNamespace(operation_id="op-3", item_id="item-3")
+    reads = {"n": 0}
+
+    def _recover(_authority):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                items=(SimpleNamespace(
+                    operation_id="op-3", item_id="item-3", mode="cli",
+                    phase=queue_state.QueuePhase.BLOCKED),),
+                reason="queue-item-blocked",
+            )
+        if reads["n"] == 2:
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                items=(SimpleNamespace(
+                    operation_id="op-3", item_id="item-3", mode="cli",
+                    phase=queue_state.QueuePhase.RESOLVING),),
+                reason="queue-item-blocked",
+            )
+        return StartupRecoveryResult(StartupRecoveryStatus.CLEAR)
+
+    def _settle(**_kwargs):
+        return BlockedItemSettlementResult(
+            BlockedItemSettlementStatus.RETRYABLE, "",
+        )
+
+    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
+    monkeypatch.setattr(
+        cli,
+        "_cli_blocked_settlement_binding",
+        lambda result: (
+            item,
+            "Aphex Twin - Music From The Merch Desk",
+            startup_recovery.SETTLEABLE_STAGED_LEFTOVER,
+        ),
+    )
+    monkeypatch.setattr(startup_recovery, "settle_blocked_item", _settle)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "c")
+
+    with caplog.at_level("INFO", logger="qobuz_librarian"):
+        assert cli.acquire_run_lock() is lease
+    assert lease.closed is False
+    assert "Cleared the leftover" in caplog.text
+    assert "could not be verified safely" not in caplog.text

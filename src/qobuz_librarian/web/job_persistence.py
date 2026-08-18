@@ -37,6 +37,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Optional
@@ -377,6 +378,61 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
         quality_shortfall_json,
         str(getattr(job, "edition", "") or "").strip(),
     )
+
+
+_TERMINAL_DOWNLOAD_SQL = (
+    "INSERT INTO jobs "
+    "(id, title, artist, album_id, kind, status, summary, created_at, "
+    " finished_at, edition) "
+    "VALUES (?,?,?,?,'download','done',?,?,?,?)"
+)
+
+
+def record_terminal_download(
+    *,
+    album_id,
+    artist,
+    title,
+    summary,
+    started_at,
+    finished_at,
+    edition="",
+) -> bool:
+    """Add one finished terminal download to the activity record.
+
+    History reads this table, and the table is only ever written from live Job
+    objects, which a terminal run does not have. Downloads made in the terminal
+    were therefore missing from the record entirely. The row carries what a
+    History entry shows and nothing that would offer a retry the row cannot
+    service.
+    """
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        return False
+    init()
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        values = (
+            str(title or ""), str(artist or ""), album_id, str(summary or ""),
+            started_at, finished_at, str(edition or "").strip(),
+        )
+        for _ in range(3):
+            try:
+                conn.execute(
+                    _TERMINAL_DOWNLOAD_SQL, (uuid.uuid4().hex[:8], *values))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                # Same eight-character id space the web uses; a collision is
+                # rare enough to just draw again.
+                _rollback_failed_write(conn)
+            except sqlite3.Error as e:
+                _rollback_failed_write(conn)
+                _note_write_failure(f"record terminal download {album_id}", e)
+                return False
+    return False
 
 
 def _persist_locked(job, *, admission=False) -> bool:

@@ -10,6 +10,7 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.library import migrate as engine
 from qobuz_librarian.library.scanner import HAVE_MUTAGEN
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, format_size, section, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL
 from qobuz_librarian.ui_cli.logging import log
@@ -17,10 +18,7 @@ from qobuz_librarian.ui_cli.prompts import confirm
 
 
 def _prompt_path(msg: str) -> str:
-    try:
-        return input(fmt(C.CYAN, msg)).strip()
-    except EOFError:
-        return ""
+    return ask(msg, lower=False) or ""
 
 
 def _resolve_paths(args):
@@ -177,10 +175,7 @@ def run_migrate_mode(args):
             f"  ⚠  The destination is short on space (needs ~{format_size(need)}, "
             f"only {format_size(free)} free); a move that runs out leaves the "
             "library half-relocated."))
-        try:
-            ack = input(fmt(C.RED, "  Type 'yes' to migrate anyway: ")).strip().lower()
-        except EOFError:
-            ack = ""
+        ack = ask("  Type 'yes' to migrate anyway: ", colour=C.RED) or ""
         if ack != "yes":
             log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
             return 0

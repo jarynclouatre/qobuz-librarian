@@ -16,6 +16,7 @@ from qobuz_librarian.library.catalog import (
 from qobuz_librarian.quality import decision as quality_decision
 from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, term_width, truncate
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import MORE, URL_QUERY
@@ -245,10 +246,9 @@ def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, strict=False):
         return True
     suffix = " [Y/n]: " if default_yes else " [y/N]: "
     while True:
-        try:
-            r = input(fmt(C.CYAN, msg + suffix)).strip().lower()
-        except EOFError:
-            # Closed stdin is not consent - and not an answer either.
+        r = ask(msg + suffix)
+        if r is None:
+            # A closed input is not consent, and not an answer either.
             return on_eof
         if not r:
             return default_yes
@@ -306,10 +306,8 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
     hint = (f"1-{len(albums)}, m=more, q/Enter=cancel" if can_load_more
             else f"1-{len(albums)}, q/Enter=cancel")
     while True:
-        try:
-            r = input(fmt(C.CYAN, f"  Pick a number ({hint}): ")).strip().lower()
-        except EOFError:
-            print(fmt(C.GRAY, "  stdin closed - cancelling."))
+        r = ask(f"  Pick a number ({hint}): ")
+        if r is None:
             return None
         if r in ("q", "quit", "exit", ""):
             return None
@@ -372,9 +370,10 @@ def interactive_query():
     section("Album mode - interactive query", color=C.CYAN)
     print()
     while True:
-        try:
-            line = input(fmt(C.CYAN, "  Artist, free-text query, or Qobuz URL (q=cancel, ?=recent): ")).strip()
-        except EOFError:
+        line = ask(
+            "  Artist, free-text query, or Qobuz URL (q=cancel, ?=recent): ",
+            lower=False)
+        if line is None:
             return None
         if not line or line.lower() in ("q", "quit", "exit"):
             return None
@@ -394,9 +393,10 @@ def interactive_query():
         # Inner loop so '?' here re-asks for the album, not the artist -
         # otherwise the user loses the artist name they just typed.
         while True:
-            try:
-                album = input(fmt(C.CYAN, "  Album (blank=search above text, q=cancel, ?=recent): ")).strip()
-            except EOFError:
+            album = ask(
+                "  Album (blank=search above text, q=cancel, ?=recent): ",
+                lower=False)
+            if album is None:
                 return None
             if album.lower() in ("q", "quit", "exit"):
                 return None
@@ -483,10 +483,9 @@ def prompt_edition_pick(current_album, current_extras_count, candidates,
     log.info("")
     hint = (f"1-{len(candidates)} to switch, {keep_idx}/Enter to keep current, q to skip")
     while True:
-        try:
-            r = input(fmt(C.CYAN, f"{label_prefix}  Pick edition ({hint}): ")).strip().lower()
-        except EOFError:
-            # Closed stdin without --yes is not consent. Default to keep current.
+        r = ask(f"{label_prefix}  Pick edition ({hint}): ")
+        if r is None:
+            # A closed input without --yes is not consent. Keep the current one.
             return None, None
         if r in ("q", "quit", "exit", "s", "skip"):
             return None, None
@@ -573,9 +572,8 @@ def prompt_artist_name():
     """Interactive prompt for artist name; offers to list available artists."""
     print()
     while True:
-        try:
-            name = input(fmt(C.CYAN, "  Artist (q=cancel, ?=library): ")).strip()
-        except EOFError:
+        name = ask("  Artist (q=cancel, ?=library): ", lower=False)
+        if name is None:
             return None
         if not name or name.lower() in ("q", "quit", "exit"):
             return None

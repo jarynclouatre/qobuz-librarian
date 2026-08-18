@@ -62,6 +62,7 @@ from qobuz_librarian.queue.executor import (
     _refresh_review_state_after_downloads,
 )
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
+from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, die
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -1545,10 +1546,9 @@ def _prompt_library_album_for_repair(args, token):
     log.info(fmt(C.GRAY, "  Tip: '?' lists artists; '*' scans your whole library."))
     artist_dir = None
     while artist_dir is None:
-        try:
-            r = input(fmt(C.CYAN,
-                "  Artist (blank/q to return, '*' for whole library): ")).strip()
-        except EOFError:
+        r = ask("  Artist (blank/q to return, '*' for whole library): ",
+                lower=False)
+        if r is None:
             return None, None
         if not r or r.lower() in ("q", "quit", "exit"):
             return None, None
@@ -1583,10 +1583,8 @@ def _prompt_library_album_for_repair(args, token):
         log.info(fmt(C.WHITE, f"   {i:>3}.  {truncate(d.name, 72)}"))
 
     while True:
-        try:
-            r = input(fmt(C.CYAN,
-                f"  Pick album (1-{len(albums)}, q to cancel): ")).strip()
-        except EOFError:
+        r = ask(f"  Pick album (1-{len(albums)}, q to cancel): ", lower=False)
+        if r is None:
             return None, None
         if not r or r.lower() in ("q", "quit", "exit"):
             return None, None
@@ -2498,13 +2496,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         return "skipped"
 
     if not args.yes:
-        try:
-            r = input(fmt(C.CYAN,
-                f"\n  Re-download {len(verified_truncated)} "
-                "ISRC-verified track(s)? [y/N]: ")
-            ).strip().lower()
-        except EOFError:
-            r = ""
+        r = ask(f"\n  Re-download {len(verified_truncated)} "
+                "ISRC-verified track(s)? [y/N]: ") or ""
         if r not in ("y", "yes"):
             log.info(fmt(C.GRAY, "  Skipped."))
             return "skipped"

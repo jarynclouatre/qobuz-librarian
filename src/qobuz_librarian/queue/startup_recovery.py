@@ -95,6 +95,9 @@ _LIBRARY_BACKUP_KINDS = frozenset({
 POST_IMPORT_RELOCATION_LOG_ENTRY = (
     "Post-import folder-move recovery needs attention"
 )
+BLOCKED_DOWNLOAD_LOG_ENTRY = (
+    "Interrupted download recovery needs attention"
+)
 
 
 class StartupRecoveryStatus(str, Enum):

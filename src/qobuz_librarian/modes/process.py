@@ -1882,5 +1882,6 @@ def process_album(album, args, *, allow_force=True, label=None,
         "quality_verdict": quality_verdict,
         "consolidation_interrupted": consolidation_interrupted,
         "consolidated_tracks_removed": n_consolidated,
+        "elapsed_s": int(elapsed),
         **downsample_outcome,
     }
