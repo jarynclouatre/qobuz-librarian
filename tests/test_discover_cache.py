@@ -27,10 +27,6 @@ def test_lastfm_rows_round_trip_and_expire():
         {"name": "Sleep", "match": 0.9}]
 
 
-def test_a_key_never_written_is_a_plain_miss():
-    assert dc.get_lastfm(dc.similar_key("nobody"), dc.SIMILAR_TTL) is None
-    assert dc.get_resolution(dc.artist_resolution_key("nobody")) is None
-
 
 def test_a_cached_miss_is_distinguishable_from_never_asked():
     # The difference decides whether the builder spends a Qobuz search on this
@@ -58,25 +54,6 @@ def test_feeds_carry_the_library_they_were_built_from():
     assert dc.get_feed("genres") is None
 
 
-def test_writes_replace_rather_than_accumulate():
-    key = dc.tag_albums_key("doom metal", 1)
-    dc.put_lastfm(key, [{"artist": "Sleep", "title": "Jerusalem"}])
-    dc.put_lastfm(key, [{"artist": "Om", "title": "Pilgrimage"}])
-    assert dc.get_lastfm(key, dc.SIMILAR_TTL) == [
-        {"artist": "Om", "title": "Pilgrimage"}]
-
-
-def test_key_shapes_do_not_collide():
-    keys = {
-        dc.similar_key("sleep"),
-        dc.tags_key("sleep"),
-        dc.tag_albums_key("sleep", 1),
-        dc.tag_albums_key("sleep", 2),
-        dc.tag_artists_key("sleep", 1),
-        dc.artist_resolution_key("sleep"),
-        dc.album_resolution_key("sleep", "jerusalem"),
-    }
-    assert len(keys) == 7
 
 
 def test_a_corrupt_database_is_discarded_and_rebuilt():

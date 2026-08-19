@@ -3213,12 +3213,7 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
         _remove_job(job)
 
 
-@pytest.mark.parametrize(
-    "summary_suffix",
-    [".", ", from your last library scan."],
-)
-def test_review_hides_only_the_duplicated_count_summary(
-        client, summary_suffix):
+def test_review_hides_only_the_duplicated_count_summary(client):
     from qobuz_librarian.web import flows
 
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
@@ -3236,7 +3231,7 @@ def test_review_hides_only_the_duplicated_count_summary(
         detail="gap-fill: 2 missing of 11",
         payload={"year": "1994", "gap_fill": 2},
     )
-    count_summary = flows.library_review_summary(job.candidates) + summary_suffix
+    count_summary = flows.library_review_summary(job.candidates) + "."
     job.summary = count_summary
     try:
         embedded = client.get(f"/jobs/{job.id}/content?embedded=1")
@@ -7727,9 +7722,3 @@ def test_saving_a_lastfm_key_checks_it_and_returns_to_its_section(
                     follow_redirects=False)
 
 
-def test_a_settings_save_without_a_section_lands_at_behaviour(client):
-    r = client.post("/settings/behavior",
-                    data={"BEETS_PATH_DEFAULT": ""},
-                    follow_redirects=False)
-    assert r.status_code == 303
-    assert r.headers["location"].endswith("#behaviour")

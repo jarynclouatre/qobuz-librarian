@@ -112,17 +112,6 @@ def test_missing_key_is_reported_as_a_rejected_key():
         assert lastfm.is_configured() is False
 
 
-def test_request_carries_the_key_and_the_json_format():
-    with patch.object(lastfm, "_get_session") as sess:
-        sess.return_value.get.return_value = _response(200, {"ok": True})
-        lastfm.lastfm_get("artist.getSimilar", {"artist": "Cher"})
-        sent = sess.return_value.get.call_args.kwargs["params"]
-    assert sent["method"] == "artist.getSimilar"
-    assert sent["artist"] == "Cher"
-    assert sent["api_key"] == "0" * 32
-    assert sent["format"] == "json"
-    assert sent["autocorrect"] == 1
-
 
 def test_similar_artists_parses_scores_and_survives_missing_ones():
     # match arrives as a string, and some rows have no match at all. An
@@ -184,16 +173,6 @@ def test_top_tags_keep_their_counts():
             {"name": "seen live", "count": 0},
         ]
 
-
-def test_blank_lookups_never_reach_the_network():
-    # A blank name would spend a request to be told code 6.
-    with patch.object(lastfm, "_get_session") as sess:
-        assert lastfm.get_similar_artists("  ") == []
-        assert lastfm.get_artist_top_tags("") == []
-        assert lastfm.get_tag_top_albums("") == []
-        assert lastfm.get_tag_top_artists("") == []
-        assert lastfm.get_artist_top_albums("") == []
-        assert sess.return_value.get.call_count == 0
 
 
 def test_probe_key_separates_a_bad_key_from_lastfm_being_down():

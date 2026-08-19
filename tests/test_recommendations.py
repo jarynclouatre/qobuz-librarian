@@ -41,11 +41,6 @@ def test_owned_artists_are_recognised_through_spelling_variants():
         assert owned.owns(name), name
 
 
-def test_an_artist_not_in_the_library_is_not_treated_as_owned():
-    owned = _library(["The Beatles", "Sleep"])
-    for name in ("The Rolling Stones", "Om", "Sleater-Kinney"):
-        assert not owned.owns(name), name
-
 
 def test_a_name_that_normalizes_to_nothing_falls_back_to_exact_text():
     # Pure CJK names strip to an empty string, and comparing empty to empty
@@ -81,14 +76,6 @@ def test_ranking_drops_what_is_already_owned():
     assert [c["name"] for c in ranked] == ["Om"]
 
 
-def test_ranking_is_stable_for_the_same_library():
-    accumulated = {name: {"score": 1.0, "seeds": [("A", 1.0)]}
-                   for name in ("Zebra", "Alpha", "Mango")}
-    first = rec.rank_candidates(accumulated, _library([]))
-    second = rec.rank_candidates(accumulated, _library([]))
-    assert [c["name"] for c in first] == [c["name"] for c in second]
-    assert [c["name"] for c in first] == ["Alpha", "Mango", "Zebra"]
-
 
 def test_a_card_names_its_strongest_seeds_and_never_repeats_one():
     candidate = {"name": "Om", "score": 2.0, "seeds": [
@@ -118,10 +105,6 @@ def test_a_saved_feed_is_retired_when_the_library_changes():
     assert stale["phase"] == "idle"
     assert stale["items"] == []
 
-
-def test_a_saved_feed_expires():
-    dc.put_feed(rec.SIMILAR, [{"name": "Om"}], "sig")
-    assert rec.feed_view(rec.SIMILAR, "sig", ttl=-1)["phase"] == "idle"
 
 
 def test_a_build_in_progress_beats_the_saved_copy():

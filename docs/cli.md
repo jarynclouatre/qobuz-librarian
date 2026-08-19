@@ -29,6 +29,14 @@ docker compose run --rm -it qobuz-librarian cli --album-gaps
 docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
+Settings has no menu entry; the flag is the only way in. It writes to the same
+store the web Settings page saves to, and `--dry-run` prints the current values
+without saving:
+
+```bash
+docker compose run --rm -it qobuz-librarian cli --settings
+```
+
 ## Common unattended forms
 
 ```bash

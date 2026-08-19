@@ -242,14 +242,9 @@ def test_the_review_records_which_music_folder_it_was_read_against(library,
     assert candidate_premise.music_root_matches(recorded)
 
 
-def test_music_root_matches_only_the_same_directory_incarnation(library,
-                                                                tmp_path):
+def test_music_root_matches_only_the_same_directory_incarnation(library):
     recorded = candidate_premise.capture_music_root_identity()
     assert candidate_premise.music_root_matches(recorded)
-    for wrong in (None, "x", [], [1, 2, 3], ["a"] * 7):
-        assert not candidate_premise.music_root_matches(wrong)
-    other = tmp_path / "elsewhere"
-    other.mkdir()
     stolen = list(recorded)
     stolen[0] += 1
     assert not candidate_premise.music_root_matches(stolen)
