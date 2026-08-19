@@ -6,8 +6,8 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 
 This release makes the app honest about what it is doing, and stops a handful
 of situations where one stuck album or one wrong sign-in held up everything
-else. It also removes the terminal's new-release feature, which is why the
-minor number moves.
+else. It also removes the terminal's new-release feature and a set of tuning
+settings, which is why the minor number moves.
 
 - A collection backup is written after every library scan: a readable JSON list of every artist, album and track, kept in a folder a sync tool can watch. Settings names the folder, writes a backup on demand and hands you a copy. A scan that finds the library suddenly empty or sharply smaller keeps the last backup instead and says so. Exact Qobuz album links are recorded by a full rescan; run Force full rescan once after updating to get them into the backup.
 - Restore from a backup, under Settings, reads a backup file and opens one review of every album in it that is missing from your library, each matched on Qobuz by its saved link, its track codes, then its name. Nothing downloads until the review is confirmed, and a review built against one music folder refuses to run against another, so an unmounted drive cannot be rebuilt onto the wrong disk.
@@ -23,6 +23,7 @@ minor number moves.
 - The offline page is honest about what it reached. Retry says whether it got through, the page says your downloads and your review are unaffected, and the app returns to the page you were on by itself once the server answers. An action that fails while offline no longer replaces the page you were reading.
 - A live scan says when its stream has gone quiet and reconnects instead of sitting still, and background checks stop raising errors you never asked for. The service worker is registered on the sign-in and setup pages too, and a new release refreshes the offline files rather than serving the old ones.
 - Settings says what it actually saved, keeps the defaults open when a save warns about them, and stops a cleared field hiding the value your Compose file is still supplying. It also says which downsample setting covers new downloads, and which settings a 16-bit download quality switches off.
+- The tuning settings that only restated the app's own internals are gone. The fuzzy-match cutoffs, the search and catalogue limits, the beets retry pacing, the web request timeouts, and the job-log and live-stream sizes are fixed values now, so a `.env` that sets one of them is ignored. Everything with a control on the Settings page is untouched.
 - Library and Repair report their runs honestly. A refresh says what it did and stays on the Library page when it fails, a scan that could not save everything says so, a review gone stale points at the page that rebuilds it, and dismissed albums are counted the same way on every screen. Bring all back only brings back what the Dismissed filter is showing, and asks first.
 - Held staging files, kept backups and kept hi-res originals can all be cleared from Diagnostics, Remove is set apart from Restore, and old upgrade backups now expire without waiting for a restart.
 - Downsample counts the albums it finished rather than the albums it started, names the album and track it could not rewrite, stops promising kept originals when nothing was converted, and lets its first keep-or-delete question go back to the review.
