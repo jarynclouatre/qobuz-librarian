@@ -2,11 +2,29 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [0.13.3] - Unreleased
+## [0.14.0] - Unreleased
 
-This patch keeps remembered state and live interface state in step with what
-the app is actually doing.
+This release makes the app honest about what it is doing, and stops a handful
+of situations where one stuck album or one wrong sign-in held up everything
+else. It also removes the terminal's new-release feature, which is why the
+minor number moves.
 
+- Your Qobuz email and API token were being written into the activity log, the saved job records and the app's own log file whenever a call to Qobuz failed. They are masked now at the point anything is written, and records saved before this release are cleaned up when the app starts. This reaches the app's own records only, not the container logs your Docker host keeps, so if you have ever shared a log file or a screenshot of a failed download, sign out of Qobuz everywhere and sign back in to retire the old token.
+- An album Qobuz cannot finish serving no longer blocks everything behind it. Downloads and scans used to stay paused until someone settled it by hand, and Retry only repeated the same request. The partial download is discarded, nothing incomplete reaches your library, and the queue carries on. Giving up on an interrupted download is marked as something that cannot be undone, and the paused notice names the album that caused it.
+- Cancel is withdrawn while beets is importing, because that stage runs to its own end. A stop asked for there used to be accepted and then ignored; if one still slips through, the job says so instead of reporting a plain Done.
+- A password you set from Settings survives a restart instead of quietly handing the login back to the password in your Compose file. Editing the environment still resets a forgotten login.
+- A stranger's failed sign-ins can no longer lock you out. Behind a reverse proxy every visitor can arrive as the same address, so someone else's guesses counted against you. The app now says so at startup and names the setting that fixes it, a correct password is still checked while a wait is running, and a browser that is already signed in is never counted at all.
+- A refused request no longer answers a signed-out visitor with the whole app shell, navigation and a Log out button and no way back to signing in. The sign-in page also names the password reset route.
+- A download made in the terminal now appears in Queue and History, updates the on-disk count, and comes off an open Library review instead of being offered to you again.
+- The terminal has a Settings mode, reaches new releases from its menu, says when artist mode is listing albums you dismissed, and refuses to sit waiting at a prompt when nothing is there to answer it.
+- The offline page is honest about what it reached. Retry says whether it got through, the page says your downloads and your review are unaffected, and the app returns to the page you were on by itself once the server answers. An action that fails while offline no longer replaces the page you were reading.
+- A live scan says when its stream has gone quiet and reconnects instead of sitting still, and background checks stop raising errors you never asked for. The service worker is registered on the sign-in and setup pages too, and a new release refreshes the offline files rather than serving the old ones.
+- Settings says what it actually saved, keeps the defaults open when a save warns about them, and stops a cleared field hiding the value your Compose file is still supplying. It also says which downsample setting covers new downloads, and which settings a 16-bit download quality switches off.
+- Library and Repair report their runs honestly. A refresh says what it did and stays on the Library page when it fails, a scan that could not save everything says so, a review gone stale points at the page that rebuilds it, and dismissed albums are counted the same way on every screen. Bring all back only brings back what the Dismissed filter is showing, and asks first.
+- Held staging files, kept backups and kept hi-res originals can all be cleared from Diagnostics, Remove is set apart from Restore, and old upgrade backups now expire without waiting for a restart.
+- Downsample counts the albums it finished rather than the albums it started, names the album and track it could not rewrite, stops promising kept originals when nothing was converted, and lets its first keep-or-delete question go back to the review.
+- The app says when the data folder has stopped being writable, shows the reason writes are paused on every tool page, and puts storage errors into plain language in the download queue. A beets path template that would file music outside your library is refused, and so is a migration scan pointed at an empty source folder.
+- Queue and History rows use the same compact shape on a phone, three more touch targets reach 44 px, and the grid corner checkbox lines up on a narrow screen. The app ships a dedicated maskable icon at 192 and 512 px and no longer offers one as maskable that was never drawn for it.
 - Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, except for a catalogue too large to save, and new assets invalidate the saved result snapshot.
 - Search selections are reconciled with the controls that still exist, and Hide owned stays with its query. Real downloads read Queued, unapproved albums found by the current Library scan read In current scan, and open results update as the Queue changes. Queue updates no longer revive saved choices past the 30-minute limit.
 - Repair, Library, New Releases, Upgrade, Downsample, Lyrics, and Migration job pages use the same owning tool for navigation, back links, cancellation, and terminal return behavior. A completed or discarded child no longer pins a primary tab to its old job page.
