@@ -317,7 +317,7 @@ def list_library_artists(walk_errors=None):
         if walk_errors is None:
             raise
         walk_errors.append(f"{config.MUSIC_ROOT}: {e}")
-        log.info(f"  ⚠  Couldn’t list MUSIC_ROOT: {e}.")
+        log.info(f"  ⚠  Couldn't list MUSIC_ROOT: {e}.")
         return []
     try:
         for d in entries:
@@ -338,7 +338,7 @@ def list_library_artists(walk_errors=None):
         if walk_errors is None:
             raise
         walk_errors.append(f"{config.MUSIC_ROOT}: {e}")
-        log.info(f"  ⚠  Couldn’t list MUSIC_ROOT: {e}.")
+        log.info(f"  ⚠  Couldn't list MUSIC_ROOT: {e}.")
     if empties:
         names = ", ".join(sorted(empties)[:5])
         more = f" (+{len(empties) - 5} more)" if len(empties) > 5 else ""

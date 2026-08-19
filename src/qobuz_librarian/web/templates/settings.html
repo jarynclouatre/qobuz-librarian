@@ -121,8 +121,8 @@
 </div>
 {% elif error == "unreachable" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Qobuz couldn&rsquo;t be reached to check this token, so it was not saved
-  and the one you already have is still in use. Try again when you&rsquo;re back
+  <span>Qobuz couldn't be reached to check this token, so it was not saved
+  and the one you already have is still in use. Try again when you're back
   online.</span>
 </div>
 {% elif error == "envrejected" %}
@@ -133,9 +133,9 @@
 </div>
 {% elif error == "envunreachable" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Qobuz couldn&rsquo;t be reached, so your token could not be checked.
+  <span>Qobuz couldn't be reached, so your token could not be checked.
   Nothing was changed; it comes from your environment. Try again when
-  you&rsquo;re back online.</span>
+  you're back online.</span>
 </div>
 {% elif error == "empty" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
@@ -189,7 +189,7 @@
     {% if auth_token_set and not downloader_ready %}
     <div class="ql-notice ql-notice-warning">
       <span>Your token can use Search and catalogue scans. Downloads also need
-      your Qobuz email or user ID; add it below when you are ready.</span>
+      your Qobuz email or user ID; add it below.</span>
     </div>
     {% endif %}
     {% if not auth_token_set %}
@@ -461,8 +461,9 @@
     </div>
     {% endif %}
     <p class="ql-form-note">
-      Bringing over an existing collection? <a href="/migrate" class="ql-inline-link ql-inline-link-hit">Library migration</a>
-      copies or moves it into the <code>Artist/Album (Year)</code> layout as a one-time, reviewed step.
+      <a href="/migrate" class="ql-inline-link ql-inline-link-hit">Library migration</a>
+      copies or moves an existing collection into the <code>Artist/Album (Year)</code> layout as a
+      one-time, reviewed step.
     </p>
   </div>
 </section>
@@ -481,7 +482,7 @@
         <input type="hidden" name="mode" value="missing_albums">
         <input type="hidden" name="return_to" value="/settings">
         <button type="submit" name="force_full" value="1" class="ql-btn ql-btn-sm ql-btn-secondary"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-                data-confirm="Re-scan every artist folder from scratch? This ignores the unchanged-folder cache, so it takes as long as a first scan. Use it after large manual changes to your files. You'll land on the Library page to watch it."
+                data-confirm="Re-scan every artist folder from scratch? This ignores the unchanged-folder cache, so it takes as long as a first scan. Use it after large manual changes to your files. This opens the Library page."
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>

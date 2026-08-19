@@ -1,15 +1,8 @@
-{# One pause, one sentence, wherever the user is standing. Every tool page
-   greys its own Start button and put the reason in a title attribute, which a
-   phone never shows, so the page said only "no" and never why. Terminal mode
-   already has its own banner on every page, so repeating it here stutters. #}
+{# Terminal mode carries its own banner on every page, so this would repeat it. #}
 {% if writes_paused_notice and not cli_mode %}
 <div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
-  {# No headline: each message already opens by naming its cause and says
-     downloads and scans are paused, so anything above it stutters. #}
   <span class="min-w-0 break-words text-sm">{{ writes_paused_notice.msg }}</span>
-  {# An interrupted terminal download is the one pause the web can lift on its
-     own, so it carries its own control instead of the generic link. Giving up
-     lands on Queue wherever it was clicked from. #}
+  {# The one pause the web can lift itself, so it carries its own control. #}
   {% if writes_paused_notice.settle %}
   <form action="/queue/interrupted/discard" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

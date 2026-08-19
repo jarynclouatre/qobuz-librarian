@@ -1,9 +1,4 @@
-{# What the last refresh left behind: a scan that could not run, and a scan
-   that ran without saving everything. Both stay put until a refresh gets
-   somewhere; they are the answer to "did that button do anything", and the
-   passing note they used to share with a successful refresh was gone before
-   it could be read. Rendered on load, and swapped in by the header poll the
-   moment the scan stops, so they land either way. #}
+{# Rendered on load and swapped in by the header poll, so it lands either way. #}
 <div id="library-refresh-failure"{% if refresh_failure_oob %} hx-swap-oob="true"{% endif %}>
   {% if library_refresh_failure %}
   <div class="ql-notice ql-notice-error"><span>{{ library_refresh_failure }}</span></div>

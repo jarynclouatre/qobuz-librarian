@@ -7988,7 +7988,6 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "poll_url": "/discover",
         "feed_age": "",
         "library_count": 0,
-        "capped": False,
     }
     if not context["qobuz_ready"]:
         return _tr(request, "discover.html", context)
@@ -8006,8 +8005,6 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
             feed = await loop.run_in_executor(
                 None, lambda: recommendations.ensure_genre_feed(token, chosen))
             context["albums"] = _discover_album_views(feed["items"])
-            context["capped"] = (
-                len(context["albums"]) >= recommendations.GENRE_CARDS)
             context["poll_url"] = (
                 "/discover/genres?tag=" + urllib.parse.quote(chosen))
         else:
@@ -8019,8 +8016,6 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
             None, lambda: recommendations.ensure_search_feed(token, query))
         context["feed"] = feed
         context["artists"] = feed["items"]
-        context["capped"] = (
-            len(context["artists"]) >= recommendations.SEARCH_CARDS)
         context["poll_url"] = (
             "/discover/search?q=" + urllib.parse.quote(query))
     elif tab == "favourites":

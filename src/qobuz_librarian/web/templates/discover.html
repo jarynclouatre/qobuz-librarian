@@ -59,7 +59,7 @@
         {%- elif feed.stage == 'catalogue' -%}
         Found {{ feed.checked }} of {{ feed.total }} suggested artists in the Qobuz catalogue.
         {%- else -%}
-        Checked {{ feed.checked }} of {{ feed.total }} artists in your library. Suggestions appear as they are found.
+        Checked {{ feed.checked }} of {{ feed.total }} artists in your library.
         {%- endif -%}
       </span>
       {% elif feed.phase == 'error' and feed.error == 'key' %}
@@ -67,7 +67,7 @@
       <span>Last.fm rejected the API key. <a href="/settings#discover" class="ql-inline-link">Check it in Settings</a>.</span>
       {% elif feed.phase == 'error' and feed.error == 'rate_limited' %}
       <span class="ql-status-chip is-warning">Paused</span>
-      <span>Last.fm is rate-limiting this key. What was found is saved; reopening Discover later continues from there.</span>
+      <span>Last.fm is rate-limiting this key.</span>
       {% elif feed.phase == 'error' and feed.error == 'qobuz' %}
       <span class="ql-status-chip is-error">Qobuz unavailable</span>
       <span>Qobuz could not be reached.</span>
@@ -82,10 +82,10 @@
       <span>Last.fm could not be reached. Try again in a few minutes.</span>
       {% elif discover_tab == 'search' %}
       <span class="ql-status-chip is-info ql-status-chip--wrap">{% if query %}{{ artists | length }} artists like {{ query }}{% else %}Search{% endif %}</span>
-      <span>{% if query %}Artists Qobuz can serve that are not in your library.{% if capped %} That is as far as one search looks.{% endif %}{% else %}Type an artist to see who Qobuz has like them.{% endif %}</span>
+      {% if query %}<span>Artists Qobuz can serve that are not in your library.</span>{% endif %}
       {% elif discover_tab == 'genres' %}
       <span class="ql-status-chip is-info ql-status-chip--wrap">{% if tag %}{{ tag }}{% else %}Genres{% endif %}</span>
-      <span>{% if tag %}{{ albums | length }} albums tagged {{ tag }} that are not in your library.{% if capped %} That is as far as one tag looks.{% endif %}{% else %}The tags most used on the artists you own.{% endif %}</span>
+      {% if tag %}<span>{{ albums | length }} albums tagged {{ tag }} that are not in your library.</span>{% endif %}
       {% elif discover_tab == 'favourites' %}
       <span class="ql-status-chip is-info">Favourites</span>
       <span>{{ albums | length }} albums you saved on Qobuz that are not in your library.</span>
@@ -94,7 +94,6 @@
       <span>Built from {{ library_count }} artists in your library, {{ feed_age }}.</span>
       {% else %}
       <span class="ql-status-chip is-neutral">Nothing yet</span>
-      <span>Nothing has been built for this library yet.</span>
       {% endif %}
     </div>
 
