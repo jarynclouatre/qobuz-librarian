@@ -1583,7 +1583,7 @@
                 + names[names.length - 1];
           }
         }
-        window.qlConfirm("Download " + what + "? They queue now and import into your library.", { action: "Download" }).then(function (ok) {
+        window.qlConfirm("Download " + what + "? Downloads queue now and import into your library.", { action: "Download" }).then(function (ok) {
           if (ok) runBulkDownload(forms);
         });
       }
@@ -2161,7 +2161,7 @@
       }
       var other = otherTabNote();
       return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular(), "unselected " + dismissItemPlural()) + "?"
-        + (other ? " " + other : "") + " You can bring them back from Dismissed.";
+        + (other ? " " + other : "") + " You can bring " + (rest === 1 ? "it" : "them") + " back from Dismissed.";
     }
     function dismissBusyLabel() { return isDownsampleReview ? "Keeping…" : "Dismissing…"; }
     function dismissToast(count) {
@@ -2530,16 +2530,20 @@
       });
     }
 
+    // "the 1 unselected album" counts at the reader; after "the", one of a
+    // thing needs no number.
+    function theCount(n) { return n === 1 ? "" : formatCount(n) + " "; }
+
     // Label each artist action for what it will drop or keep.
     function artistDismissConfirm(who, rest) {
       if (isDownsampleReview) {
-        return "Keep the " + rest + " unselected " +
+        return "Keep the " + theCount(rest) + "unselected " +
           (rest === 1 ? "album" : "albums") + " by " + who +
-          " hi-res? You can downsample them later.";
+          " hi-res? You can downsample " + (rest === 1 ? "it" : "them") + " later.";
       }
-      return "Dismiss the " + rest + " unselected " +
+      return "Dismiss the " + theCount(rest) + "unselected " +
         (rest === 1 ? dismissItemSingular() : dismissItemPlural()) +
-        " by " + who + "? You can bring them back from Dismissed.";
+        " by " + who + "? You can bring " + (rest === 1 ? "it" : "them") + " back from Dismissed.";
     }
     function updateHideLabels() {
       var box = pageBox();
@@ -2870,8 +2874,8 @@
         // and the button agree with what will actually happen.
         var confirmMsg = curQuery()
           ? (isDownsampleReview
-              ? "Keep the " + countLabel(rest, "unselected album", "unselected albums") + " matching your filter hi-res? You can downsample them later."
-              : "Dismiss the " + countLabel(rest, "unselected " + dismissItemSingular(), "unselected " + dismissItemPlural()) + " matching your filter? You can bring them back from Dismissed.")
+              ? "Keep the " + theCount(rest) + (rest === 1 ? "unselected album" : "unselected albums") + " matching your filter hi-res? You can downsample " + (rest === 1 ? "it" : "them") + " later."
+              : "Dismiss the " + theCount(rest) + "unselected " + (rest === 1 ? dismissItemSingular() : dismissItemPlural()) + " matching your filter? You can bring " + (rest === 1 ? "it" : "them") + " back from Dismissed.")
           : dismissConfirm(rest);
         window.qlConfirm(confirmMsg, {
           action: isDownsampleReview ? "Keep hi-res" : "Dismiss",

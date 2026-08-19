@@ -144,7 +144,7 @@
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected files now? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Repair selected files ({count})? Files are replaced only after each new copy verifies."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
-            {%- else %} data-confirm="Download selected albums ({count})? They queue now and import into your library."
+            {%- else %} data-confirm="Download {count} selected album{s}? Downloads queue now and import into your library."
             {%- endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-irreversible{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-irreversible{% endif %}

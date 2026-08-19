@@ -46,7 +46,7 @@
         title="{{ 'Keep unselected hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }}"
         aria-label="{% if job.execute_kind == 'downsample' %}Keep unselected albums by {{ _who }} hi-res{% else %}Dismiss unselected {{ _nouns }} by {{ _who }}{% endif %}"
         {% if _rest > 0 %}
-        data-confirm="{% if job.execute_kind == 'downsample' %}Keep the {{ _rest }} unselected {{ 'album' if _rest == 1 else 'albums' }} by {{ _who }} hi-res? You can downsample them later.{% else %}Dismiss the {{ _rest }} unselected {{ _noun if _rest == 1 else _nouns }} by {{ _who }}? You can bring them back from Dismissed.{% endif %}"
+        data-confirm="{% if job.execute_kind == 'downsample' %}Keep the {% if _rest != 1 %}{{ _rest }} {% endif %}unselected {{ 'album' if _rest == 1 else 'albums' }} by {{ _who }} hi-res? You can downsample {{ 'it' if _rest == 1 else 'them' }} later.{% else %}Dismiss the {% if _rest != 1 %}{{ _rest }} {% endif %}unselected {{ _noun if _rest == 1 else _nouns }} by {{ _who }}? You can bring {{ 'it' if _rest == 1 else 'them' }} back from Dismissed.{% endif %}"
         data-confirm-action="{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss' }}"
         {% endif %}
         hx-post="/jobs/{{ job.id }}/hide"
