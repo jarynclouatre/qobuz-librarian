@@ -365,7 +365,7 @@ QOBUZ_APP_ID   = os.environ.get("QOBUZ_APP_ID",   "798273057")
 # optional: with no key the tab does not exist. The key is a plain read-only
 # API key, but it still goes through _resolve_secret so the _FILE form works
 # and so it is registered for redaction before any request carries it.
-LASTFM_API_BASE = os.environ.get("LASTFM_API_BASE", "https://ws.audioscrobbler.com/2.0/")
+LASTFM_API_BASE = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_API_KEY  = _resolve_secret("LASTFM_API_KEY")
 
 # ── Download quality ──────────────────────────────────────────────────────────
@@ -412,8 +412,8 @@ SEARCH_LIMIT     = 25
 # nothing), so 15. CATALOG_SEARCH_LIMIT is the per-album edition-match depth.
 # SEARCH_LIMIT above is the user-facing Search-page depth and is unaffected.
 # Higher = more matches at the cost of more Qobuz API calls.
-ARTIST_LOOKUP_LIMIT  = _env("ARTIST_LOOKUP_LIMIT",  15)
-CATALOG_SEARCH_LIMIT = _env("CATALOG_SEARCH_LIMIT", 12)
+ARTIST_LOOKUP_LIMIT  = 15
+CATALOG_SEARCH_LIMIT = 12
 # Per-album rip subprocess cap. 0 means no timeout (the rip runs until it
 # finishes or is cancelled); a stray negative folds to 0 rather than killing
 # every download the instant it starts.
@@ -444,7 +444,7 @@ BEETS_TIMEOUT    = _env_num_min("BEETS_TIMEOUT", 600, 0)
 # (see BEETS_RETRY_DIR) so the rest of the queue keeps going.
 BEETS_MAX_ATTEMPTS = 2
 BEETS_RETRY_PAUSE  = 30
-BEETS_RETRY_DIR    = os.environ.get("BEETS_RETRY_DIR", ".beets_retry")
+BEETS_RETRY_DIR    = ".beets_retry"
 # Per-album courtesy pause in the CLI walk. The 429 retry/backoff in
 # api/client is the real throttle backstop, so 0 is fine in practice.
 # Raise via env if Qobuz ever tightens its per-account rate limits.
@@ -466,12 +466,12 @@ REPAIR_LOOKUP_MIN_INTERVAL = 0.05
 # Cache get_album() responses on disk (DATA_DIR/album_cache.db). An album's track
 # list is immutable, so this turns the per-owned-album fetch, the dominant cost
 # of a library scan, into a local lookup on re-scans. Off disables it.
-ALBUM_CACHE_ENABLED = _env_bool("ALBUM_CACHE_ENABLED", True)
+ALBUM_CACHE_ENABLED = True
 
 # Cache parsed FLAC tags on disk (DATA_DIR/flac_cache.db), keyed on file
 # mtime+size, so unchanged files aren't re-parsed by mutagen on every scan. The
 # key self-invalidates when a file is edited/replaced. Off disables it.
-FLAC_CACHE_ENABLED = _env_bool("FLAC_CACHE_ENABLED", True)
+FLAC_CACHE_ENABLED = True
 
 # Cache the repair scan's Qobuz ISRC→track lookups on disk
 # (DATA_DIR/repair_cache.db), so a re-scan, or any album sharing an ISRC,
@@ -536,11 +536,11 @@ JOB_LOG_REPLAY_TAIL  = 500
 # Ceiling on candidates a single review job holds in memory (and persists/
 # rehydrates). A whole-library gap scan on a very large collection could
 # otherwise grow this unbounded; past the cap the scan stops adding and the
-# summary says so, so the box stays safe and the user can narrow or raise it.
+# summary says so, so the box stays safe.
 # The default is high enough that a realistic whole-library scan is never
 # silently truncated (a dense ~2k-artist library produced ~37k gaps). It is a
 # runaway guard, not a routine limit.
-JOB_CANDIDATE_CAP    = _env_num_min("JOB_CANDIDATE_CAP",  100000, 1)
+JOB_CANDIDATE_CAP    = 100000
 POST_JOB_HOOK_TIMEOUT = _env_num_min("POST_JOB_HOOK_TIMEOUT", 10, 1)
 SSE_MAX_WORKERS      = 16
 SSE_HEARTBEAT_TICKS  = 30
@@ -554,16 +554,16 @@ ARTIST_DIR_MATCH_THRESH    = 0.65
 AUTO_SAFE_TITLE_SIM_THRESH = 0.85
 
 # ── Catalog / walk ────────────────────────────────────────────────────────────
-EDITION_SEARCH_API_BUDGET = _env("EDITION_SEARCH_API_BUDGET", 3)
+EDITION_SEARCH_API_BUDGET = 3
 
-LEFTOVER_WARN_LIMIT    = _env("LEFTOVER_WARN_LIMIT",    50)
+LEFTOVER_WARN_LIMIT    = 50
 # Max albums fetched per artist when scanning. 500 truncated prolific artists
 # (the Beatles list ~900 on Qobuz), so a gap scan missed albums; 1000 covers
 # realistic discographies. Truncation past this is logged by the scanner.
 ARTIST_CATALOG_LIMIT   = 1000
-ARTIST_CATALOG_PAGE    = _env_num_min("ARTIST_CATALOG_PAGE",    100, 1)
+ARTIST_CATALOG_PAGE    = 100
 # How many starred albums Discover reads back from Qobuz.
-FAVORITES_LIMIT        = _env_num_min("FAVORITES_LIMIT",        500, 1)
+FAVORITES_LIMIT        = 500
 # Hide releases shorter than this in the "missing albums" step of artist
 # mode (singles/small EPs are usually noise; lower it to 1 to surface them).
 MISSING_ALBUMS_MIN_TRACKS = _env("MISSING_ALBUMS_MIN_TRACKS", 4)

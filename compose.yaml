@@ -162,6 +162,9 @@ services:
       CONSOLIDATE: "${CONSOLIDATE:-false}"
       # Move "Primary, Other/<album>" into "Primary/<album>" after import.
       MIGRATE_MULTI_ARTIST: "${MIGRATE_MULTI_ARTIST:-false}"
+      # Hide the rest of an album from gap scans after you download one track
+      # from it, so a deliberate single is not re-offered as a gap.
+      SUPPRESS_SINGLE_TRACK_GAPS: "${SUPPRESS_SINGLE_TRACK_GAPS:-false}"
       # Cover art placement: sidecar (image beside tracks) | embed | both.
       ARTWORK: "${ARTWORK:-sidecar}"
       # Where the collection backup is written after each library scan, as a
