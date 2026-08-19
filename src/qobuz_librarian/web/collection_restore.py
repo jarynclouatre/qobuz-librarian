@@ -19,7 +19,7 @@ from qobuz_librarian.api.search import (
     get_album,
     search_albums,
 )
-from qobuz_librarian.library import discovery, scanner
+from qobuz_librarian.library import candidate_premise, discovery, scanner
 from qobuz_librarian.library.catalog import (
     dedup_album_versions,
     is_lossless_album,
@@ -206,6 +206,12 @@ def _resolve(album, artist_name, token):
 def scan_restore(job, snapshot, token):
     """Diff an uploaded backup against the library and park one review."""
     scanner.clear_scan_caches()
+    # The music folder this diff is being read against. Kept on the job so a
+    # later approval that finds every row stale can tell "the folder is not
+    # the one this was built against" apart from ordinary churn on disk.
+    root = candidate_premise.capture_music_root_identity()
+    if root is not None and isinstance(job.execute_args, dict):
+        job.execute_args["music_root"] = root
     disk = _OnDisk()
     artists = [a for a in snapshot.get("artists") or [] if isinstance(a, dict)]
     total = len(artists)

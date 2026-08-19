@@ -712,9 +712,11 @@ def _durable_recovery_response(request, message: str):
 
 
 def _ql_notice_html(kind: str, body: str) -> str:
+    # The copy sits in one span: the notice box is a flex row, and bare text
+    # beside a link would be spaced apart as separate flex items.
     return (
         f'<div class="ql-notice ql-notice-{kind}" '
-        f'data-flash data-flash-kind="{kind}">{body}</div>'
+        f'data-flash data-flash-kind="{kind}"><span>{body}</span></div>'
     )
 
 
@@ -8898,10 +8900,10 @@ async def job_approve(request: Request, job_id: str):
                 lambda: _stale_candidate_ids(selected_candidate_snapshot),
             )
             if selected_candidate_ids <= stale_premise_candidate_ids:
+                stale_message = await loop.run_in_executor(
+                    None, lambda: _all_stale_message_for(job))
                 return RedirectResponse(
-                    url=dest + "?error=" + urllib.parse.quote(
-                        _all_candidates_stale_message(job.execute_kind)
-                    ),
+                    url=dest + "?error=" + urllib.parse.quote(stale_message),
                     status_code=303,
                 )
         # Only now that the run is going to happen: the keep-vs-delete answer is
@@ -9189,10 +9191,10 @@ async def job_approve(request: Request, job_id: str):
 
     approved = await loop.run_in_executor(None, _split_and_approve)
     if approved == "all_candidates_stale":
+        stale_message = await loop.run_in_executor(
+            None, lambda: _all_stale_message_for(job))
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
-                _all_candidates_stale_message(job.execute_kind)
-            ),
+            url=dest + "?error=" + urllib.parse.quote(stale_message),
             status_code=303,
         )
     if (isinstance(approved, tuple)
@@ -9309,6 +9311,25 @@ def _all_candidates_stale_message(execute_kind):
     return ("Every selected album changed on disk after this review was "
             "built, or the review is too old to check. Nothing was started. "
             + _rebuild_results_hint(execute_kind))
+
+
+def _all_stale_message_for(job):
+    """The refusal when every selected candidate went stale.
+
+    A restore review records which music-folder incarnation it was read
+    against. When the folder is no longer that one - unmounted, or a different
+    disk on the same path - "changed on disk, upload again" is the wrong
+    advice: re-uploading would diff the backup against the wrong folder too.
+    Mounting the library back makes this same review valid again.
+    """
+    if job.execute_kind == "collection_restore":
+        stored = (job.execute_args
+                  if isinstance(job.execute_args, dict) else {}).get("music_root")
+        if stored is not None and not candidate_premise.music_root_matches(stored):
+            return ("Nothing was started. The music folder is not the one "
+                    "this review was built against. Check that your library "
+                    "is mounted, then try again; the review is still here.")
+    return _all_candidates_stale_message(job.execute_kind)
 
 
 def _album_label(candidate):
@@ -11355,7 +11376,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        rerendered=False,
                        error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
-                       quality_note=False, password_error=""):
+                       quality_note=False, password_error="", lastfm_check=""):
     creds = _read_creds()
     values = settings_store.current()
     # If credentials come from environment or a secret-file declaration,
@@ -11429,6 +11450,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "inert_notes": settings_store.inert_behaviour_notes(values),
         "text_fields": settings_store.TEXT_FIELDS,
         "collection_backup": _collection_backup_status(),
+        "lastfm_check": (lastfm_check
+                         if lastfm_check in ("ok", "rejected", "down") else ""),
         "option_labels": settings_store.ENUM_OPTION_LABELS,
         # Which dropdowns keep their unset entry after something is picked, so
         # a choice the app asks for once can still be handed back to it.
@@ -11452,14 +11475,15 @@ async def settings_page(request: Request, saved: bool = False,
                         queued: bool = False, connected: bool = False,
                         unverified: bool = False, envchecked: bool = False,
                         error: str = "",
-                        mode: str = "", quality_note: bool = False):
+                        mode: str = "", quality_note: bool = False,
+                        lastfm: str = ""):
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, _diagnostics)
     return _settings_response(request, saved=saved, queued=queued,
                               connected=connected, unverified=unverified,
                               envchecked=envchecked,
                               error=error, mode=mode, diagnostics=diags,
-                              quality_note=quality_note)
+                              quality_note=quality_note, lastfm_check=lastfm)
 
 
 def _streamrip_has_userid() -> bool:
@@ -11634,6 +11658,11 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
 @app.post("/settings/behavior", response_class=HTMLResponse)
 async def save_behavior(request: Request):
     form = await request.form()
+    # The single-field sections (Discover, Collection backup) name themselves
+    # so a save returns the reader to the section it came from.
+    anchor = str(form.get("section") or "")
+    if anchor not in ("discover", "collection-backup"):
+        anchor = "behaviour"
     def _posted_bool(key):
         return form.get(key, "").strip().lower() not in (
             "0", "false", "off", "no", ""
@@ -11679,7 +11708,7 @@ async def save_behavior(request: Request):
     # Durable publication is the settings store's admission point; failure
     # leaves both the live config and any deferred overlay unchanged.
     if not ok:
-        return RedirectResponse(url="/settings?error=persist#behaviour", status_code=303)
+        return RedirectResponse(url=f"/settings?error=persist#{anchor}", status_code=303)
     if warnings:
         # Re-render in place so we can name exactly which entries were dropped
         # (a misspelt provider, an uninstalled beets plugin) without smuggling
@@ -11696,7 +11725,21 @@ async def save_behavior(request: Request):
     suffix = "&queued=1" if settings_store._any_active_job() else ""
     if quality_note:
         suffix += "&quality_note=1"
-    return RedirectResponse(url=f"/settings?saved=1{suffix}#behaviour", status_code=303)
+    # A freshly saved Last.fm key gets checked right away, so the section can
+    # say whether Discover will work instead of leaving that for the tab to
+    # discover later. One cheap chart call, bounded by the web timeout.
+    if "LASTFM_API_KEY" in form and lastfm.is_configured():
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, lastfm.probe_key),
+                timeout=cfg.WEB_FETCH_TIMEOUT)
+            suffix += "&lastfm=ok"
+        except lastfm.LastfmKeyRejected:
+            suffix += "&lastfm=rejected"
+        except (lastfm.LastfmError, asyncio.TimeoutError, OSError):
+            suffix += "&lastfm=down"
+    return RedirectResponse(url=f"/settings?saved=1{suffix}#{anchor}", status_code=303)
 
 
 @app.post("/settings/password", response_class=HTMLResponse)
@@ -11833,11 +11876,17 @@ async def collection_restore_upload(request: Request,
         "collection_restore",
         statuses=("pending", "scanning", "awaiting_review", "running"))
     if existing is not None:
-        return _restore_response(
-            request,
-            "A restore is already open. Finish or discard it before "
-            "uploading another backup.",
-            redirect=f"/jobs/{existing.id}")
+        # In the page, say so where the form sits and link the open review;
+        # a bare redirect there would swap the whole page under the reader
+        # without a word about why.
+        if _is_htmx(request):
+            return HTMLResponse(_ql_notice_html(
+                "error",
+                "A restore is already open. Finish or discard it before "
+                "uploading another backup. "
+                f'<a href="/jobs/{existing.id}" class="ql-inline-link">'
+                "Open the restore review</a>."))
+        return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
     raw = await _read_upload(backup, body_limit("/collection/restore"))
     if raw is None:
         return _restore_response(
@@ -11850,6 +11899,35 @@ async def collection_restore_upload(request: Request,
     ok, reason = collection_snapshot.validate_upload(data)
     if not ok:
         return _restore_response(request, reason)
+    # An empty music folder that the app's own last backup says held albums is
+    # almost always an unmounted share, and a review built against it would
+    # seal that empty folder as the restore target. A genuinely fresh install
+    # has no local backup, so a real rebuild is never refused; if the albums
+    # really are gone from this folder, replacing the held-back backup under
+    # Collection backup records that, and the upload is accepted.
+    def _empty_but_backed_up():
+        scanner.clear_scan_caches()
+        try:
+            emptied = not any(scanner.list_library_artists())
+        except OSError:
+            emptied = True
+        if not emptied:
+            return None
+        try:
+            latest = collection_snapshot.load_latest()
+        except OSError:
+            return None
+        recorded = ((latest or {}).get("counts") or {}).get("albums")
+        return recorded if isinstance(recorded, int) and recorded > 0 else None
+    loop = asyncio.get_running_loop()
+    recorded_albums = await loop.run_in_executor(None, _empty_but_backed_up)
+    if recorded_albums:
+        return _restore_response(
+            request,
+            f"No music was found in your library folder, but its last backup "
+            f"recorded {recorded_albums:,} albums. Check that the folder is "
+            f"mounted, then upload again; if those albums really are gone, "
+            f"replace the backup under Collection backup first.")
     try:
         credentials = await _authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION)

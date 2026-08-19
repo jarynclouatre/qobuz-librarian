@@ -9,6 +9,7 @@ one search + one approve endpoint, and a few genuinely tricky bits of logic.
 import asyncio
 import concurrent.futures
 import copy
+import json
 import threading
 import time
 from pathlib import Path
@@ -7317,6 +7318,7 @@ def _restore_stack(monkeypatch, tmp_path, albums):
     music = tmp_path / "music"
     music.mkdir()
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "backups"))
     monkeypatch.setattr(collection_restore.scanner, "clear_scan_caches",
                         lambda: None)
     monkeypatch.setattr(collection_restore, "get_album",
@@ -7387,8 +7389,8 @@ def test_a_file_that_is_not_a_backup_starts_nothing(client):
     assert len(jm.registry.all()) == before
 
 
-def test_a_second_backup_upload_returns_the_open_restore(client, monkeypatch,
-                                                          tmp_path):
+def test_a_second_backup_upload_links_the_open_restore(client, monkeypatch,
+                                                       tmp_path):
     _restore_stack(monkeypatch, tmp_path, {})
     parked = jm.Job(title="Restore from backup")
     parked.execute_kind = "collection_restore"
@@ -7402,10 +7404,101 @@ def test_a_second_backup_upload_returns_the_open_restore(client, monkeypatch,
                               "application/json")},
             headers={"HX-Request": "true"},
         )
-        assert response.headers["HX-Redirect"] == f"/jobs/{parked.id}"
+        # Told in place, with the open review one click away; not swapped to
+        # another page without a word.
+        assert "HX-Redirect" not in response.headers
+        assert f'href="/jobs/{parked.id}"' in response.text
         assert len(jm.registry.all()) == 1
     finally:
         _remove_job(parked)
+
+
+def test_an_empty_library_with_a_recorded_backup_refuses_an_upload(
+        client, monkeypatch, tmp_path):
+    from qobuz_librarian.library import collection_snapshot
+
+    _restore_stack(monkeypatch, tmp_path, {})
+    latest = collection_snapshot.latest_path()
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text(json.dumps({
+        "format": collection_snapshot.FORMAT,
+        "version": collection_snapshot.VERSION,
+        "counts": {"artists": 2, "albums": 5, "tracks": 40},
+        "artists": [{"name": "A", "albums": []}],
+    }), encoding="utf-8")
+    before = len(jm.registry.all())
+
+    response = client.post(
+        "/collection/restore",
+        files={"backup": ("collection.json", _backup_file(),
+                          "application/json")},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "HX-Redirect" not in response.headers
+    assert "data-flash" in response.text
+    assert len(jm.registry.all()) == before
+
+
+def test_a_library_with_music_on_disk_is_not_mistaken_for_unmounted(
+        client, monkeypatch, tmp_path):
+    from qobuz_librarian.library import collection_snapshot
+
+    album = {"id": "a0", "title": "Room 25", "tracks_count": 8,
+             "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1,
+             "artist": {"name": "Noname"},
+             "tracks": {"items": [{"id": "t1"}]}}
+    _restore_stack(monkeypatch, tmp_path, {"a0": album})
+    somebody = tmp_path / "music" / "Someone Else" / "An Album (2020)"
+    somebody.mkdir(parents=True)
+    (somebody / "01.flac").write_bytes(b"")
+    latest = collection_snapshot.latest_path()
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text(json.dumps({
+        "format": collection_snapshot.FORMAT,
+        "version": collection_snapshot.VERSION,
+        "counts": {"artists": 2, "albums": 5, "tracks": 40},
+        "artists": [{"name": "A", "albums": []}],
+    }), encoding="utf-8")
+    jm.start_worker()
+
+    response = client.post(
+        "/collection/restore",
+        files={"backup": ("collection.json", _backup_file(),
+                          "application/json")},
+        headers={"HX-Request": "true"},
+    )
+
+    assert "HX-Redirect" in response.headers
+    job_id = response.headers["HX-Redirect"].rsplit("/", 1)[-1]
+    job = jm.registry.get(job_id)
+    try:
+        assert _wait_for(
+            lambda: job.status == jm.JobStatus.AWAITING_REVIEW)
+    finally:
+        _remove_job(job)
+
+
+def test_the_all_stale_refusal_names_the_missing_music_folder(monkeypatch):
+    from qobuz_librarian.library import candidate_premise
+    from qobuz_librarian.web import app as web_app
+
+    job = jm.Job(title="Restore from backup")
+    job.execute_kind = "collection_restore"
+    generic = web_app._all_candidates_stale_message("collection_restore")
+
+    # No recorded folder: the generic refusal stands.
+    assert web_app._all_stale_message_for(job) == generic
+
+    job.execute_args["music_root"] = [1, 2, 3, 4, 5, 6, 7]
+    monkeypatch.setattr(candidate_premise, "music_root_matches",
+                        lambda identity: False)
+    assert web_app._all_stale_message_for(job) != generic
+
+    monkeypatch.setattr(candidate_premise, "music_root_matches",
+                        lambda identity: True)
+    assert web_app._all_stale_message_for(job) == generic
 
 
 # ── Discover ──────────────────────────────────────────────────────────────────
@@ -7571,3 +7664,45 @@ def test_search_without_a_query_asks_lastfm_nothing(client, monkeypatch):
     monkeypatch.setattr(recommendations, "ensure_search_feed", ensure)
     assert client.get("/discover/search").status_code == 200
     assert asked == [""]
+
+
+def test_saving_a_lastfm_key_checks_it_and_returns_to_its_section(
+        client, monkeypatch):
+    from qobuz_librarian.api import lastfm
+
+    try:
+        monkeypatch.setattr(lastfm, "probe_key", lambda: True)
+        r = client.post("/settings/behavior",
+                        data={"LASTFM_API_KEY": "k" * 32,
+                              "section": "discover"},
+                        follow_redirects=False)
+        assert r.status_code == 303
+        assert "lastfm=ok" in r.headers["location"]
+        assert r.headers["location"].endswith("#discover")
+
+        def rejected():
+            raise lastfm.LastfmKeyRejected("bad key")
+        monkeypatch.setattr(lastfm, "probe_key", rejected)
+        r = client.post("/settings/behavior",
+                        data={"LASTFM_API_KEY": "m" * 32,
+                              "section": "discover"},
+                        follow_redirects=False)
+        assert "lastfm=rejected" in r.headers["location"]
+
+        # An emptied field goes back to the environment; nothing to check.
+        r = client.post("/settings/behavior",
+                        data={"LASTFM_API_KEY": "", "section": "discover"},
+                        follow_redirects=False)
+        assert "lastfm=" not in r.headers["location"]
+        assert r.headers["location"].endswith("#discover")
+    finally:
+        client.post("/settings/behavior", data={"LASTFM_API_KEY": ""},
+                    follow_redirects=False)
+
+
+def test_a_settings_save_without_a_section_lands_at_behaviour(client):
+    r = client.post("/settings/behavior",
+                    data={"BEETS_PATH_DEFAULT": ""},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("#behaviour")

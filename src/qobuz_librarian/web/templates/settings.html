@@ -503,8 +503,23 @@
       </div>
     </div>
 
+    {% if lastfm_check == 'ok' %}
+    <div class="ql-notice ql-notice-success mb-6">
+      <span>Last.fm accepted the key.</span>
+    </div>
+    {% elif lastfm_check == 'rejected' %}
+    <div class="ql-notice ql-notice-error mb-6">
+      <span>Last.fm rejected this key. Check it was copied whole.</span>
+    </div>
+    {% elif lastfm_check == 'down' %}
+    <div class="ql-notice ql-notice-warning mb-6">
+      <span>The key was saved, but Last.fm could not be reached to check it.</span>
+    </div>
+    {% endif %}
+
     <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="section" value="discover">
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'LASTFM_API_KEY' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
@@ -578,6 +593,7 @@
 
     <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="section" value="collection-backup">
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'COLLECTION_BACKUP_DIR' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>

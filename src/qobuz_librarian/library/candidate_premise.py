@@ -236,10 +236,23 @@ def _canonical_absent(candidate: dict):
     return name, identity
 
 
+def music_root_matches(identity) -> bool:
+    """Whether the music folder is still the directory incarnation `identity`.
+
+    `identity` must be the 7-int list capture_music_root_identity returns;
+    anything else, or a folder that cannot be opened, is not a match.
+    """
+    if (type(identity) is not list or len(identity) != 7
+            or any(type(field) is not int for field in identity)):
+        return False
+    current = capture_music_root_identity()
+    return (current is not None
+            and _durable_generations_match([identity], [current]))
+
+
 def _validate_absent(saved) -> dict:
     name, identity = saved
-    current = capture_music_root_identity()
-    if current is None or not _durable_generations_match([identity], [current]):
+    if not music_root_matches(identity):
         raise CandidateStale(
             "The music folder is not the one this review was built against. "
             "Check that your library is mounted, then build the review again; "

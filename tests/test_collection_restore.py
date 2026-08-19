@@ -229,3 +229,27 @@ def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
         {"name": "Migration", "qobuz_album_id": "a1", "tracks": []}]}]))
 
     assert job.candidates == []
+
+
+def test_the_review_records_which_music_folder_it_was_read_against(library,
+                                                                   qobuz):
+    qobuz["albums"]["a1"] = _qobuz_album("a1", "Room 25", artist="Noname")
+    job = _run(_snapshot([{"name": "Noname", "albums": [
+        {"name": "Room 25", "qobuz_album_id": "a1",
+         "tracks": [_track("Self", 1)]}]}]))
+
+    recorded = job.execute_args.get("music_root")
+    assert candidate_premise.music_root_matches(recorded)
+
+
+def test_music_root_matches_only_the_same_directory_incarnation(library,
+                                                                tmp_path):
+    recorded = candidate_premise.capture_music_root_identity()
+    assert candidate_premise.music_root_matches(recorded)
+    for wrong in (None, "x", [], [1, 2, 3], ["a"] * 7):
+        assert not candidate_premise.music_root_matches(wrong)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    stolen = list(recorded)
+    stolen[0] += 1
+    assert not candidate_premise.music_root_matches(stolen)
