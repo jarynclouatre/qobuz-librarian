@@ -7324,7 +7324,8 @@ def _census_view():
 
 
 @app.get("/library", response_class=HTMLResponse)
-async def library_page(request: Request, page: int = 1, tab: str = ""):
+async def library_page(request: Request, page: int = 1, tab: str = "",
+                       q: str = ""):
     badge_generation = review_badges.ready_generation("library")
     # Albums a terminal run downloaded are still listed by the review this
     # process holds in memory until they are applied. Do it before anything
@@ -7400,7 +7401,7 @@ async def library_page(request: Request, page: int = 1, tab: str = ""):
         ctx["queue_wait"] = _queue_wait(ljob)
         # A full load has to be able to land on either tab: the address is the
         # only thing a reload or a bookmark still carries.
-        ctx.update(_review_context(ljob, page, tab=tab))
+        ctx.update(_review_context(ljob, page, q, tab=tab))
         ctx["library_resume"] = None
     else:
         # Resume hint: only when an interrupted baseline checkpoint exists and
@@ -7491,11 +7492,18 @@ async def library_scan(
     request: Request,
     mode: str = Form("missing_albums"),
     force_full: str = Form(""),
+    return_to: str = Form(""),
 ):
     busy = _lock_busy_response(request)
     if busy is not None:
         return busy
     mode_norm = (mode or "").strip().lower()
+    # Settings' Force full rescan posts here too. A scan that actually starts
+    # still lands the user on /library, where it runs and is watched (the
+    # single scan surface); only a refusal that starts nothing sends them back
+    # to where they clicked from instead of bouncing them off Settings with an
+    # error about a page they weren't on.
+    error_home = "/settings" if return_to == "/settings" else "/library"
     # Run the submit off the event loop: it takes _auto_check_lock, which the
     # dashboard auto-triggers can hold across small data-volume reads, and the
     # loop shouldn't block on a (possibly NAS) mount, same reason the dashboard
@@ -7561,7 +7569,7 @@ async def library_scan(
                 f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                 status_code=200)
         return RedirectResponse(
-            url="/library?error=" + urllib.parse.quote(msg), status_code=303)
+            url=error_home + "?error=" + urllib.parse.quote(msg), status_code=303)
     existing = _active_library_scan()
     if existing is not None:
         return RedirectResponse(url="/library", status_code=303)
@@ -7584,7 +7592,7 @@ async def library_scan(
                 status_code=200,
             )
         return RedirectResponse(
-            url="/library?error=" + urllib.parse.quote(msg), status_code=303)
+            url=error_home + "?error=" + urllib.parse.quote(msg), status_code=303)
     # "library" (not "album") so the review screen knows this is the paced triage
     # surface; both modes run the same album executor and resume from a matching
     # checkpoint if one's waiting (see _start_library_scan / scan_library).
@@ -7600,7 +7608,7 @@ async def library_scan(
         ),
     )
     if job is None:
-        return _scan_submission_failure_response(request, "/library")
+        return _scan_submission_failure_response(request, error_home)
     # Land back on /library, where the scan is watched and reviewed right here.
     return RedirectResponse(url="/library", status_code=303)
 
@@ -8321,6 +8329,19 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
                     "That job is no longer in the record."),
                 status_code=303)
         historical = True
+    if job.execute_kind == "library":
+        # /library is the single Library review surface (launcher, live scan,
+        # and the parked review all render there). A library-kind job never
+        # gets its own page, whatever a History card or an old link says.
+        params = {}
+        if tab:
+            params["tab"] = tab
+        if page and page != 1:
+            params["page"] = str(page)
+        if q:
+            params["q"] = q
+        query = ("?" + urllib.parse.urlencode(params)) if params else ""
+        return RedirectResponse(url=f"/library{query}", status_code=303)
     review_badge_ack = _review_badge_ack_for(job)
     nav_page, _return_href, _return_label = _job_nav_destination(job)
     if job.attention and job.attention not in ("recovery", "catalog"):
@@ -10925,29 +10946,34 @@ def _diagnostics():
 
     def _dir_check(label, path, *, want_writable, skip_names=(),
                    unit=("entry", "entries"), show_size=False):
+        # The Library paths section above already resolves the same folders to
+        # the host path Docker exposes them at; naming this one by its
+        # container path made the two sections disagree about what to call
+        # the same folder.
         p = Path(path)
+        display, _is_host = _resolve_host_path(str(p))
         if not p.exists():
             checks.append({"label": label, "ok": False,
-                           "detail": f"{p} does not exist (volume not mounted?)"})
+                           "detail": f"{display} does not exist (volume not mounted?)"})
             return
         if not p.is_dir():
             checks.append({"label": label, "ok": False,
-                           "detail": f"{p} exists but is not a directory"})
+                           "detail": f"{display} exists but is not a directory"})
             return
         if want_writable and not os.access(p, os.W_OK):
             checks.append({"label": label, "ok": False,
-                           "detail": f"{p} is not writable by the container user. "
+                           "detail": f"{display} is not writable by the container user. "
                            "On a NAS, set PUID/PGID in .env to your media-share owner"})
             return
         try:
             n = sum(1 for entry in p.iterdir() if entry.name not in skip_names)
         except OSError as e:
             checks.append({"label": label, "ok": False,
-                           "detail": f"{p} unreadable: {e}"})
+                           "detail": f"{display} unreadable: {e}"})
             return
         size = f" · {format_size(_tree_size(p))}" if show_size else ""
         checks.append({"label": label, "ok": True, "mono": True,
-                       "detail": f"{p}: {plural(n, *unit)}{size}"})
+                       "detail": f"{display}: {plural(n, *unit)}{size}"})
 
     # The panel exists to say what stops a scan or a download before one is
     # started, and a pause is the most direct reason there is. It was the one
@@ -10977,17 +11003,19 @@ def _diagnostics():
                show_size=True, unit=("kept backup", "kept backups"))
 
     beets_db = Path(cfg.BEETS_DB_PATH)
+    beets_db_display, _is_host = _resolve_host_path(str(beets_db))
     if beets_db.exists():
         ok = os.access(beets_db, os.R_OK)
         checks.append({"label": "Beets database", "ok": ok,
-                       "detail": f"{beets_db}" if ok
-                       else f"{beets_db} exists but is not readable"})
+                       "detail": f"{beets_db_display}" if ok
+                       else f"{beets_db_display} exists but is not readable"})
     elif beets_db.parent.exists():
-        checks.append({"label": "beets DB (BEETS_DB_PATH)", "ok": True,
-                       "detail": f"{beets_db} (created on first import)"})
+        checks.append({"label": "Beets database", "ok": True,
+                       "detail": f"{beets_db_display} (created on first import)"})
     else:
-        checks.append({"label": "beets DB (BEETS_DB_PATH)", "ok": False,
-                       "detail": f"{beets_db.parent} does not exist"})
+        parent_display, _is_host = _resolve_host_path(str(beets_db.parent))
+        checks.append({"label": "Beets database", "ok": False,
+                       "detail": f"{parent_display} does not exist"})
 
     for binary in ("rip", "ffmpeg", "flac"):
         found = shutil.which(binary)
@@ -11685,7 +11713,13 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
     tok = html.escape(request.state.csrf_token)
     for path, origin in orphans:
         name = html.escape(path.name)
-        dest = html.escape(str(origin)) if origin else "its album folder"
+        if origin:
+            dest_display, _is_host = _resolve_host_path(str(origin))
+            dest = html.escape(dest_display)
+            album = html.escape(_album_name_from_path(origin))
+        else:
+            dest = "its album folder"
+            album = ""
         if path.name.startswith(".ql-dispose-backup-"):
             held = path / "held"
             try:
@@ -11727,7 +11761,8 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
         rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-error" aria-label="Needs attention">!</span>'
-            f'<div class="min-w-0"><div class="ql-diagnostic-label">Backup: {name}</div>'
+            f'<div class="min-w-0"><div class="ql-diagnostic-label">'
+            f'Backup{f": {album}" if album else ""}</div>'
             f'<div class="ql-diagnostic-detail">{reason}</div>'
             f'<div class="mt-2 flex gap-2">'
             f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
@@ -11756,8 +11791,13 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
         undo = []
     for path, origin in undo:
         name = html.escape(path.name)
-        dest = html.escape(str(origin)) if origin else "its album folder"
-        album = html.escape(_album_name_from_path(origin)) if origin else ""
+        if origin:
+            dest_display, _is_host = _resolve_host_path(str(origin))
+            dest = html.escape(dest_display)
+            album = html.escape(_album_name_from_path(origin))
+        else:
+            dest = "its album folder"
+            album = ""
         rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-ok" aria-label="OK">OK</span>'
@@ -11969,7 +12009,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
     if (not name or name != Path(name).name or name.startswith(".")
             or not target.is_dir()):
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
-                                "it may already be restored or cleaned up.")
+                                "It may already be restored or cleaned up.")
                 + _diagnostics_fragment(request))
     state, operation_token, lock = _begin_direct_library_operation(
         "Backup restore")
@@ -12095,7 +12135,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
     if (not name or name != Path(name).name or name.startswith(".")
             or not target.is_dir()):
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
-                                "it may already be restored or cleaned up.")
+                                "It may already be restored or cleaned up.")
                 + _diagnostics_fragment(request))
     state, operation_token, lock = _begin_direct_library_operation(
         "Backup removal")

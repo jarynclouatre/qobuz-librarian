@@ -1409,6 +1409,34 @@ def test_new_release_check_refused_without_baseline(
     assert app_mod._existing_new_release_check() is None     # no crawl was started
 
 
+def test_library_scan_refusal_returns_to_settings(client, monkeypatch, tmp_path):
+    # Settings' Force full rescan posts to the same /library route the
+    # Library page uses. A refusal that starts nothing must send the user
+    # back to Settings, where they clicked from, not bounce them onto
+    # Library with an error about a page they weren't on.
+    from qobuz_librarian import config as cfg
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "does-not-exist")
+
+    r = client.post(
+        "/library",
+        data={"mode": "missing_albums", "force_full": "1",
+              "return_to": "/settings"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/settings?error=")
+
+    # Without return_to (the Library page's own launcher), the refusal still
+    # lands back on Library as before.
+    r = client.post(
+        "/library",
+        data={"mode": "missing_albums", "force_full": "1"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/library?error=")
+
+
 def test_lyrics_submission_never_checks_qobuz(client, monkeypatch):
     from qobuz_librarian.web import app as webapp
     from qobuz_librarian.web import jobs as job_mgr
@@ -3140,6 +3168,24 @@ def test_queue_cancel_stays_on_queue_without_accepting_other_targets(client):
 
 
 
+def test_library_job_page_redirects_to_library(client):
+    """A library-kind job has no page of its own: /library is the only
+    Library review surface, so an old link or a History card must land the
+    user there, tab and filter carried over, instead of opening a second
+    review at /jobs/{id}."""
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    try:
+        r = client.get(f"/jobs/{job.id}", params={"tab": "gaps", "q": "Dum"},
+                       follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"].startswith("/library")
+        assert "tab=gaps" in r.headers["location"]
+        assert "q=Dum" in r.headers["location"]
+    finally:
+        _remove_job(job)
+
+
 def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
     """A library review with both missing albums and Gap Fill splits into tabs,
     and dismissing an artist's unselected rows from one tab must not silently
@@ -3158,13 +3204,13 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
                       detail="1994 · CD 16-bit/44.1kHz · gap-fill: 2 missing of 11",
                       payload={"year": "1994", "gap_fill": 2}, selected=False)
     try:
-        r = client.get(f"/jobs/{job.id}")
+        r = client.get("/library")
         assert r.status_code == 200
         assert "Missing Albums" in r.text and "Gap Fill" in r.text
         # The default tab shows only the missing album, not the gap fill row.
         assert "Third" in r.text and "Dummy" not in r.text
         restored = client.get(
-            f"/jobs/{job.id}", params={"tab": "gaps", "q": "Dum"}
+            "/library", params={"tab": "gaps", "q": "Dum"}
         )
         assert restored.status_code == 200
         assert "Dummy" in restored.text and "Third" not in restored.text

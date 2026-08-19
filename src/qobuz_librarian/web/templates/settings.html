@@ -53,6 +53,8 @@
   <h1>Settings</h1>
 </header>
 
+{% include "_writes_paused_notice.html" %}
+
 {% if connected %}
 {% if unverified %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
@@ -239,12 +241,12 @@
                {% if env_user_id_set %}disabled aria-disabled="true"{% endif %}
                class="ql-input max-w-lg">
         <p class="ql-field-help">
-          Needed by the downloader; a token by itself still supports Search,
-          Library, New Releases, and Repair scans.
+          {% if env_user_id_set %}Set by environment; remove <code>QOBUZ_USER_ID</code> from <code>.env</code> or <code>compose.yaml</code> to manage it here.{% else %}Needed by the downloader; a token by itself still supports Search,
+          Library, New Releases, and Repair scans.{% endif %}
         </p>
       </div>
       <div class="ql-field">
-        <label class="ql-field-label" for="auth_token">Auth token <span class="ql-required" aria-hidden="true">*</span></label>
+        <label class="ql-field-label" for="auth_token">Auth token{% if not creds_from_env %} <span class="ql-required" aria-hidden="true">*</span>{% endif %}</label>
         {% if auth_token_set %}
         <p class="ql-field-state">Token saved. Leave this field blank to keep it.</p>
         {% endif %}
@@ -349,6 +351,19 @@
     <form action="/settings/behavior" method="post">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="form_complete" value="1">
+      {% for key, label, help, kind, choices, placeholder in text_fields if key == 'STREAMRIP_QUALITY' %}
+      <div class="ql-default-field ql-quality-field">
+        <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
+        <div class="ql-default-control">
+          <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select text-base sm:max-w-sm sm:text-xs">
+            {% for c in choices %}
+            <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
+            {% endfor %}
+          </select>
+          <p class="ql-field-help">{{ help }}</p>
+        </div>
+      </div>
+      {% endfor %}
       <div class="ql-setting-list">
         {% for key, label, help in behavior_fields %}
         <label class="ql-setting-row">
@@ -371,11 +386,11 @@
         <summary class="ql-disclosure-summary">
           <span class="ql-settings-summary-row">
             <span>Download and import defaults</span>
-            <span>Quality, lyrics, artwork, beets</span>
+            <span>Lyrics, artwork, beets</span>
           </span>
         </summary>
         <div class="ql-defaults-grid">
-          {% for key, label, help, kind, choices, placeholder in text_fields %}
+          {% for key, label, help, kind, choices, placeholder in text_fields if key != 'STREAMRIP_QUALITY' %}
           <div class="ql-default-field">
             <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
             <div class="ql-default-control">
@@ -463,14 +478,16 @@
           for new releases, use Check new releases on the Library page. Use a
           full rescan only after large manual changes to your files. It ignores
           the unchanged-folder cache and re-reads every artist, so it takes as
-          long as a first scan.
+          long as a first scan. Starting one takes you to the Library page,
+          where it runs and can be watched.
         </p>
       </div>
       <form action="/library" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="mode" value="missing_albums">
+        <input type="hidden" name="return_to" value="/settings">
         <button type="submit" name="force_full" value="1" class="ql-btn ql-btn-sm ql-btn-secondary"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-                data-confirm="Re-scan every artist folder from scratch? This ignores the unchanged-folder cache, so it takes as long as a first scan. Use it after large manual changes to your files."
+                data-confirm="Re-scan every artist folder from scratch? This ignores the unchanged-folder cache, so it takes as long as a first scan. Use it after large manual changes to your files. You'll land on the Library page to watch it."
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>
@@ -552,13 +569,15 @@
               hx-get="/api/diagnostics"
               hx-target="#diagnostics-list"
               hx-swap="innerHTML"
-              hx-indicator="#diag-spinner">Recheck</button>
+              hx-indicator="#diag-spinner">
+        <span id="diag-spinner" class="htmx-indicator ql-spinner ql-spinner-xs"></span>
+        <span>Recheck</span>
+      </button>
     </div>
     <div id="diagnostics-list" class="ql-diagnostics-list">
       {{ diagnostics_html | safe }}
     </div>
     <p id="diagnostics-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
-    <span id="diag-spinner" class="htmx-indicator ql-spinner ql-spinner-xs mt-2"></span>
   </div>
 </section>
 </div>

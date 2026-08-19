@@ -5233,6 +5233,13 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   min-width: 0;
   gap: 0.45rem;
 }
+/* Download quality standing on its own above the toggle list, not folded
+   into the collapsed defaults disclosure with beets path templates. */
+.ql-quality-field {
+  margin-bottom: 1.1rem;
+  padding-bottom: 1.1rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--ql-text) 9%, transparent);
+}
 .ql-default-control {
   min-width: 0;
 }

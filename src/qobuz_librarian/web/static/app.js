@@ -3284,6 +3284,10 @@
     if (!target || target.id !== "diagnostics-list") return;
     var status = document.getElementById("diagnostics-status");
     if (status) status.textContent = "Diagnostics refreshed.";
+    // The status line above is sr-only; a sighted user pressing Recheck on a
+    // long diagnostics list saw the button change nothing and nothing else
+    // say the check ran.
+    showToast("Diagnostics refreshed.", "info");
   }
 
   function rememberSearchSwap(event) {
