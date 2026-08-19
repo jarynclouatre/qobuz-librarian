@@ -68,9 +68,7 @@ TEXT_FIELDS = [
      "Empty = default (Lrclib, NetEase, Musixmatch).",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
     ("LASTFM_API_KEY", "Last.fm API key",
-     "Turns on the Discover tab, which suggests artists from the ones "
-     "already in your library. Free keys come from "
-     "last.fm/api/account/create. Empty hides the tab.",
+     "Empty hides the Discover tab.",
      "text", None, "32-character key"),
     ("COLLECTION_BACKUP_DIR", "Backup folder",
      "Leave empty to keep it with the app's other data.",
@@ -104,6 +102,9 @@ TEXT_FIELDS = [
      "enum", ["keep", "delete"], ""),
 ]
 TEXT_KEYS = [k for k, *_ in TEXT_FIELDS]
+# Account secrets among the text fields. Masked in the form and never quoted
+# back in a warning, the way the Qobuz token already is.
+SECRET_KEYS = frozenset({"LASTFM_API_KEY"})
 
 # What the environment (Compose, .env) supplies for each of those fields,
 # captured at import - before load() layers the saved settings over cfg. A
@@ -282,10 +283,15 @@ def _path_template_problem(key, value):
 
 def _restored_default_warning(key, value):
     """Said when emptying a field hands it back to a value the environment
-    supplies, so the box refilling itself doesn't read as a save that failed."""
+    supplies, so the box refilling itself doesn't read as a save that failed.
+
+    A secret field is named, never quoted: the point is that the box refilled
+    itself, and printing the value would put the key into the page in clear.
+    """
     label = _FIELD_LABELS.get(key, key)
+    restored = "the key it supplies" if key in SECRET_KEYS else value
     return (f"\u201c{label}\u201d comes from your Compose file, so clearing the "
-            f"box put {value} back. Remove {key} there to stop using it.")
+            f"box put {restored} back. Remove {key} there to stop using it.")
 
 
 def _dropped_warning(key, dropped):

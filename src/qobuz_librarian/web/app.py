@@ -2534,9 +2534,8 @@ def _lockout_notice(ip, username="", *, after_failure=False) -> str:
         return ""
     mins = max(1, (left + 59) // 60)
     lead = "" if after_failure else "Too many failed attempts. "
-    return (f"{lead}Wrong guesses stay blocked for another "
-            f"{mins} minute{'s' if mins != 1 else ''}, but your correct "
-            "password still gets you in.")
+    return (f"{lead}Try again in {mins} minute{'s' if mins != 1 else ''}, or "
+            "restart Qobuz Librarian to clear it.")
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -2573,10 +2572,6 @@ async def login_submit(request: Request, username: str = Form(""),
     # flood of failed logins for the admin username can't lock the real admin out.
     cookie = request.cookies.get(web_auth.SESSION_COOKIE)
     has_session = bool(cookie) and web_auth.verify_session(cookie)
-    # A locked bucket no longer refuses outright: the password is still checked,
-    # so a correct one always gets in.
-    throttled = (not has_session
-                 and not web_auth.check_login_rate_limit(ip, username))
     # A submission that could never succeed shouldn't cost a strike: an empty
     # field is a slip, not an attempt, and five of them locked the owner out.
     if not username.strip() or not password:
@@ -2586,13 +2581,14 @@ async def login_submit(request: Request, username: str = Form(""),
                      "username": username.strip(),
                      "next_path": next_path},
             status_code=400)
-    # While locked, only a couple of these checks run at once, so a flood of
-    # connections can't spend the box's CPU on KDFs. Refused, not queued.
-    if throttled and not web_auth.take_locked_check_slot():
+    # Checked before the password is verified, so a correct one can't clear the
+    # wait and a guess costs an attacker the wait rather than a KDF they can
+    # keep spending. The counters live in memory, so a restart is the way back
+    # in for whoever owns the box.
+    if not has_session and not web_auth.check_login_rate_limit(ip, username):
         return templates.TemplateResponse(
             request=request, name="login.html",
-            context={"error": "Sign-in attempts are coming in faster than they "
-                              "can be checked. Try again in a moment.",
+            context={"error": _lockout_notice(ip, username),
                      "username": username.strip(),
                      "next_path": next_path},
             status_code=429)
@@ -2600,12 +2596,8 @@ async def login_submit(request: Request, username: str = Form(""),
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
     loop = asyncio.get_running_loop()
-    try:
-        ok = await loop.run_in_executor(
-            None, web_auth.verify_login, username.strip(), password)
-    finally:
-        if throttled:
-            web_auth.release_locked_check_slot()
+    ok = await loop.run_in_executor(
+        None, web_auth.verify_login, username.strip(), password)
     if not ok:
         web_auth.record_login_failure(ip, username)
         wait = _lockout_notice(ip, username, after_failure=True)

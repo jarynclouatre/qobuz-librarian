@@ -523,9 +523,13 @@
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'LASTFM_API_KEY' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
-        <input type="text" name="{{ key }}" id="f-{{ key }}"
-               value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
-               class="ql-input max-w-lg font-mono text-base sm:text-sm">
+        <div class="relative max-w-lg">
+          <input type="password" name="{{ key }}" id="f-{{ key }}"
+                 value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
+                 autocomplete="off" autocorrect="off" spellcheck="false"
+                 class="ql-input pr-12 font-mono text-base sm:text-sm">
+          {{ secret_toggle("f-" ~ key, "key") }}
+        </div>
         <p class="ql-field-help">{{ help }}</p>
       </div>
       {% endfor %}

@@ -623,25 +623,6 @@ def _locked(times: list[float], limit: int, now: float) -> bool:
     return len(times) >= limit and now - max(times) < _LOGIN_LOCKOUT
 
 
-# A locked bucket still gets its password checked: someone who already knows it
-# was never stopped by a wait, and behind a proxy the wait can be triggered by a
-# stranger, leaving the owner with a container restart as the only way back in.
-# What a flood would be spending is the 600k round KDF, so only a couple of
-# those checks run at once and the rest are refused rather than queued. That
-# caps the CPU an attacker can take however many connections they open, while a
-# person retrying one attempt at a time never meets it.
-_LOCKED_CHECKS = threading.BoundedSemaphore(2)
-
-
-def take_locked_check_slot() -> bool:
-    """Claim one of the concurrent password checks allowed while locked."""
-    return _LOCKED_CHECKS.acquire(blocking=False)
-
-
-def release_locked_check_slot() -> None:
-    _LOCKED_CHECKS.release()
-
-
 def check_login_rate_limit(ip: str, username: str = "") -> bool:
     """True if BOTH this IP and this account may attempt a login. The per-account
     counter (keyed on the submitted username) blocks an attacker who rotates
@@ -688,7 +669,9 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
                       if now - t < _LOGIN_WINDOW]
             if _locked(utimes, _USER_LOGIN_MAX, now):
                 waits.append(_LOGIN_LOCKOUT - (now - max(utimes)))
-    return int(max(0, max(waits))) if waits else 0
+    # A live lockout never rounds down to nothing, or the refusal it drives
+    # would have no wait to name.
+    return max(1, int(max(waits))) if waits else 0
 
 
 def record_login_failure(ip: str, username: str = "") -> None:

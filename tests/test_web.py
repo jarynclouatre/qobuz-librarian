@@ -5575,7 +5575,8 @@ def test_login_page_says_so_while_locked_out(monkeypatch, tmp_path):
                           data={"username": "admin", "password": "nope",
                                 "_csrf_token": tok},
                           headers={"X-CSRF-Token": tok}, follow_redirects=False)
-        assert last.status_code == 401
+        # The sixth attempt is past the limit, so it is refused before the KDF.
+        assert last.status_code == 429
 
         assert "ql-notice-error" in c.get("/login").text
 
@@ -5603,22 +5604,27 @@ def test_an_untrusted_proxy_address_is_called_out(monkeypatch, caplog):
     assert "FORWARDED_ALLOW_IPS" not in caplog.text
 
 
-def test_a_correct_password_still_works_while_locked_out(monkeypatch, tmp_path):
-    """The throttle used to refuse before checking the password, so behind a
-    proxy a stranger's wrong guesses locked the owner out of their own library
-    with a container restart as the only way back in."""
+def test_a_signed_in_browser_is_never_locked_out(monkeypatch, tmp_path):
+    """Behind a proxy every visitor can arrive as the same address, so a
+    stranger's guesses must not shut the owner's own session out."""
     from qobuz_librarian.web import auth as web_auth
 
     monkeypatch.setattr(web_auth, "_login_failures", {})
     monkeypatch.setattr(web_auth, "_user_failures", {})
 
     with _enable_auth(monkeypatch, tmp_path) as c:
+        c.get("/login")
+        tok = c.cookies.get("ql_csrf")
+        signed_in = c.post("/login",
+                           data={"username": "admin",
+                                 "password": "hunter2hunter2!",
+                                 "_csrf_token": tok},
+                           headers={"X-CSRF-Token": tok},
+                           follow_redirects=False)
+        assert signed_in.status_code == 303
+
         for _ in range(6):
-            c.get("/login")
-            tok = c.cookies.get("ql_csrf")
-            c.post("/login", data={"username": "admin", "password": "nope",
-                                   "_csrf_token": tok},
-                   headers={"X-CSRF-Token": tok}, follow_redirects=False)
+            web_auth.record_login_failure("testclient", "admin")
 
         c.get("/login")
         tok = c.cookies.get("ql_csrf")
@@ -7046,14 +7052,35 @@ def test_lockout_says_how_long_is_left_and_keeps_the_username(client, monkeypatc
     monkeypatch.setattr(web_auth, "credentials_configured", lambda: True)
     monkeypatch.setattr(web_auth, "check_login_rate_limit", lambda *a, **k: False)
     monkeypatch.setattr(web_auth, "login_lockout_remaining", lambda *a, **k: 903)
+    checked = []
+    monkeypatch.setattr(web_auth, "verify_login",
+                        lambda *a, **k: checked.append(a) or True)
 
     r = client.post("/login", data={"username": "dink", "password": "x"},
                     follow_redirects=False)
 
-    assert r.status_code == 401
+    assert r.status_code == 429
+    assert checked == [], "a locked attempt must not reach the KDF"
     # The wait names what is actually left, not a fixed hour.
     assert "16 minutes" in r.text
     assert 'value="dink"' in r.text
+
+
+def test_a_lockout_with_under_a_second_left_still_names_a_wait(monkeypatch):
+    """The refusal is decided by check_login_rate_limit and the wait is read
+    from login_lockout_remaining, so a part-second truncated to zero refused
+    the attempt and left the page with nothing on it to say why."""
+    import time
+
+    from qobuz_librarian.web import app as web_app
+    from qobuz_librarian.web import auth as web_auth
+
+    last = time.monotonic() - web_auth._LOGIN_LOCKOUT + 0.5
+    monkeypatch.setattr(web_auth, "_login_failures", {"1.2.3.4": [last] * 5})
+    monkeypatch.setattr(web_auth, "_user_failures", {})
+
+    assert web_auth.check_login_rate_limit("1.2.3.4", "dink") is False
+    assert web_app._lockout_notice("1.2.3.4", "dink")
 
 
 def test_a_missing_column_is_added_whatever_the_version_stamp_says(
