@@ -7988,6 +7988,7 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "poll_url": "/discover",
         "feed_age": "",
         "library_count": 0,
+        "capped": False,
     }
     if not context["qobuz_ready"]:
         return _tr(request, "discover.html", context)
@@ -8005,6 +8006,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
             feed = await loop.run_in_executor(
                 None, lambda: recommendations.ensure_genre_feed(token, chosen))
             context["albums"] = _discover_album_views(feed["items"])
+            context["capped"] = (
+                len(context["albums"]) >= recommendations.GENRE_CARDS)
             context["poll_url"] = (
                 "/discover/genres?tag=" + urllib.parse.quote(chosen))
         else:
@@ -8016,6 +8019,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
             None, lambda: recommendations.ensure_search_feed(token, query))
         context["feed"] = feed
         context["artists"] = feed["items"]
+        context["capped"] = (
+            len(context["artists"]) >= recommendations.SEARCH_CARDS)
         context["poll_url"] = (
             "/discover/search?q=" + urllib.parse.quote(query))
     elif tab == "favourites":
@@ -8067,18 +8072,31 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
         return HTMLResponse("")
     loop = asyncio.get_running_loop()
     token = _get_token()
+    # A call that failed and an artist with nothing to offer both end up with
+    # no rows, so the reason is carried through: an empty catalogue must never
+    # stand in for a request that never got an answer.
+    error = ""
+    rows = []
     try:
         rows = await asyncio.wait_for(
             loop.run_in_executor(
                 None, lambda: recommendations.artist_albums(
                     artist_id, name, token)),
             timeout=cfg.WEB_FETCH_TIMEOUT)
-    except (asyncio.TimeoutError, AuthLost, QobuzError, QobuzUnavailable):
-        rows = []
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+    except AuthLost:
+        error = "Token is expired or invalid. Update it in Settings."
+    except QobuzUnavailable:
+        error = ("Qobuz is temporarily unavailable (network or rate limit). "
+                 "Try again shortly.")
+    except QobuzError:
+        error = "Qobuz could not list this artist. Try again."
     albums = _discover_album_views(rows)
     return _tr(request, "_discover_albums.html", {
         "albums": albums,
         "decades": _discover_decades(albums),
+        "error": error,
         "page": "discover",
     })
 

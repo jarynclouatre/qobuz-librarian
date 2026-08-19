@@ -56,10 +56,10 @@ _RANK_KEEP      = 100
 _FEED_CARDS     = 40
 _PARTIAL_CARDS  = 12
 _PUBLISH_EVERY  = 20
-_SEARCH_CARDS   = 12
+SEARCH_CARDS    = 12
 _TAG_SAMPLE     = 120
 _TAG_CHIPS      = 8
-_GENRE_CARDS    = 24
+GENRE_CARDS     = 24
 _GENRE_FETCH    = 100
 _SEED_CHIPS     = 3
 # Last.fm having one bad minute shouldn't lose a build that is most of the way
@@ -595,7 +595,7 @@ def _genre_worker(kind: str, token, owned: Library, tag: str) -> None:
     cards = []
     for index, row in enumerate(rows, start=1):
         _publish(kind, checked=index)
-        if len(cards) >= _GENRE_CARDS:
+        if len(cards) >= GENRE_CARDS:
             break
         album = resolve_album(row.get("artist") or "", row.get("title") or "",
                               token)
@@ -693,7 +693,7 @@ def _search_worker(kind: str, token, owned: Library, query: str) -> None:
     ranked = rank_candidates(accumulated, owned)
     _publish(kind, total=len(ranked))
     cards = _artist_cards(
-        ranked, token, _SEARCH_CARDS,
+        ranked, token, SEARCH_CARDS,
         progress=lambda checked, found: _publish(kind, checked=checked,
                                                  items=found))
     cache.put_feed(kind, cards, owned.signature)

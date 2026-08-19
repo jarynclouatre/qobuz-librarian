@@ -24,6 +24,10 @@
     </div>
   </div>
   {% else %}
+  {% if error %}
+  <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
+  {% else %}
   <p class="ql-empty-state">Qobuz has nothing listed for this artist.</p>
+  {% endif %}
   {% endfor %}
 </div>

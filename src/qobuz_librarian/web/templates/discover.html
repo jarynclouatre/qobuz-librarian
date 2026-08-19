@@ -81,11 +81,11 @@
       <span class="ql-status-chip is-warning">Unavailable</span>
       <span>Last.fm could not be reached. Try again in a few minutes.</span>
       {% elif discover_tab == 'search' %}
-      <span class="ql-status-chip is-info">{% if query %}{{ artists | length }} artists like {{ query }}{% else %}Search{% endif %}</span>
-      <span>{% if query %}Artists Qobuz can serve that are not in your library.{% else %}Type an artist to see who Qobuz has like them.{% endif %}</span>
+      <span class="ql-status-chip is-info ql-status-chip--wrap">{% if query %}{{ artists | length }} artists like {{ query }}{% else %}Search{% endif %}</span>
+      <span>{% if query %}Artists Qobuz can serve that are not in your library.{% if capped %} That is as far as one search looks.{% endif %}{% else %}Type an artist to see who Qobuz has like them.{% endif %}</span>
       {% elif discover_tab == 'genres' %}
-      <span class="ql-status-chip is-info">{% if tag %}{{ tag }}{% else %}Genres{% endif %}</span>
-      <span>{% if tag %}{{ albums | length }} albums tagged {{ tag }} that are not in your library.{% else %}The tags most used on the artists you own.{% endif %}</span>
+      <span class="ql-status-chip is-info ql-status-chip--wrap">{% if tag %}{{ tag }}{% else %}Genres{% endif %}</span>
+      <span>{% if tag %}{{ albums | length }} albums tagged {{ tag }} that are not in your library.{% if capped %} That is as far as one tag looks.{% endif %}{% else %}The tags most used on the artists you own.{% endif %}</span>
       {% elif discover_tab == 'favourites' %}
       <span class="ql-status-chip is-info">Favourites</span>
       <span>{{ albums | length }} albums you saved on Qobuz that are not in your library.</span>
