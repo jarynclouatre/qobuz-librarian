@@ -24,7 +24,7 @@
      page title, so name it, but only when _library_refresh.html is really
      offering it: a lost Qobuz connection leaves it disabled with its own notice
      above. #}
-  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title to bring them up to date.{% endif %}</span></div>
+  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title to bring it up to date.{% endif %}</span></div>
   {% endif %}
 
   {% if not qobuz_ready %}
@@ -101,7 +101,6 @@
     </svg>
     {% if library_review_retired_reason == 'discarded' %}
     <p class="ql-scan-hero-title">Review discarded</p>
-    <p class="ql-scan-hero-text">You discarded this review.</p>
     {% else %}
     <p class="ql-scan-hero-title">Review complete</p>
     <p class="ql-scan-hero-text">Everything from your last scan has been reviewed.</p>

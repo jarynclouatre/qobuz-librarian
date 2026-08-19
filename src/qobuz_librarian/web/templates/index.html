@@ -21,11 +21,10 @@
       <span class="min-w-0 break-words text-sm">
         <strong>{{ corrupt_stores | length }} saved file{{ 's' if corrupt_stores | length != 1 }}
           couldn't be read and {{ 'was' if corrupt_stores | length == 1 else 'were' }} reset.</strong>
-        Whatever {{ 'it' if corrupt_stores | length == 1 else 'they' }} held is back to the
-        defaults. Check download quality and downsampling in
-        <a href="/settings#diagnostics" class="ql-inline-link">Settings</a> if that matters to
-        you; Settings also has a button to delete the unreadable
-        copy{{ '' if corrupt_stores | length == 1 else 'ies' }} and clear this notice.
+        Check download quality and downsampling in
+        <a href="/settings#diagnostics" class="ql-inline-link">Settings</a>, which can also
+        delete the unreadable {{ 'copy' if corrupt_stores | length == 1 else 'copies' }} and
+        clear this notice.
       </span>
     </div>
     {% endif %}
