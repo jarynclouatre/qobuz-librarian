@@ -12,7 +12,6 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.cli import parse_qobuz_url
-from qobuz_librarian.integrations.beets import staging_preflight
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     compute_missing,
@@ -139,7 +138,9 @@ def _download_album_now(
             except CandidateStale as exc:
                 log.info(fmt(C.YELLOW, f"  ⚠  {exc}"))
                 return {"result": "stale_candidate"}
-            staging_preflight(args)
+            # _execute_download_queue runs its own preflight for this same
+            # candidate before backup/import; calling it again here just
+            # repeats its staging warnings with nothing changed in between.
             queue = [candidate]
 
             def _save_progress():

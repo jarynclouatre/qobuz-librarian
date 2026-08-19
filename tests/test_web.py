@@ -1406,7 +1406,7 @@ def test_new_release_check_refused_without_baseline(
     assert new_releases.is_baseline_complete() is False      # fresh state, no baseline
     r = client.post("/library", data={"mode": "new_releases"}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith("/library")
-    assert app_mod._existing_new_release_check() is None     # no crawl was started
+    assert app_mod._active_new_release_check() is None       # no crawl was started
 
 
 def test_library_scan_refusal_returns_to_settings(client, monkeypatch, tmp_path):

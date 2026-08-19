@@ -590,6 +590,12 @@ h1, h2, h3 {
   flex-direction: column;
   gap: 0.125rem;
 }
+/* The "More" sheet's rows inherit .ql-nav-link's 36px min-height; that is
+   short of a 44px phone touch target. */
+.ql-sheet-nav .ql-nav-link {
+  min-height: 2.75rem;
+  padding: 0.625rem 0.75rem;
+}
 .ql-sheet-nav .ql-nav-group + .ql-nav-group {
   margin-top: 0.5rem;
   padding-top: 0.5rem;
@@ -744,10 +750,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-mobile-menu-nav {
   display: grid;
   gap: 0.875rem;
-}
-.ql-mobile-menu .ql-nav-link {
-  min-height: 2.75rem;
-  padding: 0.625rem 0.75rem;
 }
 .ql-mobile-menu-footer {
   margin-top: auto;
@@ -2086,12 +2088,16 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-table-row.is-owned .ql-table-mobile-artist {
   opacity: 0.62;
 }
+/* The drawn tick stays 1.5rem; the target does not. Sized by min-width/
+   min-height rather than padding, since the native checkbox inside has no
+   fixed size of its own for padding math to add onto reliably. */
 .ql-table-check {
   display: inline-flex;
-  min-width: 1.5rem;
-  min-height: 1.5rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
   align-items: center;
   justify-content: center;
+  margin: -0.625rem;
 }
 .ql-table-check:has(.ql-checkbox) {
   cursor: pointer;
@@ -2271,6 +2277,13 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-grid-footer form {
   display: inline-flex;
 }
+/* The drawn button stays 1.9375rem; the target does not (same trick as
+   .ql-review-artist-hit and .ql-table-check). */
+.ql-icon-hit {
+  display: inline-flex;
+  padding: 0.40625rem;
+  margin: -0.40625rem;
+}
 .ql-download-icon-button {
   width: 1.9375rem;
   height: 1.9375rem;
@@ -2389,19 +2402,28 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   border-color: color-mix(in oklab, var(--ql-gold) 62%, var(--ql-line-soft));
   background-color: color-mix(in oklab, var(--ql-gold) 8%, var(--ql-surface));
 }
+/* The drawn chip stays 1.5rem (its ::before, inset to match); the target
+   grows to 44px. Top/left are pulled in by the same amount the box grew so
+   the chip lands at its original corner position. */
 .ql-grid-check {
   position: absolute;
-  top: 0.65rem;
-  left: 0.65rem;
+  top: 0.025rem;
+  left: 0.025rem;
   z-index: 1;
   display: inline-flex;
-  min-width: 1.5rem;
-  min-height: 1.5rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
   align-items: center;
   justify-content: center;
+  cursor: pointer;
+}
+.ql-grid-check::before {
+  content: "";
+  position: absolute;
+  inset: 0.625rem;
+  z-index: -1;
   border-radius: var(--ql-radius-sm);
   background-color: color-mix(in oklab, var(--ql-bg) 84%, transparent);
-  cursor: pointer;
 }
 .ql-grid-cover {
   width: 100%;
@@ -2475,12 +2497,14 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-grid-version-row:has(.ql-checkbox:checked) {
   background-color: color-mix(in oklab, var(--ql-gold) 8%, transparent);
 }
+/* Same 44px hit-area trick as .ql-table-check. */
 .ql-grid-version-check {
   display: inline-flex;
-  min-width: 1.5rem;
-  min-height: 1.5rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
   align-items: center;
   justify-content: center;
+  margin: -0.625rem;
 }
 .ql-grid-version-check:has(.ql-checkbox) {
   cursor: pointer;

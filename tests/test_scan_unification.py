@@ -1337,3 +1337,105 @@ def test_scan_signature_covers_candidate_shaping_settings(monkeypatch):
         with monkeypatch.context() as mctx:
             mctx.setattr(cfg, name, int(getattr(cfg, name)) + 1)
             assert lss.quality_signature() != base, name
+
+
+def _parked_new_release_review(*candidates):
+    """A new-release list already waiting, with the user's ticks on it."""
+    parked = jm.Job(title="New-release check")
+    parked.kind = "scan"
+    parked.execute_kind = "new_releases"
+    parked.status = jm.JobStatus.AWAITING_REVIEW
+    parked._execute_fn = lambda _job, _chosen: None
+    for title, selected in candidates:
+        parked.add_candidate("album", title, "Good", detail="2025",
+                             payload={"album_id": title}, selected=selected)
+    jm.registry.add(parked)
+    return parked
+
+
+def _stub_new_release_scan(monkeypatch, tmp_path, found_title):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows, job_persistence
+
+    # The suite runs without the job archive, so review saves would otherwise
+    # report failure and roll every mutation back. Records what each save would
+    # have written, so a test can tell an in-memory change from a saved one.
+    saves = []
+
+    def _save(_job, mutate):
+        result = mutate()
+        saves.append((_job.id, _job.summary, len(_job.candidates)))
+        return True, result
+
+    monkeypatch.setattr(job_persistence, "persist_review_mutation", _save)
+
+    good = tmp_path / "Good"
+    good.mkdir()
+
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(flows, "list_library_artists", lambda: [good])
+    monkeypatch.setattr(flows, "find_new_releases_for_artist",
+                        lambda _name, **_kwargs: SimpleNamespace(
+                            artist_id="artist-id", fetch_failed=False,
+                            unresolved=False, current_ids=["old", found_title],
+                            new_gaps=[object()], artist_name="Good"))
+    monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
+        "seen": {"artist-id": ["old"]},
+        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
+    })
+    monkeypatch.setattr(flows.new_releases_mod, "mark_run",
+                        lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(flows, "_add_gap_candidate",
+                        lambda job, *_args, **_kwargs: job.add_candidate(
+                            kind="album", title=found_title, artist="Good",
+                            detail="2026", payload={"album_id": found_title},
+                            selected=False))
+    return saves
+
+
+def test_a_fresh_new_release_check_joins_the_list_already_waiting(
+        tmp_path, monkeypatch):
+    """Pressing Check new releases with a half-worked list still parked must
+    add to that list, not park a rival one beside it: two lists would split the
+    user's own picks across two pages and strand the ticks already made."""
+    from qobuz_librarian.web import flows
+
+    parked = _parked_new_release_review(("kept", True), ("untouched", False))
+    saves = _stub_new_release_scan(monkeypatch, tmp_path, "fresh")
+    job = jm.Job(title="New-release check")
+    job.execute_kind = "new_releases"
+
+    flows.scan_new_releases(job, "tok")
+
+    # The earlier ticks survive, the new find is there, and it arrives un-ticked
+    # like every other new release.
+    by_title = {c["title"]: c for c in parked.candidates}
+    assert set(by_title) == {"kept", "untouched", "fresh"}
+    assert by_title["kept"]["selected"] is True
+    assert by_title["untouched"]["selected"] is False
+    assert by_title["fresh"]["selected"] is False
+    # This run leaves no second review behind, and says where its finds went.
+    assert job.candidates == []
+    assert job.status is jm.JobStatus.DONE
+    assert "already waiting" in job.summary
+    assert [j for j in jm.registry.awaiting_review()
+            if j.execute_kind == "new_releases"] == [parked]
+    # The parked list's own summary can't keep the count it had before the fold,
+    # and it has to be SAVED with it: a summary rewritten in memory only came
+    # back after a restart still claiming the count from before the fold.
+    assert "3 new releases waiting to review" in parked.summary
+    assert (parked.id, parked.summary, 3) in saves
+
+
+def test_a_new_release_check_with_nothing_parked_still_parks_its_own_review(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.web import flows
+
+    _stub_new_release_scan(monkeypatch, tmp_path, "fresh")
+    job = jm.Job(title="New-release check")
+    job.execute_kind = "new_releases"
+
+    flows.scan_new_releases(job, "tok")
+
+    assert [c["title"] for c in job.candidates] == ["fresh"]
+    assert job.status is jm.JobStatus.PENDING

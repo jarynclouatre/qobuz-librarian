@@ -68,6 +68,9 @@ DEFAULT_STATE_FILE = Path(__file__).resolve().parent / ".lyric_fetch_state.json"
 _OUTCOME_LABELS = {
     "synced": "added synced lyrics", "plain": "added lyrics",
     "fetched": "added lyrics",
+    "wrote-synced": "added synced lyrics", "wrote-plain": "added lyrics",
+    "dry:wrote-synced": "would add synced lyrics",
+    "dry:wrote-plain": "would add lyrics",
     "already-synced": "already had synced lyrics",
     "already-plain": "already had lyrics",
     "cached-synced": "already had synced lyrics",
@@ -1615,7 +1618,7 @@ def search_lyrics(
         if result and SYNCED_RE.search(result):
             ok, reason = lrc_duration_sane(result, duration)
             if not ok:
-                log.info("rejected %s synced result: %s", prov, reason)
+                log.debug("rejected %s synced result: %s", prov, reason)
                 continue
             return result, prov, "synced", tried, hard
     if skip_plain:

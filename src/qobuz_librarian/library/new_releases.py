@@ -46,6 +46,23 @@ def unresolved_note(names) -> str:
             "Rename each folder to the artist's name to include them.")
 
 
+# Artists a check attempt genuinely failed to reach this run (network hiccup,
+# rate limit, a transient Qobuz error) - named before the count is done.
+_NAMED_FAILED = 3
+
+
+def failed_note(names) -> str:
+    """One sentence naming artists a check couldn't reach this run, or "" if none."""
+    names = sorted({str(n) for n in (names or []) if n})
+    if not names:
+        return ""
+    shown = ", ".join(f"“{n}”" for n in names[:_NAMED_FAILED])
+    extra = len(names) - _NAMED_FAILED
+    if extra > 0:
+        shown += f" and {extra:,} more"
+    return f"{shown} couldn't be reached this run."
+
+
 def load() -> dict:
     """Return ``{"last_run": float|None, "seen": {artist_id: [album_id, …]},
     "baseline_complete": bool, "auto_scan_attempted": bool}``, tolerating a

@@ -3094,11 +3094,16 @@ def _sweep_upgrade_backups():
         job_mgr.end_library_operation(operation_token)
 
 
-def _existing_new_release_check():
-    """An active or awaiting-review new-release check, or None, so a second one
-    isn't stacked on top of one already queued or waiting for review."""
-    for j in job_mgr.registry.pending_and_running():  # ACTIVE incl awaiting_review
-        if getattr(j, "execute_kind", "") == "new_releases":
+def _active_new_release_check():
+    """A new-release check queued or crawling right now, or None, so a second
+    one isn't stacked on top of it. A check whose list is merely parked for
+    review does NOT block a fresh one: the fresh check folds its finds into
+    that list (flows._append_to_parked_new_release_review), so asking again is
+    always allowed and never costs the user the ticks already made."""
+    for j in job_mgr.registry.pending_and_running():
+        if getattr(j, "execute_kind", "") != "new_releases":
+            continue
+        if j.status != job_mgr.JobStatus.AWAITING_REVIEW:
             return j
     return None
 
@@ -3114,10 +3119,12 @@ def _pending_new_release_review(job):
     if getattr(getattr(job, "status", None), "value", "") not in (
             "done", "failed", "canceled"):
         return None
-    other = _existing_new_release_check()
-    if other is None or other.id == job.id:
-        return None
-    if other.status != job_mgr.JobStatus.AWAITING_REVIEW:
+    other = None
+    for j in job_mgr.registry.awaiting_review():
+        if getattr(j, "execute_kind", "") == "new_releases" and j.id != job.id:
+            other = j
+            break
+    if other is None:
         return None
     return {
         "href": f"/jobs/{other.id}",
@@ -3134,7 +3141,7 @@ def _start_new_release_check(credentials):
         # can run in an executor for POST /library).
         if _web_writes_paused():
             return None
-        existing = _existing_new_release_check()
+        existing = _active_new_release_check()
         if existing is not None:
             return existing
         job = job_mgr.Job(title="New-release check")
@@ -3167,8 +3174,10 @@ def _maybe_auto_check_new_releases():
 
     Read-only (it only parks a review list, never downloads), so it's safe to
     fire from a GET. Skipped when the check is off, the token is missing or
-    known-bad, the CLI holds the lock, another job is actively working, a
-    new-release list is already awaiting review, or the interval hasn't elapsed.
+    known-bad, the CLI holds the lock, another job is actively working, or the
+    interval hasn't elapsed. A list already parked for review does NOT stop it:
+    the run folds its finds into that list, so the timer keeps the review
+    current instead of going quiet until the list is cleared.
     """
     if cfg.NEW_RELEASE_CHECK_INTERVAL <= 0 or _web_writes_paused():
         return
@@ -3206,9 +3215,7 @@ def _maybe_auto_check_new_releases():
     with _auto_check_lock:
         active = job_mgr.registry.pending_and_running()
         working = any(j.status != job_mgr.JobStatus.AWAITING_REVIEW for j in active)
-        pending_check = any(getattr(j, "execute_kind", "") == "new_releases"
-                            for j in active)
-        if working or pending_check:
+        if working:
             return
         last = new_releases.last_run()
         if last is not None and (time.time() - last) < cfg.NEW_RELEASE_CHECK_INTERVAL:
@@ -7523,11 +7530,10 @@ async def library_scan(
                     status_code=200)
             return RedirectResponse(
                 url="/library?error=" + urllib.parse.quote(msg), status_code=303)
-        existing = _existing_new_release_check()
+        existing = _active_new_release_check()
         if existing is not None:
-            # Landing on the parked review without a word said made the button
-            # look broken: the check the user asked for did not run, and the
-            # page they arrived at was the one they had already seen.
+            # A check already crawling. Land on it rather than starting a
+            # second crawl over the same catalogue.
             return RedirectResponse(
                 url=f"/jobs/{existing.id}?waiting=1", status_code=303)
         try:

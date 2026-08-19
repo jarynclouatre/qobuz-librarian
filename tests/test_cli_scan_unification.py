@@ -578,128 +578,6 @@ def test_library_walk_carries_web_dismissals_into_the_missing_step(
             hidden.SCOPE_MISSING, "Artist", "Dismissed", handed[step])
 
 
-def test_cli_new_release_check_refuses_without_baseline(monkeypatch):
-    from qobuz_librarian.modes import new_releases
-
-    monkeypatch.setattr(
-        new_releases,
-        "authorize_qobuz_action",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Qobuz should not be checked without a baseline")
-        ),
-    )
-    monkeypatch.setattr(new_releases.new_releases_mod,
-                        "is_baseline_complete", lambda: False)
-    monkeypatch.setattr(new_releases, "list_library_artists",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("new-release crawl should not start")))
-
-    assert new_releases.run_check_new_releases_mode(
-        SimpleNamespace(dry_run=False)) != 0
-
-
-@pytest.mark.parametrize(
-    ("dry_run", "save_result", "expected"),
-    ((True, None, "no changes saved"),
-     (False, False, "couldn't be saved")),
-)
-def test_cli_new_release_summary_matches_persistence(
-        tmp_path, monkeypatch, caplog, dry_run, save_result, expected):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.modes import new_releases
-
-    artist = tmp_path / "Artist"
-    artist.mkdir()
-    saved = []
-
-    monkeypatch.setattr(
-        new_releases,
-        "authorize_qobuz_action",
-        lambda *_args, **_kwargs: credentials_from_values("uid", "tok"),
-    )
-    monkeypatch.setattr(new_releases.new_releases_mod,
-                        "is_baseline_complete", lambda: True)
-    monkeypatch.setattr(new_releases, "list_library_artists", lambda: [artist])
-    monkeypatch.setattr(new_releases.new_releases_mod, "load", lambda: {
-        "seen": {"artist-id": ["old"]},
-        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT) - 1,
-    })
-    monkeypatch.setattr(
-        new_releases,
-        "find_new_releases_for_artist",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            artist_id="artist-id",
-            fetch_failed=False,
-            current_ids=["old", "new"],
-            new_gaps=[],
-            artist_name="Artist",
-        ),
-    )
-    monkeypatch.setattr(
-        new_releases.new_releases_mod,
-        "mark_run",
-        lambda *_args, **_kwargs: saved.append(True) or save_result,
-    )
-
-    with caplog.at_level("INFO", logger="qobuz_librarian"):
-        exit_code = new_releases.run_check_new_releases_mode(
-            SimpleNamespace(dry_run=dry_run))
-
-    assert expected in caplog.text
-    assert bool(saved) is not dry_run
-    assert exit_code == (1 if save_result is False else 0)
-
-
-def test_cli_new_release_check_fails_when_an_artist_was_not_checked(
-        tmp_path, monkeypatch, caplog):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.modes import new_releases
-    from qobuz_librarian.ui_cli import logging as cli_logging
-
-    artist = tmp_path / "Artist"
-    artist.mkdir()
-
-    monkeypatch.setattr(
-        new_releases,
-        "authorize_qobuz_action",
-        lambda *_args, **_kwargs: credentials_from_values("uid", "tok"),
-    )
-    monkeypatch.setattr(new_releases.new_releases_mod,
-                        "is_baseline_complete", lambda: True)
-    monkeypatch.setattr(new_releases, "list_library_artists", lambda: [artist])
-    monkeypatch.setattr(new_releases.new_releases_mod, "load", lambda: {
-        "seen": {"artist-id": ["old"]},
-        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
-    })
-    monkeypatch.setattr(
-        new_releases,
-        "find_new_releases_for_artist",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            artist_id="artist-id",
-            fetch_failed=True,
-            current_ids=[],
-            new_gaps=[],
-            artist_name="Artist",
-        ),
-    )
-    monkeypatch.setattr(new_releases.new_releases_mod, "mark_run",
-                        lambda *_args, **_kwargs: True)
-
-    cli_logging.set_quiet(True)
-    try:
-        with caplog.at_level("INFO", logger="qobuz_librarian"):
-            exit_code = new_releases.run_check_new_releases_mode(
-                SimpleNamespace(dry_run=False))
-    finally:
-        cli_logging.set_quiet(False)
-
-    assert exit_code == 1
-    assert any(
-        record.levelname == "WARNING" and "incomplete" in record.getMessage()
-        for record in caplog.records
-    )
-
-
 def test_cli_file_changes_keep_generation_state_truthful(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import (
@@ -952,7 +830,6 @@ def test_direct_cli_download_routes_success_to_saved_state(
             "_admit_new_queue_items",
             lambda _items, bound_token: bound_token,
         )
-        monkeypatch.setattr(album_mode, "staging_preflight", lambda _args: None)
         monkeypatch.setattr(album_mode, "save_pending_queue", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(album_mode, "clear_pending_queue", lambda: None)
         monkeypatch.setattr(
@@ -1019,11 +896,6 @@ def test_direct_cli_download_admits_before_saving_queue(monkeypatch):
         executor,
         "_validate_queue_item_premise",
         lambda _item: side_effects.append("premise"),
-    )
-    monkeypatch.setattr(
-        album_mode,
-        "staging_preflight",
-        lambda _args: side_effects.append("preflight"),
     )
     monkeypatch.setattr(
         album_mode,
@@ -1280,3 +1152,50 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     assert rows[0]["artist"] == "Aphex Twin"
     assert rows[0]["status"] == "done"
     assert rows[0]["finished_at"] - rows[0]["created_at"] == 18
+
+
+def test_ctrl_c_exits_with_the_interrupt_code(monkeypatch):
+    """A typo, a real failure and Ctrl-C all exited 1, so nothing reading the
+    exit code could tell "the operator stopped it" from "it broke"."""
+    from qobuz_librarian import cli
+    from qobuz_librarian.ui_cli import errors
+
+    assert errors.EXIT_INTERRUPT == 130  # 128 + SIGINT, the shell convention
+
+    def _interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_maybe_drop_privileges", lambda: None)
+    monkeypatch.setattr(cli, "_check_staging_occupied", lambda: None)
+    monkeypatch.setattr(cli, "main", _interrupted)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli._entry()
+
+    assert exit_info.value.code == errors.EXIT_INTERRUPT
+
+
+def test_a_parse_error_still_exits_one(monkeypatch):
+    """The interrupt code is the only thing that moved: a bad flag stays 1,
+    and 2 stays reserved for a bad token."""
+    from qobuz_librarian import cli
+    from qobuz_librarian.ui_cli import errors
+
+    monkeypatch.setattr("sys.argv", ["qobuz-librarian", "--not-a-flag"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.parse_args()
+
+    assert exit_info.value.code == errors.EXIT_GENERAL
+
+
+def test_new_releases_is_a_web_only_feature(monkeypatch):
+    """Decided 2026-08-18: the terminal could find new releases but had no way
+    to download them, so the whole feature belongs to the web app."""
+    from qobuz_librarian import cli
+    from qobuz_librarian.ui_cli import sentinels
+
+    monkeypatch.setattr("sys.argv", ["qobuz-librarian", "--check-new-releases"])
+    with pytest.raises(SystemExit):
+        cli.parse_args()
+
+    assert not hasattr(sentinels.Mode, "NEW_RELEASES")

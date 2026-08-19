@@ -221,6 +221,21 @@ _ALBUM_WALK_DECIDED = {
     "sibling_skipped",
 }
 
+# Folder names shown in a leftover category before it falls back to a count.
+_NAMED_LEFTOVERS = 3
+
+
+def _leftover_folder_note(label, names) -> str:
+    """"{Label}: "Name", "Name" and N more" for a leftover album category."""
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    shown = ", ".join(f"“{n}”" for n in names[:_NAMED_LEFTOVERS])
+    extra = len(names) - _NAMED_LEFTOVERS
+    if extra > 0:
+        shown += f" and {extra:,} more"
+    return f"{label}: {shown}"
+
 
 def run_album_walk_mode(args, token):
     """Album fill walk: scan every album under every artist and
@@ -268,6 +283,8 @@ def run_album_walk_mode(args, token):
     n_albums_skipped = 0
     n_albums_unmatched = 0
     n_albums_unplaced = 0
+    unmatched_names = []
+    unplaced_names = []
     n_albums_filled = 0
     interrupted = False
     partial_completion = False
@@ -359,6 +376,7 @@ def run_album_walk_mode(args, token):
                         n_albums_skipped += 1
                     elif _result == "no_qobuz_match":
                         n_albums_unmatched += 1
+                        unmatched_names.append(_ad.name)
                     elif _result == "sibling_skipped":
                         pass  # a folded duplicate folder; recorded seen, not summarized
                     else:
@@ -366,6 +384,7 @@ def run_album_walk_mode(args, token):
                         # low_overlap, predicted_path_mismatch) or it had no
                         # tracks; not the same as "no Qobuz match".
                         n_albums_unplaced += 1
+                        unplaced_names.append(_ad.name)
                 n_artists_scanned += 1
                 if stopped:
                     log.info(fmt(C.GRAY, "  Stopping the album walk."))
@@ -434,6 +453,13 @@ def run_album_walk_mode(args, token):
         leftovers.append(f"couldn't place: {n_albums_unplaced}")
     if leftovers:
         log.info(fmt(C.GRAY, "    " + " · ".join(leftovers)))
+    for label, names in (
+        ("No Qobuz match", unmatched_names),
+        ("Couldn't place", unplaced_names),
+    ):
+        note = _leftover_folder_note(label, names)
+        if note:
+            log.info(fmt(C.GRAY, f"    {note}"))
     return EXIT_GENERAL if needs_attention else 0
 
 

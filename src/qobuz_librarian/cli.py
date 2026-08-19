@@ -45,6 +45,7 @@ from qobuz_librarian.ui_cli.errors import (
     EXIT_AUTH,
     EXIT_CONFIG,
     EXIT_GENERAL,
+    EXIT_INTERRUPT,
     EXIT_LOCK_BUSY,
     EXIT_TRANSIENT,
     die,
@@ -669,11 +670,12 @@ def _help_epilog():
     lines.extend(("", "Exit codes:"))
     for code, description in (
         ("0", "success"),
-        ("1", "general failure (including interrupt)"),
+        ("1", "general failure"),
         ("2", "authentication token invalid or missing"),
         ("3", "another writer holds the run lock"),
         ("4", "transient network or API error; retry later"),
         ("64", "configuration or required tool missing"),
+        ("130", "interrupted with Ctrl-C"),
     ):
         prefix = f"  {code:<4}"
         lines.extend(textwrap.wrap(
@@ -689,115 +691,133 @@ def _help_epilog():
 
 def parse_args():
     p = _ExitOneArgParser(
-        usage="%(prog)s [options]\n       [query ...]",
+        usage="%(prog)s [options] [query ...]",
+        add_help=False,
         description=_help_description(),
         formatter_class=_HelpFormatter,
         epilog=_help_epilog())
-    p.add_argument("--version", action="version", version=f"qobuz-librarian {__version__}")
-    p.add_argument("query", nargs="*", help="search query or Qobuz album URL")
-    p.add_argument("--artist",       metavar="NAME",
+    # Grouped so --help reads as sections instead of one wall. Grouping only:
+    # every flag is still spelled and parsed exactly as before, so nothing
+    # already written down stops working.
+    modes = p.add_argument_group(
+        "What to run", "Pick one. With none of these, the interactive menu opens.")
+    offers = p.add_argument_group(
+        "What gets offered", "Which releases the catalogue steps suggest.")
+    getting = p.add_argument_group(
+        "Downloading and importing", "How a run behaves once it has picks.")
+    lyrics = p.add_argument_group("Lyrics", "Only with --lyrics-walk.")
+    migration = p.add_argument_group("Migration", "Only with --migrate.")
+    output = p.add_argument_group("Output and help")
+
+    modes.add_argument("query", nargs="*", help="search query or Qobuz album URL")
+    modes.add_argument("--artist",       metavar="NAME",
                    help="run artist mode on NAME (skips interactive menu)")
-    p.add_argument("--library-walk", action="store_true",
+    modes.add_argument("--library-walk", action="store_true",
                    help="walk every artist: fill gaps, then offer albums you're "
                         "missing; queue as you go (same as menu Library walk).")
-    p.add_argument("--album-gaps", action="store_true",
+    modes.add_argument("--album-gaps", action="store_true",
                    help="fill missing tracks in every incomplete album you own; "
                         "never suggests albums you don't have.")
-    p.add_argument("--repair", action="store_true",
+    modes.add_argument("--repair", action="store_true",
                    help="re-download damaged (truncated) tracks you own. '*' at "
                         "the artist prompt sweeps the whole library.")
-    p.add_argument("--upgrade-walk", action="store_true",
+    modes.add_argument("--upgrade-walk", action="store_true",
                    help="review saved Library upgrade candidates. Per-artist "
                         "confirm (enter=skip), auto-advance.")
-    p.add_argument("--downsample-walk", action="store_true",
+    modes.add_argument("--downsample-walk", action="store_true",
                    help="scan the library for hi-res files and downsample them "
                         "to CD rate in place (per-artist confirm; --dry-run lists "
                         "only). Local; no Qobuz login needed.")
-    p.add_argument("--check-new-releases", dest="check_new_releases",
-                   action="store_true",
-                   help="walk library artists and report what's new on Qobuz "
-                        "since the last check (same engine the web auto-check "
-                        "uses); --dry-run skips advancing the baseline")
-    p.add_argument("--lyrics-walk", action="store_true",
+    modes.add_argument("--lyrics-walk", action="store_true",
                    help="fetch lyrics for tracks already in the library that "
                         "are missing them (LYRICS_FORMAT / LYRICS_PROVIDERS "
                         "settings apply). Local; no Qobuz login needed.")
-    p.add_argument("--lyrics-rescan", action="store_true",
-                   help="with --lyrics-walk: re-check every track, ignoring the "
-                        "saved per-track state.")
-    p.add_argument("--lyrics-synced-only", action="store_true",
-                   help="with --lyrics-walk: only write timed (synced) lyrics, "
-                        "never plain.")
-    p.add_argument("--no-catalog",   action="store_true",
+    modes.add_argument("--migrate", action="store_true",
+                   help="one-time setup: reorganise an existing library into the "
+                        "Artist/Album layout (local-only; no Qobuz login needed)")
+    modes.add_argument("--settings", action="store_true",
+                   help="set download quality, downsample policy and "
+                        "behaviour toggles from the terminal (same store "
+                        "the web Settings page saves to)")
+    modes.add_argument("--reset-walk-seen", action="store_true",
+                   help="delete the library-walk dedup files and exit "
+                        "(so the next walk revisits every artist/album)")
+
+    offers.add_argument("--no-catalog",   action="store_true",
                    help="skip missing album suggestions in Artist mode and "
                         "Library walk")
-    p.add_argument("--include-comps", action="store_true",
+    offers.add_argument("--include-comps", action="store_true",
                    help="include compilation/various-artists releases in "
                         "missing album suggestions for Artist mode and "
                         "Library walk")
-    p.add_argument("--dry-run",      action="store_true", help="show plan, download nothing")
-    p.add_argument("--no-import",    action="store_true",
-                   help="download but skip beets import; see the recovery "
-                        "command below")
-    p.add_argument("--force",        action="store_true",
-                   help="redownload everything (album mode only)")
-    # Default comes from config (PREFER_HIRES, env/Settings overridable) so
-    # CLI and web behave the same. --no-prefer-hires overrides per-run.
-    p.add_argument("--prefer-hires", dest="prefer_hires",
-                   action=argparse.BooleanOptionalAction,
-                   default=cfg.PREFER_HIRES,
-                   help="sort 24-bit / higher sample rate results first")
-    p.add_argument("--yes",          action="store_true",
-                   help="auto-confirm download/import prompts "
-                        "(destructive prompts still ask)")
-    p.add_argument("--verbose",      action="store_true", help="show detection details")
-    # Default from config (CONSOLIDATE, env/CLI overridable).
-    p.add_argument("--consolidate",  dest="consolidate",
-                   action=argparse.BooleanOptionalAction,
-                   default=cfg.CONSOLIDATE,
-                   help="after import, scan sibling folders and offer to consolidate")
-    # Passive auto-upgrade is OFF unless AUTO_UPGRADE_ENABLED is set or the
-    # explicit Upgrade walk is run.
-    p.add_argument("--no-upgrade",   action="store_true",
-                   help="force-disable quality upgrades for this run (plain gap-fill)")
-    # Unattended upgrade-walk gate.
-    p.add_argument("--auto-safe",    action="store_true",
-                   help="auto-confirm only safe candidates (requires --upgrade-walk).")
     # Missing-album noise filter: hide/show short releases.
-    p.add_argument("--include-singles", action="store_true",
+    offers.add_argument("--include-singles", action="store_true",
                    help=f"include releases with fewer than {cfg.MISSING_ALBUMS_MIN_TRACKS} tracks "
                         "in missing album suggestions for Artist mode and "
                         "Library walk")
-    p.add_argument("--no-color",     action="store_true", help="disable ANSI colours")
-    p.add_argument("--quiet", "-q",  action="store_true",
-                   help="suppress info-level console output (warnings/errors "
-                        "still print; the log file keeps recording)")
-    p.add_argument("--reset-walk-seen", action="store_true",
-                   help="delete the library-walk dedup files and exit "
-                        "(so the next walk revisits every artist/album)")
-    p.add_argument("--no-downsample",  dest="no_downsample",
+    # Default comes from config (PREFER_HIRES, env/Settings overridable) so
+    # CLI and web behave the same. --no-prefer-hires overrides per-run.
+    offers.add_argument("--prefer-hires", dest="prefer_hires",
+                   action=argparse.BooleanOptionalAction,
+                   default=cfg.PREFER_HIRES,
+                   help="sort 24-bit / higher sample rate results first")
+
+    getting.add_argument("--dry-run",      action="store_true", help="show plan, download nothing")
+    getting.add_argument("--force",        action="store_true",
+                   help="redownload everything (album mode only)")
+    getting.add_argument("--yes",          action="store_true",
+                   help="auto-confirm download/import prompts "
+                        "(destructive prompts still ask)")
+    # Unattended upgrade-walk gate.
+    getting.add_argument("--auto-safe",    action="store_true",
+                   help="auto-confirm only safe candidates (requires --upgrade-walk).")
+    getting.add_argument("--no-import",    action="store_true",
+                   help="download but skip beets import; see the recovery "
+                        "command below")
+    # Passive auto-upgrade is OFF unless AUTO_UPGRADE_ENABLED is set or the
+    # explicit Upgrade walk is run.
+    getting.add_argument("--no-upgrade",   action="store_true",
+                   help="force-disable quality upgrades for this run (plain gap-fill)")
+    getting.add_argument("--no-downsample",  dest="no_downsample",
                    action="store_true",
                    help="force-skip pre-import downsampling for this run "
                         "(only relevant when downsampling is enabled)")
-    p.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
+    # Default from config (CONSOLIDATE, env/CLI overridable).
+    getting.add_argument("--consolidate",  dest="consolidate",
+                   action=argparse.BooleanOptionalAction,
+                   default=cfg.CONSOLIDATE,
+                   help="after import, scan sibling folders and offer to consolidate")
+    getting.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
                    action=argparse.BooleanOptionalAction,
                    default=cfg.MIGRATE_MULTI_ARTIST,
                    help="after import, safely re-file 'Primary, Other' albums "
                         "under 'Primary'")
-    p.add_argument("--migrate", action="store_true",
-                   help="one-time setup: reorganise an existing library into the "
-                        "Artist/Album layout (local-only; no Qobuz login needed)")
-    p.add_argument("--migrate-src", dest="migrate_src", metavar="PATH", default="",
+
+    lyrics.add_argument("--lyrics-rescan", action="store_true",
+                   help="re-check every track, ignoring the saved per-track state.")
+    lyrics.add_argument("--lyrics-synced-only", action="store_true",
+                   help="only write timed (synced) lyrics, never plain.")
+
+    migration.add_argument("--migrate-src", dest="migrate_src", metavar="PATH", default="",
                    help="migration source library to read (overrides MIGRATE_SRC)")
-    p.add_argument("--migrate-dest", dest="migrate_dest", metavar="PATH", default="",
+    migration.add_argument("--migrate-dest", dest="migrate_dest", metavar="PATH", default="",
                    help="where migration builds the organised copy "
                         "(overrides MIGRATE_DEST)")
-    p.add_argument("--in-place", dest="in_place", action="store_true",
-                   help="migration: MOVE files into place instead of copying "
+    migration.add_argument("--in-place", dest="in_place", action="store_true",
+                   help="MOVE files into place instead of copying "
                         "(default copies, leaving originals untouched)")
-    p.add_argument("--acoustid", dest="acoustid", action="store_true",
-                   help="migration: fingerprint files whose tags can't place them "
+    migration.add_argument("--acoustid", dest="acoustid", action="store_true",
+                   help="fingerprint files whose tags can't place them "
                         "(slower, needs network; no key required)")
+
+    output.add_argument("--verbose",      action="store_true", help="show detection details")
+    output.add_argument("--quiet", "-q",  action="store_true",
+                   help="suppress info-level console output (warnings/errors "
+                        "still print; the log file keeps recording)")
+    output.add_argument("--no-color",     action="store_true", help="disable ANSI colours")
+    output.add_argument("--version", action="version", version=f"qobuz-librarian {__version__}")
+    output.add_argument("-h", "--help", action="help",
+                   help="show this help and exit")
     args = p.parse_args()
     # Per-run override of cfg.AUTO_UPGRADE_ENABLED.
     args.auto_upgrade = cfg.AUTO_UPGRADE_ENABLED
@@ -806,11 +826,11 @@ def parse_args():
     # flags alongside them would silently drop it.
     other_run_mode = (args.upgrade_walk or args.downsample_walk
                       or args.lyrics_walk or args.migrate or args.reset_walk_seen
-                      or args.check_new_releases or args.library_walk
-                      or args.album_gaps or args.repair)
+                      or args.library_walk
+                      or args.album_gaps or args.repair or args.settings)
     # Reject flag/mode combinations that would otherwise be silently dropped
     # or accepted.
-    if args.force and (args.artist or other_run_mode):
+    if args.force and not args.query:
         p.error("--force only applies to album mode (a query or Qobuz URL), "
                 "not --artist or a walk/migrate mode")
     # --migrate's extra options mean nothing without it.
@@ -851,7 +871,7 @@ def parse_args():
         ("--lyrics-walk", args.lyrics_walk),
         ("--migrate", args.migrate),
         ("--reset-walk-seen", args.reset_walk_seen),
-        ("--check-new-releases", args.check_new_releases),
+        ("--settings", args.settings),
     ) if on]
     if len(requested) > 1:
         p.error("run one mode at a time; got " + ", ".join(requested))
@@ -871,8 +891,7 @@ def parse_args():
     if args.no_upgrade and args.upgrade_walk:
         p.error("--no-upgrade conflicts with --upgrade-walk")
     # --auto-safe only gates the unattended upgrade walk.
-    if args.auto_safe and not args.upgrade_walk and (
-            args.query or args.artist or other_run_mode):
+    if args.auto_safe and not args.upgrade_walk:
         p.error("--auto-safe only applies to --upgrade-walk")
     # An empty --artist (e.g. `--artist "$VAR"` with VAR unset) is falsy, so it
     # would silently fall through to the interactive menu instead of running
@@ -940,7 +959,6 @@ def main():
         args.reset_walk_seen,
         args.migrate,
         args.lyrics_walk,
-        args.check_new_releases,
         args.downsample_walk,
         args.artist,
         args.library_walk,
@@ -977,6 +995,12 @@ def main():
             log.info(fmt(C.GRAY, "  No walk-seen state to clear."))
         return
 
+    # Local-only: reads/writes the same settings store the web Settings page
+    # and the downsample walk's keep-originals prompt use.
+    if args.settings:
+        from qobuz_librarian.modes.settings_cli import run_settings_mode
+        raise SystemExit(run_settings_mode(args))
+
     # Library migration is local-only: it reorganises files on disk and never
     # touches Qobuz.
     if args.migrate:
@@ -989,16 +1013,6 @@ def main():
         require_music_root()
         from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
         raise SystemExit(run_library_lyrics_mode(args))
-
-    # The new-release check hits the Qobuz API but doesn't need streamrip,
-    # ffmpeg or the FLAC tools (one catalog call per artist, no track
-    # fetches), so dispatch here before the heavy tool checks.
-    if args.check_new_releases:
-        require_music_root()
-        from qobuz_librarian.modes.new_releases import (
-            run_check_new_releases_mode,
-        )
-        raise SystemExit(run_check_new_releases_mode(args))
 
     # Downsample walk is local-only; it reads hi-res files off disk and
     # resamples them in place, never touching Qobuz.
@@ -1244,6 +1258,9 @@ def main():
             require_music_root()
             from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
             run_library_lyrics_mode(args)
+        elif mode == Mode.SETTINGS:
+            from qobuz_librarian.modes.settings_cli import run_settings_mode
+            run_settings_mode(args)
 
 
 def _check_staging_occupied():
@@ -1323,7 +1340,7 @@ def _entry():
         try:
             main()
         except KeyboardInterrupt:
-            die(fmt(C.GRAY, "\n  Interrupted."), EXIT_GENERAL)
+            die(fmt(C.GRAY, "\n  Interrupted."), EXIT_INTERRUPT)
         except AuthLost:
             die(fmt(C.RED,
                 "\n✗  Auth lost. Re-authenticate: Settings page in the web UI, "

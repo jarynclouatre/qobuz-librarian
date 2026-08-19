@@ -1860,6 +1860,60 @@ def _scan_library_impl(
     log.info(job.summary)
 
 
+def _parked_new_release_review(exclude=None):
+    """The newest new-release review still waiting to be worked through, if any.
+    ``exclude`` skips the check currently running, which is not parked yet."""
+    parked = None
+    for j in job_mgr.registry.awaiting_review():
+        if getattr(j, "execute_kind", "") != "new_releases":
+            continue
+        if exclude is not None and j.id == exclude.id:
+            continue
+        if parked is None or (j.created_at or 0) > (parked.created_at or 0):
+            parked = j
+    return parked
+
+
+def _append_to_parked_new_release_review(job):
+    """Fold this check's finds into the new-release list already waiting.
+
+    A second list beside the first would split one person's picks across two
+    pages and leave the ticks and dismissals they had already made stranded on
+    the older one. Folding keeps every earlier choice: a row the user dismissed
+    while this ran is checked against a fresh hidden snapshot and not brought
+    back, and a row already in the list keeps its tick. This job then finishes
+    as a plain result pointing at the list it fed, never as a review of its own.
+    Returns True when the finds were folded."""
+    parked = _parked_new_release_review(exclude=job)
+    if parked is None:
+        return False
+    added = refold_into_living_review(
+        list(job.candidates), execute_kind="new_releases", ticked=False)
+    if added is None or added is False:
+        return False
+    with job._lock:
+        job.candidates = []
+    waiting = len(parked.candidates)
+    if added:
+        # Through persist_review_mutation, not a bare assignment: the fold was
+        # already written with the old summary, so a summary left in memory
+        # only would come back after a restart claiming the count the review
+        # had BEFORE the fold. A save that fails restores the old text rather
+        # than leaving disk and screen disagreeing.
+        restated = (f"{plural(waiting, 'new release')} waiting to review, "
+                    f"{added} of them from the latest check.")
+        job_persistence.persist_review_mutation(
+            parked, lambda: setattr(parked, "summary", restated))
+        job.summary += (
+            " Added to the new-release review already waiting, "
+            f"now {plural(waiting, 'new release')}.")
+    else:
+        job.summary += " They were already in the review waiting for you."
+    parked.notify_review_changed()
+    job.status = job_mgr.JobStatus.DONE
+    return True
+
+
 def scan_new_releases(job, token):
     """Surface albums that appeared in library artists' Qobuz catalogs since the
     last check and that the user doesn't own or hasn't hidden, flagged as new
@@ -2038,6 +2092,10 @@ def scan_new_releases(job, token):
         # already names the reason and the remedy; a separate job.error would
         # only restate it, and the FAILED status carries its own marker.
         _mark_job_failed(job)
+    elif total:
+        # An earlier check's list may still be parked and half-worked. Join it
+        # rather than parking a rival list beside it.
+        _append_to_parked_new_release_review(job)
     # Not logged here: job.summary already renders on the job page, and the
     # activity log below it would otherwise repeat the exact same sentence.
 

@@ -22,6 +22,10 @@ the app is actually doing.
 - A password of nothing but spaces can no longer be set: length is measured after trimming, so spaces cannot pad a short password up to the minimum either. Five typos at the login now cost fifteen minutes rather than a full hour, while an attacker who keeps guessing keeps restarting that wait.
 - When the music folder is missing, empty, or not a folder, the message says where that path comes from: the container mount under Docker, or `MUSIC_ROOT` outside it. It used to name a path that does not exist on your machine and suggest choosing a location the app offers no way to choose.
 - Every library scan control goes grey while the terminal holds the library, and says so when you point at it. The baseline button, the refresh beside the Library title, Check new releases, and Force full rescan all stayed lit and answered with an error page when pressed.
+- Checking for new releases while an earlier list is still half-worked now adds to that list instead of turning the press into a refusal. Ticks and dismissals already made are kept, an album dismissed while the check ran is not brought back, and the automatic daily check keeps the waiting list current instead of going quiet until it is cleared.
+- New releases is a web feature only. The terminal could find them but had no way to download them, so `--check-new-releases` and the terminal menu's New releases entry are gone.
+- Ctrl-C in the terminal exits 130 rather than 1, so a script can tell a stop from a failure. Every other exit code is unchanged, and 2 stays reserved for a bad token.
+- `--help` is grouped into sections instead of one flat wall of flags. Every flag is spelled and parsed exactly as before.
 
 ## [0.13.2] - 2026-08-14
 

@@ -45,6 +45,7 @@
   {% set display_title = release_title(title, version) %}
   <form method="post" action="/download" hx-post="/download" hx-target="#download-toast"
         hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]"
+        {% if icon %}class="ql-icon-hit"{% endif %}
         hx-confirm='{% if as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% else %}Download "{{ display_title }}" by {{ artist }}?{% endif %}'
         data-confirm-action="Download"
         data-search-download-form data-search-title="{{ display_title }}"

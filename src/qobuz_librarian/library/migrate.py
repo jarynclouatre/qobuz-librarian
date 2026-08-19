@@ -472,7 +472,8 @@ def _statx_function():
         return _STATX_FUNCTION
     except AttributeError as exc:
         raise OSError(
-            errno.ENOSYS, "statx filesystem proof is unavailable"
+            errno.ENOSYS, "this filesystem doesn't support the identity "
+            "check migration needs"
         ) from exc
 
 
@@ -495,7 +496,8 @@ def _statx_directory_identity(descriptor, path, flags) -> list:
     # omits unused stats such as atime (ZFS atime=off) can still be proved.
     required = _STATX_TYPE | _STATX_MODE | _STATX_INO | _STATX_BTIME | _STATX_MNT_ID
     if value.mask & required != required or value.btime.tv_nsec >= 1_000_000_000:
-        raise OSError("filesystem cannot prove directory incarnation safely")
+        raise OSError("this filesystem doesn't support the identity check "
+                       "migration needs")
     device = os.makedev(value.dev_major, value.dev_minor)
     identity = [
         int(stat.S_IFMT(value.mode)),

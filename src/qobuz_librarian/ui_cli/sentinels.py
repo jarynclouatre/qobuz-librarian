@@ -17,6 +17,7 @@ class Mode(str, Enum):
     MIGRATE       = "migrate"
     DOWNSAMPLE    = "downsample"
     LYRICS        = "lyrics"
+    SETTINGS      = "settings"
 
 
 # Picker sentinels - typed as plain str so existing `is`/`==` checks at

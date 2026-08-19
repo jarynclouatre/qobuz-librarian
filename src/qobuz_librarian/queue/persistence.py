@@ -29,7 +29,7 @@ from qobuz_librarian.queue.journal import (
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
-from qobuz_librarian.ui_cli.logging import log
+from qobuz_librarian.ui_cli.logging import log, vlog
 
 __all__ = [
     "JournalItem",
@@ -196,6 +196,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
     label_for_mode = {
         "album_walk": "Album fill walk",
         "walk_queue": "Walk + queue",
+        "album-now": "Album search",
     }.get(mode, mode)
     queue_path = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
 
@@ -206,7 +207,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
         f"  ⚠  {heading} queue found: {len(items)} album(s) from {label_for_mode}",
     ))
     log.info(fmt(C.GRAY, f"     Saved: {when}"))
-    log.info(fmt(C.GRAY, f"     File:  {queue_path}"))
+    vlog(f"resume queue file: {queue_path}")
     if recovery_bearing:
         log.info(fmt(C.GRAY,
             "     The exact interrupted album must finish recovery before "
@@ -313,6 +314,7 @@ def offer_resume_pending_queue(args, token_source):
     label_for_mode = {
         "album_walk": "Album fill walk",
         "walk_queue": "Walk + queue",
+        "album-now": "Album search",
     }.get(mode or "", mode or "previous run")
 
     print()
@@ -320,7 +322,7 @@ def offer_resume_pending_queue(args, token_source):
         f"  ⚠  Pending queue found: {len(items)} album(s) from {label_for_mode}"))
     log.info(fmt(C.GRAY, f"     Saved: {when}"))
     queue_path = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
-    log.info(fmt(C.GRAY, f"     File:  {queue_path}"))
+    vlog(f"resume queue file: {queue_path}")
     log.info(fmt(C.GRAY,
         "     This means a previous run accumulated download decisions but "
         "didn't"))

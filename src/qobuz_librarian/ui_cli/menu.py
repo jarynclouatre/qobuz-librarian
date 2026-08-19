@@ -61,6 +61,7 @@ def interactive_session_mode():
         "Qobuz Librarian: download Qobuz albums and fill your library's gaps.")))
     log.info(fmt(C.BOLD + C.CYAN, "  What would you like to do?"))
     _print_choices()
+    log.info(fmt(C.WHITE, "    s) Settings"))
     log.info(fmt(C.WHITE, "    q) Quit"))
     while True:
         r = ask("  Choice (Enter = 1): ")
@@ -68,8 +69,10 @@ def interactive_session_mode():
             return Mode.QUIT
         if r in ("q", "quit", "exit"):
             return Mode.QUIT
+        if r == "s":
+            return Mode.SETTINGS
         if r == "":
             return Mode.ALBUM
         if r in _BY_KEY:
             return _BY_KEY[r]
-        log.info(fmt(C.GRAY, "  Enter 1-9 (blank = 1) or q to quit."))
+        log.info(fmt(C.GRAY, "  Enter 0-9 (blank = 1), s for Settings, or q to quit."))

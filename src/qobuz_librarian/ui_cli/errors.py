@@ -10,6 +10,10 @@ EXIT_AUTH       = 2   # token invalid / expired
 EXIT_LOCK_BUSY  = 3   # another writer holds the lock
 EXIT_TRANSIENT  = 4   # network / Qobuz API trouble - retry later
 EXIT_CONFIG     = 64  # config missing / unreadable / tool absent
+# Ctrl-C. 128 + SIGINT, the shell convention, so a wrapper script can
+# tell "the operator stopped it" from "it failed" without a scheme of
+# our own. Nothing else moves off EXIT_GENERAL.
+EXIT_INTERRUPT  = 130
 
 
 def die(msg: str, code: int = EXIT_GENERAL):
