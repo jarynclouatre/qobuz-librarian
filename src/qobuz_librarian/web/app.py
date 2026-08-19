@@ -2599,7 +2599,11 @@ async def login_submit(request: Request, username: str = Form(""),
     ok = await loop.run_in_executor(
         None, web_auth.verify_login, username.strip(), password)
     if not ok:
-        web_auth.record_login_failure(ip, username)
+        # A browser that already holds a valid session is not what the counter
+        # is for, and behind a proxy its typo would count against every other
+        # visitor arriving as the same address.
+        if not has_session:
+            web_auth.record_login_failure(ip, username)
         wait = _lockout_notice(ip, username, after_failure=True)
         return templates.TemplateResponse(
             request=request, name="login.html",
