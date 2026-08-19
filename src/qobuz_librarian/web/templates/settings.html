@@ -173,8 +173,7 @@
       <div class="ql-settings-section-copy">
         <h2>Qobuz authentication</h2>
         <p>
-          Save the Qobuz token used for searches, downloads, upgrades, and repair.
-          It stays on this server and is only sent to Qobuz.
+          Token used for search, downloads, upgrades, and repair.
         </p>
       </div>
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
@@ -474,12 +473,7 @@
       <div class="ql-settings-section-copy">
         <h2>Library maintenance</h2>
         <p>
-          A normal library scan picks up changes in your folders. To check Qobuz
-          for new releases, use Check new releases on the Library page. Use a
-          full rescan only after large manual changes to your files. It ignores
-          the unchanged-folder cache and re-reads every artist, so it takes as
-          long as a first scan. Starting one takes you to the Library page,
-          where it runs and can be watched.
+          Re-reads every artist folder, ignoring the unchanged-folder cache.
         </p>
       </div>
       <form action="/library" method="post" data-busy-submit>

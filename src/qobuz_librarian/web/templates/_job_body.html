@@ -322,7 +322,7 @@
       {% endif %}
       {% if recovery_retry and job.attention == 'recovery' %}
       <form action="/jobs/{{ job.id }}/give-up" method="post"
-            data-confirm="Discard this interrupted download? Nothing is added to your library, and you can start the album again whenever you like."
+            data-confirm="Discard this interrupted download? Nothing is added to your library."
             data-confirm-action="Give up">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">

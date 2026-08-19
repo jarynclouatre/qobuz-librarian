@@ -142,7 +142,7 @@
     </svg>
   </span>
   <p class="ql-empty-title">{% if is_downsample %}No hi-res albums kept.{% else %}Nothing dismissed.{% endif %}</p>
-  <p class="ql-empty-text">{% if is_downsample %}Albums you keep hi-res appear here so you can downsample them later.{% elif is_upgrade %}Albums you dismiss from the Upgrade review appear here so you can bring them back.{% else %}Albums you dismiss from the Library review appear here so you can bring them back.{% endif %}</p>
+  <p class="ql-empty-text">{% if is_downsample %}Albums kept hi-res appear here.{% elif is_upgrade %}Albums dismissed from the Upgrade review appear here.{% else %}Albums dismissed from the Library review appear here.{% endif %}</p>
   <a href="{{ back_url }}" class="ql-btn ql-btn-primary w-full sm:w-auto mt-4">Go to {{ back_label }}</a>
 </div>
 {% endif %}

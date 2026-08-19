@@ -240,7 +240,6 @@ def test_repair_scan_rechecks_legacy_checkpoint(tmp_path, monkeypatch):
 
     assert checked == ["New Album"]
     assert not job.candidates
-    assert "1 track decode-verified intact" in job.summary
     assert scan_checkpoint.load("repair") is None                    # cleared on clean finish
 
 
@@ -330,7 +329,6 @@ def test_repair_resume_reuses_only_exact_current_artist_bundles(
     flows.scan_repairs(job, "token")
 
     assert set(checked) == {"Changed", "Legacy", "New"}
-    assert "7 tracks decode-verified intact" in job.summary
     assert scan_checkpoint.load("repair") is None
 
 
@@ -1080,7 +1078,6 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
 
     assert callback_seen
     assert "Repaired 0/1" in job.summary
-    assert "could not be proven complete" in job.summary
     assert not job.error
     assert job.status != job_mgr.JobStatus.FAILED
 

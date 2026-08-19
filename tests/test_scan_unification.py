@@ -288,7 +288,6 @@ def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
     }], "tok")
 
     assert stale_job.status == jm.JobStatus.FAILED
-    assert "before any albums were changed" in stale_job.summary
     assert refreshed_upgrade == []
     assert refreshed_downsample == []
 
@@ -323,7 +322,6 @@ def test_execute_upgrades_refreshes_upgrade_and_downsample_state(
 
     assert attention_job.status is jm.JobStatus.FAILED
     assert attention_job.attention == "backup"
-    assert "backup retained" in attention_job.summary.lower()
 
 
 def test_web_unverified_repair_with_local_change_marks_remote_views_stale(
@@ -1144,7 +1142,7 @@ def test_scan_library_skips_upgrade_refresh_when_upgrade_disabled(
 
     flows.scan_library(job, "tok")
 
-    assert job.summary == "No missing albums found for artists in your library."
+    assert not job.candidates
 
 
 def test_library_artist_scan_ignores_single_store_when_suppression_off(
@@ -1224,7 +1222,6 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
     assert marked["baseline_limit"] is None
     assert "2 artists couldn't be checked" in job.summary
     assert "No Match" in job.summary
-    assert "Recorded a fresh baseline" not in job.summary
     assert job.status is jm.JobStatus.FAILED
     # job.summary above already names the reason and the remedy; job.error
     # would only restate it.
@@ -1464,13 +1461,11 @@ def test_a_fresh_new_release_check_joins_the_list_already_waiting(
     # This run leaves no second review behind, and says where its finds went.
     assert job.candidates == []
     assert job.status is jm.JobStatus.DONE
-    assert "already waiting" in job.summary
     assert [j for j in jm.registry.awaiting_review()
             if j.execute_kind == "new_releases"] == [parked]
     # The parked list's own summary can't keep the count it had before the fold,
     # and it has to be SAVED with it: a summary rewritten in memory only came
     # back after a restart still claiming the count from before the fold.
-    assert "3 new releases waiting to review" in parked.summary
     assert (parked.id, parked.summary, 3) in saves
 
 

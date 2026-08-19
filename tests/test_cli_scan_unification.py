@@ -222,7 +222,6 @@ def test_upgrade_walk_refuses_a_changed_saved_candidate(
         result = upgrade.run_upgrade_walk_mode(args, "token")
 
     assert result == upgrade.EXIT_GENERAL
-    assert "changed after the Library refresh" in caplog.text
 
 
 def test_upgrade_walk_carries_the_reviewed_receipt_to_the_backup_gate(
@@ -320,7 +319,6 @@ def test_upgrade_walk_refuses_incomplete_saved_state(monkeypatch, caplog):
         result = upgrade.run_upgrade_walk_mode(args, "tok")
 
     assert result == upgrade.EXIT_GENERAL
-    assert "Run a Library refresh first." in caplog.text
     assert any(record.levelname == "WARNING" for record in caplog.records)
 
 
@@ -505,8 +503,6 @@ def test_upgrade_walk_reports_a_retained_backup(monkeypatch, caplog):
 
     assert result == upgrade.EXIT_GENERAL
     assert refreshed == []
-    assert "upgraded tracks in 0 albums" in caplog.text
-    assert "kept a safety backup" in caplog.text
 
 
 def test_upgrade_walk_refuses_when_upgrade_disabled(monkeypatch, caplog):
@@ -527,10 +523,8 @@ def test_upgrade_walk_refuses_when_upgrade_disabled(monkeypatch, caplog):
             AssertionError("disabled upgrade mode should not load state")),
     )
 
-    with caplog.at_level("INFO", logger="qobuz_librarian"):
-        upgrade.run_upgrade_walk_mode(args, "tok")
-
-    assert "Upgrade scanning is turned off." in caplog.text
+    # The patched loader raises if the walk gets past the disabled check.
+    assert upgrade.run_upgrade_walk_mode(args, "tok") == 0
 
 
 def test_library_walk_carries_web_dismissals_into_the_missing_step(

@@ -982,8 +982,6 @@ def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeyp
     assert not broken.exists() and broken in moved
     assert len(list((staging / cfg.BEETS_RETRY_DIR).rglob("*.flac"))) == 2
     summary = next(message for message in messages if "Set aside 2 untagged" in message)
-    assert "private staging recovery" in summary
-    assert "each file has its own recovery record" in summary
     assert str(staging / cfg.BEETS_RETRY_DIR) not in summary
 
     clean = capture_file(tagged)

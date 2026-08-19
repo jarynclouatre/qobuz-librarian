@@ -91,14 +91,7 @@
   </div>
 
   {% if job.execute_kind == 'downsample' %}
-  {% if downsample_originals_choice not in ('keep', 'delete') %}
-  <div class="ql-notice ql-notice-info ql-review-warning">
-    <span><strong>You choose what happens to your originals.</strong>
-      Before anything is rewritten, you'll pick whether to keep a restorable
-      backup of the hi-res files or delete them to save space. Each file is
-      verified to decode cleanly before it replaces the original.</span>
-  </div>
-  {% elif downsample_originals_choice == 'keep' %}
+  {% if downsample_originals_choice == 'keep' %}
   <div class="ql-notice ql-notice-info ql-review-warning">
     <span><strong>Undoable for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}.</strong>
       Downsampling rewrites each file in place, and a copy of every hi-res
@@ -106,7 +99,7 @@
       Diagnostics. Each file is verified to decode cleanly before it replaces
       the original.</span>
   </div>
-  {% else %}
+  {% elif downsample_originals_choice == 'delete' %}
   <div class="ql-notice ql-notice-warning ql-review-warning">
     <span><strong>This cannot be undone.</strong> Downsampling rewrites each file in
       place and hi-res originals are not kept. Each file is verified to decode
@@ -119,10 +112,9 @@
      only one whose review said nothing about what it does. #}
   {% if job.execute_kind == 'upgrade' %}
   <div class="ql-notice ql-notice-warning ql-review-warning">
-    <span><strong>This replaces your files and cannot be undone.</strong> Each
-      album you pick is set aside, downloaded again from Qobuz at the higher
-      quality, and the copy you have now is removed once the replacement has
-      been verified. Unlike Downsample, no originals are kept.</span>
+    <span><strong>This replaces your files and cannot be undone.</strong>
+      Your current copy is removed once the replacement verifies. No originals
+      are kept.</span>
   </div>
   {% endif %}
 

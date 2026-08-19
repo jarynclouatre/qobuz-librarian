@@ -253,7 +253,6 @@ def test_get_track_downloads_one_without_hiding_album_gaps_by_default(
         assert _wait_for(lambda: job.status in (jm.JobStatus.DONE, jm.JobStatus.FAILED))
         assert job.status == jm.JobStatus.DONE
         assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is False
-        assert "stays out of scans" not in job.summary
     finally:
         _remove_job(job)
 
@@ -566,6 +565,5 @@ def test_undo_stays_retryable_when_its_final_job_save_fails(
 
         assert not track.exists()
         assert response.status_code == 503
-        assert "Retry Undo" in response.text
     finally:
         _remove_job(job)

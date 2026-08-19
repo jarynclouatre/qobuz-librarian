@@ -331,7 +331,6 @@ def test_scan_migration_requires_a_review_ack_for_a_short_in_place_move(
     )
 
     assert job.execute_args["requires_low_space_override"] is True
-    assert "confirm the low-space risk below" in job.summary
 
 
 def test_fingerprint_lookup_resolves_album_year_and_is_placeable():

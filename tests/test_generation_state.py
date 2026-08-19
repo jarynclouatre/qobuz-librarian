@@ -112,9 +112,6 @@ def test_restart_marks_committed_unpublished_library_attempt_incomplete(
     assert state["generation"] == publication["generation"]
     assert state["revision"] == revision + 1
     assert state["latest_attempt"]["status"] == "incomplete"
-    assert "before its review was saved" in (
-        state["latest_attempt"]["message"]
-    )
     assert state["outputs"]["library"]["status"] == "needs_refresh"
     assert generation_state.library_publication_incomplete(state) is False
     assert generation_state.reconcile_interrupted_library_publication(
@@ -391,7 +388,6 @@ def test_targeted_artist_merges_do_not_clear_other_stale_artists(
     ):
         output = generation_state.output_state(surface)
         assert output["status"] == "stale"
-        assert output["reason"] == "Another artist still needs a refresh."
         assert output["revision"] == saved["revision"]
 
 

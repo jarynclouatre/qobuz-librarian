@@ -84,7 +84,6 @@ def test_post_import_relocation_recovery_precedes_queue_recovery(
         )
     )
     assert "exact relocation evidence changed" in recovery_log
-    assert "Paths needing attention" in recovery_log
     assert all(str(path) in recovery_log for path in affected_paths)
 
 

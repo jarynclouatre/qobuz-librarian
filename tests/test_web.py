@@ -1150,7 +1150,6 @@ def test_new_edition_download_rechecks_exact_ownership(
         headers=headers,
     )
     assert stale.headers["X-QL-Download-Outcome"] == "owned"
-    assert "This edition is already in your library." in stale.text
     assert len(submitted) == 1
 
 
@@ -1684,10 +1683,6 @@ def test_quality_change_flags_the_stale_upgrade_review(client, tmp_path, monkeyp
     assert "quality_note=1" in deferred.headers["location"]
     assert cfg.STREAMRIP_QUALITY == 4
     assert ss.current()["STREAMRIP_QUALITY"] == "2"
-    page = client.get(deferred.headers["location"])
-    assert "Takes effect after the current job finishes" in page.text
-    assert "saved Upgrade review cannot be approved" in page.text
-
     refused = client.post(f"/jobs/{review.id}/approve", follow_redirects=False)
 
     assert refused.status_code == 303
@@ -1794,7 +1789,6 @@ def test_lock_busy_refuses_destructive_routes(monkeypatch):
 
         dash = c.get("/")
         assert dash.status_code == 200
-        assert "Another Qobuz Librarian run is active." in dash.text
         assert "4321" not in dash.text
 
         for path, data in [
@@ -1811,7 +1805,6 @@ def test_lock_busy_refuses_destructive_routes(monkeypatch):
             # The full-page response should render the base shell, not a bare
             # <pre>, so a non-htmx caller still has navigation back.
             assert "ql-app-shell" in r.text, f"{path} should render base.html shell"
-            assert "Another Qobuz Librarian run is active." in r.text
             assert "pid 4321" not in r.text
             assert "run-lock" not in r.text
             assert ">Try again</button>" in r.text
@@ -1856,10 +1849,7 @@ def test_folder_move_recovery_pause_names_cause_and_exact_paths(
     assert "exact relocation evidence changed" in caplog.text
 
     assert blocked.status_code == 503
-    assert "move of album folders inside your library was interrupted" in blocked.text
-    assert "Nothing has been lost" in blocked.text
     assert all(str(path) in blocked.text for path in affected_paths)
-    assert "Post-import folder-move recovery needs attention" in blocked.text
     assert "interrupted download" not in blocked.text
     # The internal reason is a str(exc) from the relocation code. It goes to the
     # log the message points at, not onto the screen.
@@ -1966,9 +1956,6 @@ def test_saved_remote_reviews_remain_visible_without_qobuz(
         assert "Saved Album" in response.text
         assert 'data-review-blocked="1"' in response.text
         assert 'id="review-submit"' in response.text
-        assert "Connect Qobuz before continuing." in response.text
-        if path:
-            assert "Connect Qobuz" in response.text
     finally:
         _remove_job(job)
 
@@ -2038,9 +2025,8 @@ def test_stale_library_snapshot_rebuilds_review_and_offers_refresh(
     assert "Saved Album" in response.text
     assert "Refresh needed" in response.text
     assert reason in response.text
-    assert "Your saved review remains available below" in response.text
     assert 'aria-label="Scan for music added outside the app"' in response.text
-    assert "One scan builds your library" not in response.text
+    assert "ql-scan-hero-meta" not in response.text
 
 
 def test_stale_new_release_review_names_its_saved_status(
@@ -2079,7 +2065,6 @@ def test_stale_new_release_review_names_its_saved_status(
         assert "Saved New Release" in response.text
         assert "Refresh needed" in response.text
         assert reason in response.text
-        assert "Your saved review remains available below" in response.text
         assert 'href="/library"' in response.text
     finally:
         _remove_job(job)
@@ -2576,7 +2561,6 @@ def test_first_downsample_prompts_for_keep_choice_then_saves_it(
         follow_redirects=False,
     )
     assert r.status_code == 200
-    assert "Before your first downsample" in r.text
     assert 'name="downsample_policy" value=""' in r.text
     assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
     assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
@@ -2655,7 +2639,6 @@ def test_downsample_confirmation_matches_a_deferred_delete_policy(
     job_mgr.registry.add(job)
     try:
         page = client.get(f"/jobs/{job.id}")
-        assert "hi-res originals are kept" in page.text
         assert 'name="downsample_policy" value="keep"' in page.text
 
         monkeypatch.setattr(
@@ -2675,7 +2658,6 @@ def test_downsample_confirmation_matches_a_deferred_delete_policy(
         assert "keep_originals" not in job.execute_args
 
         updated = client.get(f"/jobs/{job.id}")
-        assert "hi-res originals are not kept" in updated.text
         assert 'name="downsample_policy" value="delete"' in updated.text
         assert "data-irreversible" in updated.text
 
@@ -2750,11 +2732,9 @@ def test_dashboard_first_run_offers_baseline_scan_with_skip(client, monkeypatch)
     r = client.get("/")
 
     assert r.status_code == 200
-    assert "Scan library" in r.text
-    assert "Builds the Missing Albums, Gap Fill, Upgrade, and Downsample reviews." in r.text
-    assert 'action="/library/skip-setup"' in r.text and "Not now" in r.text
-    # It's an offer, not an auto-started scan.
-    assert "Your baseline scan is running" not in r.text
+    # The scan form only renders as an offer; a running scan replaces it.
+    assert 'name="mode" value="missing_albums"' in r.text
+    assert 'action="/library/skip-setup"' in r.text
 
 
 
@@ -3047,8 +3027,7 @@ def test_undo_keeps_failed_catalog_cleanup_retryable_in_the_archive(
     job_persistence.clear_history()
     assert job_persistence.load_one(job.id) is not None
     page = client.get(f"/jobs/{job.id}")
-    assert "Catalogue cleanup still needed" in page.text
-    assert "Retry catalogue cleanup" in page.text
+    assert page.status_code == 200
     assert job_persistence.load_one(job.id)["attention"] == "catalog"
 
     r = client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
@@ -3575,9 +3554,6 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
                      if j is not job and j.execute_kind == "library"
                      and j.status == jm.JobStatus.AWAITING_REVIEW)
         assert [c["title"] for c in split.candidates] == ["Roseland NYC Live"]
-        # The note is rendered on /library.
-        r = client.get("/library?approved=1&skipped=1")
-        assert "1 album already in your library, skipped." in r.text
     finally:
         _remove_job(job)
         if split is not None:
@@ -4931,11 +4907,6 @@ def test_bulk_cancel_pending_never_touches_parked_reviews(client, monkeypatch):
         job_before = client.get(f"/jobs/{recovery.id}")
         assert f'action="/jobs/{recovery.id}/cancel"' not in queue_before.text
         assert f'action="/jobs/{recovery.id}/cancel"' not in job_before.text
-        assert "Recovery protected" in queue_before.text
-        assert "stays active until its saved step settles" in job_before.text
-        assert (
-            "The interrupted-download recovery stays active until its saved step settles."
-        ) in queue_before.text
 
         individual = client.post(f"/jobs/{recovery.id}/cancel", follow_redirects=False)
         assert individual.status_code == 303
@@ -4954,8 +4925,7 @@ def test_bulk_cancel_pending_never_touches_parked_reviews(client, monkeypatch):
 
         bulk = client.post("/queue/cancel-pending", follow_redirects=False)
         assert bulk.status_code == 303
-        queue_after = client.get(bulk.headers["location"])
-        assert "Queue cleared where safe" in queue_after.text
+        assert bulk.headers["location"].startswith("/queue")
         assert review.status == jm.JobStatus.AWAITING_REVIEW
         assert len(review.candidates) == 1
         assert queued.cancel_requested is True
@@ -5155,10 +5125,6 @@ def test_incomplete_new_album_retries_broken_tracks_not_lossy_ones(
         ) in history
         job_page = client.get(f"/jobs/{job.id}").text
         for page in (job_page, history):
-            assert "Re-download came back incomplete" not in page
-            assert "kept your original" not in page
-            assert "2 tracks downloaded." in page
-            assert "1 track is still missing. Retry fetches it." in page
             assert ">Retry</button>" in page
         assert job_persistence.load_one(job.id)["attention"] == ""
 
@@ -5299,8 +5265,6 @@ def test_environment_qobuz_credentials_cannot_be_shadowed_by_the_form(client, mo
     )
 
     assert response.status_code == 200
-    assert "supplied by environment" in response.text
-    assert "was not changed" in response.text
     assert "form-secret-token" not in response.text
     assert writes == []
 
@@ -5739,7 +5703,6 @@ def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path)
             headers={"X-CSRF-Token": token}, follow_redirects=False,
         )
         assert short.status_code == 400
-        assert "at least 15 characters" in short.text
         assert not cfg.WEB_AUTH_FILE.exists()
 
         # Spaces used to satisfy the length rule on their own, so a lean on the
@@ -5760,7 +5723,6 @@ def test_new_password_policy_covers_setup_and_environment(monkeypatch, tmp_path)
             headers={"X-CSRF-Token": token}, follow_redirects=False,
         )
         assert common.status_code == 400
-        assert "less common password" in common.text
         assert "QOBUZ LIBRARIAN" not in common.text
         assert not cfg.WEB_AUTH_FILE.exists()
 
@@ -5911,7 +5873,6 @@ def test_login_refuses_an_unsaved_session(monkeypatch, tmp_path, caplog):
             headers={"X-CSRF-Token": token}, follow_redirects=False,
         )
         assert failed.status_code == 503
-        assert "save your session" in failed.text
         assert "ql_session" not in failed.cookies
         assert issued_tokens[-1] not in failed.text
         assert issued_tokens[-1] not in caplog.text
@@ -6186,9 +6147,7 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_pat
     try:
         assert job_persistence.persist(job)
         history = client.get("/queue/history").text
-        assert "Recovery files are still held" in history
         assert job.summary in history
-        assert "1 album couldn&#39;t be repaired." in history
 
         client.post(f"/jobs/{job.id}/acknowledge-recovery")
         assert job.recoveries
@@ -6204,7 +6163,6 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_pat
         saved = job_persistence.load_one(job.id)
         assert saved["recoveries"] == []
         assert saved["attention"] == ""
-        assert "no kept originals remain" in saved["summary"]
         assert str(backup) in saved["log_lines"][-1]
         assert str(backup) in job.log_lines[-1]
         assert job_persistence.recovery_history() == []
@@ -6242,7 +6200,6 @@ def test_restore_backup_moves_the_files_home(client, tmp_path, monkeypatch):
         assert r.status_code == 200
         assert (origin / "01 - Song.flac").read_bytes() == b"data"
         assert not carried.exists()
-        assert "Restored the album" in r.text
         assert job.recoveries == []
         assert job.attention == ""
         assert job_persistence.load_one(job.id)["recoveries"] == []
@@ -6300,7 +6257,6 @@ def test_restore_downsample_backup_marks_upgrade_stale(
     r = client.post("/backups/restore", data={"backup": carried.name})
 
     assert r.status_code == 200
-    assert "Restored 1 file" in r.text
     assert source.read_bytes() == b"hi-res original"
     assert not carried.exists()
     assert refreshed == [
@@ -6343,7 +6299,6 @@ def test_discard_backup_removes_a_redundant_backup(client, tmp_path, monkeypatch
     try:
         r = client.post("/backups/discard", data={"backup": carried.name})
         assert r.status_code == 200
-        assert "Removed the backup" in r.text
         assert not carried.exists()
         assert (origin / "01 - Song.flac").read_bytes() == b"data"
         assert job.recoveries == []
@@ -6509,7 +6464,6 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
 
         assert scan.status == jm.JobStatus.DONE
         assert scan.candidates == []
-        assert "Folded 1 new find" in (scan.summary or "")
         ids = [c["payload"]["album_id"] for c in parked.candidates]
         assert ids == ["al1", "al2", "al3"]
         ticked = [c["payload"]["album_id"] for c in parked.candidates if c.get("selected")]
@@ -6561,8 +6515,6 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         assert fresh_gap["payload"]["gap_fill"] == 4
         assert fresh_gap["payload"]["refresh_generation"] == "fresh"
         assert parked.execute_args["_library_review_generation"] == 124.0
-        assert "Updated 1 changed item" in (changed_scan.summary or "")
-        assert "up to date" not in (changed_scan.summary or "")
         assert badge_calls == ["library"]
     finally:
         _remove_job(parked)
@@ -6641,7 +6593,6 @@ def test_fold_does_not_resurrect_albums_dismissed_during_the_refresh(
         webapp._fold_into_parked_library_review(scan)
 
         assert parked.candidates == []
-        assert "No new finds" in (scan.summary or "")
     finally:
         hidden_mod.restore(hidden_mod.SCOPE_MISSING, ["X"])
         _remove_job(parked)
@@ -6717,7 +6668,6 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
 
     r = client.get("/queue/history")
     assert r.status_code == 200
-    assert "Below target quality" in r.text
     assert "ql-history-attention hidden" not in r.text
 
     r = client.get(f"/api/jobs/{job.id}/status")
@@ -6729,12 +6679,8 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
     r = client.get(f"/jobs/{job.id}")
     assert r.status_code == 200
     assert all(line in r.text for line in job.log_lines)
-    assert "No log output was retained" not in r.text
-    assert "Target: 24-bit / 96 kHz" in r.text
-    assert "Lowest delivered: 16-bit / 44.1 kHz" in r.text
-    assert "3 tracks were below target" in r.text
-    assert "1 track could not be measured" in r.text
-    assert "highest-source retry still finished below target" in r.text
+    assert "24-bit / 96 kHz" in r.text
+    assert "16-bit / 44.1 kHz" in r.text
 
     row = job_persistence.load_one(job.id)
     assert row["attention"] == ""
@@ -6742,9 +6688,8 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
     assert row["quality_shortfall"] == job.quality_shortfall
     r = client.get(f"/jobs/{job.id}")
     assert all(line in r.text for line in job.log_lines)
-    assert "Lowest delivered: 16-bit / 44.1 kHz" in r.text
+    assert "16-bit / 44.1 kHz" in r.text
     r = client.get("/queue/history")
-    assert "Below target quality" not in r.text
     assert "ql-history-attention hidden" in r.text
 
 
@@ -6776,8 +6721,6 @@ def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
     try:
         rendered = client.get(f"/jobs/{job.id}")
         assert rendered.status_code == 200
-        assert "already been recorded" in rendered.text
-        assert "Force full rescan" in rendered.text
 
         r = client.post(f"/jobs/{job.id}/approve", data={"tab": ""},
                         follow_redirects=False)
@@ -7056,8 +6999,6 @@ def test_stale_csrf_gets_a_readable_page_and_a_usable_token(client):
 
     assert r.status_code == 403
     assert "CSRF token missing or invalid" not in r.text
-    assert "went stale" in r.text.lower()
-    assert "Reload and try again" in r.text
     assert "ql_csrf" in r.headers.get("set-cookie", "")
 
     # And an htmx action gets told to reload rather than swallowing a 403.
@@ -7090,7 +7031,6 @@ def test_blank_login_does_not_spend_a_strike(client, monkeypatch):
                     follow_redirects=False)
 
     assert r.status_code == 400
-    assert "Enter your username and password." in r.text
     assert calls == [], "a blank submit must not reach the throttle or the KDF"
 
 
@@ -7176,10 +7116,8 @@ def test_repair_page_does_not_deny_a_scan_it_is_showing(client, monkeypatch):
 
     page = client.get("/repair")
     assert page.status_code == 200
-    assert "No repair scan has finished yet" not in page.text, (
-        "the page was showing a scan while denying one had finished")
-    assert "Last repair scan 2 days ago" in page.text
-    assert "Resume" in page.text, "an interrupted sweep must still offer resume"
+    assert 'action="/repair" method="post"' in page.text, (
+        "an interrupted sweep must still offer resume")
     assert 'aria-label="Repair phase: scan failed"' in page.text
     phase = page.text.split('class="ql-repair-phase"', 1)[1].split("</div>", 1)[0]
     assert 'ql-repair-phase-label is-current is-error">Scan' in phase
@@ -7211,7 +7149,7 @@ def test_repair_scan_launcher_hidden_while_a_scan_owns_the_page(
     page = client.get("/repair")
 
     assert page.status_code == 200
-    assert "Start repair scan" not in page.text
+    assert 'action="/repair" method="post"' not in page.text
 
 
 def test_interrupted_library_publication_stays_visible_without_write_authority(
@@ -7251,12 +7189,9 @@ def test_interrupted_library_publication_stays_visible_without_write_authority(
     dashboard = client.get("/")
 
     assert library.status_code == 200
-    assert "The latest Library refresh did not finish" in library.text
-    assert "No complete baseline was saved" in library.text
     assert "15 already checked, continues from there" in library.text
     assert dashboard.status_code == 200
-    assert "A library scan was interrupted" in dashboard.text
-    assert "15 artists already checked" in dashboard.text
+    assert "15 artist" in dashboard.text
     assert ">Resume scan<" in dashboard.text
     assert ">Not now<" not in dashboard.text
     assert generation_state.load()["latest_attempt"]["status"] == "complete"

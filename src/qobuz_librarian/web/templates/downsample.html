@@ -70,7 +70,7 @@
     <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">{{ downsample_state.count }} album{% if downsample_state.count != 1 %}s{% endif %} can be downsampled</p>
-        <p class="ql-work-card-text">Pick the albums on the review screen. Files are rewritten in place at 44.1 / 48 kHz{% if not ds_originals_chosen() %}; you'll first choose whether to keep the hi-res originals{% elif keeps_ds_originals() %}, and the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} so a rewrite can be undone from Settings{% else %} and the hi-res originals are not kept{% endif %}.</p>
+        <p class="ql-work-card-text">Files are rewritten in place at 44.1 / 48 kHz{% if ds_originals_chosen() and keeps_ds_originals() %}, and the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% elif ds_originals_chosen() %} and the hi-res originals are not kept{% else %}. You choose whether the hi-res originals are kept{% endif %}.</p>
       </div>
       <div class="ql-work-card-actions">
         <form action="/downsample/review" method="post" data-busy-submit>

@@ -829,8 +829,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     elif _LOCK_BUSY_PID is not None:
         reason = "Another Qobuz Librarian run is using the library."
         msg = ("Another Qobuz Librarian run is active. Downloads and scans are "
-               "paused so only one process writes to the library at a time. "
-               "Stop the other run first, then restart Qobuz Librarian.")
+               "paused. Stop the other run first, then restart Qobuz "
+               "Librarian.")
     elif (unwritable := _unwritable_volumes()):
         reason = "A folder Qobuz Librarian must write to is read-only."
         action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
@@ -841,10 +841,9 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     elif _LOCK_UNENFORCEABLE:
         reason = "The data folder can't hold the safety lock."
         msg = ("The data folder can't hold the single-writer safety lock "
-               "(read-only, or a mount without file locking), so a second "
-               "run writing the library at the same time would go unnoticed. "
-               "Downloads and scans are paused. Move the data folder to a "
-               "writable filesystem that supports file locking, then restart.")
+               "(read-only, or a mount without file locking). Downloads and "
+               "scans are paused. Move the data folder to a writable "
+               "filesystem that supports file locking, then restart.")
     elif not _data_dir_available():
         # The folder was fine at startup, so the lock checks above all pass and
         # nothing else notices. Without this branch the readiness check knows
@@ -886,7 +885,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             msg = (
                 "Qobuz Librarian can't confirm that move finished, so downloads "
                 "and scans are paused and your files are left exactly as they "
-                "are. Nothing has been lost. "
+                "are. "
                 + (f"The folders involved: {paths}. " if paths else "")
                 + "Restart Qobuz Librarian; if this screen comes back, the "
                 f"“{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the container "
@@ -9753,8 +9752,7 @@ async def discard_interrupted_terminal_download(request: Request):
     return RedirectResponse(
         url="/queue?notice=" + urllib.parse.quote(
             "Gave up on the interrupted download. Nothing reached your "
-            "library, downloads and scans can run again, and the album is "
-            "still there to download again."),
+            "library."),
         status_code=303)
 
 

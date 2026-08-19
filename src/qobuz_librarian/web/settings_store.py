@@ -32,9 +32,8 @@ BEHAVIOR_FIELDS = [
      "album artist instead of a combined artist folder."),
     ("DOWNSAMPLE_HIRES_ENABLED", "Downsample new hi-res downloads",
      "Before import, reduce newly downloaded hi-res FLACs to 44.1 or 48 kHz. "
-     "The hi-res version is not kept, whatever Keep originals when "
-     "downsampling is set to; that choice covers the Downsample page. "
-     "Download the album again if you want hi-res back."),
+     "The hi-res version is not kept. The Downsample page has its own keep "
+     "setting."),
     ("SUPPRESS_SINGLE_TRACK_GAPS", "Treat track downloads as singles",
      "Hide the rest of an album from gap scans after you download one track. "
      "Leave this off if a track download should not affect future album offers."),
@@ -96,11 +95,7 @@ TEXT_FIELDS = [
      "enum", ["0", "21600", "43200", "86400", "604800"], ""),
     ("DOWNSAMPLE_KEEP_ORIGINALS", "Keep originals when downsampling",
      "Whether the Downsample page parks a restorable copy of each hi-res "
-     "original before rewriting it (undo from Settings until the backup "
-     "retention window ends; uses that much extra disk) or deletes it to save "
-     "space. You're asked to choose the first time you downsample. New "
-     "downloads are not covered: downsampling one never keeps the hi-res "
-     "version.",
+     "original before rewriting it, or deletes it to save space.",
      "enum", ["keep", "delete"], ""),
 ]
 TEXT_KEYS = [k for k, *_ in TEXT_FIELDS]
@@ -177,9 +172,7 @@ def inert_behaviour_notes(values) -> dict:
             "rate and this never runs.")
     if values.get("PREFER_HIRES"):
         notes["PREFER_HIRES"] = (
-            f"Your download quality is {quality}, so every edition arrives at "
-            "that rate. This still chooses which edition you get, not its "
-            "quality.")
+            f"At {quality} this only picks the edition.")
     return notes
 
 
