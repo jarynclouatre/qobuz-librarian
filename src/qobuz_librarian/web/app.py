@@ -12172,7 +12172,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'same name there is replaced and cannot be brought back, so an '
             f'upgrade or re-download of this album since the backup was made '
             f'is undone." '
-            f'data-confirm-action="Restore">Restore</button>'
+            f'data-confirm-action="Restore" data-irreversible>Restore</button>'
             f'</form>'
             f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
@@ -12348,10 +12348,11 @@ def _restore_refused_notice(request: Request, target: Path, origin) -> str:
     """Say why an upgrade restore refused, in the figures it refused on."""
     backup_size = backup_mod.album_tree_size(target)
     origin_size = backup_mod.album_tree_size(origin) if origin else None
+    origin_display, _is_host = _resolve_host_path(str(origin or ""))
     if (backup_size and origin_size
             and origin_size[1] >= backup_size[1] > 0):
         headline = (
-            f"{html.escape(str(origin))} now holds "
+            f"{html.escape(origin_display)} now holds "
             f"{plural(origin_size[0], 'file')} "
             f"({origin_size[1] / 1024 / 1024:.1f} MB) while this backup holds "
             f"{plural(backup_size[0], 'file')} "
@@ -12476,7 +12477,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _diagnostics_result_notice(
                         "success", f"Restored {plural(n, 'file')} to "
-                        f"{html.escape(str(origin))}.")
+                        f"{html.escape(_resolve_host_path(str(origin))[0])}.")
                 else:
                     note = _diagnostics_result_notice(
                         "error", "The files were restored, but their saved "
@@ -12497,7 +12498,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             if ok and job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", f"Restored the album to "
-                    f"{html.escape(str(origin))}.")
+                    f"{html.escape(_resolve_host_path(str(origin))[0])}.")
             elif ok:
                 note = _diagnostics_result_notice(
                     "error", "The album was restored, but its saved recovery "
@@ -12560,7 +12561,8 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "so this backup was left untouched. Check that the data "
                 "volume is writable, then try again.")
         elif backup_mod.discard_redundant_backup(target):
-            dest = html.escape(str(carried.receipt.get("origin", "")))
+            dest = html.escape(_resolve_host_path(
+                str(carried.receipt.get("origin", "")))[0])
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", "Removed the backup. Every file it held is "

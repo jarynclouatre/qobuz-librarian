@@ -327,7 +327,7 @@
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
         <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Give up on this album</button>
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible>Give up on this album</button>
       </form>
       {% endif %}
       {% if s in ('done', 'failed') and catalog_cleanup and catalog_cleanup.get('pending') and not job._preserve_persisted_single and not job._single_undo_unavailable %}

@@ -3317,6 +3317,11 @@
   function announceDiagnosticsSwap(event) {
     var target = event.detail && event.detail.target;
     if (!target || target.id !== "diagnostics-list") return;
+    // Recheck alone. Restore, Remove and Delete swap the same list, and each
+    // already says what it did; a second, generic notice beside a refusal
+    // reads like the action went through.
+    var req = event.detail && event.detail.requestConfig;
+    if (!req || String(req.verb).toLowerCase() !== "get") return;
     var status = document.getElementById("diagnostics-status");
     if (status) status.textContent = "Diagnostics refreshed.";
     // The status line above is sr-only; a sighted user pressing Recheck on a
