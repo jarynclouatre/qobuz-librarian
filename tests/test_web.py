@@ -7324,3 +7324,51 @@ def test_finished_download_marks_its_search_row_in_library(client):
     finally:
         _remove_job(complete)
         _remove_job(partial)
+
+
+def test_downloading_the_collection_snapshot_serves_the_saved_file(
+        client, tmp_path, monkeypatch):
+    import json
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import collection_snapshot
+
+    monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "backups"))
+    # Nothing saved yet: the page says so rather than serving an empty file.
+    missing = client.get("/collection/snapshot/download", follow_redirects=False)
+    assert missing.status_code == 303
+
+    document = {"format": collection_snapshot.FORMAT,
+                "version": collection_snapshot.VERSION,
+                "counts": {"artists": 1, "albums": 1, "tracks": 1},
+                "artists": [{"name": "Artist", "albums": []}]}
+    assert collection_snapshot.write_snapshot(document)[0] is True
+
+    served = client.get("/collection/snapshot/download")
+    assert served.status_code == 200
+    assert "attachment" in served.headers["content-disposition"]
+    assert json.loads(served.text)["counts"]["albums"] == 1
+
+
+def test_a_manual_backup_reports_what_it_saved(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import collection_snapshot, scanner
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    (music / "Artist" / "Album").mkdir(parents=True)
+    (music / "Artist" / "Album" / "01.flac").write_bytes(b"")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "backups"))
+    monkeypatch.setattr(
+        scanner, "read_album_dir",
+        lambda d, walk_errors=None: [{"title": "One", "tracknumber": 1,
+                                      "discnumber": 1, "isrc": "",
+                                      "mb_trackid": "", "album": "Album"}])
+    scanner.clear_scan_caches()
+
+    job = jm.Job(title="Collection backup")
+    flows.run_collection_snapshot(job)
+
+    assert collection_snapshot.latest_path().is_file()
+    assert "1 album" in job.summary

@@ -40,6 +40,7 @@ out of library scans and import targets.
 | `LYRICS_PROVIDERS` | `Lrclib,NetEase,Musixmatch` | Ordered comma list |
 | `LYRICS_PROVIDER_TIMEOUT` | `30` | Maximum seconds for one provider lookup before its circuit-breaker records a failure |
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
+| `COLLECTION_BACKUP_DIR` | app data folder | Where the collection backup is written after each library scan |
 | `AUTO_LIBRARY_SCAN` | `true` | Offer the one-time baseline scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
 | `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days |

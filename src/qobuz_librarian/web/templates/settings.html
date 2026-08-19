@@ -390,7 +390,7 @@
           </span>
         </summary>
         <div class="ql-defaults-grid">
-          {% for key, label, help, kind, choices, placeholder in text_fields if key != 'STREAMRIP_QUALITY' %}
+          {% for key, label, help, kind, choices, placeholder in text_fields if key not in ('STREAMRIP_QUALITY', 'COLLECTION_BACKUP_DIR') %}
           <div class="ql-default-field">
             <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
             <div class="ql-default-control">
@@ -491,6 +491,79 @@
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>
+  </div>
+</section>
+
+<section class="ql-settings-section">
+  <div class="ql-settings-section-body">
+    <div class="ql-settings-section-head ql-settings-section-head-actions">
+      <div class="ql-settings-section-copy">
+        <h2 id="collection-backup" tabindex="-1" class="ql-anchor-target">Collection backup</h2>
+        <p>
+          Writes a list of every artist, album and track in your library to the
+          folder below, after each library scan.
+        </p>
+      </div>
+      <div class="flex gap-2">
+        <form action="/collection/snapshot" method="post" data-busy-submit>
+          <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+          <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary">Back up now</button>
+        </form>
+        {% if collection_backup.counts %}
+        <a href="/collection/snapshot/download" class="ql-btn ql-btn-sm ql-btn-secondary">Download a copy</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if collection_backup.held_back %}
+    <div class="ql-notice ql-notice-warning mb-6 flex items-start flex-wrap gap-3">
+      <span class="flex-1">
+        {% if not collection_backup.held_back.albums %}
+        Backup held back: no music was found in your library folder. The last
+        backup was kept.
+        {% else %}
+        Backup held back:
+        {{ "{:,}".format(collection_backup.counts.albums) if collection_backup.counts else "more" }}
+        albums last time,
+        {{ "{:,}".format(collection_backup.held_back.albums) }} now. The last
+        backup was kept.
+        {% endif %}
+      </span>
+      <form action="/collection/snapshot" method="post" class="w-full sm:w-auto" data-busy-submit>
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="force" value="1">
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary whitespace-nowrap"
+                data-confirm="Replace the last backup with what is on disk now?"
+                data-confirm-action="Replace">Replace anyway</button>
+      </form>
+    </div>
+    {% endif %}
+
+    <p class="ql-storage-meta">
+      {% if collection_backup.counts %}
+      Last backup {{ collection_backup.age }}:
+      {{ "{:,}".format(collection_backup.counts.albums) }} albums,
+      {{ "{:,}".format(collection_backup.counts.artists) }} artists.
+      {% else %}
+      No backup yet.
+      {% endif %}
+    </p>
+
+    <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      {% for key, label, help, kind, choices, placeholder in text_fields if key == 'COLLECTION_BACKUP_DIR' %}
+      <div class="ql-field">
+        <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
+        <input type="text" name="{{ key }}" id="f-{{ key }}"
+               value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
+               class="ql-input max-w-lg text-base sm:text-sm">
+        <p class="ql-field-help">Writing to <code>{{ collection_backup.folder }}</code>. {{ help }}</p>
+      </div>
+      {% endfor %}
+      <div class="ql-settings-actions">
+        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save folder</button>
+      </div>
+    </form>
   </div>
 </section>
 

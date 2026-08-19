@@ -68,6 +68,9 @@ TEXT_FIELDS = [
      "NetEase, Megalobiz, Musixmatch, Genius. Unknown names are ignored. "
      "Empty = default (Lrclib, NetEase, Musixmatch).",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
+    ("COLLECTION_BACKUP_DIR", "Backup folder",
+     "Leave empty to keep it with the app's other data.",
+     "text", None, "e.g. /data/collection-backups"),
     ("BEETS_PATH_DEFAULT", "beets path: default",
      "Folder/file naming for normal albums (beets path syntax). "
      "Empty = use beets/config.yaml.",

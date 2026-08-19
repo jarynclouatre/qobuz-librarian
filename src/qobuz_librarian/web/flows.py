@@ -28,6 +28,7 @@ from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     candidate_premise,
     catalog,
+    collection_snapshot,
     downsample_state,
     generation_state,
     library_scan_state,
@@ -1037,6 +1038,35 @@ def _record_last_scan():
         pass
 
 
+def _write_collection_snapshot(job, owned_qobuz, artist_ids, source="scan"):
+    """Leave a rebuild record after a completed scan.
+
+    Returns the guard's refusal so the caller can put it in the job summary, or
+    None when the snapshot was written. A snapshot that cannot be written never
+    fails the scan: the review the user is waiting for is already good.
+    """
+    try:
+        previous = collection_snapshot.load_latest()
+    except OSError:
+        previous = None
+    try:
+        document = collection_snapshot.build_snapshot(
+            owned_qobuz=owned_qobuz, artist_ids=artist_ids,
+            previous=previous, source=source)
+        written, refusal = collection_snapshot.write_snapshot(document)
+    except OSError as e:
+        job.push_line(f"The collection snapshot could not be written: {e}")
+        return None
+    if not written:
+        # With no earlier snapshot there is nothing being protected and nothing
+        # to tell the user about; the guard just declines to save an empty one.
+        if previous is None:
+            return None
+        job.push_line(refusal)
+        return refusal
+    return None
+
+
 def _load_scan_seen(mode):
     """Fingerprints the last completed walk of this mode surfaced, or None if
     there's no prior run to compare against (first scan badges nothing)."""
@@ -1232,7 +1262,21 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
     catalog_ids = None if result.catalog_incomplete else [
         str(a["id"]) for a in result.catalog
         if is_lossless_album(a) and a.get("id") is not None]
-    return artist_dir.name, result.artist_name, result.gaps, artist_id, catalog_ids
+    # Folder name to Qobuz id for the albums already on disk. The scan resolves
+    # these anyway and then drops them; the collection snapshot keeps them so a
+    # restore can ask for the exact album instead of guessing from a search.
+    owned_ids = {}
+    for entry in list(result.complete) + list(result.singles):
+        album = entry.get("qobuz_album") or {}
+        folder = entry.get("dir")
+        if folder is not None and album.get("id") is not None:
+            owned_ids[Path(folder).name] = str(album["id"])
+    for gap in result.gaps:
+        album = gap.qobuz_album or {}
+        if gap.on_disk_dir is not None and album.get("id") is not None:
+            owned_ids[Path(gap.on_disk_dir).name] = str(album["id"])
+    return (artist_dir.name, result.artist_name, result.gaps, artist_id,
+            catalog_ids, owned_ids)
 
 
 _CHECKPOINT_EVERY = 15  # artists between progress saves (resume granularity)
@@ -1549,6 +1593,11 @@ def _scan_library_impl(
     done = len(scanned)
     reused = 0
     scan_errors = 0
+    # Ids for the collection snapshot written when the scan finishes. Artists
+    # whose folders haven't changed are skipped by the scan and so aren't here;
+    # the snapshot carries their ids forward from the last one.
+    owned_qobuz = {}
+    snapshot_artist_ids = {}
     for artist_dir in artists:
         if artist_dir.name in scanned:
             continue
@@ -1602,7 +1651,8 @@ def _scan_library_impl(
                 break
             done += 1
             try:
-                name, artist_name, gaps, artist_id, catalog_ids = fut.result()
+                (name, artist_name, gaps, artist_id, catalog_ids,
+                 owned_ids) = fut.result()
             except (AuthLost, QobuzUnavailable):
                 # A lost token or an unreachable API isn't a per-artist
                 # hiccup, so cancel the rest and fail the scan rather than
@@ -1619,6 +1669,10 @@ def _scan_library_impl(
                                   found=total, unit="artist")
                 continue
             scanned.add(name)
+            if owned_ids:
+                owned_qobuz[name] = owned_ids
+            if artist_id:
+                snapshot_artist_ids[name] = artist_id
             if artist_id and catalog_ids is not None:
                 baseline_seen[artist_id] = catalog_ids
             artist_candidates = []
@@ -1663,6 +1717,7 @@ def _scan_library_impl(
     flush_resolve_cache()
     baseline_save_failed = False
     scan_state_save_failed = False
+    snapshot_refused = None
     downsample_save_failed = False
     upgrade_save_failed = False
     catalog_complete = False
@@ -1793,6 +1848,8 @@ def _scan_library_impl(
                     "saved generation is complete, so it will not be treated "
                     "as newer results."
                 )
+            snapshot_refused = _write_collection_snapshot(
+                job, owned_qobuz, snapshot_artist_ids)
         elif catalog_complete and scan_state_save_failed:
             # Keep a complete resumable copy when the main review could not be
             # saved.
@@ -1841,6 +1898,8 @@ def _scan_library_impl(
     if baseline_save_failed:
         job.summary += (" The New Releases baseline couldn't be saved; "
                         "the next complete scan will try again.")
+    if snapshot_refused:
+        job.summary += " " + snapshot_refused
     if scan_state_save_failed:
         job.summary += (" The saved scan state couldn't be written; scan again "
                         "before restarting the app.")
@@ -4156,6 +4215,44 @@ def execute_repairs(job, chosen, token):
         _mark_job_failed(job)
     else:
         _close_completed_job(job)
+
+
+def run_collection_snapshot(job, *, force=False):
+    """Write a collection snapshot on demand, outside a scan.
+
+    Nothing here talks to Qobuz. Album ids come from the last snapshot, so a
+    manual backup between scans keeps everything the scans have resolved.
+    """
+    job.push_line("Reading the library.")
+    try:
+        previous = collection_snapshot.load_latest()
+    except OSError:
+        previous = None
+    try:
+        document = collection_snapshot.build_snapshot(
+            previous=previous, source="manual")
+        written, refusal = collection_snapshot.write_snapshot(
+            document, force=force)
+    except OSError as e:
+        job.summary = f"The snapshot couldn't be written: {e}"
+        job.error = job.summary
+        _mark_job_failed(job)
+        log.info(job.summary)
+        return
+    counts = document["counts"]
+    if not written:
+        job.summary = refusal
+        job.error = refusal
+        _mark_job_failed(job)
+        log.info(job.summary)
+        return
+    job.summary = (
+        f"Backed up {plural(counts['albums'], 'album')} by "
+        f"{plural(counts['artists'], 'artist')} to "
+        f"{collection_snapshot.latest_path()}."
+    )
+    log.info(job.summary)
+    _close_completed_job(job)
 
 
 def run_lyric_retry(job):

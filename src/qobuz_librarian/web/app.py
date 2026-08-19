@@ -73,6 +73,7 @@ from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     candidate_premise,
     catalog,
+    collection_snapshot,
     downsample_state,
     flac_cache,
     generation_state,
@@ -11241,6 +11242,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "behavior_fields": settings_store.BEHAVIOR_FIELDS,
         "inert_notes": settings_store.inert_behaviour_notes(values),
         "text_fields": settings_store.TEXT_FIELDS,
+        "collection_backup": _collection_backup_status(),
         "option_labels": settings_store.ENUM_OPTION_LABELS,
         # Which dropdowns keep their unset entry after something is picked, so
         # a choice the app asks for once can still be handed back to it.
@@ -11569,6 +11571,43 @@ async def clear_corrupt_stores(request: Request):
             "One of the unreadable copies couldn't be deleted. Check the "
             "data folder's permissions, then try again."),
         status_code=303)
+
+
+@app.post("/collection/snapshot")
+async def collection_snapshot_now(request: Request, force: str = Form("")):
+    """Write a collection snapshot now instead of waiting for the next scan.
+
+    Runs as a job because a library this walks can live on a slow NAS, and a
+    request that sits there for a minute looks like the app has hung.
+    """
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    existing = _active_scan("collection_snapshot",
+                            statuses=("pending", "running"))
+    if existing is not None:
+        return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
+    job = job_mgr.Job(title="Collection backup")
+    job.execute_kind = "collection_snapshot"
+    forced = bool((force or "").strip())
+    if job_mgr.submit(
+            job, lambda j: flows.run_collection_snapshot(j, force=forced)) is None:
+        return _job_admission_response(request)
+    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
+
+
+@app.get("/collection/snapshot/download")
+async def collection_snapshot_download(request: Request):
+    """Hand the current snapshot to the browser as a file."""
+    path = collection_snapshot.latest_path()
+    if not path.is_file():
+        return RedirectResponse(
+            url="/settings?error=" + urllib.parse.quote(
+                "There is no snapshot yet. Run a library scan, or use Back up "
+                "now, and it will be here."),
+            status_code=303)
+    return FileResponse(path, media_type="application/json",
+                        filename=collection_snapshot.LATEST_NAME)
 
 
 @app.post("/settings/mode")
@@ -12641,6 +12680,33 @@ def _get_optional_token():
         return _get_token()
     except Exception:
         return None
+
+
+def _collection_backup_status():
+    """What the Settings page shows about the collection snapshot."""
+    try:
+        latest = collection_snapshot.load_latest()
+    except OSError:
+        latest = None
+    info = {
+        "folder": str(collection_snapshot.snapshot_dir()),
+        "age": None,
+        "counts": None,
+        "held_back": None,
+    }
+    if isinstance(latest, dict):
+        info["counts"] = latest.get("counts")
+        stamp = latest.get("updated_at_epoch")
+        if isinstance(stamp, (int, float)):
+            info["age"] = _format_age(float(stamp))
+    suspect = collection_snapshot.suspect_path()
+    try:
+        held = json.loads(suspect.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        held = None
+    if isinstance(held, dict):
+        info["held_back"] = held.get("counts")
+    return info
 
 
 def _format_age(ts: float) -> str:

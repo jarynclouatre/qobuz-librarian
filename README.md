@@ -31,6 +31,7 @@ Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what y
 - **Clean import.** beets handles tagging and cover art, and files land in your library in a single move. Lyrics are fetched on import; **Lyrics** mode backfills tracks you already have.
 - **Repair.** ISRC-anchored scanning finds truncated or corrupt FLACs and refills exact tracks when the ISRC resolves to that same recording. Damage is found whatever the tag says, but a file whose ISRC is missing, unmatched, or names a different song is never offered a single-track swap; the review offers a whole-album redownload instead.
 - **Library migration.** **Migrate** reorganises an existing library into the folder structure `Artist/Album (Year)`. Copy mode leaves the original library in place; optional move mode relocates originals after preview. Merging existing duplicate album folders is a CLI-only option.
+- **Collection backup.** After each library scan, a JSON list of every artist, album and track in your library is written to a folder you choose, with the Qobuz ids the app has resolved. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it, so an unmounted drive cannot overwrite a good copy.
 - **Crash-safe queue.** Job records and review lists survive restarts; interrupted downloads are marked failed and can be retried. A shared run lock keeps the web app and CLI from writing at the same time within one deployment.
 
 ## How it works

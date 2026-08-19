@@ -92,13 +92,56 @@ def test_baseline_scan_refreshes_shared_downsample_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         flows,
         "_scan_library_artist",
-        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "artist-id", []),
+        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "artist-id", [], {}),
     )
     job = jm.Job(title="baseline")
 
     flows.scan_library(job, "tok")
 
     assert calls == [["Artist"]]
+
+
+def test_a_completed_scan_leaves_a_collection_snapshot(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import collection_snapshot, scanner
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01.flac").write_bytes(b"")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "backups"))
+    monkeypatch.setattr(
+        scanner, "read_album_dir",
+        lambda d, walk_errors=None: [{"title": "One", "tracknumber": 1,
+                                      "discnumber": 1, "isrc": "GB0000000001",
+                                      "mb_trackid": "", "album": "Album"}])
+    scanner.clear_scan_caches()
+
+    artist_dir = music / "Artist"
+    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
+    monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
+    monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda _kind: True)
+    monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
+    monkeypatch.setattr(flows, "_flag_new_since_last_scan", lambda *a, **k: None)
+    monkeypatch.setattr(flows, "flush_resolve_cache", lambda: None)
+    monkeypatch.setattr(flows.new_releases_mod, "is_baseline_complete", lambda: True)
+    monkeypatch.setattr(
+        flows, "_scan_library_artist",
+        lambda ad, token, partial_only, hidden: (
+            ad.name, ad.name, [], "artist-7", [], {"Album": "album-9"}),
+    )
+
+    flows.scan_library(jm.Job(title="baseline"), "tok")
+
+    saved = json.loads(collection_snapshot.latest_path().read_text())
+    assert saved["counts"] == {"artists": 1, "albums": 1, "tracks": 1}
+    artist = saved["artists"][0]
+    # The ids the scan resolved are what lets a restore ask for the exact album.
+    assert artist["qobuz_artist_id"] == "artist-7"
+    assert artist["albums"][0]["qobuz_album_id"] == "album-9"
 
 
 def test_scan_library_reuses_checkpoint_from_interrupted_publication(monkeypatch):
@@ -548,7 +591,7 @@ def test_baseline_scan_refreshes_shared_upgrade_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         flows,
         "_scan_library_artist",
-        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "artist-id", []),
+        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "artist-id", [], {}),
     )
     job = jm.Job(title="baseline")
 
@@ -687,7 +730,7 @@ def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkey
     monkeypatch.setattr(
         flows,
         "_scan_library_artist",
-        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "next-id", ["next-album"]),
+        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "next-id", ["next-album"], {}),
     )
 
     job = jm.Job(title="baseline")
@@ -745,7 +788,8 @@ def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, 
     monkeypatch.setattr(
         flows,
         "_scan_library_artist",
-        lambda ad, *_a, **_k: (ad.name, ad.name, [gap], "artist-id", ["album-1"]),
+        lambda ad, *_a, **_k: (ad.name, ad.name, [gap], "artist-id",
+                               ["album-1"], {}),
     )
     job = jm.Job(title="baseline")
 
@@ -809,7 +853,7 @@ def test_resumed_baseline_rescans_checkpoint_entries_without_artist_snapshot(
 
     def fake_scan_artist(ad, token, partial_only, hidden):
         scanned.append(ad.name)
-        return ad.name, ad.name, [], "good-id", ["fresh"]
+        return ad.name, ad.name, [], "good-id", ["fresh"], {}
 
     monkeypatch.setattr(flows, "_scan_library_artist", fake_scan_artist)
     job = jm.Job(title="baseline")
@@ -1050,7 +1094,8 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
         flows,
         "_scan_library_artist",
         lambda ad, token, partial_only, hidden: (
-            scanned.append(ad.name) or (ad.name, ad.name, [], "artist-id", [])),
+            scanned.append(ad.name)
+            or (ad.name, ad.name, [], "artist-id", [], {})),
     )
     job = jm.Job(title="baseline")
 
@@ -1093,7 +1138,7 @@ def test_scan_library_skips_upgrade_refresh_when_upgrade_disabled(
     monkeypatch.setattr(
         flows,
         "_scan_library_artist",
-        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "artist-id", []),
+        lambda ad, token, partial_only, hidden: (ad.name, ad.name, [], "artist-id", [], {}),
     )
     job = jm.Job(title="baseline")
 
@@ -1117,6 +1162,8 @@ def test_library_artist_scan_ignores_single_store_when_suppression_off(
             artist_id="id1",
             artist_name="Artist",
             gaps=[],
+            complete=[],
+            singles=[],
             catalog=[],
             catalog_incomplete=False,
         )
