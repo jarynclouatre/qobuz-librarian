@@ -65,7 +65,7 @@ TEXT_FIELDS = [
     ("LYRICS_PROVIDERS", "Lyrics providers",
      "Comma-separated list of providers to try in order. Available: Lrclib, "
      "NetEase, Megalobiz, Musixmatch, Genius. Unknown names are ignored. "
-     "Empty = default (Lrclib, NetEase, Musixmatch).",
+     "Empty tries them in the provider library's own order.",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
     ("LASTFM_API_KEY", "Last.fm API key",
      "Empty hides the Discover tab.",

@@ -37,7 +37,7 @@ out of library scans and import targets.
 | `PREFER_HIRES` | `true` | When a release has several versions, pick the hi-res master rather than the original edition |
 | `LYRICS_ENABLED` | `true` | Fetch lyrics on import |
 | `LYRICS_FORMAT` | `embed` | `embed` (FLAC tag), `sidecar` (.lrc), or `both` |
-| `LYRICS_PROVIDERS` | `Lrclib,NetEase,Musixmatch` | Ordered comma list |
+| `LYRICS_PROVIDERS` | unset | Ordered comma list; unset tries the bundled provider library's own order |
 | `LYRICS_PROVIDER_TIMEOUT` | `30` | Maximum seconds for one provider lookup before its circuit-breaker records a failure |
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
 | `COLLECTION_BACKUP_DIR` | app data folder | Where the collection backup is written after each library scan |
