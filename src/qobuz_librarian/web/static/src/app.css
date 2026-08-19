@@ -91,6 +91,7 @@
 .ql-tabbar-count.hidden,
 .ql-queue-badge.hidden,
 .ql-review-tool.hidden,
+.ql-discover-album.hidden,
 .ql-active-strip.hidden {
   display: none;
 }
