@@ -56,6 +56,7 @@ from qobuz_librarian.library.scanner import read_album_dir, read_audio_meta
 from qobuz_librarian.library.tags import normalize, strip_edition_suffix
 from qobuz_librarian.recovery import normalise_recovery_owner
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
 
 
@@ -867,7 +868,8 @@ def run_album_download(
         url = f"https://play.qobuz.com/album/{album_id}"
         section("Downloading full album")
         report_progress(
-            "Downloading album", 0, 0, f"{album.get('title') or '?'} · {n_tracks_total} tracks"
+            "Downloading album", 0, 0,
+            f"{album.get('title') or '?'} · {plural(n_tracks_total, 'track')}"
         )
         vlog(f"  ⟳  {url}")
         # Move the already-present tracks to a backup before the rip so beets

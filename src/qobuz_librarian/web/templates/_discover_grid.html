@@ -7,7 +7,7 @@
     <div class="ql-grid-copy">
       <p class="ql-grid-title">{{ release_title(g.title, g.version) }}</p>
       <p class="ql-grid-artist">{{ g.artist }}</p>
-      <p class="ql-grid-meta">{{ g.year or '?' }} · {{ g.tracks or '?' }} tracks</p>
+      <p class="ql-grid-meta">{{ g.year or '?' }} · {{ g.tracks or '?' }} track{{ 's' if g.tracks != 1 }}</p>
     </div>
     <div class="ql-grid-footer">
       {{ quality_badge(g) }}

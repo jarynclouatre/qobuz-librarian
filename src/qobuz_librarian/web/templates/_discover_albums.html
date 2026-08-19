@@ -16,7 +16,7 @@
     {% if al.cover %}<img src="{{ al.cover }}" alt="" width="36" height="36" loading="lazy">{% endif %}
     <div class="ql-discover-album-copy">
       <p class="ql-discover-album-title">{{ release_title(al.title, al.version) }}</p>
-      <p class="ql-discover-album-meta">{{ al.year or '?' }} · {{ al.tracks or '?' }} tracks<span class="ql-result-inline-quality {% if al.hires %}quality-hires{% elif al.lossy %}quality-lossy{% else %}quality-cd{% endif %}">{{ al.quality or ('Hi-Res' if al.hires else 'CD') }}</span></p>
+      <p class="ql-discover-album-meta">{{ al.year or '?' }} · {{ al.tracks or '?' }} track{{ 's' if al.tracks != 1 }}<span class="ql-result-inline-quality {% if al.hires %}quality-hires{% elif al.lossy %}quality-lossy{% else %}quality-cd{% endif %}">{{ al.quality or ('Hi-Res' if al.hires else 'CD') }}</span></p>
     </div>
     <div class="ql-discover-album-side">
       {{ quality_badge(al) }}

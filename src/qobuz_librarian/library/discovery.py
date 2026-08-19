@@ -55,6 +55,7 @@ from qobuz_librarian.library.tags import (
     similarity,
     strip_leading_article,
 )
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 
 # ── Artist resolution (the shared matcher) ──────────────────────────────────────
@@ -577,7 +578,7 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                                        limit=cfg.ARTIST_CATALOG_LIMIT, fresh=fresh)
     truncated = bool(total and total > len(catalog))
     if truncated:
-        log.info(f"  Qobuz lists {total} albums; scanning the first "
+        log.info(f"  Qobuz lists {plural(total, 'album')}; scanning the first "
                  f"{len(catalog)}.")
 
     # catalog_incomplete is the PRECISE short-page signal (distinct from the

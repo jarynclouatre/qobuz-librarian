@@ -132,7 +132,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             vlog(f"  Pre-fetched {len(catalog)} catalog entries (artist_id={artist_id}).")
             if qobuz_total is not None and qobuz_total > len(catalog):
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Qobuz reports {qobuz_total} albums; only fetched "
+                    f"  ⚠  Qobuz reports {plural(qobuz_total, 'album')}; only fetched "
                     f"{len(catalog)}. Folders past the limit will fall back to search."))
         except QobuzError as e:
             log.info(fmt(C.YELLOW,

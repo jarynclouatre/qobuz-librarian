@@ -589,8 +589,8 @@
     <p class="ql-storage-meta">
       {% if collection_backup.counts %}
       Last backup {{ collection_backup.age }}:
-      {{ "{:,}".format(collection_backup.counts.albums) }} albums,
-      {{ "{:,}".format(collection_backup.counts.artists) }} artists.
+      {{ "{:,}".format(collection_backup.counts.albums) }} album{{ 's' if collection_backup.counts.albums != 1 }},
+      {{ "{:,}".format(collection_backup.counts.artists) }} artist{{ 's' if collection_backup.counts.artists != 1 }}.
       {% else %}
       No backup yet.
       {% endif %}

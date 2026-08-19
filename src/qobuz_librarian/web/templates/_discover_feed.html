@@ -17,7 +17,7 @@
               aria-expanded="false" aria-controls="discover-albums-{{ a.artist_id }}"
               hx-get="/discover/artist-albums?artist_id={{ a.artist_id | urlencode }}&name={{ a.name | urlencode }}"
               hx-target="#discover-albums-{{ a.artist_id }}" hx-swap="innerHTML"
-              hx-trigger="click once">{{ a.albums | length }} albums</button>
+              hx-trigger="click once">{{ a.albums | length }} album{{ 's' if a.albums | length != 1 }}</button>
     </div>
     <div id="discover-albums-{{ a.artist_id }}" class="hidden"></div>
     {% endfor %}
