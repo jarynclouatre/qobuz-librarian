@@ -58,26 +58,17 @@ out of library scans and import targets.
 
 `DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved, originals replaced atomically). To downsample hi-res already in your library, use the on-demand **Downsample** mode instead.
 
-Advanced thresholds, including fuzzy-match cutoffs, retention windows, and `POST_JOB_HOOK`, ship with working defaults. The common tuning knobs are forwarded in `compose.yaml`, so setting them in `.env` takes effect:
+Pacing and timeout knobs are forwarded in `compose.yaml`, so setting them in `.env` takes effect:
 
 - `RIP_TIMEOUT`
 - `DELAY_BETWEEN`
 - `ARTIST_API_DELAY`
 - `ARTIST_SCAN_WORKERS`
-- `JOB_LOG_CAP`
-- `JOB_LOG_REPLAY_TAIL`
-- `SSE_MAX_WORKERS`
-- `SSE_HEARTBEAT_TICKS`
 - `MISSING_ALBUMS_MIN_TRACKS`
-- `REPAIR_LOOKUP_MIN_INTERVAL`
 
-`JOB_LOG_CAP` bounds the live lines retained per job, while `JOB_LOG_REPLAY_TAIL`
-sets how many prior lines a newly opened progress stream receives (`0` means
-live output only). `SSE_MAX_WORKERS` sets the number of concurrent progress and
-review streams. `SSE_HEARTBEAT_TICKS` controls their keepalive interval in
-0.5-second ticks. The full annotated list is in
-`src/qobuz_librarian/config.py`. `POST_JOB_HOOK` runs in a shell, so only set it
-to a command you trust.
+Fuzzy-match cutoffs, search and catalogue limits, and the job-log and stream
+internals are constants in `src/qobuz_librarian/config.py`, not settings.
+`POST_JOB_HOOK` runs in a shell, so only set it to a command you trust.
 
 ## Download quality
 

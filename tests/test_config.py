@@ -53,32 +53,14 @@ def test_env_bool_empty_string_means_unset(monkeypatch):
 def test_env_num_min_floors_a_sub_minimum_count(monkeypatch):
     # A 0 or negative worker count would crash the thread-pool constructor at
     # import time; clamp to the floor so a typo can't take down the web app.
-    monkeypatch.setenv("SSE_MAX_WORKERS", "0")
-    assert cfg._env_num_min("SSE_MAX_WORKERS", 16, 1) == 1
-
-
-def test_env_unit_float_clamps_out_of_range_thresholds(monkeypatch):
-    # Fuzzy thresholds are 0–1 similarity scores and several gate destructive
-    # review paths, so an out-of-range typo must clamp into range rather than
-    # make consolidation match everything (<0). 0.0 is a legit boundary and
-    # passes through; a non-numeric value falls back to the default.
-    monkeypatch.setenv("CONSOLIDATE_THRESH", "-1")
-    assert cfg._env_unit_float("CONSOLIDATE_THRESH", 0.70) == 0.0
-    monkeypatch.setenv("CONSOLIDATE_THRESH", "1.5")
-    assert cfg._env_unit_float("CONSOLIDATE_THRESH", 0.70) == 1.0
-    monkeypatch.setenv("CONSOLIDATE_THRESH", "0")
-    assert cfg._env_unit_float("CONSOLIDATE_THRESH", 0.70) == 0.0
-    monkeypatch.setenv("CONSOLIDATE_THRESH", "loose")
-    assert cfg._env_unit_float("CONSOLIDATE_THRESH", 0.70) == 0.70
+    monkeypatch.setenv("ARTIST_SCAN_WORKERS", "0")
+    assert cfg._env_num_min("ARTIST_SCAN_WORKERS", 4, 1) == 1
 
 
 def test_numeric_settings_reject_non_finite_values(monkeypatch):
     for value in ("nan", "inf", "-inf"):
-        monkeypatch.setenv("QL_WEB_FETCH_TIMEOUT", value)
-        assert cfg._env_num_min("QL_WEB_FETCH_TIMEOUT", 12.0, 1.0) == 12.0
-
-        monkeypatch.setenv("CONSOLIDATE_THRESH", value)
-        assert cfg._env_unit_float("CONSOLIDATE_THRESH", 0.70) == 0.70
+        monkeypatch.setenv("LYRICS_PROVIDER_TIMEOUT", value)
+        assert cfg._env_num_min("LYRICS_PROVIDER_TIMEOUT", 30.0, 1.0) == 30.0
 
 
 def test_resolve_secret_reads_token_from_a_file(monkeypatch, tmp_path):

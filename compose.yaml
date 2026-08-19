@@ -136,8 +136,6 @@ services:
       DELAY_BETWEEN:             "${DELAY_BETWEEN:-1.0}"          # pause between consecutive album downloads (s)
       ARTIST_API_DELAY:          "${ARTIST_API_DELAY:-0.0}"      # pause between Qobuz API calls during library walks (s)
       ARTIST_SCAN_WORKERS:       "${ARTIST_SCAN_WORKERS:-4}"     # parallel artist lookups during a library scan (1-16)
-      SEARCH_LIMIT:              "${SEARCH_LIMIT:-25}"           # search results per query
-      ARTIST_CATALOG_LIMIT:      "${ARTIST_CATALOG_LIMIT:-1000}" # max albums fetched per artist
       MISSING_ALBUMS_MIN_TRACKS: "${MISSING_ALBUMS_MIN_TRACKS:-4}"  # hide singles / very short EPs in the missing-albums step
 
       # ── Download quality ──────────────────────────────────────────────────
@@ -198,9 +196,6 @@ services:
       # Let the Upgrade walk also re-rip tracks downloaded as singles (off = leave
       # deliberate one-off singles alone).
       UPGRADE_SINGLES_ENABLED: "${UPGRADE_SINGLES_ENABLED:-false}"
-      # How long (days) to remember that Qobuz delivered a partial hi-res for
-      # an album before retrying it in the upgrade walk.
-      CAPPED_RETENTION_DAYS: "${CAPPED_RETENTION_DAYS:-90}"
       # Downsample hi-res FLACs to 44.1/48 kHz before import to save space.
       # Leave false to keep whatever Qobuz delivers (CD quality is fine).
       DOWNSAMPLE_HIRES_ENABLED: "${DOWNSAMPLE_HIRES_ENABLED:-false}"
@@ -209,31 +204,17 @@ services:
       # to save space. Leave unset to be asked on the first downsample.
       DOWNSAMPLE_KEEP_ORIGINALS: "${DOWNSAMPLE_KEEP_ORIGINALS:-}"
 
-      # ── Matching thresholds (advanced) ──────────────────────────────────
-      # Similarity score (0–1) for fuzzy directory-name matching.
-      # Lower = more permissive, more false positives.
-      FUZZY_DIR_THRESH:           "${FUZZY_DIR_THRESH:-0.78}"
-      ARTIST_NAME_THRESH:         "${ARTIST_NAME_THRESH:-0.85}"
-      ARTIST_DIR_MATCH_THRESH:    "${ARTIST_DIR_MATCH_THRESH:-0.65}"
-      CONSOLIDATE_THRESH:         "${CONSOLIDATE_THRESH:-0.70}"
-      AUTO_SAFE_TITLE_SIM_THRESH: "${AUTO_SAFE_TITLE_SIM_THRESH:-0.85}"
-
       # ── Advanced overrides ──────────────────────────────────────────────
       # beets import guard: seconds of no-output before a stalled import is
-      # killed and quarantined, retry count, and pause between attempts.
+      # killed and quarantined.
       BEETS_TIMEOUT:         "${BEETS_TIMEOUT:-600}"
-      BEETS_MAX_ATTEMPTS:    "${BEETS_MAX_ATTEMPTS:-2}"
-      BEETS_RETRY_PAUSE:     "${BEETS_RETRY_PAUSE:-30}"
-      # Cooldown (seconds) after Qobuz rate-limits the account.
-      RATE_LIMIT_COOLDOWN:   "${RATE_LIMIT_COOLDOWN:-30}"
       # Parallel ffmpeg workers for the on-demand downsample (CPU-bound).
       RESAMPLE_WORKERS:      "${RESAMPLE_WORKERS:-4}"
       # Free-space floor (MB) checked before each album download; turns a
       # near-full staging area into a clean disk-full stop. 0 disables it.
       MIN_FREE_STAGING_MB:   "${MIN_FREE_STAGING_MB:-500}"
-      # Repair scan: minimum gap (s) between live Qobuz ISRC lookups, and the
-      # on-disk ISRC-lookup cache (files are still decode-tested fresh each scan).
-      REPAIR_LOOKUP_MIN_INTERVAL: "${REPAIR_LOOKUP_MIN_INTERVAL:-0.05}"
+      # Repair scan: the on-disk ISRC-lookup cache (files are still
+      # decode-tested fresh each scan).
       REPAIR_CACHE_ENABLED:       "${REPAIR_CACHE_ENABLED:-true}"
       REPAIR_CACHE_TTL_DAYS:      "${REPAIR_CACHE_TTL_DAYS:-30}"
       # Drop obvious live/tour/session releases from the missing-albums gap list.
@@ -246,23 +227,6 @@ services:
       # POST_JOB_HOOK_TIMEOUT caps a slow webhook.
       POST_JOB_HOOK:         "${POST_JOB_HOOK:-}"
       POST_JOB_HOOK_TIMEOUT: "${POST_JOB_HOOK_TIMEOUT:-10}"
-
-      # ── Web request budgets ───────────────────────────────────────────────
-      # Per-request timeout (seconds) for the web UI's Qobuz API calls.
-      # QL_WEB_FETCH_TIMEOUT bounds album/track fetches and the search box;
-      # QL_WEB_TEST_AUTH_TIMEOUT bounds the startup + Settings token probe.
-      QL_WEB_FETCH_TIMEOUT:     "${QL_WEB_FETCH_TIMEOUT:-12.0}"
-      QL_WEB_TEST_AUTH_TIMEOUT: "${QL_WEB_TEST_AUTH_TIMEOUT:-8.0}"
-
-      # Bound each live job log and the history replay sent to a newly opened
-      # progress stream. Set replay to 0 to show live output only.
-      JOB_LOG_CAP:         "${JOB_LOG_CAP:-5000}"
-      JOB_LOG_REPLAY_TAIL: "${JOB_LOG_REPLAY_TAIL:-500}"
-
-      # Web live-update streams. Each open progress or review stream uses a
-      # worker while it waits; heartbeat ticks are 0.5 seconds each.
-      SSE_MAX_WORKERS:     "${SSE_MAX_WORKERS:-16}"
-      SSE_HEARTBEAT_TICKS: "${SSE_HEARTBEAT_TICKS:-30}"
 
     volumes:
       # Host paths come from a .env file (see .env.example). Defaults to

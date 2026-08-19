@@ -122,27 +122,6 @@ def _env_num_min(key, default, minimum, maximum=None):
     return val
 
 
-def _env_unit_float(key, default):
-    """A similarity threshold env value clamped to the valid 0.0–1.0 range.
-
-    Every fuzzy-match threshold is a 0..1 score cutoff, and several gate
-    destructive review paths (consolidate, artist/dir matching). A value that
-    falls outside the range can only come from a typo'd `.env`, and it changes
-    behaviour far from intent: CONSOLIDATE_THRESH=-1 (or any negative) would make
-    every sibling folder a consolidation candidate, while a value above 1 makes
-    nothing ever match and silently disables the feature. Clamp into range and
-    warn rather than trust the bad value. (0.0 and 1.0 are the legitimate
-    boundaries, "match everything" and "exact only", so they pass through.)"""
-    val = _env(key, default)
-    if val < 0.0:
-        _warn(f"{key}={val!r} is below 0.0 (thresholds are 0–1 scores); using 0.0.")
-        return 0.0
-    if val > 1.0:
-        _warn(f"{key}={val!r} is above 1.0 (thresholds are 0–1 scores); using 1.0.")
-        return 1.0
-    return val
-
-
 def in_container() -> bool:
     """Whether we are running inside the Docker image. Read at call time, not
     frozen at import: messages that name a compose file are wrong for a pipx
@@ -426,7 +405,7 @@ LYRICS_PROVIDER_TIMEOUT = _env_num_min("LYRICS_PROVIDER_TIMEOUT", 30.0, 1.0)
 # Results shown on the user-facing Search page. 8 was too few for a major
 # artist (a "Paul McCartney" search surfaced almost nothing); 25 shows a useful
 # page. The CLI fetches more; a web "load more" beyond this is a future add.
-SEARCH_LIMIT     = _env("SEARCH_LIMIT",     25)
+SEARCH_LIMIT     = 25
 # Per-context search depth for internal matchers. ARTIST_LOOKUP_LIMIT scores
 # this many artist-search hits when resolving a name to an id; 5 was too few for
 # common names (the right artist could rank 6th+ and silently resolve to
@@ -449,7 +428,7 @@ MIN_FREE_STAGING_MB = _env_num_min("MIN_FREE_STAGING_MB", 500, 0)
 # Pause before the next queued album when Qobuz throttling was detected
 # in the last rip (vs the normal DELAY_BETWEEN). Tames the error-wave
 # pattern on multi-hundred-album queues. Set 0 to disable.
-RATE_LIMIT_COOLDOWN = _env_num_min("RATE_LIMIT_COOLDOWN", 30.0, 0.0)
+RATE_LIMIT_COOLDOWN = 30.0
 # INACTIVITY timeout for the beets import (seconds of *zero output*),
 # NOT a wall-clock cap: a slow-but-progressing import over R2 / a slow
 # NAS keeps printing beets progress, so it is never killed no matter how
@@ -463,8 +442,8 @@ BEETS_TIMEOUT    = _env_num_min("BEETS_TIMEOUT", 600, 0)
 # pause between, so a single transient stall doesn't strand the album.
 # After exhausting retries the album's staged folder is moved aside
 # (see BEETS_RETRY_DIR) so the rest of the queue keeps going.
-BEETS_MAX_ATTEMPTS = _env_num_min("BEETS_MAX_ATTEMPTS", 2, 1)
-BEETS_RETRY_PAUSE  = _env_num_min("BEETS_RETRY_PAUSE", 30, 0)
+BEETS_MAX_ATTEMPTS = 2
+BEETS_RETRY_PAUSE  = 30
 BEETS_RETRY_DIR    = os.environ.get("BEETS_RETRY_DIR", ".beets_retry")
 # Per-album courtesy pause in the CLI walk. The 429 retry/backoff in
 # api/client is the real throttle backstop, so 0 is fine in practice.
@@ -482,7 +461,7 @@ ARTIST_SCAN_WORKERS = _env_num_min("ARTIST_SCAN_WORKERS", 4, 1, 16)
 # the account; this paces the live calls (cache hits skip it). The ISRC cache
 # already makes re-scans and shared ISRCs free, so this only bounds the cold
 # scan. 0 disables it; the 429 back-off in api/client is still the backstop.
-REPAIR_LOOKUP_MIN_INTERVAL = _env_num_min("REPAIR_LOOKUP_MIN_INTERVAL", 0.05, 0.0)
+REPAIR_LOOKUP_MIN_INTERVAL = 0.05
 
 # Cache get_album() responses on disk (DATA_DIR/album_cache.db). An album's track
 # list is immutable, so this turns the per-owned-album fetch, the dominant cost
@@ -537,8 +516,8 @@ AUTO_LIBRARY_SCAN = _env_bool("AUTO_LIBRARY_SCAN", True)
 # Per-request budgets for the web UI's Qobuz API calls (album/search/track
 # fetches and the Settings token check). A slow Qobuz response shouldn't
 # park a worker thread for minutes, so the user gets a clear timeout instead.
-WEB_FETCH_TIMEOUT     = _env_num_min("QL_WEB_FETCH_TIMEOUT",     12.0, 1.0)
-WEB_TEST_AUTH_TIMEOUT = _env_num_min("QL_WEB_TEST_AUTH_TIMEOUT", 8.0,  1.0)
+WEB_FETCH_TIMEOUT     = 12.0
+WEB_TEST_AUTH_TIMEOUT = 8.0
 
 # Web job log and SSE tunables.
 # JOB_LOG_CAP is the per-job line ceiling; very long artist walks
@@ -552,8 +531,8 @@ WEB_TEST_AUTH_TIMEOUT = _env_num_min("QL_WEB_TEST_AUTH_TIMEOUT", 8.0,  1.0)
 # 0.5s queue-empty ticks pass before a `: ping` keepalive. Reverse
 # proxies with short idle timeouts (60s default on most) want a lower
 # value.
-JOB_LOG_CAP          = _env_num_min("JOB_LOG_CAP",         5000, 1)
-JOB_LOG_REPLAY_TAIL  = _env_num_min("JOB_LOG_REPLAY_TAIL",  500, 0)
+JOB_LOG_CAP          = 5000
+JOB_LOG_REPLAY_TAIL  = 500
 # Ceiling on candidates a single review job holds in memory (and persists/
 # rehydrates). A whole-library gap scan on a very large collection could
 # otherwise grow this unbounded; past the cap the scan stops adding and the
@@ -563,16 +542,16 @@ JOB_LOG_REPLAY_TAIL  = _env_num_min("JOB_LOG_REPLAY_TAIL",  500, 0)
 # runaway guard, not a routine limit.
 JOB_CANDIDATE_CAP    = _env_num_min("JOB_CANDIDATE_CAP",  100000, 1)
 POST_JOB_HOOK_TIMEOUT = _env_num_min("POST_JOB_HOOK_TIMEOUT", 10, 1)
-SSE_MAX_WORKERS      = _env_num_min("SSE_MAX_WORKERS", 16, 1)
-SSE_HEARTBEAT_TICKS  = _env_num_min("SSE_HEARTBEAT_TICKS", 30, 1)
+SSE_MAX_WORKERS      = 16
+SSE_HEARTBEAT_TICKS  = 30
 
 # ── Fuzzy-match thresholds ────────────────────────────────────────────────────
-FUZZY_DIR_THRESH           = _env_unit_float("FUZZY_DIR_THRESH",           0.78)
-FUZZY_DIR_MIN_COVERAGE     = _env_unit_float("FUZZY_DIR_MIN_COVERAGE",     0.75)
-CONSOLIDATE_THRESH         = _env_unit_float("CONSOLIDATE_THRESH",         0.70)
-ARTIST_NAME_THRESH         = _env_unit_float("ARTIST_NAME_THRESH",         0.85)
-ARTIST_DIR_MATCH_THRESH    = _env_unit_float("ARTIST_DIR_MATCH_THRESH",    0.65)
-AUTO_SAFE_TITLE_SIM_THRESH = _env_unit_float("AUTO_SAFE_TITLE_SIM_THRESH", 0.85)
+FUZZY_DIR_THRESH           = 0.78
+FUZZY_DIR_MIN_COVERAGE     = 0.75
+CONSOLIDATE_THRESH         = 0.70
+ARTIST_NAME_THRESH         = 0.85
+ARTIST_DIR_MATCH_THRESH    = 0.65
+AUTO_SAFE_TITLE_SIM_THRESH = 0.85
 
 # ── Catalog / walk ────────────────────────────────────────────────────────────
 EDITION_SEARCH_API_BUDGET = _env("EDITION_SEARCH_API_BUDGET", 3)
@@ -581,7 +560,7 @@ LEFTOVER_WARN_LIMIT    = _env("LEFTOVER_WARN_LIMIT",    50)
 # Max albums fetched per artist when scanning. 500 truncated prolific artists
 # (the Beatles list ~900 on Qobuz), so a gap scan missed albums; 1000 covers
 # realistic discographies. Truncation past this is logged by the scanner.
-ARTIST_CATALOG_LIMIT   = _env_num_min("ARTIST_CATALOG_LIMIT",   1000, 1)
+ARTIST_CATALOG_LIMIT   = 1000
 ARTIST_CATALOG_PAGE    = _env_num_min("ARTIST_CATALOG_PAGE",    100, 1)
 # How many starred albums Discover reads back from Qobuz.
 FAVORITES_LIMIT        = _env_num_min("FAVORITES_LIMIT",        500, 1)
@@ -591,7 +570,7 @@ MISSING_ALBUMS_MIN_TRACKS = _env("MISSING_ALBUMS_MIN_TRACKS", 4)
 
 # ── Retention windows (days) ──────────────────────────────────────────────────
 UPGRADE_BACKUP_RETENTION_DAYS = _env_num_min("UPGRADE_BACKUP_RETENTION_DAYS", 7, 0)
-CAPPED_RETENTION_DAYS         = _env_num_min("CAPPED_RETENTION_DAYS",         90, 0)
+CAPPED_RETENTION_DAYS         = 90
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 UPGRADE_SCAN_ENABLED = _env_bool("UPGRADE_SCAN_ENABLED", True)
