@@ -98,11 +98,22 @@ def build_args():
 
 
 def _set_empty_library_summary(job):
-    """Describe the expected layout and point an empty scan back to Settings."""
+    """Describe the expected layout and name where the music path is set.
+
+    Inside the image the container path is meaningless on the host, and there
+    is no Settings control for it, so the message has to name the mount.
+    """
+    if cfg.in_container():
+        where = ("Nothing to scan: no artist folders were found under the "
+                 "/music mount.")
+        fix = "Check what your Compose file mounts at /music."
+    else:
+        where = ("Nothing to scan: no artist folders were found in "
+                 f"{cfg.MUSIC_ROOT}.")
+        fix = "Check MUSIC_ROOT."
     job.error = (
-        f"Nothing to scan: no artist folders were found in {cfg.MUSIC_ROOT}. "
-        "Qobuz Librarian expects one folder per artist, each holding album "
-        "folders. Check the music folder path in Settings."
+        f"{where} Qobuz Librarian expects one folder per artist, each "
+        f"holding album folders. {fix}"
     )
     # A run that never scanned anything is not a clean pass. submit_scan leaves
     # an explicitly-set terminal status alone, so this keeps the green Done

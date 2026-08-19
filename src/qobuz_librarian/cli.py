@@ -544,9 +544,14 @@ def check_media_tools():
 
 def require_music_root():
     if not cfg.MUSIC_ROOT.exists() or not cfg.MUSIC_ROOT.is_dir():
-        die(fmt(C.RED,
-            f"\n✗  MUSIC_ROOT missing or inaccessible: {cfg.MUSIC_ROOT}\n"
-            "   Refusing to proceed.\n"), EXIT_CONFIG)
+        if _in_container():
+            problem = "\n✗  The /music mount is missing or inaccessible.\n"
+            fix = "   Check what your Compose file mounts at /music.\n"
+        else:
+            problem = (f"\n✗  MUSIC_ROOT missing or inaccessible: "
+                       f"{cfg.MUSIC_ROOT}\n")
+            fix = "   Refusing to proceed.\n"
+        die(fmt(C.RED, problem + fix), EXIT_CONFIG)
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
