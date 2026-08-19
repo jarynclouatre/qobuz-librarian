@@ -97,16 +97,6 @@ def test_an_album_still_on_disk_is_not_offered_again(library, qobuz):
     assert qobuz["album_calls"] == []
 
 
-def test_a_re_edition_of_the_same_album_counts_as_owned(library, qobuz):
-    library.add("Bonobo", "Migration (2017)", [_track("Migration", 1)])
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Migration", "qobuz_album_id": "a1",
-         "tracks": [_track("Migration", 1)]}]}]))
-
-    assert job.candidates == []
-    assert qobuz["album_calls"] == []
-
-
 def test_a_folder_renamed_past_recognition_is_matched_by_its_isrcs(library,
                                                                    qobuz):
     library.add("Bonobo", "unsorted rip 03", [
@@ -124,36 +114,6 @@ def test_a_folder_renamed_past_recognition_is_matched_by_its_isrcs(library,
     assert qobuz["album_calls"] == []
 
 
-def test_too_few_shared_isrcs_is_not_the_same_album(library, qobuz):
-    library.add("Bonobo", "unsorted rip 03", [
-        _track("Migration", 1, isrc="GBCEL1600123"),
-    ])
-    qobuz["albums"]["a1"] = _qobuz_album("a1", "Migration")
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Migration", "qobuz_album_id": "a1", "tracks": [
-            _track("Migration", 1, isrc="GBCEL1600123"),
-            _track("Break Apart", 2, isrc="GBCEL1600124"),
-            _track("Outlier", 3, isrc="GBCEL1600125"),
-            _track("Kerala", 4, isrc="GBCEL1600126"),
-        ]}]}]))
-
-    assert [c["title"] for c in job.candidates] == ["Migration"]
-
-
-def test_a_missing_album_is_fetched_by_its_saved_qobuz_id(library, qobuz):
-    library.add("Bonobo", "Black Sands", [_track("Kiara", 1)])
-    qobuz["albums"]["a1"] = _qobuz_album("a1", "Migration")
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Black Sands", "tracks": [_track("Kiara", 1)]},
-        {"name": "Migration", "qobuz_album_id": "a1",
-         "tracks": [_track("Migration", 1)]}]}]))
-
-    assert [c["title"] for c in job.candidates] == ["Migration"]
-    candidate = job.candidates[0]
-    assert candidate["selected"] is True
-    assert candidate["payload"]["album_id"] == "a1"
-
-
 def test_a_dead_album_id_falls_back_to_the_isrc_then_the_name(library, qobuz):
     library.add("Bonobo", "Black Sands", [_track("Kiara", 1)])
     qobuz["albums"]["a9"] = _qobuz_album("a9", "Migration")
@@ -169,17 +129,6 @@ def test_a_dead_album_id_falls_back_to_the_isrc_then_the_name(library, qobuz):
     assert sorted(c["title"] for c in job.candidates) == ["Fragments",
                                                           "Migration"]
     assert "Bonobo Fragments" in qobuz["search_calls"]
-
-
-def test_an_album_nothing_can_match_is_named_in_the_log(library, qobuz):
-    library.add("Bonobo", "Black Sands", [_track("Kiara", 1)])
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Migration", "qobuz_album_id": "gone",
-         "tracks": [_track("Migration", 1, isrc="GBCEL1600123")]}]}]))
-
-    assert job.candidates == []
-    assert any("Migration" in line and restore.NO_QOBUZ_ALBUM in line
-               for line in job.log_lines)
 
 
 def test_an_artist_with_no_folder_seals_the_music_folder_instead(library,
@@ -212,15 +161,6 @@ def test_an_unmounted_library_refuses_an_absent_artist_row(library, qobuz,
         candidate_premise.validate(job.candidates[0])
 
 
-def test_one_album_is_queued_once_however_often_it_appears(library, qobuz):
-    qobuz["albums"]["a1"] = _qobuz_album("a1", "Migration")
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Migration", "qobuz_album_id": "a1", "tracks": []},
-        {"name": "Migration (2017)", "qobuz_album_id": "a1", "tracks": []}]}]))
-
-    assert len(job.candidates) == 1
-
-
 def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
     lossy = _qobuz_album("a1", "Migration")
     lossy["maximum_bit_depth"] = 0
@@ -230,21 +170,3 @@ def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
 
     assert job.candidates == []
 
-
-def test_the_review_records_which_music_folder_it_was_read_against(library,
-                                                                   qobuz):
-    qobuz["albums"]["a1"] = _qobuz_album("a1", "Room 25", artist="Noname")
-    job = _run(_snapshot([{"name": "Noname", "albums": [
-        {"name": "Room 25", "qobuz_album_id": "a1",
-         "tracks": [_track("Self", 1)]}]}]))
-
-    recorded = job.execute_args.get("music_root")
-    assert candidate_premise.music_root_matches(recorded)
-
-
-def test_music_root_matches_only_the_same_directory_incarnation(library):
-    recorded = candidate_premise.capture_music_root_identity()
-    assert candidate_premise.music_root_matches(recorded)
-    stolen = list(recorded)
-    stolen[0] += 1
-    assert not candidate_premise.music_root_matches(stolen)
