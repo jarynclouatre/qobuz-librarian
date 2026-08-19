@@ -88,3 +88,15 @@ def test_closed_stdin_on_quality_cancels_without_saving(monkeypatch):
 
     assert result == 0
     assert saved == []
+
+
+def test_cd_quality_marks_the_settings_it_switches_off():
+    from qobuz_librarian.web import settings_store
+
+    values = {"STREAMRIP_QUALITY": "2",
+              "DOWNSAMPLE_HIRES_ENABLED": True, "PREFER_HIRES": True}
+    assert set(settings_store.inert_behaviour_notes(values)) == {
+        "DOWNSAMPLE_HIRES_ENABLED", "PREFER_HIRES"}
+    assert settings_store.inert_behaviour_notes({**values, "PREFER_HIRES": False}) \
+        .keys() == {"DOWNSAMPLE_HIRES_ENABLED"}
+    assert settings_store.inert_behaviour_notes({**values, "STREAMRIP_QUALITY": "3"}) == {}
