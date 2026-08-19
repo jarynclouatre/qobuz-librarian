@@ -67,6 +67,11 @@ TEXT_FIELDS = [
      "NetEase, Megalobiz, Musixmatch, Genius. Unknown names are ignored. "
      "Empty = default (Lrclib, NetEase, Musixmatch).",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
+    ("LASTFM_API_KEY", "Last.fm API key",
+     "Turns on the Discover tab, which suggests artists from the ones "
+     "already in your library. Free keys come from "
+     "last.fm/api/account/create. Empty hides the tab.",
+     "text", None, "32-character key"),
     ("COLLECTION_BACKUP_DIR", "Backup folder",
      "Leave empty to keep it with the app's other data.",
      "text", None, "e.g. /data/collection-backups"),

@@ -1,0 +1,29 @@
+{% from "_search_results.html" import download_form, quality_badge with context %}
+{# The years are Qobuz's own, so a chip press filters what is already on
+   screen instead of asking for the list again. #}
+<div class="ql-discover-expand" data-decade-scope>
+  {# One decade plus 'All' is a filter with a single setting, so it is not offered. #}
+  {% if decades | length > 2 %}
+  <div class="ql-decade-row" role="group" aria-label="Filter by decade">
+    {% for decade, label in decades %}
+    <button type="button" class="ql-dchip{% if loop.first %} is-active{% endif %}"
+            data-decade="{{ decade }}" aria-pressed="{{ 'true' if loop.first else 'false' }}">{{ label }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% for al in albums %}
+  <div class="ql-discover-album" data-album-year="{{ al.year }}">
+    {% if al.cover %}<img src="{{ al.cover }}" alt="" width="36" height="36" loading="lazy">{% endif %}
+    <div class="ql-discover-album-copy">
+      <p class="ql-discover-album-title">{{ release_title(al.title, al.version) }}</p>
+      <p class="ql-discover-album-meta">{{ al.year or '?' }} · {{ al.tracks or '?' }} tracks<span class="ql-result-inline-quality {% if al.hires %}quality-hires{% elif al.lossy %}quality-lossy{% else %}quality-cd{% endif %}">{{ al.quality or ('Hi-Res' if al.hires else 'CD') }}</span></p>
+    </div>
+    <div class="ql-discover-album-side">
+      {{ quality_badge(al) }}
+      {{ download_form(al.id, al.title, al.artist, version=al.version, queued=al.queued, scanning=al.scanning) }}
+    </div>
+  </div>
+  {% else %}
+  <p class="ql-empty-state">Qobuz has nothing listed for this artist.</p>
+  {% endfor %}
+</div>

@@ -32,7 +32,8 @@ from qobuz_librarian.ui_cli.logging import log, vlog
 
 
 # ── Session ───────────────────────────────────────────────────────────────────
-def _ua_string() -> str:
+def ua_string() -> str:
+    """The app's User-Agent, shared by every outbound API session."""
     try:
         from importlib.metadata import version as _pkg_version
         return f"qobuz-librarian/{_pkg_version('qobuz-librarian')} (+streamrip-companion)"
@@ -48,7 +49,7 @@ def _get_session() -> requests.Session:
     s = getattr(_thread_local, "session", None)
     if s is None:
         s = requests.Session()
-        s.headers.update({"User-Agent": _ua_string()})
+        s.headers.update({"User-Agent": ua_string()})
         _thread_local.session = s
     return s
 

@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Discover - Qobuz Librarian{% endblock %}
+{% block content_max %}max-w-5xl{% endblock %}
+{% block content %}
+
+<div class="ql-tool-page">
+  <header class="ql-page-header">
+    <h1>Discover</h1>
+  </header>
+
+  {% include "_discover_tabs.html" %}
+
+  {% if not qobuz_ready %}
+  {% include "_connect_cta.html" %}
+  {% else %}
+
+  {% if discover_tab == 'search' %}
+  <form class="ql-search-form" action="/discover/search" method="get">
+    <div class="ql-search-row">
+      <div class="ql-search-field">
+        <svg class="ql-search-field-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/>
+          <path d="M21 21l-4.35-4.35" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <input type="text" name="q" value="{{ query }}" aria-label="Artist name"
+               placeholder="Artist name" class="ql-search-input" autocomplete="off"
+               maxlength="200">
+      </div>
+      <button type="submit" class="ql-search-submit" aria-label="Find similar"><span>Find similar</span></button>
+    </div>
+  </form>
+  {% endif %}
+
+  {# A build publishes as it goes, so the page re-asks for itself while one is
+     running, and stops when the replacement arrives without the trigger. #}
+  <div id="discover-body"{% if feed.phase == 'building' %} hx-get="{{ poll_url }}"
+       hx-trigger="every 2s" hx-target="#discover-body"
+       hx-select="#discover-body" hx-swap="outerHTML"{% endif %}>
+
+    <div class="ql-work-status ql-work-status--bar">
+      {% if feed.phase == 'building' %}
+      <span class="ql-status-chip is-info">Building</span>
+      {# The counter only means something once the worker knows the total, so
+         the first frame of every build says what it is doing instead. #}
+      <span>
+        {%- if not feed.total -%}
+        {%- if discover_tab == 'favourites' -%}Reading your saved albums.
+        {%- elif discover_tab == 'search' -%}Asking Last.fm who sounds like {{ query }}.
+        {%- elif discover_tab == 'genres' and tag -%}Asking Last.fm what is tagged {{ tag }}.
+        {%- else -%}Reading your library.{%- endif -%}
+        {%- elif discover_tab == 'search' -%}
+        Checked {{ feed.checked }} of {{ feed.total }} artists Last.fm suggested.
+        {%- elif discover_tab == 'genres' and not tag -%}
+        Read the tags on {{ feed.checked }} of {{ feed.total }} of your artists.
+        {%- elif discover_tab == 'genres' -%}
+        Checked {{ feed.checked }} of {{ feed.total }} albums tagged {{ tag }}.
+        {%- elif discover_tab == 'favourites' -%}
+        Checked {{ feed.checked }} of {{ feed.total }} saved albums.
+        {%- elif feed.stage == 'catalogue' -%}
+        Found {{ feed.checked }} of {{ feed.total }} suggested artists in the Qobuz catalogue.
+        {%- else -%}
+        Checked {{ feed.checked }} of {{ feed.total }} artists in your library. Suggestions appear as they are found.
+        {%- endif -%}
+      </span>
+      {% elif feed.phase == 'error' and feed.error == 'key' %}
+      <span class="ql-status-chip is-error">Key rejected</span>
+      <span>Last.fm rejected the API key. <a href="/settings#discover" class="ql-inline-link">Check it in Settings</a>.</span>
+      {% elif feed.phase == 'error' and feed.error == 'rate_limited' %}
+      <span class="ql-status-chip is-warning">Paused</span>
+      <span>Last.fm is rate-limiting this key. What was found is saved; reopening Discover later continues from there.</span>
+      {% elif feed.phase == 'error' and feed.error == 'qobuz' %}
+      <span class="ql-status-chip is-error">Qobuz unavailable</span>
+      <span>Qobuz could not be reached.</span>
+      {% elif feed.phase == 'error' and feed.error == 'other' %}
+      <span class="ql-status-chip is-error">Failed</span>
+      <span>The suggestions could not be built.</span>
+      {% elif feed.stale %}
+      <span class="ql-status-chip is-warning">Saved suggestions</span>
+      <span>Last.fm could not be reached. These were found {{ feed_age }}.</span>
+      {% elif feed.phase == 'error' %}
+      <span class="ql-status-chip is-warning">Unavailable</span>
+      <span>Last.fm could not be reached. Try again in a few minutes.</span>
+      {% elif discover_tab == 'search' %}
+      <span class="ql-status-chip is-info">{% if query %}{{ artists | length }} artists like {{ query }}{% else %}Search{% endif %}</span>
+      <span>{% if query %}Artists Qobuz can serve that are not in your library.{% else %}Type an artist to see who Qobuz has like them.{% endif %}</span>
+      {% elif discover_tab == 'genres' %}
+      <span class="ql-status-chip is-info">{% if tag %}{{ tag }}{% else %}Genres{% endif %}</span>
+      <span>{% if tag %}{{ albums | length }} albums tagged {{ tag }} that are not in your library.{% else %}The tags most used on the artists you own.{% endif %}</span>
+      {% elif discover_tab == 'favourites' %}
+      <span class="ql-status-chip is-info">Favourites</span>
+      <span>{{ albums | length }} albums you saved on Qobuz that are not in your library.</span>
+      {% elif feed_age %}
+      <span class="ql-status-chip is-info">Suggestions ready</span>
+      <span>Built from {{ library_count }} artists in your library, {{ feed_age }}.</span>
+      {% else %}
+      <span class="ql-status-chip is-neutral">Nothing yet</span>
+      <span>Nothing has been built for this library yet.</span>
+      {% endif %}
+    </div>
+
+    {% include "_writes_paused_notice.html" %}
+
+    {% if discover_tab == 'favourites' %}
+    {% include "_discover_grid.html" %}
+    {% if not albums and feed.phase == 'ready' %}
+    <p class="ql-empty-state">{% if feed.total %}Everything you have saved on Qobuz is already in your library.{% else %}No albums are saved on your Qobuz account.{% endif %}</p>
+    {% endif %}
+    {% elif discover_tab == 'genres' %}
+    {% if tags %}
+    <div class="ql-tag-row" role="group" aria-label="Tags in your library">
+      {% for t in tags %}
+      <a href="/discover/genres?tag={{ t | urlencode }}"
+         class="ql-dchip{% if t == tag %} is-active{% endif %}">{{ t }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% include "_discover_grid.html" %}
+    {% if tag and not albums and feed.phase == 'ready' %}
+    <p class="ql-empty-state">Qobuz has nothing tagged {{ tag }} that is not already in your library.</p>
+    {% endif %}
+    {% else %}
+    {% include "_discover_feed.html" %}
+    {% if not artists and feed.phase == 'ready' %}
+    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ query }} that Qobuz can serve.{% else %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% endif %}</p>
+    {% endif %}
+    {% endif %}
+
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

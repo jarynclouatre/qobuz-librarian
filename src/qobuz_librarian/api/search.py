@@ -276,3 +276,39 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     if complete and (items or qobuz_total == 0):
         album_cache.put_catalog(cache_key, {"items": items, "total": qobuz_total})
     return items, qobuz_total
+
+
+# ── Saved favourites ──────────────────────────────────────────────────────────
+def get_user_favorites(token, limit=None):
+    """The albums this account has starred on Qobuz, newest first.
+
+    Paged like the discography walk, and bounded: a long-standing account can
+    have thousands, and Discover only lists what it can show.
+    """
+    limit = limit if limit is not None else config.FAVORITES_LIMIT
+    items = []
+    seen = set()
+    offset = 0
+    while len(items) < limit:
+        want = min(config.ARTIST_CATALOG_PAGE, limit - len(items))
+        data = _expect_dict(qobuz_get("favorite/getUserFavorites", {
+            "type": "albums",
+            "limit": want,
+            "offset": offset,
+        }, token), "favorite/getUserFavorites")
+        page = _items(data, "albums")
+        raw = _envelope(data, "albums").get("items")
+        raw_len = len(raw) if isinstance(raw, list) else 0
+        for a in page:
+            album_id = a.get("id")
+            key = str(album_id) if album_id is not None else None
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            _normalize_album_fields(a)
+            items.append(a)
+        offset += raw_len
+        if raw_len < want:
+            break
+    return items

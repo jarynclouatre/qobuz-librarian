@@ -6512,6 +6512,134 @@ details[data-artist].htmx-swapping {
   transition: opacity 200ms ease;
 }
 
+/* Discover. The page borrows the search result row and the grid tile whole;
+   what is new is the line naming why an artist was suggested, the album rows
+   that open under it, and the two chip rows that filter them. */
+.ql-discover-reason {
+  display: flex;
+  margin: 0.3125rem 0 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3125rem;
+  color: var(--ql-text-3);
+  font-family: var(--ql-font-mono);
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+.ql-seed-chip {
+  display: inline-flex;
+  border: 1px solid var(--ql-line-soft);
+  border-radius: 0.25rem;
+  padding: 0.14rem 0.36rem;
+  color: var(--ql-text-2);
+  font-size: 0.6875rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+.ql-discover-expand {
+  border-top: 1px solid color-mix(in oklab, var(--ql-gold) 12%, transparent);
+  padding: 0.75rem 1rem 0.5rem;
+  background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
+}
+[data-theme="winter"] .ql-discover-expand {
+  --ql-subrow-bg: oklch(0% 0 0 / 0.045);
+}
+.ql-decade-row,
+.ql-tag-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.ql-decade-row {
+  margin-bottom: 0.5rem;
+}
+.ql-tag-row {
+  margin-bottom: 1rem;
+}
+.ql-dchip {
+  border: 1px solid var(--ql-line-soft);
+  border-radius: 0.25rem;
+  padding: 0.2rem 0.45rem;
+  background: transparent;
+  color: var(--ql-text-3);
+  font-family: var(--ql-font-mono);
+  font-size: 0.6875rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background-color 150ms ease;
+}
+.ql-dchip:hover {
+  color: var(--ql-text-2);
+  border-color: var(--ql-line);
+}
+.ql-dchip.is-active {
+  border-color: color-mix(in oklab, var(--ql-gold) 40%, transparent);
+  background-color: color-mix(in oklab, var(--ql-gold) 8%, transparent);
+  color: var(--ql-gold);
+}
+.ql-dchip:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
+  outline-offset: 2px;
+}
+.ql-discover-album {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4375rem 0;
+}
+.ql-discover-album + .ql-discover-album {
+  border-top: 1px solid var(--ql-line-soft);
+}
+.ql-discover-album img {
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
+  border-radius: var(--ql-radius-sm);
+  object-fit: cover;
+}
+.ql-discover-album-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.ql-discover-album-title {
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ql-text);
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ql-discover-album-meta {
+  display: block;
+  margin: 0.125rem 0 0;
+  color: var(--ql-text-3);
+  font-family: var(--ql-font-mono);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+}
+.ql-discover-album-side {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+@media (max-width: 63.9375rem) {
+  .ql-discover-expand {
+    padding: 0.625rem 0.78rem 0.4rem;
+  }
+  /* The badge repeats what the meta line already says; on a phone the row
+     needs the width more than it needs the second copy. */
+  .ql-discover-album-side > .ql-quality-badge {
+    display: none;
+  }
+  .ql-discover-album-meta .ql-result-inline-quality {
+    margin-left: 0.4rem;
+  }
+}
+
 /* Honour a reduced-motion preference everywhere: collapse transitions and
    animations to a hair rather than zero so state changes (a hide, a swap)
    still register without movement. */

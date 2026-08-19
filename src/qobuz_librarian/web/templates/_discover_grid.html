@@ -1,0 +1,19 @@
+{% from "_search_results.html" import download_form, quality_badge with context %}
+{% if albums %}
+<div class="ql-grid-view">
+  {% for g in albums %}
+  <div class="ql-grid-tile">
+    {% if g.cover %}<img src="{{ g.cover }}" alt="" width="320" height="320" class="ql-grid-cover" loading="lazy">{% endif %}
+    <div class="ql-grid-copy">
+      <p class="ql-grid-title">{{ release_title(g.title, g.version) }}</p>
+      <p class="ql-grid-artist">{{ g.artist }}</p>
+      <p class="ql-grid-meta">{{ g.year or '?' }} · {{ g.tracks or '?' }} tracks</p>
+    </div>
+    <div class="ql-grid-footer">
+      {{ quality_badge(g) }}
+      {{ download_form(g.id, g.title, g.artist, version=g.version, queued=g.queued, scanning=g.scanning) }}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

@@ -19,7 +19,7 @@
   </script>
   <script src="/static/app.js?v={{ asset_version }}"></script>
 </head>
-{% set _nav_tab = 'search' if page == 'dashboard' else page if page in ('library', 'upgrade', 'downsample', 'repair', 'lyrics', 'queue', 'settings') else '' %}
+{% set _nav_tab = 'search' if page == 'dashboard' else page if page in ('library', 'discover', 'upgrade', 'downsample', 'repair', 'lyrics', 'queue', 'settings') else '' %}
 <body class="ql-app-body min-h-screen bg-base-100" data-nav-tab="{{ _nav_tab }}">
 
   <a href="#main-content"
@@ -64,6 +64,12 @@
               <span class="ql-review-badge" data-review-badge="library" aria-label="Library review ready" title="Library review ready"></span>
               {% endif %}
             </a>
+            {% if discover_available %}
+            <a href="/discover" data-nav-tab-link="discover" class="ql-nav-link {% if page=='discover' %}is-active{% endif %}">
+              <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>
+              Discover
+            </a>
+            {% endif %}
           </div>
 
           <div class="ql-nav-group">
@@ -218,7 +224,7 @@
     </a>
     <details class="ql-mobile-drawer ql-tab-more">
       {# This discloses ordinary navigation links, not menu items. #}
-      <summary class="ql-tab {% if page in ('upgrade', 'downsample', 'repair', 'lyrics') %}is-active{% endif %} list-none" role="button" aria-label="More" aria-controls="mobile-menu" aria-expanded="false">
+      <summary class="ql-tab {% if page in ('discover', 'upgrade', 'downsample', 'repair', 'lyrics') %}is-active{% endif %} list-none" role="button" aria-label="More" aria-controls="mobile-menu" aria-expanded="false">
         <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>
         <span>More</span>
         {% if nav_review_badges.get('upgrade') or nav_review_badges.get('downsample') or nav_review_badges.get('repair') %}<span class="ql-tab-dot" aria-hidden="true"></span>{% endif %}
@@ -231,6 +237,14 @@
           </button>
         </div>
         <nav class="ql-sheet-nav" aria-label="More">
+          {% if discover_available %}
+          <div class="ql-nav-group">
+            <a href="/discover" data-nav-tab-link="discover" class="ql-nav-link {% if page=='discover' %}is-active{% endif %}">
+              <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>
+              Discover
+            </a>
+          </div>
+          {% endif %}
           <div class="ql-nav-group">
             {% if upgrade_available %}
             <a href="/upgrade" data-nav-tab-link="upgrade" class="ql-nav-link {% if page=='upgrade' %}is-active{% endif %}">

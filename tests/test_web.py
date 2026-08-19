@@ -7307,3 +7307,168 @@ def test_a_manual_backup_reports_what_it_saved(tmp_path, monkeypatch):
 
     assert collection_snapshot.latest_path().is_file()
     assert "1 album" in job.summary
+
+
+# ── Discover ──────────────────────────────────────────────────────────────────
+
+
+def _discover_ready(monkeypatch, items=(), **overrides):
+    """Point every Discover build at a finished feed so the route tests
+    exercise the routes, not a background thread."""
+    from qobuz_librarian.library import recommendations
+    from qobuz_librarian.web import app as app_mod
+
+    view = {"phase": "ready", "checked": 0, "total": 0, "error": "",
+            "items": list(items), "built_at": time.time(), "stale": False}
+    view.update(overrides)
+    monkeypatch.setattr(app_mod, "_qobuz_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(recommendations, "ensure_similar_feed",
+                        lambda token: view)
+    monkeypatch.setattr(recommendations, "ensure_search_feed",
+                        lambda token, query: view)
+    monkeypatch.setattr(recommendations, "library",
+                        lambda **kw: recommendations.Library(
+                            set(), [], ["A", "B"], "sig"))
+    return view
+
+
+def test_discover_is_absent_until_a_lastfm_key_is_set(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "")
+    for path in ("/discover", "/discover/genres", "/discover/search",
+                 "/discover/favourites", "/discover/artist-albums?artist_id=1"):
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 303, path
+        assert r.headers["location"] == "/"
+    assert 'href="/discover"' not in client.get("/queue").text
+
+
+def test_discover_appears_once_a_key_is_set(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    _discover_ready(monkeypatch)
+    assert client.get("/discover").status_code == 200
+    assert 'href="/discover"' in client.get("/queue").text
+
+
+def test_discover_lists_the_suggestions_and_what_caused_them(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    _discover_ready(monkeypatch, items=[{
+        "name": "Boards of Canada", "artist_id": "77",
+        "seeds": ["Aphex Twin", "Autechre"], "score": 1.4,
+        "cover": "https://static.qobuz.com/x.jpg",
+        "albums": [{"id": "1"}, {"id": "2"}],
+    }])
+    body = client.get("/discover").text
+    assert "Boards of Canada" in body
+    assert "Aphex Twin" in body and "Autechre" in body
+    # The row loads its albums when opened, not with the page.
+    assert 'hx-get="/discover/artist-albums?artist_id=77' in body
+
+
+def test_a_suggested_artists_albums_load_with_a_download_button(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import recommendations
+    from qobuz_librarian.web import app as app_mod
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    monkeypatch.setattr(app_mod, "_qobuz_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(recommendations, "artist_albums", lambda *a, **k: [
+        {"id": "901", "title": "Geogaddi", "version": "", "artist": "BoC",
+         "year": "2002", "tracks": 23, "maximum_bit_depth": 24,
+         "maximum_sampling_rate": 44.1, "cover": ""},
+        {"id": "902", "title": "Twoism", "version": "", "artist": "BoC",
+         "year": "1995", "tracks": 9, "maximum_bit_depth": 16,
+         "maximum_sampling_rate": 44.1, "cover": ""},
+    ])
+    body = client.get("/discover/artist-albums?artist_id=77&name=BoC").text
+    assert 'name="album_id" value="901"' in body
+    assert 'data-album-year="2002"' in body
+    # Two decades are present, so the filter row is worth showing.
+    assert 'data-decade="2000"' in body and 'data-decade="1990"' in body
+
+
+def test_one_decade_gets_no_decade_filter(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import recommendations
+    from qobuz_librarian.web import app as app_mod
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    monkeypatch.setattr(app_mod, "_qobuz_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(recommendations, "artist_albums", lambda *a, **k: [
+        {"id": "901", "title": "Geogaddi", "version": "", "artist": "BoC",
+         "year": "2002", "tracks": 23, "maximum_bit_depth": 24,
+         "maximum_sampling_rate": 44.1, "cover": ""}])
+    body = client.get("/discover/artist-albums?artist_id=77&name=BoC").text
+    assert "ql-decade-row" not in body
+
+
+def test_genres_opens_on_the_top_tag_in_the_library(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import recommendations
+    from qobuz_librarian.web import app as app_mod
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    monkeypatch.setattr(app_mod, "_qobuz_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    tags_view = {"phase": "ready", "checked": 0, "total": 0, "error": "",
+                 "items": ["shoegaze", "trip hop"], "built_at": time.time(),
+                 "stale": False}
+    asked = []
+
+    def genre_feed(token, tag):
+        asked.append(tag)
+        return {"phase": "ready", "checked": 0, "total": 0, "error": "",
+                "items": [{"id": "5", "title": "Souvlaki", "version": "",
+                           "artist": "Slowdive", "year": "1993", "tracks": 10,
+                           "maximum_bit_depth": 24,
+                           "maximum_sampling_rate": 96, "cover": ""}],
+                "built_at": time.time(), "stale": False}
+
+    monkeypatch.setattr(recommendations, "ensure_library_tags",
+                        lambda token: tags_view)
+    monkeypatch.setattr(recommendations, "ensure_genre_feed", genre_feed)
+    body = client.get("/discover/genres").text
+    assert asked == ["shoegaze"]
+    assert "Souvlaki" in body
+    assert 'name="album_id" value="5"' in body
+    client.get("/discover/genres?tag=trip+hop")
+    assert asked[-1] == "trip hop"
+
+
+def test_a_building_feed_asks_again_and_a_finished_one_stops(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    _discover_ready(monkeypatch, phase="building", checked=7, total=90,
+                    built_at=0)
+    building = client.get("/discover").text
+    assert 'hx-trigger="every 2s"' in building
+    _discover_ready(monkeypatch)
+    assert 'hx-trigger="every 2s"' not in client.get("/discover").text
+
+
+def test_search_without_a_query_asks_lastfm_nothing(client, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import recommendations
+    from qobuz_librarian.web import app as app_mod
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "k" * 32)
+    monkeypatch.setattr(app_mod, "_qobuz_ready", lambda: True)
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    asked = []
+
+    def ensure(token, query):
+        asked.append(query)
+        return recommendations.feed_view("search:none", "sig")
+
+    monkeypatch.setattr(recommendations, "ensure_search_feed", ensure)
+    assert client.get("/discover/search").status_code == 200
+    assert asked == [""]

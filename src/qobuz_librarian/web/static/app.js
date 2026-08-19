@@ -846,6 +846,41 @@
     }
   });
 
+  // Discover artist rows open their albums under the row. htmx fetches the
+  // list once; after that the same button is a plain show/hide.
+  document.addEventListener("click", function (evt) {
+    var btn = evt.target.closest && evt.target.closest("[data-discover-toggle]");
+    if (!btn) return;
+    var panel = document.getElementById(btn.getAttribute("aria-controls"));
+    if (!panel) return;
+    var next = btn.getAttribute("aria-expanded") !== "true";
+    btn.setAttribute("aria-expanded", next ? "true" : "false");
+    panel.classList.toggle("hidden", !next);
+  });
+
+  // Decade chips filter the albums already on screen. The years come from
+  // Qobuz, so a chip press never asks for the list again. An album Qobuz has
+  // no year for stays visible under every chip rather than disappearing into a
+  // decade nobody can name.
+  document.addEventListener("click", function (evt) {
+    var chip = evt.target.closest && evt.target.closest("[data-decade]");
+    if (!chip) return;
+    var scope = chip.closest("[data-decade-scope]");
+    if (!scope) return;
+    evt.preventDefault();
+    var decade = parseInt(chip.getAttribute("data-decade"), 10);
+    Array.prototype.forEach.call(scope.querySelectorAll("[data-decade]"), function (c) {
+      var on = c === chip;
+      c.classList.toggle("is-active", on);
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    Array.prototype.forEach.call(scope.querySelectorAll("[data-album-year]"), function (row) {
+      var year = parseInt(row.getAttribute("data-album-year"), 10);
+      var show = !decade || !year || Math.floor(year / 10) * 10 === decade;
+      row.classList.toggle("hidden", !show);
+    });
+  });
+
   // Light/dark toggle.
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest && evt.target.closest("#theme-toggle, [data-theme-toggle]");

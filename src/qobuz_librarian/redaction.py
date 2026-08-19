@@ -31,7 +31,7 @@ _VALUE = r'[^\s&;,"\'<>\\]+'
 # so the parameter can arrive with its first characters on the line above.
 _NAMED = re.compile(
     r"(?i)(user_auth_token|auth_token|user_id|password|app_secret|"
-    r"request_sig|x-user-auth-token|authorization)(" + _SEP + r")"
+    r"request_sig|x-user-auth-token|authorization|api_key)(" + _SEP + r")"
     r"(?:(Bearer|Basic)\s+)?(" + _VALUE + r")")
 
 _lock = threading.Lock()

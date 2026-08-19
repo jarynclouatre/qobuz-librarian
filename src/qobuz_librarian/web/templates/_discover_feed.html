@@ -1,0 +1,26 @@
+{% from "_search_results.html" import download_form, quality_badge with context %}
+{% if artists %}
+<div class="ql-results-panel ql-artist-results">
+  <div class="ql-result-list">
+    {% for a in artists %}
+    <div class="ql-result-row ql-result-row--artist">
+      <div class="ql-result-main">
+        {% if a.cover %}<img src="{{ a.cover }}" alt="" width="52" height="52" class="ql-result-art" loading="lazy">{% endif %}
+        <div class="ql-result-copy">
+          <p class="ql-result-title">{{ a.name }}</p>
+          <p class="ql-discover-reason">{% if discover_tab == 'search' %}Similar to{% else %}Because you have{% endif %}
+            {% for s in a.seeds %}<span class="ql-seed-chip">{{ s }}</span>{% endfor %}
+          </p>
+        </div>
+      </div>
+      <button type="button" class="ql-vchip" data-discover-toggle
+              aria-expanded="false" aria-controls="discover-albums-{{ a.artist_id }}"
+              hx-get="/discover/artist-albums?artist_id={{ a.artist_id | urlencode }}&name={{ a.name | urlencode }}"
+              hx-target="#discover-albums-{{ a.artist_id }}" hx-swap="innerHTML"
+              hx-trigger="click once">{{ a.albums | length }} albums</button>
+    </div>
+    <div id="discover-albums-{{ a.artist_id }}" class="hidden"></div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

@@ -57,6 +57,16 @@ services:
       # (add the matching `secrets:` block + a top-level `secrets:` definition).
       QOBUZ_USER_AUTH_TOKEN_FILE: "${QOBUZ_USER_AUTH_TOKEN_FILE:-}"
 
+      # ── Discover ──────────────────────────────────────────────────────────
+      # A free Last.fm API key turns on the Discover tab, which suggests
+      # artists based on the ones already in your library. Empty = no tab.
+      # Get one at https://www.last.fm/api/account/create, or set it on the
+      # Settings page instead.
+      LASTFM_API_KEY: "${LASTFM_API_KEY:-}"
+      # Or keep it out of the container environment and read it from a file
+      # (e.g. a Docker secret), like the Qobuz token above:
+      LASTFM_API_KEY_FILE: "${LASTFM_API_KEY_FILE:-}"
+
       # ── Paths ─────────────────────────────────────────────────────────────
       MUSIC_ROOT:           /music
       STAGING_DIR:          /staging

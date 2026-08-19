@@ -389,7 +389,7 @@
           </span>
         </summary>
         <div class="ql-defaults-grid">
-          {% for key, label, help, kind, choices, placeholder in text_fields if key not in ('STREAMRIP_QUALITY', 'COLLECTION_BACKUP_DIR') %}
+          {% for key, label, help, kind, choices, placeholder in text_fields if key not in ('STREAMRIP_QUALITY', 'COLLECTION_BACKUP_DIR', 'LASTFM_API_KEY') %}
           <div class="ql-default-field">
             <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
             <div class="ql-default-control">
@@ -485,6 +485,39 @@
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>
+  </div>
+</section>
+
+<section class="ql-settings-section">
+  <div class="ql-settings-section-body">
+    <div class="ql-settings-section-head">
+      <div class="ql-settings-section-copy">
+        <h2 id="discover" tabindex="-1" class="ql-anchor-target">Discover</h2>
+        <p>
+          Suggests artists from the ones already in your library, and offers
+          what Qobuz has by them. The tab appears once a key is set; free keys
+          come from
+          <a href="https://www.last.fm/api/account/create" target="_blank"
+             rel="noopener" class="ql-link">last.fm</a>.
+        </p>
+      </div>
+    </div>
+
+    <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      {% for key, label, help, kind, choices, placeholder in text_fields if key == 'LASTFM_API_KEY' %}
+      <div class="ql-field">
+        <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
+        <input type="text" name="{{ key }}" id="f-{{ key }}"
+               value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
+               class="ql-input max-w-lg font-mono text-base sm:text-sm">
+        <p class="ql-field-help">{{ help }}</p>
+      </div>
+      {% endfor %}
+      <div class="ql-settings-actions">
+        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save key</button>
+      </div>
+    </form>
   </div>
 </section>
 

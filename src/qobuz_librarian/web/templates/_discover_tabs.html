@@ -1,0 +1,7 @@
+<nav class="ql-page-tabs" aria-label="Discover">
+  {% for slug, href, label in discover_tabs %}
+  <a href="{{ href }}"
+     class="{% if discover_tab == slug %}is-active{% endif %}"
+     {% if discover_tab == slug %}aria-current="page"{% endif %}><span>{{ label }}</span></a>
+  {% endfor %}
+</nav>

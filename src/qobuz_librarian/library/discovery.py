@@ -94,6 +94,15 @@ def _load_resolve_cache() -> dict:
     return _resolve_cache
 
 
+def cached_artist_resolutions() -> dict:
+    """The folder-name to [id, name] map past scans resolved, as a plain copy.
+
+    Discover reads it to learn what Qobuz calls each artist on the shelf, which
+    is usually how Last.fm spells them too.
+    """
+    return dict(_load_resolve_cache())
+
+
 def flush_resolve_cache():
     """Persist the resolution cache to disk, only if it gained entries."""
     global _resolve_cache_dirty
@@ -121,17 +130,32 @@ def flush_resolve_cache():
                 pass
 
 
-def resolve_artist(query, token):
-    """Return (artist_id, artist_name) for the best Qobuz match, or (None, None).
+def pick_best_artist(results, query):
+    """The artist search result that is really `query`, or None.
 
     Qobuz lists the canonical artist ('The Beatles') next to bare-name twins
     ('Beatles') that aggregate covers, interviews and bootlegs. A raw string
     match favours the twin - it has no 'The ' to cost it similarity - so compare
     with the leading article stripped and, among equally close names, take the
     one with the deepest catalog: the real artist's, not the twin's.
+    """
+    q = strip_leading_article(query)
 
-    Matched artists are cached to disk so a re-scan skips the search call;
-    flush_resolve_cache() persists new matches.
+    def match_score(a):
+        return similarity(strip_leading_article(a.get("name", "")), q)
+
+    qualifying = [a for a in results if match_score(a) >= cfg.ARTIST_NAME_THRESH]
+    if not qualifying:
+        return None
+    return max(qualifying,
+               key=lambda a: (match_score(a), a.get("albums_count") or 0))
+
+
+def resolve_artist(query, token):
+    """Return (artist_id, artist_name) for the best Qobuz match, or (None, None).
+
+    The matching itself is pick_best_artist; this adds the on-disk cache, so a
+    re-scan skips the search call. flush_resolve_cache() persists new matches.
     """
     global _resolve_cache_dirty
     cache = _load_resolve_cache()
@@ -145,16 +169,9 @@ def resolve_artist(query, token):
     except Exception as e:
         log.info(f"  artist search failed for '{query}': {e}")
         raise ArtistSearchUnavailable(str(e)) from e
-    q = strip_leading_article(query)
-
-    def match_score(a):
-        return similarity(strip_leading_article(a.get("name", "")), q)
-
-    qualifying = [a for a in results if match_score(a) >= cfg.ARTIST_NAME_THRESH]
-    if not qualifying:
+    best = pick_best_artist(results, query)
+    if best is None:
         return None, None
-    best = max(qualifying,
-               key=lambda a: (match_score(a), a.get("albums_count") or 0))
     aid, aname = best.get("id"), best.get("name")
     # A name match with no id is a malformed/partial result, not a usable hit -
     # the callers need the id, so caching [None, name] would skip the artist on

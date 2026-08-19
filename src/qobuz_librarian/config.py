@@ -382,6 +382,13 @@ LYRIC_RETRY_VERSION   = 1
 QOBUZ_API_BASE = os.environ.get("QOBUZ_API_BASE", "https://www.qobuz.com/api.json/0.2")
 QOBUZ_APP_ID   = os.environ.get("QOBUZ_APP_ID",   "798273057")
 
+# Last.fm supplies artist similarity and tags for the Discover tab. It is
+# optional: with no key the tab does not exist. The key is a plain read-only
+# API key, but it still goes through _resolve_secret so the _FILE form works
+# and so it is registered for redaction before any request carries it.
+LASTFM_API_BASE = os.environ.get("LASTFM_API_BASE", "https://ws.audioscrobbler.com/2.0/")
+LASTFM_API_KEY  = _resolve_secret("LASTFM_API_KEY")
+
 # ── Download quality ──────────────────────────────────────────────────────────
 # streamrip quality code: 2=CD/16-bit·44.1kHz lossless, 3=24-bit ≤96kHz,
 # 4=24-bit ≤192kHz. Default 4: the highest quality your subscription serves
@@ -576,6 +583,8 @@ LEFTOVER_WARN_LIMIT    = _env("LEFTOVER_WARN_LIMIT",    50)
 # realistic discographies. Truncation past this is logged by the scanner.
 ARTIST_CATALOG_LIMIT   = _env_num_min("ARTIST_CATALOG_LIMIT",   1000, 1)
 ARTIST_CATALOG_PAGE    = _env_num_min("ARTIST_CATALOG_PAGE",    100, 1)
+# How many starred albums Discover reads back from Qobuz.
+FAVORITES_LIMIT        = _env_num_min("FAVORITES_LIMIT",        500, 1)
 # Hide releases shorter than this in the "missing albums" step of artist
 # mode (singles/small EPs are usually noise; lower it to 1 to surface them).
 MISSING_ALBUMS_MIN_TRACKS = _env("MISSING_ALBUMS_MIN_TRACKS", 4)
