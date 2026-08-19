@@ -166,6 +166,9 @@ services:
       MIGRATE_MULTI_ARTIST: "${MIGRATE_MULTI_ARTIST:-false}"
       # Cover art placement: sidecar (image beside tracks) | embed | both.
       ARTWORK: "${ARTWORK:-sidecar}"
+      # Where the collection backup is written after each library scan, as a
+      # path inside the container. Empty keeps it with the app's other data.
+      COLLECTION_BACKUP_DIR: "${COLLECTION_BACKUP_DIR:-}"
 
       # ── New releases ──────────────────────────────────────────────────────
       # First launch offers a baseline library scan. It lists missing albums and
