@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import config as cfg
 from .. import state_file
-from . import scanner
+from . import discovery, scanner
 
 FORMAT = "qobuz-librarian-collection-snapshot"
 VERSION = 1
@@ -98,6 +98,10 @@ def build_snapshot(*, owned_qobuz=None, artist_ids=None, previous=None,
     owned_qobuz = owned_qobuz or {}
     artist_ids = artist_ids or {}
     carried = _previous_ids(previous)
+    # Artist ids every past scan has ever resolved, keyed by folder name. An
+    # ordinary scan skips unchanged folders and reports nothing for them, so
+    # without this a library that never changes would back up id-less forever.
+    resolved = discovery.cached_artist_resolutions()
 
     artists = []
     album_count = 0
@@ -125,9 +129,14 @@ def build_snapshot(*, owned_qobuz=None, artist_ids=None, previous=None,
             track_count += len(tracks)
         if not albums:
             continue
+        hit = resolved.get(name)
+        cached_id = (str(hit[0])
+                     if isinstance(hit, (list, tuple)) and len(hit) > 1 and hit[0]
+                     else None)
         artists.append({
             "name": name,
-            "qobuz_artist_id": artist_ids.get(name) or prev_artist_id or None,
+            "qobuz_artist_id": (artist_ids.get(name) or prev_artist_id
+                                or cached_id or None),
             "albums": albums,
         })
 
@@ -237,7 +246,7 @@ def validate_upload(data):
         return False, "That file isn't a collection snapshot from this app."
     if data.get("version") != VERSION:
         return False, (f"That snapshot was written by a different version of "
-                       f"the app (format {data.get('version')!r}, this one "
+                       f"the app (version {data.get('version')!r}, this one "
                        f"reads {VERSION}).")
     artists = data.get("artists")
     if not isinstance(artists, list) or not artists:

@@ -7309,6 +7309,105 @@ def test_a_manual_backup_reports_what_it_saved(tmp_path, monkeypatch):
     assert "1 album" in job.summary
 
 
+def _restore_stack(monkeypatch, tmp_path, albums):
+    """An empty library and a catalogue that answers by album id."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import collection_restore
+
+    music = tmp_path / "music"
+    music.mkdir()
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(collection_restore.scanner, "clear_scan_caches",
+                        lambda: None)
+    monkeypatch.setattr(collection_restore, "get_album",
+                        lambda album_id, _t: albums[str(album_id)])
+    monkeypatch.setattr(collection_restore, "find_qobuz_track_by_isrc",
+                        lambda *_a: None)
+    monkeypatch.setattr(collection_restore, "search_albums",
+                        lambda *_a, **_k: [])
+
+
+def _backup_file(album_count=1, padding=0):
+    import json
+
+    from qobuz_librarian.library import collection_snapshot
+
+    albums = [{"name": f"Album {i}", "qobuz_album_id": f"a{i}", "tracks": []}
+              for i in range(album_count)]
+    document = {"format": collection_snapshot.FORMAT,
+                "version": collection_snapshot.VERSION,
+                "counts": {"artists": 1, "albums": album_count, "tracks": 0},
+                "artists": [{"name": "Noname", "albums": albums}]}
+    if padding:
+        document["music_root"] = "x" * padding
+    return json.dumps(document).encode("utf-8")
+
+
+def test_uploading_a_backup_parks_one_restore_review(client, monkeypatch,
+                                                     tmp_path):
+    album = {"id": "a0", "title": "Room 25", "tracks_count": 8,
+             "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1,
+             "artist": {"name": "Noname"},
+             "tracks": {"items": [{"id": "t1"}]}}
+    _restore_stack(monkeypatch, tmp_path, {"a0": album})
+    jm.start_worker()
+
+    # Deliberately past the 1 MB form cap: a real backup is several MB, and the
+    # upload route is the one path allowed past it.
+    response = client.post(
+        "/collection/restore",
+        files={"backup": ("collection.json", _backup_file(padding=2_000_000),
+                          "application/json")},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    job_id = response.headers["HX-Redirect"].rsplit("/", 1)[-1]
+    job = jm.registry.get(job_id)
+    try:
+        assert _wait_for(
+            lambda: job.status == jm.JobStatus.AWAITING_REVIEW)
+        assert [c["payload"]["album_id"] for c in job.candidates] == ["a0"]
+        assert job.candidates[0]["selected"] is True
+    finally:
+        _remove_job(job)
+
+
+def test_a_file_that_is_not_a_backup_starts_nothing(client):
+    before = len(jm.registry.all())
+
+    response = client.post(
+        "/collection/restore",
+        files={"backup": ("notes.txt", b"nothing here", "text/plain")},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "HX-Redirect" not in response.headers
+    assert len(jm.registry.all()) == before
+
+
+def test_a_second_backup_upload_returns_the_open_restore(client, monkeypatch,
+                                                          tmp_path):
+    _restore_stack(monkeypatch, tmp_path, {})
+    parked = jm.Job(title="Restore from backup")
+    parked.execute_kind = "collection_restore"
+    parked.status = jm.JobStatus.AWAITING_REVIEW
+    jm.registry.add(parked)
+
+    try:
+        response = client.post(
+            "/collection/restore",
+            files={"backup": ("collection.json", _backup_file(),
+                              "application/json")},
+            headers={"HX-Request": "true"},
+        )
+        assert response.headers["HX-Redirect"] == f"/jobs/{parked.id}"
+        assert len(jm.registry.all()) == 1
+    finally:
+        _remove_job(parked)
+
+
 # ── Discover ──────────────────────────────────────────────────────────────────
 
 

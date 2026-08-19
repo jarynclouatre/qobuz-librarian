@@ -163,3 +163,19 @@ def test_validate_upload_rejects_files_that_are_not_ours():
     assert snap.validate_upload({"hello": "world"})[0] is False
     assert snap.validate_upload({**good, "version": 99})[0] is False
     assert snap.validate_upload({**good, "artists": []})[0] is False
+
+
+def test_an_artist_id_every_past_scan_resolved_still_reaches_the_backup(
+        library, monkeypatch):
+    # An ordinary scan skips unchanged folders and reports no ids for them,
+    # so the builder falls back to the on-disk resolution cache.
+    library.add("Bonobo", "Black Sands (2010)",
+                [{"title": "Prelude", "number": 1}])
+    monkeypatch.setattr(snap.discovery, "cached_artist_resolutions",
+                        lambda: {"Bonobo": ["7619", "Bonobo"]})
+    document = snap.build_snapshot()
+    assert document["artists"][0]["qobuz_artist_id"] == "7619"
+
+    # Ids handed over by the scan itself still win.
+    fresh = snap.build_snapshot(artist_ids={"Bonobo": "1"})
+    assert fresh["artists"][0]["qobuz_artist_id"] == "1"

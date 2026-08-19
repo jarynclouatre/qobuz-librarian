@@ -325,8 +325,18 @@ class NewReleaseResult:
     unresolved: bool = False
 
 
+def owned_title_key(name):
+    """The key an album folder name is filed under in the owned-title map.
+
+    Shared so anything comparing a name that never came from a folder listing -
+    a title out of a collection backup, say - keys it exactly the way the
+    folders were keyed.
+    """
+    return normalize(strip_leading_article(tags.strip_album_decorations(name or "")))
+
+
 def _record_owned_title(owned_titles, album_dir):
-    key = normalize(strip_leading_article(tags.strip_album_decorations(album_dir.name)))
+    key = owned_title_key(album_dir.name)
     if key:
         owned_titles.setdefault(key, set()).add(_dir_year(album_dir.name))
 

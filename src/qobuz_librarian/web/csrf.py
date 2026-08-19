@@ -10,6 +10,13 @@ CSRF_HEADER = "X-CSRF-Token"
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _MAX_FORM_BYTES = 1 * 1024 * 1024  # 1 MB - no form on this app gets close
+# One route takes a file instead of a form. A collection backup is a few MB for
+# a large library, and the route enforces this same bound as it reads.
+_UPLOAD_LIMITS = {"/collection/restore": 64 * 1024 * 1024}
+
+
+def body_limit(path: str) -> int:
+    return _UPLOAD_LIMITS.get(path, _MAX_FORM_BYTES)
 
 
 def _new_token() -> str:
@@ -61,7 +68,8 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 content_length = int(request.headers.get("content-length") or 0)
             except ValueError:
                 content_length = 0
-            if content_length > _MAX_FORM_BYTES:
+            limit = body_limit(request.url.path)
+            if content_length > limit:
                 return PlainTextResponse("Request body too large",
                                          status_code=413)
             submitted = request.headers.get(CSRF_HEADER)

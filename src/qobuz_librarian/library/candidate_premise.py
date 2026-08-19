@@ -11,12 +11,14 @@ import json
 import os
 from pathlib import Path
 
+from qobuz_librarian import config as cfg
 from qobuz_librarian.library.backup import (
     _close_descriptors,
     _open_backup_source,
     _path_directory_generations,
     canonical_album_source_receipt,
     capture_album_source_receipt,
+    capture_music_root_identity,
 )
 
 PREMISE_VERSION = 1
@@ -194,6 +196,63 @@ def expected_path(candidate: dict, kind: str | None = None) -> str:
         return ""
 
 
+ABSENT_CONTAINER_KEY = "_absent_container"
+
+
+def _plain_folder_name(value) -> str:
+    """A single folder name, or "" for anything that could reach elsewhere."""
+    if type(value) is not str or not value or value in (".", ".."):
+        return ""
+    return value if value == Path(value).name else ""
+
+
+def capture_absent(artist_name) -> dict | None:
+    """Seal what a missing-album row can prove with no artist folder at all.
+
+    A collection restore names artists the library may have no folder for, so
+    there is no tree to receipt. Nothing local can be lost by fetching into a
+    folder that does not exist, and the album's own reappearance is caught at
+    download time, so what this holds is the one fact that still matters: the
+    music folder is the same mounted directory throughout.
+    """
+    name = _plain_folder_name(artist_name)
+    identity = capture_music_root_identity() if name else None
+    return None if identity is None else {"artist": name,
+                                          "music_root": identity}
+
+
+def _canonical_absent(candidate: dict):
+    """Read a saved absent-folder seal, or None when the row isn't one."""
+    value = (candidate.get("payload") or {}).get(ABSENT_CONTAINER_KEY)
+    if type(value) is not dict or set(value) != {"artist", "music_root"}:
+        return None
+    if expected_kind(candidate) != "missing":
+        return None
+    name = _plain_folder_name(value["artist"])
+    identity = value["music_root"]
+    if (not name or type(identity) is not list or len(identity) != 7
+            or any(type(field) is not int for field in identity)):
+        return None
+    return name, identity
+
+
+def _validate_absent(saved) -> dict:
+    name, identity = saved
+    current = capture_music_root_identity()
+    if current is None or not _durable_generations_match([identity], [current]):
+        raise CandidateStale(
+            "The music folder is not the one this review was built against. "
+            "Check that your library is mounted, then build the review again; "
+            "nothing was changed."
+        )
+    return {
+        "version": PREMISE_VERSION,
+        "kind": "missing",
+        "path": os.path.abspath(os.fspath(cfg.MUSIC_ROOT / name)),
+        "receipt": None,
+    }
+
+
 def canonical(candidate: dict) -> dict | None:
     """Read and validate a candidate's saved premise."""
     payload = candidate.get("payload") or {}
@@ -256,6 +315,9 @@ def gap_fill_receipts(value) -> dict | None:
 
 def validate(candidate: dict) -> dict:
     """Check a saved review against the current files before using it."""
+    absent = _canonical_absent(candidate)
+    if absent is not None:
+        return _validate_absent(absent)
     premise = canonical(candidate)
     if premise is None:
         raise CandidateStale(
@@ -278,6 +340,9 @@ def validate_container(candidate: dict) -> dict:
     download legitimately changes that artist tree, but it must not authorize
     a replaced artist directory or a different mounted path for later picks.
     """
+    absent = _canonical_absent(candidate)
+    if absent is not None:
+        return _validate_absent(absent)
     premise = canonical(candidate)
     if premise is None:
         raise CandidateStale(

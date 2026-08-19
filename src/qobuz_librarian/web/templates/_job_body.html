@@ -55,7 +55,7 @@
 
   {% set s = job.status.value %}
   {% set _review_thing = labels.discard_review_label(job) %}
-  {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair') %}
+  {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair', 'collection_restore') %}
   {% set _review_qobuz_blocked = _review_needs_qobuz and not qobuz_ready %}
   {% if job.recoveries %}
   {% set kept = namespace(on_disk=false) %}
@@ -237,7 +237,7 @@
       </div>
     </div>
 
-    {% if s == 'scanning' and job.execute_kind in ('library', 'upgrade', 'downsample', 'new_releases') %}
+    {% if s == 'scanning' and job.execute_kind in ('library', 'upgrade', 'downsample', 'new_releases', 'collection_restore') %}
     <p id="scan-found" class="ql-scan-found" aria-live="polite"></p>
     {% endif %}
 

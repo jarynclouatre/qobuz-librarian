@@ -371,3 +371,48 @@ def test_favourites_leaves_out_albums_already_in_the_library(monkeypatch):
     rec._favourites_worker("favourites", "tok", owned)
     cards = rec.build_status("favourites")["items"]
     assert [c["title"] for c in cards] == ["Wanted"]
+
+
+def test_a_short_release_is_left_out_of_a_suggestions_discography(monkeypatch):
+    # Discover follows the missing-albums rule: releases under the track
+    # threshold are noise, but an unknown track count is bad metadata, not a
+    # single, and passes.
+    rows = [
+        {"id": "a1", "title": "Real Album", "tracks_count": 10,
+         "artist": {"name": "Someone"},
+         "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+        {"id": "s1", "title": "Some Single", "tracks_count": 1,
+         "artist": {"name": "Someone"},
+         "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+        {"id": "u1", "title": "No Count", "tracks_count": None,
+         "artist": {"name": "Someone"},
+         "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+    ]
+    monkeypatch.setattr(rec, "get_artist_albums",
+                        lambda artist_id, token: (rows, len(rows)))
+    monkeypatch.setattr(cfg, "MISSING_ALBUMS_MIN_TRACKS", 4)
+    got = {a["id"] for a in rec.artist_albums("42", "Someone", token=None)}
+    assert got == {"a1", "u1"}
+
+
+def test_a_genre_card_under_the_track_threshold_is_dropped(monkeypatch):
+    monkeypatch.setattr(cfg, "MISSING_ALBUMS_MIN_TRACKS", 4)
+    monkeypatch.setattr(rec, "get_tag_top_albums",
+                        lambda tag, limit=None: [
+                            {"artist": "A", "title": "Album"},
+                            {"artist": "A", "title": "Single"},
+                        ])
+    resolved = {
+        "Album": {"id": "a1", "title": "Album", "artist": "A", "tracks": 9,
+                  "version": "", "year": 2020, "cover": "",
+                  "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+        "Single": {"id": "s1", "title": "Single", "artist": "A", "tracks": 1,
+                   "version": "", "year": 2021, "cover": "",
+                   "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+    }
+    monkeypatch.setattr(rec, "resolve_album",
+                        lambda artist, title, token: resolved[title])
+    monkeypatch.setattr(rec, "_owned_on_disk", lambda album: False)
+    rec._genre_worker(rec.genre_feed_kind("tag"), None, _library(["B"]), "tag")
+    feed = dc.get_feed(rec.genre_feed_kind("tag"))
+    assert [a["id"] for a in feed["payload"]] == ["a1"]

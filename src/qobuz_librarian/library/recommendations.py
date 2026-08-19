@@ -267,10 +267,16 @@ def resolve_artist(name: str, token) -> dict | None:
 
 
 def artist_albums(artist_id, artist_name: str, token) -> list[dict]:
-    """The artist's albums, one row per record rather than one per edition."""
+    """The artist's albums, one row per record rather than one per edition.
+
+    Short releases are dropped under the same threshold the missing-albums
+    step uses: a suggestion's discography is for browsing, and a run of
+    one-track singles buries the records worth seeing.
+    """
     items, _total = get_artist_albums(artist_id, token)
     pairs = catalog.dedup_album_versions(items, prefer_hires=bool(cfg.PREFER_HIRES))
     pairs = catalog.filter_compilation_albums(pairs, artist_name)
+    pairs = catalog.filter_short_releases(pairs, cfg.MISSING_ALBUMS_MIN_TRACKS)
     # dedup_album_versions already returns oldest first, which is how the rest
     # of the app lists a discography.
     return [_album_row(album) for album, _versions in pairs if album.get("id")]
@@ -594,6 +600,10 @@ def _genre_worker(kind: str, token, owned: Library, tag: str) -> None:
         album = resolve_album(row.get("artist") or "", row.get("title") or "",
                               token)
         if not album:
+            continue
+        # Same short-release rule as the artist rows; an unknown track count
+        # passes rather than punishing bad metadata.
+        if 0 < (album.get("tracks") or 0) < cfg.MISSING_ALBUMS_MIN_TRACKS:
             continue
         if _owned_on_disk(album):
             continue

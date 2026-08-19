@@ -48,6 +48,7 @@ from qobuz_librarian.library.catalog import (
     is_lossless_album,
 )
 from qobuz_librarian.library.discovery import (
+    AlbumGap,
     DiscoveryOpts,
     find_missing_for_artist,
     find_new_releases_for_artist,
@@ -430,6 +431,28 @@ def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False,
     return _add_candidate_spec(
         job, _gap_candidate_spec(
             gap, artist_name, selected, is_new, artist_key=artist_key))
+
+
+def add_restore_candidate(job, album, artist_name, *, artist_key=None):
+    """Add one album a collection restore has to fetch back.
+
+    Ticked on arrival: uploading a backup file is the intent, and the review is
+    where it gets confirmed. ``artist_key`` is the artist's folder when the
+    library still has one; without it the row seals the music folder itself,
+    because there is no artist tree left to receipt.
+    """
+    spec = _gap_candidate_spec(
+        AlbumGap(qobuz_album=album, on_disk_dir=None),
+        artist_name,
+        selected=True,
+        artist_key=artist_key,
+    )
+    if artist_key is None:
+        absent = candidate_premise.capture_absent(artist_name)
+        if absent is None:
+            return None
+        spec["payload"][candidate_premise.ABSENT_CONTAINER_KEY] = absent
+    return _add_candidate_spec(job, spec)
 
 
 def candidate_matches_query(c, q):

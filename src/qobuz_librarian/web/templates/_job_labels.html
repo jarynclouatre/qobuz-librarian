@@ -17,6 +17,8 @@
     Library migration
   {%- elif job.execute_kind == 'library' -%}
     Library scan
+  {%- elif job.execute_kind == 'collection_restore' -%}
+    Restore from a backup
   {%- else -%}
     {{ job.title }}
   {%- endif -%}
@@ -35,7 +37,7 @@
     Gap Fill candidate
   {%- elif job.execute_kind == 'library' -%}
     candidate
-  {%- elif job.execute_kind == 'new_releases' -%}
+  {%- elif job.execute_kind in ('new_releases', 'collection_restore') -%}
     album
   {%- else -%}
     result
@@ -55,7 +57,7 @@
     Gap Fill candidates
   {%- elif job.execute_kind == 'library' -%}
     candidates
-  {%- elif job.execute_kind == 'new_releases' -%}
+  {%- elif job.execute_kind in ('new_releases', 'collection_restore') -%}
     albums
   {%- else -%}
     results
@@ -133,6 +135,8 @@
     downsample review
   {%- elif job.execute_kind == 'new_releases' -%}
     new-release review
+  {%- elif job.execute_kind == 'collection_restore' -%}
+    restore review
   {%- else -%}
     library review
   {%- endif -%}
@@ -145,6 +149,8 @@
     Discard this library review? Your ticks are cleared, but you can bring the whole review back from the Library page.
   {%- elif job.execute_kind == 'new_releases' -%}
     Discard this new-release review? These releases are recorded as seen. A later check won't list them again.
+  {%- elif job.execute_kind == 'collection_restore' -%}
+    Discard this restore review? Upload the backup file again to build it back.
   {%- else -%}
     Discard this {{ discard_review_label(job) }}? Everything you've ticked is lost. A later scan lists these results again, unticked.
   {%- endif -%}
@@ -168,7 +174,7 @@
     Fetching lyrics
   {%- elif job.execute_kind == 'migration' -%}
     Migrating
-  {%- elif job.kind == 'download' or job.execute_kind in ('library', 'new_releases') -%}
+  {%- elif job.kind == 'download' or job.execute_kind in ('library', 'new_releases', 'collection_restore') -%}
     Downloading
   {%- else -%}
     Running

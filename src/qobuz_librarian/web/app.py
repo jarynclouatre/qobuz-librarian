@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
@@ -108,12 +108,19 @@ from qobuz_librarian.ui_cli import logging as cli_logging
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import auth as web_auth
-from qobuz_librarian.web import flows, job_persistence, review_badges, settings_store
+from qobuz_librarian.web import (
+    collection_restore,
+    flows,
+    job_persistence,
+    review_badges,
+    settings_store,
+)
 from qobuz_librarian.web import jobs as job_mgr
 from qobuz_librarian.web.csrf import (
     CSRFMiddleware,
     SecurityHeadersMiddleware,
     StripServerHeaderMiddleware,
+    body_limit,
 )
 
 # Held for the lifetime of the web process. Module-level so Python won't
@@ -1868,6 +1875,7 @@ def _review_job_from_library_state():
 _RESUME_EXECUTE: dict = {
     "library":      _resume_album_download,
     "new_releases": _resume_album_download,
+    "collection_restore": _resume_album_download,
     "upgrade":      _resume_upgrade,
     "repair":       _resume_repair,
     "migration":    _resume_migration,
@@ -3314,7 +3322,8 @@ def _repair_current_job():
 # progress, and the parked Missing Albums / Gap Fill review all live on
 # /library, never handed off to /jobs/{id} under the Queue nav.
 _LIBRARY_SURFACE_KINDS = ("library", "new_releases")
-_QOBUZ_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair")
+_QOBUZ_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair",
+                       "collection_restore")
 _PREMISE_REVIEW_KINDS = _QOBUZ_REVIEW_KINDS + ("downsample",)
 
 
@@ -9290,6 +9299,9 @@ def _rebuild_results_hint(execute_kind):
         return "Start a new scan on the Repair page, then try again."
     if execute_kind == "new_releases":
         return "Run Check new releases on the Library page, then try again."
+    if execute_kind == "collection_restore":
+        return ("Upload the backup file again from Settings, then try "
+                "again.")
     return "Rebuild these results before trying again."
 
 
@@ -11782,6 +11794,91 @@ async def collection_snapshot_download(request: Request):
             status_code=303)
     return FileResponse(path, media_type="application/json",
                         filename=collection_snapshot.LATEST_NAME)
+
+
+def _restore_response(request, message, *, redirect=None, kind="error"):
+    """Answer the Settings upload form, which posts through htmx."""
+    if _is_htmx(request):
+        if redirect:
+            return HTMLResponse("", headers={"HX-Redirect": redirect})
+        return HTMLResponse(_ql_notice_html(kind, html.escape(message)))
+    if redirect:
+        return RedirectResponse(url=redirect, status_code=303)
+    return RedirectResponse(
+        url="/settings?error=" + urllib.parse.quote(message), status_code=303)
+
+
+async def _read_upload(upload, limit):
+    """The whole uploaded file, or None once it passes ``limit`` bytes."""
+    chunks = []
+    size = 0
+    while True:
+        chunk = await upload.read(64 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+
+
+@app.post("/collection/restore")
+async def collection_restore_upload(request: Request,
+                                    backup: UploadFile = File(...)):
+    """Read a collection backup and park one review of what it can put back."""
+    busy = _lock_busy_response(request)
+    if busy is not None:
+        return busy
+    existing = _active_scan(
+        "collection_restore",
+        statuses=("pending", "scanning", "awaiting_review", "running"))
+    if existing is not None:
+        return _restore_response(
+            request,
+            "A restore is already open. Finish or discard it before "
+            "uploading another backup.",
+            redirect=f"/jobs/{existing.id}")
+    raw = await _read_upload(backup, body_limit("/collection/restore"))
+    if raw is None:
+        return _restore_response(
+            request, "That file is far too large to be a collection backup.")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return _restore_response(
+            request, "That file isn't a collection backup from this app.")
+    ok, reason = collection_snapshot.validate_upload(data)
+    if not ok:
+        return _restore_response(request, reason)
+    try:
+        credentials = await _authorize_qobuz_for_web(
+            QobuzAccess.CATALOGUE_ACTION)
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        DownloaderNotReady,
+        CredentialChanged,
+        asyncio.TimeoutError,
+    ) as exc:
+        return _restore_response(
+            request, _qobuz_action_error_message(exc, unchanged=True))
+    job = job_mgr.Job(title="Restore from backup")
+    job.execute_kind = "collection_restore"
+
+    def _scan(j):
+        active = _authorize_qobuz_live(
+            QobuzAccess.CATALOGUE_ACTION,
+            expected_generation=credentials.generation,
+        )
+        collection_restore.scan_restore(j, data, active.token)
+
+    if job_mgr.submit_scan(
+            job, _scan,
+            _resume_album_download(job, job.execute_args)) is None:
+        return _job_admission_response(request)
+    return _restore_response(request, "", redirect=f"/jobs/{job.id}")
 
 
 @app.post("/settings/mode")

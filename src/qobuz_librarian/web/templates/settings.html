@@ -594,6 +594,36 @@
   </div>
 </section>
 
+<section class="ql-settings-section">
+  <div class="ql-settings-section-body">
+    <div class="ql-settings-section-head">
+      <div class="ql-settings-section-copy">
+        <h2 id="collection-restore" tabindex="-1" class="ql-anchor-target">Restore from a backup</h2>
+        <p>
+          Reads a backup file and opens a review of every album in it that is
+          not in your library.
+        </p>
+      </div>
+    </div>
+
+    <form hx-post="/collection/restore" hx-encoding="multipart/form-data"
+          hx-target="#collection-restore-result" hx-swap="innerHTML"
+          hx-disabled-elt="find button[type=submit]"
+          class="ql-settings-form">
+      <div class="ql-field">
+        <label class="ql-field-label" for="f-collection-restore">Backup file</label>
+        <input type="file" name="backup" id="f-collection-restore" required
+               accept="application/json,.json"
+               class="ql-input max-w-lg text-base sm:text-sm">
+      </div>
+      <div class="ql-settings-actions">
+        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Check this backup</button>
+      </div>
+    </form>
+    <div id="collection-restore-result" aria-live="polite"></div>
+  </div>
+</section>
+
 {% if web_login_available %}
 <section class="ql-settings-section">
   <div class="ql-settings-section-body">

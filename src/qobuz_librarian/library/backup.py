@@ -1324,6 +1324,30 @@ def _album_source_receipt_from_opened(public, music_root, parts, descriptors):
             _release_held_snapshot_files(held)
 
 
+def capture_music_root_identity():
+    """The music root's own directory incarnation, with nothing walked.
+
+    A restore row for an artist the library has no folder for has no tree to
+    seal a receipt over. What still has to hold before it fetches anything is
+    that the music folder is the same mounted directory it was reviewed
+    against; an unmounted share would otherwise take the whole rebuild onto
+    the container's own disk.
+    """
+    from qobuz_librarian.library.migrate import _directory_identity
+
+    try:
+        descriptor = _open_backup_directory(
+            Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT))))
+    except OSError:
+        return None
+    try:
+        return _directory_identity(descriptor)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
 def capture_album_source_receipt(album_dir):
     """Seal an exact, serializable receipt for later whole-album retirement."""
     opened = _open_backup_source(Path(album_dir))
