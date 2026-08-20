@@ -16,6 +16,7 @@ track) is never cached, so a hiccup can't freeze a "no match" in place. Set
 ``REPAIR_CACHE_ENABLED=false`` to disable; delete the db to drop everything.
 """
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -156,19 +157,44 @@ def get_track(isrc) -> dict | None:
         return None
     if not row:
         return None
+    try:
+        stored_at = float(row[0])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(stored_at) or stored_at < 0:
+        return None
     ttl = float(cfg.REPAIR_CACHE_TTL_DAYS) * 86400
-    if ttl > 0 and (time.time() - row[0]) > ttl:
+    if ttl > 0 and (time.time() - stored_at) > ttl:
         return None
     try:
-        return json.loads(row[1])
+        track = json.loads(row[1])
     except (ValueError, TypeError):
         return None
+    return track if _track_matches_isrc(isrc, track) else None
+
+
+def _normalise_isrc(value) -> str:
+    return str(value or "").replace("-", "").upper().strip()
+
+
+def _track_matches_isrc(isrc, track) -> bool:
+    if not isinstance(track, dict):
+        return False
+    track_id = track.get("id")
+    if (
+        isinstance(track_id, bool)
+        or not isinstance(track_id, (str, int))
+        or not str(track_id).strip()
+    ):
+        return False
+    expected = _normalise_isrc(isrc)
+    return bool(expected and _normalise_isrc(track.get("isrc")) == expected)
 
 
 def put_track(isrc, track) -> None:
     """Remember a positive ISRC→track lookup. A None/empty result is never stored
     so a transient miss can't later be served as a stable 'no match'."""
-    if not isrc or not isinstance(track, dict) or not track or not _ensure():
+    if not _track_matches_isrc(isrc, track) or not _ensure():
         return
     try:
         data = json.dumps(track)

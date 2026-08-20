@@ -192,9 +192,10 @@ def get(path) -> dict | None:
         b_mtime, b_size, b_payload = buffered
         if b_mtime == mtime_ns and b_size == size:
             try:
-                return json.loads(b_payload)
+                payload = json.loads(b_payload)
             except (ValueError, TypeError):
                 return None
+            return payload if isinstance(payload, dict) else None
         return None
     try:
         row = _conn().execute(
@@ -207,9 +208,10 @@ def get(path) -> dict | None:
     if not row or row[0] != mtime_ns or row[1] != size:
         return None
     try:
-        return json.loads(row[2])
+        payload = json.loads(row[2])
     except (ValueError, TypeError):
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 def put(path, payload, sig=None) -> None:
@@ -368,12 +370,19 @@ def census():
         vlog(f"flac cache census read failed: {e}")
         _handle_db_error(e)
         return None
+    def nonnegative_int(value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return max(parsed, 0)
+
     for path, payload in rows:
         # Rows land for every file whose tags were read, which includes staging
         # runs and upgrade backups. Only the library counts as what's on disk;
         # without this a download or an upgrade inflates the census by its own
         # working copies.
-        if not path.startswith(music_root):
+        if not isinstance(path, str) or not path.startswith(music_root):
             continue
         try:
             meta = json.loads(payload)
@@ -381,9 +390,9 @@ def census():
             continue
         if not isinstance(meta, dict) or meta.get("__neg__"):
             continue
-        bits = int(meta.get("bits") or 0)
-        sr = int(meta.get("sample_rate") or 0)
-        size = int(meta.get("size") or 0)
+        bits = nonnegative_int(meta.get("bits"))
+        sr = nonnegative_int(meta.get("sample_rate"))
+        size = nonnegative_int(meta.get("size"))
         if not bits or not sr:
             tier = "unknown"
         elif bits <= 16:

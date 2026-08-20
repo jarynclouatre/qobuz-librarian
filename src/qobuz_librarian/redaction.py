@@ -1,17 +1,4 @@
-"""Keep account secrets out of anything the app writes down.
-
-A failed call is reported as the call that failed, and a Qobuz call carries the
-account email and the auth token in its query string, so an ordinary timeout
-puts the whole credential into the activity log, the stored job record and the
-app log file. Masking belongs where the text is written: by the time a line is
-rendered it has already been persisted, and a record written yesterday is still
-readable today.
-
-Two rules run together. Names are matched so a value never has to be known in
-advance, which covers an error nobody has seen yet; live credential values are
-registered as they are read, which covers a token printed on its own with no
-name beside it.
-"""
+"""Keep account secrets out of logs and stored jobs."""
 import os
 import re
 import tempfile
@@ -63,27 +50,30 @@ def redact(text):
         return text
     s = text if isinstance(text, str) else str(text)
     with _lock:
-        known = tuple(_values)
+        known = tuple(sorted(_values, key=len, reverse=True))
     for value in known:
         if value in s:
             s = s.replace(value, MASK)
     return _NAMED.sub(_mask_named, s)
 
 
-def scrub_file(path) -> bool:
-    """Mask credentials in a file already on disk, in place. Returns True when
-    something was masked. For records written before this module existed: an
-    upgrade must not leave yesterday's token sitting in the log."""
+def scrub_file(path) -> bool | None:
+    """Mask credentials in a file, returning None when it could not be read."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             original = f.read()
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return False
+    except (OSError, ValueError):
+        return None
     cleaned = redact(original)
     if cleaned == original:
         return False
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(dir=directory)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=directory)
+    except OSError:
+        return None
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(cleaned)
@@ -93,5 +83,5 @@ def scrub_file(path) -> bool:
             os.unlink(tmp)
         except OSError:
             pass
-        return False
+        return None
     return True

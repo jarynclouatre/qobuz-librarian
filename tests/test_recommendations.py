@@ -1,4 +1,4 @@
-"""Tests for qobuz_librarian.library.recommendations - what gets suggested."""
+"""Discover recommendation tests."""
 import time
 from pathlib import Path
 
@@ -30,8 +30,6 @@ def _library(names):
 
 
 def test_owned_artists_are_recognised_through_spelling_variants():
-    # Suggesting a record already on the shelf is the embarrassing failure, so
-    # the check has to survive articles, case, punctuation and accents.
     owned = _library(["The Beatles", "Sigur Rós", "Godspeed You! Black Emperor",
                       "Death Cab for Cutie"])
     for name in ("The Beatles", "the beatles", "Beatles", "BEATLES",
@@ -154,4 +152,3 @@ def test_a_failed_build_is_left_alone_before_anything_retries_it():
             break
         time.sleep(0.002)
     assert starts == ["t", "t"]
-

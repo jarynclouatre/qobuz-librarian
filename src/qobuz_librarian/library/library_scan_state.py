@@ -1,5 +1,6 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
 import copy
+import math
 import threading
 import time
 
@@ -67,6 +68,28 @@ def quality_signature() -> str:
             f"|{bool(getattr(cfg, 'EXCLUDE_LIVE_ALBUMS', False))}")
 
 
+def _nonnegative_int(value):
+    if value in (None, ""):
+        return 0, True
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0, False
+    return (parsed, True) if parsed >= 0 else (0, False)
+
+
+def _optional_time(value):
+    if value in (None, ""):
+        return None, True
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    if not math.isfinite(parsed) or parsed < 0:
+        return None, False
+    return parsed, True
+
+
 def load():
     data = state_file.load_json_object(
         cfg.LIBRARY_SCAN_STATE_FILE, "the saved library scan",
@@ -77,12 +100,15 @@ def load():
         return _empty_state()
     base = _empty_state()
     kinds = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}
+    updated_at, _ = _optional_time(data.get("updated_at"))
+    retired_at, _ = _optional_time(data.get("review_retired_at"))
+    retired_generation, _ = _nonnegative_int(
+        data.get("review_retired_generation")
+    )
     base.update({
-        "updated_at": data.get("updated_at"),
-        "review_retired_at": float(data.get("review_retired_at") or 0.0),
-        "review_retired_generation": int(
-            data.get("review_retired_generation") or 0
-        ),
+        "updated_at": updated_at,
+        "review_retired_at": retired_at or 0.0,
+        "review_retired_generation": retired_generation,
         "review_retired_reason": str(data.get("review_retired_reason") or ""),
         "kinds": kinds,
     })
@@ -95,12 +121,34 @@ def kind_state(kind: str):
     if not isinstance(bucket, dict):
         return _empty_kind()
     base = _empty_kind()
-    artists = bucket.get("artists") if isinstance(bucket.get("artists"), dict) else {}
+    updated_at, updated_ok = _optional_time(bucket.get("updated_at"))
+    generation, generation_ok = _nonnegative_int(bucket.get("generation"))
+    revision, revision_ok = _nonnegative_int(bucket.get("revision"))
+    raw_artists = bucket.get("artists")
+    artists_ok = raw_artists is None or isinstance(raw_artists, dict)
+    artists = {}
+    for name, entry in (raw_artists or {}).items() if artists_ok else ():
+        if not isinstance(entry, dict):
+            artists_ok = False
+            continue
+        cleaned = _clean_artist_state(entry)
+        raw_candidates = entry.get("candidates")
+        if (
+            raw_candidates is not None
+            and (
+                not isinstance(raw_candidates, list)
+                or len(cleaned["candidates"]) != len(raw_candidates)
+            )
+        ):
+            artists_ok = False
+        artists[str(name)] = cleaned
     base.update({
-        "updated_at": bucket.get("updated_at"),
-        "generation": int(bucket.get("generation") or 0),
-        "revision": int(bucket.get("revision") or 0),
-        "complete": bool(bucket.get("complete")),
+        "updated_at": updated_at,
+        "generation": generation,
+        "revision": revision,
+        "complete": bool(bucket.get("complete")) and all((
+            updated_ok, generation_ok, revision_ok, artists_ok,
+        )),
         "limited": bool(bucket.get("limited")),
         "quality_signature": str(bucket.get("quality_signature") or ""),
         "artists": artists,
@@ -126,7 +174,15 @@ def _clean_artist_state(entry):
     catalog_ids = entry.get("catalog_ids")
     return {
         "fingerprint": str(entry.get("fingerprint") or ""),
-        "candidates": candidates if isinstance(candidates, list) else [],
+        "candidates": (
+            [candidate for candidate in candidates
+             if isinstance(candidate, dict)
+             and (
+                 candidate.get("payload") is None
+                 or isinstance(candidate.get("payload"), dict)
+             )]
+            if isinstance(candidates, list) else []
+        ),
         "artist_id": entry.get("artist_id") or "",
         "catalog_ids": (list(catalog_ids) if isinstance(catalog_ids, list)
                         else None),

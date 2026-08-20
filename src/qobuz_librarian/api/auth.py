@@ -254,8 +254,9 @@ def read_qobuz_credentials(*, strict: bool = False) -> QobuzCredentials:
             user_id = streamrip.get("user_id", "")
         return credentials_from_values(user_id, env_token, source="env")
     streamrip = _read_streamrip_qobuz(strict=strict)
+    user_id = str(config.QOBUZ_USER_ID or "").strip()
     return credentials_from_values(
-        streamrip.get("user_id", ""),
+        user_id or streamrip.get("user_id", ""),
         streamrip.get("token", ""),
         source="streamrip",
     )
@@ -437,26 +438,37 @@ def sync_streamrip_creds_from_env():
     streamrip's interactive "Enter your Qobuz email:" prompt.
     """
     token = config.QOBUZ_USER_AUTH_TOKEN
-    if not token:
-        return None
     env_user_id = config.QOBUZ_USER_ID or ""
     existing_user_id = ""
+    existing_token = ""
+    existing_enabled = False
     if config.STREAMRIP_CONFIG.exists():
         try:
             with open(config.STREAMRIP_CONFIG, "rb") as f:
                 existing = tomllib.load(f)
             qz = existing.get("qobuz", {})
             existing_user_id = str(qz.get("email_or_userid", "") or "")
-            if (qz.get("use_auth_token")
-                    and str(qz.get("password_or_token", "")) == token
+            existing_token = str(qz.get("password_or_token", "") or "")
+            existing_enabled = bool(qz.get("use_auth_token"))
+            if (token and existing_enabled
+                    and existing_token == token
                     and existing_user_id
                     and (not env_user_id or existing_user_id == env_user_id)):
                 return None  # already usable and in sync
         except Exception:
             pass  # unparseable/old → fall through and rewrite
-    # Env id wins; fall back to whatever the config already had so a
-    # token-only .env (QOBUZ_USER_ID unset) doesn't blank a working id.
-    user_id = env_user_id or existing_user_id
+
+    if not token:
+        if not (env_user_id and existing_enabled and existing_token):
+            return None
+        if existing_user_id == env_user_id:
+            return None
+        return write_streamrip_creds(env_user_id, existing_token)
+
+    matching_user_id = existing_user_id if (
+        existing_enabled and existing_token == token
+    ) else ""
+    user_id = env_user_id or matching_user_id
     if not user_id:
         import logging
         logging.getLogger("qobuz_librarian").warning(fmt(

@@ -207,7 +207,7 @@ def load_json_object(path, what, lost):
         raise
     try:
         data = json.loads(raw.decode("utf-8"))
-    except ValueError as e:
+    except (RecursionError, ValueError) as e:
         if not preserve_corrupt(path, what, e, lost):
             raise
         return None

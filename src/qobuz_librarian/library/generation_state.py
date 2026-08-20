@@ -64,7 +64,7 @@ def _normalise_output(value):
     try:
         generation = max(0, int(value.get("generation") or 0))
         revision = max(0, int(value.get("revision") or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         generation = revision = 0
         status = "stale"
     base.update({
@@ -102,14 +102,14 @@ def load():
     try:
         revision = max(0, int(data.get("revision") or 0))
         generation = max(0, int(data.get("generation") or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return base
     attempt = data.get("latest_attempt")
     if not isinstance(attempt, dict):
         attempt = {}
     try:
         attempt_id = max(0, int(attempt.get("id") or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         attempt_id = 0
     attempt_status = str(attempt.get("status") or "never")
     if attempt_status not in {

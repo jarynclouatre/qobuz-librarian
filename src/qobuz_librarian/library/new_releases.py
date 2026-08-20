@@ -6,6 +6,7 @@ and hasn't hidden is a new release. The first check of an artist records only a
 baseline (so the back catalogue isn't dumped as "new") - later checks surface
 the difference. ``last_run`` lets the dashboard throttle the automatic check.
 """
+import math
 import threading
 import time
 
@@ -84,8 +85,10 @@ def load() -> dict:
         base["seen"] = {str(k): [str(x) for x in v]
                         for k, v in seen.items() if isinstance(v, list)}
     lr = data.get("last_run")
-    if isinstance(lr, (int, float)):
-        base["last_run"] = float(lr)
+    if isinstance(lr, (int, float)) and not isinstance(lr, bool):
+        last_run = float(lr)
+        if math.isfinite(last_run) and last_run >= 0:
+            base["last_run"] = last_run
     # The ARTIST_CATALOG_LIMIT the baseline was captured under.
     bl = data.get("baseline_limit")
     if isinstance(bl, int) and not isinstance(bl, bool):
@@ -94,7 +97,7 @@ def load() -> dict:
     try:
         base["generation"] = max(0, int(data.get("generation") or 0))
         base["revision"] = max(0, int(data.get("revision") or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         base["baseline_complete"] = False
         base["generation"] = base["revision"] = 0
     base["auto_scan_attempted"] = bool(data.get("auto_scan_attempted"))

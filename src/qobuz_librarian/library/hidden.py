@@ -46,6 +46,10 @@ _SCOPES = (SCOPE_MISSING, SCOPE_UPGRADE, SCOPE_DOWNSAMPLE, SCOPE_SINGLE)
 _LOCK = threading.RLock()
 
 
+def _stored_text(value):
+    return value if isinstance(value, str) else ""
+
+
 @contextmanager
 def _store_lock():
     """Serialise the hidden-store load-modify-save across BOTH threads and OS
@@ -58,7 +62,7 @@ def _store_lock():
 
 
 def _fingerprint_text(value):
-    text = unicodedata.normalize("NFKD", value or "").casefold()
+    text = unicodedata.normalize("NFKD", _stored_text(value)).casefold()
     return "".join(
         char for char in text
         if char.isalnum() or unicodedata.category(char).startswith("S")
@@ -75,6 +79,7 @@ def _split_stored_year(title, year):
     keeps them apart; the Dismissed page can only style the year like a
     year once the two are split.
     """
+    title = _stored_text(title)
     if year or not title:
         return title, year
     m = _TRAILING_YEAR_RE.match(title.strip())
@@ -89,7 +94,7 @@ def album_fingerprint(artist, title):
     # The strict strip: the loose one collapsed distinct albums into one key
     # ('Alone' with 'Alone (Again)'), so dismissing one buried the other and
     # a kept album could vanish under a dismissed sibling's fingerprint.
-    t = _fingerprint_text(strip_album_decorations_strict(title or ""))
+    t = _fingerprint_text(strip_album_decorations_strict(_stored_text(title)))
     if not a or not t:
         return None
     return f"{a}|{t}"
@@ -104,16 +109,24 @@ def _entry_rows(entry):
     the top level, so derive a single row from those. The counts on screen
     have to mean the same thing for an old store as a new one.
     """
+    def clean(row):
+        cleaned = dict(row)
+        for field in ("title", "year", "ts"):
+            cleaned[field] = _stored_text(row.get(field))
+        cleaned["gap_fill"] = row.get("gap_fill") is True
+        return cleaned
+
     rows = entry.get("rows")
     if isinstance(rows, list) and rows:
-        kept = [r for r in rows if isinstance(r, dict)]
+        kept = [clean(r) for r in rows if isinstance(r, dict)]
         # A rows list holding no dicts (hand edit, partial old write) must
         # degrade to the top-level fallback like a missing list, not return
         # [] and crash every page that indexes rows[0].
         if kept:
             return kept
-    return [{"title": entry.get("title") or "", "year": entry.get("year") or "",
-             "ts": entry.get("ts") or ""}]
+    return [{"title": _stored_text(entry.get("title")),
+             "year": _stored_text(entry.get("year")),
+             "ts": _stored_text(entry.get("ts"))}]
 
 
 def load():
@@ -145,9 +158,16 @@ def _rekeyed(bucket):
     titles recorded, artist lost) stay under their stored key. In-memory
     only; the next save persists the re-keyed form."""
     out = {}
-    for old_key, entry in bucket.items():
+    for old_key, raw_entry in bucket.items():
+        entry = dict(raw_entry)
+        for field in ("artist", "title", "year", "ts"):
+            entry[field] = _stored_text(entry.get(field))
+        if "rows" in entry:
+            entry["rows"] = _entry_rows(entry)
+        if "single_rows" in entry:
+            entry["single_rows"] = _single_rows(entry)
         rows = _entry_rows(entry)
-        artist = entry.get("artist") or ""
+        artist = _stored_text(entry.get("artist"))
         split = {}
         for row in rows:
             fp = album_fingerprint(artist, row.get("title") or "")
@@ -167,6 +187,7 @@ def _rekeyed(bucket):
                     not in have]
                 continue
             head = dict(entry)
+            head["artist"] = artist
             head["title"] = fp_rows[0].get("title") or entry.get("title") or ""
             head["year"] = fp_rows[0].get("year") or ""
             head["rows"] = fp_rows
@@ -470,14 +491,23 @@ def _single_rows(entry):
     """Exact album identities held under one edition-folded fingerprint."""
     rows = entry.get("single_rows")
     if isinstance(rows, list):
-        valid = [row for row in rows if isinstance(row, dict)]
+        valid = [
+            {
+                **row,
+                "album_id": _stored_text(row.get("album_id")),
+                "year": _stored_text(row.get("year")),
+                "title": _stored_text(row.get("title")),
+                "ts": _stored_text(row.get("ts")),
+            }
+            for row in rows if isinstance(row, dict)
+        ]
         if valid:
             return valid
     return [{
         "album_id": str(entry.get("album_id") or ""),
         "year": str(entry.get("year") or ""),
-        "title": entry.get("title") or "",
-        "ts": entry.get("ts") or "",
+        "title": _stored_text(entry.get("title")),
+        "ts": _stored_text(entry.get("ts")),
     }]
 
 

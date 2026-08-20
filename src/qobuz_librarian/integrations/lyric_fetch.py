@@ -18,6 +18,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import logging
+import math
 import os
 import queue
 import re
@@ -222,17 +223,62 @@ class TrackState:
     representations: str = ""  # embed | sidecar | both
 
 
+_SAVED_STATUSES = frozenset({
+    "", "synced", "plain", "not_found", "transient", "error", "skipped",
+    "unsafe_path",
+})
+_SAVED_REPRESENTATIONS = frozenset({"", "embed", "sidecar", "both"})
+
+
+def _track_state_from_dict(value) -> TrackState | None:
+    if not isinstance(value, dict):
+        return None
+    mtime = value.get("mtime", 0.0)
+    size = value.get("size", 0)
+    last_seen = value.get("last_seen", 0.0)
+    if (
+        isinstance(mtime, bool)
+        or type(mtime) not in (int, float)
+        or not math.isfinite(mtime)
+        or isinstance(size, bool)
+        or type(size) is not int
+        or size < 0
+        or isinstance(last_seen, bool)
+        or type(last_seen) not in (int, float)
+        or not math.isfinite(last_seen)
+        or last_seen < 0
+    ):
+        return None
+    status = value.get("status", "")
+    source = value.get("source", "")
+    representations = value.get("representations", "")
+    return TrackState(
+        mtime=float(mtime),
+        size=size,
+        status=status if isinstance(status, str) and status in _SAVED_STATUSES else "",
+        source=source if isinstance(source, str) else "",
+        last_seen=float(last_seen),
+        representations=(
+            representations
+            if isinstance(representations, str)
+            and representations in _SAVED_REPRESENTATIONS
+            else ""
+        ),
+    )
+
+
 def load_state(path: Path = DEFAULT_STATE_FILE) -> dict[str, TrackState]:
     raw = state_file.load_json_object(
         path, "the lyrics state file",
         "the record of which tracks have already been checked for lyrics")
     if raw is None:
         return {}
-    # Strip legacy keys (e.g. 'attempts', removed in schema cleanup) so
-    # existing state files load cleanly instead of raising TypeError.
-    _known = TrackState.__dataclass_fields__
-    return {k: TrackState(**{fk: fv for fk, fv in v.items() if fk in _known})
-            for k, v in raw.items() if isinstance(v, dict)}
+    loaded = {}
+    for key, value in raw.items():
+        state = _track_state_from_dict(value)
+        if state is not None:
+            loaded[str(key)] = state
+    return loaded
 
 
 @contextmanager

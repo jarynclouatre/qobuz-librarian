@@ -102,6 +102,22 @@ def _required_items(data, key, endpoint):
     return items
 
 
+def _paged_items(data, key, endpoint):
+    """Return a pagination envelope and its raw list.
+
+    Pagination needs the raw length so it can advance past an occasional bad
+    member, but a missing/wrong envelope is not an empty page. Treating those
+    shapes as [] lets catalogue scans record a false empty discography.
+    """
+    envelope = data.get(key)
+    if not isinstance(envelope, dict):
+        raise QobuzError(f"{endpoint} returned a malformed {key} envelope")
+    items = envelope.get("items")
+    if not isinstance(items, list):
+        raise QobuzError(f"{endpoint} returned malformed {key} items")
+    return envelope, items
+
+
 def search_albums(query, token, limit=None):
     limit = limit if limit is not None else config.SEARCH_LIMIT
     data = _expect_dict(
@@ -126,28 +142,59 @@ def search_artists(query, token, limit=10):
     return items
 
 
-def get_album(album_id, token):
-    cached = album_cache.get(album_id)
-    if (
-        isinstance(cached, dict)
-        and cached.get("id") is not None
-        and str(cached.get("id")) == str(album_id)
-    ):
-        return cached
-    album = qobuz_get("album/get", {"album_id": album_id, "extra": "track_ids"}, token)
+def _validated_album(album, album_id):
     album = _normalize_album_fields(album)
     if not isinstance(album, dict):
-        # A malformed/error 200 body (list/str/None) would crash on `.get` below
-        # and escape every caller that only catches QobuzError - raise one here.
-        raise QobuzError(f"album/get returned a non-dict response for {album_id!r}")
+        raise QobuzError(
+            f"album/get returned a non-dict response for {album_id!r}"
+        )
     returned_id = album.get("id")
     if returned_id is None or str(returned_id) != str(album_id):
         raise QobuzError(
             "album/get returned album id "
             f"{returned_id!r} for requested album {album_id!r}"
         )
+    artist = album.get("artist")
+    if artist is not None and not isinstance(artist, dict):
+        raise QobuzError(
+            f"album/get returned malformed artist for album {album_id!r}"
+        )
+    tracks = album.get("tracks")
+    if tracks is not None and not isinstance(tracks, dict):
+        raise QobuzError(
+            f"album/get returned malformed tracks for album {album_id!r}"
+        )
+    track_items = (tracks or {}).get("items")
+    if track_items is not None and (
+        not isinstance(track_items, list)
+        or any(not isinstance(track, dict) for track in track_items)
+    ):
+        raise QobuzError(
+            f"album/get returned malformed tracks for album {album_id!r}"
+        )
+    return album, track_items
+
+
+def get_album(album_id, token):
+    cached = album_cache.get(album_id)
+    if cached is not None:
+        try:
+            cached, cached_items = _validated_album(cached, album_id)
+        except QobuzError:
+            pass
+        else:
+            if cached_items:
+                return cached
+    album, track_items = _validated_album(
+        qobuz_get(
+            "album/get",
+            {"album_id": album_id, "extra": "track_ids"},
+            token,
+        ),
+        album_id,
+    )
     # Don't cache a track-less response.
-    if (album.get("tracks") or {}).get("items"):
+    if track_items:
         album_cache.put(album_id, album)
     return album
 
@@ -158,8 +205,16 @@ def get_track(track_id, token):
     Returns the track dict - which carries its `album` sub-object, so the search
     results renderer has everything it needs - or None when the id doesn't
     resolve to a real track."""
-    t = qobuz_get("track/get", {"track_id": track_id}, token)
-    return t if isinstance(t, dict) and t.get("id") else None
+    track = qobuz_get("track/get", {"track_id": track_id}, token)
+    if not isinstance(track, dict) or track.get("id") is None:
+        return None
+    returned_id = track.get("id")
+    if str(returned_id) != str(track_id):
+        raise QobuzError(
+            "track/get returned track id "
+            f"{returned_id!r} for requested track {track_id!r}"
+        )
+    return _normalize_track_fields(track)
 
 
 def search_tracks(query, token, limit=10):
@@ -197,7 +252,7 @@ def find_qobuz_track_by_isrc(isrc, token):
     except QobuzError:
         return None
     for t in results:
-        t_isrc = (t.get("isrc") or "").replace("-", "").upper().strip()
+        t_isrc = str(t.get("isrc") or "").replace("-", "").upper().strip()
         if t_isrc and t_isrc == isrc_n:
             return t
     return None
@@ -218,7 +273,19 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     if not fresh:
         cached = album_cache.get_catalog(cache_key, config.ARTIST_CATALOG_CACHE_TTL)
         if cached is not None:
-            return cached.get("items") or [], cached.get("total")
+            cached_items = cached.get("items")
+            cached_total = cached.get("total")
+            if (
+                isinstance(cached_items, list)
+                and all(isinstance(item, dict) for item in cached_items)
+                and (
+                    cached_total is None
+                    or type(cached_total) is int and cached_total >= 0
+                )
+            ):
+                for album in cached_items:
+                    _normalize_album_fields(album)
+                return cached_items, cached_total
     items = []
     seen_album_ids = set()
     offset = 0
@@ -232,13 +299,11 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
             "limit": want,
             "offset": offset,
         }, token), "artist/get")
-        albums_obj = _envelope(data, "albums")
-        _albums_raw = albums_obj.get("items")
-        raw_list = _albums_raw if isinstance(_albums_raw, list) else None
+        albums_obj, raw_list = _paged_items(data, "albums", "artist/get")
         # `block` is the usable albums (dicts only); `raw_len` is how much of
         # the page Qobuz actually handed back.
-        block = [a for a in raw_list if isinstance(a, dict)] if raw_list else []
-        raw_len = len(raw_list) if raw_list else 0
+        block = [a for a in raw_list if isinstance(a, dict)]
+        raw_len = len(raw_list)
         if qobuz_total is None:
             t = albums_obj.get("total")
             if isinstance(t, bool):
@@ -249,6 +314,7 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
                 qobuz_total = t
         if not raw_len:
             break
+        items_before_page = len(items)
         for a in block:
             _normalize_album_fields(a)
             album_id = a.get("id")
@@ -259,6 +325,10 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
                 seen_album_ids.add(album_key)
             items.append(a)
         offset += raw_len
+        if len(items) == items_before_page:
+            raise QobuzError(
+                "artist/get repeated a page without new albums"
+            )
         # Short page = end of data on Qobuz's side; stop early. Measured by the
         # raw page length so malformed entries don't truncate the walk.
         if raw_len < want:
@@ -296,9 +366,11 @@ def get_user_favorites(token, limit=None):
             "limit": want,
             "offset": offset,
         }, token), "favorite/getUserFavorites")
-        page = _items(data, "albums")
-        raw = _envelope(data, "albums").get("items")
-        raw_len = len(raw) if isinstance(raw, list) else 0
+        _albums_obj, raw = _paged_items(
+            data, "albums", "favorite/getUserFavorites")
+        page = [album for album in raw if isinstance(album, dict)]
+        raw_len = len(raw)
+        items_before_page = len(items)
         for a in page:
             album_id = a.get("id")
             key = str(album_id) if album_id is not None else None
@@ -309,6 +381,12 @@ def get_user_favorites(token, limit=None):
             _normalize_album_fields(a)
             items.append(a)
         offset += raw_len
+        if not raw_len:
+            break
+        if len(items) == items_before_page:
+            raise QobuzError(
+                "favorite/getUserFavorites repeated a page without new albums"
+            )
         if raw_len < want:
             break
     return items

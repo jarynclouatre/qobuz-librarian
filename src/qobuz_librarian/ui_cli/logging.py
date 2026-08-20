@@ -21,6 +21,15 @@ class _RedactFilter(logging.Filter):
         try:
             record.msg = redaction.redact(record.getMessage())
             record.args = ()
+            if record.exc_info:
+                trace = record.exc_text or logging.Formatter().formatException(
+                    record.exc_info)
+                record.exc_text = redaction.redact(trace)
+                record.exc_info = None
+            elif record.exc_text:
+                record.exc_text = redaction.redact(record.exc_text)
+            if record.stack_info:
+                record.stack_info = redaction.redact(record.stack_info)
         except Exception:
             pass
         return True

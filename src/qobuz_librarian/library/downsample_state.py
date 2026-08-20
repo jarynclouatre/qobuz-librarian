@@ -4,6 +4,7 @@ The downsample pass is local-only, so both the standalone Downsample scan and
 the baseline Library scan can refresh the same candidate state without mixing
 downsample items into the Library review list.
 """
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -80,6 +81,28 @@ def _candidate_from_dict(data):
     )
 
 
+def _nonnegative_int(value):
+    if value in (None, ""):
+        return 0, True
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0, False
+    return (parsed, True) if parsed >= 0 else (0, False)
+
+
+def _optional_time(value):
+    if value in (None, ""):
+        return None, True
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    if not math.isfinite(parsed) or parsed < 0:
+        return None, False
+    return parsed, True
+
+
 def load():
     data = state_file.load_json_object(
         cfg.DOWNSAMPLE_STATE_FILE, "the saved downsample scan",
@@ -89,12 +112,37 @@ def load():
     if data is None or data.get("version") != STATE_VERSION:
         return _empty_state()
     base = _empty_state()
+    updated_at, updated_ok = _optional_time(data.get("updated_at"))
+    generation, generation_ok = _nonnegative_int(data.get("generation"))
+    revision, revision_ok = _nonnegative_int(data.get("revision"))
+    raw_artists = data.get("artists_scanned")
+    artists_ok = raw_artists is None or isinstance(raw_artists, list)
+    artists_scanned = (
+        [str(name) for name in raw_artists if isinstance(name, str)]
+        if isinstance(raw_artists, list) else []
+    )
+    if isinstance(raw_artists, list) and len(artists_scanned) != len(raw_artists):
+        artists_ok = False
+    raw_candidates = data.get("candidates")
+    candidates_ok = raw_candidates is None or isinstance(raw_candidates, list)
+    candidates = [
+        candidate for candidate in (raw_candidates or [])
+        if isinstance(candidate, dict)
+        and (
+            candidate.get("payload") is None
+            or isinstance(candidate.get("payload"), dict)
+        )
+    ] if candidates_ok else []
+    if isinstance(raw_candidates, list) and len(candidates) != len(raw_candidates):
+        candidates_ok = False
     base.update({
-        "updated_at": data.get("updated_at"),
-        "generation": int(data.get("generation") or 0),
-        "revision": int(data.get("revision") or 0),
-        "complete": bool(data.get("complete")),
-        "artists_scanned": list(data.get("artists_scanned") or []),
+        "updated_at": updated_at,
+        "generation": generation,
+        "revision": revision,
+        "complete": bool(data.get("complete")) and all((
+            updated_ok, generation_ok, revision_ok, artists_ok, candidates_ok,
+        )),
+        "artists_scanned": artists_scanned,
         "errors": data.get("errors") if isinstance(data.get("errors"), dict) else {},
         "fingerprints": (data.get("fingerprints")
                          if isinstance(data.get("fingerprints"), dict) else {}),
@@ -104,8 +152,7 @@ def load():
         "artist_revision": (data.get("artist_revision")
                             if isinstance(data.get("artist_revision"), dict)
                             else {}),
-        "candidates": (data.get("candidates")
-                       if isinstance(data.get("candidates"), list) else []),
+        "candidates": candidates,
     })
     return base
 

@@ -543,15 +543,39 @@ def check_media_tools():
 
 
 def require_music_root():
-    if not cfg.MUSIC_ROOT.exists() or not cfg.MUSIC_ROOT.is_dir():
-        if _in_container():
-            problem = "\n✗  The /music mount is missing or inaccessible.\n"
-            fix = "   Check what your Compose file mounts at /music.\n"
-        else:
-            problem = (f"\n✗  MUSIC_ROOT missing or inaccessible: "
-                       f"{cfg.MUSIC_ROOT}\n")
-            fix = "   Refusing to proceed.\n"
-        die(fmt(C.RED, problem + fix), EXIT_CONFIG)
+    from qobuz_librarian.library import collection_snapshot
+
+    state, recorded = collection_snapshot.music_root_write_state()
+    if state == "ready":
+        return
+    if state == "recorded_empty":
+        albums = "album" if recorded == 1 else "albums"
+        problem = (
+            f"\n✗  The music folder has no artist folders, but the last "
+            f"collection backup recorded {recorded:,} {albums}.\n"
+        )
+        fix = (
+            "   Check that the music folder is mounted. If those albums really "
+            "are gone, open web Settings → Collection backup, choose Back up "
+            "now, then Replace anyway before retrying.\n"
+        )
+    elif state == "backup_unreadable":
+        problem = (
+            "\n✗  The music folder has no artist folders, and the last "
+            "collection backup could not be read safely.\n"
+        )
+        fix = (
+            "   Check that the music folder is mounted and that the collection-"
+            "backup folder is readable. Refusing to proceed.\n"
+        )
+    elif _in_container():
+        problem = "\n✗  The /music mount is missing or inaccessible.\n"
+        fix = "   Check what your Compose file mounts at /music.\n"
+    else:
+        problem = (f"\n✗  MUSIC_ROOT missing or inaccessible: "
+                   f"{cfg.MUSIC_ROOT}\n")
+        fix = "   Refusing to proceed.\n"
+    die(fmt(C.RED, problem + fix), EXIT_CONFIG)
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -917,8 +941,14 @@ def main():
     try:
         from qobuz_librarian.web import settings_store
         settings_store.load()
-    except Exception:
-        pass
+    except (OSError, ValueError) as exc:
+        die(fmt(
+            C.RED,
+            f"\n✗  Couldn't read the saved settings: {exc}\n"
+            "   Refusing to run with environment defaults because that could "
+            "change download or file-handling behaviour. Fix the data-folder "
+            "permissions or recover the settings file, then try again.\n",
+        ), EXIT_CONFIG)
 
     args = parse_args()
     set_verbose(args.verbose)

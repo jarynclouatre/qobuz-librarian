@@ -2,17 +2,27 @@
 set -e
 
 CONFIG_DIR="${CONFIG_DIR:-/config}"
+case "$CONFIG_DIR" in
+    /*) ;;
+    *)
+        echo "[fatal] CONFIG_DIR must be an absolute path (got ${CONFIG_DIR})." >&2
+        exit 1
+        ;;
+esac
+if ! CONFIG_DIR="$(realpath -m -- "$CONFIG_DIR")" || [ "$CONFIG_DIR" = "/" ]; then
+    echo "[fatal] CONFIG_DIR must resolve to a dedicated directory, not /." >&2
+    exit 1
+fi
 BEETS_DIR="$CONFIG_DIR/beets"
 STREAMRIP_DIR="$CONFIG_DIR/streamrip"
 
 # ── First-run bootstrap ───────────────────────────────────────────────────────
-# /staging /music /data /upgrade_backups are normally mounted volumes. The
 # mkdir is a no-op when they exist. With --read-only and a missing mount,
 # `mkdir -p` would fail under `set -e`; warn instead so the writability
 # diagnostics below can run and surface the real problem to the user.
 mkdir -p "$BEETS_DIR" "$STREAMRIP_DIR" 2>/dev/null || \
     echo "[warn] couldn't create $CONFIG_DIR subdirs. Mount /config read-write." >&2
-for d in /staging /music /data /upgrade_backups; do
+for d in /staging /music /data /upgrade_backups /collection_backups; do
     [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || \
         echo "[warn] couldn't create $d. Add a mount, or remove --read-only on the rootfs." >&2
 done
@@ -230,9 +240,10 @@ case "${PUID}${PGID}" in
         # even when nothing changes, which would break every sealed backup
         # receipt on every restart. Non-fatal on failure (a NAS-bound staging
         # just falls through to the writability warning).
-        find "$CONFIG_DIR" /data /staging /upgrade_backups \
+        find "$BEETS_DIR" "$STREAMRIP_DIR" /data /staging \
+            /upgrade_backups /collection_backups \
             \( ! -user "$PUID" -o ! -group "$PGID" \) \
-            -exec chown "$APP_USER" {} + 2>/dev/null || true
+            -exec chown -h "$APP_USER" -- {} + 2>/dev/null || true
         echo "[init] Running as ${APP_USER}."
         ;;
 esac
@@ -240,7 +251,7 @@ esac
 # ── Writability diagnostics ───────────────────────────────────────────────────
 # A NAS export that doesn't grant the run user write access is the most
 # common failure; surface it clearly instead of failing cryptically later.
-for d in /music /staging /data /upgrade_backups "$CONFIG_DIR"; do
+for d in /music /staging /data /upgrade_backups /collection_backups "$CONFIG_DIR"; do
     if [ "$APP_USER" = "root" ]; then
         [ -w "$d" ] && ok=yes || ok=no
     elif gosu "$APP_USER" test -w "$d" 2>/dev/null; then

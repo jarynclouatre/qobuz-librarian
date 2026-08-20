@@ -1,4 +1,4 @@
-"""Tests for qobuz_librarian.api.discover_cache - retention, misses, self-heal."""
+"""Discover cache tests."""
 import sqlite3
 
 import pytest
@@ -50,4 +50,3 @@ def test_a_corrupt_database_is_discarded_and_rebuilt():
     assert dc.get_lastfm(key, dc.SIMILAR_TTL) is None
     dc.put_lastfm(key, [{"name": "Sleep", "match": 0.7}])
     assert dc.get_lastfm(key, dc.SIMILAR_TTL) == [{"name": "Sleep", "match": 0.7}]
-

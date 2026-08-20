@@ -205,6 +205,43 @@ def test_entrypoint_defaults_to_nonroot_user(tmp_path):
     assert "Running as 1000:1000" in r.stdout
 
 
+def test_entrypoint_ownership_repair_does_not_follow_config_symlinks(tmp_path):
+    cfg = _make_config(tmp_path, "[database]\n")
+    target = tmp_path / "library-track.flac"
+    target.write_bytes(b"not really audio")
+    link = cfg / "streamrip" / "linked-track.flac"
+    link.symlink_to(target)
+    called = tmp_path / "chown-called"
+    dereferenced = tmp_path / "chown-dereferenced"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_chown = fake_bin / "chown"
+    fake_chown.write_text(
+        "#!/bin/sh\n"
+        ': > "$CHOWN_CALLED"\n'
+        "for argument do\n"
+        '    [ "$argument" = "-h" ] && exit 0\n'
+        "done\n"
+        ': > "$CHOWN_DEREFERENCED"\n'
+    )
+    fake_chown.chmod(0o755)
+
+    _run_entrypoint_head(
+        tmp_path,
+        {
+            "CONFIG_DIR": str(cfg),
+            "PUID": str(os.getuid() + 1),
+            "PGID": str(os.getgid() + 1),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "CHOWN_CALLED": str(called),
+            "CHOWN_DEREFERENCED": str(dereferenced),
+        },
+    )
+
+    assert called.is_file()
+    assert not dereferenced.exists()
+
+
 def test_cli_privilege_drop_canonicalises_ids_and_rejects_mixed_root(
         monkeypatch):
     from qobuz_librarian import cli

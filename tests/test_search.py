@@ -8,7 +8,10 @@ import pytest
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import (
     find_qobuz_track_by_isrc,
+    get_album,
     get_artist_albums,
+    get_track,
+    get_user_favorites,
     search_albums,
     search_artists,
     search_tracks,

@@ -13,6 +13,7 @@ each hold their own connection. Set ``ALBUM_CACHE_ENABLED=false`` to turn it off
 delete the db file to force a full refresh.
 """
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -171,9 +172,10 @@ def get(album_id) -> dict | None:
     if not row:
         return None
     try:
-        return json.loads(row[0])
+        payload = json.loads(row[0])
     except (ValueError, TypeError):
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 # Cap the albums table so it can't grow without bound over a library's
@@ -234,12 +236,22 @@ def get_catalog(key, ttl_seconds) -> dict | None:
         vlog(f"catalog cache read failed: {e}")
         _handle_db_error(e)
         return None
-    if not row or (time.time() - (row[1] or 0)) > ttl_seconds:
+    if not row:
         return None
     try:
-        return json.loads(row[0])
+        fetched_at = float(row[1] or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not math.isfinite(fetched_at)
+        or (time.time() - fetched_at) > ttl_seconds
+    ):
+        return None
+    try:
+        payload = json.loads(row[0])
     except (ValueError, TypeError):
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 def put_catalog(key, payload) -> None:

@@ -63,9 +63,19 @@ def load(kind) -> dict | None:
         return None
     # setdefault only fills ABSENT keys; coerce present-but-wrong types too so a
     # corrupt or hand-edited checkpoint can't crash the consumer's set()/dict().
-    if not isinstance(cp.get("scanned"), list):
+    if isinstance(cp.get("scanned"), list):
+        cp["scanned"] = [
+            name for name in cp["scanned"]
+            if isinstance(name, str) and name
+        ]
+    else:
         cp["scanned"] = []
-    if not isinstance(cp.get("candidates"), list):
+    if isinstance(cp.get("candidates"), list):
+        cp["candidates"] = [
+            candidate for candidate in cp["candidates"]
+            if isinstance(candidate, dict)
+        ]
+    else:
         cp["candidates"] = []
     if not isinstance(cp.get("seen"), dict):
         cp["seen"] = {}
@@ -112,9 +122,8 @@ def pending() -> dict | None:
     """A summary of any unfinished scan for the dashboard, or None. Missing
     takes precedence (it's the kind the first-run auto-scan runs). Returns
     ``{"kind", "done"}`` where done is how many artists are already scanned."""
-    data = _read()
     for kind in _KINDS:
-        cp = data.get(kind)
-        if isinstance(cp, dict):
+        cp = load(kind)
+        if cp is not None:
             return {"kind": kind, "done": len(cp.get("scanned", []))}
     return None

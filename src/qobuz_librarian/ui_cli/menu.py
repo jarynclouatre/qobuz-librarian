@@ -75,4 +75,4 @@ def interactive_session_mode():
             return Mode.ALBUM
         if r in _BY_KEY:
             return _BY_KEY[r]
-        log.info(fmt(C.GRAY, "  Enter 0-9 (blank = 1), s for Settings, or q to quit."))
+        log.info(fmt(C.GRAY, "  Enter 1-9 (blank = 1), s for Settings, or q to quit."))

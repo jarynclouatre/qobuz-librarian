@@ -1,17 +1,8 @@
-"""Plain-JSON snapshots of what the collection holds.
-
-The music folder is the collection's only record. If that disk dies there is
-nothing left to rebuild from, so this writes the shape of the library out as
-readable JSON: artist and album folder names, track titles and ISRCs, and the
-Qobuz ids the app already knows. The file is rewritten in full every time,
-never appended to, because a collection shrinks as well as grows and a restore
-has to know exactly what was there rather than a union of everything ever seen.
-
-The app never uploads anything. Snapshots land in a folder the owner points
-their own sync tool at.
-"""
+"""Write portable JSON snapshots of the local collection."""
 from __future__ import annotations
 
+import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,14 +17,15 @@ LATEST_NAME = "collection.json"
 DATED_NAME_FMT = "collection-%Y%m%d-%H%M%S.json"
 SUSPECT_NAME = "collection-suspect.json"
 KEEP_DATED = 5
+_DATED_NAME_RE = re.compile(
+    r"collection-\d{8}-\d{6}(?:-(?:[2-9]|[1-9]\d+))?\.json"
+)
+_CORRUPT_LATEST_RE = re.compile(r"collection\.json\.corrupt(?:\.\d+)?")
 
 # An unmounted, dying or half-walked drive reads as a much smaller library.
 # Losing more than this much of the album count freezes the good snapshot until
 # the owner confirms the albums really are gone.
 SHRINK_TOLERANCE = 0.10
-# Under this size the percentage is noise: four albums down to three is an
-# ordinary tidy-up, not a failing disk.
-SHRINK_GUARD_MIN_ALBUMS = 10
 
 _LOST = ("the record of what the library held (without it a lost disk can "
          "only be rebuilt by hand)")
@@ -51,6 +43,83 @@ def latest_path() -> Path:
 
 def suspect_path() -> Path:
     return snapshot_dir() / SUSPECT_NAME
+
+
+def preserved_latest_copies() -> list[Path]:
+    """Unreadable latest snapshots kept by ``state_file``.
+
+    Collection backups may live outside ``DATA_DIR``, so the general corrupt
+    store notice cannot discover these copies. Keep this lookup beside the
+    snapshot path and use it to distinguish a genuinely new install from a
+    backup that was present but had to be moved aside.
+    """
+    try:
+        return sorted(
+            path
+            for path in snapshot_dir().iterdir()
+            if path.is_file() and _CORRUPT_LATEST_RE.fullmatch(path.name)
+        )
+    except OSError:
+        return []
+
+
+def latest_status() -> tuple[str, dict | None]:
+    """Return ``(ready|missing|unreadable, snapshot)`` for the latest copy.
+
+    ``load_json_object`` returns ``None`` both when a file never existed and
+    after it preserved a corrupt file. That distinction is safety-critical for
+    an empty music root: the former is a normal first run, while the latter may
+    be the only evidence that an apparently writable folder is a missing
+    mount.
+    """
+    latest = latest_path()
+    try:
+        latest.stat()
+        was_present = True
+    except FileNotFoundError:
+        was_present = False
+    except OSError:
+        return "unreadable", None
+    try:
+        snapshot = load_latest()
+    except OSError:
+        return "unreadable", None
+    if isinstance(snapshot, dict):
+        return "ready", snapshot
+    if was_present or preserved_latest_copies():
+        return "unreadable", None
+    return "missing", None
+
+
+def music_root_write_state() -> tuple[str, int]:
+    """Whether new library writes have a plausible target.
+
+    An empty root is valid on a fresh install. Once a collection backup says
+    the root held albums, though, an empty top level is usually a missing NAS
+    mount whose host fallback directory is still writable. Return a small
+    state code for the CLI and web surfaces to explain in their own words.
+    """
+    root = Path(cfg.MUSIC_ROOT)
+    try:
+        if not root.exists():
+            return "missing", 0
+        if not root.is_dir():
+            return "not_folder", 0
+        has_artist_folder = any(
+            entry.is_dir() and not entry.name.startswith(".")
+            for entry in root.iterdir()
+        )
+    except OSError:
+        return "unreadable", 0
+    if has_artist_folder:
+        return "ready", 0
+    backup_state, previous = latest_status()
+    if backup_state == "unreadable":
+        return "backup_unreadable", 0
+    recorded = _album_count(previous)
+    if recorded > 0:
+        return "recorded_empty", recorded
+    return "ready", 0
 
 
 def _previous_ids(previous):
@@ -154,10 +223,26 @@ def build_snapshot(*, owned_qobuz=None, artist_ids=None, previous=None,
     }
 
 
+def _load_snapshot(path):
+    snapshot = state_file.load_json_object(
+        path, "the collection snapshot", _LOST
+    )
+    if snapshot is None:
+        return None
+    valid, reason = validate_upload(snapshot, allow_empty=True)
+    if valid:
+        return snapshot
+    problem = ValueError(reason or "invalid collection snapshot")
+    if state_file.preserve_corrupt(
+            path, "the collection snapshot", problem, _LOST):
+        return None
+    raise OSError("the invalid collection snapshot could not be preserved") \
+        from problem
+
+
 def load_latest():
     """The last written snapshot, or None when there isn't a readable one."""
-    return state_file.load_json_object(latest_path(), "the collection snapshot",
-                                       _LOST)
+    return _load_snapshot(latest_path())
 
 
 def _album_count(snapshot):
@@ -175,12 +260,16 @@ def shrink_verdict(snapshot, previous):
     the backup.
     """
     if not (snapshot.get("artists") or []):
+        if previous is None:
+            return "No music found in your library folder. No backup was created."
+        if previous is not None and _album_count(previous) == 0:
+            return None
         return "No music found in your library folder. The last backup was kept."
     before = _album_count(previous)
     after = _album_count(snapshot)
-    if before < SHRINK_GUARD_MIN_ALBUMS or after >= before:
+    if after >= before:
         return None
-    if (before - after) <= before * SHRINK_TOLERANCE:
+    if (before - after) <= max(1, before * SHRINK_TOLERANCE):
         return None
     return (f"{before:,} albums last time, {after:,} now. The last backup "
             f"was kept.")
@@ -197,8 +286,7 @@ def write_snapshot(snapshot, *, force=False):
     # The lock lives with the app's data, not in the backup folder: that folder
     # is synced offsite, and a stray .lock file riding along in it is noise.
     with state_file.store_lock(cfg.DATA_DIR / ".qobuz_collection_backup"):
-        previous = None if force else state_file.load_json_object(
-            latest, "the collection snapshot", _LOST)
+        previous = None if force else _load_snapshot(latest)
         refusal = None if force else shrink_verdict(snapshot, previous)
         if refusal:
             # Kept beside the good copy rather than dropped: if the drive really
@@ -228,7 +316,10 @@ def _dated_path() -> Path:
 def _prune_dated():
     """Keep the newest KEEP_DATED dated copies. The name sorts by time."""
     try:
-        dated = sorted(snapshot_dir().glob("collection-2*.json"))
+        dated = sorted(
+            path for path in snapshot_dir().glob("collection-*.json")
+            if _DATED_NAME_RE.fullmatch(path.name)
+        )
     except OSError:
         return
     for old in dated[:-KEEP_DATED] if len(dated) > KEEP_DATED else []:
@@ -238,8 +329,13 @@ def _prune_dated():
             pass
 
 
-def validate_upload(data):
-    """Check an uploaded file is one of ours. Returns (ok, reason)."""
+def validate_upload(data, *, allow_empty=False):
+    """Check a snapshot is one of ours. Returns ``(ok, reason)``.
+
+    An empty current baseline is valid only after the owner explicitly forces
+    it. An uploaded empty backup still has nothing to restore, so callers keep
+    the stricter default.
+    """
     if not isinstance(data, dict):
         return False, "That file isn't a collection snapshot from this app."
     if data.get("format") != FORMAT:
@@ -248,7 +344,50 @@ def validate_upload(data):
         return False, (f"That snapshot was written by a different version of "
                        f"the app (version {data.get('version')!r}, this one "
                        f"reads {VERSION}).")
+    updated_at_epoch = data.get("updated_at_epoch")
+    if updated_at_epoch is not None and (
+        type(updated_at_epoch) not in (int, float)
+        or not math.isfinite(updated_at_epoch)
+        or updated_at_epoch < 0
+    ):
+        return False, "That snapshot has an invalid backup timestamp."
+    counts = data.get("counts")
+    if (
+        not isinstance(counts, dict)
+        or any(
+            type(counts.get(name)) is not int or counts[name] < 0
+            for name in ("artists", "albums", "tracks")
+        )
+    ):
+        return False, "That snapshot has invalid collection totals."
     artists = data.get("artists")
-    if not isinstance(artists, list) or not artists:
+    if (not isinstance(artists, list)
+            or (not artists and not allow_empty)):
         return False, "That snapshot doesn't list any artists."
+    album_count = 0
+    track_count = 0
+    for artist in artists:
+        if (not isinstance(artist, dict)
+                or not isinstance(artist.get("name"), str)
+                or not artist["name"].strip()
+                or not isinstance(artist.get("albums"), list)):
+            return False, "That snapshot has an invalid artist entry."
+        for album in artist["albums"]:
+            if (not isinstance(album, dict)
+                    or not isinstance(album.get("name"), str)
+                    or not album["name"].strip()
+                    or ("title" in album
+                        and not isinstance(album.get("title"), str))
+                    or not isinstance(album.get("tracks"), list)
+                    or not all(isinstance(track, dict)
+                               for track in album["tracks"])):
+                return False, "That snapshot has an invalid album entry."
+            album_count += 1
+            track_count += len(album["tracks"])
+    if counts != {
+        "artists": len(artists),
+        "albums": album_count,
+        "tracks": track_count,
+    }:
+        return False, "That snapshot's collection totals do not match its contents."
     return True, None

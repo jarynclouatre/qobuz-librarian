@@ -1,5 +1,4 @@
-"""Regression coverage for the credential redaction funnel."""
-
+"""Credential redaction tests."""
 from qobuz_librarian import redaction
 
 

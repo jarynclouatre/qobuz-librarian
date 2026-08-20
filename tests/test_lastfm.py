@@ -1,4 +1,4 @@
-"""Tests for qobuz_librarian.api.lastfm - error-code mapping, retry, shapes."""
+"""Last.fm client tests."""
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -87,8 +87,27 @@ def _load_resolve_cache() -> dict:
                 try:
                     raw = json.loads(cfg.ARTIST_RESOLVE_CACHE_FILE
                                      .read_text(encoding="utf-8"))
-                    if raw.get("version") == _RESOLVE_CACHE_VERSION:
-                        loaded = raw.get("entries") or {}
+                    if (
+                        isinstance(raw, dict)
+                        and raw.get("version") == _RESOLVE_CACHE_VERSION
+                        and isinstance(raw.get("entries"), dict)
+                    ):
+                        for query, hit in raw["entries"].items():
+                            if (
+                                not isinstance(hit, (list, tuple))
+                                or len(hit) != 2
+                            ):
+                                continue
+                            artist_id, artist_name = hit
+                            if (
+                                isinstance(artist_id, bool)
+                                or not isinstance(artist_id, (str, int))
+                                or not str(artist_id).strip()
+                                or not isinstance(artist_name, str)
+                                or not artist_name.strip()
+                            ):
+                                continue
+                            loaded[str(query)] = [artist_id, artist_name]
                 except (OSError, ValueError):
                     pass
                 _resolve_cache = loaded

@@ -2081,6 +2081,7 @@ def _record_terminal_downloads(successful):
     from qobuz_librarian.web import job_persistence
 
     finished = time.time()
+    recorded = False
     for change in successful:
         album = change.get("album") or {}
         album_id = str(album.get("id") or "").strip()
@@ -2106,6 +2107,12 @@ def _record_terminal_downloads(successful):
             vlog(f"activity record write failed: {exc}")
         if not saved:
             vlog(f"activity record write failed for album {album_id}")
+        else:
+            recorded = True
+    if recorded:
+        job_persistence.prune_finished(
+            job_persistence.FINISHED_HISTORY_KEEP
+        )
 
 
 def _refresh_review_state_after_downloads(

@@ -1,25 +1,6 @@
-"""Disk cache for everything the Discover tab fetches.
-
-Three kinds of thing are kept, each with its own retention:
-
-  lastfm       one row per Last.fm answer: an artist's similar list, an
-               artist's tags, a page of a tag's albums or artists. Similarity
-               barely moves, so these last a fortnight, and they are what makes
-               a rebuild after adding one artist cost one request instead of
-               six hundred.
-  resolutions  the Qobuz artist or album a Last.fm name turned out to be. A
-               name Qobuz does not carry is stored as a miss, so an artist
-               Qobuz will never have is not searched for again on every build.
-  feeds        the assembled, ranked feed, stamped with the signature of the
-               library it was built from. A changed library retires it.
-
-SQLite rather than one JSON file because these are hundreds of small keyed
-payloads written one at a time while the feed builds, and a JSON file would be
-rewritten in full for each one. Like the album cache this is derived data: if
-the file is corrupt it is deleted and rebuilt, and losing it costs time, never
-correctness.
-"""
+"""SQLite cache for Last.fm results and assembled Discover feeds."""
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -36,6 +17,8 @@ FEED_TTL       = 7 * 86400
 # Favourites are the user's own list and change the moment they star something
 # in Qobuz, so this one is short. Rebuilding it costs one request.
 FAVOURITES_TTL = 300
+
+_MAX_FEEDS = 100
 
 # Stored in place of a resolution when Qobuz has nothing for that name.
 _MISS = {"miss": True}
@@ -156,7 +139,6 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-# ── Key shapes ────────────────────────────────────────────────────────────────
 # Built here so the writer and the reader can't drift apart: a key typo would
 # show up as a cache that never hits, which looks like Last.fm being slow.
 def similar_key(artist_key: str) -> str:
@@ -183,7 +165,6 @@ def album_resolution_key(artist_key: str, title_key: str) -> str:
     return f"album:{artist_key}|{title_key}"
 
 
-# ── Rows ──────────────────────────────────────────────────────────────────────
 def _read(table: str, id_column: str, key: str, ttl_seconds: float,
           allow_stale: bool):
     if not key or not _ensure():
@@ -198,8 +179,16 @@ def _read(table: str, id_column: str, key: str, ttl_seconds: float,
         return None
     if not row:
         return None
-    if not allow_stale and (time.time() - (row[1] or 0)) > ttl_seconds:
-        return None
+    if not allow_stale:
+        try:
+            fetched_at = float(row[1] or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if (
+            not math.isfinite(fetched_at)
+            or (time.time() - fetched_at) > ttl_seconds
+        ):
+            return None
     try:
         return json.loads(row[0])
     except (ValueError, TypeError):
@@ -229,7 +218,13 @@ def _write(table: str, id_column: str, key: str, payload) -> None:
 def get_lastfm(key: str, ttl_seconds: float, *, allow_stale: bool = False):
     """A saved Last.fm answer, or None. ``allow_stale`` ignores the age, which
     is how an expired row still fills the page when Last.fm is unreachable."""
-    return _read("lastfm", "key", key, ttl_seconds, allow_stale)
+    payload = _read("lastfm", "key", key, ttl_seconds, allow_stale)
+    if (
+        not isinstance(payload, list)
+        or any(not isinstance(row, dict) for row in payload)
+    ):
+        return None
+    return payload
 
 
 def put_lastfm(key: str, payload) -> None:
@@ -241,7 +236,8 @@ def get_resolution(key: str, ttl_seconds: float = RESOLUTION_TTL,
     """What a name resolved to on Qobuz. A cached miss comes back as a miss,
     not as None, so the caller can tell "asked, nothing there" from "never
     asked"."""
-    return _read("resolutions", "key", key, ttl_seconds, allow_stale)
+    payload = _read("resolutions", "key", key, ttl_seconds, allow_stale)
+    return payload if isinstance(payload, dict) else None
 
 
 def put_resolution(key: str, payload) -> None:
@@ -258,7 +254,6 @@ def is_miss(payload) -> bool:
     return isinstance(payload, dict) and payload.get("miss") is True
 
 
-# ── Feeds ─────────────────────────────────────────────────────────────────────
 def get_feed(kind: str) -> dict | None:
     """The saved feed and the two facts that decide whether it can still be
     used: which library it was built from, and when.
@@ -283,9 +278,23 @@ def get_feed(kind: str) -> dict | None:
         payload = json.loads(row[0])
     except (ValueError, TypeError):
         return None
+    if not isinstance(payload, list):
+        return None
+    if kind == "tags":
+        valid_items = all(isinstance(item, str) for item in payload)
+    else:
+        valid_items = all(isinstance(item, dict) for item in payload)
+    if not valid_items:
+        return None
+    try:
+        built_at = float(row[2] or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(built_at) or built_at < 0:
+        return None
     return {"payload": payload,
             "library_sig": str(row[1] or ""),
-            "built_at": float(row[2] or 0)}
+            "built_at": built_at}
 
 
 def put_feed(kind: str, payload, library_sig: str) -> None:
@@ -301,13 +310,16 @@ def put_feed(kind: str, payload, library_sig: str) -> None:
             "INSERT OR REPLACE INTO feeds (kind, payload, library_sig, built_at) "
             "VALUES (?, ?, ?, ?)",
             (str(kind), data, str(library_sig or ""), time.time()))
+        conn.execute(
+            "DELETE FROM feeds WHERE kind NOT IN "
+            "(SELECT kind FROM feeds ORDER BY built_at DESC, kind DESC LIMIT ?)",
+            (_MAX_FEEDS,))
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"discover cache feed write failed: {e}")
         _handle_db_error(e)
 
 
-# ── Housekeeping ──────────────────────────────────────────────────────────────
 # A library that changes over years would otherwise leave a row behind for
 # every artist it ever held. Oldest rows go first; they are the ones a rebuild
 # would have refetched anyway.

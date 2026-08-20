@@ -1,32 +1,4 @@
-"""Last.fm client for the Discover tab.
-
-Discover needs three things Qobuz does not publish: which artists resemble one
-you already own, which tags describe an artist, and which artists and albums
-sit under a tag. Last.fm answers all three from names alone, so nothing here
-needs an account, a session or a signature - only a read-only API key, which is
-optional: with no key the Discover tab does not exist.
-
-Last.fm reports the outcome in the response body, not always in the status
-code, so the body is read first and the status only decides what is left. Four
-outcomes are separated because the caller reacts differently to each:
-
-  LastfmKeyRejected  the key is wrong or suspended. Only the operator can fix
-                     it, so the builder stops instead of retrying.
-  LastfmRateLimited  slow down. Whatever was already fetched stays cached, so
-                     reopening Discover later resumes rather than restarts.
-  LastfmUnavailable  Last.fm is down, unreachable or temporarily failing.
-                     Saved suggestions are served instead.
-  LastfmError        anything else, including a body that is not the documented
-                     shape.
-
-Code 6 is not a failure. It is how Last.fm says it has never heard of a name,
-which for a personal library full of obscure artists is routine, so it comes
-back as an empty result.
-
-One 0.25s minimum gap between requests is enforced for the whole process.
-Last.fm asks for no more than five requests a second per key; only one feed
-builder runs at a time, so this module-level gate is the entire enforcement.
-"""
+"""Last.fm client used by Discover."""
 import threading
 import time
 
@@ -37,7 +9,6 @@ from qobuz_librarian.api.client import ua_string
 from qobuz_librarian.ui_cli.logging import vlog
 
 
-# ── Exceptions ────────────────────────────────────────────────────────────────
 class LastfmError(Exception):
     """Last.fm answered, but not with a result."""
     def __init__(self, message, *, code: int | None = None):
@@ -57,7 +28,6 @@ class LastfmUnavailable(LastfmError):
     """Last.fm could not be reached, or could not answer (8, 11, 16, 5xx)."""
 
 
-# ── Request plumbing ──────────────────────────────────────────────────────────
 # Documented Last.fm error codes this module reacts to by name. Everything else
 # becomes a plain LastfmError carrying the code.
 _NOT_FOUND_CODE     = 6
@@ -155,12 +125,15 @@ def _raise_for_code(code: int, message: str, method: str):
     raise LastfmError(f"Last.fm error {code} from {method}: {text}", code=code)
 
 
-def lastfm_get(method: str, params: dict | None = None) -> dict:
+def lastfm_get(method: str, params: dict | None = None, *,
+               api_key_override: str | None = None) -> dict:
     """One Last.fm call. Returns the decoded body, or {} when Last.fm has never
     heard of what was asked for (code 6)."""
-    key = api_key()
+    key = (api_key() if api_key_override is None
+           else str(api_key_override or "").strip())
     if not key:
         raise LastfmKeyRejected("No Last.fm API key is set")
+    redaction.register_secret(key)
     query = {
         **(params or {}),
         "method": method,
@@ -220,11 +193,8 @@ def lastfm_get(method: str, params: dict | None = None) -> dict:
         if not isinstance(body, dict):
             raise LastfmError(f"{method} returned a non-dict response")
         return body
-    # Unreachable: every path above either returns or raises on the last attempt.
-    raise LastfmUnavailable(f"Last.fm gave up on {method}")
 
 
-# ── Payload readers ───────────────────────────────────────────────────────────
 def _rows(payload: dict, container: str, key: str) -> list:
     """Last.fm nests every list one level down, and collapses a single-entry
     list into a bare object. Both shapes come back as a list of dicts here."""
@@ -281,7 +251,6 @@ def _albums(payload: dict, container: str) -> list[dict]:
     return out
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
 def get_similar_artists(name: str, *, limit: int = 100) -> list[dict]:
     """Artists Last.fm considers similar to `name`, each with its 0-1 match."""
     if not str(name or "").strip():
@@ -336,7 +305,7 @@ def get_tag_top_artists(tag: str, *, page: int = 1,
 def get_artist_top_albums(name: str, *, page: int = 1,
                           limit: int = 50) -> list[dict]:
     """The artist's most-played albums, which is how Discover picks which of a
-    suggested artist's records to show first."""
+    suggested artist's albums to show first."""
     if not str(name or "").strip():
         return []
     body = lastfm_get("artist.getTopAlbums",
@@ -344,8 +313,11 @@ def get_artist_top_albums(name: str, *, page: int = 1,
     return _albums(body, "topalbums")
 
 
-def probe_key() -> bool:
+def probe_key(api_key_override: str | None = None) -> bool:
     """One cheap call that separates a bad key from Last.fm being down, so the
-    Settings page can say which it is. Returns True, or raises."""
-    lastfm_get("chart.getTopArtists", {"limit": 1})
+    Settings page can say which it is. A supplied key is checked directly even
+    when applying it is deferred until an active job ends. Returns True, or
+    raises."""
+    lastfm_get("chart.getTopArtists", {"limit": 1},
+               api_key_override=api_key_override)
     return True

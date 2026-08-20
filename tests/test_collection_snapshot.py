@@ -1,4 +1,4 @@
-"""Collection snapshot: what gets recorded, and what refuses to overwrite it."""
+"""Collection snapshot tests."""
 import json
 import shutil
 
@@ -112,6 +112,20 @@ def test_an_empty_music_folder_leaves_the_saved_snapshot_alone(library):
     assert snap.latest_path().read_bytes() == kept
 
 
+def test_an_empty_music_folder_fails_closed_when_the_backup_is_unreadable(
+        library):
+    latest = snap.latest_path()
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text('{"counts":', encoding="utf-8")
+
+    assert snap.music_root_write_state() == ("backup_unreadable", 0)
+    assert not latest.exists()
+    assert [path.name for path in snap.preserved_latest_copies()] == [
+        "collection.json.corrupt"
+    ]
+    assert snap.latest_status()[0] == "unreadable"
+
+
 def test_a_big_shrink_is_held_back_until_it_is_forced(library):
     for i in range(20):
         library.add("Bonobo", f"Album {i:02d}", [_track("t", 1)])
@@ -134,4 +148,3 @@ def test_a_big_shrink_is_held_back_until_it_is_forced(library):
     assert json.loads(snap.latest_path().read_text())["counts"]["albums"] == 5
     # Forcing settles the question, so the suspect copy stops nagging.
     assert not snap.suspect_path().exists()
-
