@@ -33,12 +33,15 @@
 
   {# A build publishes as it goes, so the page re-asks for itself while one is
      running, and stops when the replacement arrives without the trigger. #}
-  <div id="discover-body"{% if feed.phase == 'building' %} hx-get="{{ poll_url }}"
+  <div id="discover-body"{% if feed.phase in ('building', 'waiting') %} hx-get="{{ poll_url }}"
        hx-trigger="every 2s" hx-target="#discover-body"
        hx-select="#discover-body" hx-swap="outerHTML"{% endif %}>
 
     <div class="ql-work-status ql-work-status--bar">
-      {% if feed.phase == 'building' %}
+      {% if feed.phase == 'waiting' %}
+      <span class="ql-status-chip is-neutral">Waiting</span>
+      <span>Other Discover requests are still finishing. This one will start automatically.</span>
+      {% elif feed.phase == 'building' %}
       <span class="ql-status-chip is-info">Building</span>
       {# The counter only means something once the worker knows the total, so
          the first frame of every build says what it is doing instead. #}

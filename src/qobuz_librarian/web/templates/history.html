@@ -16,6 +16,8 @@
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
+{% include "_writes_paused_notice.html" %}
+
 {% if attention_only %}
 <div class="ql-notice ql-notice-warning">
   <span>Showing unresolved History items. Recovery and Catalogue cleanup stay until resolved. <a href="/queue/history">Show all history</a>.</span>
@@ -43,6 +45,8 @@
         <span class="ql-status-chip is-warning" title="Original files remain in a Repair recovery folder.">Recovery needed</span>
       {% elif job.execute_args_unreadable %}
         <span class="ql-status-chip is-warning" title="The saved details needed to retry this job could not be read.">Retry unavailable</span>
+      {% elif job.single_unreadable %}
+        <span class="ql-status-chip is-warning" title="The saved single-track recovery details could not be read.">Actions unavailable</span>
       {% elif job.attention == 'recovery' %}
         <span class="ql-status-chip is-warning" title="The saved download recovery must be settled before retrying.">Recovery attention</span>
       {% elif job.attention == 'partial' %}
@@ -63,7 +67,7 @@
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
       <div class="ql-activity-actions">
         {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-        {% if job.status == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
+        {% if job.status == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           {% if recovery_retry %}
@@ -117,7 +121,7 @@
           {% elif job.recoveries %}
           <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% endif %}
-          {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
+          {% if job.summary and job.summary != job.error %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
           {% if job.error %}<p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>{% endif %}
         </div>
         {{ job_side(job) }}
@@ -157,7 +161,7 @@
         <p class="ql-row-title">
           <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
         </p>
-        {% if job.summary %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
+        {% if job.summary and job.summary != job.error %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
         {% if job.error %}
         <p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>
         {% endif %}
@@ -193,8 +197,8 @@
       <path d="M20 12a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"/>
     </svg>
   </div>
-  <p class="font-medium text-base-content/70">{% if attention_only %}Nothing needs attention{% else %}No finished jobs yet{% endif %}.</p>
-  <p class="text-sm mt-1 text-base-content/50">{% if attention_only %}Unresolved warnings, recoveries, and catalogue cleanup appear here.{% else %}Completed downloads, scans, and reviews appear here.{% endif %}</p>
+  <p class="font-medium text-base-content/70">{% if history_unavailable %}History is unavailable or incomplete{% elif attention_only %}Nothing needs attention{% else %}No finished jobs yet{% endif %}.</p>
+  <p class="text-sm mt-1 text-base-content/50">{% if history_unavailable %}Saved activity could not be read reliably. Nothing was deleted; check the data folder and restart Qobuz Librarian.{% elif attention_only %}Unresolved warnings, recoveries, and catalogue cleanup appear here.{% else %}Completed downloads, scans, and reviews appear here.{% endif %}</p>
   <div class="ql-empty-actions">
     <a href="{% if attention_only %}/queue/history{% else %}/queue{% endif %}" class="ql-btn ql-btn-secondary w-full sm:w-auto">{% if attention_only %}Show all history{% else %}Back to Queue{% endif %}</a>
   </div>

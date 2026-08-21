@@ -1,5 +1,7 @@
 {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
 <div id="review-groups" class="ql-review-groups" data-page="{{ review_page }}"
+     data-filtered-total="{{ review_filtered_total | default(0) }}"
+     data-filtered-selected="{{ review_filtered_selected | default(0) }}"
      data-filtered-rest="{{ review_filtered_rest | default(0) }}"
      data-review-total="{{ review_counts.total }}"
      data-review-selected="{{ review_counts.selected }}"

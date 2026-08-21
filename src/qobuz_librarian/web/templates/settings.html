@@ -43,6 +43,11 @@
   <span>Nothing changed because the settings could not be saved. Give the data
   folder write access, then try again.</span>
 </div>
+{% elif error == "settingschanged" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>These settings changed after this form was opened, so the older save
+  was not applied. Review the current values below, then try again.</span>
+</div>
 {% endif %}
 {% endmacro %}
 
@@ -150,8 +155,20 @@
 </div>
 {% elif error == "credsbusy" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>The account was not changed because Qobuz work is already running.
+  <span>The account was not changed because Qobuz work is queued or running.
   Wait for that album or scan to finish, then try again.</span>
+</div>
+{% elif error == "credschanged" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>The Qobuz account changed after this form was opened, so this older
+  save was not applied. Reload the page, check the current account, then try
+  again.</span>
+</div>
+{% elif error == "credsmode" %}
+<div class="ql-notice ql-notice-warning mb-6" data-flash>
+  <span>The Qobuz account was not changed because the web app does not hold
+  the safety lock. Finish the other Qobuz Librarian run or resume the web app,
+  then try again.</span>
 </div>
 {% elif error and error not in ("invalidsettings", "persist") %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash><span>{{ error }}</span></div>
@@ -233,6 +250,7 @@
 
     <form action="/settings" method="post" class="ql-settings-form ql-credentials-form">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="credential_generation" value="{{ credential_generation }}">
       <div class="ql-field">
         <label class="ql-field-label" for="user_id">Email or user ID <span class="ql-field-optional">Optional for scans</span></label>
         <input type="text" name="user_id" id="user_id" value="{{ user_id or '' }}"
@@ -350,6 +368,7 @@
     <form action="/settings/behavior" method="post">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="form_complete" value="1">
+      <input type="hidden" name="settings_generation" value="{{ behavior_generation }}">
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'STREAMRIP_QUALITY' %}
       <div class="ql-default-field ql-quality-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
@@ -521,6 +540,7 @@
     <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="section" value="discover">
+      <input type="hidden" name="settings_generation" value="{{ lastfm_generation }}">
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'LASTFM_API_KEY' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
@@ -562,12 +582,42 @@
       </div>
     </div>
 
+    {% if collection_backup.unreadable %}
+    <div class="ql-notice ql-notice-error mb-6 flex items-start flex-wrap gap-3">
+      <span class="flex-1">
+        The current collection backup could not be read safely. It was not
+        treated as an empty backup. Check that <code>{{ collection_backup.folder }}</code>
+        is readable and recover the preserved copy if needed. Replace it only
+        after confirming the music folder is mounted and complete.
+      </span>
+      <form action="/collection/snapshot" method="post" class="w-full sm:w-auto" data-busy-submit>
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="force" value="1">
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary whitespace-nowrap"
+                data-confirm="Replace the unreadable backup with what is on disk now?"
+                data-confirm-action="Replace">Replace backup</button>
+      </form>
+    </div>
+    {% endif %}
+
+    {% if collection_backup.held_back_unreadable %}
+    <div class="ql-notice ql-notice-error mb-6">
+      <span>
+        The held-back collection check could not be read safely. It was not used
+        to replace or describe the current backup. Check that
+        <code>{{ collection_backup.folder }}</code> is readable before replacing
+        anything.
+      </span>
+    </div>
+    {% endif %}
+
     {% if collection_backup.held_back %}
     <div class="ql-notice ql-notice-warning mb-6 flex items-start flex-wrap gap-3">
       <span class="flex-1">
         {% if not collection_backup.held_back.albums %}
-        Backup held back: no music was found in your library folder. The last
-        backup was kept.
+        Backup held back: no music was found in your library folder.
+        {% if collection_backup.counts %}The last backup was kept.{% else %}No backup was created because there was nothing to record.{% endif %}
+        Check that your music folder is mounted before {% if collection_backup.counts %}replacing it{% else %}recording the library as empty{% endif %}.
         {% else %}
         Backup held back:
         {{ "{:,}".format(collection_backup.counts.albums) if collection_backup.counts else "more" }}
@@ -580,14 +630,16 @@
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="force" value="1">
         <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary whitespace-nowrap"
-                data-confirm="Replace the last backup with what is on disk now?"
-                data-confirm-action="Replace">Replace anyway</button>
+                data-confirm="{% if collection_backup.counts %}Replace the last backup with what is on disk now?{% else %}Record the current library as intentionally empty?{% endif %}"
+                data-confirm-action="{% if collection_backup.counts %}Replace{% else %}Record{% endif %}">{% if collection_backup.counts %}Replace anyway{% else %}Record empty library{% endif %}</button>
       </form>
     </div>
     {% endif %}
 
     <p class="ql-storage-meta">
-      {% if collection_backup.counts %}
+      {% if collection_backup.unreadable %}
+      Current backup unavailable. Nothing was treated as empty or replaced.
+      {% elif collection_backup.counts %}
       Last backup {{ collection_backup.age }}:
       {{ "{:,}".format(collection_backup.counts.albums) }} album{{ 's' if collection_backup.counts.albums != 1 }},
       {{ "{:,}".format(collection_backup.counts.artists) }} artist{{ 's' if collection_backup.counts.artists != 1 }}.
@@ -599,6 +651,7 @@
     <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="section" value="collection-backup">
+      <input type="hidden" name="settings_generation" value="{{ collection_backup_generation }}">
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'COLLECTION_BACKUP_DIR' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
@@ -637,6 +690,16 @@
                accept="application/json,.json"
                class="ql-input max-w-lg text-base sm:text-sm">
       </div>
+      <label class="ql-option-row">
+        <input type="checkbox" name="empty_replacement" value="1" class="ql-checkbox">
+        <span>
+          <span class="ql-option-title">Empty replacement music folder</span>
+          <span class="ql-option-help ql-option-help-warning">
+            Select only after confirming the music folder is mounted and
+            intentionally empty. The current collection backup will be kept.
+          </span>
+        </span>
+      </label>
       <div class="ql-settings-actions">
         <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Check this backup</button>
       </div>

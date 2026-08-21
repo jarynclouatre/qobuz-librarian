@@ -2,7 +2,8 @@
 {% if albums %}
 <div class="ql-grid-view">
   {% for g in albums %}
-  <div class="ql-grid-tile">
+  <div class="ql-grid-tile" data-search-item data-search-key="album-{{ g.id }}"
+       data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
     {% if g.cover %}<img src="{{ g.cover }}" alt="" width="320" height="320" class="ql-grid-cover" loading="lazy">{% endif %}
     <div class="ql-grid-copy">
       <p class="ql-grid-title">{{ release_title(g.title, g.version) }}</p>

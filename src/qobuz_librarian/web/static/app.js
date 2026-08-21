@@ -175,6 +175,95 @@
   }
   window.qlInvalidateSearchSnapshots = invalidateSearchSnapshots;
 
+  var queueBadgePollingStarted = false;
+  function initQueueBadgePolling() {
+    if (queueBadgePollingStarted
+        || !document.querySelector(".js-queue-badge")) return;
+    queueBadgePollingStarted = true;
+    var inFlight = null;
+    var controller = null;
+    var queueSignatureKey = "ql-queue-count-signature";
+
+    function apply(n) {
+      document.querySelectorAll(".js-queue-badge").forEach(function (badge) {
+        if (!n) {
+          badge.classList.add("hidden");
+          badge.textContent = "";
+          return;
+        }
+        badge.classList.remove("hidden");
+        badge.textContent = n > 99 ? "99+" : String(n);
+      });
+    }
+
+    function applyAttention(n) {
+      document.querySelectorAll("[data-attention-badge]").forEach(function (badge) {
+        badge.classList.toggle("hidden", !n);
+        if (!n) return;
+        var items = n + " History item" + (n === 1 ? "" : "s");
+        badge.setAttribute("aria-label", "Open " + items + " needing attention");
+        if (badge.hasAttribute("title")) {
+          badge.setAttribute("title", items + (n === 1 ? " needs" : " need")
+            + " attention");
+        }
+      });
+    }
+
+    function refresh() {
+      if (document.hidden || inFlight) return;
+      controller = typeof AbortController === "function"
+        ? new AbortController() : null;
+      var request = fetch("/api/queue/count", {
+        headers: { "Accept": "application/json" },
+        signal: controller ? controller.signal : undefined,
+      });
+      inFlight = request;
+      request
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .then(function (data) {
+          if (!data || inFlight !== request || document.hidden) return;
+          var signature = data.signature
+            || String(data.count) + ":" + (data.running ? "1" : "0");
+          try {
+            var previous = sessionStorage.getItem(queueSignatureKey);
+            if (previous && previous !== signature
+                && window.qlInvalidateSearchSnapshots) {
+              window.qlInvalidateSearchSnapshots();
+            }
+            sessionStorage.setItem(queueSignatureKey, signature);
+          } catch (e) {}
+          apply(data.count);
+          applyAttention(data.attention || 0);
+        })
+        .catch(function () {})
+        .then(function () {
+          if (inFlight === request) {
+            inFlight = null;
+            controller = null;
+          }
+        });
+    }
+
+    refresh();
+    setInterval(refresh, 12000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        if (controller) controller.abort();
+        controller = null;
+        inFlight = null;
+      } else {
+        refresh();
+      }
+    });
+    window.qlRefreshQueueBadge = refresh;
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initQueueBadgePolling);
+  } else {
+    initQueueBadgePolling();
+  }
+
   var bootSearchState = searchStateFromUrl();
   var bootSearchRecord = readSearchRecord(bootSearchState);
   var bootSearchHtml = readSearchSnapshot(bootSearchState);
@@ -192,6 +281,7 @@
   var NAV_DEFAULTS = {
     search: "/",
     library: "/library",
+    discover: "/discover",
     upgrade: "/upgrade",
     downsample: "/downsample",
     repair: "/repair",
@@ -213,6 +303,9 @@
     if (/^\/jobs\/[^/]+\/?$/.test(path)) return owner === tab;
     if (tab === "search") return path === "/";
     if (tab === "library") return /^\/library(?:\/hidden)?\/?$/.test(path);
+    if (tab === "discover") {
+      return /^\/discover(?:\/(?:genres|search|favourites))?\/?$/.test(path);
+    }
     if (tab === "repair") return /^\/repair(?:\/history)?\/?$/.test(path);
     if (tab === "lyrics") return path === "/lyrics" || path === "/lyrics/";
     if (tab === "settings") return /^\/(?:settings|migrate)\/?$/.test(path);
@@ -455,20 +548,34 @@
     return items;
   }
 
+  function searchAvailabilityItems() {
+    var items = Array.prototype.slice.call(
+      document.querySelectorAll("[data-search-item]")
+    );
+    document.querySelectorAll("template[data-search-view-template]").forEach(
+      function (template) {
+        items = items.concat(Array.prototype.slice.call(
+          template.content.querySelectorAll("[data-search-item]")
+        ));
+      }
+    );
+    return items;
+  }
+
   function markSearchDownloadQueued(form) {
     if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
     var item = form.closest("[data-search-item]");
     var key = item && item.dataset.searchKey;
-    var root = item && item.closest("[data-search-results-root]");
     var peers = item ? [item] : [];
-    if (root && key) {
-      peers = searchResultItems(root).filter(function (peer) {
+    if (key) {
+      peers = searchAvailabilityItems().filter(function (peer) {
         return peer.dataset.searchKey === key;
       });
     }
     peers.forEach(function (peer) {
       setSearchItemAvailability(peer, "queued");
     });
+    var root = item && item.closest("[data-search-results-root]");
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
@@ -476,7 +583,7 @@
   var refreshSearchAvailabilityAgain = false;
 
   function refreshSearchAvailability() {
-    if (!document.querySelector("[data-search-results-root]")) return;
+    if (!searchAvailabilityItems().length) return;
     if (searchAvailabilityRequest) {
       refreshSearchAvailabilityAgain = true;
       return;
@@ -494,13 +601,13 @@
         // now; without this the row would fall back to offering that same
         // download again the moment its job left the queue.
         var owned = new Set(data.owned || []);
+        searchAvailabilityItems().forEach(function (item) {
+          var key = item.dataset.searchKey || "";
+          if (owned.has(key)) { markSearchItemOwned(item); return; }
+          setSearchItemAvailability(item,
+            queued.has(key) ? "queued" : scanning.has(key) ? "scanning" : "available");
+        });
         document.querySelectorAll("[data-search-results-root]").forEach(function (root) {
-          searchResultItems(root).forEach(function (item) {
-            var key = item.dataset.searchKey || "";
-            if (owned.has(key)) { markSearchItemOwned(item); return; }
-            setSearchItemAvailability(item,
-              queued.has(key) ? "queued" : scanning.has(key) ? "scanning" : "available");
-          });
           root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
         });
         if (!refreshSearchAvailabilityAgain) {
@@ -546,14 +653,14 @@
     if (!form || !form.matches || !form.matches("[data-search-download-form]")) return;
     var item = form.closest("[data-search-item]");
     var key = item && item.dataset.searchKey;
-    var root = item && item.closest("[data-search-results-root]");
     var peers = item ? [item] : [];
-    if (root && key) {
-      peers = searchResultItems(root).filter(function (peer) {
+    if (key) {
+      peers = searchAvailabilityItems().filter(function (peer) {
         return peer.dataset.searchKey === key;
       });
     }
     peers.forEach(markSearchItemOwned);
+    var root = item && item.closest("[data-search-results-root]");
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
@@ -596,8 +703,6 @@
   // Animate a fully hidden artist group before htmx removes it. Dismissals
   // target the group's positioning SHELL (the dismiss button lives beside the
   // <details>, not inside it), so match the shell as well as a bare details;
-  // matching only the details left the swap unanimated and, worse, skipped
-  // the qlHidden recount, so an emptied page kept its stale counts.
   document.addEventListener("htmx:beforeSwap", function (evt) {
     var t = evt.detail && evt.detail.target;
     if (!t || !t.matches) return;
@@ -606,10 +711,6 @@
              && t.querySelector("details[data-artist]"))) return;
     if ((evt.detail.serverResponse || "").trim() !== "") return;
     collapse(t);
-    // Recount after the delayed removal has actually finished.
-    setTimeout(function () {
-      document.body.dispatchEvent(new CustomEvent("qlHidden"));
-    }, 360);
   });
 
   // Global search, escape, and g-then-key navigation shortcuts.
@@ -683,9 +784,7 @@
     }, 0);
   });
 
-  // BFCache can restore a disabled submit button.
-  window.addEventListener("pageshow", function (evt) {
-    if (!evt.persisted) return;
+  function restoreBusySubmitButtons() {
     document.querySelectorAll("form[data-busy-submit] button[type=submit]").forEach(function (b) {
       if (b.dataset.busyHtml == null) return;
       b.disabled = false;
@@ -693,7 +792,23 @@
       b.innerHTML = b.dataset.busyHtml;
       delete b.dataset.busyHtml;
     });
+  }
+
+  window.addEventListener("pageshow", function (evt) {
+    if (!evt.persisted) return;
+    restoreBusySubmitButtons();
   });
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", function (evt) {
+      if (!evt.data || evt.data.type !== "ql-post-failed") return;
+      restoreBusySubmitButtons();
+      showToast(
+        "Couldn't reach the server. Nothing was changed. Check your connection and try again.",
+        "error"
+      );
+    });
+  }
 
   // Whether the control being confirmed does something that cannot be undone.
   // The marker sits on the button the user presses; when the confirmation is
@@ -1102,6 +1217,13 @@
   // textContent-only toast structurally couldn't.
   function showToast(message, kind) {
     var host = document.getElementById("download-toast");
+    if (!host && document.body) {
+      host = document.createElement("div");
+      host.id = "download-toast";
+      host.className = "ql-toast-host";
+      host.setAttribute("aria-live", "polite");
+      document.body.appendChild(host);
+    }
     if (!host) return;
     var el = document.createElement("div");
     var noticeKind = kind || "info";
@@ -1175,6 +1297,11 @@
       }
       return response;
     });
+  }
+
+  function returnToLogin() {
+    var next = window.location.pathname + window.location.search;
+    window.location.assign("/login?next=" + encodeURIComponent(next));
   }
 
   function initCoverFallbacks() {
@@ -1825,6 +1952,10 @@
       };
       src.addEventListener("progress", onProgress);
       src.addEventListener("done", onDone);
+      src.addEventListener("auth", function () {
+        shut();
+        returnToLogin();
+      });
     }
     function onProgress(e) {
       streamAlive();
@@ -2045,6 +2176,11 @@
         }
       });
       src.addEventListener("done", onDone);
+      src.addEventListener("auth", function () {
+        if (src) { try { src.close(); } catch (e) {} }
+        stopWatching();
+        returnToLogin();
+      });
     }
 
     function watchStream() {
@@ -2216,6 +2352,8 @@
         reclaimable: parseInt(box.dataset.reviewReclaimable || "0", 10),
         reclaimable_label: box.dataset.reviewReclaimableLabel || "",
         hidden_total: parseInt(box.dataset.reviewHiddenTotal || "0", 10),
+        filtered_total: parseInt(box.dataset.filteredTotal || "0", 10),
+        filtered_selected: parseInt(box.dataset.filteredSelected || "0", 10),
         filtered_rest: parseInt(box.dataset.filteredRest || "0", 10),
       };
       if (box.dataset.reviewMissingTotal !== undefined) {
@@ -2232,9 +2370,13 @@
     function applyCounts(c) {
       if (!c) return;
       lastCounts = c;
-      if (typeof c.filtered_rest === "number") {
+      if (typeof c.filtered_total === "number") {
         var fb = pageBox();
-        if (fb) fb.dataset.filteredRest = String(c.filtered_rest);
+        if (fb) {
+          fb.dataset.filteredTotal = String(c.filtered_total);
+          fb.dataset.filteredSelected = String(c.filtered_selected);
+          fb.dataset.filteredRest = String(c.filtered_rest);
+        }
       }
       var tc = tabCounts(c);
       if (submit) {
@@ -2310,6 +2452,15 @@
       var master = cont.querySelector("[data-select-master]");
       if (!master) return;
       var tc = tabCounts(lastCounts);
+      if (curQuery()) {
+        var box = pageBox();
+        if (box) {
+          tc = {
+            total: parseInt(box.dataset.filteredTotal || "0", 10),
+            selected: parseInt(box.dataset.filteredSelected || "0", 10),
+          };
+        }
+      }
       master.checked = tc.total > 0 && tc.selected >= tc.total;
       master.indeterminate = tc.selected > 0 && tc.selected < tc.total;
     }
@@ -2444,6 +2595,8 @@
           var counts = c;
           if (!current && typeof c.filtered_rest === "number") {
             counts = Object.assign({}, c);
+            delete counts.filtered_total;
+            delete counts.filtered_selected;
             delete counts.filtered_rest;
           }
           applyCounts(counts);
@@ -3006,9 +3159,10 @@
       var d = e.detail || {};
       if (d.counts) applyCounts(d.counts);
       var box = pageBox();
-      if (box && box.querySelectorAll(":scope > .ql-review-group-shell, :scope > details").length === 0) {
-        var p = curPage();
-        loadPage(p > 1 ? p - 1 : 1, curQuery());
+      var empty = box && box.querySelectorAll(
+        ":scope > .ql-review-group-shell, :scope > details").length === 0;
+      if (empty || document.getElementById("review-loadmore")) {
+        loadPage(1, curQuery());
       } else {
         updateHideLabels();
       }
@@ -3124,7 +3278,7 @@
       // from the action's response, and reloading now would swap the page out
       // from under the user's next click.
       if (reviewNavigating || (e.data || "") === TAB_ID) return;
-      loadPage(curPage(), curQuery());
+      loadPage(1, curQuery());
     });
     rsrc.addEventListener("closed", function (e) {
       // An archived/restored review has no live producer, so the server ends
@@ -3141,6 +3295,10 @@
         window.htmx.ajax("GET", "/jobs/" + id + "/content" + embedded, { target: "#job-content", swap: "outerHTML" });
       } else { location.reload(); }
     });
+    rsrc.addEventListener("auth", function () {
+      shutReview();
+      returnToLogin();
+    });
     rsrc.onerror = function () {
       if (rsrc.readyState === EventSource.CLOSED) shutReview();
     };
@@ -3151,6 +3309,10 @@
     normalizeFlashAnnouncements();
     initCoverFallbacks();
     initSearchResults();
+    if (!document.querySelector("[data-search-results-root]")
+        && document.querySelector("[data-search-item]")) {
+      refreshSearchAvailability();
+    }
     initStreamCards();
     initJobContent();
   }
@@ -3347,12 +3509,27 @@
     }
   }
 
+  function restoreSearchHistory() {
+    var results = document.getElementById("search-results");
+    if (!results || !results.querySelector("[data-search-results-root]")) return;
+    results.querySelectorAll("[data-search-wired]").forEach(function (node) {
+      node.removeAttribute("data-search-wired");
+    });
+    results.querySelectorAll("[data-cover-fallback-wired]").forEach(function (node) {
+      node.removeAttribute("data-cover-fallback-wired");
+    });
+    restoreSearchFormFromUrl();
+    initSearchResults();
+    initCoverFallbacks();
+  }
+
   // Re-scan swapped content for flashes and streams.
   document.addEventListener("htmx:afterSwap", initAll);
   document.addEventListener("htmx:afterSwap", rememberSearchSwap);
   document.addEventListener("htmx:afterSwap", restoreSearchFocus);
   document.addEventListener("htmx:afterSwap", revealSearchFeedback);
   document.addEventListener("htmx:afterSwap", announceDiagnosticsSwap);
+  document.addEventListener("htmx:historyRestore", restoreSearchHistory);
   // A restored artist deep-link replays itself once on load; drop the artist it
   // carried afterwards so the next search the user types is its own.
   document.addEventListener("htmx:afterRequest", function (e) {

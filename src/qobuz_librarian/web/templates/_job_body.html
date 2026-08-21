@@ -251,7 +251,7 @@
     {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
        what went wrong. Showing only the error threw away the outcome. #}
-    {% if job.summary %}
+    {% if job.summary and job.summary != job.error %}
     <div class="ql-job-summary ql-job-summary--terminal"><span>{{ job.summary }}</span></div>
     {% endif %}
     {% if job.attention == 'cancel_late' %}
@@ -276,6 +276,14 @@
       <div class="ql-notice-copy">
         <strong>Retry unavailable</strong>
         <div>The saved details needed to retry this job could not be read. Start the download again from Search or Library.</div>
+      </div>
+    </div>
+    {% endif %}
+    {% if job._single_undo_unavailable %}
+    <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
+      <div class="ql-notice-copy">
+        <strong>Saved actions unavailable</strong>
+        <div>The saved recovery state for this single-track job could not be verified, so Retry and Undo are paused. Check the data folder, then restart Qobuz Librarian and reopen this job.</div>
       </div>
     </div>
     {% endif %}

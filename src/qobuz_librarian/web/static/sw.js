@@ -45,6 +45,14 @@ self.addEventListener('activate', event => {
   );
 });
 
+function notifyPostFailure(event) {
+  const clientId = event.clientId || event.resultingClientId;
+  if (!clientId) return Promise.resolve();
+  return self.clients.get(clientId).then(client => {
+    if (client) client.postMessage({ type: 'ql-post-failed' });
+  }).catch(() => {});
+}
+
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
@@ -78,9 +86,16 @@ self.addEventListener('fetch', event => {
   // server is unreachable (container stopped, network down).
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request).catch(() =>
-        caches.open(CACHE).then(cache => cache.match('/static/offline.html'))
-      )
+      fetch(event.request).catch(() => {
+        if (event.request.method !== 'GET') {
+          return notifyPostFailure(event).then(
+            () => new Response(null, { status: 204 })
+          );
+        }
+        return caches.open(CACHE).then(
+          cache => cache.match('/static/offline.html')
+        );
+      })
     );
   }
 });

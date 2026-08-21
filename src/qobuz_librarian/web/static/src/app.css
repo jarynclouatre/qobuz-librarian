@@ -90,6 +90,8 @@
 .ql-tab-count.hidden,
 .ql-tabbar-count.hidden,
 .ql-queue-badge.hidden,
+.ql-history-attention.hidden,
+.ql-tab-attention.hidden,
 .ql-review-tool.hidden,
 .ql-discover-album.hidden,
 .ql-active-strip.hidden {
@@ -826,6 +828,9 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     left: 0.75rem;
     width: auto;
   }
+}
+.ql-auth-page .ql-toast-host {
+  bottom: 0.75rem;
 }
 
 /* Dashboard. */
@@ -2278,17 +2283,10 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-grid-footer form {
   display: inline-flex;
 }
-/* The drawn button stays 1.9375rem; the target does not (same trick as
-   .ql-review-artist-hit and .ql-table-check). */
-.ql-icon-hit {
-  display: inline-flex;
-  padding: 0.40625rem;
-  margin: -0.40625rem;
-}
 .ql-download-icon-button {
-  width: 1.9375rem;
-  height: 1.9375rem;
-  min-height: 1.9375rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  min-height: 2.75rem;
   border-radius: 0.5rem;
   border-color: color-mix(in oklab, var(--ql-gold) 16%, transparent);
   color: var(--ql-text-2);

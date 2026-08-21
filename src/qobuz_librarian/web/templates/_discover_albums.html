@@ -12,7 +12,9 @@
   </div>
   {% endif %}
   {% for al in albums %}
-  <div class="ql-discover-album" data-album-year="{{ al.year }}">
+  <div class="ql-discover-album" data-album-year="{{ al.year }}"
+       data-search-item data-search-key="album-{{ al.id }}"
+       data-queued="{{ 1 if al.queued else 0 }}" data-scanning="{{ 1 if al.scanning else 0 }}">
     {% if al.cover %}<img src="{{ al.cover }}" alt="" width="36" height="36" loading="lazy">{% endif %}
     <div class="ql-discover-album-copy">
       <p class="ql-discover-album-title">{{ release_title(al.title, al.version) }}</p>
