@@ -519,6 +519,8 @@ def split_review_summary(execute_kind, candidates):
                 "higher quality.")
     if execute_kind == "downsample":
         return f"{plural(n, 'album')} stored above CD rate."
+    if execute_kind == "collection_restore":
+        return f"{plural(n, 'album')} from the backup to restore."
     return ""
 
 
@@ -796,6 +798,10 @@ def _park_library_failures(failed_cands, execute_kind="library",
                           execute_kind="repair",
                           status=job_mgr.JobStatus.AWAITING_REVIEW,
                           review_verb="Repair")
+    elif execute_kind == "collection_restore":
+        job = job_mgr.Job(title="Restore from backup",
+                          execute_kind="collection_restore",
+                          status=job_mgr.JobStatus.AWAITING_REVIEW)
     else:
         job = job_mgr.Job(title="Library scan", kind="scan",
                           execute_kind="library",
@@ -836,6 +842,9 @@ def _park_library_failures(failed_cands, execute_kind="library",
     elif execute_kind == "repair":
         job.summary = (f"{n:,} album{'s' if n != 1 else ''} couldn't be "
                        "repaired last time. Ticked and ready to retry.")
+    elif execute_kind == "collection_restore":
+        job.summary = (f"{n:,} album{'s' if n != 1 else ''} from the backup "
+                       "didn't download last time. Ticked and ready to retry.")
     else:
         job.summary = (f"{n:,} album{'s' if n != 1 else ''} didn't download "
                        "last time. Ticked and ready to retry.")
@@ -876,7 +885,7 @@ def _return_new_release_picks(picks):
 
 
 def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
-    """Return unfinished Upgrade or Repair picks to the living review."""
+    """Return unfinished picks to their Qobuz-backed review."""
     if not picks:
         return True
     folded = refold_into_living_review(picks, execute_kind=execute_kind)
@@ -916,7 +925,7 @@ def _fold_partial_gap_fill(full_album, artist_name, n_missing):
 def prune_library_review_candidates(album):
     """A full album just landed on disk (Search download, batch download,
     upgrade replace): drop its candidates from every parked or still-scanning
-    library review, so a stale review can't offer to download an album the
+    Qobuz album review, so a stale review can't offer to download an album the
     user already has. The executing job itself is RUNNING and untouched.
     Matched by Qobuz album id. Returns the number of candidates dropped."""
     album_id = str((album or {}).get("id") or "")
@@ -925,7 +934,8 @@ def prune_library_review_candidates(album):
     dropped = 0
     states = (job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)
     for job in job_mgr.registry.all():
-        if (getattr(job, "execute_kind", "") not in ("library", "new_releases")
+        if (getattr(job, "execute_kind", "") not in (
+                "library", "new_releases", "collection_restore")
                 or job.status not in states):
             continue
         try:
@@ -960,7 +970,8 @@ def prune_library_review_candidates(album):
 def _library_review_lists(album_id):
     states = (job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)
     for job in job_mgr.registry.all():
-        if (getattr(job, "execute_kind", "") not in ("library", "new_releases")
+        if (getattr(job, "execute_kind", "") not in (
+                "library", "new_releases", "collection_restore")
                 or job.status not in states):
             continue
         if any(str((c.get("payload") or {}).get("album_id") or "") == album_id
@@ -1496,12 +1507,18 @@ def _scan_library_impl(
             if name not in current_artist_names:
                 continue
             saved = checkpoint_artists.get(name)
-            if not isinstance(saved, dict) or saved.get("catalog_ids") is None:
+            if (
+                not isinstance(saved, dict)
+                or not isinstance(saved.get("catalog_ids"), list)
+            ):
                 continue
             scanned.add(name)
             artist_id = saved.get("artist_id") or ""
             if artist_id:
-                baseline_seen[str(artist_id)] = list(saved.get("catalog_ids") or [])
+                baseline_seen[str(artist_id)] = [
+                    str(album_id) for album_id in saved["catalog_ids"]
+                    if album_id is not None
+                ]
     else:
         scanned = set()
         baseline_seen = {}
@@ -2243,6 +2260,7 @@ def execute_albums(job, chosen, token):
     # downloaded or dismissed).
     is_library_run = getattr(job, "execute_kind", "") == "library"
     is_nr_run = getattr(job, "execute_kind", "") == "new_releases"
+    is_restore_run = getattr(job, "execute_kind", "") == "collection_restore"
     review_save_failed = False
     retry_save_failed = False
 
@@ -2313,6 +2331,9 @@ def execute_albums(job, chosen, token):
             _remember_review_save(_return_library_picks(leftovers))
         elif is_nr_run:
             _remember_review_save(_return_new_release_picks(leftovers))
+        elif is_restore_run:
+            _remember_review_save(_return_qobuz_review_picks(
+                leftovers, "collection_restore", job.execute_args))
     for i, cand in enumerate(chosen, 1):
         if job.cancel_requested:
             break
@@ -2410,7 +2431,7 @@ def execute_albums(job, chosen, token):
                 lossy_only_tracks += lossy_only
                 if is_nr_run and retryable:
                     _remember_review_save(_return_new_release_picks([cand]))
-                elif is_library_run and retryable:
+                elif (is_library_run or is_restore_run) and retryable:
                     _remember_review_save(_fold_partial_gap_fill(
                         full, cand.get("artist") or "", retryable))
             elif attention_kind:
@@ -2444,6 +2465,9 @@ def execute_albums(job, chosen, token):
             _remember_review_save(_return_library_picks(leftovers))
         elif leftovers and is_nr_run:
             _remember_review_save(_return_new_release_picks(leftovers))
+        elif leftovers and is_restore_run:
+            _remember_review_save(_return_qobuz_review_picks(
+                leftovers, "collection_restore", job.execute_args))
         interrupted = 1 if cancelled_cand is not None else 0
         not_started = len(chosen) - processed
         parts = [f"{plural(ok, 'album')} downloaded"]
@@ -2461,8 +2485,9 @@ def execute_albums(job, chosen, token):
         parts.append(f"{plural(not_started, 'album')} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
         retry_count = failed + interrupted + not_started
-        destination = "Library" if is_library_run else "New Releases"
-        if retry_count and (is_library_run or is_nr_run):
+        destination = ("Library" if is_library_run else
+                       "New Releases" if is_nr_run else "Restore review")
+        if retry_count and (is_library_run or is_nr_run or is_restore_run):
             if retry_save_failed:
                 job.summary += (
                     f" {plural(retry_count, 'retry choice')} could not be "
@@ -2567,8 +2592,12 @@ def execute_albums(job, chosen, token):
         # back to the New Releases review rather than being consumed (the
         # baseline already recorded it, so nothing else would re-offer it).
         _remember_review_save(_return_new_release_picks(failed_cands))
+    elif failed_cands and is_restore_run:
+        _remember_review_save(_return_qobuz_review_picks(
+            failed_cands, "collection_restore", job.execute_args))
     if failed:
-        destination = "New Releases" if is_nr_run else "Library"
+        destination = ("New Releases" if is_nr_run else
+                       "Restore review" if is_restore_run else "Library")
         if retry_save_failed:
             outcome = f"They could not be saved back to {destination}."
         else:

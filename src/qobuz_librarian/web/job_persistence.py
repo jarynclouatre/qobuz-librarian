@@ -55,6 +55,8 @@ _admission_ready = False
 # The db opened fine but a write later failed (typically a full disk).
 _warned_write_failure = False
 
+FINISHED_HISTORY_KEEP = 1000
+
 
 @dataclass(frozen=True)
 class RecoveryResolutionPlan:
@@ -116,6 +118,112 @@ def _decode_execute_args(value) -> tuple[dict, bool]:
     if type(args) is not dict:
         return {}, True
     return args, False
+
+
+def _decode_object(value) -> tuple[dict, bool]:
+    try:
+        decoded = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}, True
+    if type(decoded) is not dict:
+        return {}, True
+    return decoded, False
+
+
+def _decode_single(value) -> tuple[dict, bool]:
+    single, unreadable = _decode_object(value)
+    if unreadable:
+        return {}, True
+    text_fields = (
+        "album_id", "track_id", "dir", "isrc", "title", "artist",
+        "album", "owned_root",
+    )
+    if (
+        any(
+            key in single
+            and single[key] is not None
+            and type(single[key]) is not str
+            for key in text_fields
+        )
+        or (
+            "owned_path" in single
+            and single["owned_path"] is not None
+            and type(single["owned_path"]) is not dict
+        )
+        or (
+            "catalog_cleanup" in single
+            and single["catalog_cleanup"] is not None
+            and type(single["catalog_cleanup"]) is not dict
+        )
+        or any(
+            key in single and type(single[key]) is not bool
+            for key in ("marked", "removed")
+        )
+    ):
+        return {}, True
+    return single, False
+
+
+def _decode_candidates(value, status) -> tuple[list[dict], bool]:
+    if status != "awaiting_review":
+        return [], False
+    try:
+        candidates = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return [], True
+    if type(candidates) is not list:
+        return [], True
+    for candidate in candidates:
+        if type(candidate) is not dict:
+            return [], True
+        cid = candidate.get("cid")
+        seq = candidate.get("seq")
+        payload = candidate.get("payload")
+        selected = candidate.get("selected")
+        if (
+            not isinstance(cid, str)
+            or not cid
+            or (seq is not None and type(seq) is not int)
+            or (payload is not None and type(payload) is not dict)
+            or (
+                "selected" in candidate
+                and type(selected) is not bool
+            )
+            or any(
+                value is not None and type(value) is not str
+                for value in (
+                    candidate.get("kind"),
+                    candidate.get("title"),
+                    candidate.get("artist"),
+                    candidate.get("detail"),
+                )
+            )
+        ):
+            return [], True
+    return candidates, False
+
+
+_UNREADABLE_LOG_LINE = "[Saved activity log could not be read.]"
+
+
+def _decode_log_lines(value) -> tuple[list[str], bool]:
+    try:
+        lines = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return [_UNREADABLE_LOG_LINE], True
+    if type(lines) is not list or any(type(line) is not str for line in lines):
+        return [_UNREADABLE_LOG_LINE], True
+    return lines, False
+
+
+def _decode_timestamp(value) -> float | None:
+    if (
+        type(value) not in (int, float)
+        or not math.isfinite(value)
+        or not 0 <= value < 32_503_680_000
+    ):
+        return None
+    return float(value)
 
 
 def _note_write_failure(what: str, e: Exception) -> None:
@@ -241,7 +349,7 @@ CREATE TABLE IF NOT EXISTS post_import_relocation_handoffs (
 _SCHEMA_VERSION = 7
 
 
-def scrub_stored_secrets() -> int:
+def scrub_stored_secrets() -> int | None:
     """Mask account secrets in rows written before the masking existed, and
     report how many rows changed. A provider error carrying the signed-in URL
     reached job.error, job.summary and the stored activity log, so an upgrade
@@ -252,7 +360,7 @@ def scrub_stored_secrets() -> int:
     with _lock:
         conn = _get_conn()
         if conn is None or not _schema_ready:
-            return 0
+            return None
         try:
             rows = conn.execute(
                 f"SELECT id, {', '.join(columns)} FROM jobs").fetchall()
@@ -269,7 +377,7 @@ def scrub_stored_secrets() -> int:
                 conn.commit()
         except sqlite3.Error:
             _rollback_failed_write(conn)
-            return 0
+            return None
     return changed
 
 
@@ -1412,25 +1520,33 @@ def load_one(job_id: str) -> Optional[dict]:
     if row is None:
         return None
     execute_args, execute_args_unreadable = _decode_execute_args(row[12])
-    try:
-        return {
-            "id": row[0], "title": row[1], "artist": row[2], "album_id": row[3],
-            "kind": row[4], "status": row[5], "phase": row[6],
-            "candidates": json.loads(row[7] or "[]"),
-            "error": row[8], "summary": row[9] or "", "review_verb": row[10] or "Download",
-            "execute_kind": row[11] or "",
-            "execute_args": execute_args,
-            "execute_args_unreadable": execute_args_unreadable,
-            "created_at": row[13], "finished_at": row[14],
-            "single": json.loads(row[15] or "{}"),
-            "attention": row[16] or "",
-            "recoveries": json.loads(row[17] or "[]"),
-            "log_lines": json.loads(row[18] or "[]"),
-            "quality_shortfall": json.loads(row[19] or "{}"),
-            "edition": row[20] or "",
-        }
-    except (ValueError, TypeError):
+    recoveries, recovery_unreadable = _decode_recoveries(row[17])
+    if recovery_unreadable:
         return None
+    candidates, candidates_unreadable = _decode_candidates(row[7], row[5])
+    single, single_unreadable = _decode_single(row[15])
+    log_lines, log_lines_unreadable = _decode_log_lines(row[18])
+    quality_shortfall, _ = _decode_object(row[19])
+    return {
+        "id": row[0], "title": row[1], "artist": row[2], "album_id": row[3],
+        "kind": row[4], "status": row[5], "phase": row[6],
+        "candidates": candidates,
+        "candidates_unreadable": candidates_unreadable,
+        "error": row[8], "summary": row[9] or "", "review_verb": row[10] or "Download",
+        "execute_kind": row[11] or "",
+        "execute_args": execute_args,
+        "execute_args_unreadable": execute_args_unreadable,
+        "created_at": _decode_timestamp(row[13]),
+        "finished_at": _decode_timestamp(row[14]),
+        "single": single,
+        "single_unreadable": single_unreadable,
+        "attention": row[16] or "",
+        "recoveries": recoveries,
+        "log_lines": log_lines,
+        "log_lines_unreadable": log_lines_unreadable,
+        "quality_shortfall": quality_shortfall,
+        "edition": row[20] or "",
+    }
 
 
 def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
@@ -1565,7 +1681,7 @@ def history_page(limit: int, offset: int,
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
                 "execute_kind, execute_args, created_at, finished_at, "
-                "attention, recoveries, edition "
+                "attention, recoveries, edition, single "
                 "FROM jobs "
                 f"WHERE {_HISTORY_SQL} {clause}"
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC "
@@ -1579,16 +1695,19 @@ def history_page(limit: int, offset: int,
     for row in rows:
         recoveries, recovery_unreadable = _decode_recoveries(row[12])
         execute_args, execute_args_unreadable = _decode_execute_args(row[8])
+        _single, single_unreadable = _decode_single(row[14])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
             "execute_args": execute_args,
             "execute_args_unreadable": execute_args_unreadable,
-            "created_at": row[9], "finished_at": row[10],
+            "created_at": _decode_timestamp(row[9]),
+            "finished_at": _decode_timestamp(row[10]),
             "attention": row[11] or "", "recoveries": recoveries,
             "edition": row[13] or "",
             "recovery_unreadable": recovery_unreadable,
+            "single_unreadable": single_unreadable,
         })
     return result
 
@@ -1607,7 +1726,7 @@ def recovery_history(*, attention_only: bool = False) -> list[dict]:
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
                 "execute_kind, execute_args, created_at, finished_at, "
-                "attention, recoveries, edition "
+                "attention, recoveries, edition, single "
                 "FROM jobs "
                 "WHERE COALESCE(recoveries, '[]') != '[]' "
                 f"{attention_clause}"
@@ -1622,16 +1741,19 @@ def recovery_history(*, attention_only: bool = False) -> list[dict]:
         if not recoveries and not recovery_unreadable:
             continue
         execute_args, execute_args_unreadable = _decode_execute_args(row[8])
+        _single, single_unreadable = _decode_single(row[14])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
             "execute_args": execute_args,
             "execute_args_unreadable": execute_args_unreadable,
-            "created_at": row[9], "finished_at": row[10],
+            "created_at": _decode_timestamp(row[9]),
+            "finished_at": _decode_timestamp(row[10]),
             "attention": row[11] or "", "recoveries": recoveries,
             "edition": row[13] or "",
             "recovery_unreadable": recovery_unreadable,
+            "single_unreadable": single_unreadable,
         })
     return result
 
@@ -1656,7 +1778,7 @@ def last_finished_at(execute_kind: str) -> Optional[float]:
             ).fetchone()
         except sqlite3.Error:
             return None
-    return row[0] if row and row[0] is not None else None
+    return _decode_timestamp(row[0]) if row else None
 
 
 def attention_count() -> int:
@@ -1761,24 +1883,28 @@ def load_all() -> list[dict]:
             if recovery_unreadable:
                 raise ValueError("recovery payload is invalid")
             execute_args, execute_args_unreadable = _decode_execute_args(r[12])
-            # Only AWAITING_REVIEW jobs need their candidates on restore; all
-            # other statuses are either rehydrated as live state (RUNNING →
-            # FAILED) or displayed as history without candidates.
-            candidates = json.loads(r[7] or "[]") if r[5] == "awaiting_review" else []
+            candidates, candidates_unreadable = _decode_candidates(r[7], r[5])
+            single, single_unreadable = _decode_single(r[15])
+            log_lines, log_lines_unreadable = _decode_log_lines(r[18])
+            quality_shortfall, _ = _decode_object(r[19])
             out.append({
                 "id": r[0], "title": r[1], "artist": r[2], "album_id": r[3],
                 "kind": r[4], "status": r[5], "phase": r[6],
                 "candidates": candidates,
+                "candidates_unreadable": candidates_unreadable,
                 "error": r[8], "summary": r[9] or "", "review_verb": r[10] or "Download",
                 "execute_kind": r[11] or "",
                 "execute_args": execute_args,
                 "execute_args_unreadable": execute_args_unreadable,
-                "created_at": r[13], "finished_at": r[14],
-                "single": json.loads(r[15] or "{}"),
+                "created_at": _decode_timestamp(r[13]),
+                "finished_at": _decode_timestamp(r[14]),
+                "single": single,
+                "single_unreadable": single_unreadable,
                 "attention": r[16] or "",
                 "recoveries": recoveries,
-                "log_lines": json.loads(r[18] or "[]"),
-                "quality_shortfall": json.loads(r[19] or "{}"),
+                "log_lines": log_lines,
+                "log_lines_unreadable": log_lines_unreadable,
+                "quality_shortfall": quality_shortfall,
                 "edition": r[20] or "",
             })
         except (ValueError, TypeError) as e:

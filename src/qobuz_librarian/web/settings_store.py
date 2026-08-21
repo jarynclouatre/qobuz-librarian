@@ -4,7 +4,10 @@ Values are applied to the config module so flows read cfg.* at call time.
 During a running job the in-memory apply is deferred until the worker idles
 to avoid mid-job quality or config changes; disk write still happens immediately.
 """
+import hashlib
+import json
 import logging
+import secrets
 import threading
 from typing import Optional
 
@@ -71,8 +74,10 @@ TEXT_FIELDS = [
      "Empty hides the Discover tab.",
      "text", None, "32-character key"),
     ("COLLECTION_BACKUP_DIR", "Backup folder",
-     "Leave empty to keep it with the app's other data.",
-     "text", None, "e.g. /data/collection-backups"),
+     "In Docker this is a container path, not a folder on your host. Keep "
+     "/collection_backups here and set QL_COLLECTION_BACKUPS in .env to "
+     "choose the host folder; another path needs a matching mount.",
+     "text", None, "e.g. /collection_backups"),
     ("BEETS_PATH_DEFAULT", "beets path: default",
      "Folder/file naming for normal albums (beets path syntax). "
      "Empty = use beets/config.yaml.",
@@ -102,15 +107,43 @@ TEXT_FIELDS = [
      "enum", ["keep", "delete"], ""),
 ]
 TEXT_KEYS = [k for k, *_ in TEXT_FIELDS]
+
+FORM_KEYS = {
+    "behaviour": tuple(BEHAVIOR_KEYS) + tuple(
+        key for key in TEXT_KEYS
+        if key not in {"LASTFM_API_KEY", "COLLECTION_BACKUP_DIR"}
+    ),
+    "discover": ("LASTFM_API_KEY",),
+    "collection-backup": ("COLLECTION_BACKUP_DIR",),
+}
+_FORM_GENERATION_KEY = secrets.token_bytes(32)
+
+
+class SettingsChanged(RuntimeError):
+    """The form was rendered from settings that are no longer current."""
+
+
+def _form_generation(section: str, values: dict) -> str:
+    keys = FORM_KEYS[section]
+    payload = json.dumps(
+        [section, [(key, values.get(key)) for key in keys]],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.blake2s(
+        payload,
+        key=_FORM_GENERATION_KEY,
+        digest_size=16,
+    ).hexdigest()
 # Account secrets among the text fields. Masked in the form and never quoted
 # back in a warning, the way the Qobuz token already is.
 SECRET_KEYS = frozenset({"LASTFM_API_KEY"})
 
-# What the environment (Compose, .env) supplies for each of those fields,
 # captured at import - before load() layers the saved settings over cfg. A
-# field the user empties goes back to tracking this value, so it has to be
-# kept somewhere the save path can still read it.
-_ENV_DEFAULTS = {key: getattr(cfg, key, "") for key, *_ in TEXT_FIELDS}
+_ENV_DEFAULTS = {
+    **{key: bool(getattr(cfg, key)) for key in BEHAVIOR_KEYS},
+    **{key: getattr(cfg, key, "") for key, *_ in TEXT_FIELDS},
+}
 
 # Enum fields whose value is an int on cfg (the form/JSON carry strings).
 _INT_ENUM_KEYS = {"STREAMRIP_QUALITY", "ARTIST_CATALOG_CACHE_TTL",
@@ -331,6 +364,13 @@ def current() -> dict:
     return out
 
 
+def form_generation(section: str, values: Optional[dict] = None) -> str:
+    """Opaque version of the values rendered in one Settings form."""
+    if section not in FORM_KEYS:
+        raise ValueError(f"unknown Settings section: {section}")
+    return _form_generation(section, current() if values is None else values)
+
+
 def _apply(values: dict):
     for k in BEHAVIOR_KEYS:
         if k in values:
@@ -417,6 +457,30 @@ def load():
                 _atomic_write_settings(fresh)
 
 
+def reload_from_disk() -> None:
+    """Rebuild the live settings after another process held the run lock.
+
+    The terminal and Web UI share the settings file but not Python memory. A
+    plain ``load()`` is insufficient here: if the terminal cleared an override,
+    that key is absent from the file and the Web process has to put the original
+    environment value back rather than keep its old override. Callers only use
+    this while Web writes are paused and before they publish write authority.
+    """
+    with _save_lock, state_file.store_lock(SETTINGS_FILE):
+        data = _read_settings() or {}
+        if _normalise(data) and not _atomic_write_settings(data):
+            raise OSError("the normalized settings could not be saved")
+        effective = dict(_ENV_DEFAULTS)
+        effective.update(data)
+
+        from qobuz_librarian.web import jobs as job_mgr
+
+        global _pending_apply
+        with job_mgr.settings_admission_guard(), _pending_lock:
+            _pending_apply = None
+            _apply(effective)
+
+
 def _any_active_job() -> bool:
     """True if a job is genuinely in flight (pending/scanning/running). Parked
     reviews don't count: they sit for weeks by design, and deferring saves
@@ -479,10 +543,27 @@ def save(values: dict):
         return _save_locked(values)
 
 
-def _save_locked(values: dict):
+def save_from_form(values: dict, section: str, generation: str):
+    """Save only if one rendered Settings form is still current.
+
+    The comparison shares the same lock as the read-merge-write below. Two
+    browser requests that started from the same page therefore cannot both
+    save successfully and let the slower one restore stale values.
+    """
+    if section not in FORM_KEYS:
+        raise ValueError(f"unknown Settings section: {section}")
+    with _save_lock, state_file.store_lock(SETTINGS_FILE):
+        baseline = current()
+        actual = _form_generation(section, baseline)
+        if not generation or not secrets.compare_digest(generation, actual):
+            raise SettingsChanged
+        return _save_locked(values, baseline=baseline)
+
+
+def _save_locked(values: dict, *, baseline: Optional[dict] = None):
     # What the user currently sees (cfg overlaid with any deferred save) - the
     # baseline that decides whether a posted value is actually a change.
-    baseline = current()
+    baseline = current() if baseline is None else baseline
     clean = {}
     warnings = []
     for k in BEHAVIOR_KEYS:

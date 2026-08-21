@@ -526,8 +526,9 @@ def test_undo_with_no_isrc_or_track_number_deletes_nothing(
         _remove_job(job)
 
 
+@pytest.mark.parametrize("htmx", [False, True])
 def test_undo_stays_retryable_when_its_final_job_save_fails(
-    client, monkeypatch, fresh_singles, tmp_path
+    client, monkeypatch, fresh_singles, tmp_path, htmx
 ):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations import beets as beets_mod
@@ -561,9 +562,18 @@ def test_undo_stays_retryable_when_its_final_job_save_fails(
 
     monkeypatch.setattr(job_persistence, "persist", save_until_final)
     try:
-        response = client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
+        headers = {"HX-Request": "true"} if htmx else {}
+        response = client.post(
+            f"/jobs/{job.id}/undo",
+            headers=headers,
+            follow_redirects=False,
+        )
 
         assert not track.exists()
-        assert response.status_code == 503
+        assert response.status_code == (200 if htmx else 503)
+        assert "final record couldn&#39;t be saved" in response.text
+        assert job.single.get("removed") is not True
+        if htmx:
+            assert f'hx-post="/jobs/{job.id}/undo"' in response.text
     finally:
         _remove_job(job)

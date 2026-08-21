@@ -8,6 +8,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -118,6 +119,7 @@ from qobuz_librarian.web import (
 from qobuz_librarian.web import jobs as job_mgr
 from qobuz_librarian.web.csrf import (
     CSRFMiddleware,
+    RequestBodyLimitMiddleware,
     SecurityHeadersMiddleware,
     StripServerHeaderMiddleware,
     body_limit,
@@ -879,6 +881,15 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
         msg = ("The single-writer safety lock was lost. Downloads and scans "
                "are paused so another process cannot write to the library "
                "at the same time. Restart Qobuz Librarian before continuing.")
+    elif not job_mgr.job_persistence.ready_for_admission():
+        reason = "Queue and History cannot be saved to the data folder."
+        action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
+        msg = (
+            "Qobuz Librarian can't save Queue and History to the data folder, "
+            "so downloads and scans are paused before any work starts. Nothing "
+            "new was queued. Check the data-folder permissions and free space, "
+            "then restart Qobuz Librarian."
+        )
     elif (_startup_recovery_status_value() == "attention_required"):
         relocation = _post_import_relocation_recovery()
         if relocation is not None:
@@ -1006,6 +1017,7 @@ def _web_writes_paused() -> bool:
         or _LOCK_BUSY_PID is not None
         or bool(_unwritable_volumes())
         or not _data_dir_available()
+        or not job_mgr.job_persistence.ready_for_admission()
         or _LOCK_UNENFORCEABLE
         or not _run_lock_intact()
         or _startup_recovery_status_value() in {
@@ -1161,6 +1173,7 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
     global _RUN_LOCK_HANDLE
     _RUN_LOCK_HANDLE = lease
     try:
+        settings_store.reload_from_disk()
         result = _record_startup_recovery(lease)
 
         publication_recovery = (
@@ -1923,38 +1936,51 @@ def _scrub_stored_credentials(logger) -> None:
             return
     except OSError:
         return
+    complete = True
     try:
         # Reading them registers the live values, so a token logged with no
         # parameter name beside it is masked too.
         api_auth.read_qobuz_credentials()
     except Exception:
-        pass
+        complete = False
     rows = 0
     try:
         job_persistence.init()
-        rows = job_persistence.scrub_stored_secrets()
+        scrubbed = job_persistence.scrub_stored_secrets()
+        if scrubbed is None:
+            complete = False
+        else:
+            rows = scrubbed
     except Exception:
-        pass
+        complete = False
     files = 0
     try:
         targets = list(cfg.DATA_DIR.glob("qobuz-librarian*.log*"))
     except OSError:
+        complete = False
         targets = []
     targets.append(cfg.FETCH_LOG_FILE)
     for path in targets:
         try:
-            if redaction.scrub_file(path):
+            scrubbed = redaction.scrub_file(path)
+            if scrubbed is None:
+                complete = False
+            elif scrubbed:
                 files += 1
         except Exception:
-            continue
+            complete = False
     if rows or files:
         logger.info(
             f"Masked account details in {rows} stored job record(s) and "
             f"{files} log file(s) written by an earlier version.")
-    try:
-        marker.touch()
-    except OSError:
-        pass
+    if complete:
+        try:
+            marker.touch()
+        except OSError:
+            pass
+    else:
+        logger.warning(
+            "Stored credential cleanup was incomplete and will retry next start.")
 
 
 @asynccontextmanager
@@ -2298,6 +2324,7 @@ app = FastAPI(title="Qobuz Librarian", docs_url=None, redoc_url=None,
 # lets the redirects it returns pick up the security headers.
 app.add_middleware(web_auth.AuthMiddleware)
 app.add_middleware(CSRFMiddleware)
+app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(StripServerHeaderMiddleware)
 
@@ -2374,7 +2401,14 @@ def _quality_shortfall_view(record):
         if not isinstance(value, (list, tuple)) or len(value) != 2:
             return ""
         bits, rate = value
-        if not bits or not rate:
+        if (
+            type(bits) not in (int, float)
+            or type(rate) not in (int, float)
+            or not math.isfinite(bits)
+            or not math.isfinite(rate)
+            or bits <= 0
+            or rate <= 0
+        ):
             return ""
         return f"{bits}-bit / {rate / 1000:g} kHz"
 
@@ -2585,25 +2619,33 @@ async def login_submit(request: Request, username: str = Form(""),
     # wait and a guess costs an attacker the wait rather than a KDF they can
     # keep spending. The counters live in memory, so a restart is the way back
     # in for whoever owns the box.
-    if not has_session and not web_auth.check_login_rate_limit(ip, username):
-        return templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": _lockout_notice(ip, username),
-                     "username": username.strip(),
-                     "next_path": next_path},
-            status_code=429)
+    reserved_attempt = False
+    if not has_session:
+        reserved_attempt = web_auth.begin_login_attempt(ip, username)
+        if not reserved_attempt:
+            refusal = _lockout_notice(ip, username) or (
+                "Sign-in checks are busy. Try again shortly."
+            )
+            return templates.TemplateResponse(
+                request=request, name="login.html",
+                context={"error": refusal,
+                         "username": username.strip(),
+                         "next_path": next_path},
+                status_code=429)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
     loop = asyncio.get_running_loop()
-    ok = await loop.run_in_executor(
-        None, web_auth.verify_login, username.strip(), password)
+    try:
+        ok = await loop.run_in_executor(
+            None, web_auth.verify_login, username.strip(), password)
+    except BaseException:
+        if reserved_attempt:
+            web_auth.cancel_login_attempt(ip, username)
+        raise
+    if reserved_attempt:
+        web_auth.finish_login_attempt(ip, username, success=ok)
     if not ok:
-        # A browser that already holds a valid session is not what the counter
-        # is for, and behind a proxy its typo would count against every other
-        # visitor arriving as the same address.
-        if not has_session:
-            web_auth.record_login_failure(ip, username)
         wait = _lockout_notice(ip, username, after_failure=True)
         return templates.TemplateResponse(
             request=request, name="login.html",
@@ -2693,8 +2735,16 @@ async def setup_submit(request: Request, username: str = Form(""),
     # second tap while it ran would land here again before the first request
     # finished, reading a false "created in another browser" conflict.
     loop = asyncio.get_running_loop()
-    stored = await loop.run_in_executor(
-        None, lambda: web_auth.set_credentials(user, password))
+    try:
+        stored = await loop.run_in_executor(
+            None,
+            lambda: web_auth.set_credentials(
+                user, password, require_unconfigured=True),
+        )
+    except web_auth.CredentialsAlreadyConfigured:
+        return templates.TemplateResponse(
+            request=request, name="setup.html",
+            context={"setup_conflict": True}, status_code=409)
     if not stored:
         return templates.TemplateResponse(
             request=request, name="setup.html",
@@ -3502,6 +3552,50 @@ def _music_root_hint() -> str:
     return "Set MUSIC_ROOT to the folder that holds your artist folders."
 
 
+def _music_write_target_message(state: str, recorded_albums: int = 0, *,
+                                job_started: bool = False,
+                                diagnostic: bool = False) -> str:
+    root = Path(cfg.MUSIC_ROOT)
+    hint = _music_root_hint()
+    ending = "" if diagnostic else (
+        "The download stopped before writing any files."
+        if job_started else "Nothing was queued."
+    )
+
+    def finish(message):
+        return f"{message} {ending}".rstrip()
+
+    if state == "missing":
+        return finish(f"{root} does not exist. {hint}")
+    if state == "not_folder":
+        return finish(f"{root} is not a folder. {hint}")
+    if state == "unreadable":
+        return finish(f"{root} could not be read. {hint}")
+    if state == "backup_unreadable":
+        return finish(
+            f"No artist folders were found in {root}, and the last collection "
+            "backup could not be read safely. Check that the music folder is "
+            "mounted and that the collection-backup folder is readable."
+        )
+    if state == "recorded_empty":
+        return finish(
+            f"No artist folders were found in {root}, but the last collection "
+            f"backup recorded {recorded_albums:,} "
+            f"{'album' if recorded_albums == 1 else 'albums'}. Check that the "
+            "music folder is mounted. If those albums really are gone, open "
+            "Settings → Collection backup, choose Back up now, then Replace "
+            "anyway before retrying."
+        )
+    return ""
+
+
+def _require_music_write_target_for_job() -> None:
+    state, recorded_albums = collection_snapshot.music_root_write_state()
+    if state != "ready":
+        raise RuntimeError(_music_write_target_message(
+            state, recorded_albums, job_started=True))
+
+
 def _library_scan_state():
     """Whether a whole-library scan has something valid to scan."""
     root = Path(cfg.MUSIC_ROOT)
@@ -3809,19 +3903,23 @@ _SEARCH_SNAPSHOT_RESULT_LIMIT = 150
 def _qobuz_quality_bits_rate(primary: dict | None,
                              fallback: dict | None = None) -> tuple[int, int]:
     """Return Qobuz source quality as (bits, sample_rate_hz)."""
-    primary = primary or {}
-    fallback = fallback or {}
+    primary = primary if isinstance(primary, dict) else {}
+    fallback = fallback if isinstance(fallback, dict) else {}
     bits = primary.get("maximum_bit_depth") or fallback.get("maximum_bit_depth") or 0
     rate = (primary.get("maximum_sampling_rate")
             or fallback.get("maximum_sampling_rate") or 0)
     try:
         bits_i = int(bits)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         bits_i = 0
     try:
         rate_f = float(rate)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         rate_f = 0.0
+    if not math.isfinite(rate_f) or rate_f <= 0:
+        rate_f = 0.0
+    if bits_i <= 0:
+        bits_i = 0
     if 0 < rate_f < 1000:
         rate_f *= 1000
     return bits_i, int(round(rate_f))
@@ -4527,6 +4625,7 @@ def _make_download_run(
     expected_generation = api_auth.token_credential_generation(token)
 
     def run(j):
+        _require_music_write_target_for_job()
         active = None
         active_token = token
         if getattr(token, "credential_generation", ""):
@@ -6795,6 +6894,7 @@ def _make_single_track_run(album, track, token):
     expected_generation = api_auth.token_credential_generation(token)
 
     def run(j):
+        _require_music_write_target_for_job()
         active = None
         active_token = token
         if getattr(token, "credential_generation", ""):
@@ -7081,12 +7181,20 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 "duplicate",
             )
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
+    loop = asyncio.get_running_loop()
+    root_state, recorded_albums = await loop.run_in_executor(
+        None, collection_snapshot.music_root_write_state)
+    if root_state != "ready":
+        msg = _music_write_target_message(root_state, recorded_albums)
+        if _is_htmx(request):
+            return _download_fragment("error", html.escape(msg), "failed")
+        return RedirectResponse(
+            url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
     try:
         credentials = await _authorize_qobuz_for_web(
             QobuzAccess.DOWNLOAD_ACTION
         )
         token = credentials.token
-        loop = asyncio.get_running_loop()
         album = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
@@ -7996,7 +8104,12 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
     if not context["qobuz_ready"]:
         return _tr(request, "discover.html", context)
 
-    token = _get_token()
+    try:
+        token = _get_token()
+    except (SystemExit, NoCredsError):
+        context["creds_ok"] = False
+        context["qobuz_ready"] = False
+        return _tr(request, "discover.html", context)
     loop = asyncio.get_running_loop()
     if tab == "genres":
         tags_view = await loop.run_in_executor(
@@ -8070,7 +8183,18 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
     if not artist_id or not _qobuz_ready():
         return HTMLResponse("")
     loop = asyncio.get_running_loop()
-    token = _get_token()
+    try:
+        token = _get_token()
+    except (SystemExit, NoCredsError):
+        return _tr(request, "_discover_albums.html", {
+            "albums": [],
+            "decades": [],
+            "error": (
+                "The Qobuz connection changed. Reload Discover and reconnect "
+                "in Settings."
+            ),
+            "page": "discover",
+        })
     # A call that failed and an artist with nothing to offer both end up with
     # no rows, so the reason is carried through: an empty catalogue must never
     # stand in for a request that never got an answer.
@@ -8501,6 +8625,8 @@ _JOB_NAV_SURFACES = {
     "repair": ("repair", "/repair", "Back to Repair"),
     "lyrics": ("lyrics", "/lyrics", "Back to Lyrics"),
     "migration": ("settings", "/migrate", "Back to Migration"),
+    "collection_snapshot": ("settings", "/settings", "Back to Settings"),
+    "collection_restore": ("settings", "/settings", "Back to Settings"),
 }
 
 
@@ -8655,6 +8781,8 @@ def _review_context(job, page=1, query="", tab=""):
     groups = _review_artist_groups(job, query, tab)
     page_groups, page, n_pages = _paginate_groups(groups, page)
     counts = job.selection_counts()
+    filtered_total = sum(len(rows) for _artist, rows in groups)
+    filtered_rest = _filtered_rest_of(groups)
     return {
         "review_groups": page_groups,
         "review_page": page,
@@ -8662,7 +8790,9 @@ def _review_context(job, page=1, query="", tab=""):
         "review_query": query,
         # What "Dismiss unselected" would actually take under this filter, so
         # the button cannot quote the tab total while acting on a subset.
-        "review_filtered_rest": _filtered_rest_of(groups),
+        "review_filtered_total": filtered_total,
+        "review_filtered_selected": filtered_total - filtered_rest,
+        "review_filtered_rest": filtered_rest,
         "review_tab": tab,
         "review_tab_counts": tab_counts,
         "review_hidden_count": hidden_mod.count(_hide_scope(job.execute_kind)),
@@ -8760,7 +8890,7 @@ async def job_review_page(request: Request, job_id: str, page: int = 1,
 
 def _build_unapproved_review(job, tab, *, admission_filter=None,
                              discard_ids=()):
-    """Before approving a library or new-release review: move every candidate
+    """Before approving a Qobuz album review: move every candidate
     that ISN'T being downloaded right now into its own parked review, so a
     partial download consumes ONLY the ticked picks. Everything else stays in
     the living review:
@@ -9082,7 +9212,8 @@ async def job_approve(request: Request, job_id: str):
                     if flows.is_gap_candidate(candidate) != gap_active:
                         admission_decisions[key] = False
                         return False
-                if job.execute_kind in ("library", "new_releases"):
+                if job.execute_kind in (
+                        "library", "new_releases", "collection_restore"):
                     album_id = completion.normalise_album_id(
                         (candidate.get("payload") or {}).get("album_id")
                     )
@@ -9291,7 +9422,9 @@ async def job_approve(request: Request, job_id: str):
 _TRIAGE_KINDS = ("library", "upgrade", "new_releases", "downsample")
 
 # Kinds whose review screen has server-backed per-candidate selection.
-_SELECTABLE_KINDS = _TRIAGE_KINDS + ("repair", "migration")
+_SELECTABLE_KINDS = _TRIAGE_KINDS + (
+    "repair", "migration", "collection_restore",
+)
 
 
 def _rebuild_results_hint(execute_kind):
@@ -9493,11 +9626,16 @@ def _filtered_rest_of(groups):
                for row in rows if not row.get("selected"))
 
 
-def _filtered_rest(job, query, tab):
-    """Unselected candidates under a review filter: what Dismiss unselected
-    will take. The tick endpoints re-answer this so the button can't keep
-    quoting the number from render time."""
-    return _filtered_rest_of(_review_artist_groups(job, query, tab))
+def _filtered_selection_payload(job, query, tab):
+    """Counts for selection controls scoped to the active filter."""
+    groups = _review_artist_groups(job, query, tab)
+    total = sum(len(rows) for _artist, rows in groups)
+    rest = _filtered_rest_of(groups)
+    return {
+        "filtered_total": total,
+        "filtered_selected": total - rest,
+        "filtered_rest": rest,
+    }
 
 
 def _review_tab_totals(job):
@@ -9562,8 +9700,8 @@ async def job_select(request: Request, job_id: str):
     payload = _selection_payload(job)
     q = (form.get("q") or "").strip()
     if q:
-        payload["filtered_rest"] = _filtered_rest(
-            job, q, (form.get("tab") or "").strip())
+        payload.update(_filtered_selection_payload(
+            job, q, (form.get("tab") or "").strip()))
     return JSONResponse(payload)
 
 
@@ -9616,7 +9754,7 @@ async def job_select_all(request: Request, job_id: str):
     payload = _selection_payload(job, persist_failed=persist_failed)
     payload["accepted_cids"] = accepted_cids
     if q:
-        payload["filtered_rest"] = _filtered_rest(job, q, tab)
+        payload.update(_filtered_selection_payload(job, q, tab))
     return JSONResponse(payload)
 
 
@@ -9760,7 +9898,9 @@ async def job_hide(request: Request, job_id: str):
             counts = _selection_payload(job)
             counts["hidden_total"] = hidden_mod.count(
                 _hide_scope(job.execute_kind))
-            resp.headers["HX-Trigger"] = json.dumps(
+            if q:
+                counts.update(_filtered_selection_payload(job, q, tab))
+            resp.headers["HX-Trigger-After-Swap"] = json.dumps(
                 {"qlHidden": {"n": n, "counts": counts}})
         return resp
     return HTMLResponse("")
@@ -9862,6 +10002,8 @@ async def job_dismiss_rest(request: Request, job_id: str):
     payload = _selection_payload(job)
     payload["hidden"] = hidden_count
     payload["hidden_total"] = hidden_mod.count(scope)
+    if q:
+        payload.update(_filtered_selection_payload(job, q, tab))
     finalized = job_mgr.finalize_review_if_empty(job)
     payload["review_done"] = finalized is True
     if finalized is None:
@@ -9878,7 +10020,22 @@ async def job_acknowledge_recovery(request: Request, job_id: str):
             url="/queue?error=" + urllib.parse.quote(
                 "That job is no longer in the record."),
             status_code=303)
-    job_persistence.acknowledge_missing_recoveries(job, _recovery_missing)
+    loop = asyncio.get_running_loop()
+    acknowledged = await loop.run_in_executor(
+        None,
+        lambda: job_persistence.acknowledge_missing_recoveries(
+            job, _recovery_missing
+        ),
+    )
+    if not acknowledged:
+        return RedirectResponse(
+            url=f"/jobs/{job_id}?error=" + urllib.parse.quote(
+                "The missing recovery could not be acknowledged. Nothing "
+                "changed; reload the page and check the data-folder "
+                "permissions, then try again."
+            ),
+            status_code=303,
+        )
     return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 
@@ -9928,7 +10085,14 @@ async def job_give_up(request: Request, job_id: str):
             "was added to your library. Downloads and scans can run again, "
             "and you can start this album whenever you like."
         )
-    job_persistence.persist(job)
+    if not job_persistence.persist(job):
+        return _durable_recovery_response(
+            request,
+            "The interrupted download was discarded and downloads can run "
+            "again, but its outcome could not be saved to History. Nothing "
+            "was added to your library. Check the data-folder permissions "
+            "before restarting Qobuz Librarian.",
+        )
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
@@ -10766,12 +10930,10 @@ async def job_undo(request: Request, job_id: str):
                 "Undo changed the saved track state, but its final record "
                 "couldn't be saved. Retry Undo before clearing History."
             )
+            job.single = info
+            job.summary = msg
             if _is_htmx(request):
-                return HTMLResponse(
-                    f'<div id="job-content">'
-                    f'{_ql_notice_html("warning", html.escape(msg))}</div>',
-                    status_code=503,
-                )
+                return _tr(request, "_job_body.html", {"job": job})
             return _tr(request, "lock_busy.html", {
                 "reason": "Undo needs attention",
                 "msg": msg,
@@ -10802,16 +10964,16 @@ async def job_cancel(
         return RedirectResponse(url="/queue", status_code=303)
     was_review = job.status == job_mgr.JobStatus.AWAITING_REVIEW
     was_pending = job.status == job_mgr.JobStatus.PENDING
-    importing = job.importing
     # Offload: cancelling a parked review runs cancel_review -> persist (a
     # json.dumps of the full candidate list + SQLite commit), which would block
     # the event loop and stall every SSE stream for a large review.
     loop = asyncio.get_running_loop()
-    protected = job_mgr.cancel_is_protected(job)
     canceled = await loop.run_in_executor(
         None, lambda: job_mgr.request_cancel(job)
     )
     if not canceled:
+        protected = job_mgr.cancel_is_protected(job)
+        importing = job.importing
         if protected:
             message = (
                 "This interrupted-download recovery cannot be canceled until "
@@ -10949,6 +11111,7 @@ async def queue_history(
         "bulk_page": jp, "bulk_pages": bulk_pages,
         "cur_page": p, "pages": pages, "total": total,
         "attention_only": attention,
+        "history_unavailable": not job_persistence.ready_for_admission(),
         "error": error[:200],
     })
 
@@ -10983,22 +11146,31 @@ async def queue_cancel_pending():
     # Parked reviews are deliberately exempt: the queue page no longer shows
     # them, and a bulk clear must never take something the user can't see.
     protected = 0
+    finishing = 0
     unsaved = 0
     for j in list(job_mgr.registry.pending_and_running()):
         if j.status == job_mgr.JobStatus.AWAITING_REVIEW:
             continue
-        was_protected = job_mgr.cancel_is_protected(j)
         if not job_mgr.request_cancel(j):
-            if was_protected:
+            if job_mgr.cancel_is_protected(j):
                 protected += 1
+            elif j.importing:
+                finishing += 1
+            elif j.status in job_mgr.TERMINAL:
+                continue
             else:
                 unsaved += 1
-    if protected or unsaved:
+    if protected or finishing or unsaved:
         parts = ["Queue cleared where safe."]
         if protected:
             parts.append(
                 "The interrupted-download recovery stays in place until its "
                 "saved step settles."
+            )
+        if finishing:
+            noun = "job is" if finishing == 1 else "jobs are"
+            parts.append(
+                f"{finishing} {noun} already importing and will finish."
             )
         if unsaved:
             noun = "job" if unsaved == 1 else "jobs"
@@ -11203,13 +11375,25 @@ def _diagnostics():
     # thing missing: every row could read OK while nothing could run at all.
     paused = _writes_paused_notice()
     if paused is not None:
-        checks.append({"label": "Downloads and scans", "ok": False,
+        checks.append({"label": "Active write pause", "ok": False,
                        "detail": paused["msg"]})
     else:
-        checks.append({"label": "Downloads and scans", "ok": True,
-                       "detail": "Ready to run"})
+        checks.append({"label": "Active write pause", "ok": True,
+                       "detail": "No active write pause"})
 
-    _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True)
+    music_state, recorded_albums = collection_snapshot.music_root_write_state()
+    if music_state == "ready":
+        _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True)
+    else:
+        checks.append({
+            "label": "Music library",
+            "ok": False,
+            "detail": _music_write_target_message(
+                music_state,
+                recorded_albums,
+                diagnostic=True,
+            ),
+        })
     # The app's own recovery folder is not a staging entry; counting it made a
     # pile of kept files read as one healthy item. It gets its own check below,
     # so this row says what it counted rather than "0 entries", which read as
@@ -11254,15 +11438,24 @@ def _diagnostics():
     })
 
     stranded = []
+    stranded_error = False
     if cfg.UPGRADE_BACKUP_DIR.exists():
         try:
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
                 if entry.is_dir() and (entry.suffix == ".partial"
                                        or entry.name == ".restore_trash"):
                     stranded.append(entry)
-        except OSError:
-            pass
-    if stranded:
+        except OSError as exc:
+            stranded_error = True
+            logging.getLogger("qobuz_librarian").warning(
+                "couldn't inspect stranded upgrade backups: %s", exc)
+    if stranded_error:
+        checks.append({
+            "label": "Stranded upgrade backups",
+            "ok": False,
+            "detail": "Could not inspect this folder; its status is unknown.",
+        })
+    elif stranded:
         checks.append({"label": "Stranded upgrade backups", "ok": False,
                        "detail": f"{len(stranded)} found in "
                                  f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed"})
@@ -11272,10 +11465,18 @@ def _diagnostics():
 
     # Backups whose original is still missing the tracks they hold: orphaned
     # by a hard kill that skipped the restore/delete.
+    inventory = {"orphans": [], "undo": [], "leftovers": []}
     try:
-        orphans = backup_mod.find_only_copy_backups()
-    except Exception:
-        orphans = []
+        inventory["orphans"] = backup_mod.find_only_copy_backups()
+    except Exception as exc:
+        logging.getLogger("qobuz_librarian").warning(
+            "couldn't inspect kept recovery backups: %s", exc)
+        checks.append({
+            "label": "Backups needing review",
+            "ok": False,
+            "detail": "Could not inspect kept backups; their status is unknown.",
+        })
+    orphans = inventory["orphans"]
     interrupted_disposals = [
         item for item in orphans
         if item[0].name.startswith(".ql-dispose-backup-")
@@ -11299,7 +11500,7 @@ def _diagnostics():
                                  "kept. Restore or remove "
                                  f"{'it' if len(orphans) == 1 else 'them'} "
                                  "below."})
-    else:
+    elif not any(d["label"] == "Backups needing review" for d in checks):
         checks.append({"label": "Backups needing review", "ok": True,
                        "detail": "none"})
 
@@ -11307,9 +11508,16 @@ def _diagnostics():
     # the undo copies a downsample was asked to keep, and leaving them out of
     # every count made the restore rows below look like unexplained extras.
     try:
-        undo_copies = backup_mod.list_undo_copies()
-    except Exception:
-        undo_copies = []
+        inventory["undo"] = backup_mod.list_undo_copies()
+    except Exception as exc:
+        logging.getLogger("qobuz_librarian").warning(
+            "couldn't inspect retained hi-res originals: %s", exc)
+        checks.append({
+            "label": "Hi-res originals kept",
+            "ok": False,
+            "detail": "Could not inspect retained originals; their status is unknown.",
+        })
+    undo_copies = inventory["undo"]
     if undo_copies:
         checks.append({
             "label": "Hi-res originals kept",
@@ -11320,9 +11528,16 @@ def _diagnostics():
         })
 
     try:
-        leftovers = _staging_leftovers()
-    except Exception:
-        leftovers = []
+        inventory["leftovers"] = _staging_leftovers()
+    except Exception as exc:
+        logging.getLogger("qobuz_librarian").warning(
+            "couldn't inspect files kept in staging: %s", exc)
+        checks.append({
+            "label": "Files kept in staging",
+            "ok": False,
+            "detail": "Could not inspect kept staging files; their status is unknown.",
+        })
+    leftovers = inventory["leftovers"]
     if leftovers:
         checks.append({
             "label": "Files kept in staging",
@@ -11331,10 +11546,10 @@ def _diagnostics():
                       f"{'is' if len(leftovers) == 1 else 'are'} being held "
                       "outside your library. Review them below.",
         })
-    else:
+    elif not any(d["label"] == "Files kept in staging" for d in checks):
         checks.append({"label": "Files kept in staging", "ok": True,
                        "detail": "none"})
-    return checks
+    return {"checks": checks, **inventory}
 
 
 def _resolve_host_path(container_path: str) -> tuple[str, bool]:
@@ -11418,12 +11633,16 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         # True once Qobuz has accepted the saved token, False once it has
         # rejected it, None when it has never been asked.
         "token_verified": _token_valid_for(),
-        "user_id": creds.get("user_id", "") if user_id is None else user_id,
+        "user_id": (
+            cfg.QOBUZ_USER_ID or creds.get("user_id", "")
+            if user_id is None else user_id
+        ),
         "auth_token_set": bool(creds.get("auth_token")),
         "downloader_ready": bool(
             creds.get("auth_token") and creds.get("user_id")
         ),
         "auth_token_prefill": auth_token_prefill,
+        "credential_generation": creds.get("_generation", ""),
         "creds_from_env": creds_from_env,
         "env_user_id_set": bool(
             cfg.QOBUZ_USER_ID or os.environ.get("QOBUZ_USER_ID", "").strip()
@@ -11442,7 +11661,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         # Every warning a save can raise is about a field in the collapsed
         # defaults section, and it re-rendered closed: the notice named a
         # value the reader could not see or correct without hunting for it.
-        "defaults_open": bool(warnings) or error == "invalidsettings",
+        "defaults_open": bool(warnings) or error in {
+            "invalidsettings", "settingschanged"
+        },
         "page": "settings",
         "library_paths": [
             {"label": label, "container": cp,
@@ -11458,6 +11679,12 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "behavior_fields": settings_store.BEHAVIOR_FIELDS,
         "inert_notes": settings_store.inert_behaviour_notes(values),
         "text_fields": settings_store.TEXT_FIELDS,
+        "behavior_generation": settings_store.form_generation(
+            "behaviour", values),
+        "lastfm_generation": settings_store.form_generation(
+            "discover", values),
+        "collection_backup_generation": settings_store.form_generation(
+            "collection-backup", values),
         "collection_backup": _collection_backup_status(),
         "lastfm_check": (lastfm_check
                          if lastfm_check in ("ok", "rejected", "down") else ""),
@@ -11534,7 +11761,12 @@ async def _classify_token_async(loop, token):
 
 
 @app.post("/settings", response_class=HTMLResponse)
-async def save_settings(request: Request, user_id: str = Form(""), auth_token: str = Form("")):
+async def save_settings(
+    request: Request,
+    user_id: str = Form(""),
+    auth_token: str = Form(""),
+    credential_generation: str = Form(""),
+):
     global _TOKEN_GENERATION, _TOKEN_VALID
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, _diagnostics)
@@ -11547,16 +11779,24 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
     env_owned = _qobuz_token_is_env_owned()
     env_token = cfg.QOBUZ_USER_AUTH_TOKEN
     env_user_id = cfg.QOBUZ_USER_ID
-    if env_owned and (
-        not env_token
-        or (auth_token.strip() and auth_token.strip() != env_token)
-        or (env_user_id and user_id.strip() and user_id.strip() != env_user_id)
-    ):
+    if ((env_owned and (
+            not env_token
+            or (auth_token.strip() and auth_token.strip() != env_token)))
+            or (env_user_id and user_id.strip()
+                and user_id.strip() != env_user_id)):
         return _settings_response(
             request,
             error="envcreds",
             user_id=existing.get("user_id", ""),
             auth_token_prefill="",
+            diagnostics=diags,
+        )
+    submitted_generation = str(credential_generation or "").strip()
+    existing_generation = str(existing.get("_generation") or "")
+    if submitted_generation != existing_generation:
+        return _settings_response(
+            request,
+            error="credschanged",
             diagnostics=diags,
         )
     # First-run with empty inputs: nothing to save and no creds to keep,
@@ -11584,7 +11824,7 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
         return RedirectResponse(url="/settings?error=envunreachable",
                                 status_code=303)
     new_token = auth_token.strip() or existing.get("auth_token", "")
-    new_uid = user_id.strip() or existing.get("user_id", "")
+    new_uid = env_user_id.strip() or user_id.strip() or existing.get("user_id", "")
     if new_uid and not new_token:
         return _settings_response(request, error="empty",
                                   user_id=user_id.strip(),
@@ -11620,21 +11860,45 @@ async def save_settings(request: Request, user_id: str = Form(""), auth_token: s
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    with _CREDENTIAL_LOCK:
+    with _auto_check_lock, _CREDENTIAL_LOCK:
         active_credentials = _credentials_snapshot()
         candidate_credentials = credentials_from_values(
             new_uid,
             new_token,
             source="env" if env_owned else "streamrip",
         )
-        credential_work_running = any(
-            (getattr(job, "execute_kind", "") or "download")
-            not in {"downsample", "lyrics", "migration"}
-            for job in job_mgr.registry.executing()
-        )
-        if (
+        if active_credentials.generation != submitted_generation:
+            return _settings_response(
+                request,
+                error="credschanged",
+                diagnostics=diags,
+            )
+        credential_changed = (
             candidate_credentials.generation
             != active_credentials.generation
+        )
+        if credential_changed and (
+            _SHUTTING_DOWN
+            or _CLI_MODE
+            or _LOCK_BUSY_PID is not None
+            or _LOCK_UNENFORCEABLE
+            or not _run_lock_intact()
+        ):
+            return _settings_response(
+                request,
+                error="credsmode",
+                user_id=user_id.strip(),
+                auth_token_prefill=auth_token.strip(),
+                diagnostics=diags,
+            )
+        credential_work_running = any(
+            (getattr(job, "execute_kind", "") or "download")
+            not in {"downsample", "lyrics", "migration", "collection_snapshot"}
+            and job.status != job_mgr.JobStatus.AWAITING_REVIEW
+            for job in job_mgr.registry.pending_and_running()
+        )
+        if (
+            credential_changed
             and credential_work_running
         ):
             return _settings_response(
@@ -11672,29 +11936,46 @@ async def save_behavior(request: Request):
     anchor = str(form.get("section") or "")
     if anchor not in ("discover", "collection-backup"):
         anchor = "behaviour"
+    submitted_generation = str(form.get("settings_generation") or "")
+    allowed_keys = set(settings_store.FORM_KEYS[anchor])
     def _posted_bool(key):
         return form.get(key, "").strip().lower() not in (
             "0", "false", "off", "no", ""
         )
     # The real Settings form ships a hidden form_complete=1 marker.
     is_complete = "form_complete" in form
-    if is_complete:
+    if is_complete and anchor == "behaviour":
         values = {k: (_posted_bool(k) if k in form else False)
                   for k in settings_store.BEHAVIOR_KEYS}
     else:
         values = {k: _posted_bool(k)
-                  for k in settings_store.BEHAVIOR_KEYS if k in form}
+                  for k in settings_store.BEHAVIOR_KEYS
+                  if k in allowed_keys and k in form}
     # Text/enum/list fields: take whatever the form posted; absent =
     # leave unchanged (don't wipe a previously-set value).
     for k in settings_store.TEXT_KEYS:
-        if k in form:
+        if k in allowed_keys and k in form:
             values[k] = form.get(k, "")
     effective_before = settings_store.current()
     quality_before = (
         str(effective_before.get("STREAMRIP_QUALITY", "")),
         bool(effective_before.get("PREFER_HIRES", False)),
     )
-    ok, warnings = settings_store.save(values)
+    try:
+        ok, warnings = settings_store.save_from_form(
+            values,
+            anchor,
+            submitted_generation,
+        )
+    except settings_store.SettingsChanged:
+        loop = asyncio.get_running_loop()
+        diags = await loop.run_in_executor(None, _diagnostics)
+        return _settings_response(
+            request,
+            error="settingschanged",
+            diagnostics=diags,
+            rerendered=True,
+        )
     if ok is None:
         # Re-render rather than redirect so the reason can name the field and
         # say what to change; a redirect can only carry the generic code.
@@ -11731,17 +12012,20 @@ async def save_behavior(request: Request):
                                   warnings=warnings, diagnostics=diags,
                                   quality_note=quality_note,
                                   rerendered=True)
-    suffix = "&queued=1" if settings_store._any_active_job() else ""
+    queued = settings_store._any_active_job()
+    suffix = "&queued=1" if queued else ""
     if quality_note:
         suffix += "&quality_note=1"
     # A freshly saved Last.fm key gets checked right away, so the section can
     # say whether Discover will work instead of leaving that for the tab to
     # discover later. One cheap chart call, bounded by the web timeout.
-    if "LASTFM_API_KEY" in form and lastfm.is_configured():
+    posted_lastfm_key = str(form.get("LASTFM_API_KEY") or "").strip()
+    if posted_lastfm_key:
         loop = asyncio.get_running_loop()
         try:
             await asyncio.wait_for(
-                loop.run_in_executor(None, lastfm.probe_key),
+                loop.run_in_executor(
+                    None, lambda: lastfm.probe_key(posted_lastfm_key)),
                 timeout=cfg.WEB_FETCH_TIMEOUT)
             suffix += "&lastfm=ok"
         except lastfm.LastfmKeyRejected:
@@ -11761,7 +12045,9 @@ async def change_web_password(request: Request):
     current = str(form.get("current_password") or "")
     fresh = str(form.get("new_password") or "")
     confirm = str(form.get("confirm_password") or "")
-    username = web_auth.current_username()
+    username, credential_generation = (
+        web_auth.current_username_and_generation()
+    )
     loop = asyncio.get_running_loop()
     # The KDF is deliberately slow, so it runs off the event loop; on the loop
     # it would stall every other request for the length of the hash.
@@ -11779,10 +12065,13 @@ async def change_web_password(request: Request):
                 None,
                 lambda: web_auth.set_credentials(
                     username, fresh,
-                    env_password_hash=web_auth.env_override_hash()),
+                    env_password_hash=web_auth.env_override_hash(),
+                    expected_generation=credential_generation),
             )
         except web_auth.PasswordRejected as exc:
             stored, error = False, str(exc)
+        except web_auth.CredentialsChanged:
+            return RedirectResponse(url="/login?changed=1", status_code=303)
         if not stored and not error:
             error = ("The new password couldn't be saved. Check that the data "
                      "folder is writable, then try again.")
@@ -11837,8 +12126,17 @@ async def collection_snapshot_now(request: Request, force: str = Form("")):
 @app.get("/collection/snapshot/download")
 async def collection_snapshot_download(request: Request):
     """Hand the current snapshot to the browser as a file."""
+    loop = asyncio.get_running_loop()
+    state, _snapshot = await loop.run_in_executor(
+        None, collection_snapshot.latest_status)
+    if state == "unreadable":
+        return RedirectResponse(
+            url="/settings?error=" + urllib.parse.quote(
+                "The current collection backup couldn't be read safely, so it "
+                "was not downloaded. Check the backup folder in Settings."),
+            status_code=303)
     path = collection_snapshot.latest_path()
-    if not path.is_file():
+    if state != "ready" or not path.is_file():
         return RedirectResponse(
             url="/settings?error=" + urllib.parse.quote(
                 "There is no snapshot yet. Run a library scan, or use Back up "
@@ -11876,7 +12174,8 @@ async def _read_upload(upload, limit):
 
 @app.post("/collection/restore")
 async def collection_restore_upload(request: Request,
-                                    backup: UploadFile = File(...)):
+                                    backup: UploadFile = File(...),
+                                    empty_replacement: str = Form("")):
     """Read a collection backup and park one review of what it can put back."""
     busy = _lock_busy_response(request)
     if busy is not None:
@@ -11902,41 +12201,64 @@ async def collection_restore_upload(request: Request,
             request, "That file is far too large to be a collection backup.")
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return _restore_response(
             request, "That file isn't a collection backup from this app.")
     ok, reason = collection_snapshot.validate_upload(data)
     if not ok:
         return _restore_response(request, reason)
     # An empty music folder that the app's own last backup says held albums is
-    # almost always an unmounted share, and a review built against it would
-    # seal that empty folder as the restore target. A genuinely fresh install
-    # has no local backup, so a real rebuild is never refused; if the albums
-    # really are gone from this folder, replacing the held-back backup under
-    # Collection backup records that, and the upload is accepted.
-    def _empty_but_backed_up():
+    def _restore_target_state():
+        root = Path(cfg.MUSIC_ROOT)
+        hint = _music_root_hint()
+        try:
+            if not root.exists():
+                return f"{root} does not exist. {hint}", None, None
+            if not root.is_dir():
+                return f"{root} is not a folder. {hint}", None, None
+        except OSError:
+            return f"{root} could not be read. {hint}", None, None
         scanner.clear_scan_caches()
         try:
             emptied = not any(scanner.list_library_artists())
         except OSError:
-            emptied = True
+            return f"{root} could not be read. {hint}", None, None
+        if not root.is_dir():
+            return f"{root} does not exist. {hint}", None, None
+        root_identity = candidate_premise.capture_music_root_identity()
+        if root_identity is None:
+            return (f"{root} could not be verified as the restore target. "
+                    f"{hint}", None, None)
         if not emptied:
-            return None
-        try:
-            latest = collection_snapshot.load_latest()
-        except OSError:
-            return None
+            return None, None, root_identity
+        backup_state, latest = collection_snapshot.latest_status()
+        if backup_state == "unreadable" and empty_replacement != "1":
+            return (
+                "No music was found in the library folder, and the last "
+                "collection backup could not be read safely. Check both "
+                "folders before continuing. If this is an intentionally empty "
+                "replacement folder, select that option and upload again.",
+                None,
+                None,
+            )
         recorded = ((latest or {}).get("counts") or {}).get("albums")
-        return recorded if isinstance(recorded, int) and recorded > 0 else None
+        if isinstance(recorded, int) and recorded > 0:
+            return None, recorded, root_identity
+        return None, None, root_identity
     loop = asyncio.get_running_loop()
-    recorded_albums = await loop.run_in_executor(None, _empty_but_backed_up)
-    if recorded_albums:
+    root_problem, recorded_albums, root_identity = await loop.run_in_executor(
+        None, _restore_target_state)
+    if root_problem:
+        return _restore_response(
+            request, f"{root_problem} No restore was started.")
+    if recorded_albums and empty_replacement != "1":
         return _restore_response(
             request,
             f"No music was found in your library folder, but its last backup "
             f"recorded {recorded_albums:,} albums. Check that the folder is "
-            f"mounted, then upload again; if those albums really are gone, "
-            f"replace the backup under Collection backup first.")
+            f"mounted, then upload again. If this is an empty replacement "
+            f"folder, select that option and upload again. The current backup "
+            f"will be kept.")
     try:
         credentials = await _authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION)
@@ -11955,17 +12277,30 @@ async def collection_restore_upload(request: Request,
     job.execute_kind = "collection_restore"
 
     def _scan(j):
+        if not candidate_premise.music_root_matches(root_identity):
+            raise CandidateStale(
+                "The music folder changed before the restore check began. "
+                "Check that it is mounted, then upload the backup again."
+            )
         active = _authorize_qobuz_live(
             QobuzAccess.CATALOGUE_ACTION,
             expected_generation=credentials.generation,
         )
         collection_restore.scan_restore(j, data, active.token)
 
-    if job_mgr.submit_scan(
-            job, _scan,
-            _resume_album_download(job, job.execute_args)) is None:
+    submitted = await _submit_scan_deduped_async(
+        job,
+        _scan,
+        _resume_album_download(job, job.execute_args),
+        "collection_restore",
+        statuses=("pending", "scanning", "awaiting_review", "running"),
+    )
+    if submitted is None:
+        busy = _lock_busy_response(request)
+        if busy is not None:
+            return busy
         return _job_admission_response(request)
-    return _restore_response(request, "", redirect=f"/jobs/{job.id}")
+    return _restore_response(request, "", redirect=f"/jobs/{submitted.id}")
 
 
 @app.post("/settings/mode")
@@ -12086,14 +12421,26 @@ _SSE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=cfg.SSE_MAX_WORKERS, thread_name_prefix="sse")
 
 
-def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
+def _stream_session_active(request: Request) -> bool:
+    if web_auth.auth_disabled():
+        return True
+    token = request.cookies.get(web_auth.SESSION_COOKIE)
+    return bool(token) and web_auth.verify_session(token)
+
+
+def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
     """The diagnostics list items, plus a Restore row per orphaned backup.
 
     Shared by the Settings page render, the Recheck partial, and the restore
     POST below, which re-renders the list in place so a restored backup
     disappears from it without a page reload."""
-    if checks is None:
-        checks = _diagnostics()
+    if not isinstance(diagnostics, dict):
+        report = _diagnostics()
+        if diagnostics is not None:
+            report["checks"] = diagnostics
+    else:
+        report = diagnostics
+    checks = report["checks"]
     rows = []
     for d in checks:
         icon = "OK" if d["ok"] else "!"
@@ -12109,10 +12456,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'<div class="min-w-0"><div class="ql-diagnostic-label">{html.escape(d["label"])}</div>{detail}</div>'
             f'</div>'
         )
-    try:
-        orphans = backup_mod.find_only_copy_backups()
-    except Exception:
-        orphans = []
+    orphans = report["orphans"]
     tok = html.escape(request.state.csrf_token)
     for path, origin in orphans:
         name = html.escape(path.name)
@@ -12188,10 +12532,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'</form>'
             f'</div></div></div>'
         )
-    try:
-        undo = backup_mod.list_undo_copies()
-    except Exception:
-        undo = []
+    undo = report["undo"]
     for path, origin in undo:
         name = html.escape(path.name)
         if origin:
@@ -12233,10 +12574,7 @@ def _diagnostics_fragment(request: Request, checks: list | None = None) -> str:
             f'</form>'
             f'</div></div></div>'
         )
-    try:
-        leftovers = _staging_leftovers()
-    except Exception:
-        leftovers = []
+    leftovers = report["leftovers"]
     for leftover in leftovers:
         detail = html.escape(leftover["reason"])
         if leftover["note"]:
@@ -12623,10 +12961,16 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
         elif backup_mod.release_undo_copy(target):
             album = html.escape(
                 _album_name_from_path(carried.receipt.get("origin", "")))
-            job_mgr.resolve_recovery_resolution(resolution_plan)
-            note = _diagnostics_result_notice(
-                "success", f"Deleted the hi-res originals of {album}. That "
-                "downsample can no longer be undone.")
+            if job_mgr.resolve_recovery_resolution(resolution_plan):
+                note = _diagnostics_result_notice(
+                    "success", f"Deleted the hi-res originals of {album}. "
+                    "That downsample can no longer be undone.")
+            else:
+                note = _diagnostics_result_notice(
+                    "error", "The hi-res originals were deleted, but their "
+                    "saved recovery status could not be updated. History may "
+                    "keep flagging the recovery until the data volume has "
+                    "been checked.")
         else:
             note = _diagnostics_result_notice(
                 "error", "Couldn't confirm the album still holds every one of "
@@ -12772,7 +13116,7 @@ async def discard_backup_unchecked(request: Request, backup: str = Form("")):
 
 
 @app.get("/api/jobs/{job_id}/stream")
-async def job_stream(job_id: str):
+async def job_stream(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id)
     if not job:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -12781,6 +13125,9 @@ async def job_stream(job_id: str):
         # Reconnect quickly so a backgrounded tab's progress bar catches up to
         # the live count soon after it's brought back to the foreground.
         yield "retry: 750\n\n"
+        if not _stream_session_active(request):
+            yield "event: auth\ndata: signed_out\n\n"
+            return
         if (job.status in job_mgr.TERMINAL
                 or job.status == job_mgr.JobStatus.AWAITING_REVIEW):
             replay = (
@@ -12789,8 +13136,14 @@ async def job_stream(job_id: str):
                 else ()
             )
             for line in replay:
+                if not _stream_session_active(request):
+                    yield "event: auth\ndata: signed_out\n\n"
+                    return
                 escaped = line.replace("\n", " ").replace("\r", "")
                 yield f"data: {escaped}\n\n"
+            if not _stream_session_active(request):
+                yield "event: auth\ndata: signed_out\n\n"
+                return
             yield f"event: done\ndata: {job.status.value}\n\n"
             return
         sub = job.subscribe()
@@ -12798,9 +13151,15 @@ async def job_stream(job_id: str):
         empty_ticks = 0
         try:
             while True:
+                if not _stream_session_active(request):
+                    yield "event: auth\ndata: signed_out\n\n"
+                    break
                 try:
                     line = await loop.run_in_executor(
                         _SSE_EXECUTOR, lambda: sub.get(timeout=0.5))
+                    if not _stream_session_active(request):
+                        yield "event: auth\ndata: signed_out\n\n"
+                        break
                     empty_ticks = 0
                     if line == job_mgr.STREAM_END:
                         yield f"event: done\ndata: {job.status.value}\n\n"
@@ -12836,7 +13195,7 @@ async def job_stream(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/review-stream")
-async def job_review_stream(job_id: str):
+async def job_review_stream(request: Request, job_id: str):
     """Live channel for an awaiting-review page: emits `event: review` whenever
     selection or candidates change (a tick/untick/hide in this or another tab),
     so every open view stays in sync. Closes once the job leaves review (the
@@ -12851,6 +13210,9 @@ async def job_review_stream(job_id: str):
 
     async def _generator():
         yield "retry: 1000\n\n"
+        if not _stream_session_active(request):
+            yield "event: auth\ndata: signed_out\n\n"
+            return
         if job is None or job.status != job_mgr.JobStatus.AWAITING_REVIEW:
             yield "event: closed\ndata: inactive\n\n"
             return
@@ -12859,9 +13221,15 @@ async def job_review_stream(job_id: str):
         empty_ticks = 0
         try:
             while True:
+                if not _stream_session_active(request):
+                    yield "event: auth\ndata: signed_out\n\n"
+                    break
                 try:
                     line = await loop.run_in_executor(
                         _SSE_EXECUTOR, lambda: sub.get(timeout=0.5))
+                    if not _stream_session_active(request):
+                        yield "event: auth\ndata: signed_out\n\n"
+                        break
                     if line.startswith(job_mgr.REVIEW_CHANGED):
                         # The data names the originating tab (or "changed" for a
                         # server-side sync) so that tab can skip reloading a DOM
@@ -13044,15 +13412,14 @@ def _get_optional_token():
 
 def _collection_backup_status():
     """What the Settings page shows about the collection snapshot."""
-    try:
-        latest = collection_snapshot.load_latest()
-    except OSError:
-        latest = None
+    state, latest = collection_snapshot.latest_status()
     info = {
         "folder": str(collection_snapshot.snapshot_dir()),
         "age": None,
         "counts": None,
         "held_back": None,
+        "held_back_unreadable": False,
+        "unreadable": state == "unreadable",
     }
     if isinstance(latest, dict):
         info["counts"] = latest.get("counts")
@@ -13062,15 +13429,29 @@ def _collection_backup_status():
     suspect = collection_snapshot.suspect_path()
     try:
         held = json.loads(suspect.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         held = None
-    if isinstance(held, dict):
+    except (OSError, RecursionError, ValueError):
+        held = None
+        info["held_back_unreadable"] = True
+    valid, _reason = collection_snapshot.validate_upload(
+        held, allow_empty=True
+    )
+    if valid:
         info["held_back"] = held.get("counts")
+    elif held is not None:
+        info["held_back_unreadable"] = True
     return info
 
 
 def _format_age(ts: float) -> str:
     """Human-readable age of a past timestamp."""
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if not math.isfinite(ts):
+        return ""
     age = time.time() - ts
     if age < 120:
         return "just now"

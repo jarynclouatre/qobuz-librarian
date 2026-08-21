@@ -14,6 +14,7 @@ revive stale sessions; a session also ends on logout or expiry.
 import hashlib
 import json
 import logging
+import math
 import os
 import secrets
 import tempfile
@@ -26,6 +27,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.web.csrf import request_is_https
 
 log = logging.getLogger("qobuz_librarian")
 
@@ -40,6 +42,14 @@ class PasswordRejected(ValueError):
 
 
 class CredentialSeedError(RuntimeError):
+    pass
+
+
+class CredentialsAlreadyConfigured(RuntimeError):
+    pass
+
+
+class CredentialsChanged(RuntimeError):
     pass
 
 
@@ -122,9 +132,11 @@ def safe_current_path(raw, host: str) -> str:
 # Credential file cache.
 _cred_cache: dict | None = None
 _cred_cache_path: str | None = None
+_credentials_lock = threading.RLock()
 
 # Login failure tracking: IP → list of failure timestamps.
 _login_failures: dict[str, list[float]] = {}
+_login_pending: dict[str, int] = {}
 _login_lock = threading.Lock()
 _LOGIN_MAX = 5
 _LOGIN_WINDOW = 3600
@@ -142,8 +154,10 @@ _MAX_TRACKED_IPS = 2048
 # also lock the targeted account after _USER_LOGIN_MAX failures regardless of
 # source IP.
 _user_failures: dict[str, list[float]] = {}
+_user_pending: dict[str, int] = {}
 _USER_LOGIN_MAX = 10
 _MAX_TRACKED_USERS = 1024
+_MAX_CONCURRENT_LOGIN_CHECKS = 8
 
 # Active session tokens: a credential-generation-bound digest of the random
 # per-login cookie value → expiry epoch seconds. Binding the lookup to the
@@ -151,6 +165,7 @@ _MAX_TRACKED_USERS = 1024
 # rotation, even if clearing that second file failed after credential publish.
 _SESSIONS_FILE = cfg.DATA_DIR / ".qobuz_web_sessions.json"
 _sessions_lock = threading.Lock()
+_MAX_ACTIVE_SESSIONS = 128
 
 
 def _token_digest(token: str) -> str:
@@ -165,10 +180,21 @@ def _token_digest(token: str) -> str:
 def _load_sessions() -> dict[str, float]:
     try:
         raw = json.loads(_SESSIONS_FILE.read_text(encoding="utf-8"))
-        now = time.time()
-        return {str(k): float(v) for k, v in raw.items() if float(v) > now}
     except (OSError, ValueError, AttributeError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    now = time.time()
+    active = []
+    for digest, raw_expiry in raw.items():
+        try:
+            expiry = float(raw_expiry)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if isinstance(digest, str) and math.isfinite(expiry) and expiry > now:
+            active.append((digest, expiry))
+    active.sort(key=lambda item: item[1], reverse=True)
+    return dict(active[:_MAX_ACTIVE_SESSIONS])
 
 
 def _save_sessions_locked() -> bool:
@@ -292,6 +318,13 @@ def current_username() -> str:
     return str(_read().get("username") or "")
 
 
+def current_username_and_generation() -> tuple[str, str]:
+    """The login name and credential generation from the same snapshot."""
+    credentials = _read()
+    return (str(credentials.get("username") or ""),
+            str(credentials.get("session_secret") or ""))
+
+
 def credentials_configured() -> bool:
     d = _read()
     return bool(d.get("username") and d.get("password_hash")
@@ -312,67 +345,79 @@ def creds_file_present_but_unreadable() -> bool:
 
 
 def set_credentials(username: str, password: str, *,
-                    env_password_hash: str = "") -> bool:
+                    env_password_hash: str = "",
+                    require_unconfigured: bool = False,
+                    expected_generation: str | None = None) -> bool:
     """Persist username + password hash + a fresh session secret, atomically
     and 0600. Returns False if the data volume isn't writable so callers can
     show a clear message instead of 500ing. The new session secret rotates on
     every call, so resetting the password logs out any existing browser. Raises
-    PasswordRejected before writing when the new password does not meet policy."""
+    PasswordRejected before writing when the new password does not meet policy.
+    When expected_generation is supplied, raises CredentialsChanged rather than
+    overwriting credentials that changed after the caller verified them."""
     global _cred_cache, _cred_cache_path
     error = new_password_error(username, password)
     if error:
         raise PasswordRejected(error)
-    # Never overwrite an existing-but-unreadable creds file: a transient read
-    # error must not let the open /setup page clobber the admin account.
-    if creds_file_present_but_unreadable():
-        return False
-    _cred_cache = None
-    _cred_cache_path = None
-    payload = {
-        "username": username,
-        "password_hash": hash_password(password),
-        "session_secret": secrets.token_urlsafe(32),
-    }
-    if env_password_hash:
-        payload["env_password_hash"] = env_password_hash
-    try:
-        cfg.WEB_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(cfg.WEB_AUTH_FILE.parent),
-                                   prefix=".qobuz_web_auth.", suffix=".tmp")
-        fd_owned = False
+    with _credentials_lock:
+        if require_unconfigured and credentials_configured():
+            raise CredentialsAlreadyConfigured(
+                "a web login was created by another request"
+            )
+        if creds_file_present_but_unreadable():
+            return False
+        if expected_generation is not None:
+            current_generation = str(_read().get("session_secret") or "")
+            if (not expected_generation or not current_generation
+                    or not _constant_time_eq(expected_generation,
+                                             current_generation)):
+                raise CredentialsChanged(
+                    "the web login changed while this request was running"
+                )
+        _cred_cache = None
+        _cred_cache_path = None
+        payload = {
+            "username": username,
+            "password_hash": hash_password(password),
+            "session_secret": secrets.token_urlsafe(32),
+        }
+        if env_password_hash:
+            payload["env_password_hash"] = env_password_hash
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                fd_owned = True
-                json.dump(payload, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, cfg.WEB_AUTH_FILE)
-            # Make the rename durable: a power loss right after replace() must not
-            # revert to "no creds" and re-open the unauthenticated /setup page on
-            # reboot. fsync the parent dir so the new directory entry is on disk.
+            cfg.WEB_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(cfg.WEB_AUTH_FILE.parent),
+                                       prefix=".qobuz_web_auth.", suffix=".tmp")
+            fd_owned = False
             try:
-                dfd = os.open(str(cfg.WEB_AUTH_FILE.parent), os.O_RDONLY)
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    fd_owned = True
+                    json.dump(payload, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, cfg.WEB_AUTH_FILE)
                 try:
-                    os.fsync(dfd)
-                finally:
-                    os.close(dfd)
-            except OSError:
-                pass
-        finally:
-            if not fd_owned:
-                try:
-                    os.close(fd)
+                    dfd = os.open(str(cfg.WEB_AUTH_FILE.parent), os.O_RDONLY)
+                    try:
+                        os.fsync(dfd)
+                    finally:
+                        os.close(dfd)
                 except OSError:
                     pass
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-    except OSError:
-        return False
-    # A password change (or first setup) invalidates every existing session, so
-    # tokens minted under the prior password stop authenticating.
-    revoke_all_sessions()
-    return True
+            finally:
+                if not fd_owned:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+        except OSError:
+            return False
+        _cred_cache = payload
+        _cred_cache_path = str(cfg.WEB_AUTH_FILE)
+        revoke_all_sessions()
+        return True
 
 
 def _env_password() -> str:
@@ -470,16 +515,17 @@ def mint_session() -> str:
     now = time.time()
     digest = _token_digest(token)
     with _sessions_lock:
+        previous_sessions = dict(_sessions)
         for t, exp in list(_sessions.items()):
             if exp <= now:
                 del _sessions[t]
-        previous = _sessions.get(digest)
         _sessions[digest] = now + _COOKIE_MAX_AGE
+        while len(_sessions) > _MAX_ACTIVE_SESSIONS:
+            oldest = min(_sessions, key=_sessions.get)
+            del _sessions[oldest]
         if not _save_sessions_locked():
-            if previous is None:
-                _sessions.pop(digest, None)
-            else:
-                _sessions[digest] = previous
+            _sessions.clear()
+            _sessions.update(previous_sessions)
             raise SessionPersistenceError("The web session could not be saved.")
     return token
 
@@ -528,8 +574,7 @@ def verify_session(cookie_value: str) -> bool:
 
 
 def _secure(request) -> bool:
-    return (request.url.scheme == "https"
-            or request.headers.get("x-forwarded-proto") == "https")
+    return request_is_https(request)
 
 
 def set_session_cookie(response, request) -> None:
@@ -599,8 +644,9 @@ def client_ip(request) -> str:
     FORWARDED_ALLOW_IPS names, and its default (127.0.0.1) never matches a
     proxy on a Docker network. Left unset, every visitor arrives as the proxy
     and the per-address throttle becomes one bucket for the whole deployment,
-    so a stranger's wrong guesses lock the owner out too. Say so once, naming
-    the address to trust, rather than throttling everyone as one in silence.
+    so one visitor's wrong guesses can affect everyone behind it. Say so once,
+    naming the peer for the operator to verify rather than silently sharing one
+    throttle bucket.
     """
     global _warned_untrusted_proxy
     peer = (request.client.host if request.client else "") or ""
@@ -613,8 +659,9 @@ def client_ip(request) -> str:
         log.warning(
             "Sign-ins are arriving through a proxy at %s whose forwarded "
             "address isn't trusted, so the failed-login limit counts every "
-            "visitor as one and a stranger's wrong guesses can lock you out. "
-            "Set FORWARDED_ALLOW_IPS=%s in .env and restart.", peer, peer)
+            "visitor as one. If %s is your reverse proxy, set "
+            "FORWARDED_ALLOW_IPS=%s in .env and restart; never trust an "
+            "address that belongs to a visitor.", peer, peer, peer)
     return peer or "unknown"
 
 
@@ -623,30 +670,102 @@ def _locked(times: list[float], limit: int, now: float) -> bool:
     return len(times) >= limit and now - max(times) < _LOGIN_LOCKOUT
 
 
-def check_login_rate_limit(ip: str, username: str = "") -> bool:
-    """True if BOTH this IP and this account may attempt a login. The per-account
-    counter (keyed on the submitted username) blocks an attacker who rotates
-    source IPs against one account; the per-IP counter alone is bypassable."""
+def _has_attempt_slot(times: list[float], pending: int, limit: int,
+                      now: float) -> bool:
+    if _locked(times, limit, now):
+        return False
+    slots = 1 if len(times) >= limit else limit - len(times)
+    return pending < slots
+
+
+def _reservation_victim(failures, pending, key, maximum):
+    """Return (room, old failure bucket to evict). Caller holds the lock."""
+    if key in failures or key in pending:
+        return True, None
+    if len(set(failures) | set(pending)) < maximum:
+        return True, None
+    evictable = [old for old in failures if not pending.get(old)]
+    if not evictable:
+        return False, None
+    return True, min(evictable, key=lambda old: min(failures[old]))
+
+
+def begin_login_attempt(ip: str, username: str = "") -> bool:
+    """Atomically reserve a password check for this IP and account.
+
+    Completed failures and checks already running both consume the limit. This
+    closes the gap where a burst of requests could all pass a read-only check
+    before any of their slow password hashes finished and recorded a failure.
+    Every successful reservation must be finished or cancelled.
+    """
     now = time.monotonic()
     uname = _norm_user(username)
     with _login_lock:
-        times = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
-        if times:
-            _login_failures[ip] = times
-        else:
-            _login_failures.pop(ip, None)
-        if _locked(times, _LOGIN_MAX, now):
+        _prune_failures(now)
+        if sum(_login_pending.values()) >= _MAX_CONCURRENT_LOGIN_CHECKS:
+            return False
+        times = _login_failures.get(ip, [])
+        if not _has_attempt_slot(
+                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
             return False
         if uname:
-            utimes = [t for t in _user_failures.get(uname, [])
-                      if now - t < _LOGIN_WINDOW]
-            if utimes:
-                _user_failures[uname] = utimes
-            else:
-                _user_failures.pop(uname, None)
-            if _locked(utimes, _USER_LOGIN_MAX, now):
+            utimes = _user_failures.get(uname, [])
+            if not _has_attempt_slot(
+                    utimes, _user_pending.get(uname, 0),
+                    _USER_LOGIN_MAX, now):
                 return False
+
+        ip_room, ip_victim = _reservation_victim(
+            _login_failures, _login_pending, ip, _MAX_TRACKED_IPS)
+        user_room, user_victim = True, None
+        if uname:
+            user_room, user_victim = _reservation_victim(
+                _user_failures, _user_pending, uname, _MAX_TRACKED_USERS)
+        if not ip_room or not user_room:
+            return False
+        if ip_victim is not None:
+            _login_failures.pop(ip_victim, None)
+        if user_victim is not None:
+            _user_failures.pop(user_victim, None)
+        _login_pending[ip] = _login_pending.get(ip, 0) + 1
+        if uname:
+            _user_pending[uname] = _user_pending.get(uname, 0) + 1
         return True
+
+
+def _release_login_attempt(ip: str, uname: str) -> None:
+    """Release one reservation. Caller holds _login_lock."""
+    pending = _login_pending.get(ip, 0)
+    if pending <= 1:
+        _login_pending.pop(ip, None)
+    else:
+        _login_pending[ip] = pending - 1
+    if uname:
+        pending = _user_pending.get(uname, 0)
+        if pending <= 1:
+            _user_pending.pop(uname, None)
+        else:
+            _user_pending[uname] = pending - 1
+
+
+def finish_login_attempt(ip: str, username: str = "", *, success: bool) -> None:
+    """Finish a reserved check, recording failure or clearing old failures."""
+    now = time.monotonic()
+    uname = _norm_user(username)
+    with _login_lock:
+        _release_login_attempt(ip, uname)
+        if success:
+            _login_failures.pop(ip, None)
+            if uname:
+                _user_failures.pop(uname, None)
+            return
+        _record_login_failure(ip, uname, now)
+
+
+def cancel_login_attempt(ip: str, username: str = "") -> None:
+    """Release a check that did not reach a password verdict."""
+    with _login_lock:
+        _release_login_attempt(ip, _norm_user(username))
 
 
 def login_lockout_remaining(ip: str, username: str = "") -> int:
@@ -664,31 +783,42 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
         times = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
         if _locked(times, _LOGIN_MAX, now):
             waits.append(_LOGIN_LOCKOUT - (now - max(times)))
+        elif not _has_attempt_slot(
+                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
+            waits.append(1)
         if uname:
             utimes = [t for t in _user_failures.get(uname, [])
                       if now - t < _LOGIN_WINDOW]
             if _locked(utimes, _USER_LOGIN_MAX, now):
                 waits.append(_LOGIN_LOCKOUT - (now - max(utimes)))
+            elif not _has_attempt_slot(
+                    utimes, _user_pending.get(uname, 0),
+                    _USER_LOGIN_MAX, now):
+                waits.append(1)
     # A live lockout never rounds down to nothing, or the refusal it drives
     # would have no wait to name.
     return max(1, int(max(waits))) if waits else 0
 
 
+def _record_login_failure(ip: str, uname: str, now: float) -> None:
+    """Record one failure. Caller holds _login_lock."""
+    _prune_failures(now)
+    if ip not in _login_failures and len(_login_failures) >= _MAX_TRACKED_IPS:
+        del _login_failures[min(_login_failures,
+                                key=lambda k: min(_login_failures[k]))]
+    _login_failures.setdefault(ip, []).append(now)
+    if uname:
+        if (uname not in _user_failures
+                and len(_user_failures) >= _MAX_TRACKED_USERS):
+            del _user_failures[min(_user_failures,
+                                   key=lambda k: min(_user_failures[k]))]
+        _user_failures.setdefault(uname, []).append(now)
+
+
 def record_login_failure(ip: str, username: str = "") -> None:
     now = time.monotonic()
-    uname = _norm_user(username)
     with _login_lock:
-        _prune_failures(now)
-        if ip not in _login_failures and len(_login_failures) >= _MAX_TRACKED_IPS:
-            del _login_failures[min(_login_failures,
-                                    key=lambda k: min(_login_failures[k]))]
-        _login_failures.setdefault(ip, []).append(now)
-        if uname:
-            if (uname not in _user_failures
-                    and len(_user_failures) >= _MAX_TRACKED_USERS):
-                del _user_failures[min(_user_failures,
-                                       key=lambda k: min(_user_failures[k]))]
-            _user_failures.setdefault(uname, []).append(now)
+        _record_login_failure(ip, _norm_user(username), now)
 
 
 def clear_login_failures(ip: str, username: str = "") -> None:

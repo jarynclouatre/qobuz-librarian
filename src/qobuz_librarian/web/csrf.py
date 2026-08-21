@@ -19,8 +19,76 @@ def body_limit(path: str) -> int:
     return _UPLOAD_LIMITS.get(path, _MAX_FORM_BYTES)
 
 
+class RequestBodyLimitMiddleware:
+    """Enforce form limits on bytes received, including chunked requests."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope["type"] != "http"
+                or scope.get("method", "GET") in _SAFE_METHODS):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {name.lower(): value for name, value in scope["headers"]}
+        try:
+            content_length = int(headers.get(b"content-length", b"0"))
+        except ValueError:
+            content_length = 0
+        limit = body_limit(scope.get("path", ""))
+        if content_length > limit:
+            await PlainTextResponse(
+                "Request body too large", status_code=413
+            )(scope, receive, send)
+            return
+
+        received = 0
+        exceeded = False
+        pending_messages = []
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            if exceeded:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def pending_send(message):
+            pending_messages.append(message)
+
+        try:
+            await self.app(scope, limited_receive, pending_send)
+        except Exception:
+            if not exceeded:
+                raise
+
+        if exceeded:
+            await PlainTextResponse(
+                "Request body too large", status_code=413
+            )(scope, receive, send)
+            return
+        for message in pending_messages:
+            await send(message)
+
+
 def _new_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def request_is_https(request) -> bool:
+    """Whether the ASGI server accepted this request as HTTPS.
+
+    Uvicorn promotes X-Forwarded-Proto into the request scheme only when the
+    connecting proxy is in FORWARDED_ALLOW_IPS. Reading the raw header here
+    would let any HTTP client force unusable Secure cookies onto itself.
+    """
+    return request.url.scheme == "https"
 
 
 _STALE_MESSAGE = ("This page had been open too long to be trusted with that "
@@ -44,15 +112,13 @@ def _stale_page_response(request, token):
 
 
 def _set_csrf_cookie(request, response, token):
-    secure = (request.url.scheme == "https"
-              or request.headers.get("x-forwarded-proto") == "https")
     response.set_cookie(
         CSRF_COOKIE_NAME,
         token,
         max_age=60 * 60 * 24 * 30,
         samesite="strict",
         httponly=True,
-        secure=secure,
+        secure=request_is_https(request),
         path="/",
     )
 
@@ -108,8 +174,6 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # /api responses don't need it.
         is_html = response.headers.get("content-type", "").startswith("text/html")
         if not cookie_token and is_html:
-            secure = (request.url.scheme == "https"
-                      or request.headers.get("x-forwarded-proto") == "https")
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
@@ -119,7 +183,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 # this cookie, so HttpOnly costs nothing and keeps it out of
                 # reach of any injected script.
                 httponly=True,
-                secure=secure,
+                secure=request_is_https(request),
             )
         return response
 
@@ -169,9 +233,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Permissions-Policy", "geolocation=(), microphone=(), camera=()")
         # HSTS only on HTTPS - emitting it over plain HTTP is pointless and
         # would brick a user who later reaches the host via HTTP.
-        is_https = (request.url.scheme == "https"
-                    or request.headers.get("x-forwarded-proto") == "https")
-        if is_https:
+        if request_is_https(request):
             response.headers.setdefault(
                 "Strict-Transport-Security", "max-age=31536000")
         return response

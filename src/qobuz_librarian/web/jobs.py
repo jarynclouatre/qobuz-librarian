@@ -742,8 +742,17 @@ class Job:
             cands = list(self.candidates)
         selected = [c for c in cands if c.get("selected")]
         artists = {c.get("artist") for c in cands}
-        reclaimable = sum(int((c.get("payload") or {}).get("est_saving") or 0)
-                          for c in selected)
+
+        def estimate(candidate):
+            try:
+                value = int(
+                    (candidate.get("payload") or {}).get("est_saving") or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                return 0
+            return max(0, value)
+
+        reclaimable = sum(estimate(candidate) for candidate in selected)
         return {
             "total": len(cands),
             "artists": len(artists),
@@ -809,7 +818,7 @@ class JobRegistry:
     def finished(self) -> list[Job]:
         return [j for j in self.all() if j.status in TERMINAL]
 
-    PERSIST_KEEP = 1000  # finished rows retained on disk for the archive view
+    PERSIST_KEEP = job_persistence.FINISHED_HISTORY_KEEP
 
     def _prune_locked(self):
         """Evict the oldest finished jobs past MAX_FINISHED. Caller holds _lock.
@@ -983,6 +992,10 @@ _download_queue: "queue.Queue" = queue.Queue()
 _scan_queue: "queue.Queue" = queue.Queue()
 _stop_event = threading.Event()
 _worker_lifecycle_lock = threading.Lock()
+_POST_JOB_HOOK_WORKERS = 4
+_POST_JOB_HOOK_QUEUE_CAP = job_persistence.FINISHED_HISTORY_KEEP
+_post_job_hook_queue: "queue.Queue[dict]" = queue.Queue(
+    maxsize=_POST_JOB_HOOK_QUEUE_CAP)
 _post_job_hook_threads: set[threading.Thread] = set()
 _post_job_hook_threads_lock = threading.Lock()
 _staging_entry_guard_lock = threading.Lock()
@@ -1271,49 +1284,63 @@ def _fire_post_job_hook(payload):
     _run_post_job_hook(payload)
 
 
-def _start_post_job_hook(payload):
-    thread = None
-
-    def run():
+def _post_job_hook_worker():
+    while True:
+        payload = _post_job_hook_queue.get()
         try:
             _fire_post_job_hook(payload)
+        except Exception:
+            logging.getLogger("qobuz_librarian").exception(
+                "post-job hook worker failed")
         finally:
-            with _post_job_hook_threads_lock:
-                _post_job_hook_threads.discard(thread)
+            _post_job_hook_queue.task_done()
 
-    thread = threading.Thread(
-        target=run,
-        args=(),
-        daemon=True,
-        name="post-job-hook",
-    )
-    try:
-        with _post_job_hook_threads_lock:
+
+def _ensure_post_job_hook_workers() -> bool:
+    with _post_job_hook_threads_lock:
+        while len(_post_job_hook_threads) < _POST_JOB_HOOK_WORKERS:
+            thread = threading.Thread(
+                target=_post_job_hook_worker,
+                args=(),
+                daemon=True,
+                name="post-job-hook",
+            )
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                logging.getLogger("qobuz_librarian").warning(
+                    "post-job hook thread could not start: %s", exc)
+                break
             _post_job_hook_threads.add(thread)
-            thread.start()
-    except RuntimeError as exc:
-        with _post_job_hook_threads_lock:
-            _post_job_hook_threads.discard(thread)
+        return bool(_post_job_hook_threads)
+
+
+def _start_post_job_hook(payload):
+    if not os.environ.get("POST_JOB_HOOK", "").strip():
+        return
+    if not _ensure_post_job_hook_workers():
+        return
+    try:
+        _post_job_hook_queue.put_nowait(payload)
+    except queue.Full:
         logging.getLogger("qobuz_librarian").warning(
-            "post-job hook thread could not start: %s", exc)
+            "post-job hook queue is full; notification for %s was skipped",
+            payload.get("id") or "a finished job",
+        )
 
 
 def _wait_for_post_job_hooks():
     """Wait at most one hook timeout for notifications already in flight."""
     deadline = time.monotonic() + float(cfg.POST_JOB_HOOK_TIMEOUT) + 1.0
-    while True:
-        with _post_job_hook_threads_lock:
-            threads = tuple(_post_job_hook_threads)
-        if not threads:
-            return
+    while _post_job_hook_queue.unfinished_tasks:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             logging.getLogger("qobuz_librarian").warning(
-                "%s post-job hook thread(s) still running at shutdown",
-                len(threads),
+                "%s post-job hook notification(s) still pending at shutdown",
+                _post_job_hook_queue.unfinished_tasks,
             )
             return
-        threads[0].join(remaining)
+        time.sleep(min(0.05, remaining))
 
 
 def fire_auth_lost_hook():
@@ -1940,6 +1967,11 @@ def restore_jobs(
     restored = []
     terminal_payloads = []
 
+    unreadable_review_error = (
+        "This saved review couldn't be restored because its choices could "
+        "not be read. Start the scan again from its original page."
+    )
+
     def _persist_restored_transition(job, previous_status):
         saved = job_persistence.persist(job)
         if saved is not True:
@@ -1998,6 +2030,9 @@ def restore_jobs(
             finished_at=row.get("finished_at"),
         )
         job._durability_required = True
+        if row.get("single_unreadable"):
+            job._preserve_persisted_single = True
+            job._single_undo_unavailable = True
         completion_acknowledged = False
         if job.album_id and not job.recoveries:
             completion_acknowledged = (
@@ -2120,6 +2155,12 @@ def restore_jobs(
                 job.finished_at = time.time()
                 interrupted += 1
                 _persist_restored_transition(job, previous_status)
+            elif row.get("candidates_unreadable"):
+                job.status = JobStatus.FAILED
+                job.error = unreadable_review_error
+                job.finished_at = time.time()
+                interrupted += 1
+                _persist_restored_transition(job, previous_status)
             elif job.execute_args_unreadable:
                 job.status = JobStatus.FAILED
                 job.error = (
@@ -2188,7 +2229,14 @@ def load_historical_job(job_id: str) -> Optional[Job]:
         status = JobStatus(row["status"])
     except ValueError:
         return None
-    return Job(
+    if status == JobStatus.AWAITING_REVIEW and row.get("candidates_unreadable"):
+        status = JobStatus.FAILED
+        row["error"] = (
+            "This saved review couldn't be restored because its choices "
+            "could not be read. Start the scan again from its original page."
+        )
+        row["finished_at"] = row.get("finished_at") or time.time()
+    job = Job(
         id=row["id"],
         title=row.get("title") or "",
         artist=row.get("artist") or "",
@@ -2216,6 +2264,10 @@ def load_historical_job(job_id: str) -> Optional[Job]:
         ),
         finished_at=row.get("finished_at"),
     )
+    if row.get("single_unreadable"):
+        job._preserve_persisted_single = True
+        job._single_undo_unavailable = True
+    return job
 
 
 def _finish_canceled(job: Job) -> bool:
@@ -2251,11 +2303,6 @@ def request_cancel(job: Job) -> bool:
     # journal settles.
     if cancel_is_protected(job):
         return False
-    # Beets runs to its own end, so accepting a cancel here would be a promise
-    # the job then breaks: it imports everything and finishes as if nothing was
-    # asked. Refuse it and say why instead.
-    if job.importing:
-        return False
     if job.status == JobStatus.AWAITING_REVIEW:
         review_canceled = cancel_review(job)
         if review_canceled is True:
@@ -2265,6 +2312,8 @@ def request_cancel(job: Job) -> bool:
     # Either it wasn't in review, or an approve() flipped it to PENDING
     # between the check and cancel_review's locked re-check.
     with job._lock:
+        if job.importing:
+            return False
         if job.status in TERMINAL:
             return False
         canceled_pending = job.status == JobStatus.PENDING

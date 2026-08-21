@@ -1,15 +1,4 @@
-"""Rebuild a library from a collection backup file.
-
-The backup written under Settings lists every artist, album and track the
-library held. This reads one back, works out which of those albums are not on
-disk any more, finds each one on Qobuz, and parks a single review so the whole
-rebuild is confirmed once rather than album by album.
-
-Nothing here writes to the library, and none of the uploaded file's text is
-ever used as a path: an album is matched against folders the scanner listed,
-and a row for an artist with no folder left carries only the artist's name,
-checked to be a single folder name before it is stored.
-"""
+"""Build a download review from a collection snapshot."""
 from __future__ import annotations
 
 from qobuz_librarian import config as cfg
@@ -57,6 +46,26 @@ def _album_isrcs(album) -> list:
 def _snapshot_album_title(album) -> str:
     """What to call a backed-up album: its tag title, else its folder name."""
     return (album.get("title") or album.get("name") or "").strip()
+
+
+def _title_key(value) -> str:
+    text = str(value or "").strip()
+    return discovery.owned_title_key(text) or text.casefold()
+
+
+def _name_key(value) -> str:
+    text = str(value or "").strip()
+    return normalize(text) or text.casefold()
+
+
+def _matches_snapshot(found, album, artist_name) -> bool:
+    found_artist = found.get("artist") or {}
+    if isinstance(found_artist, dict):
+        found_artist = found_artist.get("name") or ""
+    return (
+        _title_key(found.get("title")) == _title_key(_snapshot_album_title(album))
+        and _name_key(found_artist) == _name_key(artist_name)
+    )
 
 
 class _OnDisk:
@@ -138,7 +147,7 @@ def _by_stored_id(album, token):
     return found if _usable(found) else None
 
 
-def _by_isrc(album, token):
+def _by_isrc(album, artist_name, token):
     for code in _album_isrcs(album)[:ISRC_LOOKUP_TRIES]:
         track = find_qobuz_track_by_isrc(code, token)
         album_id = ((track or {}).get("album") or {}).get("id")
@@ -150,7 +159,7 @@ def _by_isrc(album, token):
             raise
         except Exception:
             continue
-        if _usable(found):
+        if _usable(found) and _matches_snapshot(found, album, artist_name):
             return found
     return None
 
@@ -159,8 +168,8 @@ def _by_search(album, artist_name, token):
     title = _snapshot_album_title(album)
     if not title:
         return None
-    wanted = discovery.owned_title_key(title)
-    wanted_artist = normalize(artist_name)
+    wanted = _title_key(title)
+    wanted_artist = _name_key(artist_name)
     try:
         results = search_albums(f"{artist_name} {title}", token)
     except (AuthLost, QobuzUnavailable):
@@ -170,10 +179,10 @@ def _by_search(album, artist_name, token):
     lossless = [a for a in results if is_lossless_album(a)]
     for found, _versions in dedup_album_versions(
             lossless, prefer_hires=cfg.PREFER_HIRES):
-        if discovery.owned_title_key(found.get("title")) != wanted:
+        if _title_key(found.get("title")) != wanted:
             continue
         found_artist = (found.get("artist") or {}).get("name") or ""
-        if wanted_artist and normalize(found_artist) != wanted_artist:
+        if wanted_artist and _name_key(found_artist) != wanted_artist:
             continue
         try:
             full = get_album(found.get("id"), token)
@@ -192,7 +201,7 @@ def _resolve(album, artist_name, token):
     if found is not None:
         return found, None
     stored_failed = bool(album.get("qobuz_album_id"))
-    found = _by_isrc(album, token)
+    found = _by_isrc(album, artist_name, token)
     if found is not None:
         return found, None
     found = _by_search(album, artist_name, token)

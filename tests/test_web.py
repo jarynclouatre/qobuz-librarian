@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import copy
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -33,6 +34,17 @@ def _wait_for(predicate, timeout=5.0):
             return True
         time.sleep(0.02)
     return False
+
+
+def _settings_form(data):
+    """Add the optimistic version carried by the rendered Settings form."""
+    from qobuz_librarian.web import settings_store
+
+    section = str(data.get("section") or "behaviour")
+    return {
+        **data,
+        "settings_generation": settings_store.form_generation(section),
+    }
 
 
 def _allow_legacy_candidate_execution(monkeypatch):
@@ -480,6 +492,30 @@ def test_parked_review_candidate_does_not_swallow_a_download():
     # Once approved and running, the same album folds again.
     review.status = jm.JobStatus.RUNNING
     assert app_mod._duplicate_download_job("Z") is review
+
+
+def test_queued_download_rechecks_the_music_root_before_it_runs(monkeypatch):
+    from qobuz_librarian.web import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod.collection_snapshot,
+        "music_root_write_state",
+        lambda: ("recorded_empty", 7),
+    )
+    monkeypatch.setattr(
+        app_mod.flows,
+        "build_args",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("download preparation must not start")),
+    )
+    run = app_mod._make_download_run(
+        {"id": "new-album", "artist": {"name": "Artist"},
+         "title": "Album", "tracks": {"items": []}},
+        "token",
+    )
+
+    with pytest.raises(RuntimeError, match="stopped before writing any files"):
+        run(jm.Job(title="Waiting download"))
 
 
 def test_direct_album_download_refreshes_saved_quality_state(
@@ -1638,11 +1674,19 @@ def test_quality_change_flags_the_stale_upgrade_review(client, tmp_path, monkeyp
     monkeypatch.setattr(upgrade_state, "load", lambda: state)
     monkeypatch.setattr(ss, "_pending_apply", None)
 
-    r = client.post("/settings/behavior", data={"STREAMRIP_QUALITY": "2"}, follow_redirects=False)
+    r = client.post(
+        "/settings/behavior",
+        data=_settings_form({"STREAMRIP_QUALITY": "2"}),
+        follow_redirects=False,
+    )
     assert r.status_code == 303
     assert "quality_note=1" in r.headers["location"]
     assert r.headers["location"].endswith("#behaviour")
-    r2 = client.post("/settings/behavior", data={"STREAMRIP_QUALITY": "2"}, follow_redirects=False)
+    r2 = client.post(
+        "/settings/behavior",
+        data=_settings_form({"STREAMRIP_QUALITY": "2"}),
+        follow_redirects=False,
+    )
     assert "quality_note" not in r2.headers["location"]
     assert r2.headers["location"].endswith("#behaviour")
 
@@ -1656,7 +1700,7 @@ def test_quality_change_flags_the_stale_upgrade_review(client, tmp_path, monkeyp
 
     deferred = client.post(
         "/settings/behavior",
-        data={"STREAMRIP_QUALITY": "2"},
+        data=_settings_form({"STREAMRIP_QUALITY": "2"}),
         follow_redirects=False,
     )
 
@@ -1746,6 +1790,36 @@ def test_concurrent_settings_saves_merge_without_losing_either_change(tmp_path, 
 
 
 # ── CSRF middleware ───────────────────────────────────────────────────────────
+
+
+def test_chunked_form_body_is_limited_by_bytes_received(client):
+    token = client.cookies.get("ql_csrf")
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-CSRF-Token": token,
+    }
+
+    async def chunks(*parts):
+        for part in parts:
+            yield part
+
+    probe = httpx.Request(
+        "POST",
+        "http://testserver/settings/behavior",
+        content=chunks(b"one", b"two"),
+        headers=headers,
+    )
+    assert "content-length" not in probe.headers
+
+    response = client.post(
+        "/settings/behavior",
+        content=chunks(b"form_complete=1&ignored=",
+                       b"x" * (1024 * 1024)),
+        headers=headers,
+    )
+
+    assert response.status_code == 413
+    assert response.text == "Request body too large"
 
 
 # ── run-lock busy → destructive routes 503, read-only stay open ───────
@@ -2711,6 +2785,16 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
     archived.status = jm.JobStatus.FAILED
     archived.finished_at = time.time() - 10
     job_persistence.persist(archived)
+    with sqlite3.connect(job_persistence._path()) as observer:
+        observer.execute(
+            "UPDATE jobs SET log_lines='{', quality_shortfall='[]' "
+            "WHERE id=?",
+            (archived.id,),
+        )
+
+    detail = client.get(f"/jobs/{archived.id}")
+    assert detail.status_code == 200
+    assert archived.title in detail.text
 
     monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
     outage = {"active": True}
@@ -3127,6 +3211,7 @@ def test_library_hide_scoped_to_review_tab(client, monkeypatch, tmp_path):
         r = client.post(f"/jobs/{job.id}/hide",
                         data={"artist": "Portishead", "tab": "missing"})
         assert r.status_code == 200
+        assert "qlHidden" in r.headers["HX-Trigger-After-Swap"]
         assert [c["title"] for c in job.candidates] == ["Dummy"]
         store = hidden.load()
         assert hidden.is_hidden(hidden.SCOPE_MISSING, "Portishead", "Third", store)
@@ -3307,12 +3392,13 @@ def test_search_download_prunes_parked_library_review(client, monkeypatch, tmp_p
     again. Other candidates and their ticks stay put."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import review_badges
+    from qobuz_librarian.web import job_persistence, review_badges
     monkeypatch.setattr(
         cfg, "REVIEW_BADGE_STATE_FILE", tmp_path / "review-badges.json")
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
     monkeypatch.setattr("qobuz_librarian.modes.process.process_album",
                         lambda *a, **k: {"imported": True, "n_ok": 9})
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
 
     parked = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     parked.execute_kind = "library"
@@ -3507,8 +3593,22 @@ def test_select_all_scoped_to_the_active_filter(client):
                         data={"on": "1", "scope": "all", "tab": "missing",
                               "q": "agalloch"})
         assert r.status_code == 200
+        assert r.json()["filtered_total"] == 1
+        assert r.json()["filtered_selected"] == 1
+        assert r.json()["filtered_rest"] == 0
         flags = {x["title"]: x["selected"] for x in job.candidates}
         assert flags == {"Third": False, "Ashes": True}
+        page = client.get(
+            f"/jobs/{job.id}/review",
+            params={"tab": "missing", "q": "agalloch"},
+        )
+        assert 'data-filtered-total="1"' in page.text
+        assert 'data-filtered-selected="1"' in page.text
+        r = client.post(f"/jobs/{job.id}/select-all",
+                        data={"on": "0", "scope": "all", "tab": "missing",
+                              "q": "agalloch"})
+        assert r.json()["filtered_selected"] == 0
+        assert r.json()["filtered_rest"] == 1
         # Empty query keeps the whole-tab behavior.
         client.post(f"/jobs/{job.id}/select-all",
                     data={"on": "1", "scope": "all", "tab": "missing", "q": ""})
@@ -3822,10 +3922,32 @@ def test_one_broken_review_does_not_abort_job_restore(monkeypatch):
     broken.execute_args = {"src": []}
     broken.status = jm.JobStatus.AWAITING_REVIEW
     broken.add_candidate("album", "Dummy", "Portishead", payload={})
+    broken_choices = jm.Job(title="Broken Library choices")
+    broken_choices.execute_kind = "library"
+    broken_choices.status = jm.JobStatus.AWAITING_REVIEW
+    broken_choices.add_candidate("album", "Unreadable", payload={})
     healthy = jm.Job(title="Healthy history")
     healthy.status = jm.JobStatus.DONE
     assert job_persistence.persist(broken)
+    assert job_persistence.persist(broken_choices)
     assert job_persistence.persist(healthy)
+    with sqlite3.connect(job_persistence._path()) as observer:
+        observer.execute(
+            "UPDATE jobs SET candidates=? WHERE id=?",
+            (
+                json.dumps([{
+                    "cid": "c0",
+                    "seq": 0,
+                    "kind": "album",
+                    "title": "Unreadable",
+                    "artist": {"name": "not a review label"},
+                    "detail": "",
+                    "payload": {},
+                    "selected": True,
+                }]),
+                broken_choices.id,
+            ),
+        )
 
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
     sent = []
@@ -3844,9 +3966,16 @@ def test_one_broken_review_does_not_abort_job_restore(monkeypatch):
     restored_broken = jm.registry.get(broken.id)
     assert restored_broken.status == jm.JobStatus.FAILED
     assert "couldn't be restored" in restored_broken.error
+    restored_choices = jm.registry.get(broken_choices.id)
+    assert restored_choices.status == jm.JobStatus.FAILED
+    assert "choices" in restored_choices.error
     assert jm.registry.get(healthy.id).status == jm.JobStatus.DONE
     assert job_persistence.load_one(broken.id)["status"] == "failed"
-    assert sent == [(broken.id, "failed")]
+    assert job_persistence.load_one(broken_choices.id)["status"] == "failed"
+    assert sent == [
+        (broken.id, "failed"),
+        (broken_choices.id, "failed"),
+    ]
 
 
 def test_rehydrated_review_never_mints_colliding_cids(monkeypatch):
@@ -5071,29 +5200,47 @@ def test_environment_qobuz_credentials_cannot_be_shadowed_by_the_form(client, mo
 
 def test_settings_accepts_a_token_without_downloader_identity(client, monkeypatch):
     import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian.api.auth import AuthOutcome
+    from qobuz_librarian.api.auth import AuthOutcome, credentials_from_values
 
     writes = []
-    monkeypatch.setattr(app_mod, "_read_creds", lambda: {})
+    state = {"credentials": credentials_from_values(source="streamrip")}
+
+    def read_credentials():
+        credentials = state["credentials"]
+        if not credentials.configured:
+            return {}
+        return {
+            "user_id": credentials.user_id,
+            "auth_token": credentials.token,
+            "_generation": credentials.generation,
+            "_source": credentials.source,
+        }
+
+    def write_credentials(user_id, token):
+        writes.append((user_id, token))
+        state["credentials"] = credentials_from_values(
+            user_id, token, source="streamrip"
+        )
+        return True
+
+    monkeypatch.setattr(app_mod, "_read_creds", read_credentials)
     monkeypatch.setattr(
         app_mod,
         "_write_creds",
-        lambda user_id, token: writes.append((user_id, token)) or True,
+        write_credentials,
     )
     monkeypatch.setattr(
         app_mod,
         "_classify_token",
         lambda _token: AuthOutcome.ACCEPTED,
     )
-    monkeypatch.setattr(
-        app_mod,
-        "_credentials_snapshot",
-        lambda: app_mod.credentials_from_values("", "token-only"),
-    )
-
     response = client.post(
         "/settings",
-        data={"user_id": "", "auth_token": "token-only"},
+        data={
+            "user_id": "",
+            "auth_token": "token-only",
+            "credential_generation": "",
+        },
         follow_redirects=False,
     )
 
@@ -5125,6 +5272,7 @@ def test_settings_rejected_candidate_token_cannot_fire_auth_loss_hook(
         lambda: {
             "user_id": active.user_id,
             "auth_token": active.token,
+            "_generation": active.generation,
             "_source": active.source,
         },
     )
@@ -5145,7 +5293,11 @@ def test_settings_rejected_candidate_token_cannot_fire_auth_loss_hook(
 
     response = client.post(
         "/settings",
-        data={"user_id": "candidate-user", "auth_token": "candidate-token"},
+        data={
+            "user_id": "candidate-user",
+            "auth_token": "candidate-token",
+            "credential_generation": active.generation,
+        },
         follow_redirects=False,
     )
 
@@ -5162,10 +5314,7 @@ def test_settings_refuses_account_change_during_remote_file_work(
     import qobuz_librarian.web.app as app_mod
     from qobuz_librarian.api.auth import AuthOutcome, credentials_from_values
 
-    running = jm.Job(
-        title="Album",
-        status=jm.JobStatus.RUNNING,
-    )
+    running = jm.Job(title="Album", status=jm.JobStatus.RUNNING)
     jm.registry.add(running)
     active = credentials_from_values("old-user", "old-token", source="streamrip")
     writes = []
@@ -5175,10 +5324,12 @@ def test_settings_refuses_account_change_during_remote_file_work(
         lambda: {
             "user_id": active.user_id,
             "auth_token": active.token,
+            "_generation": active.generation,
             "_source": active.source,
         },
     )
-    monkeypatch.setattr(app_mod, "_classify_token", lambda _token: AuthOutcome.ACCEPTED)
+    monkeypatch.setattr(
+        app_mod, "_classify_token", lambda _token: AuthOutcome.ACCEPTED)
     monkeypatch.setattr(
         app_mod,
         "_write_creds",
@@ -5187,12 +5338,16 @@ def test_settings_refuses_account_change_during_remote_file_work(
     try:
         response = client.post(
             "/settings",
-            data={"user_id": "new-user", "auth_token": "new-token"},
+            data={
+                "user_id": "new-user",
+                "auth_token": "new-token",
+                "credential_generation": active.generation,
+            },
             follow_redirects=False,
         )
 
         assert response.status_code == 200
-        assert "already running" in response.text
+        assert "Qobuz work is queued or running" in response.text
         assert writes == []
     finally:
         _remove_job(running)
@@ -5359,6 +5514,8 @@ def test_login_page_says_so_while_locked_out(monkeypatch, tmp_path):
     # lockout it deliberately triggers doesn't follow the rest of the suite.
     monkeypatch.setattr(web_auth, "_login_failures", {})
     monkeypatch.setattr(web_auth, "_user_failures", {})
+    monkeypatch.setattr(web_auth, "_login_pending", {})
+    monkeypatch.setattr(web_auth, "_user_pending", {})
 
     with _enable_auth(monkeypatch, tmp_path) as c:
         for _ in range(6):
@@ -5372,6 +5529,25 @@ def test_login_page_says_so_while_locked_out(monkeypatch, tmp_path):
         assert last.status_code == 429
 
         assert "ql-notice-error" in c.get("/login").text
+
+
+def test_concurrent_login_attempts_reserve_the_limit_atomically(monkeypatch):
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(web_auth, "_login_failures", {})
+    monkeypatch.setattr(web_auth, "_user_failures", {})
+    monkeypatch.setattr(web_auth, "_login_pending", {})
+    monkeypatch.setattr(web_auth, "_user_pending", {})
+    start = threading.Barrier(20)
+
+    def reserve():
+        start.wait()
+        return web_auth.begin_login_attempt("203.0.113.8", "admin")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        admitted = list(executor.map(lambda _n: reserve(), range(20)))
+
+    assert sum(admitted) == web_auth._LOGIN_MAX
 
 
 def test_an_untrusted_proxy_address_is_called_out(monkeypatch, caplog):
@@ -5404,6 +5580,8 @@ def test_a_signed_in_browser_is_never_locked_out(monkeypatch, tmp_path):
 
     monkeypatch.setattr(web_auth, "_login_failures", {})
     monkeypatch.setattr(web_auth, "_user_failures", {})
+    monkeypatch.setattr(web_auth, "_login_pending", {})
+    monkeypatch.setattr(web_auth, "_user_pending", {})
 
     with _enable_auth(monkeypatch, tmp_path) as c:
         c.get("/login")
@@ -5941,16 +6119,28 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_pat
         history = client.get("/queue/history").text
         assert job.summary in history
 
-        client.post(f"/jobs/{job.id}/acknowledge-recovery")
+        response = client.post(
+            f"/jobs/{job.id}/acknowledge-recovery",
+            follow_redirects=False,
+        )
+        assert "?error=" in response.headers["location"]
         assert job.recoveries
 
         backup.rmdir()
         backup.parent.rmdir()
-        client.post(f"/jobs/{job.id}/acknowledge-recovery")
+        response = client.post(
+            f"/jobs/{job.id}/acknowledge-recovery",
+            follow_redirects=False,
+        )
+        assert "?error=" in response.headers["location"]
         assert job.recoveries
 
         backup.parent.mkdir()
-        client.post(f"/jobs/{job.id}/acknowledge-recovery")
+        response = client.post(
+            f"/jobs/{job.id}/acknowledge-recovery",
+            follow_redirects=False,
+        )
+        assert response.headers["location"] == f"/jobs/{job.id}"
 
         saved = job_persistence.load_one(job.id)
         assert saved["recoveries"] == []
@@ -6470,6 +6660,15 @@ def test_quality_shortfall_marks_history_until_the_job_is_opened(
     r = client.get("/queue/history")
     assert "ql-history-attention hidden" in r.text
 
+    with sqlite3.connect(job_persistence._path()) as observer:
+        observer.execute(
+            "UPDATE jobs SET quality_shortfall=? WHERE id=?",
+            ('{"version":1,"target":[24,"96000"]}', job.id),
+        )
+    r = client.get(f"/jobs/{job.id}")
+    assert r.status_code == 200
+    assert "Below target quality" not in r.text
+
 
 def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
     """A new release stays in the New Releases review until it's downloaded or
@@ -6811,7 +7010,7 @@ def test_lockout_says_how_long_is_left_and_keeps_the_username(client, monkeypatc
     monkeypatch.setattr(web_auth, "_read", lambda: {
         "username": "dink", "password_hash": "x", "session_secret": "s"})
     monkeypatch.setattr(web_auth, "credentials_configured", lambda: True)
-    monkeypatch.setattr(web_auth, "check_login_rate_limit", lambda *a, **k: False)
+    monkeypatch.setattr(web_auth, "begin_login_attempt", lambda *a, **k: False)
     monkeypatch.setattr(web_auth, "login_lockout_remaining", lambda *a, **k: 903)
     checked = []
     monkeypatch.setattr(web_auth, "verify_login",
@@ -7108,8 +7307,14 @@ def test_an_empty_library_with_a_recorded_backup_refuses_an_upload(
     latest.write_text(json.dumps({
         "format": collection_snapshot.FORMAT,
         "version": collection_snapshot.VERSION,
-        "counts": {"artists": 2, "albums": 5, "tracks": 40},
-        "artists": [{"name": "A", "albums": []}],
+        "counts": {"artists": 1, "albums": 5, "tracks": 0},
+        "artists": [{
+            "name": "A",
+            "albums": [
+                {"name": f"Album {index}", "tracks": []}
+                for index in range(5)
+            ],
+        }],
     }), encoding="utf-8")
     before = len(jm.registry.all())
 
@@ -7167,32 +7372,49 @@ def test_saving_a_lastfm_key_checks_it_and_returns_to_its_section(
     from qobuz_librarian.api import lastfm
 
     try:
-        monkeypatch.setattr(lastfm, "probe_key", lambda: True)
-        r = client.post("/settings/behavior",
-                        data={"LASTFM_API_KEY": "k" * 32,
-                              "section": "discover"},
-                        follow_redirects=False)
+        monkeypatch.setattr(lastfm, "probe_key", lambda _key=None: True)
+        r = client.post(
+            "/settings/behavior",
+            data=_settings_form({
+                "LASTFM_API_KEY": "k" * 32,
+                "section": "discover",
+            }),
+            follow_redirects=False,
+        )
         assert r.status_code == 303
         assert "lastfm=ok" in r.headers["location"]
         assert r.headers["location"].endswith("#discover")
 
-        def rejected():
+        def rejected(_key=None):
             raise lastfm.LastfmKeyRejected("bad key")
         monkeypatch.setattr(lastfm, "probe_key", rejected)
-        r = client.post("/settings/behavior",
-                        data={"LASTFM_API_KEY": "m" * 32,
-                              "section": "discover"},
-                        follow_redirects=False)
+        r = client.post(
+            "/settings/behavior",
+            data=_settings_form({
+                "LASTFM_API_KEY": "m" * 32,
+                "section": "discover",
+            }),
+            follow_redirects=False,
+        )
         assert "lastfm=rejected" in r.headers["location"]
 
         # An emptied field goes back to the environment; nothing to check.
-        r = client.post("/settings/behavior",
-                        data={"LASTFM_API_KEY": "", "section": "discover"},
-                        follow_redirects=False)
+        r = client.post(
+            "/settings/behavior",
+            data=_settings_form({
+                "LASTFM_API_KEY": "",
+                "section": "discover",
+            }),
+            follow_redirects=False,
+        )
         assert "lastfm=" not in r.headers["location"]
         assert r.headers["location"].endswith("#discover")
     finally:
-        client.post("/settings/behavior", data={"LASTFM_API_KEY": ""},
-                    follow_redirects=False)
-
-
+        client.post(
+            "/settings/behavior",
+            data=_settings_form({
+                "LASTFM_API_KEY": "",
+                "section": "discover",
+            }),
+            follow_redirects=False,
+        )

@@ -1,4 +1,4 @@
-"""Collection restore: what a backup file puts back, and what it refuses to."""
+"""Collection restore tests."""
 import pytest
 
 from qobuz_librarian import config as cfg
@@ -169,4 +169,3 @@ def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
         {"name": "Migration", "qobuz_album_id": "a1", "tracks": []}]}]))
 
     assert job.candidates == []
-
