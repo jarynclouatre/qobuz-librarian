@@ -101,7 +101,7 @@ BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'
 
 Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field, the artwork plugins required by `ARTWORK`, and its internal import guards. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
 
-For a `pip` or `pipx` installation, install beets 2.12.0 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused because the import and recovery contract is verified against 2.12.0.
+For a `pip` or `pipx` installation, install beets 2.13.1 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused because the import and recovery contract is verified against 2.13.1.
 
 Treat enabled beets plugins as trusted code. A plugin must finish all database work before its `beet` command exits; detached or background database writers are unsupported. Stop Qobuz Librarian completely before running a manual `beet` command, since external commands do not participate in the app's database coordination.
 

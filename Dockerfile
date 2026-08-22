@@ -40,7 +40,7 @@ WORKDIR /app
 COPY docker/image-lock.txt ./image-lock.txt
 RUN pip install --no-cache-dir --no-deps \
         "streamrip @ git+https://github.com/nathom/streamrip.git@e3291615ba6be34aa76df19da8aeb6f41673c6a0" \
- && pip install --no-cache-dir --no-deps "beets==2.12.0" \
+ && pip install --no-cache-dir --no-deps "beets==2.13.1" \
  && pip install --no-cache-dir -r image-lock.txt
 
 # App source. image-lock.txt already installed the app's dependencies above, so

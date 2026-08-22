@@ -4302,7 +4302,7 @@ def _strip_ownership_markers(root_fd, records, nonce):
     return stripped
 
 
-_SUPPORTED_BEETS_VERSION = "2.12.0"
+_SUPPORTED_BEETS_VERSION = "2.13.1"
 _BEETS_CONFIG_PROTOCOL_VERSION = 1
 
 
@@ -4639,7 +4639,7 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
         log.info(
             fmt(
                 C.GRAY,
-                "     Install beets 2.12.0 or set BEETS_PYTHON to its Python executable.",
+                "     Install beets 2.13.1 or set BEETS_PYTHON to its Python executable.",
             )
         )
         return None, None, None
@@ -4661,7 +4661,7 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
         log.info(
             fmt(
                 C.RED,
-                "  ✗  The configured Python does not provide the supported Beets 2.12.0 runtime.",
+                "  ✗  The configured Python does not provide the supported Beets 2.13.1 runtime.",
             )
         )
         return None, None, None

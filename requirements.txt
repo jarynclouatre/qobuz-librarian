@@ -60,7 +60,7 @@ typing-inspection==0.4.4
     #   pydantic
 urllib3==2.7.0
     # via requests
-uvicorn==0.52.3
+uvicorn==0.52.4
     # via qobuz-librarian (pyproject.toml)
 uvloop==0.22.1
     # via uvicorn
