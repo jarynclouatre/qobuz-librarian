@@ -22,6 +22,7 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 | `QL_MUSIC_DIR` | `./music` | Music library; beets imports into this |
 | `QL_STAGING_DIR` | `./staging` | Scratch space for in-progress downloads |
 | `QL_UPGRADE_BACKUPS` | `./upgrade_backups` | Backups taken before a quality upgrade |
+| `QL_COLLECTION_BACKUPS` | `./collection_backups` | Collection snapshots used by Backup & Restore |
 | `WEB_PORT` | `8666` | Host port for the web UI |
 
 The music, staging, and upgrade-backup directories must be separate,
@@ -40,7 +41,7 @@ out of library scans and import targets.
 | `LYRICS_PROVIDERS` | unset | Ordered comma list; unset tries the bundled provider library's own order |
 | `LYRICS_PROVIDER_TIMEOUT` | `30` | Maximum seconds for one provider lookup before its circuit-breaker records a failure |
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
-| `COLLECTION_BACKUP_DIR` | app data folder | Where the collection backup is written after each library scan |
+| `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path where the collection backup is written after each library scan |
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
 | `AUTO_LIBRARY_SCAN` | `true` | Offer the one-time baseline scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
@@ -123,7 +124,7 @@ PUID=1000   # id -u
 PGID=1000   # id -g
 ```
 
-On boot, the container chowns the app-managed volumes (`config`, `data`, `staging`, `upgrade_backups`) to that user and warns if a mounted path is not writable. `/music` is left alone because it is often a large NAS mount; the run user must be able to write to it.
+On boot, the container chowns its managed config folders and the `data`, `staging`, `upgrade_backups`, and `collection_backups` volumes to that user, and warns if a mounted path is not writable. `/music` is left alone because it is often a large NAS mount; the run user must be able to write to it.
 
 Operations that replace or remove an existing library file also require the share to flush file and directory changes reliably. If the mount cannot do that, Qobuz Librarian stops the destructive step and keeps the original.
 
@@ -132,7 +133,7 @@ For a read-only music share, append `:ro` to the `/music` bind and set `QL_CHECK
 If the bind dirs were auto-created as root on a first `up`, chown them:
 
 ```bash
-sudo chown -R 1000:1000 ./music ./staging ./upgrade_backups
+sudo chown -R 1000:1000 ./music ./staging ./upgrade_backups ./collection_backups
 ```
 
 To run as root, set `PUID=0` and `PGID=0` explicitly. A non-numeric typo makes the container refuse to start rather than silently falling back to root.
@@ -147,9 +148,9 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 `WEB_AUTH=none` disables login. Use it only on a trusted LAN or behind your own authenticating proxy. The container logs a warning every boot while login is off.
 
-**Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory is unavailable, the single-writer lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
+**Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, the single-writer lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
 
-**Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address so the failed-login throttle counts attempts per real client, not per the shared proxy IP. Point it at your proxy, not `*`. The default, `127.0.0.1`, does not cover a proxy on a Docker network, so leaving it unset there throttles every visitor as one; the log names the address to use the first time a sign-in arrives that way.
+**Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address so the failed-login throttle counts attempts per real client, not per the shared proxy IP. Point it at your proxy, not `*`. The default, `127.0.0.1`, does not cover a proxy on a Docker network, so leaving it unset there throttles every visitor as one; the log names the untrusted peer so you can verify that it really is your proxy before adding it.
 
 **Keeping the token out of the environment.** `docker inspect` exposes environment variables, so to keep the Qobuz token out of them, point `QOBUZ_USER_AUTH_TOKEN_FILE` at a file containing only the token (a [Docker secret](https://docs.docker.com/engine/swarm/secrets/) or read-only bind mount) instead of setting `QOBUZ_USER_AUTH_TOKEN`. The web-login password supports the same pattern with `WEB_AUTH_PASSWORD_FILE`.
 

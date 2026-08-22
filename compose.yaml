@@ -72,6 +72,7 @@ services:
       STAGING_DIR:          /staging
       DATA_DIR:             /data
       UPGRADE_BACKUP_DIR:   /upgrade_backups
+      COLLECTION_BACKUP_DIR: "${COLLECTION_BACKUP_DIR:-/collection_backups}"
       # One-time Migrate tool. Leave unset unless you have mounted source and
       # destination folders for migration; see docs/existing-libraries.md.
       MIGRATE_SRC:          "${MIGRATE_SRC:-}"
@@ -167,10 +168,6 @@ services:
       SUPPRESS_SINGLE_TRACK_GAPS: "${SUPPRESS_SINGLE_TRACK_GAPS:-false}"
       # Cover art placement: sidecar (image beside tracks) | embed | both.
       ARTWORK: "${ARTWORK:-sidecar}"
-      # Where the collection backup is written after each library scan, as a
-      # path inside the container. Empty keeps it with the app's other data.
-      COLLECTION_BACKUP_DIR: "${COLLECTION_BACKUP_DIR:-}"
-
       # ── New releases ──────────────────────────────────────────────────────
       # First launch offers a baseline library scan. It lists missing albums and
       # establishes the new-release baseline (resuming if interrupted). "false"
@@ -232,8 +229,7 @@ services:
       POST_JOB_HOOK_TIMEOUT: "${POST_JOB_HOOK_TIMEOUT:-10}"
 
     volumes:
-      # Host paths come from a .env file (see .env.example). Defaults to
-      # ./music, ./staging, ./upgrade_backups so a fresh clone runs as-is.
+      # Host paths come from .env; relative defaults work from a fresh clone.
       # Music library (read-write so beets can move files in)
       - ${QL_MUSIC_DIR:-./music}:/music
       # Staging area for streamrip downloads
@@ -244,6 +240,7 @@ services:
       - qobuz-librarian-data:/data
       # Upgrade backups
       - ${QL_UPGRADE_BACKUPS:-./upgrade_backups}:/upgrade_backups
+      - ${QL_COLLECTION_BACKUPS:-./collection_backups}:/collection_backups
 
 volumes:
   qobuz-librarian-config:
