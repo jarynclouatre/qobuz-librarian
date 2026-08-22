@@ -95,7 +95,7 @@ Auth is by token, not your password. You need a paid Qobuz account; this only do
 
 Get the token from the [Qobuz web player](https://play.qobuz.com): sign in, open dev tools (F12), and find Local Storage for `play.qobuz.com` (**Application** tab in Chrome/Edge, **Storage** in Firefox). Open the `localuser` entry and copy its `token` value; the `id` field next to it is your user id. Paste the token into **Auth token** on Settings; **Email or user ID** takes either your email or that numeric id. Credentials stay in the container and are used only for Qobuz authentication.
 
-The token is enough for Search and catalogue scans. Downloads also need the email or user ID because streamrip uses it to start a Qobuz download.
+The token is enough for Search, Library, Discover, New Releases, Upgrade, and Repair. Downloads also need the email or user ID because streamrip uses it to start a Qobuz download.
 
 If you already run streamrip elsewhere, copy `password_or_token` from `~/.config/streamrip/config.toml` instead.
 

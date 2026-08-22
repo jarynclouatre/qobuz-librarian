@@ -29,6 +29,10 @@ docker compose run --rm -it qobuz-librarian cli --album-gaps
 docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
+A real Library walk or Album gaps run refreshes the collection backup after it
+scans at least one artist. Dry runs and interrupted walks leave the current
+backup unchanged.
+
 Choose `s` in the menu to open Settings, or use the flag to jump straight in.
 It writes to the same store the web Settings page saves to, and `--dry-run`
 prints the current values without saving:
