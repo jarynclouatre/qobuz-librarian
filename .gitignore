@@ -32,6 +32,12 @@ venv/
 .qobuz_web_auth.*.tmp
 .qobuz_settings.*.tmp
 .upgrade_backups/
+
+# Default Compose bind mounts contain local library and recovery data.
+/music/
+/staging/
+/upgrade_backups/
+/collection_backups/
 .pytest_cache/
 .coverage
 htmlcov/

@@ -190,7 +190,8 @@
       <div class="ql-settings-section-copy">
         <h2>Qobuz authentication</h2>
         <p>
-          Token used for search, downloads, upgrades, and repair.
+          Token used for Search, Library, Discover, New Releases, Upgrade,
+          Repair, and downloads.
         </p>
       </div>
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
@@ -259,7 +260,7 @@
                class="ql-input max-w-lg">
         <p class="ql-field-help">
           {% if env_user_id_set %}Set by environment; remove <code>QOBUZ_USER_ID</code> from <code>.env</code> or <code>compose.yaml</code> to manage it here.{% else %}Needed by the downloader; a token by itself still supports Search,
-          Library, New Releases, and Repair scans.{% endif %}
+          Library, Discover, New Releases, Upgrade, and Repair scans.{% endif %}
         </p>
       </div>
       <div class="ql-field">

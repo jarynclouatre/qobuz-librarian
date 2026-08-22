@@ -9,8 +9,7 @@ into milliseconds.
 
 SQLite (not one big JSON) so a few thousand albums are written incrementally and
 read by id without rewriting the whole file, and so a scan's parallel workers can
-each hold their own connection. Set ``ALBUM_CACHE_ENABLED=false`` to turn it off;
-delete the db file to force a full refresh.
+each hold their own connection. Delete the db file to force a full refresh.
 """
 import json
 import math

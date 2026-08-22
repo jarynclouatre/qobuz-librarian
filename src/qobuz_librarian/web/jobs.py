@@ -444,9 +444,7 @@ class Job:
                     except (queue.Empty, queue.Full):
                         pass
 
-    # Read from config at class-definition time so env overrides on startup
-    # take effect (set JOB_LOG_CAP to lower for tight-memory NAS boxes, or
-    # higher for long artist walks).
+    # Bound long job logs before they dominate process memory.
     LOG_CAP = cfg.JOB_LOG_CAP
 
     _LOG_SLACK = 1000

@@ -1037,7 +1037,7 @@ def run_album_download(
                     log.info(fmt(C.GRAY, "      " + out[-200:].replace("\n", " ")))
             # Qobuz throttles sustained per-track pulls; when the last rip shows
             # throttle signals, pause longer before the next so we stop pounding
-            # the limit (set RATE_LIMIT_COOLDOWN=0 to disable).
+            # the limit.
             cooldown = cfg.RATE_LIMIT_COOLDOWN if detect_rate_limited(out) else 0
             if cooldown and i < len(missing):
                 log.info(

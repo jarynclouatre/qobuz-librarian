@@ -427,7 +427,7 @@ DELAY_BETWEEN    = _env_num_min("DELAY_BETWEEN", 1.0, 0.0)
 MIN_FREE_STAGING_MB = _env_num_min("MIN_FREE_STAGING_MB", 500, 0)
 # Pause before the next queued album when Qobuz throttling was detected
 # in the last rip (vs the normal DELAY_BETWEEN). Tames the error-wave
-# pattern on multi-hundred-album queues. Set 0 to disable.
+# pattern on multi-hundred-album queues.
 RATE_LIMIT_COOLDOWN = 30.0
 # INACTIVITY timeout for the beets import (seconds of *zero output*),
 # NOT a wall-clock cap: a slow-but-progressing import over R2 / a slow
@@ -460,17 +460,17 @@ ARTIST_SCAN_WORKERS = _env_num_min("ARTIST_SCAN_WORKERS", 4, 1, 16)
 # ARTIST_SCAN_WORKERS, so a first scan of a big library could otherwise burst
 # the account; this paces the live calls (cache hits skip it). The ISRC cache
 # already makes re-scans and shared ISRCs free, so this only bounds the cold
-# scan. 0 disables it; the 429 back-off in api/client is still the backstop.
+# scan; the 429 back-off in api/client is still the backstop.
 REPAIR_LOOKUP_MIN_INTERVAL = 0.05
 
 # Cache get_album() responses on disk (DATA_DIR/album_cache.db). An album's track
 # list is immutable, so this turns the per-owned-album fetch, the dominant cost
-# of a library scan, into a local lookup on re-scans. Off disables it.
+# of a library scan, into a local lookup on re-scans.
 ALBUM_CACHE_ENABLED = True
 
 # Cache parsed FLAC tags on disk (DATA_DIR/flac_cache.db), keyed on file
 # mtime+size, so unchanged files aren't re-parsed by mutagen on every scan. The
-# key self-invalidates when a file is edited/replaced. Off disables it.
+# key self-invalidates when a file is edited/replaced.
 FLAC_CACHE_ENABLED = True
 
 # Cache the repair scan's Qobuz ISRC→track lookups on disk
@@ -519,9 +519,8 @@ AUTO_LIBRARY_SCAN = _env_bool("AUTO_LIBRARY_SCAN", True)
 WEB_FETCH_TIMEOUT     = 12.0
 WEB_TEST_AUTH_TIMEOUT = 8.0
 
-# Web job log and SSE tunables.
-# JOB_LOG_CAP is the per-job line ceiling; very long artist walks
-# (500+ albums) on tight memory should drop this to e.g. 2000.
+# Web job log and SSE limits.
+# JOB_LOG_CAP is the per-job line ceiling.
 # JOB_LOG_REPLAY_TAIL is what a late SSE subscriber gets replayed; 0 disables
 # historical replay while keeping live lines and the terminal event.
 # POST_JOB_HOOK_TIMEOUT bounds the subprocess that fires the optional
@@ -529,8 +528,7 @@ WEB_TEST_AUTH_TIMEOUT = 8.0
 # more. SSE_MAX_WORKERS sets the thread pool for SSE streams (each
 # active subscriber holds one). SSE_HEARTBEAT_TICKS sets how many
 # 0.5s queue-empty ticks pass before a `: ping` keepalive. Reverse
-# proxies with short idle timeouts (60s default on most) want a lower
-# value.
+# proxies with short idle timeouts still receive a keepalive within 15 seconds.
 JOB_LOG_CAP          = 5000
 JOB_LOG_REPLAY_TAIL  = 500
 # Ceiling on candidates a single review job holds in memory (and persists/

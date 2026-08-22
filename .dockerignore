@@ -26,6 +26,12 @@ src/qobuz_librarian/web/static/dist
 .env
 *.local
 
+# Default bind-mount data must not enter a source-build context.
+music/
+staging/
+upgrade_backups/
+collection_backups/
+
 # Build artifacts.
 *.egg-info
 dist/

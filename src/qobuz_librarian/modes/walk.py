@@ -6,6 +6,7 @@ import tempfile
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
+from qobuz_librarian.library import collection_snapshot
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
@@ -223,6 +224,34 @@ _ALBUM_WALK_DECIDED = {
 
 # Folder names shown in a leftover category before it falls back to a count.
 _NAMED_LEFTOVERS = 3
+
+
+def _write_collection_snapshot():
+    """Record the library after a completed CLI walk."""
+    clear_scan_caches()
+    try:
+        previous = collection_snapshot.load_latest()
+    except OSError:
+        previous = None
+    try:
+        document = collection_snapshot.build_snapshot(
+            previous=previous, source="scan")
+        written, refusal = collection_snapshot.write_snapshot(document)
+    except OSError as exc:
+        log.warning(fmt(
+            C.YELLOW,
+            f"  ⚠  The collection backup could not be written: {exc}",
+        ))
+        return
+    if not written:
+        log.warning(fmt(C.YELLOW, f"  ⚠  {refusal}"))
+        return
+    counts = document["counts"]
+    log.info(fmt(
+        C.GRAY,
+        f"  Collection backup updated: {plural(counts['albums'], 'album')} "
+        f"by {plural(counts['artists'], 'artist')}.",
+    ))
 
 
 def _leftover_folder_note(label, names) -> str:
@@ -460,6 +489,8 @@ def run_album_walk_mode(args, token):
         note = _leftover_folder_note(label, names)
         if note:
             log.info(fmt(C.GRAY, f"    {note}"))
+    if n_artists_scanned and not interrupted and not args.dry_run:
+        _write_collection_snapshot()
     return EXIT_GENERAL if needs_attention else 0
 
 
@@ -704,4 +735,6 @@ def run_walk_queued_mode(args, token):
     else:
         log.info(fmt(C.GREEN,
             f"  ✓ Walk done. Scanned {n_scanned}, skipped {n_skipped}."))
+    if n_scanned and not interrupted and not args.dry_run:
+        _write_collection_snapshot()
     return EXIT_GENERAL if needs_attention else 0

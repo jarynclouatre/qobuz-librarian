@@ -7,8 +7,7 @@ unchanged file costs one ``stat()`` and a SQLite lookup instead of a full parse.
 A file edited or replaced changes its mtime or size, invalidating the entry, so
 in normal use there are no stale tags. The one gap is a retag that preserves
 BOTH mtime and size (e.g. an mtime restored with ``touch -r``), which keeps the
-cached tags until the file next changes. Set ``FLAC_CACHE_ENABLED=false`` to
-disable; delete the db to force a re-parse.
+cached tags until the file next changes. Delete the db to force a re-parse.
 """
 import atexit
 import json

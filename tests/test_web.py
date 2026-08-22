@@ -398,6 +398,8 @@ def test_per_artist_rescan_supersedes_only_that_artists_parked_review(
     from qobuz_librarian.web import job_persistence
 
     monkeypatch.setattr(job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(
+        job_persistence, "ready_for_admission", lambda: True)
 
     class Authority:
         @staticmethod
@@ -841,6 +843,7 @@ def client(monkeypatch):
         StartupRecoveryStatus,
     )
     from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import job_persistence
 
     class TestAuthority:
         def __init__(self):
@@ -858,8 +861,11 @@ def client(monkeypatch):
     monkeypatch.setattr(app_mod, "_LOCK_UNENFORCEABLE", False)
     monkeypatch.setattr(app_mod, "_SHUTTING_DOWN", False)
     # This lightweight client bypasses the application lifespan. Treat its
-    # in-memory registry as already restored unless a test exercises restore.
+    # in-memory registry and persistence gate as ready unless a test exercises
+    # either startup path.
     monkeypatch.setattr(app_mod, "_JOBS_RESTORED", True)
+    monkeypatch.setattr(
+        job_persistence, "ready_for_admission", lambda: True)
     clear_recovery = StartupRecoveryResult(StartupRecoveryStatus.CLEAR)
     monkeypatch.setattr(app_mod, "_STARTUP_RECOVERY_RESULT", clear_recovery)
     monkeypatch.setattr(app_mod, "_STARTUP_RECOVERY_UNKNOWN", False)
@@ -976,6 +982,8 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
     (data_dir / "jobs.db").mkdir()
     job_persistence._schema_ready = False
     job_persistence.init()
+    monkeypatch.setattr(
+        job_persistence, "ready_for_admission", lambda: False)
     assert job_persistence.ready_for_admission() is False
     assert job_persistence.persist(jm.Job(title="refused")) is False
     response = client.get("/readyz")

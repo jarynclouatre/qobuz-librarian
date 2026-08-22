@@ -2985,8 +2985,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 log.info(fmt(
                     C.YELLOW,
                     f"    ⏳ Qobuz rate-limit detected; cooling down "
-                    f"{int(cooldown)}s before the next album "
-                    f"(set RATE_LIMIT_COOLDOWN=0 to disable).",
+                    f"{int(cooldown)}s before the next album.",
                 ))
                 if _sleep_unless_cancelled(cooldown, is_cancel_requested):
                     cancelled = True
@@ -3602,8 +3601,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             if cooldown:
                 log.info(fmt(C.YELLOW,
                     f"    ⏳ Qobuz rate-limit detected; cooling down "
-                    f"{int(cooldown)}s before the next album "
-                    f"(set RATE_LIMIT_COOLDOWN=0 to disable)."))
+                    f"{int(cooldown)}s before the next album."))
                 if _sleep_unless_cancelled(cooldown, is_cancel_requested):
                     cancelled = True  # next album short-circuits at the loop top
             else:
