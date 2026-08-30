@@ -632,7 +632,7 @@ def ensure_similar_feed(token) -> dict:
     owned = library()
     prefer_hires = bool(cfg.PREFER_HIRES)
     signature = _catalogue_feed_signature(owned, prefer_hires)
-    view = feed_view(SIMILAR, signature)
+    view = _without_owned_artists(feed_view(SIMILAR, signature), owned)
     if view["phase"] in ("building", "ready"):
         return view
     start_build(
@@ -644,7 +644,7 @@ def ensure_similar_feed(token) -> dict:
         signature,
         library_sig=signature,
     )
-    return feed_view(SIMILAR, signature)
+    return _without_owned_artists(feed_view(SIMILAR, signature), owned)
 
 
 def _tags_worker(kind: str, token, owned: Library) -> None:
@@ -790,6 +790,14 @@ def _without_owned_albums(view: dict) -> dict:
     return view
 
 
+def _without_owned_artists(view: dict, owned: Library) -> dict:
+    view["items"] = [
+        row for row in view["items"]
+        if not owned.owns(str(row.get("name") or ""))
+    ]
+    return view
+
+
 FAVOURITES = "favourites"
 
 
@@ -876,7 +884,7 @@ def ensure_search_feed(token, query: str) -> dict:
     prefer_hires = bool(cfg.PREFER_HIRES)
     signature = _catalogue_feed_signature(owned, prefer_hires)
     kind = search_feed_kind(text)
-    view = feed_view(kind, signature)
+    view = _without_owned_artists(feed_view(kind, signature), owned)
     if view["phase"] in ("building", "ready"):
         return view
     start_build(
@@ -889,7 +897,7 @@ def ensure_search_feed(token, query: str) -> dict:
         signature,
         library_sig=signature,
     )
-    return feed_view(kind, signature)
+    return _without_owned_artists(feed_view(kind, signature), owned)
 
 
 def feed_view(kind: str, library_sig: str, *,

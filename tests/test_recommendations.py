@@ -73,6 +73,21 @@ def test_a_failed_build_falls_back_to_the_saved_copy():
     assert view["stale"] is True
 
 
+def test_an_outage_does_not_bring_back_an_artist_just_downloaded(monkeypatch):
+    owned = _library(["Sleep"])
+    signature = rec._catalogue_feed_signature(owned, bool(cfg.PREFER_HIRES))
+    monkeypatch.setattr(rec, "library", lambda: owned)
+    dc.put_feed(rec.SIMILAR, [{"name": "Sleep"}, {"name": "Om"}], "old")
+    rec._builds[rec.SIMILAR] = rec._new_build(signature)
+    rec._publish(rec.SIMILAR, phase="error", error="unavailable",
+                 finished_at=time.time())
+
+    view = rec.ensure_similar_feed("tok")
+
+    assert [item["name"] for item in view["items"]] == ["Om"]
+    assert view["stale"] is True
+
+
 def test_opening_the_page_again_does_not_start_a_second_build():
     # Every poll calls through here; a build per poll would flood Last.fm.
     import threading
