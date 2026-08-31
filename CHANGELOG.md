@@ -9,8 +9,6 @@ and a documentation pass; nothing changes how the app works.
 
 - Discover's saved suggestions and Search's saved results no longer offer artists already in your library while Qobuz is unreachable.
 - The History header says "1 item needs attention" rather than "1 item need attention", the Move confirmation names how many folders it moves, and the repair history note reads as one sentence.
-- The guides caught up with the app: the terminal guide separates commands that confirm each album from truly unattended ones, troubleshooting quotes the messages the app actually shows, the migration page goes by its real name and location, and the configuration guide lists every shipped setting.
-- A release can no longer be published while its changelog entry is still marked Unreleased.
 
 ## [0.14.0] - 2026-08-22
 
