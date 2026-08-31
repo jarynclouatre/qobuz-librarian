@@ -667,11 +667,6 @@ def _require_delete_journal_mode(connection):
 
 
 
-def _beets_database_connection_path(anchor):
-    """Keep SQLite recovery beside the exact canonical public database."""
-    return f"/proc/self/fd/{anchor['parent_chain'][-1]}/{anchor['name']}"
-
-
 def _preflight_beets_database_anchor(anchor, anchors_match=None):
     """Reject an unsafe DB before the first associated filesystem mutation."""
     if anchor is None:

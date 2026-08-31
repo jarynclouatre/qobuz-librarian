@@ -2282,12 +2282,6 @@ def _qobuz_ready() -> bool:
     return _qobuz_access(QobuzAccess.CATALOGUE_ACTION).allowed
 
 
-def _recent_empty_hint() -> str:
-    if not _read_creds().get("auth_token"):
-        return "Set up Qobuz before searching."
-    return "Search above to find an artist, album, or track."
-
-
 async def _probe_token():
     """One-shot startup check that the saved token still authenticates.
 
@@ -11722,14 +11716,6 @@ async def settings_page(request: Request, saved: bool = False,
                               quality_note=quality_note, lastfm_check=lastfm)
 
 
-def _streamrip_has_userid() -> bool:
-    """True if the streamrip config carries a non-empty user id, so `rip` can
-    actually authenticate a download. A token-only env (QOBUZ_USER_AUTH_TOKEN set,
-    QOBUZ_USER_ID unset) has none until the id is set or creds are saved, even
-    though the app's own Qobuz API calls work from the token alone."""
-    return api_auth.read_qobuz_credentials().downloader_ready
-
-
 def _qobuz_token_is_env_owned() -> bool:
     """Whether environment configuration owns the Qobuz token slot.
 
@@ -13500,33 +13486,12 @@ def _last_scan_age() -> str | None:
     return _format_age(ts)
 
 
-def _last_new_release_check_age() -> str | None:
-    """Human-readable age of the last new-release check, or None. Gives the
-    dashboard a sibling indicator to the existing 'last library scan' line so
-    the user can see how fresh the auto-check's signal is."""
-    ts = new_releases.last_run()
-    return _format_age(ts) if ts is not None else None
-
-
 def _tool_last_run_age(execute_kind: str) -> str | None:
     """Age of the last clean run of a tool scan, or None if it's never
     finished, so a tool page can show "Last scan 3 days ago" instead of
     looking identical to a first visit."""
     ts = job_persistence.last_finished_at(execute_kind)
     return _format_age(ts) if ts is not None else None
-
-
-def _no_creds_response(request):
-    """Return a 303 redirect (or htmx fragment) when no credentials are set."""
-    if _is_htmx(request):
-        return HTMLResponse(
-            _ql_notice_html(
-                "error",
-                'No Qobuz credentials set. Visit '
-                '<a href="/settings" class="ql-inline-link">Settings</a>.',
-            ),
-            status_code=200)
-    return RedirectResponse(url="/settings?error=creds", status_code=303)
 
 
 def _read_creds():
