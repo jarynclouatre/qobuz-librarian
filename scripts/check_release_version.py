@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Refuse a release tag that disagrees with the packaged application version."""
+"""Refuse a release tag that disagrees with the packaged application version,
+or whose changelog entry is still marked Unreleased."""
 
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -23,6 +25,17 @@ def check_release_tag(tag: str, version: str) -> str | None:
     return f"release tag {tag!r} does not match packaged version {version!r} ({expected!r})"
 
 
+def check_changelog_dated(version: str, path: Path = ROOT / "CHANGELOG.md") -> str | None:
+    heading = f"## [{version}] - "
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(heading):
+            when = line.removeprefix(heading).strip()
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", when):
+                return None
+            return f"CHANGELOG.md: [{version}] reads {when!r}; date it before releasing"
+    return f"CHANGELOG.md has no [{version}] entry"
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: check_release_version.py RELEASE_TAG", file=sys.stderr)
@@ -32,11 +45,12 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         print(exc, file=sys.stderr)
         return 1
-    problem = check_release_tag(argv[1], version)
+    problem = check_release_tag(argv[1], version) or check_changelog_dated(version)
     if problem:
         print(problem, file=sys.stderr)
         return 1
-    print(f"Release tag {argv[1]} matches packaged version {version}.")
+    print(f"Release tag {argv[1]} matches packaged version {version}, "
+          "and its changelog entry is dated.")
     return 0
 
 

@@ -2,7 +2,7 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [0.14.0] - Unreleased
+## [0.14.0] - 2026-08-22
 
 0.14.0 adds portable collection recovery, a new way to discover music, and a
 terminal Settings screen. It also improves reliability across downloads,
