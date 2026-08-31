@@ -45,6 +45,7 @@ out of library scans and import targets.
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
 | `AUTO_LIBRARY_SCAN` | `true` | Offer the one-time baseline scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
+| `NEW_RELEASE_MAX_AGE_DAYS` | `365` | Only flag albums released within this many days as new (`0` = any catalogue newcomer counts, including older releases Qobuz recently added) |
 | `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days |
 | `REPAIR_CACHE_ENABLED` | `true` | Cache the repair scan's Qobuz ISRC lookups (files are still decode-tested fresh every scan) |
 | `REPAIR_CACHE_TTL_DAYS` | `30` | How long a cached ISRC lookup is reused before re-verifying (`0` = keep until the db is deleted) |
@@ -54,19 +55,23 @@ out of library scans and import targets.
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
 | `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Hide the rest of an album from gap scans once you download one track from it |
+| `EXCLUDE_LIVE_ALBUMS` | `false` | Drop obvious live/tour/session/acoustic releases from the missing-albums gap list; a studio album whose real title merely contains "Live" is never dropped |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
 `MIGRATE_MULTI_ARTIST` affects new imports only. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.
 
 `DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved, originals replaced atomically). To downsample hi-res already in your library, use the on-demand **Downsample** mode instead.
 
-Pacing and timeout knobs are forwarded in `compose.yaml`, so setting them in `.env` takes effect:
+Pacing, timeout, and worker knobs are forwarded in `compose.yaml`, so setting them in `.env` takes effect (each is described in `.env.example`):
 
 - `RIP_TIMEOUT`
 - `DELAY_BETWEEN`
 - `ARTIST_API_DELAY`
 - `ARTIST_SCAN_WORKERS`
 - `MISSING_ALBUMS_MIN_TRACKS`
+- `BEETS_TIMEOUT`
+- `MIN_FREE_STAGING_MB`
+- `RESAMPLE_WORKERS`
 
 Fuzzy-match cutoffs, search and catalogue limits, and the job-log and stream
 internals are constants in `src/qobuz_librarian/config.py`, not settings.
