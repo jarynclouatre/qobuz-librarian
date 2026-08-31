@@ -12,8 +12,7 @@
 
 {% if entries %}
 <p class="ql-repair-history-summary">
-  {{ entries | length }} most recent (newest first). Repaired in place, so
-  re-sync the album on offline devices to pick up the fixed file.
+  {{ entries | length }} most recent repairs, newest first. Each replaced its damaged file in place.
 </p>
 <ul class="ql-repair-history-list">
   {% for e in entries %}
