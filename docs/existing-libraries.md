@@ -25,11 +25,11 @@ The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, and 
 
 ## Migrating into the layout
 
-If your library is not already organised as artist folders with album folders inside them, the **Migrate** tool can build the expected structure. It is a one-time local-library preparation step.
+If your library is not already organised as artist folders with album folders inside them, the **Library migration** tool can build the expected structure. It is a one-time local-library preparation step.
 
 It places each file by its tags (album artist, album, title, track, disc). For files whose tags are not enough to place them, an optional AcoustID fingerprint pass identifies them by sound (slower, needs network, off by default; no API key required).
 
-Migrate copies by default, so the source library stays where it is. Optional move mode relocates the originals after preview and removes source folders that become empty. The tool previews the full plan first: where each file goes, what it could not place, and how much space is needed at the destination. Nothing is copied or moved until you confirm. Files it cannot confidently place are left alone and listed.
+Library migration copies by default, so the source library stays where it is. Optional move mode relocates the originals after preview and removes source folders that become empty. The tool previews the full plan first: where each file goes, what it could not place, and how much space is needed at the destination. Nothing is copied or moved until you confirm. Files it cannot confidently place are left alone and listed.
 
 An approved migration writes two CSVs at the destination: a `migration-manifest-*.csv` recording the full plan (including everything left behind and why) and a `migration-results-*.csv` recording what the run copied, moved, skipped, or failed on. Each file gets a unique timestamped name, so repeated runs never overwrite an earlier record; the approved plan and the finished run both report the exact filename they wrote. A `--dry-run` prints the preview without writing either file or otherwise changing the destination.
 
@@ -48,7 +48,7 @@ services:
 
 Then either:
 
-- **Web:** open **Migrate**, optionally tick *Fingerprint unclear files*, click **Preview migration**, review the per-artist list, then **Copy N selected** (reads **Move N selected** in move mode).
+- **Web:** open **Library migration** from **Settings**, optionally tick *Fingerprint unclear files*, click **Preview migration**, review the per-artist list, then **Copy N selected** (reads **Move N selected** in move mode).
 - **CLI:** `docker compose run --rm qobuz-librarian cli --migrate`. Add `--acoustid` for fingerprinting, `--in-place` to move instead of copy, or `--dry-run` to preview. Source and destination come from the env vars above or `--migrate-src` / `--migrate-dest`.
 
 After migration finishes, point `QL_MUSIC_DIR` at the new destination and run a Library scan.
@@ -80,7 +80,7 @@ docker compose run --rm qobuz-librarian \
 
 It shows the matching MusicBrainz releases one album at a time, for you to accept, skip, or replace. Lookups use beets' built-in AcoustID key; you only need your own (from <https://acoustid.org/new-application>, added as `acoustid: {apikey: "KEY"}`) to submit fingerprints with `beet submit`.
 
-Stop Qobuz Librarian completely before running this or any other manual `beet` command. Waiting for downloads to finish is not enough: manual commands do not participate in the app's database coordination and must not run alongside it. To also re-folder the files into the layout, use [Migrate](#migrating-into-the-layout) instead.
+Stop Qobuz Librarian completely before running this or any other manual `beet` command. Waiting for downloads to finish is not enough: manual commands do not participate in the app's database coordination and must not run alongside it. To also re-folder the files into the layout, use [Library migration](#migrating-into-the-layout) instead.
 
 ## The first scan on a big library
 

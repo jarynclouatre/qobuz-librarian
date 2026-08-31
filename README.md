@@ -31,7 +31,7 @@ Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what y
 - **Discover.** With a Last.fm API key saved, a Discover tab suggests artists like the ones already in your library and names the artists that vouch for each, browses the genres of your library, searches for artists similar to a name you type, and lists the albums you saved on Qobuz that are not on disk yet. Suggested artists and albums are resolved on Qobuz, and short single-track releases are left out.
 - **Clean import.** beets handles tagging and cover art, and files land in your library in a single move. Lyrics are fetched on import; **Lyrics** mode backfills tracks you already have.
 - **Repair.** ISRC-anchored scanning finds truncated or corrupt FLACs and refills exact tracks when the ISRC resolves to that same recording. Damage is found whatever the tag says, but a file whose ISRC is missing, unmatched, or names a different song is never offered a single-track swap; the review offers a whole-album redownload instead.
-- **Library migration.** **Migrate** reorganises an existing library into the folder structure `Artist/Album (Year)`. Copy mode leaves the original library in place; optional move mode relocates originals after preview. Merging existing duplicate album folders is a CLI-only option.
+- **Library migration.** Reorganise an existing library into the folder structure `Artist/Album (Year)`. Copy mode leaves the original library in place; optional move mode relocates originals after preview. Merging existing duplicate album folders is a CLI-only option.
 - **Collection backup.** After each library scan, a JSON list of every artist, album and track in your library is written to a folder you choose, with the Qobuz ids the app has resolved. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it, so an unmounted drive cannot overwrite a good copy. Upload a backup file again later and the app lists every album in it that is not in your library, as one review to download from.
 - **Crash-safe queue.** Job records and review lists survive restarts; interrupted downloads are marked failed and can be retried. A shared run lock keeps the web app and CLI from writing at the same time within one deployment.
 
@@ -50,7 +50,7 @@ Most scan modes work the same way: **scan → review → act.** A scan runs in t
 | **Downsample** | Bring hi-res files down to 44.1 / 48 kHz (local, no login) |
 | **Repair** | Refill truncated or partial FLACs (ISRC-verified) |
 | **Lyrics** | Fetch lyrics for tracks missing them (no Qobuz login; uses internet lyric websites) |
-| **Migrate** | Reorganise an existing library into the folder structure `Artist/Album (Year)` (copies by default; optional move mode) |
+| **Library migration** (on Settings) | Reorganise an existing library into the folder structure `Artist/Album (Year)` (copies by default; optional move mode) |
 | **Queue / History** | Running and waiting work, plus a record of finished jobs |
 | **Settings** | Qobuz credentials, behaviour toggles, paths, and diagnostics |
 
