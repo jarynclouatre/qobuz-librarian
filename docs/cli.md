@@ -2,7 +2,7 @@
 
 [← README](../README.md)
 
-The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and download lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags for unattended runs. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands as `qobuz-librarian …` (drop the `docker compose run --rm` prefix). Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
+The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and download lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands as `qobuz-librarian …` (drop the `docker compose run --rm` prefix). Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
 
 ## The download lock
 
@@ -16,7 +16,7 @@ Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing 
 docker compose run --rm -it qobuz-librarian cli
 ```
 
-Three menu modes also have flags that jump straight to them. They are still interactive (they confirm per artist or prompt for one), so keep `-it`:
+Every menu mode has a flag that jumps straight to it; `--help` lists them all. The walks below stay interactive (they confirm per artist or prompt for one), so keep `-it`:
 
 ```bash
 # The artist walk over every artist, queueing as you go
@@ -41,16 +41,22 @@ prints the current values without saving:
 docker compose run --rm -it qobuz-librarian cli --settings
 ```
 
-## Common unattended forms
+## Direct downloads
+
+Both confirm each album before anything downloads (download, queue, or skip), so keep `-it`. With no terminal attached, an unanswered prompt skips the album.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)
-docker compose run --rm qobuz-librarian cli https://open.qobuz.com/album/abcd1234
+docker compose run --rm -it qobuz-librarian cli https://open.qobuz.com/album/abcd1234
 
 # Work through one artist's catalogue (--include-singles and/or
 # --include-comps to also offer singles and compilation appearances)
-docker compose run --rm qobuz-librarian cli --artist "Paysage d'Hiver"
+docker compose run --rm -it qobuz-librarian cli --artist "Paysage d'Hiver"
+```
 
+## Common unattended forms
+
+```bash
 # Sweep every artist for quality upgrades, auto-confirming upgrades the scanner can classify safely
 docker compose run --rm qobuz-librarian cli --upgrade-walk --auto-safe
 
