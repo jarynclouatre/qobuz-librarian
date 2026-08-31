@@ -87,7 +87,7 @@
 {% if bulk_jobs or jobs %}
 {% set history_count = bulk_total + total %}
 <div class="ql-activity-toolbar">
-  <p class="ql-mono-meta">{{ history_count }} item{% if history_count != 1 %}s{% endif %}{% if attention_only %} need attention{% else %} in history{% endif %}</p>
+  <p class="ql-mono-meta">{% if attention_only %}{{ history_count }} item{% if history_count != 1 %}s need{% else %} needs{% endif %} attention{% else %}{{ history_count }} item{% if history_count != 1 %}s{% endif %} in history{% endif %}</p>
   {% if not attention_only %}
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
