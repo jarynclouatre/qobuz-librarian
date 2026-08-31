@@ -2,7 +2,7 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-08-31
 
 1.0.0 marks Qobuz Librarian stable. The work since 0.14.0 is small fixes
 and a documentation pass; nothing changes how the app works.
