@@ -7,14 +7,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qobuz-librarian"
-version = "0.14.0"
+version = "1.0.0"
 description = "Qobuz Librarian: album/artist downloader and music-library maintenance tool"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 keywords = ["qobuz", "music", "downloader", "beets", "library", "flac", "streamrip"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Environment :: Web Environment",
     "Intended Audience :: End Users/Desktop",

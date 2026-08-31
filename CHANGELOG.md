@@ -2,6 +2,16 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [1.0.0] - Unreleased
+
+1.0.0 marks Qobuz Librarian stable. The work since 0.14.0 is small fixes
+and a documentation pass; nothing changes how the app works.
+
+- Discover's saved suggestions and Search's saved results no longer offer artists already in your library while Qobuz is unreachable.
+- The History header says "1 item needs attention" rather than "1 item need attention", the Move confirmation names how many folders it moves, and the repair history note reads as one sentence.
+- The guides caught up with the app: the terminal guide separates commands that confirm each album from truly unattended ones, troubleshooting quotes the messages the app actually shows, the migration page goes by its real name and location, and the configuration guide lists every shipped setting.
+- A release can no longer be published while its changelog entry is still marked Unreleased.
+
 ## [0.14.0] - 2026-08-22
 
 0.14.0 adds portable collection recovery, a new way to discover music, and a
