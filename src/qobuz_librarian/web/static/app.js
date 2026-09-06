@@ -928,6 +928,18 @@
     if (hideIcon) hideIcon.classList.toggle("hidden", !isVisible);
   });
 
+  // A hidden file input says nothing about what was picked, so write the name
+  // beside the button that opened it.
+  document.addEventListener("change", function (evt) {
+    var input = evt.target;
+    if (!input.matches || !input.matches("input[type=file][data-file-name]")) return;
+    var out = document.getElementById(input.getAttribute("data-file-name"));
+    if (!out) return;
+    var file = input.files && input.files[0];
+    out.textContent = file ? file.name : out.getAttribute("data-empty");
+    out.classList.toggle("is-chosen", !!file);
+  });
+
   // Keep the search field metadata in step with the search mode.
   document.addEventListener("change", function (evt) {
     var radio = evt.target;

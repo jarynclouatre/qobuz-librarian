@@ -5269,6 +5269,34 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-required {
   color: var(--ql-danger);
 }
+/* The browser's file control cannot be styled, so it is hidden behind a label
+   wearing the normal button styles and the chosen name is written beside it.
+   The label is the input's containing block so a "choose a file" validation
+   bubble points at the button rather than the corner of the page. */
+.ql-file-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem;
+}
+.ql-file-choose {
+  position: relative;
+}
+.ql-file-choose:has(input:focus-visible) {
+  outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
+  outline-offset: 2px;
+}
+.ql-file-name {
+  min-width: 0;
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.ql-file-name.is-chosen {
+  color: var(--ql-text);
+  font-weight: 680;
+}
 .ql-settings-actions {
   display: flex;
   flex-wrap: wrap;
