@@ -44,7 +44,7 @@ Most scan modes work the same way: **scan → review → act.** A scan runs in t
 | Page | What it does |
 |---|---|
 | **Search** | Find artists, albums, or tracks and download from the results |
-| **Library** | Find missing albums and Gap Fill candidates, then check for new releases |
+| **Library** | Find missing albums and albums to fill, then check for new releases |
 | **Discover** | Suggested artists, library genres, similar-artist search, and your saved Qobuz albums (needs a Last.fm API key) |
 | **Upgrade** | Re-rip albums Qobuz can now serve at higher quality |
 | **Downsample** | Bring hi-res files down to 44.1 / 48 kHz (local, no login) |
