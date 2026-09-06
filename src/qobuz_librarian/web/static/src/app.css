@@ -1617,6 +1617,11 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   .ql-result-row--artist .ql-result-meta {
     font-size: 0.8rem;
   }
+  /* The count has to fit a ~97 px column beside the picture and the button;
+     the screen is Qobuz's own search, so the phone drops the source. */
+  .ql-result-row--artist .ql-result-meta-source {
+    display: none;
+  }
   .ql-result-row--artist .ql-result-action-form {
     width: auto;
     justify-self: end;

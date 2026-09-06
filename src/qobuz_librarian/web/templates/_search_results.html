@@ -133,11 +133,10 @@
           {% endif %}
           <div class="ql-result-copy">
             <p class="ql-result-title">{{ a.name }}</p>
-            {# No album count here: search's albums_count and the album page's
-               own catalog total are different Qobuz measurements (51 vs 30 for
-               the same artist), so any number promised on this row reads as a
-               contradiction two taps later. #}
-            <p class="ql-result-meta">Artist</p>
+            {# "about": search's albums_count and the album page's own catalog
+               total are different Qobuz measurements (51 vs 30 for the same
+               artist), so an exact number here contradicts the next screen. #}
+            <p class="ql-result-meta">Artist{% if a.albums_count %} · about {{ a.albums_count }} album{{ 's' if a.albums_count != 1 else '' }}<span class="ql-result-meta-source"> on Qobuz</span>{% endif %}</p>
           </div>
         </div>
         <form method="post" action="/search"

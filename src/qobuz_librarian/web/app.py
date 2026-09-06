@@ -4148,11 +4148,16 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         cover = ""
                         if isinstance(img, dict):
                             cover = img.get("small") or img.get("thumbnail") or ""
+                        albums_count = a.get("albums_count")
                         artist_results.append({
                             "id": a.get("id"),
                             "name": a.get("name") or "?",
                             "cover": cover if str(cover).startswith(
                                 "https://static.qobuz.com/") else "",
+                            "albums_count": (
+                                albums_count
+                                if isinstance(albums_count, int)
+                                and albums_count > 0 else None),
                         })
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."

@@ -992,6 +992,32 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
     assert client.get("/healthz").status_code == 200
 
 
+def test_artist_search_rows_carry_a_catalog_size(client, monkeypatch):
+    """Qobuz returns same-named artist entries; the row has to separate them."""
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(
+        search_mod,
+        "search_artists",
+        lambda *_args, **_kwargs: [
+            {"id": "bonobo-real", "name": "Bonobo", "albums_count": 51},
+            {"id": "bonobo-twin", "name": "Bonobo"},
+        ],
+    )
+
+    response = client.post(
+        "/search",
+        data={"q": "Bonobo", "kind": "artist"},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "about 51 albums" in response.text
+    assert response.text.count("View albums") == 2
+
+
 def test_artist_search_selected_artist_shows_discography(client, monkeypatch):
     import qobuz_librarian.api.search as search_mod
     import qobuz_librarian.library.catalog as catalog_mod
