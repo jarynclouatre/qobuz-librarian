@@ -56,6 +56,17 @@
 <div class="ql-settings-page">
 <header class="ql-page-header ql-settings-header">
   <h1>Settings</h1>
+  <nav class="ql-settings-jump" aria-label="Settings sections">
+    <a href="#qobuz">Qobuz</a>
+    <a href="#mode">Mode</a>
+    <a href="#behaviour">Behaviour</a>
+    <a href="#library-paths">Paths</a>
+    <a href="#library-maintenance">Maintenance</a>
+    <a href="#discover">Discover</a>
+    <a href="#collection-backup">Backup</a>
+    {% if web_login_available %}<a href="#web-login">Login</a>{% endif %}
+    <a href="#diagnostics">Diagnostics</a>
+  </nav>
 </header>
 
 {% include "_writes_paused_notice.html" %}
@@ -188,7 +199,7 @@
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2>Qobuz authentication</h2>
+        <h2 id="qobuz" tabindex="-1" class="ql-anchor-target">Qobuz authentication</h2>
         <p>
           Token used for Search, Library, Discover, New Releases, Upgrade,
           Repair, and downloads.
@@ -298,7 +309,7 @@
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2>Mode</h2>
+        <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
         <p>
           Use terminal mode before running CLI commands. Web scans and
           downloads pause while terminal mode is active.
@@ -443,7 +454,7 @@
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2>Library paths</h2>
+        <h2 id="library-paths" tabindex="-1" class="ql-anchor-target">Library paths</h2>
         <p>
           Paths currently in use. Host paths are shown when Docker exposes them;
           otherwise this shows the container path.
@@ -492,7 +503,7 @@
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
-        <h2>Library maintenance</h2>
+        <h2 id="library-maintenance" tabindex="-1" class="ql-anchor-target">Library maintenance</h2>
         <p>
           Re-reads every artist folder, ignoring the unchanged-folder cache.
         </p>

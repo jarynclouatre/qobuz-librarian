@@ -3967,6 +3967,42 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     font-size: 2.4rem;
   }
 }
+/* Settings is nine sections and about six phone screens long, so the title
+   carries a link to each one. Phone links keep the 44 px target the rest of
+   the page uses; the row wraps rather than scrolling sideways so nothing is
+   hidden off the edge. */
+.ql-settings-jump {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+}
+.ql-settings-jump a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  border: 1px solid var(--ql-line-soft);
+  border-radius: var(--ql-radius-sm);
+  padding: 0.3rem 0.7rem;
+  color: var(--ql-text-2);
+  font-family: var(--ql-font-ui);
+  font-size: 0.8125rem;
+  font-weight: 680;
+  line-height: 1;
+  text-decoration: none;
+  transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease;
+}
+.ql-settings-jump a:hover {
+  border-color: color-mix(in oklab, var(--ql-text) 26%, transparent);
+  background-color: var(--ql-surface-hover);
+  color: var(--ql-text);
+}
+@media (min-width: 640px) {
+  .ql-settings-jump a {
+    min-height: 2rem;
+  }
+}
 .ql-page-header--split {
   display: flex;
   align-items: center;
