@@ -1938,6 +1938,10 @@ def _restore_jobs_once() -> None:
     with _JOBS_RESTORE_LOCK:
         if _JOBS_RESTORED:
             return
+        # Ahead of the restore, which would otherwise reopen a gone backup as a
+        # failure pointing at the notice this settles away, and ahead of the
+        # first page render, which carries the attention count.
+        _retire_gone_recoveries(job_persistence.recovery_history())
         try:
             job_mgr.restore_jobs(
                 _RESUME_EXECUTE,
@@ -2406,6 +2410,31 @@ def _recovery_missing(recovery) -> bool:
 
 
 templates.env.globals["recovery_on_disk"] = _recovery_on_disk
+
+
+def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:
+    """Drop the History recoveries whose kept folders are confirmed gone.
+
+    The job page checks the disk; History only read the record, so a backup
+    restored or cleaned up elsewhere stayed pinned to page one under a red
+    chip, pointing at a Diagnostics panel with nothing in it. Retiring the
+    record where History reads it settles both screens, and the nav's
+    attention count with them, without a press per stale scan."""
+    kept = []
+    for row in rows:
+        if (
+            row.get("attention") == "recovery"
+            and row.get("recoveries")
+            and not any(_recovery_on_disk(r) for r in row["recoveries"])
+        ):
+            job = (job_mgr.registry.get(row["id"])
+                   or job_mgr.load_historical_job(row["id"]))
+            if job is not None and job_persistence.acknowledge_missing_recoveries(
+                job, _recovery_missing
+            ):
+                continue
+        kept.append(row)
+    return kept
 
 
 def _fmt_clock(ts):
@@ -8726,6 +8755,13 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
             with job._lock:
                 if job.attention == attention:
                     job.attention = ""
+    if job.attention == "recovery" and job.recoveries:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: job_persistence.acknowledge_missing_recoveries(
+                job, _recovery_missing),
+        )
     new_release_state = {"stale": False, "reason": ""}
     if (
         job.execute_kind == "new_releases"
@@ -10052,34 +10088,6 @@ async def job_dismiss_rest(request: Request, job_id: str):
     return JSONResponse(payload)
 
 
-@app.post("/jobs/{job_id}/acknowledge-recovery")
-async def job_acknowledge_recovery(request: Request, job_id: str):
-    """Retire exact Repair recovery records whose folders are confirmed gone."""
-    job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
-    if not job:
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
-                "That job is no longer in the record."),
-            status_code=303)
-    loop = asyncio.get_running_loop()
-    acknowledged = await loop.run_in_executor(
-        None,
-        lambda: job_persistence.acknowledge_missing_recoveries(
-            job, _recovery_missing
-        ),
-    )
-    if not acknowledged:
-        return RedirectResponse(
-            url=f"/jobs/{job_id}?error=" + urllib.parse.quote(
-                "The missing recovery could not be acknowledged. Nothing "
-                "changed; reload the page and check the data-folder "
-                "permissions, then try again."
-            ),
-            status_code=303,
-        )
-    return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
-
-
 @app.post("/jobs/{job_id}/give-up")
 async def job_give_up(request: Request, job_id: str):
     """Abandon a blocked download so downloads and scans can run again.
@@ -11119,7 +11127,7 @@ async def queue_history(
     def _load_page(page, bulk_page):
         # Two layers: meaningful jobs as cards, plain downloads as the table
         # underneath. Both walk the archive a page at a time.
-        recoveries = (
+        recoveries = _retire_gone_recoveries(
             job_persistence.recovery_history(attention_only=True)
             if attention else job_persistence.recovery_history()
         )

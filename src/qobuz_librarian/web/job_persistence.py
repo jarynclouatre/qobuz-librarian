@@ -938,16 +938,16 @@ def acknowledge_missing_recoveries(job, is_missing) -> bool:
             return False
 
         resolution = (
-            "The missing Repair backup was acknowledged; no kept originals "
-            "remain."
+            "That backup is no longer on disk, so there is nothing left to "
+            "review."
             if len(recoveries) == 1
-            else "The missing Repair backups were acknowledged; no kept "
-                 "originals remain."
+            else "Those backups are no longer on disk, so there is nothing "
+                 "left to review."
         )
         acknowledgement_lines = []
         for record in recoveries:
             line = (
-                "Acknowledged missing Repair recovery folder: "
+                "Cleared the record for a Repair backup folder that is gone: "
                 f"{record['location']}"
             )
             acknowledgement_lines.append(job._CTRL_RE.sub("", line))

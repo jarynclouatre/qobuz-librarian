@@ -6183,7 +6183,11 @@ def test_restore_backup_rejects_path_shaped_names(client, tmp_path, monkeypatch)
     assert "isn't there anymore" in r.text
 
 
-def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_path, monkeypatch):
+def test_repair_recovery_goes_quiet_once_its_kept_files_are_gone(client, tmp_path, monkeypatch):
+    # A Repair backup restored or cleaned up outside the job left History
+    # pinning the scan under a red "Recovery needed" chip for good, pointing at
+    # a Diagnostics panel that had nothing in it. History now settles the
+    # record itself, but only when it can see the folder is really gone.
     from qobuz_librarian.web import job_persistence
 
     job_persistence._reset_for_tests()
@@ -6208,29 +6212,20 @@ def test_missing_repair_recovery_can_be_acknowledged_and_cleared(client, tmp_pat
         assert job_persistence.persist(job)
         history = client.get("/queue/history").text
         assert job.summary in history
-
-        response = client.post(
-            f"/jobs/{job.id}/acknowledge-recovery",
-            follow_redirects=False,
-        )
-        assert "?error=" in response.headers["location"]
+        assert "Recovery needed" in history
         assert job.recoveries
 
+        # The whole tree gone reads as an unmounted volume, not as licence to
+        # clear the alarm.
         backup.rmdir()
         backup.parent.rmdir()
-        response = client.post(
-            f"/jobs/{job.id}/acknowledge-recovery",
-            follow_redirects=False,
-        )
-        assert "?error=" in response.headers["location"]
+        assert "Recovery needed" in client.get("/queue/history").text
         assert job.recoveries
 
         backup.parent.mkdir()
-        response = client.post(
-            f"/jobs/{job.id}/acknowledge-recovery",
-            follow_redirects=False,
-        )
-        assert response.headers["location"] == f"/jobs/{job.id}"
+        history = client.get("/queue/history").text
+        assert "Recovery needed" not in history
+        assert "Recovery files are still held" not in history
 
         saved = job_persistence.load_one(job.id)
         assert saved["recoveries"] == []

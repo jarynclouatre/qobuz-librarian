@@ -70,19 +70,13 @@
          had already landed in the album. #}
       {% for recovery in job.recoveries %}
       <div>
-        {{ recovery.backed_up }} of {{ recovery.requested }} original file{% if recovery.requested != 1 %}s{% endif %} kept.{% if recovery.reason %} {{ recovery.reason }}{% endif %}
+        {{ recovery.backed_up }} of {{ recovery.requested }} original file{% if recovery.requested != 1 %}s{% endif %} {% if kept.on_disk %}kept{% else %}were kept at the time{% endif %}.{% if recovery.reason %} {{ recovery.reason }}{% endif %}
       </div>
       {% endfor %}
       {% if kept.on_disk %}
       <span>Review or restore {% if job.recoveries|length == 1 %}it{% else %}them{% endif %} under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</span>
       {% else %}
       <span>The kept cop{% if job.recoveries|length == 1 %}y is{% else %}ies are{% endif %} no longer on disk, restored or cleaned up outside this job, so there's nothing left to review.</span>
-      {% if job.attention == 'recovery' %}
-      <form action="/jobs/{{ job.id }}/acknowledge-recovery" method="post">
-        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Acknowledge</button>
-      </form>
-      {% endif %}
       {% endif %}
     </div>
   </div>
