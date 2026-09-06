@@ -108,6 +108,13 @@
 </div>
 {% endif %}
 
+{% if password_error %}
+<div class="ql-notice ql-notice-error mb-6" data-flash>
+  <span>{{ password_error }} Try again under
+    <a href="#web-login" class="ql-inline-link">Web login</a>.</span>
+</div>
+{% endif %}
+
 {% if error == "creds" %}
 <div class="ql-notice ql-notice-error mb-6" data-flash>
   <span>Qobuz Librarian could not save the credentials. Give the config folder
@@ -184,7 +191,7 @@
 {% endif %}
 
 <div class="ql-settings-stack">
-<details class="ql-settings-section ql-settings-section-primary"{% if not auth_token_set or error == 'creds' %} open{% endif %}>
+<details class="ql-settings-section ql-settings-section-primary">
   <summary class="ql-settings-summary">
     <h2 id="qobuz" tabindex="-1" class="ql-anchor-target">Qobuz authentication</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -580,7 +587,7 @@
   </div>
 </details>
 
-<details class="ql-settings-section"{% if collection_backup.unreadable or collection_backup.held_back or collection_backup.held_back_unreadable %} open{% endif %}>
+<details class="ql-settings-section">
   <summary class="ql-settings-summary">
     <h2 id="collection-backup" tabindex="-1" class="ql-anchor-target">Collection backup</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -741,7 +748,7 @@
 </details>
 
 {% if web_login_available %}
-<details class="ql-settings-section"{% if password_error %} open{% endif %}>
+<details class="ql-settings-section">
   <summary class="ql-settings-summary">
     <h2 id="web-login" tabindex="-1" class="ql-anchor-target">Web login</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -755,12 +762,6 @@
         </p>
       </div>
     </div>
-
-    {% if password_error %}
-    <div class="ql-notice ql-notice-error mb-6">
-      <span>{{ password_error }}</span>
-    </div>
-    {% endif %}
 
     <form action="/settings/password" method="post" class="ql-settings-form" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
