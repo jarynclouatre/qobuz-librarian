@@ -96,28 +96,23 @@
 {%- endmacro %}
 
 {% if bulk_jobs or jobs %}
-{% set history_count = bulk_total + total %}
+{% if not attention_only %}
 <div class="ql-activity-toolbar">
-  <p class="ql-mono-meta">{% if attention_only %}{{ history_count }} item{% if history_count != 1 %}s need{% else %} needs{% endif %} attention{% else %}{{ history_count }} item{% if history_count != 1 %}s{% endif %} in history{% endif %}</p>
-  {% if not attention_only %}
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
             data-confirm="Clear finished jobs from history? Active single-track Undo, parked reviews, and recovery records stay until resolved."
             data-confirm-action="Clear history" data-irreversible>Clear history</button>
   </form>
-  {% endif %}
 </div>
+{% endif %}
 
 {% if bulk_jobs %}
 <section class="ql-activity-section" aria-labelledby="history-jobs-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-jobs-heading">Jobs</h2>
-    <span class="ql-activity-count">{{ bulk_total }}</span>
+    <p class="ql-mono-meta">{{ bulk_total }}{% if bulk_pages > 1 %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
   </header>
-  {% if bulk_pages > 1 %}
-  <p class="ql-mono-meta ql-history-truncated">Page {{ bulk_page }} of {{ bulk_pages }} · {{ bulk_total }} in total.</p>
-  {% endif %}
   <div class="ql-history-cards">
     <div class="ql-activity-list ql-panelize">
       {% for job in bulk_jobs %}
@@ -132,10 +127,9 @@
           {% elif job.recoveries %}
           <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% endif %}
-          {% if job.summary and job.summary != job.error %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
-          {% if job.error %}<p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>{% endif %}
         </div>
         {{ job_side(job) }}
+        {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta ql-row-meta--error ql-row-reason" title="{{ reason }}">{{ reason }}</p>{% endif %}
       </article>
       {% endfor %}
     </div>
@@ -162,7 +156,7 @@
 <section class="ql-activity-section" aria-labelledby="history-downloads-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-downloads-heading">Downloads</h2>
-    <span class="ql-activity-count">{{ total }}</span>
+    <p class="ql-mono-meta">{{ total }}{% if pages > 1 %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
   </header>
   <div class="ql-activity-list ql-panelize">
     {% for job in jobs %}
@@ -172,12 +166,12 @@
         <p class="ql-row-title">
           <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
         </p>
-        {% if job.summary and job.summary != job.error %}<p class="ql-row-meta">{{ job.summary }}</p>{% endif %}
-        {% if job.error %}
-        <p class="ql-row-meta ql-row-meta--error">{{ job.error | strip_log_pointer(none) }}</p>
-        {% endif %}
       </div>
       {{ job_side(job) }}
+      {% if job.error %}
+      {% set reason = job.error | strip_log_pointer(none) %}
+      <p class="ql-row-meta ql-row-meta--error ql-row-reason" title="{{ reason }}">{{ reason }}</p>
+      {% endif %}
     </article>
     {% endfor %}
   </div>

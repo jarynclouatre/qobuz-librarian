@@ -11169,8 +11169,10 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
     })
 
 
-_HISTORY_PER_PAGE = 30
-_HISTORY_BULK_CAP = 40
+# A page's worth is what a phone can scan in about five screens now that a
+# job is one line rather than a card.
+_HISTORY_PER_PAGE = 25
+_HISTORY_BULK_CAP = 20
 
 
 @app.get("/queue/history", response_class=HTMLResponse)

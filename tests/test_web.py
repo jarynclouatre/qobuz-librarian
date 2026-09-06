@@ -6237,7 +6237,7 @@ def test_repair_recovery_goes_quiet_once_its_kept_files_are_gone(client, tmp_pat
     try:
         assert job_persistence.persist(job)
         history = client.get("/queue/history").text
-        assert job.summary in history
+        assert job.title in history
         assert "Recovery needed" in history
         assert job.recoveries
 

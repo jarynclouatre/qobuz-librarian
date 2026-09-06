@@ -2937,6 +2937,9 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   gap: 0.5rem;
   padding-inline: 0.15rem;
 }
+.ql-activity-toolbar {
+  justify-content: flex-end;
+}
 .ql-activity-section-header h2 {
   margin: 0;
   color: var(--ql-text-3);
@@ -3104,10 +3107,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-history-cards {
   border-radius: 16px;
 }
-.ql-history-truncated {
-  margin: 0 0 0.5rem;
-  color: var(--ql-text-3);
-}
 .ql-history-row--compact {
   padding-block: 0.6rem;
 }
@@ -3128,6 +3127,19 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+/* One line of the reason on the row; the job page carries the sentence. It
+   sits on its own grid row under the name rather than inside it, so a phone
+   can give it the width of the card. */
+.ql-history-row .ql-row-meta--error {
+  -webkit-line-clamp: 1;
+}
+.ql-history-row {
+  row-gap: 0.3rem;
+}
+.ql-history-row .ql-row-reason {
+  grid-column: 2;
+  margin-top: 0;
 }
 .ql-row-open {
   display: inline-flex;
@@ -3217,30 +3229,37 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     width: 100%;
     justify-items: start;
   }
-  /* History follows the Queue rows: the icon sits beside the text instead of
-     taking a row of its own, and the chips line up beneath it. The stacked
-     card per job ran the page to nineteen phone screens. */
+  /* History follows the Queue rows: the icon sits beside the text, and the
+     chips and time sit at the end of the same line, so a job is one line
+     rather than a card. The "Open" link goes: the name is the same link. */
   .ql-history-row {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 0.4rem 0.7rem;
     padding: 0.7rem 0.9rem;
   }
   .ql-history-row .ql-job-tile {
     width: 34px;
     height: 34px;
-    align-self: start;
   }
   .ql-history-row .ql-job-tile svg {
     width: 16px;
     height: 16px;
   }
+  .ql-history-row .ql-row-open {
+    display: none;
+  }
+  .ql-history-row .ql-row-reason {
+    grid-column: 2 / -1;
+  }
   .ql-history-row .ql-activity-side {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    grid-column: 2;
-    /* Tight enough that a status chip, a warning chip, the time and Open sit
-       on one line at 390 px; anything busier still wraps. */
+    justify-content: flex-end;
+    /* Capped so a busy row wraps its own chips instead of squeezing the
+       name into a column two words wide. A length, not a percentage: a
+       percentage resolves against the column the chips themselves sized. */
+    max-width: 10rem;
     gap: 0.4rem;
   }
   .ql-history-row .ql-activity-side .ql-activity-actions {
