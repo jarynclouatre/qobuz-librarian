@@ -148,22 +148,11 @@
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-irreversible
             {%- else %} data-confirm-action="Download"
             {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
-          {% set _result_count = review_counts.total %}
-          {% set _discard_confirm = labels.discard_confirm(job) | trim %}
+          {% if not embedded_surface|default(false) %}
           <div class="ql-review-footer-secondary-group">
-            {% if not embedded_surface|default(false) %}
             <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ job_return_label }}</a>
-            {% endif %}
-            {# Marked only where discarding actually loses something. A
-               new-release review is the one list the app cannot rebuild, since
-               those releases are already recorded as seen; every other review
-               comes back from its own page with a refresh. #}
-            <button type="submit" formaction="/jobs/{{ job.id }}/cancel"
-                    class="ql-btn ql-btn-sm{% if job.execute_kind != 'new_releases' %} ql-btn-secondary{% endif %}"
-                    formnovalidate
-                    data-confirm="{{ _discard_confirm }}"
-                    data-confirm-action="Discard"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ _review_thing }}</button>
           </div>
+          {% endif %}
         </div>
       </div>
     </form>

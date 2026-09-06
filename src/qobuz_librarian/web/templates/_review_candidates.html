@@ -1,3 +1,13 @@
+{# Discard lives in this quiet toolbar row rather than the floating bar: that
+   bar is the one she taps for every download, and a destructive action a
+   thumb-slip away from it does not belong there. Marked only where
+   discarding loses something no rescan can rebuild. #}
+{% macro discard_review(job, thing, confirm) -%}
+<button type="submit" formaction="/jobs/{{ job.id }}/cancel" formnovalidate
+        class="ql-review-tool{% if job.execute_kind == 'new_releases' %} ql-review-tool-danger{% endif %}"
+        data-confirm="{{ confirm }}"
+        data-confirm-action="Discard"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ thing }}</button>
+{%- endmacro %}
 <div id="review-candidates"
      class="ql-review-candidates"
      data-job-id="{{ job.id }}"
@@ -17,6 +27,7 @@
                        else '/downsample/hidden' if job.execute_kind == 'downsample'
                        else '/library/hidden' %}
   {% set _hidden_label = 'Kept hi-res' if job.execute_kind == 'downsample' else 'Dismissed' %}
+  {% set _discard_confirm = labels.discard_confirm(job) | trim %}
 
   <div class="ql-review-sticky">
   {% if review_tab %}
@@ -86,6 +97,7 @@
       {% set _hidden_toolbar_label = 'View kept hi-res' if job.execute_kind == 'downsample' else _hidden_label %}
       <a href="{{ _hidden_url }}" class="ql-inline-link ql-review-dismissed-link" data-hidden-label="{{ _hidden_toolbar_label }}">{{ _hidden_toolbar_label }} ({{ labels.format_count(review_hidden_count) }})</a>
       {% endif %}
+      {{ discard_review(job, _review_thing, _discard_confirm) }}
     </div>
   </div>
   </div>
@@ -129,5 +141,8 @@
       <a href="{{ _hidden_url }}" class="ql-inline-link">Kept hi-res</a>.{% elif job.execute_kind == 'repair' %}No repair choices remain in this review.{% elif job.execute_kind == 'migration' %}No migration choices remain in this preview.{% elif job.execute_kind == 'library' %}No missing albums or Gap Fill choices remain in this review. Look under
       <a href="{{ _hidden_url }}" class="ql-inline-link">Dismissed</a>.{% else %}No choices remain in this review. Look under
       <a href="{{ _hidden_url }}" class="ql-inline-link">Dismissed</a>.{% endif %}</p>
+    {# The toolbar row above is hidden once nothing is left, so the way out of
+       a spent review has to live here too. #}
+    <p class="ql-review-empty-text">{{ discard_review(job, _review_thing, _discard_confirm) }}</p>
   </div>
 </div>

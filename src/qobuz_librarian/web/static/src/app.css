@@ -3689,6 +3689,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-review-tool:hover {
   color: var(--ql-text);
 }
+.ql-review-tool-danger {
+  color: color-mix(in oklab, var(--ql-danger) 72%, var(--ql-text));
+}
+.ql-review-tool-danger:hover {
+  color: color-mix(in oklab, var(--ql-danger) 92%, var(--ql-text));
+}
 .ql-review-tool:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
   outline-offset: 2px;
