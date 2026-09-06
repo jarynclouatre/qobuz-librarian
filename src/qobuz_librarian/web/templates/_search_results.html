@@ -67,6 +67,15 @@
   </form>
 {%- endmacro %}
 
+{% macro tracks_toggle(album_id, title, panel_id) -%}
+  <button type="button" class="ql-vchip" data-tracks-toggle
+          aria-expanded="false" aria-controls="{{ panel_id }}"
+          aria-label="Tracks on {{ title }}"
+          hx-get="/search/album-tracks?album_id={{ album_id | urlencode }}"
+          hx-target="#{{ panel_id }}" hx-swap="innerHTML"
+          hx-trigger="click once">Tracks</button>
+{%- endmacro %}
+
 {% macro search_tools(hide_owned=False) -%}
   <div class="ql-search-tools">
     <label class="ql-search-select-all">
@@ -279,6 +288,7 @@
         </div>
         <div class="ql-table-body">
           {% for g in album_groups %}
+          {% set gi = loop.index0 %}
           {% set key = 'album-' ~ g.id %}
           <div class="ql-table-row ql-table-row--album{% if g.owned %} is-owned{% endif %}" role="row"
                data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
@@ -295,21 +305,22 @@
               <div>
                 <p class="ql-table-title">{{ g.title }}</p>
                 <p class="ql-table-mobile-artist">{{ g.artist }}</p>
-                {% if g.version or g.others or not selected_artist %}
                 <div class="ql-table-sub">
                   <span class="ql-table-release-meta">
                     {% if not selected_artist %}<span class="ql-sub-artist">{{ g.artist }}</span>{% endif %}
                     {% if g.version %}<span class="ql-sub-version">{{ g.version }}</span>{% endif %}
                   </span>
-                  {% if g.others %}
-                  <button type="button" class="ql-vchip"
-                          data-version-toggle
-                          aria-expanded="false"
-                          aria-controls="search-versions-{{ loop.index0 }}"
-                          aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} Version{{ 's' if g.others | length != 1 else '' }}</button>
-                  {% endif %}
+                  <span class="ql-row-chips">
+                    {{ tracks_toggle(g.id, g.title, 'search-tracks-' ~ gi) }}
+                    {% if g.others %}
+                    <button type="button" class="ql-vchip"
+                            data-version-toggle
+                            aria-expanded="false"
+                            aria-controls="search-versions-{{ gi }}"
+                            aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} Version{{ 's' if g.others | length != 1 else '' }}</button>
+                    {% endif %}
+                  </span>
                 </div>
-                {% endif %}
                 <p class="ql-table-subtitle ql-sub-mobile">{{ g.tracks }} track{{ 's' if g.tracks != 1 else '' }}{% if g.year and g.year != '?' %} · {{ g.year }}{% endif %}</p>
               </div>
             </div>
@@ -318,8 +329,10 @@
             <span role="cell">{{ album_quality_status(g) }}</span>
             <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning) }}{% endif %}</span>
           </div>
+          <div id="search-tracks-{{ gi }}" class="ql-tracklist-panel hidden"
+               data-owned="{{ 1 if g.owned else 0 }}"></div>
           {% if g.others %}
-          <div id="search-versions-{{ loop.index0 }}" class="ql-version-panel hidden"
+          <div id="search-versions-{{ gi }}" class="ql-version-panel hidden"
                data-version-panel data-owned="{{ 1 if g.owned else 0 }}">
             {% for e in g.others %}
             <div class="ql-table-row ql-subrow{% if e.owned %} is-owned{% endif %}{% if loop.last %} ql-subrow-last{% endif %}" role="row"
@@ -337,6 +350,9 @@
                 <div>
                   <p class="ql-subtitle">{{ e.title }}{% if e.version %} <span class="ql-subver">{{ e.version }}</span>{% endif %}</p>
                   <p class="ql-table-subtitle ql-sub-mobile">{{ e.tracks }} track{{ 's' if e.tracks != 1 else '' }}{% if e.year and e.year != '?' %} · {{ e.year }}{% endif %}</p>
+                  <div class="ql-row-chips ql-sub-chips">
+                    {{ tracks_toggle(e.id, e.title, 'search-tracks-' ~ gi ~ '-' ~ loop.index0) }}
+                  </div>
                 </div>
               </div>
               <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
@@ -344,6 +360,8 @@
               <span role="cell">{{ album_quality_status(e) }}</span>
               <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning) }}{% endif %}</span>
             </div>
+            <div id="search-tracks-{{ gi }}-{{ loop.index0 }}" class="ql-tracklist-panel hidden"
+                 data-owned="{{ 1 if e.owned else 0 }}"></div>
             {% endfor %}
           </div>
           {% endif %}
@@ -356,6 +374,7 @@
     <div class="ql-grid-view hidden" data-search-view-panel="grid">
       {% if defer_search_views %}<template data-search-view-template>{% endif %}
       {% for g in album_groups %}
+      {% set gi = loop.index0 %}
       {% set key = 'album-' ~ g.id %}
       <div class="ql-grid-tile{% if g.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
         {% if not g.owned %}
@@ -371,14 +390,18 @@
           <p class="ql-grid-title">{{ release_title(g.title, g.version) }}</p>
           {% if not selected_artist %}<p class="ql-grid-artist">{{ g.artist }}</p>{% endif %}
           <p class="ql-grid-meta">{{ g.year }} · {{ g.tracks }} track{{ 's' if g.tracks != 1 else '' }}</p>
+          <div class="ql-row-chips ql-sub-chips">
+            {{ tracks_toggle(g.id, g.title, 'search-grid-tracks-' ~ gi) }}
+          </div>
         </div>
+        <div id="search-grid-tracks-{{ gi }}" class="ql-tracklist-panel hidden"></div>
         {% if g.others %}
         <button type="button" class="ql-vchip ql-grid-versions-toggle"
                 data-version-toggle
                 aria-expanded="false"
-                aria-controls="search-grid-versions-{{ loop.index0 }}"
+                aria-controls="search-grid-versions-{{ gi }}"
                 aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} Version{{ 's' if g.others | length != 1 else '' }}</button>
-        <div id="search-grid-versions-{{ loop.index0 }}" class="ql-grid-version-panel hidden"
+        <div id="search-grid-versions-{{ gi }}" class="ql-grid-version-panel hidden"
              data-version-panel>
           {% for e in g.others %}
           <div class="ql-grid-version-row{% if e.owned %} is-owned{% endif %}"
@@ -395,6 +418,9 @@
             <div class="ql-grid-version-copy">
               <p>{{ release_title(e.title, e.version) }}</p>
               <span>{{ e.year }} · {{ e.tracks }} track{{ 's' if e.tracks != 1 else '' }} · {{ e.quality }}</span>
+              <div class="ql-row-chips ql-sub-chips">
+                {{ tracks_toggle(e.id, e.title, 'search-grid-tracks-' ~ gi ~ '-' ~ loop.index0) }}
+              </div>
             </div>
             <div class="ql-grid-version-action">
               {% if e.owned %}<span class="ql-owned-label">Owned</span>
@@ -404,6 +430,8 @@
               {% endif %}
             </div>
           </div>
+          <div id="search-grid-tracks-{{ gi }}-{{ loop.index0 }}" class="ql-tracklist-panel hidden"
+               data-owned="{{ 1 if e.owned else 0 }}"></div>
           {% endfor %}
         </div>
         {% endif %}

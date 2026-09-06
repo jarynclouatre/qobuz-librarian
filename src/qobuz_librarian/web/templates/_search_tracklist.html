@@ -1,0 +1,20 @@
+{% if error %}
+<div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
+{% else %}
+<div class="ql-tracklist">
+  {% set ns = namespace(disc=0) %}
+  {% for t in tracks %}
+  {% if multi_disc and t.disc != ns.disc %}
+  {% set ns.disc = t.disc %}
+  <p class="ql-track-disc">Disc {{ t.disc }}</p>
+  {% endif %}
+  <p class="ql-track-line{% if t.owned %} is-owned{% endif %}">
+    <span class="ql-track-n">{{ t.n }}</span>
+    <span class="ql-track-name">{{ t.title }}</span>
+    <span class="ql-track-time">{{ t.length }}</span>
+  </p>
+  {% else %}
+  <p class="ql-empty-state">Qobuz lists no tracks for this release.</p>
+  {% endfor %}
+</div>
+{% endif %}

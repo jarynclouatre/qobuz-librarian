@@ -942,10 +942,12 @@
     q.setAttribute("aria-label", placeholder);
   });
 
-  // Search result version lists use a real button so the row itself does not
-  // mix "expand" and "download" tap targets.
+  // Search result version lists and tracklists use a real button so the row
+  // itself does not mix "expand" and "download" tap targets. The tracklist is
+  // fetched once by htmx; after that the button is a plain show/hide.
   document.addEventListener("click", function (evt) {
-    var btn = evt.target.closest && evt.target.closest("[data-version-toggle]");
+    var btn = evt.target.closest
+      && evt.target.closest("[data-version-toggle],[data-tracks-toggle]");
     if (!btn) return;
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
     if (!panel) return;

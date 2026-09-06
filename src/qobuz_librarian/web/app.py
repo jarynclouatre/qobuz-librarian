@@ -4473,6 +4473,78 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     return RedirectResponse(url="/", status_code=303)
 
 
+def _track_length(seconds):
+    s = max(0, int(round(float(seconds or 0))))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _album_tracklist(album_id, token):
+    """One release's tracks, with the ones already on disk marked.
+
+    Presence is the same folder resolve and pairing the search rows use, so a
+    marked line and an Owned row can never disagree."""
+    album = api_client.call_within(
+        cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
+    items = (album.get("tracks") or {}).get("items") or []
+    present_ids = set()
+    try:
+        folder = catalog.find_album_dir_filesystem(album)
+        if folder is not None and items:
+            existing, _ = catalog.find_existing_tracks(album, album_dir=folder)
+            if existing:
+                _missing, present = catalog.compute_missing(items, existing)
+                present_ids = {str(t.get("id")) for t in present if t.get("id")}
+    except Exception:
+        # A library that can't be read still leaves a usable tracklist; the
+        # marks are the only thing lost.
+        logging.getLogger("qobuz_librarian").exception(
+            "tracklist ownership check failed for album %r", album_id)
+    return [{"n": t.get("track_number") or i,
+             "disc": t.get("media_number") or 1,
+             "title": t.get("title") or "?",
+             "length": _track_length(t.get("duration")),
+             "owned": str(t.get("id")) in present_ids}
+            for i, t in enumerate(items, 1)]
+
+
+@app.get("/search/album-tracks", response_class=HTMLResponse)
+async def search_album_tracks(request: Request, album_id: str = ""):
+    """The tracks under one search row, fetched when the row is opened rather
+    than shipped with every result."""
+    album_id = str(album_id or "").strip()
+    if not album_id or not _qobuz_ready():
+        return HTMLResponse("")
+    loop = asyncio.get_running_loop()
+    error = ""
+    tracks = []
+    try:
+        token = _get_token()
+        tracks = await asyncio.wait_for(
+            loop.run_in_executor(
+                None, lambda: _album_tracklist(album_id, token)),
+            timeout=cfg.WEB_FETCH_TIMEOUT)
+    except (SystemExit, NoCredsError):
+        error = "No Qobuz credentials set. Visit Settings."
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+    except AuthLost:
+        error = "Token is expired or invalid. Update it in Settings."
+    except QobuzUnavailable:
+        error = ("Qobuz is temporarily unavailable (network or rate limit). "
+                 "Try again shortly.")
+    except QobuzError:
+        error = "Qobuz could not list these tracks. Try again."
+    except Exception:
+        logging.getLogger("qobuz_librarian").exception(
+            "tracklist failed for album %r", album_id)
+        error = "Qobuz could not list these tracks. Try again."
+    return _tr(request, "_search_tracklist.html", {
+        "tracks": tracks,
+        "multi_disc": len({t["disc"] for t in tracks}) > 1,
+        "error": error,
+        "page": "search"})
+
+
 _DOWNLOAD_SUMMARY_LABELS = {
     "already_complete": "Album already complete. Nothing to download.",
     "skipped_already_higher_quality": "Skipped: the library already has higher quality.",

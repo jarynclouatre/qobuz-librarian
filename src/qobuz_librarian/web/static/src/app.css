@@ -1696,6 +1696,89 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
   outline-offset: 2px;
 }
+.ql-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+.ql-sub-chips {
+  justify-content: flex-start;
+  margin-top: 0.3rem;
+}
+.ql-tracklist-panel.hidden {
+  display: none;
+}
+.ql-tracklist-panel:not(.hidden) + .ql-table-row {
+  border-top-color: var(--ql-line);
+}
+.ql-tracklist {
+  display: grid;
+  gap: 0.05rem;
+  border-top: 1px solid color-mix(in oklab, var(--ql-gold) 8%, transparent);
+  padding: 0.5rem 0.9rem 0.65rem;
+  background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
+}
+.ql-table-body > .ql-tracklist-panel .ql-tracklist {
+  padding-left: 4.53rem;
+}
+.ql-track-line {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.7rem;
+  max-width: 42rem;
+  margin: 0;
+  padding: 0.16rem 0;
+  font-size: 0.8125rem;
+  line-height: 1.3;
+}
+.ql-track-n,
+.ql-track-time {
+  color: var(--ql-text-3);
+  font-family: var(--ql-font-mono);
+  font-size: 0.71875rem;
+}
+.ql-track-n {
+  text-align: right;
+}
+.ql-track-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ql-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ql-grid-tile .ql-track-line {
+  grid-template-columns: 1.35rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.45rem;
+}
+.ql-grid-tile .ql-track-name {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.ql-track-line.is-owned {
+  opacity: 0.5;
+}
+.ql-track-disc {
+  margin: 0.45rem 0 0.1rem;
+  color: var(--ql-text-3);
+  font-family: var(--ql-font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ql-track-disc:first-child {
+  margin-top: 0;
+}
+[data-theme="winter"] .ql-tracklist {
+  --ql-subrow-bg: oklch(0% 0 0 / 0.045);
+}
+.ql-tracklist-panel + .ql-grid-version-row {
+  border-top: 1px solid color-mix(in oklab, var(--ql-line-soft) 72%, transparent);
+}
 .ql-table-row.ql-subrow {
   background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
   border-top: 1px solid color-mix(in oklab, var(--ql-gold) 5%, transparent);
@@ -2759,6 +2842,16 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     display: grid;
     gap: 0.55rem;
     margin-left: 0.9rem;
+  }
+  .ql-tracklist {
+    margin-left: 0.5rem;
+    border: 0;
+    border-left: 2px solid color-mix(in oklab, var(--ql-gold) 28%, transparent);
+    border-radius: var(--ql-radius);
+    padding: 0.6rem 0.7rem;
+  }
+  .ql-table-body > .ql-tracklist-panel .ql-tracklist {
+    padding-left: 0.7rem;
   }
   .ql-vchip {
     padding: 0.32rem 0.55rem;
