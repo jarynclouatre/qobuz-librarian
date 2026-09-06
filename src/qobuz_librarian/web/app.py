@@ -1602,7 +1602,20 @@ _SAVED_REVIEW_TITLES = {
     "upgrade": "Albums to upgrade",
     "downsample": "Albums to downsample",
 }
+# A review parked under the earlier titles is still in jobs.db under them, and
+# a restart drops the in-memory signature that would otherwise identify it, so
+# the old name has to be recognised or the page publishes a second review
+# beside the one already there.
+_SAVED_REVIEW_TITLES_PRIOR = {
+    "upgrade": "Upgrade candidates",
+    "downsample": "Downsample candidates",
+}
 _SAVED_REVIEW_LOCK = threading.RLock()
+
+
+def _is_saved_review_title(surface, title):
+    return title in (_SAVED_REVIEW_TITLES.get(surface),
+                     _SAVED_REVIEW_TITLES_PRIOR.get(surface))
 
 
 def _stale_saved_review_job(surface):
@@ -1612,7 +1625,7 @@ def _stale_saved_review_job(surface):
     ]
     for job in reversed(review_jobs):
         if (getattr(job, "_saved_review_signature", None) is not None
-                or job.title == _SAVED_REVIEW_TITLES.get(surface)):
+                or _is_saved_review_title(surface, job.title)):
             return job
     return None
 
@@ -1682,6 +1695,7 @@ def _sync_saved_review_job(job, surface, state, signature):
                 "quality_signature": str(state.get("quality_signature") or ""),
             }
         n = len(rebuilt)
+        job.title = _SAVED_REVIEW_TITLES[surface]
         if surface == "downsample":
             job.summary = f"{n} album{'s' if n != 1 else ''} can be downsampled."
         else:
@@ -1714,7 +1728,7 @@ def _sync_saved_review_before_approve(job):
     if surface not in _SAVED_REVIEW_TITLES:
         return job
     if (getattr(job, "_saved_review_signature", None) is None
-            and job.title != _SAVED_REVIEW_TITLES.get(surface)):
+            and not _is_saved_review_title(surface, job.title)):
         return job
     with _SAVED_REVIEW_LOCK:
         state = (

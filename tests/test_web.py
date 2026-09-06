@@ -2215,6 +2215,56 @@ def test_saved_review_creation_is_atomic_for_parallel_posts(monkeypatch):
     )
 
 
+def test_upgrade_review_parked_under_the_old_title_is_reused(
+        client, monkeypatch):
+    # A review parked before "Upgrade candidates" was renamed is still in
+    # jobs.db under that title, and a restart drops the in-memory signature,
+    # so the title is all that identifies it. Missing it published a second
+    # review beside the one already waiting.
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+    from qobuz_librarian.web import jobs as job_mgr
+
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+
+    parked = job_mgr.Job(title="Upgrade candidates",
+                         status=job_mgr.JobStatus.AWAITING_REVIEW)
+    parked.kind = "scan"
+    parked.execute_kind = "upgrade"
+    parked.review_verb = "Upgrade"
+    parked.add_candidate(kind="upgrade", title="Third", artist="Portishead",
+                         detail="16-bit/44.1 kHz -> 24-bit/96 kHz",
+                         payload={"album_id": "up2"})
+    job_mgr.registry.add(parked)
+
+    state = {
+        "updated_at": time.time(),
+        "complete": True,
+        "quality_signature": webapp._effective_upgrade_quality_signature(),
+        "candidates": [
+            {
+                "title": "Dummy",
+                "artist": "Portishead",
+                "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
+                "payload": {"album_id": "up1"},
+            },
+        ],
+    }
+    _make_saved_surface_current(monkeypatch, "upgrade", state)
+    monkeypatch.setattr(
+        "qobuz_librarian.quality.upgrade_state.load", lambda: state)
+
+    try:
+        review = webapp._review_job_from_upgrade_state(state)
+        assert review is parked
+        assert review.title == "Albums to upgrade"
+        assert [c["title"] for c in review.candidates] == ["Dummy"]
+        assert [job.id for job in job_mgr.registry.awaiting_review()
+                if job.execute_kind == "upgrade"] == [parked.id]
+    finally:
+        _remove_job(parked)
+
+
 def test_upgrade_saved_review_respects_hidden_candidates(
         client, monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
