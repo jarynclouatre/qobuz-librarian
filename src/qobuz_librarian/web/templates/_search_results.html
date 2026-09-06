@@ -156,6 +156,7 @@
       {{ search_tools(hide_owned=False) }}
     </div>
     {{ bulk_bar() }}
+    {% include "_writes_paused_reason.html" %}
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">
       {% if defer_search_views %}<template data-search-view-template>{% endif %}
@@ -267,6 +268,7 @@
       {{ search_tools(hide_owned=True) }}
     </div>
     {{ bulk_bar() }}
+    {% include "_writes_paused_reason.html" %}
     <p class="ql-review-page-empty hidden" data-owned-empty>Every result here is already in your library. Turn off &ldquo;Hide owned&rdquo; to see them.</p>
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">

@@ -7413,3 +7413,72 @@ def test_saving_a_lastfm_key_checks_it_and_returns_to_its_section(
             }),
             follow_redirects=False,
         )
+
+
+def test_retry_queues_another_album_behind_the_interrupted_download(
+        client, monkeypatch):
+    """One album's unsettled recovery refused Retry on every other album, which
+    left a second album with nowhere to go but an error. It waits its turn."""
+    from types import SimpleNamespace
+
+    from qobuz_librarian.api import search as qobuz_search
+    from qobuz_librarian.queue.startup_recovery import (
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    interrupted = jm.Job(title="Cartouche", artist="The Funky Lowlives",
+                         album_id="al-cartouche")
+    interrupted.status = jm.JobStatus.FAILED
+    interrupted.finished_at = time.time() - 5
+    second = jm.Job(title="Amber", artist="Autechre", album_id="al-amber")
+    second.status = jm.JobStatus.FAILED
+    second.finished_at = time.time() - 5
+    for job in (interrupted, second):
+        jm.registry.add(job)
+    monkeypatch.setattr(job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(job_persistence, "admit", lambda _job: True)
+
+    def _record(_authority):
+        result = StartupRecoveryResult(StartupRecoveryStatus.RESUME_REQUIRED)
+        webapp._STARTUP_RECOVERY_RESULT = result
+        return result
+
+    monkeypatch.setattr(webapp, "_record_startup_recovery", _record)
+    monkeypatch.setattr(webapp, "_run_lock_intact", lambda: True)
+    monkeypatch.setattr(webapp, "_startup_recovery_binding", lambda: (
+        SimpleNamespace(operation_id="op-1", item_id="item-1"), None, None, None,
+    ))
+    monkeypatch.setattr(webapp, "_startup_recovery_web_job_id",
+                        lambda: interrupted.id)
+    monkeypatch.setattr(webapp, "_durable_completion_status", lambda _job: False)
+    monkeypatch.setattr(qobuz_search, "get_album", lambda *_a, **_k: {
+        "id": "al-amber",
+        "title": "Amber",
+        "artist": {"name": "Autechre"},
+        "tracks": {"items": []},
+    })
+    _record(None)
+
+    try:
+        blocked = client.post(f"/jobs/{interrupted.id}/retry",
+                              follow_redirects=False)
+        assert blocked.status_code == 503
+
+        queued = client.post(f"/jobs/{second.id}/retry", follow_redirects=False)
+        assert queued.status_code == 303
+        started = next(item for item in jm.registry.all()
+                       if item.album_id == "al-amber" and item.id != second.id)
+        assert started.status is jm.JobStatus.PENDING
+        # Held, not queued: the interrupted download is retried through the
+        # same lane, so anything waiting on it would block its own release.
+        assert jm._download_queue.empty()
+        assert [job.id for job, _fn in jm._held_downloads] == [started.id]
+    finally:
+        with jm._held_downloads_lock:
+            jm._held_downloads.clear()
+        for job in (interrupted, second, *(
+                [started] if "started" in locals() else [])):
+            _remove_job(job)

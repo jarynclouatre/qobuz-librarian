@@ -1,0 +1,5 @@
+{# Beside a greyed control that is far from the page's pause notice. The
+   control explains itself in a title attribute, which a phone never shows. #}
+{% if writes_paused and writes_paused_reason %}
+<p class="ql-form-note">{{ writes_paused_reason }}</p>
+{% endif %}

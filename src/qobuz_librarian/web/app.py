@@ -475,6 +475,26 @@ def _durable_recovery_matches_job(job) -> bool:
         return False
 
 
+def _recovery_pause_is_another_download(job) -> bool:
+    """True when the interrupted download holding everything up isn't this job.
+
+    Its own Retry is the only control that settles it, so a Retry on any other
+    album has nothing it can do about the pause and queues behind it instead.
+    """
+    if _startup_recovery_status_value() not in {
+        "attention_required",
+        "resume_required",
+    }:
+        return False
+    if type(job) is not job_mgr.Job or getattr(job, "attention", "") == "recovery":
+        return False
+    if _STARTUP_RECOVERY_UNKNOWN or _post_import_relocation_recovery() is not None:
+        return False
+    if _startup_recovery_binding() is None:
+        return False
+    return _startup_recovery_web_job_id() != job.id
+
+
 def _durable_recovery_planned(job):
     """Copy the validated saved plan for this exact Web resume, or refuse."""
     with _STARTUP_RECOVERY_LOCK:
@@ -823,13 +843,16 @@ def _job_admission_response(request):
 
 
 def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
+                          queue_behind_job=None,
                           log_details: bool = False):
     """Why downloads and scans are paused, in the user's words, or None.
 
     One source for both the 503 a blocked request gets and the notice the
     dashboard shows, so the two cannot drift into naming different causes.
     ``log_details`` is for the request path only: the dashboard reads this on
-    every load and must not write a log line each time.
+    every load and must not write a log line each time. ``queue_behind_job``
+    is the one job allowed past another download's recovery, to wait its turn
+    rather than be refused.
     """
     reason = ""
     action = None
@@ -913,6 +936,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                 f"“{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the container "
                 "log has the technical detail."
             )
+        elif _recovery_pause_is_another_download(queue_behind_job):
+            return None
         else:
             reason = "An interrupted download couldn't be verified."
             # A terminal download never became a web job, so it has no History
@@ -923,7 +948,14 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             of_album = f" of “{named}”" if named else ""
             paused = ("Downloads and scans are paused, and its saved queue and "
                       "staged files were left unchanged. ")
-            if origin == "cli":
+            held_job_id = _startup_recovery_web_job_id()
+            if origin != "cli" and held_job_id is not None:
+                action = {"href": f"/jobs/{held_job_id}",
+                          "label": "Open that download"}
+                msg = ("Downloads and scans are paused until the interrupted "
+                       f"download{of_album} is retried or given up. Its saved "
+                       "queue and staged files were left unchanged.")
+            elif origin == "cli":
                 settle = _terminal_recovery_offer()
                 if settle is not None:
                     # Not everyone who starts a download in a terminal wants to
@@ -943,12 +975,6 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                            "not be verified safely. " + paused + "Switch to "
                            "terminal mode in Settings and run Qobuz Librarian "
                            "there; it offers to settle this.")
-            elif origin == "web-job":
-                msg = (f"An interrupted download{of_album} could not be "
-                       "verified safely. " + paused + "Open that download from "
-                       "Queue or History. Retry settles it; if Retry keeps "
-                       "failing, Give up on this album discards it so "
-                       "everything else can run.")
             else:
                 msg = (f"An interrupted download{of_album} could not be "
                        "verified safely. " + paused + "Settle it from the "
@@ -957,21 +983,27 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     elif (
         _startup_recovery_status_value() == "resume_required"
         and not _durable_resume_allowed(durable_resume_job_id or "")
+        and not _recovery_pause_is_another_download(queue_behind_job)
     ):
         reason = "An interrupted download is waiting to be settled."
         origin = _startup_recovery_origin_value()
         named = _startup_recovery_album_label()
         of_album = f" of “{named}”" if named else ""
+        held_job_id = _startup_recovery_web_job_id()
         if origin == "cli":
             action = {"href": "/settings#mode", "label": "Open Settings"}
             msg = (f"An interrupted terminal download{of_album} has saved "
                    "recovery state. Other library changes are paused. Switch "
                    "to terminal mode in Settings, then resume that download "
                    "there.")
-        elif origin == "web-job":
-            msg = (f"An interrupted download{of_album} has saved recovery "
-                   "state. Other library changes are paused until that exact "
-                   "download is retried from Queue or History.")
+        elif held_job_id is not None:
+            # The saved origin is missing on records written before it
+            # existed, and it decided the wording; the job named by the saved
+            # mode is the one to open, so that is what the notice offers.
+            action = {"href": f"/jobs/{held_job_id}",
+                      "label": "Open that download"}
+            msg = ("Downloads and scans are paused until the interrupted "
+                   f"download{of_album} is retried or given up.")
         else:
             msg = (f"An interrupted download{of_album} has saved recovery "
                    "state. Other library changes are paused until that exact "
@@ -981,10 +1013,12 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     return {"reason": reason, "msg": msg, "action": action, "settle": settle}
 
 
-def _lock_busy_response(request, *, durable_resume_job_id: str | None = None):
+def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
+                        queue_behind_job=None):
     """Return a 503 response if web writes are paused, else None."""
     notice = _writes_paused_notice(
         durable_resume_job_id=durable_resume_job_id,
+        queue_behind_job=queue_behind_job,
         log_details=True,
     )
     if notice is None:
@@ -1122,6 +1156,7 @@ def _shutdown_web_mutations() -> None:
     global _RUN_LOCK_HANDLE
     job_mgr.stop_worker()
     job_mgr.configure_staging_entry_guard(None)
+    job_mgr.configure_held_release(None)
     if _RUN_LOCK_HANDLE is not None:
         try:
             _RUN_LOCK_HANDLE.close()
@@ -2146,6 +2181,7 @@ async def _lifespan(_app: FastAPI):
             except Exception as e:
                 _log.debug("lyric-state prune error at startup: %s", e)
         job_mgr.configure_staging_entry_guard(_staging_entry_allowed)
+        job_mgr.configure_held_release(lambda: not _web_writes_paused())
         job_mgr.start_worker()
         if run_startup_maintenance:
             maintenance_token = job_mgr.begin_library_operation(
@@ -3314,8 +3350,12 @@ def _queue_wait(job):
     worker and downloads another (see web/jobs.py), so a job only waits behind
     others in its OWN lane (job.kind: "scan" | "download"). ``position`` counts
     how many run before it (the one holding the worker + any earlier-queued).
-    Returns {"ahead_title", "lane", "position"} or None when nothing's ahead,
-    i.e. it's about to start, so there's nothing to explain."""
+    A job waiting behind an interrupted download instead carries
+    ``paused_for``, because "starts automatically" is not true of it: nothing
+    moves until that album is retried or given up.
+
+    Returns {"ahead_title", "lane", "position", "paused_for"} or None when
+    nothing's ahead, i.e. it's about to start, so there's nothing to explain."""
     if job.status != job_mgr.JobStatus.PENDING:
         return None
     holder = None
@@ -3328,12 +3368,19 @@ def _queue_wait(job):
         elif (j.status == job_mgr.JobStatus.PENDING
               and (j.created_at or 0) < (job.created_at or 0)):
             ahead += 1
-    if holder is None and ahead == 0:
+    paused_for = None
+    if _recovery_pause_is_another_download(job):
+        paused_for = {
+            "album": _startup_recovery_album_label(),
+            "job_id": _startup_recovery_web_job_id(),
+        }
+    if holder is None and ahead == 0 and paused_for is None:
         return None
     return {
         "ahead_title": holder.title if holder else "",
         "lane": job.kind,
         "position": ahead + (1 if holder else 0),
+        "paused_for": paused_for,
     }
 
 
@@ -10275,6 +10322,11 @@ async def job_retry(request: Request, job_id: str):
             )
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
+    # A different album's unsettled recovery used to refuse this Retry
+    # outright, leaving the second album nowhere to go. It waits for that one
+    # to settle instead.
+    queue_behind = _recovery_pause_is_another_download(job)
+
     if recovery_submission:
         if not _recovery_submission_matches(
             job,
@@ -10286,7 +10338,9 @@ async def job_retry(request: Request, job_id: str):
                 "That interrupted-download Retry is stale. No download was "
                 "started. Reload the job and use its current Retry button.",
             )
-    elif recovery_status != "clear" or job.attention == "recovery":
+    elif (
+        recovery_status != "clear" or job.attention == "recovery"
+    ) and not queue_behind:
         return _durable_recovery_response(
             request,
             "This download needs its exact recovery Retry control. No "
@@ -10342,28 +10396,30 @@ async def job_retry(request: Request, job_id: str):
             "safely. No download was started. Check the application log, "
             "then restart Qobuz Librarian.",
         )
-    if recovery_status == "attention_required":
-        return _durable_recovery_response(
-            request,
-            "The saved interrupted download needs recovery attention. No "
-            "download was started. Check the application log, then restart "
-            "Qobuz Librarian.",
-        )
-    if recovery_status == "resume_required" and not durable_resume:
-        return _durable_recovery_response(
-            request,
-            "Saved recovery belongs to a different or changed download. No "
-            "download was started. Retry only the exact interrupted job.",
-        )
-    if recovery_status not in {"clear", "resume_required"}:
-        return _durable_recovery_response(
-            request,
-            "The saved recovery state could not be verified safely. No "
-            "download was started. Restart Qobuz Librarian.",
-        )
+    if not queue_behind:
+        if recovery_status == "attention_required":
+            return _durable_recovery_response(
+                request,
+                "The saved interrupted download needs recovery attention. No "
+                "download was started. Check the application log, then restart "
+                "Qobuz Librarian.",
+            )
+        if recovery_status == "resume_required" and not durable_resume:
+            return _durable_recovery_response(
+                request,
+                "Saved recovery belongs to a different or changed download. No "
+                "download was started. Retry only the exact interrupted job.",
+            )
+        if recovery_status not in {"clear", "resume_required"}:
+            return _durable_recovery_response(
+                request,
+                "The saved recovery state could not be verified safely. No "
+                "download was started. Restart Qobuz Librarian.",
+            )
     busy = _lock_busy_response(
         request,
         durable_resume_job_id=job.id if durable_resume else None,
+        queue_behind_job=job if queue_behind else None,
     )
     if busy is not None:
         return busy
@@ -10468,6 +10524,7 @@ async def job_retry(request: Request, job_id: str):
                     "recovery could not be finalized safely. No download was "
                     "started. Restart Qobuz Librarian.",
                 )
+            queue_behind = _recovery_pause_is_another_download(job)
             if job.attention == "recovery" and not (
                 recovery_status_now == "clear" or durable_resume_now
             ):
@@ -10477,27 +10534,29 @@ async def job_retry(request: Request, job_id: str):
                     "retried safely. No download was started. Restart Qobuz "
                     "Librarian.",
                 )
-            if recovery_status_now == "attention_required":
-                return _durable_recovery_response(
-                    request,
-                    "The saved interrupted download needs recovery attention. "
-                    "No download was started. Restart Qobuz Librarian.",
-                )
-            if (
-                recovery_status_now == "resume_required"
-                and not durable_resume_now
-            ):
-                return _durable_recovery_response(
-                    request,
-                    "The saved interrupted download no longer matches this "
-                    "job. No download was started. Restart Qobuz Librarian.",
-                )
-            if recovery_status_now not in {"clear", "resume_required"}:
-                return _durable_recovery_response(
-                    request,
-                    "The saved recovery state could not be verified safely. "
-                    "No download was started. Restart Qobuz Librarian.",
-                )
+            if not queue_behind:
+                if recovery_status_now == "attention_required":
+                    return _durable_recovery_response(
+                        request,
+                        "The saved interrupted download needs recovery "
+                        "attention. No download was started. Restart Qobuz "
+                        "Librarian.",
+                    )
+                if (
+                    recovery_status_now == "resume_required"
+                    and not durable_resume_now
+                ):
+                    return _durable_recovery_response(
+                        request,
+                        "The saved interrupted download no longer matches this "
+                        "job. No download was started. Restart Qobuz Librarian.",
+                    )
+                if recovery_status_now not in {"clear", "resume_required"}:
+                    return _durable_recovery_response(
+                        request,
+                        "The saved recovery state could not be verified safely. "
+                        "No download was started. Restart Qobuz Librarian.",
+                    )
             if durable_resume and recovery_status_now == "clear":
                 return _durable_recovery_response(
                     request,
@@ -10516,6 +10575,7 @@ async def job_retry(request: Request, job_id: str):
             busy = _lock_busy_response(
                 request,
                 durable_resume_job_id=job.id if durable_resume else None,
+                queue_behind_job=job if queue_behind else None,
             )
             if busy is not None:
                 return busy
@@ -10622,7 +10682,9 @@ async def job_retry(request: Request, job_id: str):
                     }
                 if as_new:
                     new_job.execute_args = {"new_edition": True}
-                if job_mgr.submit(new_job, run) is None:
+                submit = (job_mgr.submit_held if queue_behind
+                          else job_mgr.submit)
+                if submit(new_job, run) is None:
                     return _job_admission_response(request)
         return RedirectResponse(url=f"/jobs/{new_job.id}", status_code=303)
     except NoCredsError as exc:
@@ -11369,8 +11431,10 @@ def _diagnostics():
     # thing missing: every row could read OK while nothing could run at all.
     paused = _writes_paused_notice()
     if paused is not None:
+        # The banner at the top of this same page already carries the whole
+        # sentence; the row names the cause so the panel reads as a checklist.
         checks.append({"label": "Active write pause", "ok": False,
-                       "detail": paused["msg"]})
+                       "detail": paused["reason"]})
     else:
         checks.append({"label": "Active write pause", "ok": True,
                        "detail": "No active write pause"})

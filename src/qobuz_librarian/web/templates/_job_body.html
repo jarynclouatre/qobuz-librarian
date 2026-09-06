@@ -134,6 +134,7 @@
       </label>
       {% endif %}
       {% include "_review_candidates.html" %}
+      {% include "_writes_paused_reason.html" %}
       <div class="ql-review-footer">
         <div class="ql-review-footer-actions">
           <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary"
@@ -217,7 +218,11 @@
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-job-wait-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
       </svg>
+      {% if queue_wait.paused_for %}
+      <span>Waiting until {% if queue_wait.paused_for.album %}“{{ queue_wait.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if queue_wait.paused_for.job_id %} <a href="/jobs/{{ queue_wait.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}</span>
+      {% else %}
       <span>Waiting for “{{ queue_wait.ahead_title }}” to finish{% if queue_wait.position > 1 %} ({{ queue_wait.position }} ahead of yours){% endif %}. Starts automatically.</span>
+      {% endif %}
     </div>
     {% endif %}
 

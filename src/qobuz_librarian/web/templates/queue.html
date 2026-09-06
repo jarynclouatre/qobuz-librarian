@@ -47,7 +47,9 @@
     {% elif job.status.value == 'pending' %}
     {% set qw = (queue_waits or {}).get(job.id) %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
-      {%- if qw and qw.position > 1 -%}
+      {%- if qw and qw.paused_for -%}
+      Waiting until {% if qw.paused_for.album %}“{{ qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.
+      {%- elif qw and qw.position > 1 -%}
       Waiting behind {{ qw.position }} jobs. Starts automatically.
       {%- elif qw -%}
       Starts automatically after the current job finishes.
@@ -160,8 +162,12 @@
   <p class="font-medium text-base-content/70">{% if writes_paused %}Nothing is running.{% else %}Queue is empty.{% endif %}</p>
   <p class="text-sm mt-1 text-base-content/50">{% if writes_paused %}Downloads and scans are paused, so nothing can start yet.{% else %}Downloads and scans appear here while they run.{% endif %} Finished work and parked reviews live in History.</p>
   <div class="ql-empty-actions">
+    {# Nothing can start, so a Search button here only leads back to a greyed
+       download; the notice above carries the one thing that lifts the pause. #}
+    {% if not writes_paused %}
     <a href="/" class="ql-btn ql-btn-primary w-full sm:w-auto">Search Qobuz</a>
-    <a href="/queue/history" class="ql-btn ql-btn-secondary w-full sm:w-auto">View history</a>
+    {% endif %}
+    <a href="/queue/history" class="ql-btn ql-btn-{% if writes_paused %}primary{% else %}secondary{% endif %} w-full sm:w-auto">View history</a>
   </div>
 </div>
 {% endif %}

@@ -998,6 +998,9 @@ _post_job_hook_threads: set[threading.Thread] = set()
 _post_job_hook_threads_lock = threading.Lock()
 _staging_entry_guard_lock = threading.Lock()
 _staging_entry_guard: Callable[[Optional[Job]], bool] | None = None
+_held_downloads_lock = threading.Lock()
+_held_downloads: list[tuple[Job, Callable]] = []
+_held_release_check: Callable[[], bool] | None = None
 
 
 class StagingRecoveryBlocked(RuntimeError):
@@ -1359,6 +1362,8 @@ def fire_auth_lost_hook():
 
 def _worker_loop(work_queue: "queue.Queue"):
     while not _stop_event.is_set():
+        if work_queue is _download_queue:
+            _release_held_downloads()
         try:
             job, fn = work_queue.get(timeout=1)
         except queue.Empty:
@@ -1492,6 +1497,49 @@ def submit(job: Job, fn) -> Optional[Job]:
     registry.add(job)
     _download_queue.put((job, fn))
     return job
+
+
+def configure_held_release(check: Callable[[], bool] | None) -> None:
+    """Set the check that says held downloads may take their turn."""
+    if check is not None and not callable(check):
+        raise TypeError("held release check must be callable or None")
+    global _held_release_check
+    with _held_downloads_lock:
+        _held_release_check = check
+
+
+def submit_held(job: Job, fn) -> Optional[Job]:
+    """Queue a download that waits for a paused library before it starts.
+
+    It cannot go on the work queue: the interrupted download that paused the
+    library is retried through that same queue, so a job waiting at the head
+    of it would keep the one thing that lifts the pause from ever running.
+    """
+    if not job_persistence.admit(job):
+        return None
+    registry.add(job)
+    with _held_downloads_lock:
+        _held_downloads.append((job, fn))
+    return job
+
+
+def _release_held_downloads() -> None:
+    with _held_downloads_lock:
+        if not _held_downloads:
+            return
+        check = _held_release_check
+    try:
+        if check is None or not check():
+            return
+    except Exception as exc:
+        logging.getLogger("qobuz_librarian").warning(
+            "couldn't check whether held downloads may start: %s", exc)
+        return
+    with _held_downloads_lock:
+        released = list(_held_downloads)
+        _held_downloads.clear()
+    for job, fn in released:
+        _download_queue.put((job, fn))
 
 
 def resubmit_failed(job: Job, fn) -> bool:
