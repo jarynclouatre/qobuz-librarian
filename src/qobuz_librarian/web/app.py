@@ -10179,42 +10179,62 @@ async def discard_interrupted_terminal_download(request: Request):
         status_code=303)
 
 
+_RETRY_RETURN_KEYS = ("p", "jp", "attention")
+
+
+def _retry_return_url(raw: object, **extra: str) -> str | None:
+    """The History page a Retry was clicked on, or None for anything else.
+
+    History sends its own address with the click so the outcome arrives where
+    the user is already looking instead of dragging her into the job card.
+    Only that one surface is honoured and only its own paging keys ride along,
+    so a forged field cannot aim the redirect somewhere else.
+    """
+    path, _, query = (raw if isinstance(raw, str) else "").partition("?")
+    if path != "/queue/history":
+        return None
+    params = [(k, v) for k, v in urllib.parse.parse_qsl(query)
+              if k in _RETRY_RETURN_KEYS]
+    params += [(k, v) for k, v in extra.items() if v]
+    return path + ("?" + urllib.parse.urlencode(params) if params else "")
+
+
 @app.post("/jobs/{job_id}/retry")
 async def job_retry(request: Request, job_id: str):
     # Retry rebuilds the download from the persisted album_id, so it works as
     # well for a job evicted from the registry (restart, or 50 jobs later) as
     # for a live one, so fall back to the archive instead of silently bouncing.
+    # The form is read before the first refusal, not halfway down the route:
+    # every answer below has to land where the button was clicked.
+    form = await request.form()
+    return_to = form.get("return_to")
+
+    def _land(started: str = "", error: str = "") -> RedirectResponse:
+        dest = _retry_return_url(return_to, started=started, error=error)
+        if dest is None:
+            dest = (f"/jobs/{started}" if started
+                    else "/queue?error=" + urllib.parse.quote(error))
+        return RedirectResponse(url=dest, status_code=303)
+
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
-                "That job is no longer in the record."),
-            status_code=303)
+        return _land(error="That job is no longer in the record.")
     if job.status != job_mgr.JobStatus.FAILED or not job.album_id:
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
-                "Nothing to retry for that job."),
-            status_code=303)
+        return _land(error="Nothing to retry for that job.")
     if job.execute_args_unreadable:
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
-                "The saved details needed to retry that job couldn't be read. "
-                "Start the download again from Search or Library."),
-            status_code=303,
+        return _land(
+            error="The saved details needed to retry that job couldn't be "
+                  "read. Start the download again from Search or Library.",
         )
     if (job.execute_args or {}).get("retry_disabled") == "lossy":
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
-                "Qobuz only has the missing tracks in lossy quality. This "
-                "album needs another source, so it cannot be retried here."),
-            status_code=303,
+        return _land(
+            error="Qobuz only has the missing tracks in lossy quality. This "
+                  "album needs another source, so it cannot be retried here.",
         )
     if (job.execute_args or {}).get("retry_disabled") == "backup":
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
-                "This album has a retained safety backup. Review it under "
-                "Settings > Diagnostics before starting the album again."),
-            status_code=303,
+        return _land(
+            error="This album has a retained safety backup. Review it under "
+                  "Settings > Diagnostics before starting the album again.",
         )
     if (
         getattr(job, "_preserve_persisted_single", False) is True
@@ -10225,7 +10245,6 @@ async def job_retry(request: Request, job_id: str):
             "This track's saved recovery state is uncertain, so Retry is "
             "paused. No download was started. Restart Qobuz Librarian.",
         )
-    form = await request.form()
     raw_recovery_operation = form.get("recovery_operation_id")
     raw_recovery_item = form.get("recovery_item_id")
     recovery_submission = (
@@ -10267,10 +10286,7 @@ async def job_retry(request: Request, job_id: str):
         asyncio.TimeoutError,
     ) as exc:
         message = _qobuz_action_error_message(exc, unchanged=True)
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(message),
-            status_code=303,
-        )
+        return _land(error=message)
 
     # A Retry is also the only user-triggered lane for an interrupted durable
     # Web download.
@@ -10320,7 +10336,7 @@ async def job_retry(request: Request, job_id: str):
                 "download was started. Check the data-folder permissions, "
                 "then restart Qobuz Librarian.",
             )
-        return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
+        return _land(started=job.id)
 
     # A different album's unsettled recovery used to refuse this Retry
     # outright, leaving the second album nowhere to go. It waits for that one
@@ -10361,10 +10377,7 @@ async def job_retry(request: Request, job_id: str):
                     CredentialChanged(),
                     unchanged=True,
                 )
-                return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(message),
-                    status_code=303,
-                )
+                return _land(error=message)
             settled, reason = _settle_durable_web_recovery(
                 job,
                 BlockedItemSettlementAction.RETRY,
@@ -10427,7 +10440,7 @@ async def job_retry(request: Request, job_id: str):
     retry_as_new = bool((job.execute_args or {}).get("new_edition"))
     duplicate = _find_job_touching_album(album_id)
     if duplicate:
-        return RedirectResponse(url=f"/jobs/{duplicate.id}", status_code=303)
+        return _land(started=duplicate.id)
     try:
         token = credentials.token
         album = None
@@ -10459,13 +10472,10 @@ async def job_retry(request: Request, job_id: str):
                     CredentialChanged(),
                     unchanged=True,
                 )
-                return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(message),
-                    status_code=303,
-                )
+                return _land(error=message)
             duplicate = _find_job_touching_album(album_id)
             if duplicate:
-                return RedirectResponse(url=f"/jobs/{duplicate.id}", status_code=303)
+                return _land(started=duplicate.id)
             # set_mode could have handed the lock to the terminal during the
             # get_album await above; re-check inside the submit lock (as
             # queue_download does) so a retry can't start a job after the CLI
@@ -10516,8 +10526,7 @@ async def job_retry(request: Request, job_id: str):
                 if recovery_status_now == "clear" and (
                     _reconcile_acknowledged_job(job)
                 ):
-                    return RedirectResponse(
-                        url=f"/jobs/{job.id}", status_code=303)
+                    return _land(started=job.id)
                 return _durable_recovery_response(
                     request,
                     "This download is already recorded as complete, but its "
@@ -10566,11 +10575,9 @@ async def job_retry(request: Request, job_id: str):
                 )
             durable_resume = durable_resume_now
             if not durable_resume and same_edition_complete:
-                return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(
-                        "This edition is already in your library. Nothing to retry."
-                    ),
-                    status_code=303,
+                return _land(
+                    error="This edition is already in your library. "
+                          "Nothing to retry.",
                 )
             busy = _lock_busy_response(
                 request,
@@ -10627,10 +10634,8 @@ async def job_retry(request: Request, job_id: str):
             elif single and single.get("track_id"):
                 # The original was a single-track download but that track is no
                 # longer on Qobuz, so do NOT silently re-download the whole album.
-                return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(
-                        "That track is no longer on Qobuz. Nothing to retry."),
-                    status_code=303)
+                return _land(
+                    error="That track is no longer on Qobuz. Nothing to retry.")
             else:
                 # Carry the "get this edition too" override across the retry,
                 # without it the rebuilt run sees the album as already owned
@@ -10686,21 +10691,16 @@ async def job_retry(request: Request, job_id: str):
                           else job_mgr.submit)
                 if submit(new_job, run) is None:
                     return _job_admission_response(request)
-        return RedirectResponse(url=f"/jobs/{new_job.id}", status_code=303)
+        return _land(started=new_job.id)
     except NoCredsError as exc:
         message = _qobuz_action_error_message(exc, unchanged=True)
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(message), status_code=303
-        )
+        return _land(error=message)
     except Exception as exc:
         message = _download_error_message(
             exc,
             "Couldn't prepare this retry. Try again.",
         )
-        return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(message),
-            status_code=303,
-        )
+        return _land(error=message)
 
 
 @app.post("/jobs/{job_id}/undo")
@@ -11100,6 +11100,7 @@ async def queue_history(
     p: int = 1,
     jp: int = 1,
     error: str = "",
+    started: str = "",
     attention: bool = False,
 ):
     """The History tab: every finished job, newest first, paged from jobs.db so
@@ -11169,6 +11170,10 @@ async def queue_history(
         "attention_only": attention,
         "history_unavailable": not job_persistence.ready_for_admission(),
         "error": error[:200],
+        # What a Retry from this page just did. Retry no longer opens the job
+        # card, so the page it left the user on has to say what started and
+        # offer the way in.
+        "started_job": job_mgr.registry.get(started) if started else None,
     })
 
 

@@ -2862,6 +2862,89 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
     _remove_job(new_job)
 
 
+def test_retry_from_history_answers_where_it_was_clicked(client, monkeypatch):
+    # Retry used to redirect into the job card, throwing away the History page
+    # (and its paging) the button was pressed on; a refused retry threw the
+    # user to the Queue instead. Both answers now come back to that page, and
+    # the success one names what started and offers the way in.
+    from qobuz_librarian.api.auth import QobuzUnavailable
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+
+    archived = jm.Job(title="Dummy", artist="Portishead", album_id="al1")
+    archived.status = jm.JobStatus.FAILED
+    archived.finished_at = time.time() - 10
+    job_persistence.persist(archived)
+
+    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
+    outage = {"active": True}
+
+    def get_album(_album_id, _token):
+        if outage["active"]:
+            raise QobuzUnavailable("request deadline exhausted")
+        return {"title": "Dummy", "artist": {"name": "Portishead"},
+                "tracks": {"items": []}}
+
+    monkeypatch.setattr("qobuz_librarian.api.search.get_album", get_album)
+    monkeypatch.setattr(webapp, "_make_download_run", lambda *a, **k: (lambda job: None))
+
+    back = "/queue/history?jp=2"
+    r = client.post(f"/jobs/{archived.id}/retry", data={"return_to": back},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/queue/history?jp=2&error=")
+
+    outage["active"] = False
+    r = client.post(f"/jobs/{archived.id}/retry", data={"return_to": back},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    location = r.headers["location"]
+    assert location.startswith("/queue/history?jp=2&started=")
+    new_id = location.rpartition("=")[2]
+    new_job = jm.registry.get(new_id)
+    assert new_job is not None and new_job.id != archived.id
+    landed = client.get(location)
+    assert f'/jobs/{new_id}' in landed.text
+    _remove_job(new_job)
+
+
+def test_retry_ignores_a_return_field_that_is_not_history(client, monkeypatch):
+    # The field steers a redirect, so only History may set it; anything else
+    # falls back to the job page Retry has always opened.
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+
+    archived = jm.Job(title="Dummy", artist="Portishead", album_id="al1")
+    archived.status = jm.JobStatus.FAILED
+    archived.finished_at = time.time() - 10
+    job_persistence.persist(archived)
+
+    monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
+    monkeypatch.setattr(
+        "qobuz_librarian.api.search.get_album",
+        lambda _a, _t: {"title": "Dummy", "artist": {"name": "Portishead"},
+                        "tracks": {"items": []}},
+    )
+    monkeypatch.setattr(webapp, "_make_download_run", lambda *a, **k: (lambda job: None))
+
+    r = client.post(f"/jobs/{archived.id}/retry",
+                    data={"return_to": "https://example.invalid/steal"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/jobs/")
+    new_job = jm.registry.get(r.headers["location"].removeprefix("/jobs/"))
+    assert new_job is not None
+    _remove_job(new_job)
+
+
 def test_retry_keeps_the_new_edition_override(client, monkeypatch):
     # "Download this edition anyway" lives on the job (execute_args), not just
     # in the run closure; a retried edition download that lost the flag would

@@ -16,6 +16,16 @@
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
+{% if started_job %}
+<div class="ql-notice ql-notice-success" data-flash data-flash-kind="success">
+  <span>
+    <strong>{% if started_job.artist %}{{ started_job.artist }} · {% endif %}{{ started_job.display_title }}</strong>
+    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}already finished.{% else %}added to the queue.{% endif %}
+    <a href="/jobs/{{ started_job.id }}" class="ql-inline-link">Open it →</a>
+  </span>
+</div>
+{% endif %}
+
 {% include "_writes_paused_notice.html" %}
 
 {% if attention_only %}
@@ -70,6 +80,7 @@
         {% if job.status == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+          <input type="hidden" name="return_to" value="/queue/history{% if request.url.query %}?{{ request.url.query }}{% endif %}">
           {% if recovery_retry %}
           <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
           <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
