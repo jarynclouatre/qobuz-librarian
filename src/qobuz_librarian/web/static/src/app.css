@@ -3364,6 +3364,11 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
+/* The dashboard row drops this line when its chip has already said the same
+   thing; the element stays so a later phase can fill it back in. */
+.ql-row-meta:empty {
+  display: none;
+}
 .ql-row-status {
   display: flex;
   flex-wrap: wrap;

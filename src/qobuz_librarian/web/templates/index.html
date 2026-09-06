@@ -297,10 +297,8 @@
             <p id="dash-prog-{{ j.id }}" class="ql-row-meta">
               {%- if j.progress_total > 0 -%}
               {% if _detail %}{{ _detail }} {% endif %}{{ j.progress_current }} / {{ j.progress_total }}{% if j.progress_unit %} {{ j.progress_unit }}{{ 's' if j.progress_total != 1 }}{% endif %}
-              {%- elif j.progress_phase -%}
-              {{ j.progress_phase }}
               {%- else -%}
-              {{ labels.job_activity(j) }}…
+              {{ _detail }}
               {%- endif -%}
             </p>
           </div>

@@ -1973,15 +1973,16 @@
       var el = document.getElementById(progId);
       if (!el) return;
       var verb = status === "scanning" ? "Scanning" : (p.phase || runFallback);
-      // The dashboard row carries a chip saying the same activity, so the verb
-      // beside the count drops out where it would only repeat it. Queue rows
-      // have no chip and keep theirs.
+      // The dashboard row carries a chip saying the same activity, so a phase
+      // that only repeats it leaves nothing but the count, and nothing at all
+      // where there is no count. Queue rows have no chip and keep their verb.
       if (surface === "dashboard"
           && verb.toLowerCase().indexOf(runFallback.toLowerCase()) === 0) {
-        verb = "";
+        el.textContent = p.total > 0 ? fmtProgress(p, "", false) : "";
+      } else {
+        var txt = fmtProgress(p, verb, surface !== "dashboard");
+        if (txt) el.textContent = txt;
       }
-      var txt = fmtProgress(p, verb, surface !== "dashboard");
-      if (txt) el.textContent = txt;
       var bar = document.getElementById("card-bar-" + id);
       if (bar && p.total > 0) {
         var fill = bar.querySelector("i");
