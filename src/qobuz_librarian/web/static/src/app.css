@@ -782,10 +782,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-main:focus {
   outline: none;
 }
-.ql-settings-section-copy > h2.ql-anchor-target {
-  width: fit-content;
-}
-.ql-settings-section-copy > h2.ql-anchor-target:focus-visible {
+.ql-settings-summary > h2.ql-anchor-target:focus-visible {
   border-radius: 0.125rem;
   outline: 2px solid var(--ql-gold-strong);
   outline-offset: 0.2rem;
@@ -3967,42 +3964,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     font-size: 2.4rem;
   }
 }
-/* Settings is nine sections and about six phone screens long, so the title
-   carries a link to each one. Phone links keep the 44 px target the rest of
-   the page uses; the row wraps rather than scrolling sideways so nothing is
-   hidden off the edge. */
-.ql-settings-jump {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.3rem;
-  margin-top: 0.15rem;
-}
-.ql-settings-jump a {
-  display: inline-flex;
-  min-height: 2.75rem;
-  align-items: center;
-  border: 1px solid var(--ql-line-soft);
-  border-radius: var(--ql-radius-sm);
-  padding: 0.3rem 0.7rem;
-  color: var(--ql-text-2);
-  font-family: var(--ql-font-ui);
-  font-size: 0.8125rem;
-  font-weight: 680;
-  line-height: 1;
-  text-decoration: none;
-  transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease;
-}
-.ql-settings-jump a:hover {
-  border-color: color-mix(in oklab, var(--ql-text) 26%, transparent);
-  background-color: var(--ql-surface-hover);
-  color: var(--ql-text);
-}
-@media (min-width: 640px) {
-  .ql-settings-jump a {
-    min-height: 2rem;
-  }
-}
 .ql-page-header--split {
   display: flex;
   align-items: center;
@@ -5209,13 +5170,41 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-settings-section-copy {
   min-width: 0;
 }
-.ql-settings-section-copy h2 {
+/* A settings section is a disclosure: its heading stays on the page, its
+   controls come out when it is opened. Same card and same chevron as a review
+   group, so nothing new is introduced to look at. */
+.ql-settings-summary {
+  display: flex;
+  min-height: 3.25rem;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.8rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+.ql-settings-summary::-webkit-details-marker {
+  display: none;
+}
+.ql-settings-summary h2 {
   margin: 0;
+  min-width: 0;
   color: var(--ql-text);
   font-family: var(--ql-font-display);
   font-size: 1.19rem;
   font-weight: 600;
   line-height: 1.25;
+}
+.ql-settings-summary:hover h2 {
+  color: var(--ql-gold);
+}
+.ql-settings-section[open] > .ql-settings-summary {
+  border-bottom: 1px solid var(--ql-line);
+}
+.ql-settings-section[open] > .ql-settings-summary .ql-review-chevron {
+  margin-top: 0;
+  transform: translateY(-0.1rem) rotate(45deg);
 }
 .ql-conn-line {
   display: flex;

@@ -56,17 +56,6 @@
 <div class="ql-settings-page">
 <header class="ql-page-header ql-settings-header">
   <h1>Settings</h1>
-  <nav class="ql-settings-jump" aria-label="Settings sections">
-    <a href="#qobuz">Qobuz</a>
-    <a href="#mode">Mode</a>
-    <a href="#behaviour">Behaviour</a>
-    <a href="#library-paths">Paths</a>
-    <a href="#library-maintenance">Maintenance</a>
-    <a href="#discover">Discover</a>
-    <a href="#collection-backup">Backup</a>
-    {% if web_login_available %}<a href="#web-login">Login</a>{% endif %}
-    <a href="#diagnostics">Diagnostics</a>
-  </nav>
 </header>
 
 {% include "_writes_paused_notice.html" %}
@@ -195,11 +184,14 @@
 {% endif %}
 
 <div class="ql-settings-stack">
-<section class="ql-settings-section ql-settings-section-primary">
+<details class="ql-settings-section ql-settings-section-primary"{% if not auth_token_set or error == 'creds' %} open{% endif %}>
+  <summary class="ql-settings-summary">
+    <h2 id="qobuz" tabindex="-1" class="ql-anchor-target">Qobuz authentication</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="qobuz" tabindex="-1" class="ql-anchor-target">Qobuz authentication</h2>
         <p>
           Token used for Search, Library, Discover, New Releases, Upgrade,
           Repair, and downloads.
@@ -300,16 +292,19 @@
     </form>
     {% if auth_token_set %}</details>{% endif %}
   </div>
-</section>
+</details>
 
 {# Shown before credentials are saved too: the terminal's lock-busy message
    sends a fresh install here to switch modes, so the control it names has to
    be on the page. #}
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
         <p>
           Use terminal mode before running CLI commands. Web scans and
           downloads pause while terminal mode is active.
@@ -366,13 +361,16 @@
     </div>
     {% endif %}
   </div>
-</section>
+</details>
 
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="behaviour" tabindex="-1" class="ql-anchor-target">Behaviour</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="behaviour" tabindex="-1" class="ql-anchor-target">Behaviour</h2>
         <p>These settings apply to new jobs. Saved values override Compose defaults.</p>
       </div>
     </div>
@@ -448,13 +446,16 @@
       <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save behaviour</button>
     </form>
   </div>
-</section>
+</details>
 
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="library-paths" tabindex="-1" class="ql-anchor-target">Library paths</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="library-paths" tabindex="-1" class="ql-anchor-target">Library paths</h2>
         <p>
           Paths currently in use. Host paths are shown when Docker exposes them;
           otherwise this shows the container path.
@@ -497,13 +498,16 @@
       one-time, reviewed step.
     </p>
   </div>
-</section>
+</details>
 
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="library-maintenance" tabindex="-1" class="ql-anchor-target">Library maintenance</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
-        <h2 id="library-maintenance" tabindex="-1" class="ql-anchor-target">Library maintenance</h2>
         <p>
           Re-reads every artist folder, ignoring the unchanged-folder cache.
         </p>
@@ -518,13 +522,16 @@
       </form>
     </div>
   </div>
-</section>
+</details>
 
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="discover" tabindex="-1" class="ql-anchor-target">Discover</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="discover" tabindex="-1" class="ql-anchor-target">Discover</h2>
         <p>
           Suggests artists from the ones already in your library, and offers
           what Qobuz has by them. The tab appears once a key is set; free keys
@@ -571,13 +578,16 @@
       </div>
     </form>
   </div>
-</section>
+</details>
 
-<section class="ql-settings-section">
+<details class="ql-settings-section"{% if collection_backup.unreadable or collection_backup.held_back or collection_backup.held_back_unreadable %} open{% endif %}>
+  <summary class="ql-settings-summary">
+    <h2 id="collection-backup" tabindex="-1" class="ql-anchor-target">Collection backup</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
-        <h2 id="collection-backup" tabindex="-1" class="ql-anchor-target">Collection backup</h2>
         <p>
           Writes a list of every artist, album and track in your library to the
           folder below, after each library scan.
@@ -678,13 +688,16 @@
       </div>
     </form>
   </div>
-</section>
+</details>
 
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="collection-restore" tabindex="-1" class="ql-anchor-target">Restore from a backup</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="collection-restore" tabindex="-1" class="ql-anchor-target">Restore from a backup</h2>
         <p>
           Reads a backup file and opens a review of every album in it that is
           not in your library.
@@ -725,14 +738,17 @@
     </form>
     <div id="collection-restore-result" aria-live="polite"></div>
   </div>
-</section>
+</details>
 
 {% if web_login_available %}
-<section class="ql-settings-section">
+<details class="ql-settings-section"{% if password_error %} open{% endif %}>
+  <summary class="ql-settings-summary">
+    <h2 id="web-login" tabindex="-1" class="ql-anchor-target">Web login</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <h2 id="web-login" tabindex="-1" class="ql-anchor-target">Web login</h2>
         <p>
           Signed in as <strong>{{ web_login_username }}</strong>. Changing the
           password signs out every browser, including this one.
@@ -788,14 +804,17 @@
       </div>
     </form>
   </div>
-</section>
+</details>
 {% endif %}
 
-<section class="ql-settings-section">
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="diagnostics" tabindex="-1" class="ql-anchor-target">Diagnostics</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
-        <h2 id="diagnostics" tabindex="-1" class="ql-anchor-target">Diagnostics</h2>
         <p>Checks what the container can see before scans or downloads start.</p>
       </div>
       <button class="ql-btn ql-btn-sm ql-btn-secondary"
@@ -812,7 +831,7 @@
     </div>
     <p id="diagnostics-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
   </div>
-</section>
+</details>
 </div>
 
 </div>

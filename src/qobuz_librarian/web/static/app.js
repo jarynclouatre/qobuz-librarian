@@ -757,15 +757,35 @@
       gTimer = setTimeout(function () { gPending = false; }, 800);
     }
   });
+  // Settings sections stay shut until they are wanted, so a link or a save
+  // that names one has to open it. The heading itself is in the summary, so
+  // the browser can land on it either way; this only unfolds what is under it.
+  function openSettingsSectionFromHash() {
+    var hash = window.location.hash;
+    if (hash.length < 2) return;
+    var target;
+    try { target = document.querySelector(hash); } catch (e) { return; }
+    if (!target || !target.closest) return;
+    var section = target.closest("details.ql-settings-section");
+    if (!section || section.open) return;
+    section.open = true;
+    target.scrollIntoView();
+  }
+  window.addEventListener("hashchange", openSettingsSectionFromHash);
+
   function focusSearchFromHash() {
     if (window.location.hash !== "#search") return;
     var landBox = document.querySelector('input[name="q"]');
     if (landBox) landBox.focus();
   }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", focusSearchFromHash);
-  } else {
+  function initFromHash() {
     focusSearchFromHash();
+    openSettingsSectionFromHash();
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initFromHash);
+  } else {
+    initFromHash();
   }
 
   // Plain POST forms need immediate feedback while the redirect starts.
