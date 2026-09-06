@@ -282,7 +282,7 @@
       </div>
       <div class="ql-active-list">
         {% for j in active_jobs %}
-        {% set _activity = j.progress_phase or labels.job_activity(j) %}
+        {% set _detail = labels.phase_detail(j, labels.job_activity(j)) | trim %}
         <div class="ql-active-row"
              data-job-card data-job-id="{{ j.id }}" data-job-surface="dashboard"
              data-job-status="{{ j.status.value }}" data-job-kind="{{ j.execute_kind or j.kind }}">
@@ -296,7 +296,7 @@
             </a>
             <p id="dash-prog-{{ j.id }}" class="ql-row-meta">
               {%- if j.progress_total > 0 -%}
-              {{ _activity }} {{ j.progress_current }} / {{ j.progress_total }}{% if j.progress_unit %} {{ j.progress_unit }}{{ 's' if j.progress_total != 1 }}{% endif %}
+              {% if _detail %}{{ _detail }} {% endif %}{{ j.progress_current }} / {{ j.progress_total }}{% if j.progress_unit %} {{ j.progress_unit }}{{ 's' if j.progress_total != 1 }}{% endif %}
               {%- elif j.progress_phase -%}
               {{ j.progress_phase }}
               {%- else -%}

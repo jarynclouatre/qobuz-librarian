@@ -1840,7 +1840,7 @@
     if (withItem === undefined) withItem = true;
     var item = (withItem && p.item) ? " · " + p.item : "";
     if (p.total > 0) {
-      return verb + " " + p.current + " / " + p.total + unitSuffix(p) + item;
+      return (verb ? verb + " " : "") + p.current + " / " + p.total + unitSuffix(p) + item;
     }
     if (p.phase) return p.phase + item;
     return "";
@@ -1972,8 +1972,15 @@
       }
       var el = document.getElementById(progId);
       if (!el) return;
-      var txt = fmtProgress(p, status === "scanning" ? "Scanning" : (p.phase || runFallback),
-                            surface !== "dashboard");
+      var verb = status === "scanning" ? "Scanning" : (p.phase || runFallback);
+      // The dashboard row carries a chip saying the same activity, so the verb
+      // beside the count drops out where it would only repeat it. Queue rows
+      // have no chip and keep theirs.
+      if (surface === "dashboard"
+          && verb.toLowerCase().indexOf(runFallback.toLowerCase()) === 0) {
+        verb = "";
+      }
+      var txt = fmtProgress(p, verb, surface !== "dashboard");
       if (txt) el.textContent = txt;
       var bar = document.getElementById("card-bar-" + id);
       if (bar && p.total > 0) {
@@ -2017,7 +2024,6 @@
   function wireProgress(id) {
     var logEl = document.getElementById("log");
     var card = document.getElementById("progress-card");
-    var label = document.getElementById("prog-label");
     var count = document.getElementById("prog-count");
     var bar = document.getElementById("prog-bar");
     var item = document.getElementById("prog-item");
@@ -2027,6 +2033,17 @@
     var jc = document.getElementById("job-content");
     var foundSingular = (jc && jc.dataset.progressItemSingular) || "album";
     var foundPlural = (jc && jc.dataset.progressItemPlural) || foundSingular + "s";
+    // The header chip says the activity once. A pushed phase that only repeats
+    // it ("Downloading album" under a "Downloading" chip) says nothing new, so
+    // the line stays quiet and the card's count carries the progress. Empty
+    // when the page rendered before the chip caught up, so nothing is hidden
+    // behind a stale word.
+    var chipWord = ((jc && jc.dataset.activityChip) || "").trim().toLowerCase();
+    function phaseDetail(phase) {
+      var text = (phase || "").trim();
+      if (!text || !chipWord) return text;
+      return text.toLowerCase().indexOf(chipWord) === 0 ? "" : text;
+    }
     // Server-relative elapsed clock for long-running scans.
     var elapsedEl = document.getElementById("scan-elapsed");
     var elapsedTimer = null;
@@ -2044,7 +2061,8 @@
         if (!document.body.contains(elapsedEl)) { stopElapsed(); return; }
         var secs = Math.max(0, Math.floor(elapsedAtLoad + (Date.now() - clientBase) / 1000));
         var mm = Math.floor(secs / 60), ss = secs % 60;
-        elapsedEl.textContent = "· " + mm + ":" + (ss < 10 ? "0" : "") + ss + " elapsed";
+        var lead = (activity && activity.textContent.trim()) ? "· " : "";
+        elapsedEl.textContent = lead + mm + ":" + (ss < 10 ? "0" : "") + ss + " elapsed";
       };
       // The clock reads off the server's start time, so a stream that dropped
       // and came back picks the count straight back up.
@@ -2148,11 +2166,11 @@
         var p; try { p = JSON.parse(e.data); } catch (_) { return; }
         clearQueuedState();
         if (window.qlDismissSupersededFlashes) window.qlDismissSupersededFlashes();
-        if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== p.phase) {
-          activity.textContent = p.phase;
+        var detail = phaseDetail(p.phase);
+        if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== detail) {
+          activity.textContent = detail;
         }
         if (card) card.classList.remove("hidden");
-        if (label) label.textContent = p.phase || (activity && activity.textContent !== "Queued" ? activity.textContent : "Running");
         var ct = p.total > 0 ? p.current + " / " + p.total + unitSuffix(p) : (p.current ? String(p.current) : "");
         if (count) count.textContent = ct;
         if (bar) { if (p.total > 0) { bar.max = 100; bar.value = Math.round(p.current / p.total * 100); } else { bar.removeAttribute("value"); } }

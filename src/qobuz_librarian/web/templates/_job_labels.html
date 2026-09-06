@@ -181,6 +181,22 @@
   {%- endif -%}
 {%- endmacro %}
 
+{# The one place the job header's chip wording is decided, so the line under it
+   can tell whether it would only be saying the same thing again. #}
+{% macro status_chip_label(job) -%}
+  {%- if job.status.value == 'running' -%}{{ job_activity(job) }}
+  {%- else -%}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': 'Cancelled', 'awaiting_review': 'Needs review', 'scanning': 'Scanning', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{%- endif -%}
+{%- endmacro %}
+
+{# A pushed phase only earns a line where the chip beside it has not already
+   said the same thing: "Importing" is news, "Downloading album" next to a
+   "Downloading" chip is one fact twice. #}
+{% macro phase_detail(job, chip) -%}
+  {%- set _chip = chip | trim -%}
+  {%- set _phase = (job.progress_phase or '') | trim -%}
+  {%- if _phase and not _phase.lower().startswith(_chip.lower()) -%}{{ _phase }}{%- endif -%}
+{%- endmacro %}
+
 {% macro kind_tile(job, tile_class='') -%}
 <span class="ql-job-tile{% if tile_class %} {{ tile_class }}{% endif %}" aria-hidden="true">
   {% if job.execute_kind in ('library', 'new_releases') %}

@@ -6,6 +6,7 @@
   {%- if embedded_surface|default(false) %} data-embedded="1"{% endif %}
   data-progress-item-singular="{{ labels.progress_item_singular(job) }}"
   data-progress-item-plural="{{ labels.progress_item_plural(job) }}"
+  {%- if job.status.value in ('scanning', 'running') %} data-activity-chip="{{ labels.status_chip_label(job) }}"{% endif %}
   {%- if job.status.value == 'awaiting_review' %} data-job-view="review"
   {%- elif job.status.value in ('pending', 'scanning', 'running') %} data-job-view="progress"{% endif %}>
   {# The Library surface renders this body under its own "Library" heading, so
@@ -23,7 +24,7 @@
       {%- elif job.status.value == 'canceled' %} is-neutral
       {%- elif job.status.value == 'awaiting_review' %} is-info
       {%- elif job.status.value == 'running' %} is-active
-      {%- else %} is-warning{% endif %}">{% if job.status.value == 'running' %}{{ labels.job_activity(job) }}{% else %}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': 'Cancelled', 'awaiting_review': 'Needs review', 'scanning': 'Scanning', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{% endif %}</span>
+      {%- else %} is-warning{% endif %}">{{ labels.status_chip_label(job) }}</span>
   </header>
   {% endif %}
 
@@ -185,7 +186,7 @@
     {% set _cancel_protected = job.id == cancel_protected_job_id %}
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
-        <span id="job-activity" aria-live="polite">{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s == 'scanning' %}{{ job.progress_phase or 'Scanning' }}{% elif s == 'running' %}{{ job.progress_phase or labels.job_activity(job) }}{% else %}Waiting to start{% endif %}</span>
+        <span id="job-activity" aria-live="polite">{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% else %}Waiting to start{% endif %}</span>
         {% if s in ('scanning', 'running') %}<span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>{% endif %}
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
@@ -234,10 +235,9 @@
     <div id="progress-card" class="ql-progress-panel ql-progress-panel--job{% if not job.progress_phase and not _pt %} hidden{% endif %}">
       <div>
         <div class="ql-progress-panel-head">
-          <span id="prog-label" class="ql-progress-label">{{ job.progress_phase }}</span>
           <span id="prog-count" class="ql-progress-count readout">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span>
         </div>
-        <progress id="prog-bar" class="ql-progress-bar" aria-labelledby="prog-label"{% if _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
+        <progress id="prog-bar" class="ql-progress-bar" aria-label="Progress"{% if _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
         <p id="prog-item" class="ql-progress-item">{{ job.progress_item }}</p>
       </div>
     </div>
@@ -250,6 +250,12 @@
       <summary class="ql-disclosure-summary">Activity log</summary>
       <div class="log-console log-console--job" id="log"></div>
     </details>
+
+    {% if not embedded_surface|default(false) %}
+    <div class="ql-job-actions">
+      <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ job_return_label }}</a>
+    </div>
+    {% endif %}
   {% else %}
     {% if job.finished_at %}
     <p class="ql-job-finished">Finished {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed(job.finished_at - job.started_at) }}{% endif %}</p>

@@ -3140,6 +3140,18 @@ def _remove_job(job):
             pass
 
 
+def test_a_running_job_page_offers_the_way_back(client):
+    # The finished and review states carried the return link; the running one
+    # left the bottom navbar as the only way off the page.
+    running = _inject_job(jm.JobStatus.RUNNING, "Roads")
+    try:
+        page = client.get(f"/jobs/{running.id}")
+        assert page.status_code == 200
+        assert '<a href="/queue" class="ql-btn' in page.text
+    finally:
+        _remove_job(running)
+
+
 def test_queue_cancel_stays_on_queue_without_accepting_other_targets(client):
     running = _inject_job(jm.JobStatus.RUNNING, "Running library scan")
     running.execute_kind = "library"
