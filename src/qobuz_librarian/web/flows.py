@@ -790,7 +790,7 @@ def _park_library_failures(failed_cands, execute_kind="library",
                           execute_kind="new_releases",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
     elif execute_kind == "upgrade":
-        job = job_mgr.Job(title="Upgrade candidates",
+        job = job_mgr.Job(title="Albums to upgrade",
                           execute_kind="upgrade",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
     elif execute_kind == "repair":
@@ -1916,7 +1916,7 @@ def _scan_library_impl(
                        if total else "Stopped before anything turned up.")
     elif partial_only:
         job.summary = (library_review_summary(job.candidates) + "." + _cap_note(job)
-                       if total else "No Gap Fill candidates found in your owned albums.")
+                       if total else "No owned albums are missing tracks.")
     else:
         job.summary = (library_review_summary(job.candidates) + "." + _cap_note(job)
                        if total else
@@ -3101,11 +3101,11 @@ def scan_downsamples(job):
         job.summary = (
             f"{plural(total, 'album')} stored above CD rate."
             if total else
-            "No downsample candidates found among the artists that could be checked."
+            "No albums to downsample among the artists that could be checked."
         )
         job.summary += (
             f" {plural(unchecked, 'artist')} couldn't be checked; refresh "
-            "candidates to retry."
+            "results to retry."
         )
         if not total:
             job.error = "The Downsample scan did not complete."

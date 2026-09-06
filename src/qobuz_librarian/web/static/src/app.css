@@ -1676,7 +1676,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-vchip::after {
   content: "▾";
   margin-left: 0.3rem;
-  font-size: 0.55rem;
+  font-size: 1.25em;
   line-height: 1;
   transition: transform 150ms ease;
 }

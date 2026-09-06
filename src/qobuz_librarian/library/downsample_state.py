@@ -106,7 +106,7 @@ def _optional_time(value):
 def load():
     data = state_file.load_json_object(
         cfg.DOWNSAMPLE_STATE_FILE, "the saved downsample scan",
-        "the Downsample candidates from your last Library refresh")
+        "the Downsample results from your last Library refresh")
     # A version the build doesn't know is a deliberate schema signal, not
     # corruption: leave the file alone and rebuild from a fresh scan.
     if data is None or data.get("version") != STATE_VERSION:

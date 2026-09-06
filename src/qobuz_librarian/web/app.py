@@ -367,7 +367,7 @@ def _startup_recovery_album_label() -> str:
     title = str(album.get("title") or "").strip()
     artist = str(((album.get("artist") or {}) or {}).get("name") or "").strip()
     if title and artist:
-        return f"{artist} - {title}"
+        return f"{artist} · {title}"
     return title or str(planned.get("label") or "")
 
 
@@ -1599,8 +1599,8 @@ def _active_saved_review_claim(surface, state):
 
 
 _SAVED_REVIEW_TITLES = {
-    "upgrade": "Upgrade candidates",
-    "downsample": "Downsample candidates",
+    "upgrade": "Albums to upgrade",
+    "downsample": "Albums to downsample",
 }
 _SAVED_REVIEW_LOCK = threading.RLock()
 
@@ -1685,8 +1685,7 @@ def _sync_saved_review_job(job, surface, state, signature):
         if surface == "downsample":
             job.summary = f"{n} album{'s' if n != 1 else ''} can be downsampled."
         else:
-            job.summary = (
-                f"{n} upgrade candidate{'s' if n != 1 else ''} ready to review.")
+            job.summary = f"{n} album{'s' if n != 1 else ''} can be upgraded."
         return True
 
     saved, synced = job_persistence.persist_review_mutation(job, _sync)
@@ -1755,7 +1754,7 @@ def _review_job_from_upgrade_state(state):
         stale = _stale_saved_review_job("upgrade")
         if stale is not None:
             return _sync_saved_review_job(stale, "upgrade", state, signature)
-        job = job_mgr.Job(title="Upgrade candidates")
+        job = job_mgr.Job(title="Albums to upgrade")
         job.kind = "scan"
         job.execute_kind = "upgrade"
         job.execute_args = {
@@ -1775,7 +1774,7 @@ def _review_job_from_upgrade_state(state):
             )
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
         n = len(job.candidates)
-        job.summary = f"{n} upgrade candidate{'s' if n != 1 else ''} ready to review."
+        job.summary = f"{n} album{'s' if n != 1 else ''} can be upgraded."
         if not _publish_saved_review(job):
             return None
         return job
@@ -1793,7 +1792,7 @@ def _review_job_from_downsample_state(state):
         stale = _stale_saved_review_job("downsample")
         if stale is not None:
             return _sync_saved_review_job(stale, "downsample", state, signature)
-        job = job_mgr.Job(title="Downsample candidates")
+        job = job_mgr.Job(title="Albums to downsample")
         job.kind = "scan"
         job.execute_kind = "downsample"
         job.review_verb = "Downsample"
@@ -4256,7 +4255,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except asyncio.TimeoutError:
                     logging.getLogger("qobuz_librarian").warning(
                         "track ownership annotation timed out (%ss) for %r; "
-                        "results shown without In-library marks",
+                        "results shown without Owned marks",
                         _own_timeout,
                         query,
                     )
@@ -4297,7 +4296,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 def _annotate_owned():
                     # Same filesystem resolver the download and scan paths use.
                     # "Owned" means COMPLETE, not "a folder with a file in it":
-                    # a part-finished album reading "In library" loses both its
+                    # a part-finished album reading "Owned" loses both its
                     # checkbox and its download button, which is the gap-fill
                     # case this app exists for.
                     for res, alb in zip(results, _album_raws):
@@ -4343,7 +4342,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except asyncio.TimeoutError:
                     logging.getLogger("qobuz_librarian").warning(
                         "ownership annotation timed out (%ss) for %r; results "
-                        "shown without In-library marks", _own_timeout, query)
+                        "shown without Owned marks", _own_timeout, query)
                 except Exception:
                     logging.getLogger("qobuz_librarian").exception(
                         "ownership annotation failed for %r", query)
@@ -4921,7 +4920,7 @@ def _make_download_run(
             # there so the stale review can't download it a second time.
             flows.prune_library_review_candidates(album)
             retryable, lossy_only = download_result.incomplete_track_counts(r)
-            # Nothing missing at all is what search calls "In library"; a gap of
+            # Nothing missing at all is what search calls "Owned"; a gap of
             # either kind leaves the row offering the download it still needs.
             j.landed_complete = not retryable and not lossy_only
             if retryable:
@@ -8718,7 +8717,6 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
                    error: str = "", q: str = "", tab: str = "",
                    waiting: bool = False):
     job = job_mgr.registry.get(job_id)
-    historical = False
     if not job:
         job = job_mgr.load_historical_job(job_id)
         if job is None:
@@ -8726,7 +8724,6 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
                 url="/queue?error=" + urllib.parse.quote(
                     "That job is no longer in the record."),
                 status_code=303)
-        historical = True
     if job.execute_kind == "library":
         # /library is the single Library review surface (launcher, live scan,
         # and the parked review all render there). A library-kind job never
@@ -8777,7 +8774,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
     ctx = {"job": job, "page": nav_page,
            "approved": approved, "stale": stale, "noselection": noselection,
            "waiting": waiting,
-           "error": error, "historical": historical,
+           "error": error,
            "new_release_state": new_release_state,
            "queue_wait": _queue_wait(job),
            "JobStatus": job_mgr.JobStatus}
@@ -8928,15 +8925,12 @@ async def job_content(request: Request, job_id: str, page: int = 1,
     the body under their own page heading), so the swapped-in body doesn't
     reintroduce the job header the full-page render suppressed."""
     job = job_mgr.registry.get(job_id)
-    historical = False
     if not job:
         job = job_mgr.load_historical_job(job_id)
         if job is None:
             return HTMLResponse("", status_code=404)
-        historical = True
     review_badge_ack = _review_badge_ack_for(job)
     ctx = {"job": job, "JobStatus": job_mgr.JobStatus,
-           "historical": historical,
            "embedded_surface": embedded,
            "queue_wait": _queue_wait(job)}
     ctx.update(_review_context(job, page))
@@ -9512,7 +9506,7 @@ def _rebuild_results_hint(execute_kind):
     to press the same button for the same failure.
     """
     if execute_kind == "downsample":
-        return "Refresh candidates on the Downsample page, then try again."
+        return "Refresh results on the Downsample page, then try again."
     if execute_kind in ("library", "upgrade"):
         return ("Refresh the Library, which rebuilds these results, then try "
                 "again.")
@@ -9555,7 +9549,7 @@ def _album_label(candidate):
     """One album named the way the review names it."""
     artist = (candidate.get("artist") or "").strip()
     title = (candidate.get("title") or "?").strip()
-    return f"{artist} - {title}" if artist else title
+    return f"{artist} · {title}" if artist else title
 
 
 def _named_albums(candidates, limit=3):
@@ -11305,7 +11299,7 @@ def _album_name_from_path(path):
     """
     parts = [part for part in Path(str(path)).parts if part not in ("/", "")]
     if len(parts) >= 2:
-        return f"{parts[-2]} - {parts[-1]}"
+        return f"{parts[-2]} · {parts[-1]}"
     return parts[-1] if parts else ""
 
 

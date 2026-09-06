@@ -118,7 +118,7 @@ def _optional_time(value):
 def load():
     data = state_file.load_json_object(
         cfg.UPGRADE_STATE_FILE, "the saved upgrade scan",
-        "the Upgrade candidates from your last Library refresh")
+        "the Upgrade results from your last Library refresh")
     # A version the build doesn't know is a deliberate schema signal, not
     # corruption: leave the file alone and rebuild from a fresh scan.
     if data is None or data.get("version") != STATE_VERSION:

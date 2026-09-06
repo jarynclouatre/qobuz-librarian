@@ -644,7 +644,7 @@
     if (download) {
       var owned = document.createElement("span");
       owned.className = "ql-owned-label";
-      owned.textContent = "In library";
+      owned.textContent = "Owned";
       download.replaceWith(owned);
     }
   }
@@ -953,12 +953,6 @@
     var nextOpen = !open;
     btn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
     panel.classList.toggle("hidden", !nextOpen);
-    var label = btn.querySelector("[data-version-label]");
-    if (label) {
-      label.textContent = nextOpen
-        ? (btn.dataset.hideLabel || "Hide versions")
-        : (btn.dataset.showLabel || "Show versions");
-    }
   });
 
   // Discover artist rows open their albums under the row. htmx fetches the
@@ -2281,13 +2275,13 @@
     // page was first rendered with.
     function dismissItemSingular() {
       if (reviewKind === "library" && curTab()) {
-        return curTab() === "gaps" ? "Gap Fill candidate" : "missing album";
+        return curTab() === "gaps" ? "album to fill" : "missing album";
       }
       return cont.dataset.reviewDismissSingular || "album";
     }
     function dismissItemPlural() {
       if (reviewKind === "library" && curTab()) {
-        return curTab() === "gaps" ? "Gap Fill candidates" : "missing albums";
+        return curTab() === "gaps" ? "albums to fill" : "missing albums";
       }
       return cont.dataset.reviewDismissPlural || "albums";
     }

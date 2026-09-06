@@ -7,11 +7,11 @@
 {%- endmacro %}
 
 {% macro album_quality_status(item) -%}
-  {% if item.owned %}<span class="ql-owned-label">In library</span>
+  {% if item.owned %}<span class="ql-owned-label">Owned</span>
   {% else %}
   <span class="ql-search-quality-status">
     {{ quality_badge(item) }}
-    {% if item.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ item.have_tracks }} of {{ item.want_tracks }}</span>{% endif %}
+    {% if item.partial %}<span class="ql-partial-label">{{ item.have_tracks }} of {{ item.want_tracks }} tracks</span>{% endif %}
   </span>
   {% endif %}
 {%- endmacro %}
@@ -190,7 +190,7 @@
             <span class="ql-table-artist" role="cell">{{ r.artist }}</span>
             <span class="ql-table-muted" role="cell">{{ r.album_title }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ r.year }}</span>
-            <span role="cell">{% if r.owned %}<span class="ql-owned-label">In library</span>{% else %}{{ quality_badge(r) }}{% endif %}</span>
+            <span role="cell">{% if r.owned %}<span class="ql-owned-label">Owned</span>{% else %}{{ quality_badge(r) }}{% endif %}</span>
             <span class="ql-table-action" role="cell">{% if not r.owned %}{{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}</span>
           </div>
           {% endfor %}
@@ -219,7 +219,7 @@
           <p class="ql-grid-meta">{{ r.album_title }}{% if r.year and r.year != '?' %} · {{ r.year }}{% endif %}</p>
         </div>
         <div class="ql-grid-footer">
-          {% if r.owned %}<span class="ql-owned-label">In library</span>
+          {% if r.owned %}<span class="ql-owned-label">Owned</span>
           {% else %}{{ quality_badge(r) }}
           {{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}
         </div>
@@ -304,13 +304,9 @@
                   {% if g.others %}
                   <button type="button" class="ql-vchip"
                           data-version-toggle
-                          data-show-label="+{{ g.others | length }} version{{ 's' if g.others | length != 1 else '' }}"
-                          data-hide-label="&minus; {{ g.others | length }} version{{ 's' if g.others | length != 1 else '' }}"
                           aria-expanded="false"
                           aria-controls="search-versions-{{ loop.index0 }}"
-                          aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">
-                    <span data-version-label>+{{ g.others | length }} version{{ 's' if g.others | length != 1 else '' }}</span>
-                  </button>
+                          aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} Version{{ 's' if g.others | length != 1 else '' }}</button>
                   {% endif %}
                 </div>
                 {% endif %}
@@ -379,13 +375,9 @@
         {% if g.others %}
         <button type="button" class="ql-vchip ql-grid-versions-toggle"
                 data-version-toggle
-                data-show-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }}"
-                data-hide-label="Hide versions"
                 aria-expanded="false"
                 aria-controls="search-grid-versions-{{ loop.index0 }}"
-                aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">
-          <span data-version-label>{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }}</span>
-        </button>
+                aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} Version{{ 's' if g.others | length != 1 else '' }}</button>
         <div id="search-grid-versions-{{ loop.index0 }}" class="ql-grid-version-panel hidden"
              data-version-panel>
           {% for e in g.others %}
@@ -405,9 +397,9 @@
               <span>{{ e.year }} · {{ e.tracks }} track{{ 's' if e.tracks != 1 else '' }} · {{ e.quality }}</span>
             </div>
             <div class="ql-grid-version-action">
-              {% if e.owned %}<span class="ql-owned-label">In library</span>
+              {% if e.owned %}<span class="ql-owned-label">Owned</span>
               {% else %}
-              {% if e.partial %}<span class="ql-partial-label" title="Some tracks are missing">{{ e.have_tracks }} of {{ e.want_tracks }}</span>{% endif %}
+              {% if e.partial %}<span class="ql-partial-label">{{ e.have_tracks }} of {{ e.want_tracks }} tracks</span>{% endif %}
               {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning) }}
               {% endif %}
             </div>

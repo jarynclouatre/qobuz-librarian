@@ -19,7 +19,7 @@
     {% endif %}
     <span class="ql-review-title">
       <span class="ql-review-title-main">{{ artist or 'Artist not recorded' }}</span>
-      <span class="ql-review-title-meta">{% if review_tab|default('') == 'gaps' %}{{ labels.format_count(items | length) }} Gap Fill candidate{{ 's' if (items | length) != 1 }}{% elif review_tab|default('') == 'missing' %}{{ labels.format_count(items | length) }} missing album{{ 's' if (items | length) != 1 }}{% else %}{{ labels.review_count(job, items | length) }}{% endif %}</span>
+      <span class="ql-review-title-meta">{% if review_tab|default('') == 'gaps' %}{{ labels.format_count(items | length) }} album{{ 's' if (items | length) != 1 }} to fill{% elif review_tab|default('') == 'missing' %}{{ labels.format_count(items | length) }} missing album{{ 's' if (items | length) != 1 }}{% else %}{{ labels.review_count(job, items | length) }}{% endif %}</span>
     </span>
   </summary>
   {% if lazy | default(false) %}
@@ -38,10 +38,11 @@
    dismissing on Missing Albums never touches Gap Fill and vice versa. #}
 {% set _who = artist or 'this artist' %}
 {% set _rest = (items | length) - group_selected %}
-{% set _noun = 'Gap Fill candidate' if review_tab|default('') == 'gaps'
+{% set _noun = 'album to fill' if review_tab|default('') == 'gaps'
                else 'missing album' if review_tab|default('') == 'missing'
                else 'album' %}
-{% set _nouns = _noun ~ 's' %}
+{% set _nouns = 'albums to fill' if review_tab|default('') == 'gaps'
+                else _noun ~ 's' %}
 <button type="button" data-hide data-artist="{{ artist }}"
         title="{{ 'Keep unselected hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }}"
         aria-label="{% if job.execute_kind == 'downsample' %}Keep unselected albums by {{ _who }} hi-res{% else %}Dismiss unselected {{ _nouns }} by {{ _who }}{% endif %}"

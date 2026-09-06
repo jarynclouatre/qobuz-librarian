@@ -323,7 +323,7 @@ class Job:
     # it.
     single: dict      = field(default_factory=dict)
     # Set once this download has put the whole album (or the requested track)
-    # on disk, so a search row that launched it can say "In library" the moment
+    # on disk, so a search row that launched it can say "Owned" the moment
     # the job ends instead of offering the same download again.
     landed_complete: bool = False
     kind: str         = "download"          # download | scan

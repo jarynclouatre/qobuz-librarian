@@ -1111,7 +1111,7 @@ def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path
                     headers={"HX-Request": "true"})
 
     assert r.status_code == 200
-    assert "In library" in r.text
+    assert "ql-owned-label" in r.text
     assert "quality-upgrade" not in r.text
     assert ">Upgrade<" not in r.text
 
@@ -1220,7 +1220,7 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
                     headers={"HX-Request": "true"})
 
     assert r.status_code == 200
-    assert "In library" not in r.text
+    assert "ql-owned-label" not in r.text
     assert "1 of 2" in r.text
     assert r.text.count(">24/96</span>") == 2
     assert 'name="album_id" value="album1"' in r.text   # still downloadable
@@ -2238,8 +2238,8 @@ def test_upgrade_saved_review_respects_hidden_candidates(
 
     r = client.get("/upgrade")
     assert r.status_code == 200
-    assert "1 upgrade candidate" in r.text
-    assert "2 upgrade candidates" not in r.text
+    assert "1 album to upgrade" in r.text
+    assert "2 albums to upgrade" not in r.text
 
     second = client.post("/upgrade/review", follow_redirects=False)
     assert second.headers["location"] == first.headers["location"]

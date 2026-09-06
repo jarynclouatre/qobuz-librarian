@@ -6,9 +6,9 @@
   {%- if job.execute_kind == 'new_releases' -%}
     New-release check
   {%- elif job.execute_kind == 'upgrade' -%}
-    Upgrade candidates
+    Albums to upgrade
   {%- elif job.execute_kind == 'downsample' -%}
-    Downsample candidates
+    Albums to downsample
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
     Gap Fill scan
   {%- elif job.execute_kind == 'repair' -%}
@@ -26,7 +26,7 @@
 
 {% macro review_item_singular(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
-    upgrade
+    album to upgrade
   {%- elif job.execute_kind == 'downsample' -%}
     album to downsample
   {%- elif job.execute_kind == 'repair' -%}
@@ -34,10 +34,8 @@
   {%- elif job.execute_kind == 'migration' -%}
     folder
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
-    Gap Fill candidate
-  {%- elif job.execute_kind == 'library' -%}
-    candidate
-  {%- elif job.execute_kind in ('new_releases', 'collection_restore') -%}
+    album to fill
+  {%- elif job.execute_kind in ('library', 'new_releases', 'collection_restore') -%}
     album
   {%- else -%}
     result
@@ -46,7 +44,7 @@
 
 {% macro review_item_plural(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
-    upgrades
+    albums to upgrade
   {%- elif job.execute_kind == 'downsample' -%}
     albums to downsample
   {%- elif job.execute_kind == 'repair' -%}
@@ -54,10 +52,8 @@
   {%- elif job.execute_kind == 'migration' -%}
     folders
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
-    Gap Fill candidates
-  {%- elif job.execute_kind == 'library' -%}
-    candidates
-  {%- elif job.execute_kind in ('new_releases', 'collection_restore') -%}
+    albums to fill
+  {%- elif job.execute_kind in ('library', 'new_releases', 'collection_restore') -%}
     albums
   {%- else -%}
     results
@@ -74,15 +70,13 @@
 
 {% macro review_empty_label(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
-    Select upgrades to run
+    Select albums to upgrade
   {%- elif job.execute_kind == 'repair' -%}
     Select repairs to run
   {%- elif job.execute_kind == 'migration' -%}
     Select folders to {{ job.review_verb|lower }}
   {%- elif job.execute_kind == 'downsample' -%}
     Select albums to downsample
-  {%- elif job.execute_kind == 'library' -%}
-    Select candidates to {{ job.review_verb|lower }}
   {%- else -%}
     Select albums to {{ job.review_verb|lower }}
   {%- endif -%}
@@ -90,7 +84,7 @@
 
 {% macro progress_item_singular(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
-    upgrade
+    album to upgrade
   {%- elif job.execute_kind == 'downsample' -%}
     album to downsample
   {%- elif job.execute_kind == 'repair' -%}
@@ -98,9 +92,7 @@
   {%- elif job.execute_kind == 'new_releases' -%}
     new release
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
-    Gap Fill candidate
-  {%- elif job.execute_kind == 'library' -%}
-    candidate
+    album to fill
   {%- else -%}
     album
   {%- endif -%}
@@ -108,7 +100,7 @@
 
 {% macro progress_item_plural(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
-    upgrades
+    albums to upgrade
   {%- elif job.execute_kind == 'downsample' -%}
     albums to downsample
   {%- elif job.execute_kind == 'repair' -%}
@@ -116,9 +108,7 @@
   {%- elif job.execute_kind == 'new_releases' -%}
     new releases
   {%- elif job.title == 'Gap-fill scan' or job.title == 'Gap Fill scan' -%}
-    Gap Fill candidates
-  {%- elif job.execute_kind == 'library' -%}
-    candidates
+    albums to fill
   {%- else -%}
     albums
   {%- endif -%}
