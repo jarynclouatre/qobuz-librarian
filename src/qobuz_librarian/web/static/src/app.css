@@ -6064,11 +6064,6 @@ details[open] > .ql-disclosure-summary::after {
 @media (max-width: 639.98px) {
   .ql-review-footer-secondary-group {
     justify-content: center;
-    gap: 0.5rem 1.25rem;
-    /* The widest label pair ("Back to Downsample" + "Discard downsample
-       review") outgrows a 360px screen; a centred row with no wrap spills
-       off both edges. */
-    flex-wrap: wrap;
   }
   .ql-review-footer-secondary-group .ql-btn {
     flex: none;
