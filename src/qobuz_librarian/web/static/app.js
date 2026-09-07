@@ -1813,7 +1813,7 @@
           }
           function cnt(n, one, many) { return n + " " + (n === 1 ? one : many); }
           if (duplicates) parts.push(duplicates + " already queued");
-          if (owned) parts.push(owned + " already in library");
+          if (owned) parts.push(owned + " already owned");
           if (failed) parts.push(failed + " failed");
           var receipt = document.createElement("span");
           receipt.appendChild(document.createTextNode(
