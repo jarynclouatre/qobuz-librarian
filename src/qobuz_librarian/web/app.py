@@ -10279,7 +10279,7 @@ def _retry_return_url(raw: object, **extra: str) -> str | None:
     """The History page a Retry was clicked on, or None for anything else.
 
     History sends its own address with the click so the outcome arrives where
-    the user is already looking instead of dragging her into the job card.
+    the user is already looking instead of dragging them into the job card.
     Only that one surface is honoured and only its own paging keys ride along,
     so a forged field cannot aim the redirect somewhere else.
     """
