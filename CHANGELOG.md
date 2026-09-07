@@ -2,6 +2,20 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [1.1.0] - 2026-09-06
+
+1.1.0 is an interface pass. A stuck download no longer holds up the rest of
+the app, Search can show a tracklist before you download, and History and
+Settings fit on a phone.
+
+- An interrupted download no longer refuses Retry on every other album: a second album is accepted and waits for the interrupted one to settle. The pause notice names the album and carries one button to that download, Search and the review footer say why an action is greyed instead of leaving it to a mouse hover, and Queue stops offering a search that only leads to a greyed download button.
+- Retry answers on the page it was clicked instead of opening the job card. A running job has a way back to Queue, and it says what it is doing once rather than in the chip, the line under it and the Background work row at the same time.
+- Search opens a release's tracklist under its row, numbered with track times, with its own list for each version and the tracks you already own marked. Artist rows sharing a name say roughly how many albums each has on Qobuz, so four rows called Bonobo can be told apart.
+- One name for one thing: "In library" reads Owned, the versions chip reads "3 Versions" without the plus sign, a partly owned row reads "0 of 11 tracks", reviews count albums rather than candidates, and the same separator sits between artist and album everywhere. Reviews saved under the old wording still open.
+- History is one line per job - icon, name, chip and date - under a single count, with the sentences kept on the job page. Repair scans whose kept files are already gone stop pinning themselves to the top under a red Recovery needed chip, and the job page's count of kept originals agrees with its own heading.
+- Settings is nine collapsed sections instead of six screens of scrolling, and every link into a section still opens that section. Restore from a backup has a proper Choose backup file button in place of the browser's raw control.
+- Discard moves out of the floating action bar into the toolbar row beside Dismissed, so a destructive button no longer sits a thumb-slip under Download. It still asks before discarding.
+
 ## [1.0.0] - 2026-08-31
 
 1.0.0 marks Qobuz Librarian stable. The work since 0.14.0 is small fixes
