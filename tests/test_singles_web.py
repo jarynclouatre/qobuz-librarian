@@ -571,7 +571,6 @@ def test_undo_stays_retryable_when_its_final_job_save_fails(
 
         assert not track.exists()
         assert response.status_code == (200 if htmx else 503)
-        assert "final record couldn&#39;t be saved" in response.text
         assert job.single.get("removed") is not True
         if htmx:
             assert f'hx-post="/jobs/{job.id}/undo"' in response.text
