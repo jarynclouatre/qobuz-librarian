@@ -8,7 +8,7 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 and a documentation pass; nothing changes how the app works.
 
 - Discover's saved suggestions and Search's saved results no longer offer artists already in your library while Qobuz is unreachable.
-- The History header says "1 item needs attention" rather than "1 item need attention", the Move confirmation names how many folders it moves, and the repair history note reads as one sentence.
+- The History header counts a single attention item correctly, the Move confirmation names how many folders it moves, and the repair history note reads as one sentence.
 
 ## [0.14.0] - 2026-08-22
 
@@ -23,18 +23,18 @@ saved reviews, authentication, offline use, and library maintenance.
 - Reliability work across downloads, scans, Restore, Repair, Upgrade, and Downsample improves interruption recovery, validates saved state before acting, bounds background work, and keeps Queue, History, and reviews consistent across restarts.
 - Search, review navigation, offline recovery, mobile activity rows, touch targets, and accessibility have been polished. Tool pages now explain when work is paused instead of offering actions that cannot run.
 - Qobuz account details are masked in app-owned logs and saved job records, including cleanup of existing records at startup. Docker-host log history is outside that cleanup; rotate the token if those logs were shared.
-- Settings handling and sign-in limits are safer under concurrent requests, while obsolete internal tuning options have been removed. Existing user-facing Settings controls remain available.
+- Settings handling and sign-in limits are safer under concurrent requests, while obsolete internal tuning options have been removed. Docker now bundles beets 2.13.1; bare CLI installations need that same version.
 
 ## [0.13.3] - 2026-08-15
 
 This patch keeps remembered state and live interface state in step with what
 the app is actually doing.
 
-- Search restores its existing results and scroll position before revealing the page, including after Back and reload. Warm returns no longer repeat the Qobuz search or local ownership scan, except for a catalogue too large to save, while new assets invalidate the saved result snapshot.
-- Search selections are reconciled with the controls that still exist, and Hide owned stays with its query. Real downloads read Queued, unapproved albums found by the current Library scan read In current scan, and open results update as the Queue changes. Queue updates no longer revive saved choices past the 30-minute limit.
-- Repair, Library, New Releases, Upgrade, Downsample, Lyrics, and Migration job pages use the same owning tool for navigation, back links, cancellation, and terminal return behavior. A completed or discarded child no longer pins a primary tab to its old job page.
-- Queue activity and unresolved History attention now have separate counted destinations. The History count covers terminal records only and opens a filtered view that explains how ordinary warnings, recoveries, and catalogue cleanup clear.
-- Queue polling pauses in hidden tabs and never overlaps. General scroll restoration runs once instead of polling, and page-title separators are consistent across the interface.
+- Search now returns exactly where you left it, including after Back or reload, without rebuilding the same result set through another Qobuz search and ownership scan.
+- Selections and Hide owned stay with their Search. Real downloads read Queued, unapproved albums found by the current Library scan read In current scan, and open results update as the Queue changes. Queue updates no longer revive saved choices past the 30-minute limit.
+- Job pages belong to the tool that created them. Repair, Library, New Releases, Upgrade, Downsample, Lyrics, and Migration now agree across active navigation, back links, cancellation, and terminal return behavior.
+- Queue activity and unresolved History attention have separate counts and destinations. The History count opens the exact unresolved records and explains which warnings clear on opening and which require recovery or catalogue cleanup.
+- Hidden tabs stop polling the Queue, overlapping polls are suppressed, scroll restoration no longer retries for fifteen seconds, and page titles use one separator throughout the interface.
 - Primary actions, active navigation, and status text have stronger contrast in Winter. Mobile jump links clear the sticky header, the More sheet keeps the covered page still and restores its position, and the desktop History attention badge has an obvious keyboard focus ring.
 
 ## [0.13.2] - 2026-08-14
@@ -42,12 +42,11 @@ the app is actually doing.
 This release tightens the handoff between saved reviews, Qobuz access, and the
 files those reviews describe.
 
-- Saved Library, New Releases, Upgrade, and Repair results stay available when Qobuz is disconnected. Work that needs Qobuz checks the current token before it starts, while Downsample and Lyrics remain independent of the Qobuz login.
-- Downloads and replacements recheck both the selected files and the active account before queueing, and again before the first file change. If an album or credential changed, the app leaves the files and review choices alone and asks for a refresh or retry.
-- Library refreshes keep the previous complete baseline if a later scan fails, and interrupted publication, partial results, stale quality views, and resumable Repair work now survive restarts without looking complete.
-- Partly completed Library, Upgrade, and Repair batches keep finished albums finished and return untouched picks to the living review. The CLI follows the same admission and saved-state rules.
+- Saved Library, New Releases, Upgrade, and Repair results stay open when Qobuz is disconnected. Anything that needs Qobuz checks the current token before it starts, while Downsample and Lyrics remain independent of the Qobuz login.
+- Downloads and replacements recheck the selected files and account before queueing, then once more before the first file change. If either changed, the app leaves the files and review choices alone and asks for a refresh or retry.
+- A failed Library refresh keeps the previous complete baseline. Interrupted scan saves, partial results, stale quality views, and resumable Repair work survive restarts without being presented as complete.
+- Partly completed Library, Upgrade, and Repair batches keep finished albums finished and return untouched picks to the living review. The CLI follows the same rules, and moving between pages keeps each tab's last page and scroll position.
 - Partial-to-full album downloads can settle the exact old Beets rows and backup safely. Single-track Undo works after a verified cross-mount import, partially owned Search results keep their source quality, and Docker stop signals reach the nonroot app cleanly.
-- Tabs keep their last page and scroll position when you move around the app. A search no longer disappears after a trip to Settings, and returning to Queue, History, or a maintenance tool picks up where you left it.
 
 ## [0.13.1] - 2026-08-09
 
