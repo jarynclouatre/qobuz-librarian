@@ -52,6 +52,7 @@ _disabled = False
 _conn: Optional[sqlite3.Connection] = None
 _schema_ready = False
 _admission_ready = False
+_previous_write_at: Optional[float] = None
 # The db opened fine but a write later failed (typically a full disk).
 _warned_write_failure = False
 
@@ -261,6 +262,11 @@ def _path():
     return cfg.DATA_DIR / "jobs.db"
 
 
+def previous_write_at() -> Optional[float]:
+    """When the previous run last wrote the archive, or None on a first run."""
+    return _previous_write_at
+
+
 def _get_conn() -> Optional[sqlite3.Connection]:
     """Return the persistent WAL connection, opening it on first call.
 
@@ -269,13 +275,18 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     forgoes restart durability rather than seeing a stream of OSError
     on every status change.
     """
-    global _disabled, _conn, _schema_ready, _admission_ready
+    global _disabled, _conn, _schema_ready, _admission_ready, _previous_write_at
     if _disabled:
         return None
     if _conn is not None:
         return _conn
     try:
         cfg.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _previous_write_at = max(
+            (path.stat().st_mtime for path in (_path(), _path().with_suffix(".db-wal"))
+             if path.exists()),
+            default=None,
+        )
         _conn = sqlite3.connect(str(_path()), timeout=5.0,
                                 check_same_thread=False)
         _conn.execute("PRAGMA journal_mode=WAL")

@@ -3141,6 +3141,10 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   grid-column: 2;
   margin-top: 0;
 }
+.ql-history-row .ql-row-reason--summary {
+  display: block;
+  grid-column: 2 / -1;
+}
 .ql-row-open {
   display: inline-flex;
   min-height: 2.75rem;

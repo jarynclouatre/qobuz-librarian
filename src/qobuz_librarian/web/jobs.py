@@ -400,6 +400,11 @@ class Job:
         self.sync_cand_seq()
 
     @property
+    def interrupted_by_restart(self) -> bool:
+        return (self.status is JobStatus.CANCELED
+                and self.summary.startswith("Interrupted by a restart."))
+
+    @property
     def display_title(self) -> str:
         return release_title(self.title, self.edition)
 
@@ -2165,8 +2170,6 @@ def restore_jobs(
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.SCANNING:
-            # A scan caught mid-crawl isn't a failure. Record it as cancelled
-            # (neutral) with a note in the summary, not a red error.
             job.status = JobStatus.CANCELED
             # Library scans auto-resume from their checkpoint when the app next
             # opens; the whole-library repair sweep also checkpoints but only
@@ -2187,7 +2190,7 @@ def restore_jobs(
                                "again and it continues from where it left off.")
             else:
                 job.summary = "Interrupted by a restart. Run the scan again to retry."
-            job.finished_at = time.time()
+            job.finished_at = job_persistence.previous_write_at() or job.created_at
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.AWAITING_REVIEW:

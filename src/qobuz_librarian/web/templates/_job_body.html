@@ -41,7 +41,7 @@
   {% else %}
   {% set _ph = 'repair' if job.phase == 'execute' else ('review' if job.phase == 'review' else 'scan') %}
   {% endif %}
-  {% set _phase_outcome = ' failed' if _st == 'failed' else (' cancelled' if _st == 'canceled' else '') %}
+  {% set _phase_outcome = ' ' ~ (labels.status_chip_label(job) | lower) if _st in ('failed', 'canceled') else '' %}
   <div class="ql-repair-phase" aria-label="Repair phase: {{ _ph }}{{ _phase_outcome }}">
     {% for key, label in [('scan','Scan'), ('review','Review'), ('repair','Repair')] %}
     {% set _done = (key == 'scan' and _ph in ('review','repair','done')) or (key == 'review' and _ph in ('repair','done')) or (key == 'repair' and _ph == 'done') %}

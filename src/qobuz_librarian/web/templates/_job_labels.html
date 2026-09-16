@@ -174,7 +174,8 @@
 {# The one place the job header's chip wording is decided, so the line under it
    can tell whether it would only be saying the same thing again. #}
 {% macro status_chip_label(job) -%}
-  {%- if job.status.value == 'running' -%}{{ job_activity(job) }}
+  {%- if job.interrupted_by_restart -%}Interrupted
+  {%- elif job.status.value == 'running' -%}{{ job_activity(job) }}
   {%- else -%}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': 'Cancelled', 'awaiting_review': 'Needs review', 'scanning': 'Scanning', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{%- endif -%}
 {%- endmacro %}
 
