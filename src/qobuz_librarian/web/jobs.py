@@ -47,7 +47,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
-from qobuz_librarian.library import library_scan_state, new_releases
+from qobuz_librarian.library import library_scan_state, new_releases, scan_checkpoint
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
@@ -2175,10 +2175,10 @@ def restore_jobs(
             # opens; the whole-library repair sweep also checkpoints but only
             # picks up when its scan is started again; every other kind restarts.
             if job.execute_kind == "library":
-                # Only a pre-baseline scan auto-resumes; after the baseline the
-                # affordance is the dashboard's manual resume notice; don't
-                # promise an auto-resume that never comes.
-                if new_releases.is_baseline_complete():
+                if scan_checkpoint.pending() is None:
+                    job.summary = ("Interrupted by a restart. Start the scan "
+                                   "again from the Library page.")
+                elif new_releases.is_baseline_complete():
                     job.summary = ("Interrupted by a restart. Resume it from "
                                    "the notice on the Search page.")
                 else:
@@ -2186,8 +2186,12 @@ def restore_jobs(
                                    "where it left off the next time you open "
                                    "the app.")
             elif job.execute_kind == "repair":
-                job.summary = ("Interrupted by a restart. Start the repair scan "
-                               "again and it continues from where it left off.")
+                if scan_checkpoint.load("repair") is None:
+                    job.summary = ("Interrupted by a restart. Start the scan "
+                                   "again from the Repair page.")
+                else:
+                    job.summary = ("Interrupted by a restart. Start the repair scan "
+                                   "again and it continues from where it left off.")
             else:
                 job.summary = "Interrupted by a restart. Run the scan again to retry."
             job.finished_at = job_persistence.previous_write_at() or job.created_at

@@ -3978,6 +3978,27 @@ def test_a_finished_download_is_not_failed_by_another_items_recovery(
     assert restored.attention == ""
 
 
+def test_interrupted_scan_only_promises_resume_with_a_checkpoint(monkeypatch):
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "init", lambda: None)
+    monkeypatch.setattr(job_persistence, "persist", lambda _job: True)
+    monkeypatch.setattr(job_persistence, "load_all", lambda: [{
+        "id": "interrupted-scan", "kind": "scan", "execute_kind": "library",
+        "status": "scanning", "created_at": 1700000000,
+    }])
+    monkeypatch.setattr(jm.new_releases, "is_baseline_complete", lambda: False)
+    monkeypatch.setattr(jm.scan_checkpoint, "pending", lambda: None)
+
+    jm.restore_jobs({})
+    assert "resumes" not in jm.registry.get("interrupted-scan").summary
+
+    monkeypatch.setattr(jm.scan_checkpoint, "pending",
+                        lambda: {"kind": "missing", "done": 3})
+    jm.restore_jobs({})
+    assert "resumes" in jm.registry.get("interrupted-scan").summary
+
+
 def test_a_finished_job_keeps_its_log_across_a_restart(monkeypatch):
     """A finished job's log is the record of what a download actually did, so
     it has to outlive the process that wrote it.

@@ -1324,7 +1324,6 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
             catalog_ids, owned_ids)
 
 
-_CHECKPOINT_EVERY = 15  # artists between progress saves (resume granularity)
 # Seconds between live-status refreshes during the whole-library repair sweep
 # (see scan_repairs).
 _REPAIR_HEARTBEAT_SECS = 2
@@ -1522,6 +1521,7 @@ def _scan_library_impl(
     else:
         scanned = set()
         baseline_seen = {}
+        scan_checkpoint.save(kind, scanned, [], baseline_seen)
     total = 0
     # Snapshot the dismissed-album memory before restoring the checkpoint so
     # albums the user dismissed since the interruption are not re-added, and
@@ -1684,7 +1684,8 @@ def _scan_library_impl(
             todo.append(artist_dir)
     if reused:
         log.info(f"  Reused {plural(reused, 'unchanged artist')} from the saved scan.")
-    since_save = 0
+        scan_checkpoint.save(
+            kind, scanned, job.candidates, baseline_seen, state_artists)
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # Resolve/scan artists in parallel (each worker has its own HTTP session),
     # but collect results and write candidates on this one thread so the
@@ -1758,11 +1759,8 @@ def _scan_library_impl(
             if shown:
                 tail = "with Gap Fill candidates" if partial_only else "to fill"
                 log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
-            since_save += 1
-            if since_save >= _CHECKPOINT_EVERY:
-                since_save = 0
-                scan_checkpoint.save(
-                    kind, scanned, job.candidates, baseline_seen, state_artists)
+            scan_checkpoint.save(
+                kind, scanned, job.candidates, baseline_seen, state_artists)
     # Reached here only without an AuthLost/outage abort (that re-raises out
     # above, leaving the checkpoint for resume and not seeding the baseline).
     flush_resolve_cache()
@@ -3642,7 +3640,6 @@ def scan_repairs(job, token):
     todo = [ad for ad in artists if ad.name not in scanned]
     n = len(artists)
     done = len(scanned)
-    since_save = 0
     checkpoint_warning = False
 
     def warn_checkpoint(message):
@@ -3671,6 +3668,7 @@ def scan_repairs(job, token):
                 "an interruption will recheck these artists."
             )
         return saved
+    save_checkpoint()
     # Shared heartbeat state: workers bump it per album and one logs the periodic
     # line when due, so progress keeps showing even while every worker is deep in
     # one large artist and no future has completed (see _emit_repair_heartbeat).
@@ -3757,10 +3755,7 @@ def scan_repairs(job, token):
             job.push_progress("Checking for damaged files", done, n,
                               _repair_item(current, albums_seen, total),
                               found=total, unit="artist")
-            since_save += 1
-            if since_save >= _CHECKPOINT_EVERY:
-                since_save = 0
-                save_checkpoint()
+            save_checkpoint()
     clear_failed = scan_checkpoint.clear("repair") is False
     # Honest summary: report what was actually decode-verified, and never
     # claim completeness the scan didn't earn.
