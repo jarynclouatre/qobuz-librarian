@@ -2292,12 +2292,15 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-weight: 480;
 }
 .ql-table-sub {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   align-items: start;
-  gap: 0.5rem;
+  gap: 0.25rem 0.5rem;
   margin-top: 0.1875rem;
+}
+.ql-table-sub > .ql-row-chips {
+  margin-left: auto;
 }
 .ql-table-release-meta {
   display: flex;
