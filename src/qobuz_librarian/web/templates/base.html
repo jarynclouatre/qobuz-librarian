@@ -52,11 +52,11 @@
 
         <nav class="ql-sidebar-nav" aria-label="Main">
           <div class="ql-nav-group">
-            <a href="/" data-nav-tab-link="search" class="ql-nav-link {% if page=='dashboard' %}is-active{% endif %}">
+            <a href="/" data-nav-tab-link="search" class="ql-nav-link {% if page=='dashboard' %}is-active{% endif %}"{% if page=='dashboard' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
               Search
             </a>
-            <a href="/library" data-nav-tab-link="library" class="ql-nav-link {% if page=='library' %}is-active{% endif %}">
+            <a href="/library" data-nav-tab-link="library" class="ql-nav-link {% if page=='library' %}is-active{% endif %}"{% if page=='library' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16M9 4v16M14 5.5l4.5 14"/></svg>
               Library
               {% if nav_review_badges.get('library') %}
@@ -64,7 +64,7 @@
               {% endif %}
             </a>
             {% if discover_available %}
-            <a href="/discover" data-nav-tab-link="discover" class="ql-nav-link {% if page=='discover' %}is-active{% endif %}">
+            <a href="/discover" data-nav-tab-link="discover" class="ql-nav-link {% if page=='discover' %}is-active{% endif %}"{% if page=='discover' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>
               Discover
             </a>
@@ -73,7 +73,7 @@
 
           <div class="ql-nav-group">
             {% if upgrade_available %}
-              <a href="/upgrade" data-nav-tab-link="upgrade" class="ql-nav-link {% if page=='upgrade' %}is-active{% endif %}">
+              <a href="/upgrade" data-nav-tab-link="upgrade" class="ql-nav-link {% if page=='upgrade' %}is-active{% endif %}"{% if page=='upgrade' %} aria-current="page"{% endif %}>
                 <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>
                 Upgrade
                 {% if nav_review_badges.get('upgrade') %}
@@ -81,7 +81,7 @@
                 {% endif %}
               </a>
             {% endif %}
-            <a href="/downsample" data-nav-tab-link="downsample" class="ql-nav-link {% if page=='downsample' %}is-active{% endif %}">
+            <a href="/downsample" data-nav-tab-link="downsample" class="ql-nav-link {% if page=='downsample' %}is-active{% endif %}"{% if page=='downsample' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>
               Downsample
               {% if nav_review_badges.get('downsample') %}
@@ -91,14 +91,14 @@
           </div>
 
           <div class="ql-nav-group">
-            <a href="/repair" data-nav-tab-link="repair" class="ql-nav-link {% if page=='repair' %}is-active{% endif %}">
+            <a href="/repair" data-nav-tab-link="repair" class="ql-nav-link {% if page=='repair' %}is-active{% endif %}"{% if page=='repair' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>
               Repair
               {% if nav_review_badges.get('repair') %}
               <span class="ql-review-badge" data-review-badge="repair" aria-label="Repair review ready" title="Repair review ready"></span>
               {% endif %}
             </a>
-            <a href="/lyrics" data-nav-tab-link="lyrics" class="ql-nav-link {% if page=='lyrics' %}is-active{% endif %}">
+            <a href="/lyrics" data-nav-tab-link="lyrics" class="ql-nav-link {% if page=='lyrics' %}is-active{% endif %}"{% if page=='lyrics' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l8-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="14.5" cy="16" r="2.5"/></svg>
               Lyrics
             </a>
@@ -106,7 +106,7 @@
 
           <div class="ql-nav-group">
             <div class="ql-nav-attention-row">
-              <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}">
+              <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
                 <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
                 Queue / History
                 <span class="js-queue-badge ql-queue-badge{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
@@ -123,7 +123,7 @@
           </div>
 
           <div class="ql-nav-group">
-            <a href="/settings" data-nav-tab-link="settings" class="ql-nav-link {% if page=='settings' %}is-active{% endif %}">
+            <a href="/settings" data-nav-tab-link="settings" class="ql-nav-link {% if page=='settings' %}is-active{% endif %}"{% if page=='settings' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h10"/><path d="M18 8h2"/><path d="M4 16h2"/><path d="M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>
               Settings
             </a>
@@ -196,17 +196,17 @@
   </div>
 
   <nav class="ql-tabbar lg:hidden" aria-label="Primary">
-    <a href="/" data-nav-tab-link="search" class="ql-tab {% if page=='dashboard' %}is-active{% endif %}">
+    <a href="/" data-nav-tab-link="search" class="ql-tab {% if page=='dashboard' %}is-active{% endif %}"{% if page=='dashboard' %} aria-current="page"{% endif %}>
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
       <span>Search</span>
     </a>
-    <a href="/library" data-nav-tab-link="library" class="ql-tab {% if page=='library' %}is-active{% endif %}">
+    <a href="/library" data-nav-tab-link="library" class="ql-tab {% if page=='library' %}is-active{% endif %}"{% if page=='library' %} aria-current="page"{% endif %}>
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16M9 4v16M14 5.5l4.5 14"/></svg>
       <span>Library</span>
       {% if nav_review_badges.get('library') %}<span class="ql-tab-dot" data-review-badge="library" aria-label="Library review ready"></span>{% endif %}
     </a>
     <div class="ql-tab-slot">
-      <a href="/queue" data-nav-tab-link="queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}">
+      <a href="/queue" data-nav-tab-link="queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
         <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
         <span>Queue</span>
         <span class="js-queue-badge ql-tabbar-count{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
@@ -217,7 +217,7 @@
         <span class="ql-attention-dot" aria-hidden="true"></span>
       </a>
     </div>
-    <a href="/settings" data-nav-tab-link="settings" class="ql-tab {% if page=='settings' %}is-active{% endif %}">
+    <a href="/settings" data-nav-tab-link="settings" class="ql-tab {% if page=='settings' %}is-active{% endif %}"{% if page=='settings' %} aria-current="page"{% endif %}>
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h10"/><path d="M18 8h2"/><path d="M4 16h2"/><path d="M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>
       <span>Settings</span>
     </a>
@@ -238,7 +238,7 @@
         <nav class="ql-sheet-nav" aria-label="More">
           {% if discover_available %}
           <div class="ql-nav-group">
-            <a href="/discover" data-nav-tab-link="discover" class="ql-nav-link {% if page=='discover' %}is-active{% endif %}">
+            <a href="/discover" data-nav-tab-link="discover" class="ql-nav-link {% if page=='discover' %}is-active{% endif %}"{% if page=='discover' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>
               Discover
             </a>
@@ -246,7 +246,7 @@
           {% endif %}
           <div class="ql-nav-group">
             {% if upgrade_available %}
-            <a href="/upgrade" data-nav-tab-link="upgrade" class="ql-nav-link {% if page=='upgrade' %}is-active{% endif %}">
+            <a href="/upgrade" data-nav-tab-link="upgrade" class="ql-nav-link {% if page=='upgrade' %}is-active{% endif %}"{% if page=='upgrade' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>
               Upgrade
               {% if nav_review_badges.get('upgrade') %}
@@ -254,7 +254,7 @@
               {% endif %}
             </a>
             {% endif %}
-            <a href="/downsample" data-nav-tab-link="downsample" class="ql-nav-link {% if page=='downsample' %}is-active{% endif %}">
+            <a href="/downsample" data-nav-tab-link="downsample" class="ql-nav-link {% if page=='downsample' %}is-active{% endif %}"{% if page=='downsample' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>
               Downsample
               {% if nav_review_badges.get('downsample') %}
@@ -263,14 +263,14 @@
             </a>
           </div>
           <div class="ql-nav-group">
-            <a href="/repair" data-nav-tab-link="repair" class="ql-nav-link {% if page=='repair' %}is-active{% endif %}">
+            <a href="/repair" data-nav-tab-link="repair" class="ql-nav-link {% if page=='repair' %}is-active{% endif %}"{% if page=='repair' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>
               Repair
               {% if nav_review_badges.get('repair') %}
               <span class="ql-review-badge" data-review-badge="repair" aria-label="Repair review ready" title="Repair review ready"></span>
               {% endif %}
             </a>
-            <a href="/lyrics" data-nav-tab-link="lyrics" class="ql-nav-link {% if page=='lyrics' %}is-active{% endif %}">
+            <a href="/lyrics" data-nav-tab-link="lyrics" class="ql-nav-link {% if page=='lyrics' %}is-active{% endif %}"{% if page=='lyrics' %} aria-current="page"{% endif %}>
               <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l8-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="14.5" cy="16" r="2.5"/></svg>
               Lyrics
             </a>
