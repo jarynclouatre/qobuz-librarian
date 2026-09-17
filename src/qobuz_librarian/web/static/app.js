@@ -2290,6 +2290,14 @@
       var body = document.getElementById("job-content");
       if (!body) { stopWatching(); return; }
       if (!window.htmx) { reloadToRecover(); return; }
+      var repairPage = body.dataset.embedded && document.getElementById("repair-page");
+      if (repairPage) {
+        stopWatching();
+        hideGap();
+        window.htmx.ajax("GET", "/repair",
+          { target: "#repair-page", swap: "outerHTML", select: "#repair-page" });
+        return;
+      }
       var embedded = body.dataset.embedded ? "?embedded=1" : "";
       sessionFetch("/jobs/" + id + "/content" + embedded)
         .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
