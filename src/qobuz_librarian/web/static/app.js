@@ -637,7 +637,8 @@
     if (checkbox) {
       checkbox.checked = false;
       var label = checkbox.closest("label");
-      if (label) label.remove();
+      // The label is a table cell; emptying it keeps the columns in place.
+      if (label) label.replaceChildren();
       else checkbox.remove();
     }
     var download = item.querySelector("[data-search-download-form]");
