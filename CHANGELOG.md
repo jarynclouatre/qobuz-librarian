@@ -4,8 +4,8 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 
 ## [1.1.1] - 2026-09-16
 
-1.1.1 fixes what the first days of 1.1.0 turned up. A scan no longer loses
-its place when the app is stopped under it, History says what actually
+Scan no longer lose
+their place when the app is stopped under it, History says what actually
 happened, and Search and Queue keep themselves straight while jobs run.
 
 - Library and Repair scans save their progress before the first artist and after every one, so a scan interrupted by a container stop continues from the last artist instead of starting over. History calls such a scan Interrupted, prints why under it, and dates it to the app's last write rather than to the next start. A scan you stop yourself still reads Cancelled.
