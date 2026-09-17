@@ -1864,6 +1864,7 @@
           });
         }
         syncBoxes();
+        applyOwnedFilterCount();
       });
       searchExitSave = function () {
         saveSelection();
