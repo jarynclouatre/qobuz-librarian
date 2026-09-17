@@ -2175,7 +2175,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-table-row.is-owned .ql-cover,
 .ql-table-row.is-owned .ql-table-title,
-.ql-table-row.is-owned .ql-table-sub,
+.ql-table-row.is-owned .ql-table-sub > :not(.ql-row-chips),
 .ql-table-row.is-owned .ql-table-mobile-artist {
   opacity: 0.62;
 }
