@@ -33,7 +33,7 @@
       {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not refreshed yet{% endif %}
     </span>
     <span>
-      {% if downsample_state.stale %}Saved results need a Library refresh.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No refresh has finished yet.{% endif %}
+      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No refresh has finished yet.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/downsample/hidden">
@@ -49,8 +49,8 @@
        being replaced. The Job carries the phase; use it. #}
     {% set _ds_executing = downsample_running.phase == 'execute' or downsample_running.status.value == 'running' %}
     <div class="ql-tool-note {{ 'ql-tool-note-warning' if _ds_executing else 'ql-tool-note-info' }}">
-      <p class="ql-tool-note-title">{% if _ds_executing %}Downsampling now{% else %}Downsample scan running{% endif %}</p>
-      <p>{% if _ds_executing %}Your files are being rewritten in place.{% else %}Checking your files for albums that can be downsampled.{% endif %} <a href="/jobs/{{ downsample_running.id }}" class="ql-inline-link">Watch progress →</a></p>
+      <p class="ql-tool-note-title">{% if _ds_executing %}Downsampling now{% elif downsample_running.status.value == 'pending' %}Downsample scan queued{% else %}Downsample scan running{% endif %}</p>
+      <p>{% if _ds_executing %}Your files are being rewritten in place.{% elif downsample_running.status.value == 'pending' %}Starts when the current job finishes.{% else %}Checking your files for albums that can be downsampled.{% endif %} <a href="/jobs/{{ downsample_running.id }}" class="ql-inline-link">Watch progress →</a></p>
     </div>
     {% elif downsample_state.stale %}
     <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
