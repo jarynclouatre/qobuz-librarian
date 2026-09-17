@@ -33,7 +33,7 @@
       {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not refreshed yet{% endif %}
     </span>
     <span>
-      {% if downsample_state.stale %}Saved results need a Library refresh.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No downsample refresh has finished yet.{% endif %}
+      {% if downsample_state.stale %}Saved results need a Library refresh.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run %}Last downsample refresh {{ last_run }}.{% else %}No refresh has finished yet.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/downsample/hidden">
@@ -88,8 +88,8 @@
     {% else %}
     <section class="ql-work-card ql-empty-work ql-quality-entry-card">
       <div class="ql-work-card-copy">
-      <p class="ql-work-card-title">{% if downsample_state.complete %}No albums to downsample{% else %}No Downsample refresh yet{% endif %}</p>
-        <p class="ql-work-card-text">Refresh checks the files already on disk{% if keeps_ds_originals() %} - rewrites keep their hi-res originals for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% endif %}. A library scan rebuilds every result list in one pass.</p>
+      <p class="ql-work-card-title">{% if downsample_state.complete %}No albums to downsample{% else %}No Downsample results yet{% endif %}</p>
+        <p class="ql-work-card-text">Refresh checks the files already on disk{% if keeps_ds_originals() %} - rewrites keep their hi-res originals for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% endif %}. A Library scan rebuilds every result list in one pass.</p>
       </div>
       <div class="ql-work-card-actions">
         <form action="/downsample" method="post" data-busy-submit>
