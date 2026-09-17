@@ -98,8 +98,9 @@ TEXT_FIELDS = [
      "(New-release checks always fetch fresh.)",
      "enum", ["86400", "259200", "604800", "2592000"], ""),
     ("NEW_RELEASE_CHECK_INTERVAL", "Auto-check for new releases",
-     "How often to auto-check for new releases on app open. Results go to the "
-     "dashboard to review; nothing downloads. Off = manual only.",
+     "How often to check Qobuz for new releases while the app is running. "
+     "Results go to the Search page for review; nothing downloads. "
+     "Off = manual only.",
      "enum", ["0", "21600", "43200", "86400", "604800"], ""),
     ("DOWNSAMPLE_KEEP_ORIGINALS", "Keep originals when downsampling",
      "Whether the Downsample page parks a restorable copy of each hi-res "
@@ -211,7 +212,8 @@ def inert_behaviour_notes(values) -> dict:
             "rate and this never runs.")
     if values.get("PREFER_HIRES"):
         notes["PREFER_HIRES"] = (
-            f"At {quality} this only picks the edition.")
+            f"At {quality} there is no hi-res to prefer, so this only "
+            "chooses between editions.")
     return notes
 
 
