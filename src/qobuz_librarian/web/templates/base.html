@@ -8,7 +8,7 @@
   {% include "_app_head.html" %}
   <link rel="preload" href="/static/vendor/inter/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link href="/static/dist/app.css?v={{ asset_version }}" rel="stylesheet">
-  <script src="/static/vendor/htmx-2.0.4.min.js"></script>
+  <script src="/static/vendor/htmx-2.0.10.min.js"></script>
   <script nonce="{{ request.state.csp_nonce }}">
     // Add the CSRF token and browser-tab id to htmx requests.
     document.addEventListener('htmx:configRequest', function(evt) {
