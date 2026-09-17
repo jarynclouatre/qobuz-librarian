@@ -192,7 +192,7 @@ def _beets_runtime_diagnostic() -> tuple[str | None, str]:
     if beets_mod._configured_beets_plugins(runtime) is None:
         return (
             None,
-            "Could not verify a Beets 2.13.1 runtime and readable "
+            "Could not verify a Beets 2.14.0 runtime and readable "
             f"configuration using {runtime.python}",
         )
     return runtime.python, runtime.python
@@ -11590,7 +11590,7 @@ def _diagnostics():
                        "Rebuild the image (docker compose build)"})
     beets_python, beets_detail = _beets_runtime_diagnostic()
     checks.append({
-        "label": "Beets 2.13.1 runtime",
+        "label": "Beets 2.14.0 runtime",
         "ok": beets_python is not None,
         "detail": beets_detail,
     })
