@@ -73,7 +73,7 @@
           aria-label="Tracks on {{ title }}"
           hx-get="/search/album-tracks?album_id={{ album_id | urlencode }}"
           hx-target="#{{ panel_id }}" hx-swap="innerHTML"
-          hx-trigger="click once">Tracks</button>
+          hx-trigger="click">Tracks</button>
 {%- endmacro %}
 
 {% macro search_tools(hide_owned=False) -%}

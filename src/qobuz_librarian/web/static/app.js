@@ -975,8 +975,17 @@
   });
 
   // Search result version lists and tracklists use a real button so the row
-  // itself does not mix "expand" and "download" tap targets. The tracklist is
-  // fetched once by htmx; after that the button is a plain show/hide.
+  // itself does not mix "expand" and "download" tap targets. Every press
+  // asks htmx for the list, and the request is dropped here once the panel
+  // holds one, so a press after a failed fetch (empty panel, or a notice)
+  // asks again. Discover's album lists work the same way.
+  document.addEventListener("htmx:beforeRequest", function (evt) {
+    var btn = evt.detail && evt.detail.elt;
+    if (!btn || !btn.matches("[data-tracks-toggle],[data-discover-toggle]")) return;
+    var panel = document.getElementById(btn.getAttribute("aria-controls"));
+    var first = panel && panel.firstElementChild;
+    if (first && !first.hasAttribute("data-flash")) evt.preventDefault();
+  });
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest
       && evt.target.closest("[data-version-toggle],[data-tracks-toggle]");
@@ -989,8 +998,8 @@
     panel.classList.toggle("hidden", !nextOpen);
   });
 
-  // Discover artist rows open their albums under the row. htmx fetches the
-  // list once; after that the same button is a plain show/hide.
+  // Discover artist rows open their albums under the row. Once the list is
+  // there the request above is dropped and the button is a plain show/hide.
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest && evt.target.closest("[data-discover-toggle]");
     if (!btn) return;
