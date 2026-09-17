@@ -1653,9 +1653,8 @@
           var on = evt.target.checked;
           root.querySelectorAll("[data-search-select]").forEach(function (box) {
             // Ticking it adds the albums; clearing it leaves nothing behind,
-            // including any alternate pressing picked by hand.
-            if (on ? !bulkSelectable(box)
-                   : !visibleItem(box.closest("[data-search-item]"))) return;
+            // including an alternate pressing picked by hand and folded away since.
+            if (on && !bulkSelectable(box)) return;
             selected[box.dataset.searchKey] = on;
           });
           syncBoxes();
