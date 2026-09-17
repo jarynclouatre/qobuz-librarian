@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [1.1.1] - 2026-09-16
+
+1.1.1 fixes what the first days of 1.1.0 turned up. A scan no longer loses
+its place when the app is stopped under it, History says what actually
+happened, and Search and Queue keep themselves straight while jobs run.
+
+- Library and Repair scans save their progress before the first artist and after every one, so a scan interrupted by a container stop continues from the last artist instead of starting over. History calls such a scan Interrupted, prints why under it, and dates it to the app's last write rather than to the next start. A scan you stop yourself still reads Cancelled.
+- An edition name beside the Tracks and Versions chips no longer wraps one letter per line on a phone; the chips move under the text when there is no room for both.
+- The Tracks chip asks again after a failed fetch instead of opening an empty panel until a reload. A download finishing while the search table is open keeps the columns in place, the Hide owned count follows a row that turns Owned, and unticking Select all clears a version picked by hand and folded away.
+- The Queue shows work started from another tab without a reload, a card whose live connection drops says Reconnecting, and a download reads Finishing rather than offering Cancel once its import has started. Repair gets its scan controls back when a scan fails while the page is open.
+- Upgrade and Downsample say their first-run state once, Lyrics and Downsample tell a waiting scan from a running one, Upgrade says when every upgrade it found is dismissed, and two Settings notes say what they mean. The current page is marked for screen readers, and an owned row keeps its Tracks and Versions chips readable.
+- Docker now bundles beets 2.14.0 and htmx 2.0.10, with uvicorn 0.53.0 and the rest of the dependency set refreshed. beets migrates its database the first time it imports and keeps backups beside it; bare CLI installations need beets 2.14.0.
+
 ## [1.1.0] - 2026-09-06
 
 1.1.0 is an interface pass. A stuck download no longer holds up the rest of
