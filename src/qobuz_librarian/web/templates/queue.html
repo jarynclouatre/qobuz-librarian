@@ -23,6 +23,9 @@
         {% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}
       </a>
     </p>
+    {% if job.status.value in ('running', 'scanning', 'pending') %}
+    <span id="card-reconnect-{{ job.id }}" class="ql-status-chip is-warning hidden">Reconnecting</span>
+    {% endif %}
     {% if job.status.value == 'scanning' %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if job.progress_total > 0 -%}

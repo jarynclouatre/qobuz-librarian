@@ -234,6 +234,14 @@
           } catch (e) {}
           apply(data.count);
           applyAttention(data.attention || 0);
+          // A Queue page left open does not hear about work another tab starts;
+          // redraw it when its cards and the live count disagree.
+          var body = document.getElementById("queue-body");
+          if (body && window.htmx
+              && body.querySelectorAll("[data-job-card]").length !== data.count) {
+            window.htmx.ajax("GET", "/queue",
+              { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
+          }
         })
         .catch(function () {})
         .then(function () {
@@ -1906,10 +1914,12 @@
     if (!id || !surface) return;
     // Once a queued card starts, refresh it into the live running layout.
     var flippedFromPending = false;
+    var flippedToImport = false;
     var progId = (surface === "dashboard" ? "dash-prog-" : "card-prog-") + id;
     var containerId = surface === "dashboard" ? "dashboard-active"
                     : "queue-body";
-    var reconnect = surface === "dashboard" ? document.getElementById("dash-reconnect-" + id) : null;
+    var reconnect = document.getElementById(
+      (surface === "dashboard" ? "dash-reconnect-" : "card-reconnect-") + id);
     // Same silent-stream problem as the job page: a socket that dies without
     // closing never raises an error, so watch the gap since the last event.
     var SILENT_STREAM_MS = 25000;
@@ -2000,6 +2010,17 @@
       // Re-render once a pending queue card starts.
       if (surface === "queue" && status === "pending" && !flippedFromPending) {
         flippedFromPending = true;
+        shut();
+        if (window.htmx) {
+          window.htmx.ajax("GET", "/queue",
+            { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
+        }
+        return;
+      }
+      // Beets runs to its own end, so the server draws Finishing in place of
+      // Cancel once the import starts; redraw the card when that happens.
+      if (surface === "queue" && p.importing && !flippedToImport) {
+        flippedToImport = true;
         shut();
         if (window.htmx) {
           window.htmx.ajax("GET", "/queue",
