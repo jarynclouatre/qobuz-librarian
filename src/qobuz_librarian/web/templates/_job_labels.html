@@ -188,6 +188,16 @@
   {%- if _phase and not _phase.lower().startswith(_chip.lower()) -%}{{ _phase }}{%- endif -%}
 {%- endmacro %}
 
+{# Stopping a library scan clears its checkpoint so the next one does not
+   auto-resume, which the generic wording never said. #}
+{% macro cancel_confirm(job) -%}
+  {%- if job.execute_kind == 'library' and job.status.value == 'scanning' -%}
+    Stop this scan? The artists it has already checked are discarded, and the next scan starts from the beginning.
+  {%- else -%}
+    Cancel this job? It will stop after the current safe step.
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro kind_tile(job, tile_class='') -%}
 <span class="ql-job-tile{% if tile_class %} {{ tile_class }}{% endif %}" aria-hidden="true">
   {% if job.execute_kind in ('library', 'new_releases') %}

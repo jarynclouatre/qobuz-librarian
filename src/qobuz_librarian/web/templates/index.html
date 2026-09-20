@@ -306,7 +306,7 @@
             <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
             <button type="submit" class="ql-btn ql-btn-sm"
                     title="Cancel job" aria-label="Cancel job"
-                    data-confirm="Cancel this job? It will stop after the current safe step."
+                    data-confirm="{{ labels.cancel_confirm(j) }}"
                     data-confirm-action="Stop job" data-irreversible>Cancel</button>
           </form>
         </div>
