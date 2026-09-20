@@ -63,6 +63,10 @@ except Exception as _e:  # missing deps shouldn't crash the ingest pipeline
 DEFAULT_PROVIDERS  = ["Lrclib", "NetEase", "Musixmatch"]
 DEFAULT_STATE_FILE = Path(__file__).resolve().parent / ".lyric_fetch_state.json"
 
+# A crash can lose results since the last checkpoint, plus in-flight tracks.
+# Saves are checked after each result; normal exits flush pending changes.
+CHECKPOINT_INTERVAL_SECONDS = 5.0
+
 # Per-file outcome codes are internal vocabulary; the lyrics pass shows its log
 # to the user, so map them to plain phrases (a raw "write-error" or a
 # "{'cached-synced': 4}" dict in the activity log reads like debug output).
@@ -319,6 +323,40 @@ def update_state(mutator, path: Path = DEFAULT_STATE_FILE) -> None:
         state = load_state(path)
         mutator(state)
         _write_state_unlocked(state, path)
+
+
+class _StateWriter(dict[str, TrackState]):
+    """Coalesce one pass's changed rows without replacing other writers' rows."""
+
+    def __init__(self, path: Path, log: logging.Logger, *, dry_run=False):
+        super().__init__(load_state(path))
+        self.path = path
+        self.log = log
+        self.dry_run = dry_run
+        self._pending: dict[str, TrackState] = {}
+        self._last_write = None
+
+    def __setitem__(self, key: str, value: TrackState) -> None:
+        super().__setitem__(key, value)
+        if not self.dry_run:
+            self._pending[key] = replace(value)
+
+    def save(self) -> None:
+        if (self._last_write is None
+                or time.monotonic() - self._last_write >= CHECKPOINT_INTERVAL_SECONDS):
+            self.flush()
+
+    def flush(self) -> None:
+        with _state_lock:
+            if not self._pending:
+                return
+            self._last_write = time.monotonic()
+            try:
+                update_state(lambda disk: disk.update(self._pending), self.path)
+            except Exception as e:
+                self.log.warning("checkpoint failed (continuing): %s", e)
+            else:
+                self._pending.clear()
 
 
 def prune_missing(state: dict[str, TrackState]) -> int:
@@ -1820,7 +1858,7 @@ def process_file(
         log.warning("unsafe lyric path refused: %s - %s", path, e)
         if not dry_run:
             key = str(path)
-            st = state.get(key) or TrackState()
+            st = replace(state[key]) if key in state else TrackState()
             st.status = "unsafe_path"
             st.source = "outside-owned-root"
             st.last_seen = time.time()
@@ -1850,13 +1888,9 @@ def _process_bound_file(
     lyrics_format: str = "embed",
 ) -> str:
     key = str(path)
-    st  = state.get(key) or TrackState()
-    # A preview must not change the loaded state, including by mutating an
-    # existing TrackState in place. Work on a detached copy and make each
-    # commit below a no-op; fetch_for_paths also skips every disk checkpoint.
+    st = replace(state[key]) if key in state else TrackState()
+    # Keep uncommitted changes out of checkpoints; previews never commit.
     if dry_run:
-        st = replace(st)
-
         def commit(*_args, **_kwargs):
             return None
     else:
@@ -2085,7 +2119,6 @@ def fetch_for_paths(
     dry_run: bool = False,
     rescan: bool = False,
     log: Optional[logging.Logger] = None,
-    save_every: int = 25,
     should_stop: Optional[Callable[[], bool]] = None,
     workers: int = 8,
     synced_only: bool = False,
@@ -2121,14 +2154,7 @@ def fetch_for_paths(
         _dead_providers.clear()
         _provider_fails.clear()
 
-    # Drop entries for files that have moved or gone since last run, so the state
-    # can't grow without bound across a library's churn. Route through
-    # update_state so the prune's read and write happen under one cross-process
-    # lock - a plain load→save here would clobber entries a concurrent process
-    # added in between.
-    if not dry_run:
-        update_state(prune_missing, state_path)
-    state = load_state(state_path)
+    state = _StateWriter(state_path, log, dry_run=dry_run)
     candidates = [Path(p) for p in paths
                   if should_process(Path(p), state.get(str(p)), rescan,
                                     skip_existing_plain=skip_existing_plain,
@@ -2154,91 +2180,76 @@ def fetch_for_paths(
             time.sleep(delay)
         return outcome
 
-    def checkpoint() -> None:
-        if dry_run:
-            return
-        try:
-            with _state_lock:
-                # Merge into the on-disk state under the cross-process lock so a
-                # concurrent writer's entries survive - a blind save would clobber
-                # whatever another process (CLI import hook / other lane) wrote
-                # since this run loaded its snapshot (see update_state's docstring).
-                update_state(lambda disk: disk.update(state), state_path)
-        except Exception as e:
-            # An overnight run shouldn't die because the disk hiccupped on
-            # one checkpoint write. Log and keep going - the next checkpoint
-            # (or the final one) will retry.
-            log.warning("checkpoint failed (continuing): %s", e)
-
     completed = 0
     stopped = False
-    if workers == 1:
-        for fp in candidates:
-            if should_stop and should_stop():
-                stopped = True
-                break
-            outcome = run_one(fp)
-            completed += 1
-            counts[outcome] += 1
-            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), fp.name)
-            if progress_cb:
-                progress_cb(completed, total, fp.name)
-            if completed % save_every == 0:
-                checkpoint()
-    else:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyrics") as ex:
-            remaining = iter(candidates)
-            futures = {}
+    try:
+        if workers == 1:
+            for fp in candidates:
+                if should_stop and should_stop():
+                    stopped = True
+                    break
+                outcome = run_one(fp)
+                completed += 1
+                counts[outcome] += 1
+                log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), fp.name)
+                if progress_cb:
+                    progress_cb(completed, total, fp.name)
+                state.save()
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyrics") as ex:
+                remaining = iter(candidates)
+                futures = {}
 
-            def submit_available():
-                nonlocal stopped
-                while not stopped and len(futures) < workers:
-                    if should_stop and should_stop():
-                        stopped = True
-                        return
-                    try:
-                        fp = next(remaining)
-                    except StopIteration:
-                        return
-                    futures[ex.submit(run_one, fp)] = fp
+                def submit_available():
+                    nonlocal stopped
+                    while not stopped and len(futures) < workers:
+                        if should_stop and should_stop():
+                            stopped = True
+                            return
+                        try:
+                            fp = next(remaining)
+                        except StopIteration:
+                            return
+                        futures[ex.submit(run_one, fp)] = fp
 
-            submit_available()
-            try:
-                while futures:
-                    done, _ = wait(
-                        tuple(futures), return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        fp = futures.pop(fut)
-                        try:
-                            outcome = fut.result()
-                        except Exception as e:
-                            log.exception("worker raised on %s: %s", fp, e)
-                            outcome = "exception"
-                        # Every submitted worker is drained and counted. Once a
-                        # stop is observed no replacement work is queued, so a
-                        # returned summary cannot omit a worker that may write.
-                        try:
-                            completed += 1
-                            counts[outcome] += 1
-                            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), fp.name)
-                            if progress_cb:
-                                progress_cb(completed, total, fp.name)
-                            if completed % save_every == 0:
-                                checkpoint()
-                        except Exception as e:
-                            log.exception("post-process error on %s: %s", fp, e)
-                    if not stopped and should_stop and should_stop():
-                        stopped = True
-                    submit_available()
-            except KeyboardInterrupt:
-                for f in futures:
-                    f.cancel()
-                raise
+                submit_available()
+                try:
+                    while futures:
+                        done, _ = wait(
+                            tuple(futures), return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            fp = futures.pop(fut)
+                            try:
+                                outcome = fut.result()
+                            except Exception as e:
+                                log.exception("worker raised on %s: %s", fp, e)
+                                outcome = "exception"
+                            # Every submitted worker is drained and counted. Once a
+                            # stop is observed no replacement work is queued, so a
+                            # returned summary cannot omit a worker that may write.
+                            try:
+                                completed += 1
+                                counts[outcome] += 1
+                                log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), fp.name)
+                                if progress_cb:
+                                    progress_cb(completed, total, fp.name)
+                                state.save()
+                            except Exception as e:
+                                log.exception("post-process error on %s: %s", fp, e)
+                        if not stopped and should_stop and should_stop():
+                            stopped = True
+                        submit_available()
+                except KeyboardInterrupt:
+                    for f in futures:
+                        f.cancel()
+                    raise
+
+    finally:
+        state.flush()
 
     if stopped:
         counts["stopped"] = 1
         counts["stop-total"] = total
-    checkpoint()
     return counts
 
 
@@ -2250,7 +2261,6 @@ def index_existing(
     state_path: Path = DEFAULT_STATE_FILE,
     log: Optional[logging.Logger] = None,
     workers: int = 64,
-    save_every: int = 500,
     should_stop: Optional[Callable[[], bool]] = None,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
 ) -> Counter:
@@ -2283,8 +2293,7 @@ def index_existing(
         else:
             normalized.append((Path(it), 0.0, 0))
 
-    update_state(prune_missing, state_path)
-    state = load_state(state_path)
+    state = _StateWriter(state_path, log)
     counts: Counter = Counter()
     total = len(normalized)
     workers = max(1, int(workers))
@@ -2330,93 +2339,80 @@ def index_existing(
             _commit(state, key, st)
             return f"indexed-{kind}"
 
-    def checkpoint() -> None:
-        try:
-            with _state_lock:
-                # Merge into the on-disk state under the cross-process lock so a
-                # concurrent writer's entries survive - a blind save would clobber
-                # whatever another process (CLI import hook / other lane) wrote
-                # since this run loaded its snapshot (see update_state's docstring).
-                update_state(lambda disk: disk.update(state), state_path)
-        except Exception as e:
-            log.warning("checkpoint failed (continuing): %s", e)
-
     log.info("indexing %d files with %d workers (no provider calls)",
              total, workers)
-    # Disk save is ~1MB JSON dump → expensive; progress log is cheap. Keep
-    # them on separate cadences so the user sees movement at workers=32 but
-    # we don't write the state file every few hundred ms.
     progress_every = max(1, min(250, total // 50 or 1))
     completed = 0
     stopped = False
     last_log = time.monotonic()
-    if workers == 1:
-        for fp, mt, sz in normalized:
-            if should_stop and should_stop():
-                stopped = True
-                break
-            outcome = index_one(fp, mt, sz)
-            completed += 1
-            counts[outcome] += 1
-            if progress_cb:
-                progress_cb(completed, total, fp.name)
-            if completed % progress_every == 0:
-                now = time.monotonic()
-                rate = progress_every / max(0.001, now - last_log)
-                last_log = now
-                log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
-            if completed % save_every == 0:
-                checkpoint()
-    else:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyrics-idx") as ex:
-            remaining = iter(normalized)
-            futures = {}
+    try:
+        if workers == 1:
+            for fp, mt, sz in normalized:
+                if should_stop and should_stop():
+                    stopped = True
+                    break
+                outcome = index_one(fp, mt, sz)
+                completed += 1
+                counts[outcome] += 1
+                if progress_cb:
+                    progress_cb(completed, total, fp.name)
+                if completed % progress_every == 0:
+                    now = time.monotonic()
+                    rate = progress_every / max(0.001, now - last_log)
+                    last_log = now
+                    log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
+                state.save()
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyrics-idx") as ex:
+                remaining = iter(normalized)
+                futures = {}
 
-            def submit_available():
-                nonlocal stopped
-                while not stopped and len(futures) < workers:
-                    if should_stop and should_stop():
-                        stopped = True
-                        return
-                    try:
-                        fp, mt, sz = next(remaining)
-                    except StopIteration:
-                        return
-                    futures[ex.submit(index_one, fp, mt, sz)] = fp
-
-            submit_available()
-            try:
-                while futures:
-                    done, _ = wait(
-                        tuple(futures), return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        fp = futures.pop(fut)
+                def submit_available():
+                    nonlocal stopped
+                    while not stopped and len(futures) < workers:
+                        if should_stop and should_stop():
+                            stopped = True
+                            return
                         try:
-                            outcome = fut.result()
-                        except Exception as e:
-                            log.debug("worker raised on %s: %s", fp, e)
-                            outcome = "exception"
-                        completed += 1
-                        counts[outcome] += 1
-                        if progress_cb:
-                            progress_cb(completed, total, fp.name)
-                        if completed % progress_every == 0:
-                            now = time.monotonic()
-                            rate = progress_every / max(0.001, now - last_log)
-                            last_log = now
-                            log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
-                        if completed % save_every == 0:
-                            checkpoint()
-                    if not stopped and should_stop and should_stop():
-                        stopped = True
-                    submit_available()
-            except KeyboardInterrupt:
-                for f in futures:
-                    f.cancel()
-                raise
+                            fp, mt, sz = next(remaining)
+                        except StopIteration:
+                            return
+                        futures[ex.submit(index_one, fp, mt, sz)] = fp
+
+                submit_available()
+                try:
+                    while futures:
+                        done, _ = wait(
+                            tuple(futures), return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            fp = futures.pop(fut)
+                            try:
+                                outcome = fut.result()
+                            except Exception as e:
+                                log.debug("worker raised on %s: %s", fp, e)
+                                outcome = "exception"
+                            completed += 1
+                            counts[outcome] += 1
+                            if progress_cb:
+                                progress_cb(completed, total, fp.name)
+                            if completed % progress_every == 0:
+                                now = time.monotonic()
+                                rate = progress_every / max(0.001, now - last_log)
+                                last_log = now
+                                log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
+                            state.save()
+                        if not stopped and should_stop and should_stop():
+                            stopped = True
+                        submit_available()
+                except KeyboardInterrupt:
+                    for f in futures:
+                        f.cancel()
+                    raise
+
+    finally:
+        state.flush()
 
     if stopped:
         counts["stopped"] = 1
         counts["stop-total"] = total
-    checkpoint()
     return counts

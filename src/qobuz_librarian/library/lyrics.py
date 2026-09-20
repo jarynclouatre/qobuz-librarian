@@ -79,6 +79,9 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
 
     items = list(iter_library_flacs(
         artist_dirs=artist_dirs, on_artist_error=artist_read_failed))
+    # Full-library maintenance only, including when no tracks remain.
+    if artist_dirs is None and not dry_run and lyric_fetch.AVAILABLE:
+        lyric_fetch.update_state(lyric_fetch.prune_missing, cfg.LYRIC_FETCH_STATE_FILE)
     total = len(items)
     if not total:
         return {"total": 0, "unreadable_artists": unreadable}
