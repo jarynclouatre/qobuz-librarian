@@ -1491,6 +1491,15 @@ _TITLE_NOISE_KEYWORDS = (
     "bonus track", "bonus", "deluxe", "explicit", "clean version",
     "anniversary", "expanded edition", "anniversary edition",
 )
+# A suffix can carry both at once: "(Live Remastered 2009)" names a different
+# performance and a different master, and stripping it for the master lost the
+# performance with it.
+_PERFORMANCE_KEYWORDS = (
+    "live", "acoustic", "unplugged", "demo", "session", "instrumental",
+    "alternate take", "alternate version", "re-recorded", "rerecorded",
+)
+_PERFORMANCE_RE = re.compile(
+    "|".join(re.escape(k) for k in _PERFORMANCE_KEYWORDS), re.IGNORECASE)
 _kw_alt = "|".join(re.escape(k) for k in _TITLE_NOISE_KEYWORDS)
 _TITLE_NOISE_RE = re.compile(
     rf"\s*\([^()]*(?:{_kw_alt})[^()]*\)|"
@@ -1501,11 +1510,16 @@ _TITLE_NOISE_RE = re.compile(
 del _kw_alt
 
 
+def _drop_noise(match) -> str:
+    text = match.group(0)
+    return text if _PERFORMANCE_RE.search(text) else ""
+
+
 def _clean_title(title: str) -> str:
     cleaned = title
     for _ in range(4):
         prev = cleaned
-        cleaned = _TITLE_NOISE_RE.sub("", cleaned).strip()
+        cleaned = _TITLE_NOISE_RE.sub(_drop_noise, cleaned).strip()
         if cleaned == prev:
             break
     return cleaned or title.strip()
@@ -1516,7 +1530,7 @@ def _clean_title(title: str) -> str:
 _INSTRUMENTAL_RE = re.compile(
     r"\([^()]*\binstrumentals?\b[^()]*\)|"
     r"\[[^\[\]]*\binstrumentals?\b[^\[\]]*\]|"
-    r"\s+-\s+[^-]*\binstrumentals?\b[^-]*$",
+    r"\s+-\s+[^-]*\binstrumentals?\b[^-]*",
     re.IGNORECASE,
 )
 
