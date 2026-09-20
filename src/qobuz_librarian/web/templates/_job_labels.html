@@ -188,10 +188,10 @@
   {%- if _phase and not _phase.lower().startswith(_chip.lower()) -%}{{ _phase }}{%- endif -%}
 {%- endmacro %}
 
-{# Stopping a library scan clears its checkpoint so the next one does not
-   auto-resume, which the generic wording never said. #}
+{# Stopping a library or repair scan clears its checkpoint so the next one
+   does not auto-resume, which the generic wording never said. #}
 {% macro cancel_confirm(job) -%}
-  {%- if job.execute_kind == 'library' and job.status.value == 'scanning' -%}
+  {%- if job.status.value == 'scanning' and job.execute_kind in ('library', 'repair') -%}
     Stop this scan? The artists it has already checked are discarded, and the next scan starts from the beginning.
   {%- else -%}
     Cancel this job? It will stop after the current safe step.

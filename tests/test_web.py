@@ -3282,10 +3282,16 @@ def test_gap_fill_warning_rides_the_gap_tab(client, monkeypatch):
     job.execute_kind = "library"
     job.add_candidate(kind="album", title="Third", artist="Portishead",
                       payload={"year": "2008"}, selected=False)
-    job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                      detail="1994 - gap-fill: 2 missing of 11",
-                      payload={"year": "1994", "gap_fill": 2}, selected=False)
     try:
+        # Gap Fill tab, nothing on it yet.
+        r = client.get(f"/jobs/{job.id}/review", params={"tab": "gaps"},
+                       headers={"HX-Request": "true"})
+        assert r.status_code == 200 and "ql-review-warning" not in r.text
+
+        job.add_candidate(kind="album", title="Dummy", artist="Portishead",
+                          detail="1994 - gap-fill: 2 missing of 11",
+                          payload={"year": "1994", "gap_fill": 2},
+                          selected=False)
         for tab, expected in (("missing", False), ("gaps", True)):
             r = client.get(f"/jobs/{job.id}/review", params={"tab": tab},
                            headers={"HX-Request": "true"})
@@ -5125,28 +5131,6 @@ def test_clear_history_keeps_memory_and_reports_failed_durable_delete(client, mo
         _remove_job(finished)
 
 
-def test_partial_search_download_parks_no_library_review(monkeypatch):
-    # A download that landed short used to invent a review titled "Library
-    # scan", waiting on a decision nobody asked for, when no review was open.
-    # Its shortfall is already on the download's own row, with a working Retry.
-    import qobuz_librarian.web.flows as flows_mod
-
-    parked = []
-    monkeypatch.setattr(flows_mod, "refold_into_living_review",
-                        lambda *_a, **_k: None)
-    monkeypatch.setattr(flows_mod, "_park_library_failures",
-                        lambda *a, **k: parked.append((a, k)))
-    monkeypatch.setattr(flows_mod, "_album_candidate_spec",
-                        lambda *_a, **_k: {"artist": "A", "title": "B"})
-
-    flows_mod._fold_partial_gap_fill({"id": "q1"}, "A", 3)
-    assert parked == []
-
-    flows_mod._fold_partial_gap_fill({"id": "q1"}, "A", 3,
-                                     park_when_absent=True)
-    assert len(parked) == 1
-
-
 def test_download_partial_album_proceeds_to_gap_fill(client, monkeypatch):
     from pathlib import Path
 
@@ -5262,7 +5246,7 @@ def test_incomplete_new_album_retries_broken_tracks_not_lossy_ones(
     monkeypatch.setattr(
         flows_mod,
         "_fold_partial_gap_fill",
-        lambda *_args: folded.append(_args),
+        lambda *_args, **_kw: folded.append((_args, _kw)),
     )
     monkeypatch.setattr(hidden_mod, "unmark_single", lambda *_a, **_k: None)
     monkeypatch.setattr(jm, "staging_lock", contextlib.nullcontext)
@@ -5293,7 +5277,9 @@ def test_incomplete_new_album_retries_broken_tracks_not_lossy_ones(
         assert saved["summary"]
         assert saved["error"]
         assert saved["attention"] == "partial"
-        assert folded and folded[0][2] == 1
+        # No park_when_absent: a download started outside a review must not
+        # invent one, and its shortfall rides its own row.
+        assert folded and folded[0][0][2] == 1 and folded[0][1] == {}
 
         client.get(f"/jobs/{job.id}")
         assert job_persistence.load_one(job.id)["attention"] == ""

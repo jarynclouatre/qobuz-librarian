@@ -3699,16 +3699,24 @@ def _library_scan_state():
         }
     artists = scanner.list_library_artists()
     if not artists:
-        # A readable folder with nothing in it is a new library, not a broken
-        # mount: downloads land here and there is nothing to scan until they
-        # do. Only the caller's wording separates the two.
+        # An empty top level is a fresh install until a collection backup says
+        # the root once held albums, which usually means a dropped mount. The
+        # same signal the download path explains in its own words.
+        write_state, recorded = collection_snapshot.music_root_write_state()
+        if write_state != "ready":
+            return {
+                "ready": False,
+                "empty": False,
+                "count": 0,
+                "message": _music_write_target_message(
+                    write_state, recorded, diagnostic=True),
+            }
         return {
             "ready": False,
             "empty": True,
             "count": 0,
             "message": (
-                f"Nothing has been downloaded into {root} yet, and no artist "
-                f"folders were found there. {hint}"
+                f"No artist folders with audio were found in {root}. {hint}"
             ),
         }
     return {"ready": True, "empty": False, "count": len(artists),
@@ -13461,10 +13469,14 @@ async def queue_count():
         f"{j.id}:{j.status.value}:{len(j.candidates or [])}"
         for j in active
     ))
+    rows = "\n".join(sorted(f"{j.id}:{j.status.value}" for j in active))
     return JSONResponse({
         "count": len(active),
         "running": any(j.status.value in ("running", "scanning") for j in active),
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
+        # Status alone: the signature above moves every time a scan adds a
+        # candidate, which would redraw the Queue on every poll for hours.
+        "rows": hashlib.sha256(rows.encode("utf-8")).hexdigest()[:16],
         # Carried on the same poll so the nav's warning dot appears the moment
         # a job needs the user, not at their next full page load.
         "attention": job_persistence.attention_count(),

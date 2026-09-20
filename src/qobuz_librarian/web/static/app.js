@@ -209,7 +209,7 @@
       });
     }
 
-    var lastQueueSignature = null;
+    var lastQueueRows = null;
     function refresh() {
       if (document.hidden || inFlight) return;
       controller = typeof AbortController === "function"
@@ -240,9 +240,9 @@
           // starting is invisible to it. Redraw when the row count or the
           // signature moves.
           var body = document.getElementById("queue-body");
-          var moved = lastQueueSignature !== null
-            && lastQueueSignature !== signature;
-          lastQueueSignature = signature;
+          var rows = data.rows || String(data.count);
+          var moved = lastQueueRows !== null && lastQueueRows !== rows;
+          lastQueueRows = rows;
           if (body && window.htmx
               && (moved
                   || body.querySelectorAll("[data-queue-row]").length
@@ -1921,8 +1921,6 @@
     var kind = card.dataset.jobKind || "";
     var runFallback = jobActivityFallback(kind, status);
     if (!id || !surface) return;
-    // Once a queued card starts, refresh it into the live running layout.
-    var flippedFromPending = false;
     var flippedToImport = false;
     var progId = (surface === "dashboard" ? "dash-prog-" : "card-prog-") + id;
     var containerId = surface === "dashboard" ? "dashboard-active"
@@ -2016,16 +2014,6 @@
     function onProgress(e) {
       streamAlive();
       var p; try { p = JSON.parse(e.data); } catch (_) { return; }
-      // Re-render once a pending queue card starts.
-      if (surface === "queue" && status === "pending" && !flippedFromPending) {
-        flippedFromPending = true;
-        shut();
-        if (window.htmx) {
-          window.htmx.ajax("GET", "/queue",
-            { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
-        }
-        return;
-      }
       // Beets runs to its own end, so the server draws Finishing in place of
       // Cancel once the import starts; redraw the card when that happens.
       if (surface === "queue" && p.importing && !flippedToImport) {

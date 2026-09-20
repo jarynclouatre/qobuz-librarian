@@ -524,7 +524,7 @@ def _make_encode_temp(parent_fd: int):
     raise FileExistsError("couldn't reserve a downsample temporary file")
 
 
-def _copy_source_metadata(source_fd, target_fd):
+def _copy_source_metadata(source_fd: int, target_fd: int):
     """Carry the source's comments and pictures onto the encode.
 
     Repeated keys, their capitalisation, and each picture's type and
@@ -548,7 +548,11 @@ def _copy_source_metadata(source_fd, target_fd):
             target.add_picture(picture)
         target.save(f"/proc/self/fd/{target_fd}")
     except Exception as e:
-        return str(e) or e.__class__.__name__
+        # The reader is handed descriptor paths, so its message names them.
+        reason = (str(e) or e.__class__.__name__)
+        return (reason
+                .replace(f"/proc/self/fd/{source_fd}", "the source file")
+                .replace(f"/proc/self/fd/{target_fd}", "the resampled file"))
     return None
 
 
@@ -716,8 +720,9 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
                 "-i", str(source_path),
                 # Audio only. The comments and pictures are carried over
-                # below, and a cover in a format ffmpeg has no encoder for
-                # (GIF) fails the whole encode if it is mapped here.
+                # below, and a cover in a format the FLAC muxer cannot store
+                # (GIF, WebP) fails the whole encode if it is mapped here,
+                # even under -c:v copy.
                 "-map", "0:a",
                 "-af", enc_af,
                 "-ar", str(rate),

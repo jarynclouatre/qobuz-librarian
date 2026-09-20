@@ -151,6 +151,9 @@ fi
 
 enforce_streamrip() {
     local key="$1" want="$2" section="$3" cfg="$STREAMRIP_DIR/config.toml" cur
+    # Without the file the assignment below exits non-zero and set -e takes
+    # the container down before the writability diagnostics can say why.
+    [ -f "$cfg" ] || return 0
     # Match the key with flexible whitespace around '=' so a hand-edited
     # 'downloads_enabled=false' (or extra spaces) is found and rewritten in
     # place. Demanding exactly '^key = ' would miss it, fall through to the

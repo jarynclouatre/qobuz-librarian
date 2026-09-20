@@ -64,10 +64,10 @@
     {% endif %}
 
     {% if qobuz_ready and not baseline_complete and (setup_scanning or not library_scan_state.ready or offer_baseline or library_resume) %}
-    <div class="ql-notice {% if not setup_scanning and not library_scan_state.ready %}ql-notice-warning{% else %}ql-notice-info{% endif %} flex items-start flex-wrap gap-3 p-4">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 {% if not setup_scanning and not library_scan_state.ready %}text-warning{% else %}text-info{% endif %}" fill="none"
+    <div class="ql-notice {% if not setup_scanning and not library_scan_state.ready and not library_scan_state.empty %}ql-notice-warning{% else %}ql-notice-info{% endif %} flex items-start flex-wrap gap-3 p-4">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 {% if not setup_scanning and not library_scan_state.ready and not library_scan_state.empty %}text-warning{% else %}text-info{% endif %}" fill="none"
            viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        {% if not setup_scanning and not library_scan_state.ready %}
+        {% if not setup_scanning and not library_scan_state.ready and not library_scan_state.empty %}
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M12 9v3.5m0 3h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4c-.77-1.33-2.69-1.33-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
         {% else %}

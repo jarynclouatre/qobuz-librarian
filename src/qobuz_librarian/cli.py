@@ -795,9 +795,9 @@ def parse_args():
     getting.add_argument("--force",        action="store_true",
                    help="redownload everything (album mode only)")
     getting.add_argument("--yes",          action="store_true",
-                   help="auto-confirm the download, import, upgrade and "
-                        "downsample prompts; a gap fill, an upgrade or a "
-                        "downsample can replace files you already have")
+                   help="auto-confirm the run's prompts; a gap fill, an "
+                        "upgrade, a downsample, a repair or an in-place "
+                        "migration can replace or move files you already have")
     # Unattended upgrade-walk gate.
     getting.add_argument("--auto-safe",    action="store_true",
                    help="auto-confirm only the safe upgrades (requires --upgrade-walk).")
