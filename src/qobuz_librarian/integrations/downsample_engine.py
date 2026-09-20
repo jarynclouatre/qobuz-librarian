@@ -524,6 +524,21 @@ def _make_encode_temp(parent_fd: int):
     raise FileExistsError("couldn't reserve a downsample temporary file")
 
 
+def _copy_vorbis_comments(source_fd: int, target_fd: int) -> bool:
+    """Carry the source's comments onto the encode, repeated keys intact."""
+    from mutagen.flac import FLAC
+    try:
+        source = FLAC(f"/proc/self/fd/{source_fd}")
+        target = FLAC(f"/proc/self/fd/{target_fd}")
+        if source.tags:
+            for key in source.tags.keys():
+                target[key] = source.tags[key]
+        target.save(f"/proc/self/fd/{target_fd}")
+    except Exception:
+        return False
+    return True
+
+
 def _exact_temp_is_named(parent_fd: int, name: str, descriptor: int,
                          expected=None) -> bool:
     try:
@@ -701,7 +716,10 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                 # inflating the file (a multi-MB Qobuz cover can wipe out the
                 # audio savings and make the output net-larger).
                 "-c:v", "copy",
-                "-map_metadata", "0",
+                # ffmpeg folds repeated Vorbis comments into one
+                # semicolon-joined value, turning two GENRE or ARTIST tags
+                # into "Rock;Pop". Carry the comments over separately.
+                "-map_metadata", "-1",
                 "-f", "flac",
                 "-y", str(temp_path),
             ],
@@ -712,6 +730,10 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             timeout=600,
             pass_fds=(binding.track_fd, temp_fd),
         )
+        if not _copy_vorbis_comments(binding.track_fd, temp_fd):
+            return (rel, sr, rate, None,
+                    "couldn't carry the source tags onto the resampled file; "
+                    "left the original untouched")
         readonly_fd, temp_identity = _reopen_encode_temp_readonly(
             binding.parent_fd, temp_name, temp_fd)
         writable_fd = temp_fd

@@ -142,6 +142,25 @@ def test_resample_preserves_embedded_jpeg_and_all_pictures(tmp_path, _need_ffmpe
     assert {bytes(p.data) for p in pics} == {front, back}
 
 
+def test_resample_keeps_repeated_tags_separate(tmp_path, _need_ffmpeg, _need_flac):
+    from mutagen.flac import FLAC
+    src = tmp_path / "track.flac"
+    _hires_flac(src, 2.0)
+    f = FLAC(str(src))
+    f["GENRE"] = ["Rock", "Pop"]
+    f["ARTIST"] = ["Bowie", "Queen"]
+    f.save()
+
+    af, _ = detect_resampler_filter()
+    _rel, _sr, _rate, saved, err = resample_one("track.flac", 96000, 48000, af,
+                                                base_dir=tmp_path)
+    assert err is None and saved is not None
+
+    out = FLAC(str(src))
+    assert out["GENRE"] == ["Rock", "Pop"]             # not one "Rock;Pop"
+    assert out["ARTIST"] == ["Bowie", "Queen"]
+
+
 def test_resample_keeps_truncated_source_untouched(tmp_path, _need_ffmpeg, _need_flac):
     full = tmp_path / "full.flac"
     _hires_flac(full, 3.0)
