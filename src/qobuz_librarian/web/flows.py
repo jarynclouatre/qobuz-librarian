@@ -902,21 +902,22 @@ def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
 
 def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
                            park_when_absent=False):
-    """A partial download (some tracks failed) leaves the album on disk with
-    gaps. Fold it into the living Library review as an unticked Gap Fill
-    candidate right away, the app tracks its own downloads, so the gap must
-    not wait for the next manual refresh to become visible. Runs after
-    prune_library_review_candidates, which just dropped the album's stale
-    Missing candidates, this replaces them with the honest remainder.
+    """Fold a partial download's missing tracks into an unticked Gap Fill row.
 
-    With no review open, only a run that came from one parks a fresh review.
-    A download started from Search has no review behind it, and parking one
-    presented the app's own bookkeeping as a "Library scan" waiting on a
-    decision the user never asked for. That album's shortfall is already on
-    the download's own row, where Retry fetches the missing tracks."""
+    Create a review only when ``park_when_absent`` is set. Return False if
+    receipts or saving fail, True if saved or no review is needed.
+    """
+    album_dir = catalog.find_album_dir_filesystem(full_album)
+    premise = candidate_premise.capture("gap-fill", album_dir)
+    if premise is None:
+        return False
     spec = _album_candidate_spec(
         {**full_album, "_partial_missing_count": n_missing},
-        artist_name, selected=False)
+        artist_name, selected=False, extra_payload={
+            "album_dir": str(album_dir),
+            "_premise": premise,
+            "_gap_fill_receipts": candidate_premise.gap_fill_receipts(premise),
+        })
     folded = refold_into_living_review([spec], ticked=False)
     if folded is False:
         return False

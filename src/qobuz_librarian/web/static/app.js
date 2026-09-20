@@ -209,7 +209,6 @@
       });
     }
 
-    var lastQueueRows = null;
     function refresh() {
       if (document.hidden || inFlight) return;
       controller = typeof AbortController === "function"
@@ -235,14 +234,10 @@
           } catch (e) {}
           apply(data.count);
           applyAttention(data.attention || 0);
-          // A Queue page left open does not hear about work another tab
-          // starts, and only its running rows hold a stream, so a queued row
-          // starting is invisible to it. Redraw when the row count or the
-          // signature moves.
+          // Redraw when the rendered rows no longer match the live queue.
           var body = document.getElementById("queue-body");
           var rows = data.rows || String(data.count);
-          var moved = lastQueueRows !== null && lastQueueRows !== rows;
-          lastQueueRows = rows;
+          var moved = body && body.dataset.queueRows !== rows;
           if (body && window.htmx
               && (moved
                   || body.querySelectorAll("[data-queue-row]").length

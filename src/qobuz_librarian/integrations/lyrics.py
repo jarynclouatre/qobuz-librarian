@@ -145,6 +145,9 @@ def _run_lyric_hook(album_dir):
         f"lyrics: {synced} synced, {plain} plain, "
         f"{already} already, {nofnd} not found"
     )
+    instrumental = counts.get("skipped-instrumental", 0)
+    if instrumental:
+        msg += f"; {instrumental} skipped as instrumental"
     if unavailable:
         msg += f"; {unavailable} provider-unavailable and need retry after import"
     if failed:

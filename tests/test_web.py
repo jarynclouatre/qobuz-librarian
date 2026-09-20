@@ -6958,6 +6958,47 @@ def test_repair_approve_parks_the_unticked_remnant(client, monkeypatch):
             _remove_job(remnant)
 
 
+def test_partial_download_gap_fill_can_be_approved(monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import backup, catalog
+    from qobuz_librarian.modes import process as process_mod
+    from qobuz_librarian.web import flows, job_persistence
+
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    track = album_dir / "01.flac"
+    track.write_bytes(b"imported track")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(cfg, "ARTIST_API_DELAY", 0)
+    monkeypatch.setattr(catalog, "find_album_dir_filesystem", lambda _a: album_dir)
+    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+    album = {"id": "partial1", "title": "Album", "tracks_count": 2}
+    monkeypatch.setattr(flows, "get_album", lambda *_a: album)
+    calls = []
+
+    def process_album(_album, _args, **kwargs):
+        calls.append(kwargs)
+        return {"result": "already_complete"}
+
+    monkeypatch.setattr(process_mod, "process_album", process_album)
+    assert flows._fold_partial_gap_fill(album, "Artist", 1, park_when_absent=True)
+    review, = jm.registry.awaiting_review()
+    try:
+        candidate, = review.candidates
+        assert candidate["payload"]["gap_fill"] == 1
+        assert candidate["selected"] is False
+        review.status = jm.JobStatus.RUNNING
+        flows.execute_albums(review, [candidate], "tok")
+
+        call, = calls
+        assert call["expected_album_receipt"] == candidate["payload"]["_premise"]["receipt"]
+        sealed = backup.capture_gap_fill_source_receipt(track, album_dir)
+        assert call["expected_gap_fill_receipts"] == {sealed["relative"]: sealed["file"]}
+        assert track.read_bytes() == b"imported track"
+    finally:
+        _remove_job(review)
+
+
 def test_partial_new_release_download_returns_to_the_nr_review(monkeypatch):
     """A New Releases download that lands only partly isn't downloaded, so the
     release goes back to the New Releases review (ticked, like a failure), and

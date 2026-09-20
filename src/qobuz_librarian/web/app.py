@@ -40,6 +40,7 @@ from qobuz_librarian import (
     __version__,
     cli,
     completion,
+    download,
     download_result,
     redaction,
     repair_log,
@@ -4362,6 +4363,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                                 res["partial"] = True
                                 res["have_tracks"] = len(present)
                                 res["want_tracks"] = len(qobuz_tracks)
+                                res["replaces_existing"] = download.downloads_whole_album(
+                                    len(present), len(missing), len(qobuz_tracks))
                             else:
                                 res["owned"] = True
                         except Exception:
@@ -4433,6 +4436,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         "partial": bool(res.get("partial")),
                         "have_tracks": res.get("have_tracks"),
                         "want_tracks": res.get("want_tracks"),
+                        "replaces_existing": bool(res.get("replaces_existing")),
                     })
                 for g in album_groups:
                     eds = g["editions"]
@@ -4460,7 +4464,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     for f in ("id", "title", "artist", "year", "tracks",
                               "quality", "hires", "lossy", "bit_depth",
                               "sample_rate", "cover", "version", "queued",
-                              "scanning"):
+                              "scanning", "replaces_existing"):
                         g[f] = rep[f]
                     g["partial"] = rep["partial"] and not g["owned"]
                     g["have_tracks"] = rep["have_tracks"]
@@ -11174,6 +11178,14 @@ async def job_cancel(
     return RedirectResponse(url=dest, status_code=303)
 
 
+def _queue_rows_signature(jobs):
+    rows = "\n".join(sorted(
+        f"{j.id}:{j.status.value}" for j in jobs
+        if j.status != job_mgr.JobStatus.AWAITING_REVIEW
+    ))
+    return hashlib.sha256(rows.encode("utf-8")).hexdigest()[:16]
+
+
 @app.get("/queue", response_class=HTMLResponse)
 async def queue_page(request: Request, error: str = "", notice: str = ""):
     """The Queue tab: jobs in flight (pending / scanning / running). Parked
@@ -11185,6 +11197,7 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
     protected_id = job_mgr.durable_recovery_job_id()
     return _tr(request, "queue.html", {
         "pending": pending,
+        "queue_rows_signature": _queue_rows_signature(pending),
         # Per-pending-job "waiting behind X" explainer, the same one the single
         # job page shows, so the Queue list says why a job hasn't started
         # instead of a bare "Queued". None for anything already running.
@@ -13469,14 +13482,13 @@ async def queue_count():
         f"{j.id}:{j.status.value}:{len(j.candidates or [])}"
         for j in active
     ))
-    rows = "\n".join(sorted(f"{j.id}:{j.status.value}" for j in active))
     return JSONResponse({
         "count": len(active),
         "running": any(j.status.value in ("running", "scanning") for j in active),
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
         # Status alone: the signature above moves every time a scan adds a
         # candidate, which would redraw the Queue on every poll for hours.
-        "rows": hashlib.sha256(rows.encode("utf-8")).hexdigest()[:16],
+        "rows": _queue_rows_signature(active),
         # Carried on the same poll so the nav's warning dot appears the moment
         # a job needs the user, not at their next full page load.
         "attention": job_persistence.attention_count(),

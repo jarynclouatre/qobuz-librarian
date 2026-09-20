@@ -41,11 +41,11 @@
   {% endif %}
 {%- endmacro %}
 
-{% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False, scanning=False) -%}
+{% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False, scanning=False, replaces_existing=False) -%}
   {% set display_title = release_title(title, version) %}
   <form method="post" action="/download" hx-post="/download" hx-target="#download-toast"
         hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]"
-        hx-confirm='{% if as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% else %}Download "{{ display_title }}" by {{ artist }}?{% endif %}'
+        hx-confirm='{% if as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% elif replaces_existing %}Download the whole album "{{ display_title }}" by {{ artist }}? Existing tracks in this album will be replaced.{% else %}Download "{{ display_title }}" by {{ artist }}?{% endif %}'
         data-confirm-action="Download"
         data-search-download-form data-search-title="{{ display_title }}"
         data-search-artist="{{ artist }}"
@@ -326,7 +326,7 @@
             <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
             <span role="cell">{{ album_quality_status(g) }}</span>
-            <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning) }}{% endif %}</span>
+            <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning, replaces_existing=g.replaces_existing) }}{% endif %}</span>
           </div>
           <div id="search-tracks-{{ gi }}" class="ql-tracklist-panel hidden"
                data-owned="{{ 1 if g.owned else 0 }}"></div>
@@ -357,7 +357,7 @@
               <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
               <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
               <span role="cell">{{ album_quality_status(e) }}</span>
-              <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning) }}{% endif %}</span>
+              <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning, replaces_existing=e.replaces_existing) }}{% endif %}</span>
             </div>
             <div id="search-tracks-{{ gi }}-{{ loop.index0 }}" class="ql-tracklist-panel hidden"
                  data-owned="{{ 1 if e.owned else 0 }}"></div>
@@ -425,7 +425,7 @@
               {% if e.owned %}<span class="ql-owned-label">Owned</span>
               {% else %}
               {% if e.partial %}<span class="ql-partial-label">{{ e.have_tracks }} of {{ e.want_tracks }} tracks</span>{% endif %}
-              {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning) }}
+              {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning, replaces_existing=e.replaces_existing) }}
               {% endif %}
             </div>
           </div>
@@ -436,7 +436,7 @@
         {% endif %}
         <div class="ql-grid-footer">
           {{ album_quality_status(g) }}
-          {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning) }}{% endif %}
+          {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning, replaces_existing=g.replaces_existing) }}{% endif %}
         </div>
       </div>
       {% endfor %}

@@ -2,7 +2,7 @@
 {% block title %}Queue - Qobuz Librarian{% endblock %}
 {% block content %}
 {% import "_job_labels.html" as labels %}
-<div id="queue-body" class="ql-list-page ql-activity-page">
+<div id="queue-body" class="ql-list-page ql-activity-page" data-queue-rows="{{ queue_rows_signature }}">
 
 {% set active_tab = 'queue' %}
 <header class="ql-page-header ql-page-header--actions">
