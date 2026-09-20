@@ -225,6 +225,10 @@
       </div>
     </div>
 
+    {% if s == 'scanning' and job.execute_kind == 'library' %}
+    <p class="ql-form-note">The scan keeps going if you leave this page.</p>
+    {% endif %}
+
     {% if s == 'scanning' and job.execute_kind in ('library', 'upgrade', 'downsample', 'new_releases', 'collection_restore') %}
     <p id="scan-found" class="ql-scan-found" aria-live="polite"></p>
     {% endif %}

@@ -1035,6 +1035,10 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
 
     monkeypatch.setattr(
         cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
+    monkeypatch.setattr(
+        cfg, "LIBRARY_GENERATION_STATE_FILE", tmp_path / "generation.json")
+    attempt_id = flows.generation_state.begin_attempt()
+    flows.generation_state.finish_attempt(attempt_id, "failed")
     artist_dir = tmp_path / "Artist"
     artist_dir.mkdir()
     library_scan_state.save_kind(
@@ -1081,7 +1085,11 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
                 fingerprints={},
                 ),
     )
-    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
+    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: {
+        "scanned": ["Artist"],
+        "candidates": [],
+        "artists": library_scan_state.kind_state("missing")["artists"],
+    })
     monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
     monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda _kind: None)
     monkeypatch.setattr(flows, "_record_last_scan", lambda: None)

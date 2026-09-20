@@ -1443,7 +1443,7 @@ def scan_library(job, token, partial_only=False, force_full=False):
         (previous_generation.get("latest_attempt") or {}).get("status")
         or "never"
     )
-    allow_checkpoint_resume = bool(
+    allow_checkpoint_resume = not force_full and bool(
         partial_only
         or previous_attempt_status in {"running", "failed", "incomplete"}
         or generation_state.library_publication_incomplete(previous_generation)
@@ -1553,6 +1553,16 @@ def _scan_library_impl(
     # artist loop, and on a first scan of a large library each takes real
     # minutes, without progress ticks the job sits on "Waiting for output"
     # looking hung the whole time.
+    # The upgrade pass is optional, so number the steps from the ones that
+    # will actually run rather than hard-coding four.
+    _passes = ["Reading albums on disk"]
+    if cfg.UPGRADE_SCAN_ENABLED:
+        _passes.append("Checking upgrade quality")
+    _passes += ["Checking artist folders", "Scanning library"]
+
+    def _step(name):
+        return f"Step {_passes.index(name) + 1} of {len(_passes)}: {name}"
+
     downsample_refresh_started_at = time.time()
     log.info(f"Reading albums from {plural(len(artists), 'artist folder')} on disk…")
     downsample_refresh = downsample_state.refresh_for_artists(
@@ -1562,7 +1572,8 @@ def _scan_library_impl(
         persist=False,
         skip_unchanged=cheap_refresh,
         on_artist=lambda ad, _specs, _err, done_i, total_i: job.push_progress(
-            "Reading albums on disk", done_i, total_i, ad.name, unit="artist"),
+            _step("Reading albums on disk"),
+            done_i, total_i, ad.name, unit="artist"),
     )
     upgrade_refresh = None
     upgrade_refresh_started_at = None
@@ -1581,7 +1592,8 @@ def _scan_library_impl(
             skip_unchanged=cheap_refresh,
             persist=False,
             on_artist=lambda ad, _specs, _err, done_i, total_i: job.push_progress(
-                "Checking upgrade quality", done_i, total_i, ad.name, unit="artist"),
+                _step("Checking upgrade quality"),
+                done_i, total_i, ad.name, unit="artist"),
         )
     elif not cfg.UPGRADE_SCAN_ENABLED:
         review_badges.set_ready("upgrade", False)
@@ -1591,8 +1603,8 @@ def _scan_library_impl(
     for _i, _ad in enumerate(artists, 1):
         fingerprints[_ad.name] = artist_fingerprint(_ad)
         if _i % 25 == 0 or _i == len(artists):
-            job.push_progress("Fingerprinting artist folders", _i, len(artists),
-                              _ad.name, unit="folder")
+            job.push_progress(_step("Checking artist folders"),
+                              _i, len(artists), _ad.name, unit="folder")
     if resuming:
         # A checkpoint says what was compared, not that the local folder is
         # still the same. Reuse only a current matching per-artist fingerprint;
@@ -1686,7 +1698,7 @@ def _scan_library_impl(
             }
             hit = ({"artist": artist_dir.name, "albums": len(visible)}
                    if visible else None)
-            job.push_progress("Scanning library", done, n, artist_dir.name,
+            job.push_progress(_step("Scanning library"), done, n, artist_dir.name,
                               found=total, hit=hit, unit="artist")
         else:
             todo.append(artist_dir)
@@ -1725,7 +1737,7 @@ def _scan_library_impl(
                 # resume retries it rather than baking in a transient miss.
                 scan_errors += 1
                 log.info(f"    skipped {futures[fut].name}: {e}")
-                job.push_progress("Scanning library", done, n, futures[fut].name,
+                job.push_progress(_step("Scanning library"), done, n, futures[fut].name,
                                   found=total, unit="artist")
                 continue
             scanned.add(name)
@@ -1762,7 +1774,7 @@ def _scan_library_impl(
             # preview the same moment the running total moves.
             hit = ({"artist": artist_name or name, "albums": shown}
                    if shown else None)
-            job.push_progress("Scanning library", done, n, artist_name or name,
+            job.push_progress(_step("Scanning library"), done, n, artist_name or name,
                               found=total, hit=hit, unit="artist")
             if shown:
                 tail = "with Gap Fill candidates" if partial_only else "to fill"
