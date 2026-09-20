@@ -175,6 +175,25 @@ def _validated_album(album, album_id):
     return album, track_items
 
 
+# album/get pages its track list. 500 is the largest page the endpoint
+# serves; the page count is a runaway guard, since the loop already stops
+# as soon as a page brings nothing new.
+_TRACK_PAGE = 500
+_MAX_TRACK_PAGES = 100
+
+
+def _listed_track_total(album):
+    """How many tracks the endpoint says this album's list holds.
+
+    tracks.total counts the list being paged. tracks_count is album metadata
+    and can disagree with it, so it does not decide whether a page is missing.
+    """
+    try:
+        return int((album.get("tracks") or {}).get("total") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def get_album(album_id, token):
     cached = album_cache.get(album_id)
     if cached is not None:
@@ -183,7 +202,7 @@ def get_album(album_id, token):
         except QobuzError:
             pass
         else:
-            if cached_items:
+            if cached_items and len(cached_items) >= _listed_track_total(cached):
                 return cached
     album, track_items = _validated_album(
         qobuz_get(
@@ -193,6 +212,34 @@ def get_album(album_id, token):
         ),
         album_id,
     )
+    total = _listed_track_total(album)
+    if track_items and len(track_items) < total:
+        # A box set longer than one page. Everything downstream reads this
+        # list as the album, so a short one silently becomes the album.
+        seen = {str(track.get("id")) for track in track_items}
+        offset = len(track_items)
+        for _ in range(_MAX_TRACK_PAGES):
+            _, page_items = _validated_album(
+                qobuz_get("album/get", {
+                    "album_id": album_id,
+                    "extra": "track_ids",
+                    "limit": _TRACK_PAGE,
+                    "offset": offset,
+                }, token),
+                album_id,
+            )
+            fresh = [track for track in page_items or []
+                     if str(track.get("id")) not in seen]
+            seen.update(str(track.get("id")) for track in fresh)
+            track_items.extend(fresh)
+            offset += len(page_items or [])
+            if not fresh or len(track_items) >= total:
+                break
+        if len(track_items) < total:
+            raise QobuzError(
+                f"album/get returned {len(track_items)} of {total} tracks "
+                f"for album {album_id!r}"
+            )
     # Don't cache a track-less response.
     if track_items:
         album_cache.put(album_id, album)

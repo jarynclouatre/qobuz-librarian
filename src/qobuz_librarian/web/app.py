@@ -3144,17 +3144,19 @@ def _finished_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
 def _album_tracks_complete(album: dict) -> bool:
     """Whether this payload carries the album's whole track list.
 
-    A truncated list makes everything on disk look present, so ownership and
-    "already complete" are decided from it only when the count agrees.
+    A truncated list makes everything on disk look present. tracks.total
+    counts the list itself; tracks_count is album metadata, used only when
+    the payload carries no count of its own.
     """
     tracks = album.get("tracks") or {}
     items = tracks.get("items") or []
-    counts = [count for count in (album.get("tracks_count"), tracks.get("total"))
-              if count is not None]
+    total = tracks.get("total")
+    if total is None:
+        total = album.get("tracks_count")
+    if not items or total is None:
+        return False
     try:
-        return bool(items and counts) and all(
-            int(count) == len(items) for count in counts
-        ) and int(tracks.get("offset") or 0) == 0
+        return int(total) == len(items) and int(tracks.get("offset") or 0) == 0
     except (TypeError, ValueError):
         return False
 
