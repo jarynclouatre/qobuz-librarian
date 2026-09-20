@@ -2362,8 +2362,9 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     isrc_no_match      = scan["isrc_no_match"]
     no_isrc_tag        = scan["no_isrc_tag"]
     isrc_mismatch      = scan.get("isrc_mismatch") or []
+    unverified         = scan.get("unverified", 0)
 
-    if (quiet and not verified_truncated and not isrc_mismatch and not any(
+    if (quiet and not unverified and not verified_truncated and not isrc_mismatch and not any(
             x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag))):
         return "clean"
     if quiet:
@@ -2378,6 +2379,9 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         f"{len(isrc_no_match)} ISRC has no Qobuz match  ·  "
         f"{len(no_isrc_tag)} no ISRC tag  ·  "
         f"{len(isrc_mismatch)} ISRC names another song"))
+    if unverified:
+        log.warning(fmt(C.YELLOW,
+            f"  ⚠  Scan incomplete: {unverified} unverified."))
 
     if isrc_no_match:
         log.info(fmt(C.GRAY,
@@ -2459,10 +2463,10 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 "\n  ⚠  Damage was found, but no affected track was safe "
                 "to refill automatically. Follow the guidance above.",
             ))
-        elif not quiet:
+        elif not quiet and not unverified:
             log.info(fmt(C.GREEN,
                 "\n  ✓  No verified-truncated tracks. Nothing to repair."))
-        return "attention" if unresolved_damage else "clean"
+        return "attention" if unresolved_damage or unverified else "clean"
 
     log.info(fmt(C.YELLOW + C.BOLD,
         f"\n  ⚠  {len(verified_truncated)} truncated file(s) "
@@ -2495,14 +2499,14 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         log.info(fmt(C.YELLOW,
             f"\n  --dry-run: would re-download {len(verified_truncated)} "
             "ISRC-verified track(s). Nothing changed."))
-        return "skipped"
+        return "attention" if unverified else "skipped"
 
     if not args.yes:
         r = ask(f"\n  Re-download {len(verified_truncated)} "
                 "ISRC-verified track(s)? [y/N]: ") or ""
         if r not in ("y", "yes"):
             log.info(fmt(C.GRAY, "  Skipped."))
-            return "skipped"
+            return "attention" if unverified else "skipped"
 
     try:
         result = repair_album_dir(
@@ -2525,7 +2529,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             token,
             args,
         )
-        return "repaired"
+        return "attention" if unverified else "repaired"
     return "failed"
 
 

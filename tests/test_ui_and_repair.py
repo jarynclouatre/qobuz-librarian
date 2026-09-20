@@ -5,6 +5,7 @@ refills are proven back in place and re-verified. An outage or a still-short
 re-rip must keep the backup rather than lose the only good copy.
 """
 import json
+import logging
 import os
 import threading
 from argparse import Namespace
@@ -31,6 +32,8 @@ def _allow_legacy_candidate_execution(monkeypatch):
 
 def test_repair_sweep_skips_unreadable_album_without_reporting_success(
         unreadable_album, monkeypatch, caplog):
+    from qobuz_librarian import repair_log
+    from qobuz_librarian.library import scanner
     from qobuz_librarian.modes import repair
 
     good, partial, blocked = unreadable_album
@@ -42,12 +45,40 @@ def test_repair_sweep_skips_unreadable_album_without_reporting_success(
         checked.append(album)
         return "clean"
 
-    monkeypatch.setattr(repair, "_scan_report_repair", scan)
-    result = repair.run_album_repair_mode(Namespace(no_upgrade=False), "")
+    with monkeypatch.context() as sweep:
+        sweep.setattr(repair, "_scan_report_repair", scan)
+        result = repair.run_album_repair_mode(Namespace(no_upgrade=False), "")
 
     assert set(checked) == {artist / "Album" for artist in (good, partial)}
     assert result == repair.EXIT_GENERAL
     assert str(blocked) in caplog.text
+
+    disc = partial / "Album" / "CD2"
+    blocked.rename(disc)
+    scandir = os.scandir
+
+    def read(path):
+        if str(path) == str(disc):
+            raise PermissionError(13, "Permission denied", str(disc))
+        return scandir(path)
+
+    monkeypatch.setattr(repair_log, "_read_held_audio_meta",
+                        lambda source: _track(path=str(source.path), sample_rate=0, bits=0))
+    monkeypatch.setattr(repair_log, "_qobuz_track_by_isrc",
+                        lambda *_a: {"title": "Track", "duration": 240})
+    monkeypatch.setattr(repair_log, "_flac_decode_ok", lambda *_a, **_k: True)
+    with monkeypatch.context() as permissions:
+        permissions.setattr(os, "scandir", read)
+        caplog.clear()
+        scanner.clear_scan_caches()
+        assert repair_log.scan_dir_for_isrc_repairs(partial / "Album", "")["unverified"] == 1
+        assert repair.run_album_repair_mode(Namespace(no_upgrade=False), "") == repair.EXIT_GENERAL
+        assert any("unverified" in record.message for record in caplog.records)
+
+    caplog.clear()
+    scanner.clear_scan_caches()
+    assert repair.run_album_repair_mode(Namespace(no_upgrade=False), "") == 0
+    assert not any(record.levelno >= logging.WARNING for record in caplog.records)
 
 
 def test_surgical_repair_rechecks_download_access_before_backup(
