@@ -3141,6 +3141,24 @@ def _finished_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
     return albums, tracks
 
 
+def _album_tracks_complete(album: dict) -> bool:
+    """Whether this payload carries the album's whole track list.
+
+    A truncated list makes everything on disk look present, so ownership and
+    "already complete" are decided from it only when the count agrees.
+    """
+    tracks = album.get("tracks") or {}
+    items = tracks.get("items") or []
+    counts = [count for count in (album.get("tracks_count"), tracks.get("total"))
+              if count is not None]
+    try:
+        return bool(items and counts) and all(
+            int(count) == len(items) for count in counts
+        ) and int(tracks.get("offset") or 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _same_edition_is_complete(album: dict) -> bool:
     """Prove that this exact release year is already complete on disk.
 
@@ -3161,7 +3179,7 @@ def _same_edition_is_complete(album: dict) -> bool:
             return False
         existing, _ = catalog.find_existing_tracks(album, album_dir=folder)
         wanted = (album.get("tracks") or {}).get("items") or []
-        return bool(existing and wanted) and not catalog.compute_missing(
+        return bool(existing and _album_tracks_complete(album)) and not catalog.compute_missing(
             wanted, existing)[0]
     except Exception:
         return False
@@ -4363,7 +4381,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                                 (exact_album.get("tracks") or {}).get("items")
                                 or []
                             )
-                            if not qobuz_tracks:
+                            if not _album_tracks_complete(exact_album):
                                 continue
                             existing, _ = catalog.find_existing_tracks(
                                 exact_album, album_dir=folder)
@@ -7454,7 +7472,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     existing_tracks = []
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
                 # Only count it complete when nothing's missing.
-                return bool(existing_tracks and qobuz_tracks) and not (
+                return bool(existing_tracks and _album_tracks_complete(album)) and not (
                     catalog.compute_missing(qobuz_tracks, existing_tracks)[0])
 
             # Resolving the album folder walks the (often NAS-mounted) library,

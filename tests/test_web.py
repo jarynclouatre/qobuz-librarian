@@ -1167,6 +1167,45 @@ def test_album_search_warns_when_ownership_check_fails(client, monkeypatch, tmp_
     assert len(forms) == 4
     assert all('data-search-download-warning="unknown"' in form for form in forms)
 
+    tracks = [{"id": f"track{n}"} for n in range(10)]
+    exact_album = {"tracks_count": 10, "tracks": {"items": tracks[:1]}}
+    monkeypatch.setattr(search_mod, "get_album", lambda *_a, **_k: exact_album)
+    monkeypatch.setattr(catalog_mod, "find_existing_tracks",
+                        lambda *_a, **_k: (tracks[:1], tmp_path))
+    monkeypatch.setattr(catalog_mod, "compute_missing",
+                        lambda wanted, have: ([t for t in wanted if t not in have], have))
+
+    response = client.post("/search", data={"q": "Album", "kind": "album"},
+                           headers={"HX-Request": "true"})
+    forms = re.findall(r'<form\b[^>]*data-search-download-form[^>]*>', response.text)
+    assert len(forms) == 4
+    assert all('data-search-download-warning="unknown"' in form for form in forms)
+    assert "ql-owned-label" not in response.text
+
+    monkeypatch.setattr(app_mod.job_mgr, "submit", lambda job, _run: job)
+    monkeypatch.setattr(app_mod, "_make_download_run", lambda *_a, **_k: lambda _j: None)
+    download = client.post("/download", data={"album_id": "original"},
+                           headers={"HX-Request": "true"})
+    assert download.headers["X-QL-Download-Outcome"] == "queued"
+
+    exact_album["tracks"]["items"] = tracks
+    response = client.post("/search", data={"q": "Album", "kind": "album"},
+                           headers={"HX-Request": "true"})
+    forms = re.findall(r'<form\b[^>]*data-search-download-form[^>]*>', response.text)
+    assert len(forms) == 4
+    assert all('data-search-download-warning="unknown"' not in form for form in forms)
+    assert "ql-owned-label" not in response.text
+
+    monkeypatch.setattr(catalog_mod, "find_existing_tracks",
+                        lambda *_a, **_k: (tracks, tmp_path))
+    response = client.post("/search", data={"q": "Album", "kind": "album"},
+                           headers={"HX-Request": "true"})
+    assert "data-search-download-form" not in response.text
+    assert "ql-owned-label" in response.text
+    download = client.post("/download", data={"album_id": "original"},
+                           headers={"HX-Request": "true"})
+    assert download.headers["X-QL-Download-Outcome"] == "owned"
+
 
 def test_new_edition_download_rechecks_exact_ownership(
         client, monkeypatch, tmp_path):
@@ -1179,6 +1218,7 @@ def test_new_edition_download_rechecks_exact_ownership(
         "title": "Variance",
         "artist": {"name": "The Lab"},
         "release_date_original": "2024-01-01",
+        "tracks_count": 2,
         "tracks": {"items": [
             {"id": "remaster-1", "title": "Track 1"},
             {"id": "remaster-2", "title": "Track 2"},
@@ -1332,6 +1372,7 @@ def test_album_search_keeps_quality_for_grouped_partial_editions(
         bits, rate = qualities[release["id"]]
         release["maximum_bit_depth"] = bits
         release["maximum_sampling_rate"] = rate
+        release["tracks_count"] = 2
         tracks = [
             {"id": f'{release["id"]}-1'},
             {"id": f'{release["id"]}-2'},
