@@ -45,6 +45,7 @@ from typing import Optional
 from qobuz_librarian import config as cfg
 from qobuz_librarian import redaction
 from qobuz_librarian.completion import RecoveryOwner, normalise_album_id
+from qobuz_librarian.library import candidate_premise
 
 _log = logging.getLogger("qobuz_librarian")
 _lock = threading.Lock()
@@ -165,11 +166,57 @@ def _decode_single(value) -> tuple[dict, bool]:
     return single, False
 
 
+def _artist_of(row):
+    payload = row.get("payload") if isinstance(row, dict) else None
+    key = payload.get("_artist_dir") if isinstance(payload, dict) else None
+    return key if isinstance(key, str) and key else None
+
+
+def _compact_candidates(rows):
+    """Keep one copy of an artist's receipt instead of one on every row.
+
+    A row's receipt seals its whole artist folder, and every missing album
+    under one artist carries the same one. Repeating it per row put a large
+    saved review beyond what the container can read back.
+    """
+    premises = {}
+    for row in rows:
+        key = _artist_of(row)
+        value = (row.get("payload") or {}).get("_premise") if key else None
+        if (key and key not in premises and isinstance(value, dict)
+                and value.get("kind") == "missing"):
+            premises[key] = value
+    if not premises:
+        return rows
+    return {
+        "version": 2,
+        "premises": premises,
+        "rows": [candidate_premise.compact_candidate(
+                     row, premises.get(_artist_of(row)))
+                 if isinstance(row, dict) else row
+                 for row in rows],
+    }
+
+
+def _expand_candidates(value):
+    """Put each row's receipt back. Reviews saved as a bare list still load."""
+    if not isinstance(value, dict) or value.get("version") != 2:
+        return value
+    premises = value.get("premises")
+    rows = value.get("rows")
+    if not isinstance(premises, dict) or not isinstance(rows, list):
+        return None
+    return [candidate_premise.restore_candidate(
+                row, premises.get(_artist_of(row)))
+            if isinstance(row, dict) else row
+            for row in rows]
+
+
 def _decode_candidates(value, status) -> tuple[list[dict], bool]:
     if status != "awaiting_review":
         return [], False
     try:
-        candidates = json.loads(value or "[]")
+        candidates = _expand_candidates(json.loads(value or "[]"))
     except (TypeError, ValueError):
         return [], True
     if type(candidates) is not list:
@@ -478,7 +525,8 @@ _TERMINAL_STATUSES = ("done", "failed", "canceled")
 def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
     """Serialise one job while its lock is held, or return None."""
     try:
-        candidates_json = json.dumps(job.candidates or [], default=str)
+        candidates_json = json.dumps(
+            _compact_candidates(job.candidates or []), default=str)
         execute_args_json = json.dumps(job.execute_args or {}, default=str)
         single_value = job.single if single is _CURRENT_JOB_SINGLE else single
         single_json = json.dumps(single_value or {}, default=str)
@@ -1879,7 +1927,9 @@ def load_all() -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, kind, status, phase, "
-                "candidates, error, summary, review_verb, execute_kind, "
+                # A finished job never reopens its rows, so its text is not read back.
+                "CASE WHEN status='awaiting_review' THEN candidates END, "
+                "error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
                 "recoveries, log_lines, quality_shortfall, edition "
                 "FROM jobs ORDER BY created_at"
