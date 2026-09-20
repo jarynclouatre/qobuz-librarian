@@ -726,12 +726,7 @@ def validated_staged_album_dirs(result):
 
 
 def downloads_whole_album(n_present, n_missing, n_total):
-    """Whether a gap fill fetches the whole album instead of the gaps.
-
-    When it does, the tracks already on disk are backed up and replaced, so
-    the terminal warns before its prompt from the same rule the download
-    itself applies.
-    """
+    """Whether a gap fill fetches the whole album instead of the gaps."""
     return n_present == 0 or n_missing >= max(4, int(n_total * 0.7))
 
 
