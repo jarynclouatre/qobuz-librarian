@@ -152,6 +152,7 @@ def summarize_lyrics_result(result):
         "not_found": count("not-found"),
         "missing_tags": count("skipped-tags"),
         "too_long": count("skipped-long"),
+        "instrumental": count("skipped-instrumental"),
         "policy_skipped": count("skipped"),
         "unsafe": count("unsafe-path"),
         "unavailable": count("providers-unavailable"),
@@ -161,7 +162,8 @@ def summarize_lyrics_result(result):
         summary[key]
         for key in (
             "wrote", "already", "not_found", "missing_tags", "too_long",
-            "policy_skipped", "unsafe", "unavailable", "errors",
+            "instrumental", "policy_skipped", "unsafe", "unavailable",
+            "errors",
         )
     )
     summary["other_errors"] = max(0, processed - accounted)

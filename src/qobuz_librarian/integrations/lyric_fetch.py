@@ -85,6 +85,7 @@ _OUTCOME_LABELS = {
     "error": "error", "exception": "error",
     "skipped": "skipped", "skipped-long": "skipped (too long)",
     "skipped-tags": "skipped (missing tags)",
+    "skipped-instrumental": "skipped (instrumental)",
 }
 
 
@@ -1478,17 +1479,17 @@ def write_output(
 
 
 # Title suffixes that confuse provider matching. Strip Spotify-style
-# "(Remastered 2009)", "(Album Version)", "(Live at Wembley)", "[Mono]",
-# trailing " - 2009 Remaster", etc., before querying - providers index the
-# canonical title.
+# "(Remastered 2009)", "(Album Version)", "[Mono]", trailing
+# " - 2009 Remaster", etc., before querying - providers index the canonical
+# title. Only words naming a different master belong here: a word naming a
+# different performance ("Live", "Acoustic", "Demo") must survive into the
+# query, or the studio take's words get written into it.
 _TITLE_NOISE_KEYWORDS = (
-    "remaster", "remastered", "remix", "remixed", "re-recorded", "rerecorded",
+    "remaster", "remastered", "remix", "remixed",
     "album version", "single version", "radio edit", "radio version",
-    "extended version", "extended mix", "edit", "demo", "live",
-    "acoustic", "instrumental", "mono", "stereo",
+    "extended version", "extended mix", "edit", "mono", "stereo",
     "bonus track", "bonus", "deluxe", "explicit", "clean version",
-    "alternate take", "alternate version", "anniversary",
-    "expanded edition", "anniversary edition",
+    "anniversary", "expanded edition", "anniversary edition",
 )
 _kw_alt = "|".join(re.escape(k) for k in _TITLE_NOISE_KEYWORDS)
 _TITLE_NOISE_RE = re.compile(
@@ -1508,6 +1509,20 @@ def _clean_title(title: str) -> str:
         if cleaned == prev:
             break
     return cleaned or title.strip()
+
+
+# An instrumental has no words to find, so any provider hit for it is the
+# vocal take. The duration check cannot catch that: the two run the same length.
+_INSTRUMENTAL_RE = re.compile(
+    r"\([^()]*\binstrumentals?\b[^()]*\)|"
+    r"\[[^\[\]]*\binstrumentals?\b[^\[\]]*\]|"
+    r"\s+-\s+[^-]*\binstrumentals?\b[^-]*$",
+    re.IGNORECASE,
+)
+
+
+def is_instrumental(title: str) -> bool:
+    return bool(_INSTRUMENTAL_RE.search(title or ""))
 
 
 def build_query(f) -> Optional[str]:
@@ -1853,6 +1868,13 @@ def _process_bound_file(
         st.last_seen = time.time()
         commit(state, key, st)
         return "skipped-long"
+
+    if is_instrumental((f.tags.get("title") or [""])[0]):
+        st.status = "skipped"
+        st.source = "instrumental"
+        st.last_seen = time.time()
+        commit(state, key, st)
+        return "skipped-instrumental"
 
     requested_format = _normalise_lyrics_format(lyrics_format)
     required = _required_representations(requested_format)

@@ -32,6 +32,7 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "already-plain",
     "kept-existing-plain",
     "not-found",
+    "skipped-instrumental",
 }
 _LYRIC_QUEUED_OUTCOMES = {"providers-unavailable", "unsafe-path"}
 
