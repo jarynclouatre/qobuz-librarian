@@ -70,8 +70,8 @@
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-notice-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5 19h14a2 2 0 0 0 1.84-2.75L13.74 4a2 2 0 0 0-3.5 0L3.18 16.25A2 2 0 0 0 5 19z"/>
       </svg>
-      <span class="ql-notice-copy"><strong>Music library unavailable.</strong> {{ library_scan_state.message }}</span>
-      <a href="/settings" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Open Settings</a>
+      <span class="ql-notice-copy"><strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}</span>
+      {% if not library_scan_state.empty %}<a href="/settings" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Open Settings</a>{% endif %}
     </div>
   </section>
 

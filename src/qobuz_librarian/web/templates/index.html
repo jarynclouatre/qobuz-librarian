@@ -79,7 +79,7 @@
         {% if setup_scanning %}
         <strong>Library scan running.</strong> Building the Missing Albums, Gap Fill, Upgrade, and Downsample reviews.
         {% elif not library_scan_state.ready %}
-        <strong>Music library unavailable.</strong> {{ library_scan_state.message }}
+        <strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}
         {% elif library_resume %}
         <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. Resume to finish it.
         {% else %}
@@ -87,6 +87,9 @@
         {% endif %}
       </span>
       {% if setup_scanning %}
+      {% elif library_scan_state.empty %}
+      {# Settings carries no music-folder field, so there is nothing to send
+         them to; the message names the folder and where it is set. #}
       {% elif not library_scan_state.ready %}
       <a href="/settings" class="ql-btn ql-btn-primary ql-btn-sm w-full shrink-0 sm:ml-auto sm:w-auto">Open Settings</a>
       {% else %}

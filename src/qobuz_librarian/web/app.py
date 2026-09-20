@@ -3686,25 +3686,33 @@ def _library_scan_state():
     if not root.exists():
         return {
             "ready": False,
+            "empty": False,
             "count": 0,
             "message": f"{root} does not exist. {hint}",
         }
     if not root.is_dir():
         return {
             "ready": False,
+            "empty": False,
             "count": 0,
             "message": f"{root} is not a folder. {hint}",
         }
     artists = scanner.list_library_artists()
     if not artists:
+        # A readable folder with nothing in it is a new library, not a broken
+        # mount: downloads land here and there is nothing to scan until they
+        # do. Only the caller's wording separates the two.
         return {
             "ready": False,
+            "empty": True,
             "count": 0,
             "message": (
-                f"No artist folders with audio were found in {root}. {hint}"
+                f"Nothing has been downloaded into {root} yet, and no artist "
+                f"folders were found there. {hint}"
             ),
         }
-    return {"ready": True, "count": len(artists), "message": ""}
+    return {"ready": True, "empty": False, "count": len(artists),
+            "message": ""}
 
 
 def _truthful_library_generation():
