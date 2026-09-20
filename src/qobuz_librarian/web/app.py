@@ -9217,8 +9217,10 @@ async def job_approve(request: Request, job_id: str):
         if job.execute_kind in _PREMISE_REVIEW_KINDS:
             stale_premise_candidate_ids = await loop.run_in_executor(
                 None,
+                # Admission only: a fresh unshared check runs again before
+                # anything is written, so one seal per artist is enough here.
                 lambda: candidate_premise.stale_candidate_ids(
-                    selected_candidate_snapshot),
+                    selected_candidate_snapshot, share_artist_captures=True),
             )
             if selected_candidate_ids <= stale_premise_candidate_ids:
                 stale_message = await loop.run_in_executor(

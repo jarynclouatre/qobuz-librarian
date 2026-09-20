@@ -464,15 +464,25 @@ def validate_container(candidate: dict) -> dict:
 
 
 def validate_all(candidates) -> None:
-    """Check every row, sharing artist captures only within this pass."""
-    missing_premises = {}
+    """Check every row against its files as they are right now.
+
+    Deliberately unshared. This runs immediately before the flow touches
+    anything, so each row is sealed afresh: sharing one artist's capture
+    across rows would check the first row's files and take the rest on
+    trust, widening the window in which an edit lands unnoticed.
+    """
     for candidate in candidates:
-        validate(candidate, missing_premises=missing_premises)
+        validate(candidate)
 
 
-def stale_candidate_ids(candidates) -> set:
-    """Find stale rows, sharing artist captures only within this pass."""
-    missing_premises = {}
+def stale_candidate_ids(candidates, *, share_artist_captures=False) -> set:
+    """Find rows that no longer match their files.
+
+    ``share_artist_captures`` seals each artist once for the whole sweep,
+    which is only safe where a fresh unshared check follows before anything
+    is written.
+    """
+    missing_premises = {} if share_artist_captures else None
     stale = set()
     for candidate in candidates:
         try:

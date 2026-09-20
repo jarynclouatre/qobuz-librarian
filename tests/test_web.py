@@ -2326,7 +2326,7 @@ def test_upgrade_approve_refuses_changed_saved_state_without_mutating_review(
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
-        lambda _candidates: set(),
+        lambda _candidates, **_kw: set(),
     )
 
     monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
@@ -2454,7 +2454,7 @@ def test_duplicate_qobuz_approval_queues_once(client, monkeypatch):
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
-        lambda _candidates: set(),
+        lambda _candidates, **_kw: set(),
     )
 
     job = jm.Job(title="Library review")
@@ -3551,7 +3551,7 @@ def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch)
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
-        lambda _candidates: set(),
+        lambda _candidates, **_kw: set(),
     )
     monkeypatch.setattr(webapp, "_read_creds",
                         lambda: {"auth_token": "t", "user_id": "u"})
@@ -3661,7 +3661,7 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
-        lambda _candidates: set(),
+        lambda _candidates, **_kw: set(),
     )
     monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     monkeypatch.setattr(webapp, "_read_creds",
@@ -6890,7 +6890,7 @@ def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
-        lambda _candidates: set(),
+        lambda _candidates, **_kw: set(),
     )
 
     monkeypatch.setattr(webapp, "_qobuz_ready", lambda: True)
@@ -6943,7 +6943,7 @@ def test_repair_approve_parks_the_unticked_remnant(client, monkeypatch):
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
-        lambda _candidates: set(),
+        lambda _candidates, **_kw: set(),
     )
     monkeypatch.setitem(
         webapp._RESUME_EXECUTE,

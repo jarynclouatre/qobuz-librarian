@@ -222,33 +222,41 @@ def test_legacy_candidate_without_receipt_fails_closed(tmp_path, monkeypatch):
         validate(candidate)
 
 
-def test_validation_pass_shares_capture_without_lending_row_evidence(tmp_path, monkeypatch):
+def test_only_admission_shares_an_artist_capture(tmp_path, monkeypatch):
+    # Admission may seal an artist once, because an unshared check runs again
+    # before anything is written. That later check must not share: it would
+    # read the first row's files and take the rest on trust.
     from qobuz_librarian.library import candidate_premise
 
     _root, album, _track = _music_album(tmp_path, monkeypatch)
     premise = candidate_premise.capture("missing", album.parent)
     rows = [{"cid": i, "kind": "album", "payload": {
         "_artist_dir_path": str(album.parent), "_premise": premise,
-    }} for i in range(18)]
+    }} for i in range(3)]
     capture = candidate_premise.capture
     captures = []
+    monkeypatch.setattr(candidate_premise, "capture",
+                        lambda kind, path: (captures.append(path),
+                                            capture(kind, path))[1])
 
-    def record(kind, path):
-        captures.append(path)
-        return capture(kind, path)
-
-    monkeypatch.setattr(candidate_premise, "capture", record)
     candidate_premise.validate_all(rows)
-    assert captures == [str(album.parent)]
+    assert captures == [str(album.parent)] * 3      # re-sealed for every row
+
     captures.clear()
-    uncaptured = {"cid": 18, "kind": "album", "payload": {
+    assert candidate_premise.stale_candidate_ids(
+        rows, share_artist_captures=True) == set()
+    assert captures == [str(album.parent)]          # sealed once
+
+    captures.clear()
+    assert candidate_premise.stale_candidate_ids(rows) == set()
+    assert captures == [str(album.parent)] * 3      # unshared by default
+
+    uncaptured = {"cid": 3, "kind": "album", "payload": {
         "_artist_dir_path": str(album.parent),
     }}
-    assert candidate_premise.stale_candidate_ids([*rows, uncaptured]) == {18}
-    assert captures == [str(album.parent)]
+    assert candidate_premise.stale_candidate_ids(
+        [*rows, uncaptured], share_artist_captures=True) == {3}
     assert "_premise" not in uncaptured["payload"]
-    monkeypatch.setattr(candidate_premise, "capture", lambda *_a: None)
-    assert candidate_premise.stale_candidate_ids(rows) == set(range(18))
 
 
 def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeypatch):
@@ -300,7 +308,6 @@ def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeyp
     response = asyncio.run(webapp.job_approve(SimpleNamespace(form=form), job.id))
     assert response.status_code == 303
     assert "error=" in response.headers["location"]
-    assert captures == [str(album.parent), str(album.parent)]
     assert not admitted
     assert job.status == jobs.JobStatus.AWAITING_REVIEW
     assert job.candidates == original
