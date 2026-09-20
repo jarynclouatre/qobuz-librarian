@@ -74,7 +74,9 @@ class _OnDisk:
     def __init__(self):
         self.by_name = {}
         self.by_normalized = {}
-        for artist_dir in scanner.list_library_artists():
+        self.unreadable = set()
+        for artist_dir in scanner.list_library_artists(
+                on_artist_error=lambda path, error: self.unreadable.add(path.name)):
             self.by_name[artist_dir.name] = artist_dir
             self.by_normalized.setdefault(normalize(artist_dir.name),
                                           artist_dir)
@@ -222,6 +224,11 @@ def scan_restore(job, snapshot, token):
     if root is not None and isinstance(job.execute_args, dict):
         job.execute_args["music_root"] = root
     disk = _OnDisk()
+    for name in sorted(disk.unreadable):
+        job.push_line(f"Unreadable artist {name}. Check folder permissions and retry.")
+    unreadable_keys = {normalize(name) for name in disk.unreadable}
+    if disk.unreadable:
+        flows._record_unchecked_artists(job, len(disk.unreadable))
     artists = [a for a in snapshot.get("artists") or [] if isinstance(a, dict)]
     total = len(artists)
     owned = 0
@@ -235,6 +242,8 @@ def scan_restore(job, snapshot, token):
             break
         artist_name = (entry.get("name") or "").strip()
         if not artist_name:
+            continue
+        if normalize(artist_name) in unreadable_keys:
             continue
         artist_dir = disk.artist_dir(artist_name)
         artist_key = artist_dir.name if artist_dir is not None else None
@@ -272,6 +281,12 @@ def scan_restore(job, snapshot, token):
 
     parts = [f"Restore review ready: {plural(queued, 'album')} to download."
              if queued else "Nothing to restore."]
+    if disk.unreadable:
+        if not queued:
+            parts = ["Restore check incomplete."]
+            flows._mark_job_failed(job)
+        parts.append("Unreadable: " + ", ".join(sorted(disk.unreadable))
+                     + ". Check folder permissions and retry.")
     if owned:
         parts.append(f"{plural(owned, 'album')} already in your library.")
     if unresolved:

@@ -129,7 +129,13 @@ def read_library() -> Library:
     """
     resolutions = cached_artist_resolutions()
     keys, raws, seeds, albums = set(), [], [], []
-    for directory in list_library_artists():
+    # An unreadable artist still counts as owned, so it is not recommended
+    # back to her, but its albums cannot be read.
+    unreadable = []
+    directories = list_library_artists(
+        on_artist_error=lambda path, error: unreadable.append(path))
+    unreadable_names = {path.name for path in unreadable}
+    for directory in [*directories, *unreadable]:
         folder = directory.name
         raws.append(folder)
         folder_key = normalize(folder)
@@ -144,6 +150,8 @@ def read_library() -> Library:
             canonical_key = normalize(canonical)
             if canonical_key:
                 keys.add(canonical_key)
+        if folder in unreadable_names:
+            continue
         seeds.append(canonical or folder)
         albums.extend(
             f"{folder.casefold()}/{album.name.casefold()}"

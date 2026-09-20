@@ -2078,11 +2078,17 @@ def scan_new_releases(job, token):
     Cheap (one catalog call per artist, no track fetches), so it's the quick
     "what's new" pass rather than the full gap scan."""
     clear_scan_caches()
+    unreadable_artists = {}
+
+    def artist_read_failed(artist_dir, error):
+        if normalize(artist_dir.name) not in VA_NORMALIZED:
+            unreadable_artists[artist_dir.name] = str(error)
+
     # Same VA exclusion as scan_library: the Various-Artists folder has no single
     # Qobuz catalog, so it can't yield meaningful "new releases".
-    artists = [d for d in list_library_artists()
+    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
                if normalize(d.name) not in VA_NORMALIZED]
-    if not artists:
+    if not artists and not unreadable_artists:
         _set_empty_library_summary(job)
         return
     state = new_releases_mod.load()
@@ -2099,7 +2105,7 @@ def scan_new_releases(job, token):
     log.info(f"Checking {plural(len(artists), 'artist')} for new releases…")
     total = 0
     done = 0
-    failed_count = 0
+    failed_count = len(unreadable_artists)
     # Folders Qobuz has no artist for at all. Kept apart from failed_count:
     # they are a settled answer, so they must not hold the baseline back or
     # push the user towards a retry that returns the same result.
@@ -2186,6 +2192,8 @@ def scan_new_releases(job, token):
     # Not logged on its own: every summary below carries it, and the summary
     # is the last line of the log.
     skipped_note = new_releases_mod.unresolved_note(unresolved_names)
+    if unreadable_artists:
+        skipped_note += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
     if job.cancel_requested:
         # A cancelled crawl only reached a fraction of the artists, so it can't
         # claim "No new releases" or "First check recorded" definitively.
@@ -2691,9 +2699,15 @@ def scan_upgrades(job, token):
         log.info(job.summary)
         return
     clear_scan_caches()
-    artists = [d for d in list_library_artists()
+    unreadable_artists = {}
+
+    def artist_read_failed(artist_dir, error):
+        if normalize(artist_dir.name) not in VA_NORMALIZED:
+            unreadable_artists[artist_dir.name] = str(error)
+
+    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
                if normalize(d.name) not in VA_NORMALIZED]
-    if not artists:
+    if not artists and not unreadable_artists:
         _set_empty_library_summary(job)
         return
     args = build_args()
@@ -2750,22 +2764,35 @@ def scan_upgrades(job, token):
         hidden=hidden,
         cancel_check=lambda: bool(job.cancel_requested),
         on_artist=_on_artist,
+        discovery_errors=unreadable_artists,
         workers=workers,
         pool_kwargs=job_mgr.pool_initializer_kwargs(),
     )
+    unchecked = len(refresh.errors)
+    if unchecked:
+        _record_unchecked_artists(job, unchecked)
     if not job.cancel_requested and refresh.complete:
         _sync_surface_badge("upgrade")
-    if job.cancel_requested or not refresh.complete:
+    if job.cancel_requested:
         log.info("Cancelled. Stopping scan.")
-    if not job.cancel_requested:
+    if not job.cancel_requested and refresh.complete:
         _flag_new_since_last_scan(job, "upgrade")
     if job.cancel_requested:
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
                        if total else "Stopped before anything turned up.")
+    elif unchecked:
+        job.summary = (
+            f"{plural(total, 'upgradeable album')} found. "
+            f"{plural(unchecked, 'artist')} couldn't be checked; refresh to retry."
+        )
+        if not total:
+            _mark_job_failed(job)
     else:
         job.summary = (f"{plural(total, 'upgradeable album')} Qobuz can serve "
                        "at higher quality." + _cap_note(job) if total else
                        "Every album is already at the best quality Qobuz offers.")
+    if unreadable_artists:
+        job.summary += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
     log.info(job.summary)
 
 
@@ -3077,9 +3104,15 @@ def scan_downsamples(job):
     per-artist progress.
     """
     clear_scan_caches()
-    artists = [d for d in list_library_artists()
+    unreadable_artists = {}
+
+    def artist_read_failed(artist_dir, error):
+        if normalize(artist_dir.name) not in VA_NORMALIZED:
+            unreadable_artists[artist_dir.name] = str(error)
+
+    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
                if normalize(d.name) not in VA_NORMALIZED]
-    if not artists:
+    if not artists and not unreadable_artists:
         _set_empty_library_summary(job)
         return
     hidden = hidden_mod.load()
@@ -3132,6 +3165,7 @@ def scan_downsamples(job):
         hidden=hidden,
         cancel_check=lambda: bool(job.cancel_requested),
         on_artist=_on_artist,
+        discovery_errors=unreadable_artists,
     )
     unchecked = len(refresh.errors)
     if not job.cancel_requested and unchecked:
@@ -3165,6 +3199,8 @@ def scan_downsamples(job):
                        + _cap_note(job)
                        if total else
                        "Every album is already at CD rate or lower.")
+    if unreadable_artists:
+        job.summary += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
     log.info(job.summary)
 
 
@@ -3648,8 +3684,13 @@ def scan_repairs(job, token):
 
 def _scan_repairs_impl(job, token, checkpoint):
     clear_scan_caches()
-    artists = list_library_artists()
-    if not artists:
+    unreadable_artists = {}
+
+    def artist_read_failed(artist_dir, error):
+        unreadable_artists[artist_dir.name] = str(error)
+
+    artists = list_library_artists(on_artist_error=artist_read_failed)
+    if not artists and not unreadable_artists:
         _set_empty_library_summary(job)
         return
     # Resume only artists whose saved file receipt still matches. Older global
@@ -3667,7 +3708,7 @@ def _scan_repairs_impl(job, token, checkpoint):
     n_verified = 0
     n_unverified = 0
     n_failed_albums = 0
-    n_failed_artists = 0
+    n_failed_artists = len(unreadable_artists)
     if cp:
         for artist_dir in artists:
             bundle = _validated_repair_checkpoint_bundle(
@@ -3814,7 +3855,13 @@ def _scan_repairs_impl(job, token, checkpoint):
                               _repair_item(current, albums_seen, total),
                               found=total, unit="artist")
             save_checkpoint()
-    clear_failed = checkpoint.clear() is False
+    if n_failed_artists:
+        _record_unchecked_artists(job, n_failed_artists)
+    clear_failed = False
+    if n_failed_artists or n_failed_albums:
+        save_checkpoint(force=True)
+    else:
+        clear_failed = checkpoint.clear() is False
     # Honest summary: report what was actually decode-verified, and never
     # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
@@ -3836,6 +3883,10 @@ def _scan_repairs_impl(job, token, checkpoint):
             "Repair finished, but its old resume data could not be cleared. "
             "Check the data folder before running Repair again."
         )
+    if unreadable_artists:
+        job.summary += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
+    if n_failed_artists and not total:
+        _mark_job_failed(job)
     log.info(job.summary)
 
 
@@ -4505,6 +4556,15 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
             job_mgr.set_staging_holder(None)
 
     total = res.get("total", 0)
+    unreadable = res.get("unreadable_artists", [])
+    if unreadable:
+        _record_unchecked_artists(job, len(unreadable))
+    if not total and unreadable:
+        job.summary = ("Lyrics scan incomplete. Unreadable: "
+                       + ", ".join(unreadable)
+                       + ". Retry after checking permissions.")
+        _mark_job_failed(job)
+        return
     if not total:
         job.summary = "No FLAC files found in the library."
         log.info(job.summary)
@@ -4522,7 +4582,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     counts = lyrics.summarize_lyrics_result(res)
     processed = counts["processed"]
     skipped = counts["already_checked"]
-    if not processed:
+    if not processed and not unreadable:
         job.summary = (
             f"Nothing needed checking, all {plural(total, 'track')} have "
             "lyrics or were checked before. Tick “Re-check everything” to "
@@ -4534,6 +4594,9 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         f"{plural(processed, 'track')} checked",
         f"{plural(counts['wrote'], 'track')} got lyrics",
     ]
+    if unreadable:
+        parts.append("unreadable artists: " + ", ".join(unreadable)
+                     + "; retry after checking permissions")
     for count, phrase in (
         (counts["already"],
          f"{plural(counts['already'], 'track')} already had lyrics"),
@@ -4562,6 +4625,8 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
             parts.append(phrase)
     if counts["failures"]:
         failures = []
+        if unreadable:
+            failures.append("unreadable artists: " + ", ".join(unreadable))
         if counts["unsafe"]:
             failures.append(
                 f"{plural(counts['unsafe'], 'unsafe track path')} refused")

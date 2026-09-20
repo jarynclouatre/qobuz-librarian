@@ -55,7 +55,7 @@ def test_downsample_scan_rechecks_hidden_before_adding_active_candidates(
         kwargs["on_artist"](artist_list[0], [candidate], None, 1, 1)
         return downsample_state.RefreshResult([candidate], ["Artist"], {}, True)
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_refresh)
     monkeypatch.setattr(flows.review_badges, "set_ready",
                         lambda *args: badge_calls.append(args))
@@ -194,7 +194,7 @@ def test_upgrade_scan_uses_shared_refresh_state(tmp_path, monkeypatch):
         kwargs["on_artist"](artist_list[0], [spec], None, 1, 1)
         return upgrade_state.RefreshResult([spec], ["Artist"], {}, True)
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists", fake_refresh)
     job = jm.Job(title="upgrade")
 
@@ -1434,7 +1434,7 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
 
     marked = {}
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: artists)
     monkeypatch.setattr(flows, "find_new_releases_for_artist", fake_find)
     monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
         "seen": {"Good": []},
@@ -1482,7 +1482,7 @@ def test_new_release_check_completes_past_a_folder_qobuz_has_no_artist_for(
 
     marked = {}
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: artists)
     monkeypatch.setattr(flows, "find_new_releases_for_artist", fake_find)
     monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
         "seen": {"386473": ["album"]},
@@ -1512,7 +1512,7 @@ def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
 
     artist = tmp_path / "Artist"
     artist.mkdir()
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist])
     monkeypatch.setattr(
         flows,
         "find_new_releases_for_artist",
@@ -1561,7 +1561,7 @@ def test_partial_new_release_find_stays_reviewable(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [good, failed])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [good, failed])
     monkeypatch.setattr(flows, "find_new_releases_for_artist", _find)
     monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
         "seen": {"artist-id": ["old"]},
@@ -1648,7 +1648,7 @@ def _stub_new_release_scan(monkeypatch, tmp_path, found_title):
     good.mkdir()
 
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [good])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [good])
     monkeypatch.setattr(flows, "find_new_releases_for_artist",
                         lambda _name, **_kwargs: SimpleNamespace(
                             artist_id="artist-id", fetch_failed=False,
@@ -1712,3 +1712,168 @@ def test_a_new_release_check_with_nothing_parked_still_parks_its_own_review(
 
     assert [c["title"] for c in job.candidates] == ["fresh"]
     assert job.status is jm.JobStatus.PENDING
+
+
+@pytest.fixture
+def unreadable_library(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    good, blocked = music / "Readable", music / "Unreadable"
+    for artist in (good, blocked):
+        album = artist / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    for setting in (
+        "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "UPGRADE_STATE_FILE",
+        "DOWNSAMPLE_STATE_FILE", "HIDDEN_FILE", "LIBRARY_GENERATION_STATE_FILE",
+    ):
+        monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
+    scandir = scanner.os.scandir
+
+    def read(path):
+        if path == blocked or path == str(blocked):
+            raise PermissionError(errno.EACCES, "Permission denied", str(blocked))
+        return scandir(path)
+
+    monkeypatch.setattr(scanner.os, "scandir", read)
+    scanner.clear_scan_caches()
+    yield good, blocked
+    scanner.clear_scan_caches()
+
+
+def test_readiness_keeps_readable_artists_available(unreadable_library):
+    from qobuz_librarian.library import scanner
+    from qobuz_librarian.web import app as webapp
+
+    good, blocked = unreadable_library
+    state = webapp._library_scan_state()
+    assert state["ready"] and not state["empty"]
+    assert state["count"] == 1
+    assert blocked.name in state["message"]
+    (good / "Album" / "01.flac").unlink()
+    scanner.clear_scan_caches()
+    state = webapp._library_scan_state()
+    assert not state["ready"] and not state["empty"]
+    assert blocked.name in state["message"]
+
+
+def test_new_release_discovery_failure_preserves_unchecked_baseline(
+        unreadable_library, monkeypatch):
+    from qobuz_librarian.library import new_releases
+    from qobuz_librarian.web import flows
+
+    good, blocked = unreadable_library
+    new_releases.mark_run({blocked.name: ["owned"]}, complete=False)
+    checked = []
+
+    def find(name, **_kwargs):
+        checked.append(name)
+        return SimpleNamespace(artist_id=name, fetch_failed=False, unresolved=False,
+                               current_ids=["new"], new_gaps=[], artist_name=name)
+
+    monkeypatch.setattr(flows, "find_new_releases_for_artist", find)
+    job = jm.Job(title="new releases")
+    flows.scan_new_releases(job, "tok")
+    assert checked == [good.name]
+    assert job.unchecked_artists == 1
+    assert blocked.name in job.summary
+    saved = new_releases.load()
+    assert saved["seen"] == {blocked.name: ["owned"], good.name: ["new"]}
+    assert not saved["baseline_complete"]
+
+
+@pytest.mark.parametrize("surface", ["upgrade", "downsample"])
+def test_quality_discovery_failure_keeps_last_complete_review(
+        unreadable_library, monkeypatch, surface):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import downsample_state
+    from qobuz_librarian.quality import upgrade_state
+    from qobuz_librarian.web import flows
+
+    good, blocked = unreadable_library
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", True)
+    if surface == "upgrade":
+        state = upgrade_state
+        monkeypatch.setattr(state, "_default_scan_artist", lambda *_a: lambda artist: [{
+            "qobuz_album": {"id": "upgrade", "title": "Album"},
+            "album_dir": artist / "Album",
+        }])
+    else:
+        state = downsample_state
+        monkeypatch.setattr(state.downsample, "scan_artist_for_downsample",
+                            lambda artist: [_candidate(artist / "Album")])
+    state_file = getattr(cfg, f"{surface.upper()}_STATE_FILE")
+    state_file.write_text('{"complete": true, "candidates": []}')
+    before = state_file.read_bytes()
+    refreshed = []
+    refresh = state.refresh_for_artists
+
+    def record(artists, **kwargs):
+        result = refresh(artists, **kwargs)
+        refreshed.append(result)
+        return result
+
+    monkeypatch.setattr(state, "refresh_for_artists", record)
+    job = jm.Job(title=surface)
+    if surface == "upgrade":
+        flows.scan_upgrades(job, "tok")
+    else:
+        flows.scan_downsamples(job)
+    assert len(job.candidates) == 1
+    assert job.unchecked_artists == 1
+    assert blocked.name in job.summary
+    assert refreshed[0].artists_scanned == [good.name]
+    assert not refreshed[0].complete
+    assert state_file.read_bytes() == before
+
+
+def test_repair_discovery_failure_keeps_only_readable_checkpoint(
+        unreadable_library, monkeypatch):
+    from qobuz_librarian.library import scan_checkpoint
+    from qobuz_librarian.web import flows
+
+    good, blocked = unreadable_library
+    checked = []
+
+    def scan(artist, *_a, **_k):
+        checked.append(artist.name)
+        return artist.name, {
+            "specs": [], "verified_ok": 1, "unverified": 0, "failed": 0,
+            "proof": flows._capture_repair_artist_proof(artist),
+        }
+
+    monkeypatch.setattr(flows, "_scan_repair_artist", scan)
+    job = jm.Job(title="repair")
+    flows.scan_repairs(job, "tok")
+    assert checked == [good.name]
+    assert job.unchecked_artists == 1
+    assert blocked.name in job.summary
+    saved = scan_checkpoint.load("repair")
+    assert saved["scanned"] == [good.name]
+    assert set(saved["artists"]) == {good.name}
+    assert job.status == jm.JobStatus.FAILED
+
+
+def test_lyrics_discovery_failure_stays_incomplete(unreadable_library, monkeypatch):
+    from qobuz_librarian.library import lyrics
+    from qobuz_librarian.web import flows
+
+    good, blocked = unreadable_library
+    checked = []
+    monkeypatch.setattr(lyrics, "HAVE_LYRICS", True)
+
+    def fetch(paths, **_kwargs):
+        checked.extend(paths)
+        return {"already-synced": len(paths)}
+
+    monkeypatch.setattr(lyrics.lyric_fetch, "fetch_for_paths", fetch)
+    job = jm.Job(title="lyrics")
+    flows.run_library_lyrics(job, rescan=True)
+    assert checked == [good / "Album" / "01.flac"]
+    assert job.unchecked_artists == 1
+    assert blocked.name in job.summary
+    assert job.status == jm.JobStatus.FAILED

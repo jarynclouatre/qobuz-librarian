@@ -579,7 +579,9 @@ def prompt_artist_name():
         if not name or name.lower() in ("q", "quit", "exit"):
             return None
         if name == "?":
-            artists = scanner.list_library_artists()
+            artists = scanner.list_library_artists(
+                on_artist_error=lambda path, error: log.warning(
+                    f"Unreadable artist {path.name}: {error}. Check permissions and retry."))
             if not artists:
                 log.info(fmt(C.YELLOW, "  No artist directories found."))
                 continue

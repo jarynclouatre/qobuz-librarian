@@ -486,6 +486,7 @@ def refresh_for_artists(
     pool_kwargs: dict | None = None,
     skip_unchanged: bool = False,
     persist: bool = True,
+    discovery_errors: dict[str, str] | None = None,
 ):
     """Refresh upgrade candidates for ``artists`` and persist review specs."""
     refresh_started_at = time.time()
@@ -497,8 +498,8 @@ def refresh_for_artists(
     artist_list = list(artists)
     specs: list[dict] = []
     artists_scanned: list[str] = []
-    errors: dict[str, str] = {}
-    complete = True
+    errors: dict[str, str] = dict(discovery_errors or {})
+    complete = not errors
     total = len(artist_list)
     fingerprints: dict[str, str] = {}
     previous = load()

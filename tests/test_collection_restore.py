@@ -169,3 +169,26 @@ def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
         {"name": "Migration", "qobuz_album_id": "a1", "tracks": []}]}]))
 
     assert job.candidates == []
+
+
+def test_unreadable_artist_is_not_offered_as_missing(library, qobuz, monkeypatch):
+    library.add("Bonobo", "Black Sands", [_track("Kiara", 1)])
+    library.add("Unreadable", "Owned", [_track("Owned", 1)])
+    qobuz["albums"]["a1"] = _qobuz_album("a1", "Migration")
+    blocked = library.root / "Unreadable"
+    scandir = scanner.os.scandir
+
+    def read(path):
+        if path == blocked or path == str(blocked):
+            raise PermissionError("denied")
+        return scandir(path)
+
+    monkeypatch.setattr(scanner.os, "scandir", read)
+    job = _run(_snapshot([
+        {"name": "Unreadable", "albums": [{"name": "Owned", "qobuz_album_id": "owned"}]},
+        {"name": "Bonobo", "albums": [{"name": "Migration", "qobuz_album_id": "a1"}]},
+    ]))
+    assert qobuz["album_calls"] == ["a1"]
+    assert [row["artist"] for row in job.candidates] == ["Bonobo"]
+    assert job.unchecked_artists == 1
+    assert blocked.name in job.summary

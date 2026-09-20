@@ -214,7 +214,9 @@ def resolve_artist_dir(artist_query, candidates=None):
     if not artist_query:
         return None
     if candidates is None:
-        candidates = list_library_artists()
+        candidates = list_library_artists(
+            on_artist_error=lambda path, error: log.warning(
+                f"Unreadable artist {path.name}: {error}. Check permissions and retry."))
     if not candidates:
         return None
 

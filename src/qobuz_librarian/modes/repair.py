@@ -1556,7 +1556,9 @@ def _prompt_library_album_for_repair(args, token):
             # Sentinel: caller sweeps every album under MUSIC_ROOT.
             return "__ALL__", None
         if r == "?":
-            artists = list_library_artists()
+            artists = list_library_artists(
+                on_artist_error=lambda path, error: log.warning(
+                    f"Unreadable artist {path.name}: {error}. Check permissions and retry."))
             if not artists:
                 log.info(fmt(C.YELLOW, "  No artist directories found."))
                 continue
@@ -2527,10 +2529,10 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     return "failed"
 
 
-def _all_library_album_dirs():
+def _all_library_album_dirs(*, on_artist_error=None):
     """Every (artist_dir, album_dir) under MUSIC_ROOT, artist-sorted."""
     pairs = []
-    for adir in list_library_artists():
+    for adir in list_library_artists(on_artist_error=on_artist_error):
         for aldir in list_artist_album_dirs(adir):
             pairs.append((adir, aldir))
     return pairs
@@ -2556,12 +2558,18 @@ def run_album_repair_mode(args, token, *, loop=False):
                 die(fmt(C.RED, _REPAIR_AUTH_LOST), EXIT_AUTH)
 
             if artist_dir == "__ALL__":
-                targets = _all_library_album_dirs()
+                unreadable = []
+
+                def artist_read_failed(path, error):
+                    unreadable.append(path.name)
+                    log.warning(f"Unreadable artist {path.name}: {error}. Check permissions and retry.")
+
+                targets = _all_library_album_dirs(on_artist_error=artist_read_failed)
                 if not targets:
                     log.info(fmt(C.YELLOW,
                         "  ⚠  No album folders found under the music root."))
                     if not loop:
-                        return 0
+                        return EXIT_GENERAL if unreadable else 0
                     continue
                 section(f"Repair scan, whole library "
                         f"({len(targets)} album(s))")
@@ -2619,10 +2627,13 @@ def run_album_repair_mode(args, token, *, loop=False):
                     _summary += f"  ·  recovery needed: {tally['recovery']}"
                 needs_attention = (
                     interrupted
+                    or bool(unreadable)
                     or any(tally[key] for key in (
                         "attention", "failed", "recovery"
                     ))
                 )
+                if unreadable:
+                    _summary += "  ·  unreadable artists: " + ", ".join(unreadable)
                 (log.warning if needs_attention else log.info)(
                     fmt(C.YELLOW if needs_attention else C.GRAY, _summary)
                 )

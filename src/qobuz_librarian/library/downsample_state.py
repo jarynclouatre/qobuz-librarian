@@ -439,6 +439,7 @@ def refresh_for_artists(
     on_artist: Callable[[Path, list[DownsampleCandidate], Exception | None, int, int], None] | None = None,
     persist: bool = True,
     skip_unchanged: bool = False,
+    discovery_errors: dict[str, str] | None = None,
 ):
     """Refresh downsample candidates for ``artists`` and persist the result."""
     refresh_started_at = time.time()
@@ -449,8 +450,8 @@ def refresh_for_artists(
     artist_list = list(artists)
     candidates: list[DownsampleCandidate] = []
     artists_scanned: list[str] = []
-    errors: dict[str, str] = {}
-    complete = True
+    errors: dict[str, str] = dict(discovery_errors or {})
+    complete = not errors
     total = len(artist_list)
     fingerprints: dict[str, str] = {}
     previous = load()

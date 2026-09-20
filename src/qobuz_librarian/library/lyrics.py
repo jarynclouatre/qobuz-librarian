@@ -22,7 +22,7 @@ from qobuz_librarian.ui_cli.logging import report_progress, vlog
 HAVE_LYRICS = lyric_fetch.AVAILABLE
 
 
-def iter_library_flacs(*, artist_dirs=None):
+def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
     """Yield ``(path, mtime, size)`` for every FLAC under the given artist dirs.
 
     Walks artists then albums via the same listing the rest of the app uses,
@@ -34,7 +34,11 @@ def iter_library_flacs(*, artist_dirs=None):
     backfill). Pass a list to scope to one artist; the per-artist Lyrics tool
     uses this to fill gaps for just one artist without re-walking everything.
     """
-    artists = artist_dirs if artist_dirs is not None else list_library_artists()
+    if on_artist_error is None:
+        def on_artist_error(path, error):
+            _default_log.warning(f"Unreadable artist {path.name}: {error}. Check permissions and retry.")
+    artists = (artist_dirs if artist_dirs is not None else
+               list_library_artists(on_artist_error=on_artist_error))
     for artist_dir in artists:
         for album_dir in list_artist_album_dirs(artist_dir):
             try:
@@ -67,10 +71,17 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     artists only; the per-artist Lyrics tool passes the one resolved dir.
     """
     log = log or _default_log
-    items = list(iter_library_flacs(artist_dirs=artist_dirs))
+    unreadable = []
+
+    def artist_read_failed(path, error):
+        unreadable.append(path.name)
+        log.warning(f"Unreadable artist {path.name}: {error}. Check permissions and retry.")
+
+    items = list(iter_library_flacs(
+        artist_dirs=artist_dirs, on_artist_error=artist_read_failed))
     total = len(items)
     if not total:
-        return {"total": 0}
+        return {"total": 0, "unreadable_artists": unreadable}
     paths = [p for p, _, _ in items]
 
     # Seed the state file with a fast, no-network classification of files that
@@ -96,6 +107,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
                 "stop_total": indexed.get("stop-total", total),
                 "stop_stage": "index",
                 "stopped": 1,
+                "unreadable_artists": unreadable,
             }
 
     counts = lyric_fetch.fetch_for_paths(
@@ -112,6 +124,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
         progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
     )
     result = dict(counts)
+    result["unreadable_artists"] = unreadable
     result["total"] = total
     result["processed"] = sum(
         count for outcome, count in counts.items()
@@ -170,5 +183,6 @@ def summarize_lyrics_result(result):
     summary["failures"] = (
         summary["unsafe"] + summary["unavailable"]
         + summary["errors"] + summary["other_errors"]
+        + len(result.get("unreadable_artists", []))
     )
     return summary

@@ -271,21 +271,27 @@ def run_album_walk_mode(args, token):
     prompt only on incomplete ones."""
     banner("Album gaps: fill missing tracks in albums you already own")
 
-    all_artists = list_library_artists()
+    discovery_errors = {}
+
+    def artist_read_failed(path, error):
+        discovery_errors[path.name] = str(error)
+        log.warning(f"Unreadable artist {path.name}: {error}. Retry after checking permissions.")
+
+    all_artists = list_library_artists(on_artist_error=artist_read_failed)
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
-        return 0
+        return EXIT_GENERAL if discovery_errors else 0
 
     vlog(f"  {plural(len(all_artists), 'artist')} in library.")
     flt = ask("  Filter artists (substring, case-insensitive; blank = all): ")
     if flt is None:
-        return 0
+        return EXIT_GENERAL if discovery_errors else 0
     artists = all_artists
     if flt:
         artists = [a for a in all_artists if flt in a.name.lower()]
         log.info(fmt(C.GRAY, f"  {len(artists)} artist(s) match {flt!r}."))
         if not artists:
-            return 0
+            return EXIT_GENERAL if discovery_errors else 0
 
     hidden = hidden_mod.load()
     seen = load_album_walk_seen()
@@ -459,7 +465,8 @@ def run_album_walk_mode(args, token):
                 f"persisted to {cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    needs_attention = interrupted or partial_completion or retry_needed
+    needs_attention = (interrupted or partial_completion or retry_needed
+                       or bool(discovery_errors))
     if needs_attention:
         outcome = "stopped early" if interrupted else "needs attention"
         log.warning(fmt(C.YELLOW,
@@ -489,7 +496,7 @@ def run_album_walk_mode(args, token):
         note = _leftover_folder_note(label, names)
         if note:
             log.info(fmt(C.GRAY, f"    {note}"))
-    if n_artists_scanned and not interrupted and not args.dry_run:
+    if n_artists_scanned and not needs_attention and not args.dry_run:
         _write_collection_snapshot()
     return EXIT_GENERAL if needs_attention else 0
 
@@ -500,10 +507,16 @@ def run_walk_queued_mode(args, token):
     """Walk artists, accumulate decisions across artists, flush on demand."""
     banner("Library walk: scan artists, queue, download when you choose")
 
-    all_artists = list_library_artists()
+    discovery_errors = {}
+
+    def artist_read_failed(path, error):
+        discovery_errors[path.name] = str(error)
+        log.warning(f"Unreadable artist {path.name}: {error}. Retry after checking permissions.")
+
+    all_artists = list_library_artists(on_artist_error=artist_read_failed)
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
-        return 0
+        return EXIT_GENERAL if discovery_errors else 0
 
     # The web review's dismissals and this walk's own per-artist record are two
     # different decisions: one album you said no to, versus one artist you have
@@ -518,19 +531,20 @@ def run_walk_queued_mode(args, token):
         if n_hidden:
             vlog(f"  Hiding {n_hidden} previously-decided artist(s).")
     if not all_artists:
-        log.info(fmt(C.GREEN, "  ✓  All artists already decided."))
-        return 0
+        if not discovery_errors:
+            log.info(fmt(C.GREEN, "  ✓  All artists already decided."))
+        return EXIT_GENERAL if discovery_errors else 0
 
     vlog(f"  {len(all_artists)} artist(s) to walk.")
     flt = ask("  Filter (substring, case-insensitive; blank = all): ")
     if flt is None:
-        return 0
+        return EXIT_GENERAL if discovery_errors else 0
     artists = all_artists
     if flt:
         artists = [a for a in all_artists if flt in a.name.lower()]
         log.info(fmt(C.GRAY, f"  {len(artists)} artist(s) match {flt!r}."))
         if not artists:
-            return 0
+            return EXIT_GENERAL if discovery_errors else 0
 
     log.info(fmt(C.GRAY,
         "  Per artist: y=scan+queue, enter/n=skip, p=process queue,"))
@@ -726,7 +740,8 @@ def run_walk_queued_mode(args, token):
                     f"{cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    needs_attention = interrupted or partial_completion or retry_needed
+    needs_attention = (interrupted or partial_completion or retry_needed
+                       or bool(discovery_errors))
     if needs_attention:
         outcome = "stopped early" if interrupted else "needs attention"
         log.warning(fmt(C.YELLOW,
@@ -735,6 +750,6 @@ def run_walk_queued_mode(args, token):
     else:
         log.info(fmt(C.GREEN,
             f"  ✓ Walk done. Scanned {n_scanned}, skipped {n_skipped}."))
-    if n_scanned and not interrupted and not args.dry_run:
+    if n_scanned and not needs_attention and not args.dry_run:
         _write_collection_snapshot()
     return EXIT_GENERAL if needs_attention else 0

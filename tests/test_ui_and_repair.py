@@ -313,7 +313,7 @@ def test_repair_resume_reuses_only_exact_current_artist_bundles(
         def push_progress(self, *_args, **_kwargs):
             pass
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: current)
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: current)
     monkeypatch.setattr(
         flows,
         "list_artist_album_dirs",

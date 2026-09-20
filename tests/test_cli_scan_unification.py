@@ -539,7 +539,7 @@ def test_library_walk_carries_web_dismissals_into_the_missing_step(
 
     artist_dir = tmp_path / "Artist"
     artist_dir.mkdir()
-    monkeypatch.setattr(walk, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(walk, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
     monkeypatch.setattr(walk, "_flush_stdin", lambda: None)
     handed = {}

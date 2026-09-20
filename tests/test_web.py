@@ -51,7 +51,7 @@ def _allow_legacy_candidate_execution(monkeypatch):
     """Let older fixtures reach the executor behavior they exercise."""
     from qobuz_librarian.library import candidate_premise
 
-    def allow(candidate):
+    def allow(candidate, **_kwargs):
         return {
             "kind": candidate_premise.expected_kind(candidate),
             "receipt": None,
@@ -2324,6 +2324,10 @@ def test_upgrade_approve_refuses_changed_saved_state_without_mutating_review(
         "qobuz_librarian.library.candidate_premise.validate_all",
         lambda _candidates: [],
     )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates: set(),
+    )
 
     monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     monkeypatch.setattr(webapp, "_get_token", lambda: "tok")
@@ -2447,6 +2451,10 @@ def test_duplicate_qobuz_approval_queues_once(client, monkeypatch):
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.validate_all",
         lambda _candidates: [],
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates: set(),
     )
 
     job = jm.Job(title="Library review")
@@ -2825,7 +2833,7 @@ def test_dashboard_first_run_offers_baseline_scan_with_skip(client, monkeypatch)
     monkeypatch.setattr(webapp, "_read_creds",
                         lambda: {"auth_token": "dummy", "user_id": "dummy"})
     monkeypatch.setattr("qobuz_librarian.library.scanner.list_library_artists",
-                        lambda: ["Some Artist"])
+                        lambda **_kwargs: ["Some Artist"])
     monkeypatch.setattr(cfg, "AUTO_LIBRARY_SCAN", True)
     monkeypatch.setattr(new_releases, "is_baseline_complete", lambda: False)
     monkeypatch.setattr(generation_state, "baseline_complete", lambda: False)
@@ -3541,6 +3549,10 @@ def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch)
         "qobuz_librarian.library.candidate_premise.validate_all",
         lambda _candidates: [],
     )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates: set(),
+    )
     monkeypatch.setattr(webapp, "_read_creds",
                         lambda: {"auth_token": "t", "user_id": "u"})
     monkeypatch.setattr(webapp, "_TOKEN_VALID", True)
@@ -3646,6 +3658,10 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.validate_all",
         lambda _candidates: [],
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates: set(),
     )
     monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
     monkeypatch.setattr(webapp, "_read_creds",
@@ -6872,6 +6888,10 @@ def test_new_release_approve_parks_the_unticked_remnant(client, monkeypatch):
         "qobuz_librarian.library.candidate_premise.validate_all",
         lambda _candidates: [],
     )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates: set(),
+    )
 
     monkeypatch.setattr(webapp, "_qobuz_ready", lambda: True)
     job = jm.Job(title="New-release check")
@@ -6920,6 +6940,10 @@ def test_repair_approve_parks_the_unticked_remnant(client, monkeypatch):
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.validate_all",
         lambda _candidates: [],
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates: set(),
     )
     monkeypatch.setitem(
         webapp._RESUME_EXECUTE,

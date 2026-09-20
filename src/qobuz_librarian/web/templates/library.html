@@ -57,6 +57,12 @@
   </section>
   {% endif %}
 
+  {% if library_scan_state.ready and library_scan_state.message %}
+  <div class="ql-notice ql-notice-warning" role="status">
+    <span class="ql-notice-copy">{{ library_scan_state.message }}</span>
+  </div>
+  {% endif %}
+
   {% if library_job %}
   {# Single surface: the scan's live progress and the Missing Albums / Gap
      Fill review render right here, same as /repair. A dead token banners the

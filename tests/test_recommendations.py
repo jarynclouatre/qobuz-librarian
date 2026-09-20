@@ -130,8 +130,11 @@ def test_the_library_picture_prefers_the_name_qobuz_uses(monkeypatch):
     # Last.fm spells artists the way Qobuz does far more often than the way a
     # folder on disk does, so the resolved name is what gets asked about - and
     # both names are recognised coming back.
-    monkeypatch.setattr(rec, "list_library_artists",
-                        lambda: [Path("/music/Beatles, The"), Path("/music/Sleep")])
+    def artists(*, on_artist_error):
+        on_artist_error(Path("/music/Unreadable"), PermissionError("denied"))
+        return [Path("/music/Beatles, The"), Path("/music/Sleep")]
+
+    monkeypatch.setattr(rec, "list_library_artists", artists)
     monkeypatch.setattr(rec, "cached_artist_resolutions",
                         lambda: {"Beatles, The": ["123", "The Beatles"]})
     owned = rec.read_library()
@@ -139,6 +142,8 @@ def test_the_library_picture_prefers_the_name_qobuz_uses(monkeypatch):
     assert "Sleep" in owned.seeds
     assert owned.owns("The Beatles")
     assert owned.owns("Beatles, The")
+    assert owned.owns("Unreadable")
+    assert "Unreadable" not in owned.seeds
     assert owned.signature
 
 

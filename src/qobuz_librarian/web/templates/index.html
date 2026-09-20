@@ -49,6 +49,12 @@
     </div>
     {% endif %}
 
+    {% if library_scan_state.ready and library_scan_state.message %}
+    <div class="ql-notice ql-notice-warning" role="status">
+      <span class="ql-notice-copy">{{ library_scan_state.message }}</span>
+    </div>
+    {% endif %}
+
     {% if staging_album_count %}
     <div class="ql-notice ql-notice-warning flex items-start gap-3 p-4">
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-warning" fill="none"

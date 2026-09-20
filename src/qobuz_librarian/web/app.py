@@ -3698,7 +3698,15 @@ def _library_scan_state():
             "count": 0,
             "message": f"{root} is not a folder. {hint}",
         }
-    artists = scanner.list_library_artists()
+    unreadable = []
+    artists = scanner.list_library_artists(
+        on_artist_error=lambda path, error: unreadable.append(path.name))
+    if unreadable:
+        return {
+            "ready": bool(artists), "empty": False, "count": len(artists),
+            "message": "Unreadable artist folders: " + ", ".join(unreadable)
+            + ". Check folder permissions and retry.",
+        }
     if not artists:
         # An empty top level is a fresh install until a collection backup says
         # the root once held albums, which usually means a dropped mount. The
@@ -9207,18 +9215,10 @@ async def job_approve(request: Request, job_id: str):
             return RedirectResponse(url=f"{dest}?noselection=1",
                                     status_code=303)
         if job.execute_kind in _PREMISE_REVIEW_KINDS:
-            def _stale_candidate_ids(candidates):
-                stale = set()
-                for candidate in candidates:
-                    try:
-                        candidate_premise.validate_all([candidate])
-                    except CandidateStale:
-                        stale.add(candidate.get("cid"))
-                return stale
-
             stale_premise_candidate_ids = await loop.run_in_executor(
                 None,
-                lambda: _stale_candidate_ids(selected_candidate_snapshot),
+                lambda: candidate_premise.stale_candidate_ids(
+                    selected_candidate_snapshot),
             )
             if selected_candidate_ids <= stale_premise_candidate_ids:
                 stale_message = await loop.run_in_executor(
@@ -9346,7 +9346,7 @@ async def job_approve(request: Request, job_id: str):
             } != selected_candidate_ids:
                 return "review_changed"
             if job.execute_kind in _PREMISE_REVIEW_KINDS:
-                stale_premise_candidate_ids = _stale_candidate_ids(
+                stale_premise_candidate_ids = candidate_premise.stale_candidate_ids(
                     current_selected)
                 if {
                     c.get("cid") for c in current_selected
@@ -9365,7 +9365,7 @@ async def job_approve(request: Request, job_id: str):
                 if not current_selected:
                     return job_mgr.APPROVAL_NO_SELECTION
                 if job.execute_kind in _PREMISE_REVIEW_KINDS:
-                    stale_premise_candidate_ids = _stale_candidate_ids(
+                    stale_premise_candidate_ids = candidate_premise.stale_candidate_ids(
                         current_selected)
                     if {
                         c.get("cid") for c in current_selected
@@ -12398,7 +12398,10 @@ async def collection_restore_upload(request: Request,
             return f"{root} could not be read. {hint}", None, None
         scanner.clear_scan_caches()
         try:
-            emptied = not any(scanner.list_library_artists())
+            unreadable = []
+            artists = scanner.list_library_artists(
+                on_artist_error=lambda path, error: unreadable.append(path.name))
+            emptied = not artists and not unreadable
         except OSError:
             return f"{root} could not be read. {hint}", None, None
         if not root.is_dir():

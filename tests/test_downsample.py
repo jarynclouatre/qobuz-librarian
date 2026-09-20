@@ -340,7 +340,8 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
     monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", None)
     monkeypatch.setattr(mode, "HAVE_DOWNSAMPLE", True)
     monkeypatch.setattr(mode, "clear_scan_caches", lambda: None)
-    monkeypatch.setattr(mode, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(mode, "list_library_artists",
+                        lambda **_kw: [artist_dir])
     monkeypatch.setattr(mode.hidden_mod, "load", lambda: {})
     monkeypatch.setattr(
         mode.downsample_state,
@@ -420,7 +421,8 @@ def test_walk_reports_a_flush_warning_as_unfinished_work(
     monkeypatch.setattr(cfg, "DOWNSAMPLE_KEEP_ORIGINALS", "keep")
     monkeypatch.setattr(mode, "HAVE_DOWNSAMPLE", True)
     monkeypatch.setattr(mode, "clear_scan_caches", lambda: None)
-    monkeypatch.setattr(mode, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(mode, "list_library_artists",
+                        lambda **_kw: [artist_dir])
     monkeypatch.setattr(mode.hidden_mod, "load", lambda: {})
     monkeypatch.setattr(
         mode.downsample_state,

@@ -86,9 +86,12 @@ def run_library_lyrics_mode(args):
 
 def _report_summary(res, *, dry_run):
     total = res.get("total", 0)
+    unreadable = res.get("unreadable_artists", [])
+    if unreadable:
+        log.warning("Unchecked artists: " + ", ".join(unreadable) + ". Retry after checking permissions.")
     if not total:
         log.info(fmt(C.YELLOW, "  No FLAC files found in the library."))
-        return False
+        return bool(unreadable)
 
     summary = summarize_lyrics_result(res)
     processed = summary["processed"]
@@ -101,7 +104,7 @@ def _report_summary(res, *, dry_run):
             f"     Scanned {processed} of {plural(summary['candidate_total'], 'track')}. "
             "No provider work started."))
         return True
-    if not processed and not summary["stopped"]:
+    if not processed and not summary["stopped"] and not unreadable:
         log.info(fmt(C.GREEN, "  ✓  Lyrics pass complete."))
         log.info(fmt(C.GRAY,
             f"     Nothing needed checking; all {plural(total, 'track')} "

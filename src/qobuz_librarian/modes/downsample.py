@@ -43,10 +43,16 @@ def run_downsample_walk_mode(args):
             "  ⚠  Downsampling isn't available (needs ffmpeg and flac)."))
         return EXIT_CONFIG
 
-    all_artists = list_library_artists()
+    discovery_errors = {}
+
+    def artist_read_failed(path, error):
+        discovery_errors[path.name] = str(error)
+        log.warning(f"Unreadable artist {path.name}: {error}. Retry after checking permissions.")
+
+    all_artists = list_library_artists(on_artist_error=artist_read_failed)
     if not all_artists:
         log.info(fmt(C.YELLOW, "  ⚠  No artist directories found."))
-        return 0
+        return EXIT_GENERAL if discovery_errors else 0
 
     keep_originals = cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
     if cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep":
@@ -82,6 +88,7 @@ def run_downsample_walk_mode(args):
         all_artists,
         hidden=hidden,
         on_artist=_on_artist,
+        discovery_errors=discovery_errors,
         persist=not args.dry_run,
     )
     unchecked = len(refresh.errors)

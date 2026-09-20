@@ -389,7 +389,7 @@ def gap_fill_receipts(value) -> dict | None:
         return None
 
 
-def validate(candidate: dict) -> dict:
+def validate(candidate: dict, *, missing_premises=None) -> dict:
     """Check a saved review against the current files before using it."""
     absent = _canonical_absent(candidate)
     if absent is not None:
@@ -400,7 +400,13 @@ def validate(candidate: dict) -> dict:
             "This saved review predates local file receipts. Refresh it before "
             "changing music files."
         )
-    current = capture(premise["kind"], premise["path"])
+    if premise["kind"] == "missing" and missing_premises is not None:
+        path = premise["path"]
+        if path not in missing_premises:
+            missing_premises[path] = capture("missing", path)
+        current = missing_premises[path]
+    else:
+        current = capture(premise["kind"], premise["path"])
     if not _durable_premises_match(premise, current):
         raise CandidateStale(
             "The local files changed after this review was built. Refresh the "
@@ -458,14 +464,22 @@ def validate_container(candidate: dict) -> dict:
 
 
 def validate_all(candidates) -> None:
-    """Raise CandidateStale unless every row still matches its files.
-
-    Each validation seals the row's whole folder again, so the receipts are
-    discarded as they are checked rather than held: keeping one per row put
-    approving a large review over the container's memory ceiling.
-    """
+    """Check every row, sharing artist captures only within this pass."""
+    missing_premises = {}
     for candidate in candidates:
-        validate(candidate)
+        validate(candidate, missing_premises=missing_premises)
+
+
+def stale_candidate_ids(candidates) -> set:
+    """Find stale rows, sharing artist captures only within this pass."""
+    missing_premises = {}
+    stale = set()
+    for candidate in candidates:
+        try:
+            validate(candidate, missing_premises=missing_premises)
+        except CandidateStale:
+            stale.add(candidate.get("cid"))
+    return stale
 
 
 def expected_album_receipt(candidate: dict) -> dict | None:
