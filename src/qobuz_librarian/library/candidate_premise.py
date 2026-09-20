@@ -457,8 +457,15 @@ def validate_container(candidate: dict) -> dict:
     return premise
 
 
-def validate_all(candidates) -> list[dict]:
-    return [validate(candidate) for candidate in candidates]
+def validate_all(candidates) -> None:
+    """Raise CandidateStale unless every row still matches its files.
+
+    Each validation seals the row's whole folder again, so the receipts are
+    discarded as they are checked rather than held: keeping one per row put
+    approving a large review over the container's memory ceiling.
+    """
+    for candidate in candidates:
+        validate(candidate)
 
 
 def expected_album_receipt(candidate: dict) -> dict | None:
