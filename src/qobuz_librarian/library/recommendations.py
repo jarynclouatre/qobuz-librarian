@@ -130,7 +130,7 @@ def read_library() -> Library:
     resolutions = cached_artist_resolutions()
     keys, raws, seeds, albums = set(), [], [], []
     # An unreadable artist still counts as owned, so it is not recommended
-    # back to her, but its albums cannot be read.
+    # back to the user, but its albums cannot be read.
     unreadable = []
     directories = list_library_artists(
         on_artist_error=lambda path, error: unreadable.append(path))
