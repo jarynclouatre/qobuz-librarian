@@ -5101,6 +5101,28 @@ def test_clear_history_keeps_memory_and_reports_failed_durable_delete(client, mo
         _remove_job(finished)
 
 
+def test_partial_search_download_parks_no_library_review(monkeypatch):
+    # A download that landed short used to invent a review titled "Library
+    # scan", waiting on a decision nobody asked for, when no review was open.
+    # Its shortfall is already on the download's own row, with a working Retry.
+    import qobuz_librarian.web.flows as flows_mod
+
+    parked = []
+    monkeypatch.setattr(flows_mod, "refold_into_living_review",
+                        lambda *_a, **_k: None)
+    monkeypatch.setattr(flows_mod, "_park_library_failures",
+                        lambda *a, **k: parked.append((a, k)))
+    monkeypatch.setattr(flows_mod, "_album_candidate_spec",
+                        lambda *_a, **_k: {"artist": "A", "title": "B"})
+
+    flows_mod._fold_partial_gap_fill({"id": "q1"}, "A", 3)
+    assert parked == []
+
+    flows_mod._fold_partial_gap_fill({"id": "q1"}, "A", 3,
+                                     park_when_absent=True)
+    assert len(parked) == 1
+
+
 def test_download_partial_album_proceeds_to_gap_fill(client, monkeypatch):
     from pathlib import Path
 

@@ -900,14 +900,20 @@ def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
     return True
 
 
-def _fold_partial_gap_fill(full_album, artist_name, n_missing):
+def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
+                           park_when_absent=False):
     """A partial download (some tracks failed) leaves the album on disk with
     gaps. Fold it into the living Library review as an unticked Gap Fill
     candidate right away, the app tracks its own downloads, so the gap must
-    not wait for the next manual refresh to become visible. With no library
-    review parked, a fresh one is parked so /library shows it. Runs after
+    not wait for the next manual refresh to become visible. Runs after
     prune_library_review_candidates, which just dropped the album's stale
-    Missing candidates, this replaces them with the honest remainder."""
+    Missing candidates, this replaces them with the honest remainder.
+
+    With no review open, only a run that came from one parks a fresh review.
+    A download started from Search has no review behind it, and parking one
+    presented the app's own bookkeeping as a "Library scan" waiting on a
+    decision the user never asked for. That album's shortfall is already on
+    the download's own row, where Retry fetches the missing tracks."""
     spec = _album_candidate_spec(
         {**full_album, "_partial_missing_count": n_missing},
         artist_name, selected=False)
@@ -915,6 +921,8 @@ def _fold_partial_gap_fill(full_album, artist_name, n_missing):
     if folded is False:
         return False
     if folded is None:
+        if not park_when_absent:
+            return True
         return _park_library_failures(
             [spec], ticked=False,
             summary="1 album downloaded only partly: the missing tracks "
@@ -2431,7 +2439,8 @@ def execute_albums(job, chosen, token):
                     _remember_review_save(_return_new_release_picks([cand]))
                 elif (is_library_run or is_restore_run) and retryable:
                     _remember_review_save(_fold_partial_gap_fill(
-                        full, cand.get("artist") or "", retryable))
+                        full, cand.get("artist") or "", retryable,
+                        park_when_absent=True))
             elif attention_kind:
                 attention_counts[attention_kind] += 1
                 if attention_kind == "quality":
