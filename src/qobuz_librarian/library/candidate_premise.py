@@ -266,6 +266,69 @@ def _validate_absent(saved) -> dict:
     }
 
 
+def restore_candidate(candidate: dict, premise) -> dict:
+    payload = candidate.get("payload") or {}
+    if (
+        premise is None
+        or not isinstance(payload, dict)
+        or "_premise" in payload
+    ):
+        return candidate
+    return {**candidate, "payload": {**payload, "_premise": premise}}
+
+
+def compact_candidate(candidate: dict, premise) -> dict:
+    payload = candidate.get("payload") or {}
+    if premise is None or not isinstance(payload, dict):
+        return candidate
+    payload = dict(payload)
+    value = payload.get("_premise")
+    if value is premise or value == premise:
+        payload.pop("_premise")
+    elif "_premise" not in payload:
+        # A failed capture must not inherit another row's receipt.
+        payload["_premise"] = None
+    return {**candidate, "payload": payload}
+
+
+def restore_artist(entry):
+    if not isinstance(entry, dict) or not isinstance(entry.get("candidates"), list):
+        return entry
+    restored = dict(entry)
+    premise = restored.pop("_premise", None)
+    restored["candidates"] = [
+        restore_candidate(candidate, premise)
+        if isinstance(candidate, dict) else candidate
+        for candidate in entry["candidates"]
+    ]
+    return restored
+
+
+def compact_artist(entry):
+    """Store a shared missing-album premise on its artist snapshot."""
+    entry = restore_artist(entry)
+    if not isinstance(entry, dict) or not isinstance(entry.get("candidates"), list):
+        return entry
+    premise = None
+    for candidate in entry["candidates"]:
+        payload = candidate.get("payload") if isinstance(candidate, dict) else None
+        value = payload.get("_premise") if isinstance(payload, dict) else None
+        if isinstance(value, dict) and value.get("kind") == "missing":
+            premise = value
+            break
+    if premise is None:
+        return entry
+    return {
+        **entry,
+        "_premise": premise,
+        "candidates": [
+            compact_candidate(candidate, premise)
+            if isinstance(candidate, dict) else candidate
+            for candidate in entry["candidates"]
+        ],
+    }
+
+
 def canonical(candidate: dict) -> dict | None:
     """Read and validate a candidate's saved premise."""
     payload = candidate.get("payload") or {}

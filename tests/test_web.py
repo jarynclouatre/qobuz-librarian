@@ -4523,14 +4523,16 @@ def test_cancel_mid_download_folds_every_unfinished_pick_back(monkeypatch):
         _remove_job(running)
 
 
+@pytest.mark.parametrize("legacy_review", [True, False])
 def test_missing_batch_allows_an_earlier_sibling_album_to_land(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, legacy_review):
     """One artist's first download must not stale its next missing album."""
     from copy import deepcopy
     from types import SimpleNamespace
 
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.library.candidate_premise import capture
+    from qobuz_librarian import state_file
+    from qobuz_librarian.library import candidate_premise, library_scan_state
     from qobuz_librarian.modes import process as process_mod
     from qobuz_librarian.web import flows
 
@@ -4541,23 +4543,33 @@ def test_missing_batch_allows_an_earlier_sibling_album_to_land(
     (existing / "01.flac").write_bytes(b"existing audio")
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "ARTIST_API_DELAY", 0)
-    premise = capture("missing", artist_dir)
+    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "review.json")
+    premise = candidate_premise.capture("missing", artist_dir)
     assert premise is not None
 
-    job = jm.Job(title="Library run", status=jm.JobStatus.RUNNING)
-    job.execute_kind = "library"
+    candidates = []
     for album_id in ("First", "Second"):
-        job.add_candidate(
-            "album",
-            album_id,
-            "Artist",
-            payload={
+        candidates.append({
+            "kind": "album", "title": album_id, "artist": "Artist",
+            "payload": {
                 "album_id": album_id,
                 "_artist_dir_path": str(artist_dir),
                 "_premise": deepcopy(premise),
             },
-            selected=True,
-        )
+            "selected": True,
+        })
+    artists = {"Artist": {"candidates": candidates}}
+    if legacy_review:
+        state_file.write_json(cfg.LIBRARY_SCAN_STATE_FILE, {
+            "version": 1, "kinds": {"missing": {"artists": artists}},
+        })
+    else:
+        assert library_scan_state.save_kind("missing", artists=artists, complete=True)
+    job = jm.Job(title="Library run", status=jm.JobStatus.RUNNING)
+    job.execute_kind = "library"
+    saved = library_scan_state.kind_state("missing")["artists"]["Artist"]
+    for candidate in saved["candidates"]:
+        flows._add_candidate_spec(job, candidate)
     monkeypatch.setattr(flows, "build_args", lambda: SimpleNamespace())
     monkeypatch.setattr(
         flows,

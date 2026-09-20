@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -39,6 +40,61 @@ def test_album_candidate_receipt_accepts_unchanged_and_rejects_changed_bytes(
     track.write_bytes(b"different audio bytes")
     with pytest.raises(CandidateStale, match="local files changed"):
         validate(candidate)
+
+
+def test_saved_artist_receipt_does_not_replace_row_evidence(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import (
+        candidate_premise,
+        library_scan_state,
+        scan_checkpoint,
+    )
+
+    _root, album, track = _music_album(tmp_path, monkeypatch)
+    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "review.json")
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
+    old_premise = candidate_premise.capture("missing", album.parent)
+    track.write_bytes(b"changed audio")
+    current = candidate_premise.capture("missing", album.parent)
+    gap_premise = candidate_premise.capture("gap-fill", album)
+    rows = []
+    for album_id in ("current", "uncaptured", "null", "stale", "partial"):
+        rows.append({
+            "kind": "album", "artist": "Artist", "title": album_id,
+            "payload": {"album_id": album_id, "_artist_dir": "Artist",
+                        "_artist_dir_path": str(album.parent)},
+        })
+    rows[0]["payload"]["_premise"] = current
+    rows[2]["payload"]["_premise"] = None
+    rows[3]["payload"]["_premise"] = old_premise
+    rows[4]["payload"].update({
+        "_premise": gap_premise, "album_dir": str(album), "gap_fill": True,
+    })
+    artists = {"Artist": {"candidates": rows}}
+    original = deepcopy(artists)
+
+    assert library_scan_state.save_kind("missing", artists=artists, complete=True)
+    assert scan_checkpoint.save("missing", {"Artist"}, rows, {}, artists)
+    assert artists == original
+    stored = json.loads(cfg.LIBRARY_SCAN_STATE_FILE.read_text())
+    artist = stored["kinds"]["missing"]["artists"]["Artist"]
+    assert artist["_premise"] == current
+    assert artist["candidates"][1]["payload"]["_premise"] is None
+    assert artist["candidates"][2]["payload"]["_premise"] is None
+    assert artist["candidates"][3]["payload"]["_premise"] == old_premise
+
+    resumed = scan_checkpoint.load("missing")
+    for loaded in (
+        library_scan_state.kind_state("missing")["artists"]["Artist"]["candidates"],
+        resumed["candidates"],
+        resumed["artists"]["Artist"]["candidates"],
+    ):
+        assert candidate_premise.validate(loaded[0]) == current
+        for row in loaded[1:4]:
+            with pytest.raises(candidate_premise.CandidateStale):
+                candidate_premise.validate(row)
+        assert candidate_premise.canonical(loaded[3]) == old_premise
+        assert candidate_premise.validate(loaded[4]) == gap_premise
 
 
 def _renumber_mount_ids(premise):

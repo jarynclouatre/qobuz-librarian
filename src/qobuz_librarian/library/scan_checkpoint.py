@@ -20,6 +20,7 @@ from contextlib import AbstractContextManager
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.ui_cli import logging as cli_logging
 
 # The library gap-scan kinds pending() surfaces for the dashboard resume
@@ -86,19 +87,43 @@ def load(kind) -> dict | None:
         cp["seen"] = {}
     if not isinstance(cp.get("artists"), dict):
         cp["artists"] = {}
+    cp["candidates"] = [
+        candidate_premise.restore_candidate(candidate, _artist_premise(candidate, cp["artists"]))
+        for candidate in cp["candidates"]
+    ]
+    cp["artists"] = {
+        name: candidate_premise.restore_artist(entry)
+        for name, entry in cp["artists"].items()
+    }
     if not isinstance(cp.get("meta"), dict):
         cp["meta"] = {}
     return cp
 
 
+def _artist_premise(candidate, artists):
+    payload = candidate.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("_artist_dir") or candidate.get("artist")
+    entry = artists.get(name)
+    return entry.get("_premise") if isinstance(entry, dict) else None
+
+
 def save(kind, scanned, candidates, seen, artists=None, meta=None) -> bool:
     with _lock:
         data = _read()
+        artists = {
+            name: candidate_premise.compact_artist(entry)
+            for name, entry in (artists or {}).items()
+        }
         data[kind] = {
             "scanned": sorted(scanned),
-            "candidates": candidates,
+            "candidates": [
+                candidate_premise.compact_candidate(candidate, _artist_premise(candidate, artists))
+                for candidate in candidates
+            ],
             "seen": seen,
-            "artists": artists or {},
+            "artists": artists,
             "meta": meta or {},
             "ts": time.time(),
         }

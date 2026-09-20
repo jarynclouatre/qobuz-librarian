@@ -1,11 +1,11 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
-import copy
 import math
 import threading
 import time
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
@@ -168,6 +168,7 @@ def _write_state(data):
 
 
 def _clean_artist_state(entry):
+    entry = candidate_premise.restore_artist(entry)
     if not isinstance(entry, dict):
         entry = {}
     candidates = entry.get("candidates")
@@ -195,8 +196,9 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
               limited: bool = False):
     with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
         previous = load()
-        data = copy.deepcopy(previous)
-        kinds = data.setdefault("kinds", {})
+        # Keep the previous snapshot intact for a failed publication's rollback.
+        data = dict(previous)
+        kinds = data["kinds"] = dict(previous.get("kinds") or {})
         now = time.time()
         kinds[kind] = {
             "updated_at": now,
@@ -206,7 +208,7 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
             "limited": bool(limited),
             "quality_signature": str(quality_sig or ""),
             "artists": {
-                str(name): _clean_artist_state(entry)
+                str(name): candidate_premise.compact_artist(_clean_artist_state(entry))
                 for name, entry in (artists or {}).items()
             },
         }
@@ -324,7 +326,7 @@ def remove_album(album_id) -> bool:
             if len(candidates) != len(cleaned["candidates"]):
                 changed = True
             cleaned["candidates"] = candidates
-            rebuilt[name] = cleaned
+            rebuilt[name] = candidate_premise.compact_artist(cleaned)
         if not changed:
             return generation_state.note_review_removal(album_id)
         revision = generation_state.reserve_revision()

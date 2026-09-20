@@ -913,6 +913,7 @@ def test_missing_albums_share_one_artist_receipt(tmp_path, monkeypatch):
         discovery,
         downsample_state,
         library_scan_state,
+        scan_checkpoint,
     )
     from qobuz_librarian.web import flows
 
@@ -960,6 +961,51 @@ def test_missing_albums_share_one_artist_receipt(tmp_path, monkeypatch):
     assert premises[0] is not None
     assert premises[0] == premises[1]
     assert captures == [artist_dir]
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
+    stored = json.loads(cfg.LIBRARY_SCAN_STATE_FILE.read_text())
+    artist = stored["kinds"]["missing"]["artists"]["Artist"]
+    assert artist["_premise"] == premises[0]
+    assert all("_premise" not in row["payload"] for row in artist["candidates"])
+    assert all(candidate_premise.validate(row) == premises[0] for row in saved)
+
+    artists = library_scan_state.kind_state("missing")["artists"]
+    assert scan_checkpoint.save("missing", {"Artist"}, saved, {}, artists)
+    checkpoint = json.loads(cfg.SCAN_CHECKPOINT_FILE.read_text())["missing"]
+    assert checkpoint["artists"]["Artist"]["_premise"] == premises[0]
+    for rows in (checkpoint["candidates"], checkpoint["artists"]["Artist"]["candidates"]):
+        assert all("_premise" not in row["payload"] for row in rows)
+    resumed = scan_checkpoint.load("missing")
+    assert resumed["candidates"] == saved
+    assert resumed["artists"] == artists
+
+    assert library_scan_state.remove_album("one")
+    stored = json.loads(cfg.LIBRARY_SCAN_STATE_FILE.read_text())
+    artist = stored["kinds"]["missing"]["artists"]["Artist"]
+    assert artist["_premise"] == premises[0]
+    assert [row["payload"]["album_id"] for row in artist["candidates"]] == ["two"]
+    assert "_premise" not in artist["candidates"][0]["payload"]
+
+
+def test_failed_scan_publication_preserves_parked_review(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import generation_state, library_scan_state
+
+    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library.json")
+    assert library_scan_state.save_kind(
+        "missing", complete=True,
+        artists={"Artist": {"candidates": [{
+            "kind": "album", "title": "Parked", "payload": {"album_id": "one"},
+        }]}},
+    )
+    assert library_scan_state.save_kind("partial", artists={}, complete=True)
+    previous = cfg.LIBRARY_SCAN_STATE_FILE.read_bytes()
+    monkeypatch.setattr(generation_state, "mark_output_current", lambda *_a, **_k: False)
+
+    assert library_scan_state.save_kind(
+        "missing", artists={}, complete=True, generation=2, revision=3,
+    ) is None
+
+    assert cfg.LIBRARY_SCAN_STATE_FILE.read_bytes() == previous
 
 
 def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
