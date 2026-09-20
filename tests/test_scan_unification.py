@@ -749,6 +749,8 @@ def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, 
 
     artist_dir = tmp_path / "Artist"
     artist_dir.mkdir()
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
+    monkeypatch.setattr(flows.scan_checkpoint.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
     monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
     monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "fp", raising=False)
@@ -764,14 +766,7 @@ def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, 
         "refresh_for_artists",
         lambda *_a, **_k: upgrade_state.RefreshResult([], ["Artist"], {}, True, {"Artist": "fp"}),
     )
-    monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
-    saved_checkpoints = []
     cleared = []
-    monkeypatch.setattr(
-        flows.scan_checkpoint,
-        "save",
-        lambda *args, **kwargs: saved_checkpoints.append((args, kwargs)) or True,
-    )
     monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda kind: cleared.append(kind))
     monkeypatch.setattr(library_scan_state, "save_kind", lambda *_a, **_k: None)
     monkeypatch.setattr(flows, "_record_last_scan", lambda: None)
@@ -794,9 +789,53 @@ def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, 
     flows.scan_library(job, "tok")
 
     assert [c["payload"]["album_id"] for c in job.candidates] == ["album-1"]
-    assert saved_checkpoints
+    saved = flows.scan_checkpoint.load("missing")
+    assert saved["scanned"] == ["Artist"]
+    assert saved["candidates"] == job.candidates
+    assert saved["artists"]["Artist"]["catalog_ids"] == ["album-1"]
     assert cleared == []
     assert "saved scan state couldn't be written" in job.summary
+
+
+@pytest.mark.parametrize("scan_name,kind", [("scan_library", "missing"),
+                                          ("scan_repairs", "repair")])
+def test_scan_keeps_last_artist_on_api_abort(tmp_path, monkeypatch, scan_name, kind):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import downsample_state
+    from qobuz_librarian.web import flows
+
+    artists = [tmp_path / "A", tmp_path / "B"]
+    for artist in artists:
+        artist.mkdir()
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
+    monkeypatch.setattr(flows.scan_checkpoint.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(flows, "as_completed", iter)
+    monkeypatch.setattr(
+        flows.downsample_state, "refresh_for_artists",
+        lambda *_a, **_k: downsample_state.RefreshResult([], ["A", "B"], {}, True),
+    )
+
+    def scan_artist(artist, *_a, **_k):
+        if artist.name == "B":
+            raise flows.QobuzUnavailable("offline")
+        if kind == "repair":
+            return artist.name, {
+                "specs": [], "verified_ok": 1, "unverified": 0, "failed": 0,
+                "proof": flows._capture_repair_artist_proof(artist),
+            }
+        return artist.name, artist.name, [], "artist-id", ["album"], {}
+
+    monkeypatch.setattr(flows, "_scan_library_artist", scan_artist)
+    monkeypatch.setattr(flows, "_scan_repair_artist", scan_artist)
+    with pytest.raises(flows.QobuzUnavailable):
+        getattr(flows, scan_name)(jm.Job(title="scan"), "tok")
+
+    saved = flows.scan_checkpoint.load(kind)
+    assert saved["scanned"] == ["A"]
+    assert set(saved["artists"]) == {"A"}
 
 
 def test_resumed_baseline_rescans_checkpoint_entries_without_artist_snapshot(
@@ -888,10 +927,6 @@ def test_missing_albums_share_one_artist_receipt(tmp_path, monkeypatch):
         cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
     monkeypatch.setattr(
         cfg, "LIBRARY_GENERATION_STATE_FILE", tmp_path / "generation.json")
-    # A real scan writes a collection backup, and a shared one makes every
-    # later download refuse: the library looks like it lost its albums.
-    monkeypatch.setattr(
-        cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "collection-backups"))
     gaps = [
         discovery.AlbumGap(
             qobuz_album={"id": album_id, "title": f"Missing {album_id}"},

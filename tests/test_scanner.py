@@ -114,6 +114,58 @@ def test_scan_checkpoint_load_coerces_wrong_types(tmp_path, monkeypatch):
     assert set(cp["scanned"]) == set() and dict(cp["seen"]) == {}
 
 
+def test_scan_checkpoint_batches_writes_without_losing_final_progress(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scan_checkpoint
+
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
+    now = [100.0]
+    monkeypatch.setattr(scan_checkpoint.time, "monotonic", lambda: now[0])
+    scan_checkpoint.save("repair", {"Other"}, [], {})
+    candidates = [{"payload": {"receipt": {"files": ["01.flac"]}}}]
+    seen = {"id": ["album"]}
+    artists = {"A": {"catalog_ids": ["album"]}}
+    meta = {"version": 1}
+    with patch.object(scan_checkpoint, "_write", wraps=scan_checkpoint._write) as write:
+        with scan_checkpoint.Writer("missing") as checkpoint:
+            checkpoint.save({"A"}, candidates, seen, artists, meta)
+            checkpoint.save({"A", "B"}, candidates, seen, artists, meta)
+            assert write.call_count == 1
+            assert scan_checkpoint.load("missing")["scanned"] == ["A"]
+
+            now[0] += scan_checkpoint.CHECKPOINT_INTERVAL_SECONDS
+            checkpoint.save({"A", "B", "C"}, candidates, seen, artists, meta)
+            assert write.call_count == 2
+            assert scan_checkpoint.load("missing")["scanned"] == ["A", "B", "C"]
+            checkpoint.save({"A", "B", "C", "D"}, candidates, seen, artists, meta)
+            assert write.call_count == 2
+
+        assert write.call_count == 3
+    saved = scan_checkpoint.load("missing")
+    assert saved["scanned"] == ["A", "B", "C", "D"]
+    assert saved["candidates"] == candidates
+    assert saved["seen"] == seen
+    assert saved["artists"] == artists
+    assert saved["meta"] == meta
+    assert set(saved) == {"scanned", "candidates", "seen", "artists", "meta", "ts"}
+    assert scan_checkpoint.load("repair")["scanned"] == ["Other"]
+
+
+def test_scan_checkpoint_clear_does_not_restore_buffered_progress(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scan_checkpoint
+
+    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
+    monkeypatch.setattr(scan_checkpoint.time, "monotonic", lambda: 100.0)
+    with scan_checkpoint.Writer("missing") as checkpoint:
+        checkpoint.save({"A"}, [], {})
+        checkpoint.save({"A", "B"}, [], {})
+        assert checkpoint.clear()
+        assert scan_checkpoint.load("missing") is None
+        assert not cfg.SCAN_CHECKPOINT_FILE.exists()
+    assert scan_checkpoint.load("missing") is None
+
+
 def test_dir_caches_survive_a_concurrent_clear(monkeypatch, tmp_path):
     # clear_scan_caches() (a concurrent download) can empty a scan cache between
     # the `in` check and the lookup, and that KeyError escapes the OSError guard

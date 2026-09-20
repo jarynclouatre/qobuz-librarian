@@ -16,6 +16,7 @@ means "an unfinished scan of that kind is waiting to resume."
 """
 import threading
 import time
+from contextlib import AbstractContextManager
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
@@ -24,6 +25,10 @@ from qobuz_librarian.ui_cli import logging as cli_logging
 # The library gap-scan kinds pending() surfaces for the dashboard resume
 # prompt.
 _KINDS = ("missing", "partial")
+
+# A crash can lose this interval's worth of completed artists, plus any
+# artists still being scanned. Normal exits flush the remaining progress.
+CHECKPOINT_INTERVAL_SECONDS = 5.0
 
 # save/clear are read-modify-write of the shared file; serialise them so two
 # scan kinds progressing in parallel can't clobber each other's entry.
@@ -98,6 +103,43 @@ def save(kind, scanned, candidates, seen, artists=None, meta=None) -> bool:
             "ts": time.time(),
         }
         return _write(data)
+
+
+class Writer(AbstractContextManager):
+    """Coalesce one scan's saves on its result-collection thread."""
+
+    def __init__(self, kind):
+        self.kind = kind
+        self._pending = None
+        self._last_write = None
+
+    def save(self, scanned, candidates, seen, artists=None, meta=None) -> bool:
+        # Keep the single writer's live containers, without copying receipts.
+        self._pending = (scanned, candidates, seen, artists, meta)
+        if (self._last_write is None
+                or time.monotonic() - self._last_write >= CHECKPOINT_INTERVAL_SECONDS):
+            return self.flush()
+        return True
+
+    def flush(self) -> bool:
+        if self._pending is None:
+            return True
+        self._last_write = time.monotonic()
+        saved = save(self.kind, *self._pending)
+        if saved is not False:
+            self._pending = None
+        return saved
+
+    def clear(self) -> bool:
+        # Drop the buffer rather than flushing it: writing the whole file out
+        # to delete the entry a moment later is the cost this class exists to
+        # avoid.
+        self._pending = None
+        self._last_write = None
+        return clear(self.kind)
+
+    def __exit__(self, *exc):
+        self.flush()
 
 
 def clear(kind) -> bool:

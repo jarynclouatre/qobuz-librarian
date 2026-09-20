@@ -15,6 +15,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_collection_backups(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+
+    monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "collection-backups"))
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_data_dir():
     """Point cfg.DATA_DIR and the files derived from it at a temp dir for

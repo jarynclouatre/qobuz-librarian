@@ -1473,15 +1473,17 @@ def scan_library(job, token, partial_only=False, force_full=False):
         return
     scan_started_revision = generation_state.revision()
     try:
-        return _scan_library_impl(
-            job,
-            token,
-            partial_only=partial_only,
-            force_full=force_full,
-            attempt_id=attempt_id,
-            scan_started_revision=scan_started_revision,
-            allow_checkpoint_resume=allow_checkpoint_resume,
-        )
+        with scan_checkpoint.Writer("partial" if partial_only else "missing") as checkpoint:
+            return _scan_library_impl(
+                job,
+                token,
+                checkpoint=checkpoint,
+                partial_only=partial_only,
+                force_full=force_full,
+                attempt_id=attempt_id,
+                scan_started_revision=scan_started_revision,
+                allow_checkpoint_resume=allow_checkpoint_resume,
+            )
     except Exception as exc:
         if not partial_only:
             generation_state.finish_attempt(attempt_id, "failed", str(exc))
@@ -1492,6 +1494,7 @@ def _scan_library_impl(
     job,
     token,
     *,
+    checkpoint,
     partial_only=False,
     force_full=False,
     attempt_id=None,
@@ -1539,7 +1542,7 @@ def _scan_library_impl(
     else:
         scanned = set()
         baseline_seen = {}
-        scan_checkpoint.save(kind, scanned, [], baseline_seen)
+        checkpoint.save(scanned, [], baseline_seen)
     total = 0
     # Snapshot the dismissed-album memory before restoring the checkpoint so
     # albums the user dismissed since the interruption are not re-added, and
@@ -1714,8 +1717,7 @@ def _scan_library_impl(
             todo.append(artist_dir)
     if reused:
         log.info(f"  Reused {plural(reused, 'unchanged artist')} from the saved scan.")
-        scan_checkpoint.save(
-            kind, scanned, job.candidates, baseline_seen, state_artists)
+        checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # Resolve/scan artists in parallel (each worker has its own HTTP session),
     # but collect results and write candidates on this one thread so the
@@ -1730,6 +1732,7 @@ def _scan_library_impl(
             if job.cancel_requested:
                 for f in futures:
                     f.cancel()
+                checkpoint.flush()
                 log.info("Cancelled. Stopping scan.")
                 break
             done += 1
@@ -1742,6 +1745,7 @@ def _scan_library_impl(
                 # silently report a partial library as the full picture.
                 for f in futures:
                     f.cancel()
+                checkpoint.flush()
                 raise
             except Exception as e:
                 # A per-artist failure (not auth/outage) is left unscanned so a
@@ -1791,10 +1795,10 @@ def _scan_library_impl(
             if shown:
                 tail = "with Gap Fill candidates" if partial_only else "to fill"
                 log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
-            scan_checkpoint.save(
-                kind, scanned, job.candidates, baseline_seen, state_artists)
+            checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     # Reached here only without an AuthLost/outage abort (that re-raises out
     # above, leaving the checkpoint for resume and not seeding the baseline).
+    checkpoint.flush()
     flush_resolve_cache()
     baseline_save_failed = False
     scan_state_save_failed = False
@@ -1804,7 +1808,7 @@ def _scan_library_impl(
     catalog_complete = False
     if job.cancel_requested:
         # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
-        if not scan_checkpoint.clear(kind):
+        if not checkpoint.clear():
             job.push_line(
                 "The stopped scan checkpoint could not be cleared. It will be "
                 "ignored unless its artist proofs still match."
@@ -1923,7 +1927,7 @@ def _scan_library_impl(
                 baseline_seen,
                 generation=scan_generation,
             )
-            if not scan_checkpoint.clear(kind):
+            if not checkpoint.clear():
                 job.push_line(
                     "The completed scan checkpoint could not be cleared. Its "
                     "saved generation is complete, so it will not be treated "
@@ -1934,13 +1938,11 @@ def _scan_library_impl(
         elif catalog_complete and scan_state_save_failed:
             # Keep a complete resumable copy when the main review could not be
             # saved.
-            scan_checkpoint.save(
-                kind, scanned, job.candidates, baseline_seen, state_artists)
+            checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
         elif catalog_complete and partial_only:
-            scan_checkpoint.clear(kind)
+            checkpoint.clear()
         elif scanned or job.candidates or baseline_seen:
-            scan_checkpoint.save(
-                kind, scanned, job.candidates, baseline_seen, state_artists)
+            checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     if job.cancel_requested:
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
                        if total else "Stopped before anything turned up.")
@@ -3625,6 +3627,11 @@ def _repair_scan_caveats(n_unverified, n_failed_albums, n_failed_artists):
 def scan_repairs(job, token):
     """Scan every album for ISRC-verified truncated FLACs (fanned out across
     ARTIST_SCAN_WORKERS; see _scan_repair_artist for the per-artist work)."""
+    with scan_checkpoint.Writer("repair") as checkpoint:
+        return _scan_repairs_impl(job, token, checkpoint)
+
+
+def _scan_repairs_impl(job, token, checkpoint):
     clear_scan_caches()
     artists = list_library_artists()
     if not artists:
@@ -3686,9 +3693,8 @@ def scan_repairs(job, token):
         if hasattr(job, "push_line"):
             job.push_line(message)
 
-    def save_checkpoint():
-        saved = scan_checkpoint.save(
-            "repair",
+    def save_checkpoint(*, force=False):
+        saved = checkpoint.save(
             scanned,
             [],
             {},
@@ -3697,6 +3703,8 @@ def scan_repairs(job, token):
                 "repair_checkpoint_version": _REPAIR_CHECKPOINT_VERSION,
             },
         )
+        if force and saved is not False:
+            saved = checkpoint.flush()
         if saved is False:
             warn_checkpoint(
                 "Repair progress could not be saved. Check the data folder; "
@@ -3733,7 +3741,7 @@ def scan_repairs(job, token):
                 job.summary = stopped + _repair_scan_caveats(
                     n_unverified, n_failed_albums, n_failed_artists)
                 log.info("Cancelled. Stopping scan.")
-                if scan_checkpoint.clear("repair") is False:
+                if checkpoint.clear() is False:
                     warning = (
                         " Old resume data could not be cleared; check the data "
                         "folder before running Repair again."
@@ -3751,7 +3759,7 @@ def scan_repairs(job, token):
                 for f in futures:
                     f.cancel()
                 if scanned:
-                    save_checkpoint()
+                    save_checkpoint(force=True)
                 raise
             except Exception as e:
                 # A per-artist failure (not auth/outage) is left unscanned so a
@@ -3791,7 +3799,7 @@ def scan_repairs(job, token):
                               _repair_item(current, albums_seen, total),
                               found=total, unit="artist")
             save_checkpoint()
-    clear_failed = scan_checkpoint.clear("repair") is False
+    clear_failed = checkpoint.clear() is False
     # Honest summary: report what was actually decode-verified, and never
     # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
