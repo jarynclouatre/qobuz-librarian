@@ -7,6 +7,11 @@ services:
     init: true
     mem_limit: 1g
     pids_limit: 256
+    # Receipt capture holds file guards for a whole artist folder at once.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     security_opt:
       - "no-new-privileges:true"
     cap_drop:

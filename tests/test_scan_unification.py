@@ -80,7 +80,7 @@ def test_baseline_scan_refreshes_shared_downsample_state(tmp_path, monkeypatch):
         calls.append([a.name for a in artists])
         return downsample_state.RefreshResult([], ["Artist"], {}, True)
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_refresh)
     monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
     monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
@@ -120,7 +120,7 @@ def test_a_completed_scan_leaves_a_collection_snapshot(tmp_path, monkeypatch):
     scanner.clear_scan_caches()
 
     artist_dir = music / "Artist"
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
     monkeypatch.setattr(flows.scan_checkpoint, "save", lambda *a, **k: None)
     monkeypatch.setattr(flows.scan_checkpoint, "clear", lambda _kind: True)
@@ -576,7 +576,7 @@ def test_baseline_scan_refreshes_shared_upgrade_state(tmp_path, monkeypatch):
         calls.append([a.name for a in artists])
         return upgrade_state.RefreshResult([], ["Artist"], {}, True)
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_downsample_refresh)
     monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists", fake_upgrade_refresh)
     monkeypatch.setattr(flows.scan_checkpoint, "load", lambda _kind: None)
@@ -637,7 +637,7 @@ def test_incomplete_baseline_scan_does_not_publish_quality_state(
             upgrade_state.save(result)
         return result
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists",
                         fake_downsample_refresh)
     monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists",
@@ -662,6 +662,87 @@ def test_incomplete_baseline_scan_does_not_publish_quality_state(
     assert downsample_state.load()["complete"] is False
     assert upgrade_state.load()["complete"] is False
     assert badge_calls == []
+
+
+@pytest.mark.parametrize("readable_names", [("Readable",), ()])
+def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readable_names):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import (
+        discovery,
+        downsample_state,
+        generation_state,
+        library_scan_state,
+        new_releases,
+        scan_checkpoint,
+        scanner,
+    )
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    blocked = music / "Unreadable"
+    for name in (blocked.name, *readable_names):
+        album = music / name / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
+    for setting in (
+        "LIBRARY_SCAN_STATE_FILE", "LIBRARY_GENERATION_STATE_FILE",
+        "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "DOWNSAMPLE_STATE_FILE",
+    ):
+        monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
+    scandir = scanner.os.scandir
+
+    def unreadable_scandir(path):
+        if path == blocked or path == str(blocked):
+            raise PermissionError(errno.EACCES, "Permission denied", str(blocked))
+        return scandir(path)
+
+    monkeypatch.setattr(scanner.os, "scandir", unreadable_scandir)
+    checked = []
+
+    def scan_artist(artist, *_a, **_k):
+        checked.append(artist.name)
+        gap = discovery.AlbumGap(
+            qobuz_album={"id": artist.name, "title": "Missing album"},
+            on_disk_dir=None,
+        )
+        return artist.name, artist.name, [gap], artist.name, [artist.name], {}
+
+    monkeypatch.setattr(flows, "_scan_library_artist", scan_artist)
+    monkeypatch.setattr(
+        downsample_state, "refresh_for_artists",
+        lambda artists, **_k: downsample_state.RefreshResult(
+            [], [artist.name for artist in artists], {}, True),
+    )
+    job = jm.Job(title="baseline")
+    flows.scan_library(job, "")
+
+    assert not job.error
+    assert checked == list(readable_names)
+    assert len(job.candidates) == len(readable_names)
+    assert job.unchecked_artists == 1
+    assert blocked.name in job.summary
+    checkpoint = scan_checkpoint.load("missing")
+    assert set(checkpoint["scanned"]) == set(readable_names)
+    assert set(checkpoint["artists"]) == set(readable_names)
+    assert blocked.name not in checkpoint["seen"]
+    assert not library_scan_state.kind_state("missing")["complete"]
+    assert not new_releases.load()["seen"]
+    assert not new_releases.is_baseline_complete()
+    assert generation_state.load()["latest_attempt"]["status"] == "incomplete"
+
+    monkeypatch.setattr(scanner.os, "scandir", scandir)
+    checked.clear()
+    flows.scan_library(jm.Job(title="retry"), "")
+
+    assert checked == [blocked.name]
+    assert scan_checkpoint.load("missing") is None
+    assert set(library_scan_state.kind_state("missing")["artists"]) == {
+        blocked.name, *readable_names,
+    }
+    assert new_releases.is_baseline_complete()
+    assert blocked.name in new_releases.load()["seen"]
 
 
 def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkeypatch):
@@ -715,7 +796,7 @@ def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkey
             {"Good": "good-fp", "Next": "next-fp"},
         )
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [good_dir, next_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [good_dir, next_dir])
     monkeypatch.setattr(
         flows, "artist_fingerprint", lambda path: f"{path.name.lower()}-fp", raising=False
     )
@@ -752,7 +833,7 @@ def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, 
     monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
     monkeypatch.setattr(flows.scan_checkpoint.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "fp", raising=False)
     monkeypatch.setattr(
         flows.downsample_state,
@@ -811,7 +892,7 @@ def test_scan_keeps_last_artist_on_api_abort(tmp_path, monkeypatch, scan_name, k
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
     monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
     monkeypatch.setattr(flows.scan_checkpoint.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: artists)
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: artists)
     monkeypatch.setattr(flows, "as_completed", iter)
     monkeypatch.setattr(
         flows.downsample_state, "refresh_for_artists",
@@ -868,7 +949,7 @@ def test_resumed_baseline_rescans_checkpoint_entries_without_artist_snapshot(
     }), encoding="utf-8")
     scanned = []
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [good_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [good_dir])
     monkeypatch.setattr(flows, "artist_fingerprint",
                         lambda path: f"{path.name.lower()}-fp", raising=False)
     monkeypatch.setattr(
@@ -1063,7 +1144,7 @@ def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
             fingerprints={},
         )
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "same",
                         raising=False)
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists",
@@ -1139,7 +1220,7 @@ def test_dismissed_album_survives_a_refresh_without_a_rescan(
             fingerprints={},
         )
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "same",
                         raising=False)
     monkeypatch.setattr(flows.downsample_state, "refresh_for_artists", fake_refresh)
@@ -1200,7 +1281,7 @@ def test_scan_library_force_full_ignores_saved_artist_snapshot(
     upgrade_skip = []
     scanned = []
 
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(flows, "artist_fingerprint", lambda _path: "same",
                         raising=False)
     monkeypatch.setattr(
@@ -1264,7 +1345,7 @@ def test_scan_library_skips_upgrade_refresh_when_upgrade_disabled(
     artist_dir.mkdir()
 
     monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False, raising=False)
-    monkeypatch.setattr(flows, "list_library_artists", lambda: [artist_dir])
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
     monkeypatch.setattr(
         flows.downsample_state,
         "refresh_for_artists",

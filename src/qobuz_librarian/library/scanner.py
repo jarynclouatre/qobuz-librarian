@@ -295,7 +295,7 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
     return False
 
 
-def list_library_artists(walk_errors=None):
+def list_library_artists(walk_errors=None, *, on_artist_error=None):
     """List artist directories under MUSIC_ROOT.
 
     Skips dot-folders (startswith(".")) and the staging
@@ -303,6 +303,8 @@ def list_library_artists(walk_errors=None):
     (no audio files anywhere in the tree) are also skipped - they cost an
     API round-trip during scans for zero gain and clutter the walk output.
     A single info line names anything skipped so the user can hand-clean.
+    With ``on_artist_error(path, error)``, unreadable artists are reported
+    and skipped; errors listing MUSIC_ROOT still propagate.
 
     Used for fuzzy resolution and the library / walk+queue / album-fill
     walks.
@@ -319,8 +321,8 @@ def list_library_artists(walk_errors=None):
         walk_errors.append(f"{config.MUSIC_ROOT}: {e}")
         log.info(f"  ⚠  Couldn't list MUSIC_ROOT: {e}.")
         return []
-    try:
-        for d in entries:
+    for d in entries:
+        try:
             if not d.is_dir():
                 continue
             if d.name.startswith("."):          # skip hidden dirs (.Trash, .DS_Store/, etc.)
@@ -334,11 +336,14 @@ def list_library_artists(walk_errors=None):
                 empties.append(d.name)
                 continue
             artists.append(d)
-    except OSError as e:
-        if walk_errors is None:
-            raise
-        walk_errors.append(f"{config.MUSIC_ROOT}: {e}")
-        log.info(f"  ⚠  Couldn't list MUSIC_ROOT: {e}.")
+        except OSError as e:
+            if on_artist_error is not None:
+                on_artist_error(d, e)
+            elif walk_errors is None:
+                raise
+            if walk_errors is not None:
+                walk_errors.append(f"{d}: {e}")
+            log.info(f"  ⚠  Couldn't read artist folder {d}: {e}.")
     if empties:
         names = ", ".join(sorted(empties)[:5])
         more = f" (+{len(empties) - 5} more)" if len(empties) > 5 else ""

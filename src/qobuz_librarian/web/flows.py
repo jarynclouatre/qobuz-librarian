@@ -1502,11 +1502,18 @@ def _scan_library_impl(
     allow_checkpoint_resume=True,
 ):
     clear_scan_caches()
+    unreadable_artists = set()
+
+    def artist_read_failed(artist_dir, _error):
+        if normalize(artist_dir.name) not in VA_NORMALIZED:
+            unreadable_artists.add(artist_dir.name)
+
     # Drop the Various-Artists folder: it has no single Qobuz artist catalog
     # to diff against, so a gap scan can only mis-resolve it.
-    artists = [d for d in list_library_artists()
+    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
                if normalize(d.name) not in VA_NORMALIZED]
-    if not artists:
+    discovery_errors = len(unreadable_artists)
+    if not artists and not discovery_errors:
         _set_empty_library_summary(job)
         if not partial_only:
             generation_state.finish_attempt(
@@ -1676,7 +1683,7 @@ def _scan_library_impl(
     n = len(artists)
     done = len(scanned)
     reused = 0
-    scan_errors = 0
+    scan_errors = discovery_errors
     # Ids for the collection snapshot written when the scan finishes. Artists
     # whose folders haven't changed are skipped by the scan and so aren't here;
     # the snapshot carries their ids forward from the last one.
@@ -1751,6 +1758,8 @@ def _scan_library_impl(
                 # A per-artist failure (not auth/outage) is left unscanned so a
                 # resume retries it rather than baking in a transient miss.
                 scan_errors += 1
+                if isinstance(e, OSError):
+                    unreadable_artists.add(futures[fut].name)
                 log.info(f"    skipped {futures[fut].name}: {e}")
                 job.push_progress(_step("Scanning library"), done, n, futures[fut].name,
                                   found=total, unit="artist")
@@ -1941,7 +1950,8 @@ def _scan_library_impl(
             checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
         elif catalog_complete and partial_only:
             checkpoint.clear()
-        elif scanned or job.candidates or baseline_seen:
+        elif (scanned or job.candidates or baseline_seen
+                or unreadable_artists):
             checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     if job.cancel_requested:
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
@@ -1956,11 +1966,16 @@ def _scan_library_impl(
     # Artists that errored or came back with a short catalog page aren't in
     # state_artists; the checkpoint stays for them and the last-scan stamp is
     # withheld.
-    unchecked = len(artists) - len(state_artists)
+    unchecked = len(artists) - len(state_artists) + discovery_errors
     if not job.cancel_requested and unchecked > 0:
         _record_unchecked_artists(job, unchecked)
-        job.summary += (f" {plural(unchecked, 'artist')} couldn't be checked; "
-                        "scan again to resume from where it left off.")
+        job.summary += f" {plural(unchecked, 'artist')} couldn't be checked"
+        if unreadable_artists:
+            names = ", ".join(sorted(unreadable_artists, key=str.casefold)[:5])
+            more = (f" (+{len(unreadable_artists) - 5} more)"
+                    if len(unreadable_artists) > 5 else "")
+            job.summary += f" ({len(unreadable_artists)} unreadable: {names}{more})"
+        job.summary += "; scan again to resume from where it left off."
     stale_tabs = [
         label for label, refresh, save_failed in (
             ("Upgrade", upgrade_refresh, upgrade_save_failed),
