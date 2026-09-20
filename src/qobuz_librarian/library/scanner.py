@@ -248,15 +248,21 @@ def read_album_dir(album_dir: Path, walk_errors=None):
 
 # ── Library directory listing ─────────────────────────────────────────────────
 _HAS_AUDIO_CACHE: dict = {}
+# Cached for a tree whose walk stopped at its first audio file: it has audio,
+# but whether the rest of it could be read was never established.
+_AUDIO_FOUND_EARLY = object()
 
 
 def _has_audio_anywhere(d: Path, walk_errors=None):
-    """True if audio exists, False if none does, or None after a recorded error.
+    """True if audio exists, False if none does, or None when none was found
+    and part of the tree could not be read.
 
     Without an explicit ``walk_errors`` list, traversal errors propagate so a
     production scan cannot consume an incomplete tree as empty. A caller that
     supplies a list may continue cautiously, but receives None rather than a
-    false claim that the directory contains no audio.
+    false claim that a directory it could not finish reading is empty. That
+    caller also gets the whole tree walked: stopping at the first track hides
+    an unreadable second disc folder behind a readable first one.
 
     Result cached per path: a single scan calls this once per artist plus
     once per album dir, but artist-walk/upgrade-walk/lyric-walk all hit
@@ -269,16 +275,27 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
     # dict between an `in` check and the lookup, and that KeyError would
     # escape the OSError guard below and drop the artist from the scan.
     cached = _HAS_AUDIO_CACHE.get(key)
-    if cached is not None:
+    if cached is _AUDIO_FOUND_EARLY:
+        if walk_errors is None:
+            return True
+    elif cached is not None:
         return cached
     exts = set(config.AUDIO_EXTS)
     error_count = len(walk_errors) if walk_errors is not None else 0
+    found = False
     try:
         for f in iter_tree_no_symlinks(d, errors=walk_errors):
+            if found:
+                continue
             try:
-                if f.is_file() and f.suffix.lower() in exts:
-                    _HAS_AUDIO_CACHE[key] = True
-                    return True
+                # Suffix first: the walk now runs to the end for an errors
+                # caller, and stat'ing every entry on the way would cost a
+                # syscall per file in the library.
+                if f.suffix.lower() in exts and f.is_file():
+                    found = True
+                    if walk_errors is None:
+                        _HAS_AUDIO_CACHE[key] = _AUDIO_FOUND_EARLY
+                        return True
             except OSError as e:
                 if walk_errors is None:
                     raise
@@ -289,10 +306,14 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
         walk_errors.append(f"{d}: {e}")
     if walk_errors is not None and len(walk_errors) > error_count:
         # os.walk consumed a scandir failure via the error callback and walked
-        # on without that subtree - the audio may live exactly there.
-        return None
-    _HAS_AUDIO_CACHE[key] = False
-    return False
+        # on without that subtree. Audio that was seen is still there, so the
+        # album stays in the listing and its caller reads walk_errors to learn
+        # the picture is partial; "no audio" would be a conclusion about the
+        # part that was never read. Neither answer is cached from a tree this
+        # incomplete, so the next walk reports the failure again.
+        return True if found else None
+    _HAS_AUDIO_CACHE[key] = found
+    return found
 
 
 def list_library_artists(walk_errors=None, *, on_artist_error=None):

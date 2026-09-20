@@ -148,7 +148,9 @@ def test_the_library_picture_prefers_the_name_qobuz_uses(monkeypatch):
 
 
 def test_unreadable_album_keeps_artist_owned_but_not_a_recommendation_seed(
-        unreadable_album, caplog):
+        unreadable_album, monkeypatch, caplog):
+    from qobuz_librarian.library import scanner
+
     good, partial, blocked = unreadable_album
 
     owned = rec.read_library()
@@ -157,6 +159,30 @@ def test_unreadable_album_keeps_artist_owned_but_not_a_recommendation_seed(
     assert owned.owns(partial.name)
     assert owned.seeds == [good.name]
     assert str(blocked) in caplog.text
+
+    disc = partial / "Album" / "CD2"
+    blocked.rename(disc)
+    scandir = scanner.os.scandir
+
+    def read(path):
+        if str(path) == str(disc):
+            raise PermissionError(13, "Permission denied", str(disc))
+        return scandir(path)
+
+    with monkeypatch.context() as permissions:
+        permissions.setattr(scanner.os, "scandir", read)
+        caplog.clear()
+        scanner.clear_scan_caches()
+        owned = rec.read_library()
+        assert owned.owns(partial.name)
+        assert owned.seeds == [good.name]
+        assert str(disc) in caplog.text
+
+    caplog.clear()
+    complete = rec.read_library()
+    assert set(complete.seeds) == {good.name, partial.name}
+    assert complete.signature != owned.signature
+    assert not caplog.records
 
 
 def test_a_failed_build_is_left_alone_before_anything_retries_it():
