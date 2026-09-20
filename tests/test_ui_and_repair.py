@@ -72,8 +72,9 @@ def test_repair_sweep_skips_unreadable_album_without_reporting_success(
         caplog.clear()
         scanner.clear_scan_caches()
         assert repair_log.scan_dir_for_isrc_repairs(partial / "Album", "")["unverified"] == 1
+        assert repair._scan_report_repair(
+            partial / "Album", partial.name, Namespace(), "", quiet=True) == "attention"
         assert repair.run_album_repair_mode(Namespace(no_upgrade=False), "") == repair.EXIT_GENERAL
-        assert any("unverified" in record.message for record in caplog.records)
 
     caplog.clear()
     scanner.clear_scan_caches()

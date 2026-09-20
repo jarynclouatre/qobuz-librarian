@@ -288,9 +288,11 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
             if found:
                 continue
             try:
-                # Suffix first: the walk now runs to the end for an errors
-                # caller, and stat'ing every entry on the way would cost a
-                # syscall per file in the library.
+                # Suffix first: an errors caller walks to the end, and
+                # stat'ing every entry on the way would cost a syscall per
+                # file in the library. It also means an unreadable file that
+                # is not audio no longer stops the walk, and it could not
+                # have changed the answer.
                 if f.suffix.lower() in exts and f.is_file():
                     found = True
                     if walk_errors is None:
@@ -305,12 +307,9 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
             raise
         walk_errors.append(f"{d}: {e}")
     if walk_errors is not None and len(walk_errors) > error_count:
-        # os.walk consumed a scandir failure via the error callback and walked
-        # on without that subtree. Audio that was seen is still there, so the
-        # album stays in the listing and its caller reads walk_errors to learn
-        # the picture is partial; "no audio" would be a conclusion about the
-        # part that was never read. Neither answer is cached from a tree this
-        # incomplete, so the next walk reports the failure again.
+        # A subtree could not be listed. Audio that was seen is still audio,
+        # but "no audio" would be a conclusion about the part that was not
+        # read. Nothing is cached from here, so the next walk reports it again.
         return True if found else None
     _HAS_AUDIO_CACHE[key] = found
     return found
