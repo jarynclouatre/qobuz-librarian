@@ -2094,15 +2094,10 @@ def _tree_matches_ignoring_ctime(current, expected) -> bool:
 def _tree_matches_a_copy_of_itself(current, expected) -> bool:
     """Match a sealed tree against a byte-identical copy of the same files.
 
-    A NAS snapshot restore, an rsync, or a moved data volume rewrites every
-    inode and every timestamp while the bytes stay the same. What the receipt
-    has to prove is that these are the files the app put here, and the name,
-    size and sha256 prove exactly that; the inode only ever added "and the
-    same filesystem object", which no copy can preserve and no restore needs.
-
-    Only used when reading a receipt back off disk, where a copy is a real
-    possibility. The caller then adopts the live tree, so every later check in
-    that operation is exact again.
+    A snapshot restore or a moved data volume rewrites every inode while the
+    bytes stay the same. Name, size and sha256 prove these are the files the
+    app put here; the inode only ever added "and the same filesystem object",
+    which no copy preserves and no restore needs.
     """
     if type(current) is not dict or type(expected) is not dict:
         return False
@@ -2124,6 +2119,21 @@ def _tree_matches_a_copy_of_itself(current, expected) -> bool:
                 != _fidelity_without(original, *volatile)):
             return False
     return True
+
+
+def _receipt_matches_a_copy_of_itself(current, expected) -> bool:
+    """Match persisted receipts across byte-identical copies.
+
+    Reopening may adopt a restored copy; live checks retain their held identities.
+    """
+    if type(current) is not dict or type(expected) is not dict:
+        return False
+    return (
+        _fidelity_without(current, "tree", "receipt_identity")
+            == _fidelity_without(expected, "tree", "receipt_identity")
+        and _tree_matches_a_copy_of_itself(
+            current.get("tree"), expected.get("tree"))
+    )
 
 
 def _receipt_matches_ignoring_ctime(current, expected) -> bool:
@@ -3120,19 +3130,11 @@ def _read_backup_receipt(directory_fd):
             ignore_root_names=(
                 _RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS),
         )
-        identity = list(_entry_identity(value))
-        if current != receipt["tree"] or receipt["receipt_identity"] != identity:
-            # The sidecar's own inode is part of the same self-reference the
-            # tree holds, so it moves with the rest of a copy; the sidecar
-            # being the file this name points at is proved above regardless.
-            if not _tree_matches_a_copy_of_itself(current, receipt["tree"]):
-                return None
-            # Ownership fixes bump every ctime, and a copied data volume
-            # rewrites every inode; adopt the live values so exact checks
-            # bind to them from here.
-            receipt["tree"] = current
-            receipt["receipt_identity"] = identity
-        return receipt
+        reopened = dict(
+            receipt, tree=current, receipt_identity=list(_entry_identity(value)))
+        if not _receipt_matches_a_copy_of_itself(reopened, receipt):
+            return None
+        return reopened
     except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
         return None
     finally:
@@ -3634,7 +3636,7 @@ def library_backup_record(backup, *, expected_owner=None):
 
 
 def load_library_backup_record(value, *, expected_owner=None):
-    """Reopen a journal carrier only when its exact receipt still matches."""
+    """Reopen a journal backup at its saved path, accepting an identical copy."""
     canonical = canonical_library_backup_record(
         value,
         expected_owner=expected_owner,
@@ -3650,7 +3652,7 @@ def load_library_backup_record(value, *, expected_owner=None):
         or reopened.complete != canonical["complete"]
         or reopened.requested != canonical["requested"]
         or reopened.backed_up != canonical["backed_up"]
-        or not _receipt_matches_ignoring_ctime(
+        or not _receipt_matches_a_copy_of_itself(
             reopened.receipt, canonical["receipt"])
     ):
         return None

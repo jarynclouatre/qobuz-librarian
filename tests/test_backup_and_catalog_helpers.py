@@ -35,7 +35,8 @@ def _real_flac(path, *, seconds=2):
          str(path)], check=True)
 
 
-def _seal_test_backup(bk, path, origin, *, kind="gap-fill", complete=True):
+def _seal_test_backup(bk, path, origin, *, kind="gap-fill", complete=True,
+                      owner=None):
     """Give a hand-built fixture the same carried receipt production uses."""
     descriptor = bk._open_backup_directory(path)
     try:
@@ -51,6 +52,7 @@ def _seal_test_backup(bk, path, origin, *, kind="gap-fill", complete=True):
             complete=complete,
             requested=len(manifest),
             backed_up=len(manifest),
+            owner=owner,
         )
         assert result.receipt is not None
         return result
@@ -363,6 +365,82 @@ def test_backup_receipt_survives_a_copied_data_volume(tmp_path, monkeypatch):
     shutil.copytree(backup, changed)
     (changed / "track1.flac").write_bytes(b"b" * 50_000)
     assert bkmod.load_backup_result(changed) is None
+
+
+@pytest.fixture
+def restored_job_backup(tmp_path, monkeypatch):
+    import qobuz_librarian.library.backup as bk
+
+    backup_root = tmp_path / "backups"
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", backup_root)
+    monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path)
+    backup = backup_root / "album"
+    (backup / "Disc 1").mkdir(parents=True)
+    (backup / "Disc 1" / "track.flac").write_bytes(b"original audio")
+    owner = {"operation_id": "a" * 64, "item_id": "b" * 64}
+    sealed = _seal_test_backup(bk, backup, tmp_path / "Album", owner=owner)
+    record = bk.library_backup_record(sealed, expected_owner=owner)
+    assert record is not None
+
+    saved_copy = tmp_path / "saved-copy"
+    shutil.copytree(backup, saved_copy)
+    # Keep the old inodes occupied so the restore cannot reuse them.
+    backup.rename(tmp_path / "original-backup")
+    shutil.copytree(saved_copy, backup)
+    return sealed, record, owner
+
+
+def test_saved_job_reopens_its_restored_backup(restored_job_backup):
+    import qobuz_librarian.library.backup as bk
+
+    sealed, record, owner = restored_job_backup
+    direct = bk.load_backup_result(sealed.path, expected_owner=owner)
+    assert direct is not None
+    reopened = bk.load_library_backup_record(record, expected_owner=owner)
+    assert reopened is not None and reopened.complete
+    assert reopened.receipt == direct.receipt
+    assert reopened.receipt["owner"] == owner
+    assert (reopened.receipt["tree"]["root_identity"]
+            != record["receipt"]["tree"]["root_identity"])
+    assert (reopened.receipt["receipt_identity"]
+            != record["receipt"]["receipt_identity"])
+    assert bk.library_backup_record(reopened, expected_owner=owner) is not None
+    assert bk.library_backup_record(sealed, expected_owner=owner) is None
+    assert bk._validated_backup_result(sealed) is None
+    assert bk.load_library_backup_record(record) is None
+
+
+def test_saved_job_refuses_restored_backup_with_changed_content(
+        restored_job_backup):
+    import qobuz_librarian.library.backup as bk
+
+    sealed, record, owner = restored_job_backup
+    track = sealed.path / "Disc 1" / "track.flac"
+    before = track.stat()
+    track.write_bytes(b"modified audio")
+    os.utime(track, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert bk.load_backup_result(sealed.path, expected_owner=owner) is None
+    assert bk.load_library_backup_record(record, expected_owner=owner) is None
+
+
+def test_saved_job_refuses_restored_backup_owned_by_another_job(
+        restored_job_backup, tmp_path):
+    import qobuz_librarian.library.backup as bk
+
+    sealed, record, owner = restored_job_backup
+    other_owner = {"operation_id": "c" * 64, "item_id": owner["item_id"]}
+    other_backup = tmp_path / "other-backup"
+    (other_backup / "Disc 1").mkdir(parents=True)
+    (other_backup / "Disc 1" / "track.flac").write_bytes(b"original audio")
+    _seal_test_backup(bk, other_backup, tmp_path / "Album", owner=other_owner)
+    shutil.rmtree(sealed.path)
+    shutil.copytree(other_backup, sealed.path)
+
+    assert bk.load_backup_result(sealed.path, expected_owner=other_owner) is not None
+    assert bk.load_backup_result(sealed.path, expected_owner=owner) is None
+    assert bk.load_library_backup_record(record, expected_owner=owner) is None
+    assert bk.load_library_backup_record(record, expected_owner=other_owner) is None
 
 
 def test_retire_verified_repair_backup_needs_superseding_tracks(tmp_path, monkeypatch):
