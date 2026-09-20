@@ -866,6 +866,67 @@ def test_resumed_baseline_rescans_checkpoint_entries_without_artist_snapshot(
     assert flows.scan_checkpoint.load("missing") is None
 
 
+def test_missing_albums_share_one_artist_receipt(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import (
+        backup,
+        candidate_premise,
+        discovery,
+        downsample_state,
+        library_scan_state,
+    )
+    from qobuz_librarian.web import flows
+
+    music_root = tmp_path / "music"
+    artist_dir = music_root / "Artist"
+    album_dir = artist_dir / "Owned Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01.flac").write_bytes(b"owned track")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music_root)
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
+    monkeypatch.setattr(
+        cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library_scan.json")
+    monkeypatch.setattr(
+        cfg, "LIBRARY_GENERATION_STATE_FILE", tmp_path / "generation.json")
+    # A real scan writes a collection backup, and a shared one makes every
+    # later download refuse: the library looks like it lost its albums.
+    monkeypatch.setattr(
+        cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "collection-backups"))
+    gaps = [
+        discovery.AlbumGap(
+            qobuz_album={"id": album_id, "title": f"Missing {album_id}"},
+            on_disk_dir=None,
+        )
+        for album_id in ("one", "two")
+    ]
+    monkeypatch.setattr(
+        flows, "_scan_library_artist",
+        lambda *_a, **_k: (
+            "Artist", "Artist", gaps, "artist-id", ["one", "two"], {}),
+    )
+    monkeypatch.setattr(
+        downsample_state, "refresh_for_artists",
+        lambda *_a, **_k: downsample_state.RefreshResult([], ["Artist"], {}, True),
+    )
+    captures = []
+
+    def capture(path):
+        captures.append(path)
+        return backup.capture_album_source_receipt(path)
+
+    monkeypatch.setattr(candidate_premise, "capture_album_source_receipt", capture)
+    job = jm.Job(title="baseline")
+
+    flows.scan_library(job, "", force_full=True)
+
+    saved = library_scan_state.kind_state("missing")["artists"]["Artist"]["candidates"]
+    assert len(job.candidates) == len(saved) == 2
+    premises = [row["payload"]["_premise"] for row in saved]
+    assert premises[0] is not None
+    assert premises[0] == premises[1]
+    assert captures == [artist_dir]
+
+
 def test_scan_library_reuses_unchanged_artist_snapshot(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import hidden as hidden_mod

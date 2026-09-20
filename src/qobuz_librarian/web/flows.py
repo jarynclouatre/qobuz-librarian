@@ -404,6 +404,7 @@ def _gap_candidate_spec(
     selected=False,
     is_new=False,
     artist_key=None,
+    missing_premises=None,
 ):
     """Turn an engine AlbumGap into a review candidate. A partial gap carries
     its missing-track count so the detail reads 'gap-fill: N missing'."""
@@ -429,7 +430,14 @@ def _gap_candidate_spec(
     else:
         artist_dir = cfg.MUSIC_ROOT / artist_key if artist_key else None
         extra_payload["_artist_dir_path"] = str(artist_dir or "")
-        premise = candidate_premise.capture("missing", artist_dir) if artist_dir else None
+        premise = (missing_premises or {}).get(artist_dir) if artist_dir else None
+        if premise is None and artist_dir:
+            # One seal of the artist folder serves every missing album under
+            # it. A failed capture is not cached: it would cost the rest of
+            # that artist's rows their premise over one transient read.
+            premise = candidate_premise.capture("missing", artist_dir)
+            if premise is not None and missing_premises is not None:
+                missing_premises[artist_dir] = premise
     if premise is not None:
         extra_payload["_premise"] = premise
     return _album_candidate_spec(
@@ -438,10 +446,11 @@ def _gap_candidate_spec(
 
 
 def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False,
-                       artist_key=None):
+                       artist_key=None, missing_premises=None):
     return _add_candidate_spec(
         job, _gap_candidate_spec(
-            gap, artist_name, selected, is_new, artist_key=artist_key))
+            gap, artist_name, selected, is_new, artist_key=artist_key,
+            missing_premises=missing_premises))
 
 
 def add_restore_candidate(job, album, artist_name, *, artist_key=None):
@@ -1711,6 +1720,7 @@ def _scan_library_impl(
     # Resolve/scan artists in parallel (each worker has its own HTTP session),
     # but collect results and write candidates on this one thread so the
     # candidate list and progress stay single-writer.
+    missing_premises = {}
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="libscan",
                             **job_mgr.pool_initializer_kwargs()) as ex:
         futures = {ex.submit(_scan_library_artist, ad, token, partial_only,
@@ -1754,7 +1764,8 @@ def _scan_library_impl(
                 # Library is a discovery list, leave candidates unticked so a
                 # single click can't queue hundreds nobody reviewed.
                 spec = _gap_candidate_spec(
-                    gap, artist_name or name, selected=False, artist_key=name)
+                    gap, artist_name or name, selected=False, artist_key=name,
+                    missing_premises=missing_premises)
                 if _spec_dismissed(spec, hidden):
                     # Saved but not reviewed: the snapshot is the record
                     # Restore brings back from.
@@ -2082,6 +2093,7 @@ def scan_new_releases(job, token):
     # run where some/all artists errored can't wipe their baselines and re-surface
     # everything, only artists actually reached get their snapshot refreshed).
     current_seen = {}
+    missing_premises = {}
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel",
                             **job_mgr.pool_initializer_kwargs()) as ex:
         futures = {ex.submit(find_new_releases_for_artist, ad.name, token=token,
@@ -2127,6 +2139,7 @@ def scan_new_releases(job, token):
                     selected=False,
                     is_new=True,
                     artist_key=futures[fut].name,
+                    missing_premises=missing_premises,
                 )
                 total += 1
             hit = ({"artist": result.artist_name, "albums": len(result.new_gaps)}
