@@ -130,15 +130,6 @@
   </div>
   {% endif %}
 
-  {% if review_tab_counts and review_tab_counts.gaps %}
-  <div class="ql-notice ql-notice-warning ql-review-warning">
-    <span><strong>Filling most of an album replaces the tracks you already
-      have.</strong> When only a few of an album's tracks are present the whole
-      album is downloaded, and your copies are removed once the new files
-      verify. Tags and artwork you added to them are not carried over.</span>
-  </div>
-  {% endif %}
-
   <div id="review-page" class="ql-review-page">
     {% include "_review_page.html" %}
   </div>

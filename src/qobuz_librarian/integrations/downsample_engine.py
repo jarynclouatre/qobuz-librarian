@@ -524,15 +524,27 @@ def _make_encode_temp(parent_fd: int):
     raise FileExistsError("couldn't reserve a downsample temporary file")
 
 
-def _copy_vorbis_comments(source_fd: int, target_fd: int) -> bool:
-    """Carry the source's comments onto the encode, repeated keys intact."""
+def _copy_source_metadata(source_fd: int, target_fd: int) -> bool:
+    """Carry the source's comments and pictures onto the encode.
+
+    Repeated keys, their capitalisation, and each picture's type and
+    description all survive; the encode keeps its own encoder tag.
+    """
     from mutagen.flac import FLAC
     try:
         source = FLAC(f"/proc/self/fd/{source_fd}")
         target = FLAC(f"/proc/self/fd/{target_fd}")
-        if source.tags:
-            for key in source.tags.keys():
-                target[key] = source.tags[key]
+        if target.tags is None:
+            target.add_tags()
+        carried = [(key, value) for key, value in (source.tags or [])
+                   if key.lower() != "encoder"]
+        kept = [(key, value) for key, value in target.tags
+                if key.lower() == "encoder"]
+        target.tags.clear()
+        target.tags.extend(kept + carried)
+        target.clear_pictures()
+        for picture in source.pictures:
+            target.add_picture(picture)
         target.save(f"/proc/self/fd/{target_fd}")
     except Exception:
         return False
@@ -718,7 +730,8 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                 "-c:v", "copy",
                 # ffmpeg folds repeated Vorbis comments into one
                 # semicolon-joined value, turning two GENRE or ARTIST tags
-                # into "Rock;Pop". Carry the comments over separately.
+                # into "Rock;Pop", and reduces every picture to untyped bytes.
+                # Both are carried over separately below.
                 "-map_metadata", "-1",
                 "-f", "flac",
                 "-y", str(temp_path),
@@ -730,10 +743,10 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             timeout=600,
             pass_fds=(binding.track_fd, temp_fd),
         )
-        if not _copy_vorbis_comments(binding.track_fd, temp_fd):
+        if not _copy_source_metadata(binding.track_fd, temp_fd):
             return (rel, sr, rate, None,
-                    "couldn't carry the source tags onto the resampled file; "
-                    "left the original untouched")
+                    "couldn't carry the source tags and artwork onto the "
+                    "resampled file; left the original untouched")
         readonly_fd, temp_identity = _reopen_encode_temp_readonly(
             binding.parent_fd, temp_name, temp_fd)
         writable_fd = temp_fd

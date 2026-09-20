@@ -725,6 +725,16 @@ def validated_staged_album_dirs(result):
     return sorted(album_dirs)
 
 
+def downloads_whole_album(n_present: int, n_missing: int,
+                          n_total: int) -> bool:
+    """Whether a gap fill fetches the whole album instead of the gaps.
+
+    Above this the tracks already on disk are backed up and replaced, so the
+    terminal and the web review both warn from the same rule.
+    """
+    return n_present == 0 or n_missing >= max(4, int(n_total * 0.7))
+
+
 def run_album_download(
     *,
     album,
@@ -826,7 +836,8 @@ def run_album_download(
     elif upgrade_only:
         download_full_album = len(missing) == n_tracks_total
     else:
-        download_full_album = len(present) == 0 or len(missing) >= max(4, int(n_tracks_total * 0.7))
+        download_full_album = downloads_whole_album(
+            len(present), len(missing), n_tracks_total)
 
     album_id = album.get("id")
     t_start = time.time()

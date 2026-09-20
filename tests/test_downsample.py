@@ -140,6 +140,9 @@ def test_resample_preserves_embedded_jpeg_and_all_pictures(tmp_path, _need_ffmpe
         assert pic.mime == "image/jpeg"               # -c:v copy, not PNG
         assert pic.data[:2] == b"\xff\xd8"            # real JPEG SOI marker
     assert {bytes(p.data) for p in pics} == {front, back}
+    # Front and back are distinguishable only by type; ffmpeg's metadata
+    # mapping drops it and leaves both as untyped "Other".
+    assert {p.type for p in pics} == {3, 4}
 
 
 def test_resample_keeps_repeated_tags_separate(tmp_path, _need_ffmpeg, _need_flac):

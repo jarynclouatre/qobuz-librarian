@@ -15,6 +15,7 @@ import time
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums
+from qobuz_librarian.download import downloads_whole_album
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.candidate_premise import CandidateStale
@@ -419,6 +420,12 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
         log.info(fmt(C.GRAY,
             f"    Qobuz: {album_year(album) or '?'} • {album_quality_label(album)}"
             f"{_downsample_note(album)}"))
+
+        if downloads_whole_album(len(present), len(missing), n_total):
+            log.info(fmt(C.YELLOW,
+                f"    Too little is present to patch: all {n_total} tracks "
+                f"are downloaded and the {len(present)} already here are "
+                "replaced."))
 
         if args.dry_run:
             log.info(fmt(C.GRAY, "    --dry-run: would prompt to download here"))

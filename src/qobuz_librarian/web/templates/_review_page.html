@@ -1,4 +1,12 @@
 {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
+{% if review_tab == 'gaps' %}
+<div class="ql-notice ql-notice-warning ql-review-warning">
+  <span><strong>Filling most of an album replaces the tracks you already
+    have.</strong> When only a few of an album's tracks are present the whole
+    album is downloaded, and your copies are removed once the new files
+    verify. Tags and artwork you added to them are not carried over.</span>
+</div>
+{% endif %}
 <div id="review-groups" class="ql-review-groups" data-page="{{ review_page }}"
      data-filtered-total="{{ review_filtered_total | default(0) }}"
      data-filtered-selected="{{ review_filtered_selected | default(0) }}"

@@ -1481,9 +1481,9 @@ def write_output(
 # Title suffixes that confuse provider matching. Strip Spotify-style
 # "(Remastered 2009)", "(Album Version)", "[Mono]", trailing
 # " - 2009 Remaster", etc., before querying - providers index the canonical
-# title. Only words naming a different master belong here: a word naming a
-# different performance ("Live", "Acoustic", "Demo") must survive into the
-# query, or the studio take's words get written into it.
+# title. A word naming a different performance ("Live", "Acoustic", "Demo")
+# must not be listed here: it has to survive into the query, or the studio
+# take's words get written into that recording.
 _TITLE_NOISE_KEYWORDS = (
     "remaster", "remastered", "remix", "remixed",
     "album version", "single version", "radio edit", "radio version",

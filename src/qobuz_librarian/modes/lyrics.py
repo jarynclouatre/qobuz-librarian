@@ -142,6 +142,10 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['too_long'], 'track')} skipped because "
             "they are longer than 20 minutes."))
+    if summary["instrumental"]:
+        log.info(fmt(C.YELLOW,
+            f"     {plural(summary['instrumental'], 'track')} skipped as "
+            "instrumental."))
     if summary["policy_skipped"]:
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['policy_skipped'], 'track')} skipped by "

@@ -2404,6 +2404,17 @@
       var b = cont.querySelector("[data-review-tab].is-active");
       return b ? b.getAttribute("data-review-tab") : "";
     }
+    // Approve acts on the tab in front of you, so the gap-fill sentence has to
+    // follow it. The submit button sits outside the swapped fragment.
+    var baseConfirm = submit ? (submit.getAttribute("data-confirm") || "") : "";
+    var gapConfirm = submit ? (submit.getAttribute("data-gap-confirm") || "") : "";
+    function syncSubmitConfirm() {
+      if (!submit || !gapConfirm) return;
+      submit.setAttribute(
+        "data-confirm",
+        curTab() === "gaps" ? baseConfirm + " " + gapConfirm : baseConfirm);
+    }
+    syncSubmitConfirm();
     // Last server counts payload. Seeded from the initial render's data
     // attributes so tab switches can re-scope the bulk bar without a request.
     var lastCounts = {
@@ -3015,6 +3026,7 @@
               });
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
+              syncSubmitConfirm();
             }
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;

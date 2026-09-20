@@ -4485,6 +4485,8 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
          f"{plural(counts['missing_tags'], 'track')} missing tags"),
         (counts["too_long"],
          f"{plural(counts['too_long'], 'track')} too long"),
+        (counts["instrumental"],
+         f"{plural(counts['instrumental'], 'track')} instrumental"),
         (counts["policy_skipped"],
          f"{plural(counts['policy_skipped'], 'track')} skipped by policy"),
         (counts["unsafe"],
