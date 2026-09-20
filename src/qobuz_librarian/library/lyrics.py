@@ -13,11 +13,12 @@ gates the automatic import-time fetch, so an explicit backfill runs regardless.
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library.scanner import (
+    iter_tree_no_symlinks,
     list_artist_album_dirs,
     list_library_artists,
 )
 from qobuz_librarian.ui_cli.logging import log as _default_log
-from qobuz_librarian.ui_cli.logging import report_progress, vlog
+from qobuz_librarian.ui_cli.logging import report_progress
 
 HAVE_LYRICS = lyric_fetch.AVAILABLE
 
@@ -40,22 +41,27 @@ def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
     artists = (artist_dirs if artist_dirs is not None else
                list_library_artists(on_artist_error=on_artist_error))
     for artist_dir in artists:
-        for album_dir in list_artist_album_dirs(artist_dir):
+        walk_errors = []
+        albums = list_artist_album_dirs(artist_dir, walk_errors=walk_errors)
+        for album_dir in albums:
             try:
                 flacs = sorted(
-                    p for p in album_dir.rglob("*")
+                    p for p in iter_tree_no_symlinks(album_dir, errors=walk_errors)
                     if p.is_file() and p.suffix.lower() == ".flac"
                     and not any(part.startswith(".")
                                 for part in p.relative_to(album_dir).parts))
             except OSError as e:
-                vlog(f"lyrics walk: couldn't list {album_dir}: {e}")
+                walk_errors.append(f"{album_dir}: {e}")
                 continue
             for fp in flacs:
                 try:
                     st = fp.stat()
-                except OSError:
+                except OSError as e:
+                    walk_errors.append(f"{fp}: {e}")
                     continue
                 yield fp, st.st_mtime, st.st_size
+        if walk_errors:
+            on_artist_error(artist_dir, "; ".join(map(str, walk_errors)))
 
 
 def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
@@ -80,7 +86,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     items = list(iter_library_flacs(
         artist_dirs=artist_dirs, on_artist_error=artist_read_failed))
     # Full-library maintenance only, including when no tracks remain.
-    if artist_dirs is None and not dry_run and lyric_fetch.AVAILABLE:
+    if artist_dirs is None and not unreadable and not dry_run and lyric_fetch.AVAILABLE:
         lyric_fetch.update_state(lyric_fetch.prune_missing, cfg.LYRIC_FETCH_STATE_FILE)
     total = len(items)
     if not total:

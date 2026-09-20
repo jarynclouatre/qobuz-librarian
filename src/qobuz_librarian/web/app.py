@@ -4328,6 +4328,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "cover":   _cover if _cover.startswith(
                         "https://static.qobuz.com/") else "",
                     "owned":   False,
+                    "ownership_unknown": True,
                     "queued":  str(a.get("id")) in queued_albums,
                     "scanning": str(a.get("id")) in scanning_albums,
                 })
@@ -4343,10 +4344,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     # a part-finished album reading "Owned" loses both its
                     # checkbox and its download button, which is the gap-fill
                     # case this app exists for.
-                    for res, alb in zip(results, _album_raws):
+                    annotations = []
+                    for alb in _album_raws:
+                        res = {"ownership_unknown": True}
+                        annotations.append(res)
                         try:
                             folder = catalog.find_album_dir_filesystem(alb)
                             if folder is None:
+                                res["ownership_unknown"] = False
                                 continue
                             exact_album = api_client.call_within(
                                 cfg.WEB_FETCH_TIMEOUT,
@@ -4363,6 +4368,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                             existing, _ = catalog.find_existing_tracks(
                                 exact_album, album_dir=folder)
                             if not existing:
+                                res["ownership_unknown"] = False
                                 continue
                             missing, present = catalog.compute_missing(
                                 qobuz_tracks, existing)
@@ -4375,16 +4381,20 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                                     len(present), len(missing), len(qobuz_tracks))
                             else:
                                 res["owned"] = True
+                            res["ownership_unknown"] = False
                         except Exception:
                             pass
+                    return annotations
                 try:
                     # Exact ownership may need the selected edition's track
                     # list after the cheap folder check. Keep the annotation
                     # bounded; search results are still useful without it.
                     _own_timeout = 20
-                    await asyncio.wait_for(
+                    annotations = await asyncio.wait_for(
                         loop.run_in_executor(None, _annotate_owned),
                         timeout=_own_timeout)
+                    for res, annotation in zip(results, annotations):
+                        res.update(annotation)
                 except asyncio.TimeoutError:
                     logging.getLogger("qobuz_librarian").warning(
                         "ownership annotation timed out (%ss) for %r; results "
@@ -4445,6 +4455,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         "have_tracks": res.get("have_tracks"),
                         "want_tracks": res.get("want_tracks"),
                         "replaces_existing": bool(res.get("replaces_existing")),
+                        "ownership_unknown": res["ownership_unknown"],
                     })
                 for g in album_groups:
                     eds = g["editions"]
@@ -4472,7 +4483,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     for f in ("id", "title", "artist", "year", "tracks",
                               "quality", "hires", "lossy", "bit_depth",
                               "sample_rate", "cover", "version", "queued",
-                              "scanning", "replaces_existing"):
+                              "scanning", "replaces_existing", "ownership_unknown"):
                         g[f] = rep[f]
                     g["partial"] = rep["partial"] and not g["owned"]
                     g["have_tracks"] = rep["have_tracks"]

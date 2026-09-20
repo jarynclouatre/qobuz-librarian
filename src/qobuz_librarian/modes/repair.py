@@ -2533,8 +2533,15 @@ def _all_library_album_dirs(*, on_artist_error=None):
     """Every (artist_dir, album_dir) under MUSIC_ROOT, artist-sorted."""
     pairs = []
     for adir in list_library_artists(on_artist_error=on_artist_error):
-        for aldir in list_artist_album_dirs(adir):
+        walk_errors = []
+        for aldir in list_artist_album_dirs(adir, walk_errors=walk_errors):
             pairs.append((adir, aldir))
+        if walk_errors:
+            error = "; ".join(map(str, walk_errors))
+            if on_artist_error is not None:
+                on_artist_error(adir, error)
+            else:
+                log.warning(f"Unreadable artist {adir.name}: {error}. Check permissions and retry.")
     return pairs
 
 

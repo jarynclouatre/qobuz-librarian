@@ -147,6 +147,18 @@ def test_the_library_picture_prefers_the_name_qobuz_uses(monkeypatch):
     assert owned.signature
 
 
+def test_unreadable_album_keeps_artist_owned_but_not_a_recommendation_seed(
+        unreadable_album, caplog):
+    good, partial, blocked = unreadable_album
+
+    owned = rec.read_library()
+
+    assert owned.owns(good.name)
+    assert owned.owns(partial.name)
+    assert owned.seeds == [good.name]
+    assert str(blocked) in caplog.text
+
+
 def test_a_failed_build_is_left_alone_before_anything_retries_it():
     # Without this, every reopened page relaunched a build against the same
     # dead key, which is both useless and the fastest way to earn a rate limit.

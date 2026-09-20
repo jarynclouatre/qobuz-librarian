@@ -152,12 +152,21 @@ def read_library() -> Library:
                 keys.add(canonical_key)
         if folder in unreadable_names:
             continue
+        walk_errors = []
+        artist_albums = list_artist_album_dirs(directory, walk_errors=walk_errors)
+        if walk_errors:
+            logging.getLogger("qobuz_librarian").warning(
+                "Unreadable artist %s: %s. Check permissions and retry.",
+                folder, "; ".join(map(str, walk_errors)))
+            unreadable_names.add(folder)
+            continue
         seeds.append(canonical or folder)
         albums.extend(
             f"{folder.casefold()}/{album.name.casefold()}"
-            for album in list_artist_album_dirs(directory)
+            for album in artist_albums
         )
     signature_parts = {f"key:{key}" for key in keys}
+    signature_parts.update(f"unreadable:{name}" for name in unreadable_names)
     signature_parts.update(
         f"name:{name.strip().casefold()}" for name in raws if name.strip()
     )

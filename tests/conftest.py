@@ -8,11 +8,40 @@ Individual tests still monkeypatch specific paths via ``tmp_path`` for
 finer-grained control; this fixture covers the global side effects of
 importing the package and exercising web routes in tests.
 """
+import errno
 import os
 import tempfile
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture
+def unreadable_album(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    good, partial = music / "Readable", music / "Partly readable"
+    for artist in (good, partial):
+        album = artist / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"audio")
+    blocked = partial / "Unreadable album"
+    blocked.mkdir()
+    (blocked / "01.flac").write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    scandir = scanner.os.scandir
+
+    def read(path):
+        if path == blocked or path == str(blocked):
+            raise PermissionError(errno.EACCES, "Permission denied", str(blocked))
+        return scandir(path)
+
+    monkeypatch.setattr(scanner.os, "scandir", read)
+    scanner.clear_scan_caches()
+    yield good, partial, blocked
+    scanner.clear_scan_caches()
 
 
 @pytest.fixture(autouse=True)

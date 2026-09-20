@@ -1140,6 +1140,34 @@ def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path
     assert "quality-upgrade" not in r.text
 
 
+def test_album_search_warns_when_ownership_check_fails(client, monkeypatch, tmp_path):
+    import re
+
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    albums = [{
+        "id": album_id, "title": "Album", "artist": {"name": "Artist"},
+        "version": version, "tracks_count": 10,
+    } for album_id, version in (("original", ""), ("remaster", "Remaster"))]
+    monkeypatch.setattr(search_mod, "search_albums", lambda *_a, **_k: albums)
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: tmp_path)
+
+    def failed(*_a, **_k):
+        raise TimeoutError("ownership unavailable")
+
+    monkeypatch.setattr(search_mod, "get_album", failed)
+    response = client.post("/search", data={"q": "Album", "kind": "album"},
+                           headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    forms = re.findall(r'<form\b[^>]*data-search-download-form[^>]*>', response.text)
+    assert len(forms) == 4
+    assert all('data-search-download-warning="unknown"' in form for form in forms)
+
+
 def test_new_edition_download_rechecks_exact_ownership(
         client, monkeypatch, tmp_path):
     import qobuz_librarian.api.search as search_mod

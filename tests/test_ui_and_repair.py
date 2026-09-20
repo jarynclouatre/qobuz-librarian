@@ -29,6 +29,27 @@ def _allow_legacy_candidate_execution(monkeypatch):
     )
 
 
+def test_repair_sweep_skips_unreadable_album_without_reporting_success(
+        unreadable_album, monkeypatch, caplog):
+    from qobuz_librarian.modes import repair
+
+    good, partial, blocked = unreadable_album
+    checked = []
+    monkeypatch.setattr(repair, "_prompt_library_album_for_repair",
+                        lambda *a: ("__ALL__", None))
+
+    def scan(album, *_a, **_k):
+        checked.append(album)
+        return "clean"
+
+    monkeypatch.setattr(repair, "_scan_report_repair", scan)
+    result = repair.run_album_repair_mode(Namespace(no_upgrade=False), "")
+
+    assert set(checked) == {artist / "Album" for artist in (good, partial)}
+    assert result == repair.EXIT_GENERAL
+    assert str(blocked) in caplog.text
+
+
 def test_surgical_repair_rechecks_download_access_before_backup(
         tmp_path, monkeypatch):
     from qobuz_librarian.api import client

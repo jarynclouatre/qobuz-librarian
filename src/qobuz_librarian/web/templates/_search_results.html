@@ -41,12 +41,13 @@
   {% endif %}
 {%- endmacro %}
 
-{% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False, scanning=False, replaces_existing=False) -%}
+{% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False, scanning=False, replaces_existing=False, ownership_unknown=False) -%}
   {% set display_title = release_title(title, version) %}
   <form method="post" action="/download" hx-post="/download" hx-target="#download-toast"
         hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]"
-        hx-confirm='{% if as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% elif replaces_existing %}Download the whole album "{{ display_title }}" by {{ artist }}? Existing tracks in this album will be replaced.{% else %}Download "{{ display_title }}" by {{ artist }}?{% endif %}'
+        hx-confirm='{% if as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% elif replaces_existing %}Download the whole album "{{ display_title }}" by {{ artist }}? Existing tracks in this album will be replaced.{% else %}Download "{{ display_title }}" by {{ artist }}?{% if ownership_unknown %} Could not check existing tracks. Downloading may replace tracks already in this album.{% endif %}{% endif %}'
         data-confirm-action="Download"
+        {% if not as_new_edition and (ownership_unknown or replaces_existing) %}data-search-download-warning="{{ 'unknown' if ownership_unknown else 'replacement' }}"{% endif %}
         data-search-download-form data-search-title="{{ display_title }}"
         data-search-artist="{{ artist }}"
         data-search-writes-paused="{{ 1 if writes_paused else 0 }}"
@@ -326,7 +327,7 @@
             <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
             <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
             <span role="cell">{{ album_quality_status(g) }}</span>
-            <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning, replaces_existing=g.replaces_existing) }}{% endif %}</span>
+            <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning, replaces_existing=g.replaces_existing, ownership_unknown=g.ownership_unknown) }}{% endif %}</span>
           </div>
           <div id="search-tracks-{{ gi }}" class="ql-tracklist-panel hidden"
                data-owned="{{ 1 if g.owned else 0 }}"></div>
@@ -357,7 +358,7 @@
               <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
               <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
               <span role="cell">{{ album_quality_status(e) }}</span>
-              <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning, replaces_existing=e.replaces_existing) }}{% endif %}</span>
+              <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning, replaces_existing=e.replaces_existing, ownership_unknown=e.ownership_unknown) }}{% endif %}</span>
             </div>
             <div id="search-tracks-{{ gi }}-{{ loop.index0 }}" class="ql-tracklist-panel hidden"
                  data-owned="{{ 1 if e.owned else 0 }}"></div>
@@ -425,7 +426,7 @@
               {% if e.owned %}<span class="ql-owned-label">Owned</span>
               {% else %}
               {% if e.partial %}<span class="ql-partial-label">{{ e.have_tracks }} of {{ e.want_tracks }} tracks</span>{% endif %}
-              {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning, replaces_existing=e.replaces_existing) }}
+              {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=g.owned, small=True, queued=e.queued, scanning=e.scanning, replaces_existing=e.replaces_existing, ownership_unknown=e.ownership_unknown) }}
               {% endif %}
             </div>
           </div>
@@ -436,7 +437,7 @@
         {% endif %}
         <div class="ql-grid-footer">
           {{ album_quality_status(g) }}
-          {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning, replaces_existing=g.replaces_existing) }}{% endif %}
+          {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, small=True, queued=g.queued, scanning=g.scanning, replaces_existing=g.replaces_existing, ownership_unknown=g.ownership_unknown) }}{% endif %}
         </div>
       </div>
       {% endfor %}

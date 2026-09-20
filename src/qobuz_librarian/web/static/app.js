@@ -1758,7 +1758,13 @@
                 + names[names.length - 1];
           }
         }
-        window.qlConfirm("Download " + what + "? Downloads queue now and import into your library.", { action: "Download" }).then(function (ok) {
+        var warning = "";
+        if (forms.some(function (form) { return form.dataset.searchDownloadWarning === "unknown"; })) {
+          warning = " Could not check existing tracks for every selected album. Downloading may replace existing tracks.";
+        } else if (forms.some(function (form) { return form.dataset.searchDownloadWarning === "replacement"; })) {
+          warning = " Some selected albums will replace existing tracks.";
+        }
+        window.qlConfirm("Download " + what + "?" + (warning || " Downloads queue now and import into your library."), { action: "Download" }).then(function (ok) {
           if (ok) runBulkDownload(forms);
         });
       }

@@ -1858,6 +1858,82 @@ def test_repair_discovery_failure_keeps_only_readable_checkpoint(
     assert job.status == jm.JobStatus.FAILED
 
 
+def test_unreadable_album_cannot_finish_library_baseline(
+        unreadable_album, tmp_path, monkeypatch, caplog):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import (
+        downsample_state,
+        generation_state,
+        library_scan_state,
+        new_releases,
+        scan_checkpoint,
+    )
+    from qobuz_librarian.web import flows
+
+    good, partial, blocked = unreadable_album
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    for setting in (
+        "LIBRARY_SCAN_STATE_FILE", "LIBRARY_GENERATION_STATE_FILE",
+        "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "DOWNSAMPLE_STATE_FILE",
+    ):
+        monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
+    checked, stamps = [], []
+
+    def scan_artist(artist, *_a, **_k):
+        checked.append(artist.name)
+        return artist.name, artist.name, [], artist.name, ["album"], {}
+
+    monkeypatch.setattr(flows, "_scan_library_artist", scan_artist)
+    monkeypatch.setattr(flows, "_record_last_scan", lambda: stamps.append(True))
+    monkeypatch.setattr(
+        downsample_state, "refresh_for_artists",
+        lambda artists, **_k: downsample_state.RefreshResult(
+            [], [artist.name for artist in artists], {}, True),
+    )
+    job = jm.Job(title="baseline")
+    flows.scan_library(job, "")
+
+    assert checked == [good.name]
+    assert job.unchecked_artists == 1
+    assert partial.name in job.summary
+    assert str(blocked) in caplog.text
+    saved = scan_checkpoint.load("missing")
+    assert saved["scanned"] == [good.name]
+    assert set(saved["artists"]) == {good.name}
+    assert not stamps
+    assert not library_scan_state.kind_state("missing")["complete"]
+    assert not new_releases.load()["seen"]
+    assert not new_releases.is_baseline_complete()
+    assert generation_state.load()["latest_attempt"]["status"] == "incomplete"
+
+
+def test_lyrics_skips_unreadable_album_without_finishing(
+        unreadable_album, monkeypatch, caplog):
+    from qobuz_librarian.library import lyrics
+    from qobuz_librarian.web import flows
+
+    good, partial, blocked = unreadable_album
+    checked, pruned = [], []
+    monkeypatch.setattr(lyrics, "HAVE_LYRICS", True)
+
+    def fetch(paths, **_kwargs):
+        checked.extend(paths)
+        return {"already-synced": len(paths)}
+
+    monkeypatch.setattr(lyrics.lyric_fetch, "fetch_for_paths", fetch)
+    monkeypatch.setattr(lyrics.lyric_fetch, "update_state", lambda *a: pruned.append(a))
+    job = jm.Job(title="lyrics")
+    flows.run_library_lyrics(job, rescan=True)
+
+    assert set(checked) == {artist / "Album" / "01.flac" for artist in (good, partial)}
+    assert job.unchecked_artists == 1
+    assert partial.name in job.summary
+    assert str(blocked) in caplog.text
+    assert not pruned
+    assert job.status == jm.JobStatus.FAILED
+
+
 def test_lyrics_discovery_failure_stays_incomplete(unreadable_library, monkeypatch):
     from qobuz_librarian.library import lyrics
     from qobuz_librarian.web import flows

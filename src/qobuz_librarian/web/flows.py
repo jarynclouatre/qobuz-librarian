@@ -1621,10 +1621,16 @@ def _scan_library_impl(
     log.info(f"Scanning {plural(len(artists), 'library artist')} for {target}")
     fingerprints = {}
     for _i, _ad in enumerate(artists, 1):
-        fingerprints[_ad.name] = artist_fingerprint(_ad)
+        try:
+            fingerprints[_ad.name] = artist_fingerprint(_ad)
+        except OSError as exc:
+            artist_read_failed(_ad, exc)
+            log.warning(f"Unreadable artist {_ad.name}: {exc}. Check permissions and retry.")
         if _i % 25 == 0 or _i == len(artists):
             job.push_progress(_step("Checking artist folders"),
                               _i, len(artists), _ad.name, unit="folder")
+    artists = [ad for ad in artists if ad.name in fingerprints]
+    discovery_errors = len(unreadable_artists)
     if resuming:
         # A checkpoint says what was compared, not that the local folder is
         # still the same. Reuse only a current matching per-artist fingerprint;
@@ -1632,7 +1638,8 @@ def _scan_library_impl(
         scanned = {
             name
             for name in scanned
-            if isinstance(checkpoint_artists.get(name), dict)
+            if name in fingerprints
+            and isinstance(checkpoint_artists.get(name), dict)
             and checkpoint_artists[name].get("fingerprint")
             == fingerprints.get(name)
         }
