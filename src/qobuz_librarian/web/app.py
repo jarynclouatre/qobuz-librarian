@@ -11650,11 +11650,9 @@ def _diagnostics():
         checks.append({"label": "Stranded upgrade backups", "ok": True,
                        "detail": "none"})
 
-    # Backups whose original is still missing the tracks they hold: orphaned
-    # by a hard kill that skipped the restore/delete.
     inventory = {"orphans": [], "undo": [], "leftovers": []}
     try:
-        inventory["orphans"] = backup_mod.find_only_copy_backups()
+        inventory["orphans"] = backup_mod.list_retained_backups()
     except Exception as exc:
         logging.getLogger("qobuz_librarian").warning(
             "couldn't inspect kept recovery backups: %s", exc)
@@ -11671,6 +11669,7 @@ def _diagnostics():
     orphans = [
         item for item in orphans
         if not item[0].name.startswith(".ql-dispose-backup-")
+        and not item[2].removable
     ]
     if interrupted_disposals:
         checks.append({
@@ -12608,7 +12607,7 @@ def _stream_session_active(request: Request) -> bool:
 
 
 def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
-    """The diagnostics list items, plus a Restore row per orphaned backup.
+    """The diagnostics list items, plus a row per retained backup.
 
     Shared by the Settings page render, the Recheck partial, and the restore
     POST below, which re-renders the list in place so a restored backup
@@ -12637,7 +12636,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         )
     orphans = report["orphans"]
     tok = html.escape(request.state.csrf_token)
-    for path, origin in orphans:
+    for path, origin, classification in orphans:
         name = html.escape(path.name)
         if origin:
             dest_display, _is_host = _resolve_host_path(str(origin))
@@ -12674,19 +12673,13 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'</div></div>'
             )
             continue
-        try:
-            pinned = backup_mod.backup_keep_markers_present(path)
-        except OSError:
-            pinned = False
-        reason = (
-            "Kept because an upgrade or restore couldn't be verified "
-            f"complete; its files may already be back at {dest}."
-            if pinned
-            else f"Holds files that aren't confirmed back at {dest}."
-        )
+        reason = html.escape(classification.detail)
+        status = "ok" if classification.removable else "error"
+        icon = "OK" if classification.removable else "!"
+        aria = "OK" if classification.removable else "Needs attention"
         rows.append(
-            f'<div class="ql-diagnostic-row">'
-            f'<span class="ql-diagnostic-status ql-diagnostic-status-error" aria-label="Needs attention">!</span>'
+            f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
+            f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
             f'<div class="min-w-0"><div class="ql-diagnostic-label">'
             f'Backup{f": {album}" if album else ""}</div>'
             f'<div class="ql-diagnostic-detail">{reason}</div>'

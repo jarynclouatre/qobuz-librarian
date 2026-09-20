@@ -207,6 +207,7 @@ def test_age_sweep_keeps_any_backup_it_cannot_prove_redundant(tmp_path, monkeypa
 
 def test_unverified_upgrade_backup_is_pinned_from_age_sweep(tmp_path, monkeypatch):
     import qobuz_librarian.library.backup as bk
+    _need_audio_tools()
     monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path)
     monkeypatch.setattr(bk.cfg, "DATA_DIR", tmp_path / "data")
@@ -214,14 +215,14 @@ def test_unverified_upgrade_backup_is_pinned_from_age_sweep(tmp_path, monkeypatc
 
     album = tmp_path / "music" / "Album (2020)"
     album.mkdir(parents=True)
-    (album / "01 - A.flac").write_bytes(b"a" * 3000)
-    (album / "02 - B.flac").write_bytes(b"b" * 3000)
+    _real_flac(album / "01 - A.flac")
+    shutil.copyfile(album / "01 - A.flac", album / "02 - B.flac")
     bp = bk.backup_album_dir(album)
     assert bp is not None
 
     album.mkdir(parents=True, exist_ok=True)
-    (album / "01 - A.flac").write_bytes(b"A" * 9000)
-    (album / "02 - B.flac").write_bytes(b"B" * 9000)
+    shutil.copyfile(bp / "01 - A.flac", album / "01 - A.flac")
+    shutil.copyfile(bp / "02 - B.flac", album / "02 - B.flac")
     assert bk._backup_safe_to_reap(bp)
     bk.pin_unverified_upgrade_backup(bp)
     assert not bk._backup_safe_to_reap(bp)
@@ -557,6 +558,92 @@ def test_discard_redundant_backup_requires_byte_identical_files(tmp_path, monkey
     assert not backup.exists()
     assert (origin / "01.flac").read_bytes() == b"y" * 40_000
     assert (origin / "cover.jpg").read_bytes() == b"art"
+
+
+def _render_backup_diagnostics(rows):
+    import types
+
+    from qobuz_librarian.web import app as web
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(csrf_token=""))
+    return web._diagnostics_fragment(request, {
+        "checks": [], "orphans": rows, "undo": [], "leftovers": [],
+    })
+
+
+def test_diagnostics_lists_backup_with_different_companion(tmp_path, monkeypatch):
+    import qobuz_librarian.library.backup as bk
+
+    _need_audio_tools()
+    root = tmp_path / "backups"
+    backup = root / "kept"
+    backup.mkdir(parents=True)
+    origin = tmp_path / "music" / "Album"
+    origin.mkdir(parents=True)
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", root)
+    monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(bk, "_only_copy_cache", None)
+    _real_flac(backup / "01.flac")
+    shutil.copyfile(backup / "01.flac", origin / "01.flac")
+    (backup / "booklet.pdf").write_bytes(b"original booklet")
+    (origin / "booklet.pdf").write_bytes(b"modified booklet")
+    candidate = _seal_test_backup(bk, backup, origin)
+
+    [(path, album, result)] = bk.list_retained_backups()
+    assert (path, album) == (backup, origin)
+    assert result.status == "retained"
+    assert result.reason == "different"
+    assert result.file == "booklet.pdf"
+    rendered = _render_backup_diagnostics([(path, album, result)])
+    assert 'data-backup-status="retained"' in rendered
+    assert result.file in rendered
+    assert (backup, origin) in bk.find_only_copy_backups()
+    assert bk._backup_safe_to_reap(backup) is False
+    assert bk._dispose_retention_candidate(candidate) is False
+    assert bk.discard_redundant_backup(backup) is False
+    assert (backup / "booklet.pdf").read_bytes() == b"original booklet"
+
+
+def test_diagnostics_removable_backup_is_rechecked_before_deletion(tmp_path, monkeypatch):
+    import qobuz_librarian.library.backup as bk
+
+    _need_audio_tools()
+    root = tmp_path / "backups"
+    backup = root / "kept"
+    backup.mkdir(parents=True)
+    origin = tmp_path / "music" / "Album"
+    origin.mkdir(parents=True)
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", root)
+    monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(bk, "_only_copy_cache", None)
+    _real_flac(backup / "01.flac")
+    shutil.copyfile(backup / "01.flac", origin / "01.flac")
+    (backup / "booklet.pdf").write_bytes(b"original booklet")
+    (origin / "booklet.pdf").write_bytes(b"original booklet")
+    _seal_test_backup(bk, backup, origin)
+
+    [(path, album, result)] = bk.list_retained_backups()
+    assert (path, album) == (backup, origin)
+    assert result.removable
+    rendered = _render_backup_diagnostics([(path, album, result)])
+    assert 'data-backup-status="removable"' in rendered
+    assert bk._backup_safe_to_reap(backup) is True
+    (origin / "booklet.pdf").write_bytes(b"modified booklet")
+    assert bk.list_retained_backups()[0][2].removable
+    assert bk.discard_redundant_backup(backup) is False
+    assert backup.exists()
+
+    (origin / "booklet.pdf").write_bytes(b"original booklet")
+    monkeypatch.setattr(bk, "_BACKUP_LISTING_READ_BYTES", 0)
+    monkeypatch.setattr(bk, "_only_copy_cache", None)
+    result = bk.list_retained_backups()[0][2]
+    assert result.status == "unverified"
+    assert result.reason == "budget"
+    rendered = _render_backup_diagnostics([(path, album, result)])
+    assert 'data-backup-status="unverified"' in rendered
+    assert bk.discard_redundant_backup(backup) is True
+    assert not backup.exists()
+    assert (origin / "booklet.pdf").read_bytes() == b"original booklet"
 
 
 def test_restore_upgrade_backup_exdev_verifies_before_dropping_backup(tmp_path, monkeypatch):

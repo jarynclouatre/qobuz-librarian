@@ -5997,66 +5997,37 @@ def backup_keep_markers_present(bp) -> bool:
 
 
 def _backup_safe_to_reap(bp: Path) -> bool:
-    """True ONLY when ``bp`` is provably redundant - every track it holds is
-    confirmed back at its origin. The age sweep reaps on this, so the burden of
-    proof is on "safe to delete", not on "must keep": any uncertainty (no
-    sidecar, unreadable origin, a keep marker, a track not proven back) means we
-    cannot prove redundancy and the backup is KEPT.
+    """True ONLY when the backup is provably redundant.
 
-    Redundancy is proved by CONTENT, not file count: every track in the backup
-    must be back at the origin under the same relative path and at least as
-    large. A bare count match is fooled when restored or gap-filled files
-    inflate the origin's count while one of the backup's own tracks is still
-    missing or short there - exactly the case that strands the only good copy.
-
-    This is deliberately the inverse of a "protect if marked" scheme. A backup
-    can become the only surviving copy whenever the originals were moved into it
-    and not fully put back, and the protective sidecar/sentinel writes are
-    best-effort - on the exact filesystem failures that strand a sole copy
-    (ENOSPC, RO remount, EACCES) those writes can themselves fail. Making
-    "keep" the default means no protective write has to succeed for the data to
-    be safe; the worst case of a missing marker is a stranded backup the user
-    clears by hand, never silent loss."""
-    # Explicit keep markers: a partial restore, or an upgrade kept because it
-    # couldn't be verified complete - never reap either.
+    The age sweep deletes on this, so the burden of proof is on "safe to
+    delete", never on "must keep": an unreadable backup, a missing origin, a
+    keep marker or any file not proven back means KEPT. Redundancy is proved
+    by content, not by counting files: a count match is fooled when restored
+    or gap-filled files inflate the origin while one of the backup's own
+    tracks is still missing or short there, which is the case that strands
+    the only good copy. Classification here is unbudgeted; disposal proves it
+    again on the files it holds.
+    """
     if backup_keep_markers_present(bp):
         return False
-    entries = _list_tree(bp)
-    if entries is None:
-        return False                       # can't read the backup → can't prove redundant
-    try:
-        tracks = [f for f in entries if f.is_file() and f.name not in _SIDECARS]
-    except OSError:
-        return False
-    if not tracks:
-        return True                        # holds no tracks → nothing to lose → reap the husk
     origin = _read_backup_origin(bp)
-    if origin is None or not origin.exists():
-        return False                       # can't locate origin → can't prove redundant
-    for f in tracks:
-        try:
-            dst = origin / f.relative_to(bp)
-            if not dst.is_file() or dst.stat().st_size < f.stat().st_size:
-                return False               # this track isn't proven back at the origin
-        except OSError:
-            return False
-    return True
+    return origin is not None and _classify_backup_contents(
+        origin, bp, audio_replacement=True).removable
 
 
 def pin_unverified_upgrade_backup(backup: BackupResult,
                                   note: str | None = None, *,
                                   expected_owner=None) -> bool:
-    """Mark a backup as never-reap: it holds something the age sweep's
-    redundancy proof can't see. Content-presence reaping already keeps a
-    backup whose tracks aren't all proven back at the origin, but a same-path,
-    same-or-larger file at the origin defeats the byte check - a hi-res re-rip
-    after an unverified upgrade, or a repair refill whose original tags/art
-    survive only in the backup. For exactly those, this marker is the ONLY
-    protection, so a failed or unflushed write returns False and the caller
-    must warn the user the backup is unprotected - swallowing it (ENOSPC is
-    likeliest right after a download) leaves the sole copy one age sweep from
-    deletion with no sign anything is wrong. ``note`` names the reason when
-    the default upgrade wording doesn't fit."""
+    """Mark a backup the redundancy proof cannot protect: never reap it.
+
+    Retention accepts a replacement that passes its audio checks, so a
+    same-path replacement can satisfy it while the original tags or artwork
+    survive only in the backup. For those this marker is the only protection,
+    which is why a failed or unflushed write returns False and the caller
+    must warn that the backup is unprotected. Swallowing it would leave a
+    sole copy one age sweep from deletion with no sign anything was wrong.
+    ``note`` names the reason when the default upgrade wording does not fit.
+    """
     if not _backup_owner_authorized(backup, expected_owner):
         return False
     return _write_receipt_marker(
@@ -6077,43 +6048,42 @@ def warn_pin_failed(bp: Path) -> None:
         f"     Copy what you need out of {bp} now."))
 
 
-# Memoize the orphan walk: every settings load/submit and the dashboard call
-# _diagnostics(), which calls this, and it rglob-walks every retained backup
-# to content-check redundancy. A burst of those hits (form POST → redirect →
-# dashboard render) would otherwise re-walk the whole backup tree each time.
+# Diagnostic results are advisory. The budget reserves expected hash reads,
+# including receipt validation; metadata walks still cover every backup.
+# Disposal never uses this cache or budget.
 _ONLY_COPY_TTL_SEC = 10.0
-_only_copy_cache: tuple[float, float, list] | None = None
-# Executor threads (retention) and the web diagnostic both call
-# find_only_copy_backups; the lock keeps the memo read-modify-write atomic and
-# stops two callers re-walking the tree at once on a cache miss.
+_BACKUP_LISTING_READ_BYTES = 8 * 1024 * 1024
+_only_copy_cache: tuple[float, tuple, list] | None = None
 _only_copy_lock = threading.Lock()
 
 
 def find_only_copy_backups():
-    """Backups whose recorded origin is gone or still short of them - orphaned
-    by a hard kill that skipped the caller's restore/delete. Retention keeps
-    these; the web diagnostic surfaces them so the user can recover or clear
-    them (each holds the origin path in its sidecar).
+    """Retained backups not verified removable, as (path, origin)."""
+    return [(path, origin) for path, origin, result in list_retained_backups()
+            if not result.removable]
 
-    Memoized for a few seconds keyed on the backup dir's mtime - see
-    _ONLY_COPY_TTL_SEC - so repeated diagnostics don't each re-walk the tree."""
+
+def list_retained_backups():
+    """Advisory removal classifications, including unverified and removable."""
     global _only_copy_cache
     if not cfg.UPGRADE_BACKUP_DIR.exists():
         with _only_copy_lock:
             _only_copy_cache = None
         return []
     try:
-        dir_mtime = cfg.UPGRADE_BACKUP_DIR.stat().st_mtime
+        dir_mtime = cfg.UPGRADE_BACKUP_DIR.stat().st_mtime_ns
     except OSError:
         dir_mtime = 0.0
     now = time.time()
+    cache_key = (os.fspath(cfg.UPGRADE_BACKUP_DIR), dir_mtime)
     with _only_copy_lock:
         cached = _only_copy_cache
-        if (cached is not None and cached[1] == dir_mtime
+        if (cached is not None and cached[1] == cache_key
                 and now - cached[0] < _ONLY_COPY_TTL_SEC):
             return cached[2]
 
         out = []
+        budget = _BackupReadBudget(_BACKUP_LISTING_READ_BYTES)
         try:
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
                 if not entry.is_dir():
@@ -6129,22 +6099,25 @@ def find_only_copy_backups():
                 # diagnostics list it feeds shows it separately.
                 if (entry / _REAP_AFTER_RETENTION_SENTINEL).is_file():
                     continue
-                if not _backup_safe_to_reap(entry):
-                    origin_root = entry
-                    manifest = None
-                    if entry.name.startswith(".ql-dispose-backup-"):
-                        held = entry / "held"
-                        if held.is_dir():
-                            origin_root = held
-                        manifest = _ownerless_disposal_manifest_for_path(
-                            entry)
-                    origin = _read_backup_origin(origin_root)
-                    if origin is None and manifest is not None:
-                        origin = Path(manifest["receipt"]["origin"])
-                    out.append((entry, origin))
+                origin_root = entry
+                manifest = None
+                if entry.name.startswith(".ql-dispose-backup-"):
+                    held = entry / "held"
+                    if held.is_dir():
+                        origin_root = held
+                    manifest = _ownerless_disposal_manifest_for_path(entry)
+                origin = _read_backup_origin(origin_root)
+                if origin is None and manifest is not None:
+                    origin = Path(manifest["receipt"]["origin"])
+                result = (
+                    BackupClassification("retained", "interrupted")
+                    if entry.name.startswith(".ql-dispose-backup-")
+                    else _classify_retained_backup(entry, origin, budget)
+                )
+                out.append((entry, origin, result))
         except OSError:
             pass
-        _only_copy_cache = (now, dir_mtime, out)
+        _only_copy_cache = (now, cache_key, out)
         return out
 
 
@@ -9605,22 +9578,70 @@ def _audio_duration_seconds(path: Path):
         return None
 
 
-def _retention_view_is_redundant(
+@dataclass(frozen=True)
+class BackupClassification:
+    status: str
+    reason: str
+    file: str = ""
+
+    @property
+    def removable(self):
+        return self.status == "removable"
+
+    @property
+    def detail(self):
+        return {
+            "identical": "Removable: every file matches its album copy. Removal checks again.",
+            "replacement": "The replacement passed the retention checks.",
+            "missing": f"Not removable: {self.file} is missing from the album.",
+            "different": f"Not removable: {self.file} differs from the album copy.",
+            "audio": f"Not removable: the replacement for {self.file} failed verification.",
+            "origin": "Not removable: the original album folder is unavailable.",
+            "album_metadata": "Not removable: the album contains backup recovery metadata.",
+            "album_structure": "Unverified: the album contains unreadable or unsupported file entries.",
+            "record": "Not removable: the backup recovery record could not be verified.",
+            "incomplete": "Not removable: the backup operation is incomplete.",
+            "owner": "Not removable here: this backup belongs to a saved recovery operation.",
+            "empty": "Not removable: no backed-up files could be verified.",
+            "unreadable": "Unverified: some files could not be read.",
+            "budget": "Unverified: the listing's file-check limit was reached. Remove runs the full check.",
+            "interrupted": "Backup cleanup was interrupted.",
+        }[self.reason]
+
+
+@dataclass
+class _BackupReadBudget:
+    remaining: int
+
+    def reserve(self, size):
+        if size > self.remaining:
+            return False
+        self.remaining -= size
+        return True
+
+
+def _classify_backup_contents(
         replacement_view: Path,
         backup_view: Path,
         *,
+        audio_replacement=False,
         allow_smaller_audio=False,
-) -> bool:
-    """Semantic retention proof over descriptor-bound private views."""
+        budget=None,
+):
+    """Compare payloads; retention permits verified replacement audio."""
     try:
-        for source in backup_view.rglob("*"):
-            if not source.is_file() or source.name in _SIDECARS:
-                continue
+        entries = _list_tree(backup_view)
+        if entries is None:
+            return BackupClassification("unverified", "unreadable")
+        files = [f for f in entries if f.is_file() and f.name not in _SIDECARS]
+        files.sort(key=lambda f: (f.suffix.lower() in cfg.AUDIO_EXTS, str(f)))
+        skipped = False
+        for source in files:
             relative = source.relative_to(backup_view)
             destination = replacement_view / relative
             if not destination.is_file():
-                return False
-            if source.suffix.lower() in cfg.AUDIO_EXTS:
+                return BackupClassification("retained", "missing", str(relative))
+            if audio_replacement and source.suffix.lower() in cfg.AUDIO_EXTS:
                 source_duration = _audio_duration_seconds(source)
                 destination_duration = _audio_duration_seconds(destination)
                 if (
@@ -9634,12 +9655,79 @@ def _retention_view_is_redundant(
                     or not allow_smaller_audio
                     and destination.stat().st_size < source.stat().st_size
                 ):
-                    return False
-            elif _file_digest(source) != _file_digest(destination):
-                return False
-        return True
+                    return BackupClassification("retained", "audio", str(relative))
+            else:
+                source_size = source.stat().st_size
+                destination_size = destination.stat().st_size
+                if source_size != destination_size:
+                    return BackupClassification("retained", "different", str(relative))
+                if budget is not None and not budget.reserve(source_size + destination_size):
+                    skipped = True
+                    continue
+                if _file_digest(source) != _file_digest(destination):
+                    return BackupClassification("retained", "different", str(relative))
+        if skipped:
+            return BackupClassification("unverified", "budget")
+        if not files and not audio_replacement:
+            return BackupClassification("retained", "empty")
+        return BackupClassification(
+            "removable", "replacement" if audio_replacement else "identical")
     except (OSError, TypeError, ValueError):
-        return False
+        return BackupClassification("unverified", "unreadable")
+
+
+def _classify_retained_backup(path, origin, budget):
+    if origin is None:
+        return BackupClassification("retained", "origin")
+    opened = _open_backup_source(origin)
+    if opened is None:
+        return BackupClassification("retained", "origin")
+    try:
+        if _scan_backup_tree(opened[-1][-1]) is None:
+            return BackupClassification("unverified", "album_structure")
+        if _reserved_backup_entry_present(opened[-1][-1]):
+            return BackupClassification("retained", "album_metadata")
+    finally:
+        _close_descriptors(opened[-1])
+    result = _classify_backup_contents(origin, path, budget=budget)
+    if not result.removable:
+        return result
+    # Loading the sealed receipt hashes the backup again. Reserve that read
+    # before loading it; large candidates stay explicitly unverified.
+    entries = _list_tree(path)
+    if entries is None:
+        return BackupClassification("unverified", "unreadable")
+    try:
+        size = sum(f.stat().st_size for f in entries if f.is_file())
+        if not budget.reserve(size):
+            return BackupClassification("unverified", "budget")
+        candidate = load_backup_result(path)
+        if candidate is None or candidate.receipt["origin"] != os.fspath(origin):
+            return BackupClassification("retained", "record")
+        if not candidate.complete:
+            return BackupClassification("retained", "incomplete")
+        if not _backup_owner_authorized(candidate, None):
+            return BackupClassification("retained", "owner")
+        opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, path)
+        if opened is None:
+            return BackupClassification("retained", "record")
+        try:
+            if _receipt_disposal_snapshot(opened[-1][-1], candidate.receipt) is None:
+                return BackupClassification("retained", "record")
+        finally:
+            _close_descriptors(opened[-1])
+    except (OSError, TypeError, ValueError):
+        return BackupClassification("unverified", "unreadable")
+    return result
+
+
+def _retention_view_is_redundant(
+        replacement_view: Path, backup_view: Path, *, allow_smaller_audio=False,
+) -> bool:
+    return _classify_backup_contents(
+        replacement_view, backup_view, audio_replacement=True,
+        allow_smaller_audio=allow_smaller_audio,
+    ).removable
 
 
 def _dispose_retention_candidate(candidate, *, allow_smaller_audio=False):
@@ -9698,34 +9786,16 @@ def retire_verified_repair_backup(backup) -> bool:
 
 
 def _views_are_byte_identical(replacement_view: Path, backup_view: Path) -> bool:
-    """Every payload file present at the origin with an identical digest."""
-    try:
-        checked = False
-        for source in backup_view.rglob("*"):
-            if not source.is_file() or source.name in _SIDECARS:
-                continue
-            destination = replacement_view / source.relative_to(backup_view)
-            if (
-                not destination.is_file()
-                or destination.stat().st_size != source.stat().st_size
-                or _file_digest(source) != _file_digest(destination)
-            ):
-                return False
-            checked = True
-        return checked
-    except (OSError, TypeError, ValueError):
-        return False
+    return _classify_backup_contents(replacement_view, backup_view).removable
 
 
 def discard_redundant_backup(path) -> bool:
     """Dispose one retained backup whose files are all byte-identical at
     its recorded origin.
 
-    The age sweep's size proof deliberately cannot override a keep pin - a
-    same-path, same-or-larger origin file can hide a different rendition
-    whose original survives only in the backup. A user-requested removal
-    gets the stronger proof instead: exact digests on both sides, so
-    nothing distinct can ever be deleted."""
+    Unlike retention, removal requires exact digests even for audio. The
+    classification is recomputed on held files, never read from Diagnostics.
+    """
     candidate = load_backup_result(Path(path))
     if candidate is None or candidate.receipt is None:
         return False
@@ -9899,24 +9969,19 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
             candidate = load_backup_result(entry)
             if candidate is None:
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Keeping redundant backup {entry.name!r}: its "
+                    f"  ⚠  Keeping backup {entry.name!r}: its "
                     "app-owned recovery record was unavailable."))
                 continue
             if not _backup_safe_to_reap(entry):
-                # We can't PROVE this backup is redundant (origin gone, a track
-                # not back at it, unreadable, or an explicit keep marker), so it
-                # may be the only copy of the tracks it holds. Retention must
-                # never reap the last copy; keep it and let the web diagnostic
-                # surface it for the user to reconcile (restore or remove).
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Keeping backup {entry.name!r} past retention - can't "
-                    f"confirm its tracks are back in the original folder."))
+                    f"  ⚠  Keeping backup {entry.name!r} past retention: "
+                    "it is pinned or its replacement could not be verified."))
                 continue
             if _dispose_retention_candidate(candidate):
                 n_removed += 1
             else:
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Keeping redundant backup {entry.name!r}: safe "
+                    f"  ⚠  Keeping backup {entry.name!r}: safe "
                     "disposal could not be completed."))
     try:
         sweep_stamp.parent.mkdir(parents=True, exist_ok=True)
