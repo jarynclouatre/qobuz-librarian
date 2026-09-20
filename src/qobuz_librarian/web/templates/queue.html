@@ -14,7 +14,8 @@
 
 {% macro queue_job_row(job) -%}
 <article class="ql-activity-row ql-activity-row--queue{% if job.status.value == 'running' %} is-running{% endif %}"
-     {% if job.status.value in ('running', 'scanning', 'pending') %}data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}"{% endif %}>
+     data-queue-row
+     {%- if job.status.value in ('running', 'scanning') %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}"{% endif %}>
   {{ labels.kind_tile(job, 'is-live' if job.status.value in ('running', 'scanning') else '') }}
 
   <div class="ql-activity-main">

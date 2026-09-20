@@ -13450,7 +13450,7 @@ async def queue_count():
     active = [j for j in job_mgr.registry.pending_and_running()
               if j.status != job_mgr.JobStatus.AWAITING_REVIEW]
     revision = "\n".join(sorted(
-        f"{j.id}:{len(j.candidates or [])}"
+        f"{j.id}:{j.status.value}:{len(j.candidates or [])}"
         for j in active
     ))
     return JSONResponse({

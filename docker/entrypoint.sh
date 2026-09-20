@@ -251,7 +251,11 @@ esac
 # ── Writability diagnostics ───────────────────────────────────────────────────
 # A NAS export that doesn't grant the run user write access is the most
 # common failure; surface it clearly instead of failing cryptically later.
-for d in /music /staging /data /upgrade_backups /collection_backups "$CONFIG_DIR"; do
+# The app writes to the two subdirs, not to CONFIG_DIR itself, which is left
+# alone above because its ownership is the user's to manage. Testing the parent
+# warned about a directory nothing writes to on every start.
+for d in /music /staging /data /upgrade_backups /collection_backups \
+         "$BEETS_DIR" "$STREAMRIP_DIR"; do
     if [ "$APP_USER" = "root" ]; then
         [ -w "$d" ] && ok=yes || ok=no
     elif gosu "$APP_USER" test -w "$d" 2>/dev/null; then

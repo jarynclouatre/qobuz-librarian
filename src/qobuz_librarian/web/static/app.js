@@ -209,6 +209,7 @@
       });
     }
 
+    var lastQueueSignature = null;
     function refresh() {
       if (document.hidden || inFlight) return;
       controller = typeof AbortController === "function"
@@ -234,11 +235,18 @@
           } catch (e) {}
           apply(data.count);
           applyAttention(data.attention || 0);
-          // A Queue page left open does not hear about work another tab starts;
-          // redraw it when its cards and the live count disagree.
+          // A Queue page left open does not hear about work another tab
+          // starts, and only its running rows hold a stream, so a queued row
+          // starting is invisible to it. Redraw when the row count or the
+          // signature moves.
           var body = document.getElementById("queue-body");
+          var moved = lastQueueSignature !== null
+            && lastQueueSignature !== signature;
+          lastQueueSignature = signature;
           if (body && window.htmx
-              && body.querySelectorAll("[data-job-card]").length !== data.count) {
+              && (moved
+                  || body.querySelectorAll("[data-queue-row]").length
+                     !== data.count)) {
             window.htmx.ajax("GET", "/queue",
               { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
           }
