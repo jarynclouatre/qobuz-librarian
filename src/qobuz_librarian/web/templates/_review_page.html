@@ -1,5 +1,5 @@
 {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
-{% if review_tab == 'gaps' %}
+{% if review_tab == 'gaps' and review_tab_counts and review_tab_counts.gaps %}
 <div class="ql-notice ql-notice-warning ql-review-warning">
   <span><strong>Filling most of an album replaces the tracks you already
     have.</strong> When only a few of an album's tracks are present the whole

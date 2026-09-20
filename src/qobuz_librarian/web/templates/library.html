@@ -35,6 +35,27 @@
   </section>
   {% endif %}
 
+  {# Until a baseline exists this is the page's purpose, so it is drawn
+     above whatever else owns the surface rather than instead of it. #}
+  {% if library_scan_state.ready and not library_baseline_exists %}
+  <section class="ql-scan-hero">
+    <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+      <path d="M30 22v52M42 22v52" stroke="currentColor" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round"/>
+      <path d="M54 26l12 46" stroke="currentColor" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round"/>
+      <circle cx="70" cy="66" r="14" stroke="currentColor" stroke-width="2"/>
+      <path d="M80.5 76.5 88 84" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+    </svg>
+    <p class="ql-scan-hero-title">One scan builds your library's baseline.</p>
+    <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
+    <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked, continues from there{% endif %}</p>
+    <form action="/library" method="post" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="mode" value="missing_albums">
+      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% elif not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>Scan library</button>
+    </form>
+  </section>
+  {% endif %}
+
   {% if library_job %}
   {# Single surface: the scan's live progress and the Missing Albums / Gap
      Fill review render right here, same as /repair. A dead token banners the
@@ -54,26 +75,8 @@
     </div>
   </section>
 
-  {% elif not library_baseline_exists %}
 
-  <section class="ql-scan-hero">
-    <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
-      <path d="M30 22v52M42 22v52" stroke="currentColor" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round"/>
-      <path d="M54 26l12 46" stroke="currentColor" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round"/>
-      <circle cx="70" cy="66" r="14" stroke="currentColor" stroke-width="2"/>
-      <path d="M80.5 76.5 88 84" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-    </svg>
-    <p class="ql-scan-hero-title">One scan builds your library's baseline.</p>
-    <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
-    <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked, continues from there{% endif %}</p>
-    <form action="/library" method="post" data-busy-submit>
-      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-      <input type="hidden" name="mode" value="missing_albums">
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% elif not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>Scan library</button>
-    </form>
-  </section>
-
-  {% else %}
+  {% elif library_baseline_exists %}
 
   <div class="ql-scan-status">
     <span class="ql-status-chip {% if baseline_complete %}is-success{% else %}is-warning{% endif %}">{% if baseline_complete %}Baseline ready{% else %}Refresh needed{% endif %}</span>

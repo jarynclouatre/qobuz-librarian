@@ -135,14 +135,11 @@ def test_resample_preserves_embedded_jpeg_and_all_pictures(tmp_path, _need_ffmpe
     assert err is None and saved is not None
 
     pics = FLAC(str(src)).pictures
-    assert len(pics) == 2                              # -map 0 kept both
+    assert len(pics) == 2                              # both carried over
     for pic in pics:
-        assert pic.mime == "image/jpeg"               # -c:v copy, not PNG
+        assert pic.mime == "image/jpeg"               # verbatim, not re-encoded
         assert pic.data[:2] == b"\xff\xd8"            # real JPEG SOI marker
-    assert {bytes(p.data) for p in pics} == {front, back}
-    # Front and back are distinguishable only by type; ffmpeg's metadata
-    # mapping drops it and leaves both as untyped "Other".
-    assert {p.type for p in pics} == {3, 4}
+    assert {(p.type, bytes(p.data)) for p in pics} == {(3, front), (4, back)}
 
 
 def test_resample_keeps_repeated_tags_separate(tmp_path, _need_ffmpeg, _need_flac):

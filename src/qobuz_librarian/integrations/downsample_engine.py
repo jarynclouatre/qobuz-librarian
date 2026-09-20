@@ -524,11 +524,12 @@ def _make_encode_temp(parent_fd: int):
     raise FileExistsError("couldn't reserve a downsample temporary file")
 
 
-def _copy_source_metadata(source_fd: int, target_fd: int) -> bool:
+def _copy_source_metadata(source_fd, target_fd):
     """Carry the source's comments and pictures onto the encode.
 
     Repeated keys, their capitalisation, and each picture's type and
-    description all survive; the encode keeps its own encoder tag.
+    description all survive; the encode keeps its own encoder tag. Returns
+    None when it worked, or why it did not.
     """
     from mutagen.flac import FLAC
     try:
@@ -546,9 +547,9 @@ def _copy_source_metadata(source_fd: int, target_fd: int) -> bool:
         for picture in source.pictures:
             target.add_picture(picture)
         target.save(f"/proc/self/fd/{target_fd}")
-    except Exception:
-        return False
-    return True
+    except Exception as e:
+        return str(e) or e.__class__.__name__
+    return None
 
 
 def _exact_temp_is_named(parent_fd: int, name: str, descriptor: int,
@@ -714,24 +715,18 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
                 "-i", str(source_path),
-                # Map every input stream so all embedded PICTURE blocks
-                # (front+back cover) survive; ffmpeg's default selection keeps
-                # only one video stream and would drop the rest.
-                "-map", "0",
+                # Audio only. The comments and pictures are carried over
+                # below, and a cover in a format ffmpeg has no encoder for
+                # (GIF) fails the whole encode if it is mapped here.
+                "-map", "0:a",
                 "-af", enc_af,
                 "-ar", str(rate),
                 "-sample_fmt", sample_fmt,
                 *depth_args,
                 "-c:a", "flac",
-                # Copy attached art bit-for-bit. Without this the FLAC muxer's
-                # default video codec (PNG) transcodes the embedded JPEG cover,
-                # inflating the file (a multi-MB Qobuz cover can wipe out the
-                # audio savings and make the output net-larger).
-                "-c:v", "copy",
                 # ffmpeg folds repeated Vorbis comments into one
                 # semicolon-joined value, turning two GENRE or ARTIST tags
-                # into "Rock;Pop", and reduces every picture to untyped bytes.
-                # Both are carried over separately below.
+                # into "Rock;Pop".
                 "-map_metadata", "-1",
                 "-f", "flac",
                 "-y", str(temp_path),
@@ -743,10 +738,12 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             timeout=600,
             pass_fds=(binding.track_fd, temp_fd),
         )
-        if not _copy_source_metadata(binding.track_fd, temp_fd):
+        carry_error = _copy_source_metadata(binding.track_fd, temp_fd)
+        if carry_error is not None:
             return (rel, sr, rate, None,
                     "couldn't carry the source tags and artwork onto the "
-                    "resampled file; left the original untouched")
+                    f"resampled file ({carry_error}); left the original "
+                    "untouched")
         readonly_fd, temp_identity = _reopen_encode_temp_readonly(
             binding.parent_fd, temp_name, temp_fd)
         writable_fd = temp_fd

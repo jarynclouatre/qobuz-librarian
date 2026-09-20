@@ -21,7 +21,7 @@ from qobuz_librarian.completion import (
     completion_input_ready,
     normalise_album_id,
 )
-from qobuz_librarian.download import album_track_slots
+from qobuz_librarian.download import album_track_slots, downloads_whole_album
 from qobuz_librarian.library.catalog import is_lossless_album
 from qobuz_librarian.quality.decision import album_max_quality
 
@@ -47,7 +47,8 @@ def _full_album_gap_fill(item, tracks) -> bool:
         and isinstance(present, (list, tuple))
         and missing
         and present
-        and len(missing) >= max(4, int(len(tracks) * 0.7))
+        and downloads_whole_album(
+            len(present), len(missing), len(tracks))
     )
 
 
@@ -65,7 +66,8 @@ def _full_album_download_may_backup_present(item, tracks) -> bool:
         return False
     if bool(item.get("upgrade_only")):
         return len(missing) == len(tracks)
-    return len(missing) >= max(4, int(len(tracks) * 0.7))
+    return downloads_whole_album(
+        len(present), len(missing), len(tracks))
 
 
 def queue_item_may_create_library_backup(item) -> bool:

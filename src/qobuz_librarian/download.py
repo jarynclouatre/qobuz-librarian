@@ -725,12 +725,12 @@ def validated_staged_album_dirs(result):
     return sorted(album_dirs)
 
 
-def downloads_whole_album(n_present: int, n_missing: int,
-                          n_total: int) -> bool:
+def downloads_whole_album(n_present, n_missing, n_total):
     """Whether a gap fill fetches the whole album instead of the gaps.
 
-    Above this the tracks already on disk are backed up and replaced, so the
-    terminal and the web review both warn from the same rule.
+    When it does, the tracks already on disk are backed up and replaced, so
+    the terminal warns before its prompt from the same rule the download
+    itself applies.
     """
     return n_present == 0 or n_missing >= max(4, int(n_total * 0.7))
 
