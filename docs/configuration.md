@@ -204,7 +204,7 @@ The hook also fires once if the saved Qobuz token stops being accepted (`status`
 
 On first run the Search page *offers* a one-time baseline scan (`AUTO_LIBRARY_SCAN`) rather than starting it for you. Once that baseline exists, periodic new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on their own, read-only, on a background timer, so they keep to the interval even when nobody has the app open. Both park a review list; nothing is downloaded or changed until you act on it.
 
-- **Library gap-fill** can add missing albums or missing tracks after review; it does not overwrite existing tracks.
+- **Library gap-fill** can add missing albums or missing tracks after review. It fetches only the missing tracks, except when little of the album is present: then it downloads the whole album, sets the tracks you have aside, and removes them once the new files verify.
 - **After a download**, it re-checks the new album's track lengths against Qobuz and flags **Repair** if one is short. Read-only (a clean truncation can still decode).
 - **Upgrade** and **Downsample** change files only when you start them. Upgrade backs up the originals first (`UPGRADE_BACKUP_RETENTION_DAYS`); Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`; you're asked to choose keep or delete on your first downsample), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window ends.
 - **Lyrics** writes tags or `.lrc` sidecars, not the audio.
