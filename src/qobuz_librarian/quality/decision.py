@@ -28,6 +28,20 @@ from qobuz_librarian.quality.tiers import streamrip_quality_cap
 from qobuz_librarian.ui_cli.logging import vlog
 
 
+def _quality_number(value) -> float:
+    """A catalogue quality field as a number, or 0 when it is not one.
+
+    These come straight from the API. A string or a negative in either
+    field used to raise out of a quality comparison; unknown is the honest
+    reading and every caller already treats 0 as unknown.
+    """
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+
 def album_max_quality(qobuz_album, tier=None):
     """Return the (bit_depth, sample_rate_hz) Qobuz can provide, capped to the
     streamrip quality tier.
@@ -36,8 +50,8 @@ def album_max_quality(qobuz_album, tier=None):
     as already-Hz so an API change to Hz can't make every album read as
     'lower than Qobuz' and trigger spurious upgrades.
     """
-    bd = qobuz_album.get("maximum_bit_depth") or 0
-    sr = qobuz_album.get("maximum_sampling_rate") or 0
+    bd = int(_quality_number(qobuz_album.get("maximum_bit_depth")))
+    sr = _quality_number(qobuz_album.get("maximum_sampling_rate"))
     sr_hz = int(round(sr)) if sr >= 1000 else int(round(sr * 1000))
     cap_bd, cap_sr = streamrip_quality_cap(tier)
     bd = min(bd, cap_bd) if bd else 0
