@@ -88,7 +88,8 @@ def run_settings_mode(args):
     for key, label, help_text in settings_store.BEHAVIOR_FIELDS:
         current_on = bool(values.get(key))
         answer = confirm(f"    {label} - {help_text}",
-                         default_yes=current_on, auto_yes=False, on_eof=None)
+                         default_yes=current_on, auto_yes=False, on_eof=None,
+                         strict=True)
         if answer is None:
             continue
         if answer != current_on:
