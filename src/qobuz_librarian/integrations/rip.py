@@ -555,13 +555,14 @@ def cleanup_staging_residue():
     unresolved = list_file_groups()
     if unresolved:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  {len(unresolved)} staging file(s) are retained in "
-            f"{cfg.BEETS_RETRY_DIR} for retry or manual recovery."))
+            f"  ⚠  {len(unresolved)} staging file(s) from earlier downloads "
+            f"are still in {cfg.BEETS_RETRY_DIR} for retry or manual "
+            "recovery."))
     interrupted = list_groups(kind="interrupted")
     if interrupted:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  {len(interrupted)} interrupted download(s) are retained in "
-            f"{cfg.BEETS_RETRY_DIR} for manual recovery."))
+            f"  ⚠  {len(interrupted)} earlier download(s) were interrupted "
+            f"and are still in {cfg.BEETS_RETRY_DIR} for manual recovery."))
     inspections = inspect_retry_groups()
     hidden = [
         inspection for inspection in inspections
