@@ -22,7 +22,7 @@ h11==0.16.0
     # via uvicorn
 httptools==0.8.0
     # via uvicorn
-idna==3.19
+idna==3.20
     # via
     #   anyio
     #   requests

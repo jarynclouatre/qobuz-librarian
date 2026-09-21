@@ -2,6 +2,28 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
+## [1.2.0] - 2026-09-20
+
+1.2.0 is a correction release. A part-finished download no longer turns into
+a review you never asked for, scanning a large library costs a fraction of
+what it did, and several messages that guessed at what went wrong now say
+what happened.
+
+- A download that finishes only part of an album no longer creates a "Library scan" review. Its missing tracks join an open review when there is one, and are left alone when there is not.
+- Search says Owned only when it can account for every track, and a long album's whole track list is fetched instead of only its first page. A box set no longer reads as complete because the page it arrived on was.
+- Search warns before a download replaces an album you already partly own, and says so when it could not check what is on disk.
+- A track result's artist and album open that artist and that exact album; an album result's artist opens the artist.
+- Scanning a large library is much cheaper. An artist folder is sealed once per scan instead of once per missing album, progress is written on a timer instead of after every artist, and a saved review holds an artist's evidence once instead of on every row. A 300 artist scan that used to exceed a 1 GB limit now finishes well inside it.
+- A scan carries on past an artist folder it cannot read and names it, and will not record a baseline from an incomplete pass. An unreadable second disc inside a readable album is noticed too.
+- Repair no longer claims your original files are kept: both repair paths delete them once the replacement verifies. A repair scan that could not read every file says so and finishes with an error.
+- Lyrics no longer give a live, acoustic or demo recording the studio take's words, including when that wording sits beside remaster information. An instrumental is skipped rather than given the vocal's lyrics.
+- Downsampling keeps repeated tags separate instead of joining them, keeps each picture's role, and no longer stops on a cover in a format it cannot carry.
+- A failed download reports how many tracks arrived incomplete, or that Qobuz would only serve the album lossy, instead of suggesting rate limiting in every case.
+- The warning dot beside Queue clears when you open the list it points at, and files retained from earlier downloads are named as such instead of appearing in each new download's log.
+- The Queue no longer holds a browser connection for every waiting album, an empty music folder reads as "No music yet" rather than unavailable, and stopping a scan says the artists it checked are discarded.
+- A backup restored from a copy is recognised by the job that made it, and the backup listing and its deletion agree on which backups are redundant.
+- Dependency updates: idna, multidict and platformdirs, with the runtime image on the current python:3.14-slim.
+
 ## [1.1.1] - 2026-09-16
 
 Scan no longer lose
