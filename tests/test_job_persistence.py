@@ -152,14 +152,20 @@ def test_the_history_list_clears_the_markers_it_shows(monkeypatch, tmp_path):
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
 
+    made = {}
     for title, attention in (("Failed", "failed"),
                              ("Cancelled late", "cancel_late"),
                              ("Interrupted", "recovery")):
         job = Job(title=title, status=JobStatus.FAILED)
         job.attention = attention
         assert _REAL_ADMIT(job) is True
+        made[attention] = job.id
 
     assert job_persistence.attention_count() == 3
-    assert job_persistence.acknowledge_listed_attention() == 2
+    # Only what the reader was shown: clearing the whole backlog emptied the
+    # very list they had opened.
+    assert job_persistence.acknowledge_listed_attention([made["failed"]]) == 1
+    assert job_persistence.attention_count() == 2
     # Recovery stands for work still outstanding, not for unread news.
+    assert job_persistence.acknowledge_listed_attention(list(made.values())) == 1
     assert job_persistence.attention_count() == 1

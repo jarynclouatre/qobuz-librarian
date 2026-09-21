@@ -5045,17 +5045,22 @@ def _make_download_run(
             _mark_download_attention(j, r)
         elif r.get("result") not in benign and not r.get("imported"):
             j.status = job_mgr.JobStatus.FAILED
+            retryable, lossy_only = download_result.incomplete_track_counts(r)
             if r.get("result") == "incomplete":
                 j.error = _undeliverable_album_error(r)
             elif r.get("n_fail"):
                 j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
             elif r.get("n_ok"):
                 j.error = "Downloaded, but the import failed. See job log."
-            elif (retryable := download_result.incomplete_track_counts(r)[0]):
+            elif retryable:
                 j.error = (
                     f"Qobuz sent {plural(retryable, 'track')} incomplete, so "
                     "nothing was added to your library. Running it again "
                     "usually fixes this.")
+            elif lossy_only:
+                j.error = (
+                    f"Qobuz offered {plural(lossy_only, 'track')} only in a "
+                    "lossy format, so nothing was added to your library.")
             else:
                 j.error = ("No tracks were retrieved. Qobuz may be rate-limiting "
                            "you, or the release is unavailable. Try again shortly.")
@@ -11278,13 +11283,6 @@ async def queue_history(
     pager's links carry the other's page."""
     p = max(1, p)
     jp = max(1, jp)
-    if attention:
-        # Opening this list is the acknowledgement, the same way opening one
-        # job is. Recovery markers stay: they stand for outstanding work.
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, job_persistence.acknowledge_listed_attention)
-
     def _stamp(rows):
         for r in rows:
             ts = r.get("finished_at") or r.get("created_at")
@@ -11336,6 +11334,13 @@ async def queue_history(
     (bulk_jobs, bulk_total, jp, bulk_pages,
      total, pages, p, rows) = await loop.run_in_executor(
         None, lambda: _load_page(p, jp))
+    if attention:
+        # Acknowledge the rows this page actually shows, the same way opening
+        # one job acknowledges it. Clearing the backlog before the query
+        # emptied the very list the reader had just opened.
+        shown = [row.get("id") for row in (*bulk_jobs, *rows)]
+        await loop.run_in_executor(
+            None, lambda: job_persistence.acknowledge_listed_attention(shown))
     return _tr(request, "history.html", {
         "page": "queue", "active_tab": "history",
         "bulk_jobs": bulk_jobs, "jobs": rows,
