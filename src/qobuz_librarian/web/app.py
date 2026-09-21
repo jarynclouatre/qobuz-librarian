@@ -5044,6 +5044,11 @@ def _make_download_run(
                 j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
             elif r.get("n_ok"):
                 j.error = "Downloaded, but the import failed. See job log."
+            elif (retryable := download_result.incomplete_track_counts(r)[0]):
+                j.error = (
+                    f"Qobuz sent {plural(retryable, 'track')} incomplete, so "
+                    "nothing was added to your library. Running it again "
+                    "usually fixes this.")
             else:
                 j.error = ("No tracks were retrieved. Qobuz may be rate-limiting "
                            "you, or the release is unavailable. Try again shortly.")
