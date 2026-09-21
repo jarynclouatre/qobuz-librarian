@@ -111,7 +111,7 @@
 <section class="ql-activity-section" aria-labelledby="history-jobs-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-jobs-heading">Jobs</h2>
-    <p class="ql-mono-meta">{{ bulk_total }}{% if bulk_pages > 1 %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
+    <p class="ql-mono-meta">{{ bulk_total }}{% if bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
   </header>
   <div class="ql-history-cards">
     <div class="ql-activity-list ql-panelize">
@@ -135,7 +135,7 @@
       {% endfor %}
     </div>
   </div>
-  {% if bulk_pages > 1 %}
+  {% if bulk_pages > 1 and not attention_only %}
   <nav class="ql-activity-pagination" aria-label="Job pages">
     {% if bulk_page > 1 %}
     <a href="/queue/history?jp={{ bulk_page - 1 }}&amp;p={{ cur_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
@@ -157,7 +157,7 @@
 <section class="ql-activity-section" aria-labelledby="history-downloads-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-downloads-heading">Downloads</h2>
-    <p class="ql-mono-meta">{{ total }}{% if pages > 1 %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
+    <p class="ql-mono-meta">{{ total }}{% if pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
   </header>
   <div class="ql-activity-list ql-panelize">
     {% for job in jobs %}
@@ -179,7 +179,7 @@
 </section>
 {% endif %}
 
-{% if pages > 1 %}
+{% if pages > 1 and not attention_only %}
 <nav class="ql-activity-pagination" aria-label="Download pages">
   {% if cur_page > 1 %}
   <a href="/queue/history?p={{ cur_page - 1 }}&amp;jp={{ bulk_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>

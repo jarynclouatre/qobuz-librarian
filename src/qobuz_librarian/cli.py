@@ -11,7 +11,7 @@ import subprocess
 import sys
 import textwrap
 
-from qobuz_librarian import __version__, run_lock
+from qobuz_librarian import __version__, raise_open_file_limit, run_lock
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import (
     AuthLost,
@@ -937,6 +937,7 @@ def parse_args():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    raise_open_file_limit()
     # Apply the web Settings page's persisted overrides before parse_args
     # reads cfg.* into the default flags.
     try:

@@ -42,6 +42,7 @@ from qobuz_librarian import (
     completion,
     download,
     download_result,
+    raise_open_file_limit,
     redaction,
     repair_log,
     run_lock,
@@ -2041,6 +2042,7 @@ async def _lifespan(_app: FastAPI):
     global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _CLI_MODE, _LOCK_UNENFORCEABLE
     global _SHUTTING_DOWN, _STARTUP_RECOVERY_RESULT, _STARTUP_RECOVERY_UNKNOWN
     global _JOBS_RESTORED
+    raise_open_file_limit()
     _SHUTTING_DOWN = False
     with _JOBS_RESTORE_LOCK:
         _JOBS_RESTORED = False
@@ -11283,6 +11285,12 @@ async def queue_history(
     pager's links carry the other's page."""
     p = max(1, p)
     jp = max(1, jp)
+    if attention:
+        # This list drains as it is read: the rows on the page stop needing
+        # attention once it renders. Numbered pages over a shrinking set walk
+        # past rows nobody saw, so it always shows the first page and the next
+        # visit shows what is left.
+        p = jp = 1
     def _stamp(rows):
         for r in rows:
             ts = r.get("finished_at") or r.get("created_at")
