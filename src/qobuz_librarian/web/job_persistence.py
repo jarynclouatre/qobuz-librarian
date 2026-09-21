@@ -1840,6 +1840,30 @@ def last_finished_at(execute_kind: str) -> Optional[float]:
     return _decode_timestamp(row[0]) if row else None
 
 
+def acknowledge_listed_attention() -> int:
+    """Clear the attention markers a reader of the History list has now seen.
+
+    Opening one job already acknowledges it. The list that gathers them never
+    did, so a marker only cleared by visiting every job in turn and the nav
+    dot stayed lit over a backlog nobody could clear. Recovery and catalog
+    markers stand for work that is still outstanding, not unread news, so
+    they are left alone exactly as the single-job path leaves them.
+    """
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return 0
+        try:
+            with conn:
+                return conn.execute(
+                    f"UPDATE jobs SET attention='' WHERE {_TERMINAL_SQL} "
+                    "AND attention NOT IN ('', 'recovery', 'catalog')"
+                ).rowcount
+        except sqlite3.Error as exc:
+            _note_write_failure("acknowledge listed attention", exc)
+            return 0
+
+
 def attention_count() -> int:
     """How many terminal jobs still need attention in History."""
     with _lock:

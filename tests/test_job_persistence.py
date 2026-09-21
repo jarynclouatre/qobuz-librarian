@@ -141,3 +141,25 @@ def test_a_provider_error_never_reaches_the_stored_job_record(
         observer.close()
     assert "NOT-A-REAL-TOKEN-0000" not in "".join(stored)
     assert "nobody@example.test" not in "".join(stored)
+
+
+def test_the_history_list_clears_the_markers_it_shows(monkeypatch, tmp_path):
+    # The nav dot counts finished jobs needing attention. Only opening each
+    # job in turn cleared one, and the list they are gathered on cleared
+    # nothing, so a backlog of old failures kept the dot lit for good.
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    for title, attention in (("Failed", "failed"),
+                             ("Cancelled late", "cancel_late"),
+                             ("Interrupted", "recovery")):
+        job = Job(title=title, status=JobStatus.FAILED)
+        job.attention = attention
+        assert _REAL_ADMIT(job) is True
+
+    assert job_persistence.attention_count() == 3
+    assert job_persistence.acknowledge_listed_attention() == 2
+    # Recovery stands for work still outstanding, not for unread news.
+    assert job_persistence.attention_count() == 1

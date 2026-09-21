@@ -11266,6 +11266,12 @@ async def queue_history(
     pager's links carry the other's page."""
     p = max(1, p)
     jp = max(1, jp)
+    if attention:
+        # Opening this list is the acknowledgement, the same way opening one
+        # job is. Recovery markers stay: they stand for outstanding work.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, job_persistence.acknowledge_listed_attention)
 
     def _stamp(rows):
         for r in rows:
