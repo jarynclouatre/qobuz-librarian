@@ -3628,11 +3628,12 @@
   document.addEventListener("htmx:afterSwap", revealSearchFeedback);
   document.addEventListener("htmx:afterSwap", announceDiagnosticsSwap);
   document.addEventListener("htmx:historyRestore", restoreSearchHistory);
-  // Drop restored result IDs after loading so the next search stands alone.
+  // Drop restored result IDs once the replay is over, whether or not it
+  // worked. Kept after a failure, the id rode along with the next search the
+  // user typed and opened the album they had just navigated away from.
   document.addEventListener("htmx:afterRequest", function (e) {
     var form = e.target && e.target.closest && e.target.closest(".ql-search-form");
     if (!form) return;
-    if (e.detail && e.detail.successful === false) return;
     form.querySelectorAll("[data-deep-link]").forEach(function (el) { el.remove(); });
   });
   // One album downloaded from a search row gets the same treatment as a bulk
