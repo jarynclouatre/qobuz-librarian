@@ -797,7 +797,9 @@ def parse_args():
     getting.add_argument("--yes",          action="store_true",
                    help="auto-confirm the run's prompts; a gap fill, an "
                         "upgrade, a downsample, a repair or an in-place "
-                        "migration can replace or move files you already have")
+                        "migration can replace or move files you already have. "
+                        "The first downsample still asks whether to keep the "
+                        "originals")
     # Unattended upgrade-walk gate.
     getting.add_argument("--auto-safe",    action="store_true",
                    help="auto-confirm only the safe upgrades (requires --upgrade-walk).")

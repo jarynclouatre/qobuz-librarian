@@ -78,7 +78,10 @@ Docker is the supported way to run the **web UI**: the image bundles streamrip, 
 
 ### Updating Docker
 
-Run these commands from the directory that holds `compose.yaml` and `.env`:
+Run these commands from the directory that holds `compose.yaml` and `.env`.
+They update the image, not the files you downloaded: compare your
+`compose.yaml` against the one in this repository after an update so a new
+setting it gained does not pass you by.
 
 ```bash
 docker compose pull

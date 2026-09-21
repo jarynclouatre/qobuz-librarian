@@ -8,19 +8,21 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 review of its own, scanning a large library costs a fraction of what it did,
 and several messages that guessed at a cause now report what was observed.
 
-- A part-finished download no longer creates a "Library scan" review. Its missing tracks join an open review when there is one, and are left alone when there is not.
+- A part-finished download started from Search no longer creates a "Library scan" review of its own. Its missing tracks join an open review when there is one, and are left alone when there is not. A library or collection-restore run still parks one, which is what those were asked to do.
 - Search says Owned only when it can account for every track, and a long album's whole track list is fetched instead of only its first page. A box set is no longer judged complete from its first page.
 - Search warns before a download replaces an album you already partly own, and says so when it could not check what is on disk.
 - A track result's artist and album open that artist and that exact album; an album result's artist opens the artist.
 - Scanning a large library is much cheaper. An artist folder is sealed once per scan instead of once per missing album, progress is written on a timer instead of after every artist, and a saved review holds an artist's evidence once instead of on every row. A 300 artist scan that used to exceed a 1 GB limit now finishes well inside it.
 - A scan carries on past an artist folder it cannot read and names it, and will not record a baseline from an incomplete pass. An unreadable second disc inside a readable album is noticed too.
-- Repair no longer claims your original files are kept: both repair paths delete them once the replacement verifies. A repair scan that could not read every file says so and finishes with an error.
+- Repair no longer claims your original files are kept: both repair paths delete them once the replacement verifies. A repair scan that could not read every file says which files and why, and in the terminal exits with an error rather than reporting a clean sweep.
 - Lyrics look up a live, acoustic or demo recording under its own title instead of stripping that word and searching for the studio take, including when the word sits beside remaster information. An instrumental is skipped rather than given the vocal's lyrics.
 - Downsampling keeps repeated tags separate instead of joining them, keeps each picture's role, and no longer stops on a cover in a format it cannot carry.
 - A failed download reports how many tracks arrived incomplete, or that Qobuz would only serve the album lossy, instead of suggesting rate limiting in every case.
-- The warning dot beside Queue clears when you open the list it points at, and files retained from earlier downloads say so, instead of reading as though the download you just started had left them.
+- The warning dot beside Queue clears the items the list shows you when you open it, and shows the next of them if more are waiting. Items still needing recovery keep their mark. Files retained from earlier downloads say so, instead of reading as though the download you just started had left them.
 - The Queue no longer holds a browser connection for every waiting album, an empty music folder reads as "No music yet" rather than unavailable, and stopping a scan says its progress through the artists it checked is discarded.
 - A backup restored from a copy is recognised by the job that made it, and the backup listing and its deletion agree on which backups are redundant.
+- The app raises its own open-file limit at start. Sealing a receipt holds a guard per file for a whole artist folder, and at the 1,024 limit a container inherits by default a large library left artists unchecked. `compose.yaml` asks for the higher limit too; an install started any other way no longer needs it.
+- Also: a forced rescan starts over instead of resuming, the scan names which of its passes is running, the Library page stops offering a scan while one is running, the Queue redraws far less during a scan, and a container whose streamrip config is missing starts and says so rather than exiting before its own diagnostics run.
 - Dependency updates: idna, multidict and platformdirs, with the runtime image on the current python:3.14-slim.
 
 ## [1.1.1] - 2026-09-16

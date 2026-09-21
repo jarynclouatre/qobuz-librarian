@@ -22,7 +22,7 @@ Every menu mode has a flag that jumps straight to it; `--help` lists them all. T
 # The artist walk over every artist, queueing as you go
 docker compose run --rm -it qobuz-librarian cli --library-walk
 
-# Fill missing tracks in incomplete albums you own, nothing else
+# Fill the gaps in albums you own (a mostly-missing album is fetched whole)
 docker compose run --rm -it qobuz-librarian cli --album-gaps
 
 # Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)
@@ -30,8 +30,9 @@ docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
 A real Library walk or Album gaps run refreshes the collection backup after it
-scans at least one artist. Dry runs and interrupted walks leave the current
-backup unchanged.
+scans every artist it set out to. A dry run, an interrupted walk, an artist it
+could not read, or anything left to retry leaves the current backup unchanged,
+so the snapshot always describes a walk that finished.
 
 Choose `s` in the menu to open Settings, or use the flag to jump straight in.
 It writes to the same store the web Settings page saves to, and `--dry-run`
