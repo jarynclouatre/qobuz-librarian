@@ -7851,3 +7851,41 @@ def test_retry_queues_another_album_behind_the_interrupted_download(
         for job in (interrupted, second, *(
                 [started] if "started" in locals() else [])):
             _remove_job(job)
+
+
+def test_download_during_a_scan_queues_instead_of_claiming_it_is_queued(
+        client, monkeypatch):
+    # A scan collects unticked proposals. Folding a download onto one told
+    # the user it was "already queued" and queued nothing, so the album they
+    # asked for never arrived and the message said it had.
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+    import qobuz_librarian.web.jobs as jm
+
+    scan = jm.Job(title="Library scan")
+    scan.execute_kind = "library"
+    scan.status = jm.JobStatus.SCANNING
+    scan.add_candidate(kind="album", title="Zuma", artist="Neil Young",
+                       payload={"album_id": "zuma"}, selected=False)
+    jm.registry.add(scan)
+
+    album = {"id": "zuma", "title": "Zuma", "tracks_count": 1,
+             "artist": {"id": 1, "name": "Neil Young"},
+             "tracks": {"items": [{"id": "t1"}], "total": 1, "offset": 0}}
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(search_mod, "get_album", lambda *_a, **_k: album)
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: None)
+    submitted = []
+    monkeypatch.setattr(app_mod.job_mgr, "submit",
+                        lambda job, _run: submitted.append(job) or job)
+    monkeypatch.setattr(app_mod, "_make_download_run", lambda *_a, **_k: lambda _j: None)
+    try:
+        response = client.post("/download", data={"album_id": "zuma"},
+                               headers={"HX-Request": "true"})
+        assert response.headers["X-QL-Download-Outcome"] == "queued"
+        assert len(submitted) == 1
+    finally:
+        _remove_job(scan)
+        for job in submitted:
+            _remove_job(job)

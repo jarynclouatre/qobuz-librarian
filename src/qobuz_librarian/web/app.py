@@ -3031,12 +3031,13 @@ def _find_job_touching_album(album_id: str, skip_single_track: bool = False):
     """Return a pending/running job that already covers album_id, either as
     its direct subject or as one of its candidates.
 
-    Parked reviews don't count: an album merely listed among a review's
-    candidates isn't queued for anything, so refusing an explicit download
-    with "already queued" over it would be false, and with a whole-library
-    review parked, its candidates are exactly the albums the user is most
-    likely to search for. Approve re-checks the disk and drops candidates
-    that landed in the meantime, so downloading now can't double up later.
+    Reviews don't count, parked or still being built: an album merely
+    listed among a review's candidates isn't queued for anything, so
+    refusing an explicit download with "already queued" over it would be
+    false, and with a whole-library review its candidates are exactly the
+    albums the user is most likely to search for. Approve re-checks the
+    disk and drops candidates that landed in the meantime, so downloading
+    now can't double up later.
 
     ``skip_single_track`` ignores one-track downloads, so a full-album
     download doesn't fold onto a job that only downloaded one track."""
@@ -3047,8 +3048,13 @@ def _find_job_touching_album(album_id: str, skip_single_track: bool = False):
             continue
         if j.album_id == album_id:
             return j
-        # Snapshot: a SCANNING job appends to candidates from the worker thread,
-        # and iterating it live can raise "list changed size during iteration".
+        if j.status == job_mgr.JobStatus.SCANNING:
+            # Still collecting proposals. They are no more queued than a
+            # parked review's, and saying "already queued" over one told the
+            # user their download had happened when nothing was queued.
+            continue
+        # Snapshot: an approved job appends to candidates from the worker
+        # thread, and iterating it live can raise "list changed size".
         for cand in list(j.candidates or []):
             payload = cand.get("payload") or {}
             if payload.get("album_id") == album_id:
@@ -3064,9 +3070,9 @@ def _duplicate_download_job(album_id: str, track_id: str = "",
     """The already-active job a new /download should fold onto, or None to let it
     queue. Matched by intent, not album id alone: "get this edition too" is a
     deliberate extra copy and never folds; a single-track download folds only onto an
-    identical one; a normal full-album download folds onto another full-album job
-    (or a scan candidate the user is about to review), but not onto a one-track
-    download from the same album."""
+    identical one; a normal full-album download folds onto another full-album job,
+    but not onto a one-track download from the same album, and not onto a
+    review's candidate, which is a proposal rather than queued work."""
     if as_new_edition:
         # "Get this edition too" is a deliberate extra copy of an owned album,
         # so it skips folding onto scans and normal downloads, but two
