@@ -795,10 +795,12 @@ def parse_args():
     getting.add_argument("--force",        action="store_true",
                    help="redownload everything (album mode only)")
     getting.add_argument("--yes",          action="store_true",
-                   help="auto-confirm the run's prompts; a gap fill, an "
+                   help="auto-confirm the confirmations; a gap fill, an "
                         "upgrade, a downsample, a repair or an in-place "
                         "migration can replace or move files you already have. "
-                        "The first downsample still asks whether to keep the "
+                        "Questions that are choices rather than confirmations "
+                        "still ask: which artist to walk, which release to "
+                        "take, and whether a first downsample keeps the "
                         "originals")
     # Unattended upgrade-walk gate.
     getting.add_argument("--auto-safe",    action="store_true",

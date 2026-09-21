@@ -111,7 +111,7 @@
 <section class="ql-activity-section" aria-labelledby="history-jobs-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-jobs-heading">Jobs</h2>
-    <p class="ql-mono-meta">{{ bulk_total }}{% if bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
+    <p class="ql-mono-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
   </header>
   <div class="ql-history-cards">
     <div class="ql-activity-list ql-panelize">
@@ -157,7 +157,7 @@
 <section class="ql-activity-section" aria-labelledby="history-downloads-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-downloads-heading">Downloads</h2>
-    <p class="ql-mono-meta">{{ total }}{% if pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
+    <p class="ql-mono-meta">{{ total }}{% if attention_only and total > jobs|length %} · showing {{ jobs|length }}; open again for the rest{% elif pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
   </header>
   <div class="ql-activity-list ql-panelize">
     {% for job in jobs %}

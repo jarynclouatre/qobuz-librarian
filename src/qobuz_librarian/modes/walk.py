@@ -423,6 +423,7 @@ def run_album_walk_mode(args, token):
                 n_artists_scanned += 1
                 if stopped:
                     log.info(fmt(C.GRAY, "  Stopping the album walk."))
+                    interrupted = True
                     break
             except KeyboardInterrupt:
                 # Persist NOW: the current artist's just-approved albums are in
@@ -604,11 +605,13 @@ def run_walk_queued_mode(args, token):
                 f"  [{i + 1}/{len(artists)}] {truncate(d.name, 50)}"
                 f"{qhint}: scan? [y/N/p/s/f]: ", lower=False)
             if r is None:
+                interrupted = True
                 break
             rl = r.lower()
 
             if rl in ("s", "q", "quit"):
                 log.info(fmt(C.GRAY, "  Stopping walk."))
+                interrupted = True
                 break
             if rl == "p":
                 _flush_queue()

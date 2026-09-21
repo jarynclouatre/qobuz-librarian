@@ -300,7 +300,11 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
             else:
                 log.info(fmt(C.CYAN,
                     f"  ✓  Queued. ({len(album_queue)} album(s) in queue)"))
-        elif r in ("s", "skip"):
+        elif r not in ("", "d", "download"):
+            # Only the advertised answers act. This one can replace tracks
+            # already on disk, and "n" typed at it used to mean download.
+            if r not in ("s", "skip"):
+                log.info(fmt(C.GRAY, f"  Didn't recognise {r!r}."))
             log.info(fmt(C.GRAY, "  Skipped."))
         else:
             try:

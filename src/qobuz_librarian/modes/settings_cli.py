@@ -42,7 +42,7 @@ def _pick_downsample_policy(current_value):
         note = " (not chosen yet)"
     keep = confirm(
         f"  Keep restorable backups when downsampling?{note}",
-        default_yes=default_yes, auto_yes=False, on_eof=None)
+        default_yes=default_yes, auto_yes=False, on_eof=None, strict=True)
     if keep is None:
         return current_value
     return "keep" if keep else "delete"

@@ -18,8 +18,9 @@ _CHOICES = [
      "every artist, same as Artist; queue as you go and download after each "
      "artist or all at the end"),
     ("4", "Album gaps", Mode.ALBUM_WALK,
-     "every incomplete album you own: fill missing tracks only, never "
-     "suggests albums you don't have"),
+     "every incomplete album you own: fills the gaps, or refetches the "
+     "album when most of it is missing; never suggests albums you don't "
+     "have"),
     ("5", "Repair", Mode.ALBUM_REPAIR,
      "re-download damaged (truncated) tracks you own"),
     ("6", "Upgrade", Mode.UPGRADE,
