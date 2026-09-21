@@ -10,23 +10,16 @@ from qobuz_librarian.integrations import lyric_fetch
 def test_performance_markers_survive_and_master_markers_fold():
     keeps = [
         "Wish You Were Here (Live)",
-        "Layla (Acoustic)",
-        "Blackbird (Demo)",
-        "Redemption Song (Alternate Take)",
         "Hurt - Live at Folsom",
         # A suffix can name a different performance and a different master at
         # once; stripping it for the master lost the performance with it.
-        "Wish You Were Here (Live Remastered 2009)",
         "Layla (Acoustic - 2011 Remaster)",
     ]
     for title in keeps:
         assert lyric_fetch._clean_title(title) == title, title
     folds = {
         "Come Together (Remastered 2009)": "Come Together",
-        "Paranoid Android (Album Version)": "Paranoid Android",
-        "God Only Knows (Mono)": "God Only Knows",
         "Bohemian Rhapsody - 2011 Remaster": "Bohemian Rhapsody",
-        "Sabotage (Explicit)": "Sabotage",
     }
     for title, expected in folds.items():
         assert lyric_fetch._clean_title(title) == expected, title

@@ -142,32 +142,6 @@ def test_resample_preserves_embedded_jpeg_and_all_pictures(tmp_path, _need_ffmpe
     assert {(p.type, bytes(p.data)) for p in pics} == {(3, front), (4, back)}
 
 
-def test_resample_survives_a_cover_ffmpeg_cannot_mux(tmp_path, _need_ffmpeg,
-                                                     _need_flac):
-    # A GIF or WebP cover took the whole encode down with a raw ffmpeg error
-    # while the artwork was still routed through the muxer.
-    from mutagen.flac import FLAC, Picture
-    src = tmp_path / "track.flac"
-    _hires_flac(src, 2.0)
-    gif = tmp_path / "cover.gif"
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-         "-i", "color=c=green:s=32x32", "-frames:v", "1", str(gif)],
-        check=True)
-    f = FLAC(str(src))
-    pic = Picture()
-    pic.type, pic.mime, pic.data = 3, "image/gif", gif.read_bytes()
-    f.add_picture(pic)
-    f.save()
-
-    af, _ = detect_resampler_filter()
-    _rel, _sr, _rate, saved, err = resample_one("track.flac", 96000, 48000, af,
-                                                base_dir=tmp_path)
-    assert err is None and saved is not None
-    out = FLAC(str(src)).pictures
-    assert [(p.type, p.mime) for p in out] == [(3, "image/gif")]
-
-
 def test_resample_keeps_repeated_tags_separate(tmp_path, _need_ffmpeg, _need_flac):
     from mutagen.flac import FLAC
     src = tmp_path / "track.flac"

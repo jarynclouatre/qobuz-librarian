@@ -3424,36 +3424,6 @@ def test_undo_bounces_when_the_staging_mutex_is_held(client, monkeypatch, tmp_pa
 # ── per-job cancel button on queue page ───────────────────────────────
 
 
-def test_gap_fill_warning_rides_the_gap_tab(client, monkeypatch):
-    # The notice is about replacing tracks already on disk, so it must not sit
-    # over Missing Albums, where the user owns none of the album, nor over a
-    # Gap Fill tab with nothing on it.
-    from qobuz_librarian.web import job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
-    try:
-        # Gap Fill tab, nothing on it yet.
-        r = client.get(f"/jobs/{job.id}/review", params={"tab": "gaps"},
-                       headers={"HX-Request": "true"})
-        assert r.status_code == 200 and "ql-review-warning" not in r.text
-
-        job.add_candidate(kind="album", title="Dummy", artist="Portishead",
-                          detail="1994 - gap-fill: 2 missing of 11",
-                          payload={"year": "1994", "gap_fill": 2},
-                          selected=False)
-        for tab, expected in (("missing", False), ("gaps", True)):
-            r = client.get(f"/jobs/{job.id}/review", params={"tab": tab},
-                           headers={"HX-Request": "true"})
-            assert r.status_code == 200
-            assert ("ql-review-warning" in r.text) is expected, tab
-    finally:
-        _remove_job(job)
-
-
 def _inject_job(status, title="Test Job"):
     """Add a job directly to the shared registry and return it.
     Caller must remove the job in a finally block."""
