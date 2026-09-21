@@ -197,7 +197,7 @@ def force_cleanup_preflight(album, args, *, expected_album_receipt=None):
     move_it = confirm(
         "\n  Move this folder to a backup before re-downloading? "
         "(restored automatically if the re-download fails)",
-        default_yes=True, auto_yes=False)
+        default_yes=True, auto_yes=False, strict=True)
     if not move_it:
         log.info(fmt(C.YELLOW, "  Continuing without moving it. Expect file collisions."))
         return False
