@@ -22,10 +22,12 @@
   var searchRestoreFallback = null;
   var searchSnapshotsInvalidated = false;
 
-  function searchStateId(kind, query, artistId) {
+  function searchStateId(kind, query, artistId, albumId) {
     kind = ["artist", "album", "track"].indexOf(kind) >= 0 ? kind : "artist";
     var state = kind + "|" + String(query || "").trim();
-    return artistId ? state + "|artist:" + String(artistId).trim() : state;
+    if (artistId) state += "|artist:" + String(artistId).trim();
+    if (kind === "album" && albumId) state += "|album:" + String(albumId).trim();
+    return state;
   }
 
   function searchStateFromUrl() {
@@ -33,11 +35,12 @@
     try {
       var params = new URL(location.href).searchParams;
       var query = (params.get("q") || "").trim();
-      if (!query) return "";
+      if (!query && !params.get("album_id")) return "";
       return searchStateId(
         params.get("kind") || "artist",
         query,
-        params.get("artist_id") || ""
+        params.get("artist_id") || "",
+        params.get("album_id") || ""
       );
     } catch (e) {
       return "";
@@ -3507,7 +3510,7 @@
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Enter" && event.key !== " ") return;
     var button = event.target && event.target.closest && event.target.closest("#search-results button[type=submit]");
-    if (!button || !button.form || !button.form.matches(".ql-result-action-form, .ql-search-back-form")) return;
+    if (!button || !button.form || !button.form.matches(".ql-result-action-form, .ql-result-link-form, .ql-search-back-form")) return;
     keyboardSearchForm = button.form;
   }, true);
 
@@ -3625,8 +3628,7 @@
   document.addEventListener("htmx:afterSwap", revealSearchFeedback);
   document.addEventListener("htmx:afterSwap", announceDiagnosticsSwap);
   document.addEventListener("htmx:historyRestore", restoreSearchHistory);
-  // A restored artist deep-link replays itself once on load; drop the artist it
-  // carried afterwards so the next search the user types is its own.
+  // Drop restored result IDs after loading so the next search stands alone.
   document.addEventListener("htmx:afterRequest", function (e) {
     var form = e.target && e.target.closest && e.target.closest(".ql-search-form");
     if (!form) return;

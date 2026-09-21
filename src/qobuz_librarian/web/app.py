@@ -3923,7 +3923,7 @@ def _maybe_resume_library_scan():
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, q: str = "", kind: str = "artist",
-                    artist_id: str = "", artist_name: str = ""):
+                    artist_id: str = "", artist_name: str = "", album_id: str = ""):
     active_jobs = [j for j in job_mgr.registry.pending_and_running()
                    if j.status.value in ('running', 'scanning')]
 
@@ -3991,6 +3991,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_q = str(q or "").strip()[:200]
     search_artist_id = str(artist_id or "").strip()[:64]
     search_artist_name = str(artist_name or "").strip()[:200]
+    search_album_id = str(album_id or "").strip()[:64] if search_kind == "album" else ""
     return _tr(request, "index.html", {
         "active_jobs": active_jobs,
         "pending": job_mgr.registry.pending_and_running(),
@@ -4000,7 +4001,8 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         "search_kind": search_kind,
         "search_artist_id": search_artist_id,
         "search_artist_name": search_artist_name,
-        "auto_search": bool(search_q),
+        "search_album_id": search_album_id,
+        "auto_search": bool(search_q or search_album_id),
         "page": "dashboard",
         **disk,
     })
@@ -4065,7 +4067,8 @@ def _qobuz_quality_short_label(primary: dict | None,
 async def do_search(request: Request, q: str = Form("", max_length=500),
                     kind: str = Form("album"),
                     artist_id: str = Form(""),
-                    artist_name: str = Form("")):
+                    artist_name: str = Form(""),
+                    album_id: str = Form("")):
     results = []
     album_groups = []
     artist_results = []
@@ -4076,17 +4079,16 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     kind = kind_raw if kind_raw in ("artist", "track") else "album"
     artist_id = str(artist_id or "").strip()
     artist_name = str(artist_name or "").strip()
+    album_id = str(album_id or "").strip()
     if not _is_htmx(request):
         return RedirectResponse(url="/", status_code=303)
-    if query:
+    if query or (kind == "album" and album_id):
         # Imported before the try so the except clauses below can always name
         # them, even if a failure happens before the request reaches the API.
         try:
             token = _get_token()
 
-            # If the user pasted a Qobuz URL, the placeholder says we
-            # handle it, so actually do so by fetching the album directly
-            # instead of doing a text search on the URL string.
+            # Resolve pasted Qobuz URLs before trying a text search.
             try:
                 _split = urllib.parse.urlsplit(query)
                 netloc = _split.netloc.lower()
@@ -4098,20 +4100,13 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             parsed = cli.parse_qobuz_url(query) if is_qobuz_url else None
             raw = []
             loop = asyncio.get_running_loop()
-            if parsed and parsed[0] == "album" and kind == "track":
-                # An album URL only resolves in Album mode; in Track mode it
-                # would fetch the album and then be dropped as not-a-track,
-                # leaving a blank "No results". Point the user at the toggle.
-                error = ("That's an album URL. Switch to Album to download it, "
-                         "or paste a single track to download one track.")
-            elif parsed and parsed[0] == "album" and kind == "artist":
-                error = "That's an album URL. Switch to Album to download it."
-            elif parsed and parsed[0] == "album":
+            if kind == "album" and (album_id or (parsed and parsed[0] == "album")):
                 try:
                     raw = [await asyncio.wait_for(
                         loop.run_in_executor(
                             None, lambda: api_client.call_within(
-                                cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, parsed[1], token)
+                                cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album,
+                                album_id or parsed[1], token)
                         ),
                         timeout=cfg.WEB_FETCH_TIMEOUT,
                     )]
@@ -4120,11 +4115,16 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except (AuthLost, QobuzUnavailable):
                     raise
                 except QobuzError:
-                    error = "Couldn't fetch that album. Check the URL."
+                    error = "Couldn't fetch that album."
                 except Exception:
                     logging.getLogger("qobuz_librarian").exception(
                         "album fetch failed for %r", query)
-                    error = "Couldn't fetch that album. Check the URL."
+                    error = "Couldn't fetch that album."
+            elif parsed and parsed[0] == "album" and kind == "track":
+                error = ("That's an album URL. Switch to Album to download it, "
+                         "or paste a single track to download one track.")
+            elif parsed and parsed[0] == "album" and kind == "artist":
+                error = "That's an album URL. Switch to Album to download it."
             elif parsed and parsed[0] == "track" and kind == "track":
                 # Tracks mode: resolve the pasted track URL to that one track;
                 # the track-results loop below renders it for a one-track download.
@@ -4251,6 +4251,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "title":       t.get("title") or "?",
                     "version":     t.get("version") or alb.get("version") or "",
                     "artist":      (alb.get("artist") or {}).get("name") or _perf or "?",
+                    "artist_id":   (alb.get("artist") or {}).get("id"),
                     "album_title": alb.get("title") or "?",
                     "year":        catalog.album_year(alb) or "?",
                     "track_n":     t.get("track_number") or "?",
@@ -4338,6 +4339,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     "id":      a.get("id"),
                     "title":   a.get("title") or "?",
                     "artist":  (a.get("artist") or {}).get("name") or "?",
+                    "artist_id": (a.get("artist") or {}).get("id"),
                     "year":    catalog.album_year(a) or "?",
                     "tracks":  a.get("tracks_count") or "?",
                     "quality": _qual,
@@ -4462,6 +4464,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         "id": res["id"],
                         "title": res["title"],
                         "artist": res["artist"],
+                        "artist_id": res["artist_id"],
                         "version": (alb.get("version") or "").strip(),
                         "year": res["year"], "tracks": res["tracks"],
                         "quality": res["quality"], "hires": res["hires"],
@@ -4500,7 +4503,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     if rep_i:
                         eds.insert(0, eds.pop(rep_i))
                     rep = eds[0]
-                    for f in ("id", "title", "artist", "year", "tracks",
+                    for f in ("id", "title", "artist", "artist_id", "year", "tracks",
                               "quality", "hires", "lossy", "bit_depth",
                               "sample_rate", "cover", "version", "queued",
                               "scanning", "replaces_existing", "ownership_unknown"):
@@ -4526,6 +4529,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     search_state = f"{kind}|{query}"
     if artist_id:
         search_state += f"|artist:{artist_id}"
+    if kind == "album" and album_id:
+        search_state += f"|album:{album_id}"
     search_result_count = len(results) if results else len(artist_results)
     defer_search_views = search_result_count > _SEARCH_SNAPSHOT_RESULT_LIMIT
     ctx = {"q": query, "results": results, "album_groups": album_groups,
@@ -4540,12 +4545,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         # Put the search in the address bar. Without it a reload, or Back after
         # a look at the Queue, landed on the empty state with the query, the
         # album list and every tick gone. GET / rehydrates from these.
-        if query:
+        if query or (kind == "album" and album_id):
             params = {"kind": kind, "q": query}
             if artist_id:
                 params["artist_id"] = artist_id
                 if artist_name:
                     params["artist_name"] = artist_name
+            if kind == "album" and album_id:
+                params["album_id"] = album_id
             resp.headers["HX-Push-Url"] = "/?" + urllib.parse.urlencode(params)
         return resp
     return RedirectResponse(url="/", status_code=303)

@@ -208,11 +208,14 @@
             {% if auto_search %}data-search-auto="1"{% endif %}
             class="ql-search-form">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        {# These fields restore a selected artist once, then the browser drops
+        {# These fields restore a selected result once, then the browser drops
            them before the next search. #}
         {% if search_artist_id %}
         <input type="hidden" name="artist_id" value="{{ search_artist_id }}" data-deep-link>
         <input type="hidden" name="artist_name" value="{{ search_artist_name }}" data-deep-link>
+        {% endif %}
+        {% if search_album_id %}
+        <input type="hidden" name="album_id" value="{{ search_album_id }}" data-deep-link>
         {% endif %}
         <div class="ql-segmented" role="group" aria-label="Search for">
           <label>

@@ -2343,6 +2343,28 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ql-result-link-form {
+  display: inline;
+}
+.ql-result-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 55%, transparent);
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+.ql-result-link:hover {
+  color: var(--ql-text);
+}
+.ql-result-link:focus-visible {
+  outline: 2px solid var(--ql-gold);
+  outline-offset: 2px;
+}
 .ql-table-mobile-artist {
   display: none;
 }

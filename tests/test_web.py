@@ -1061,6 +1061,82 @@ def test_artist_search_selected_artist_shows_discography(client, monkeypatch):
     assert "Das Tor" in r.text
 
 
+def test_track_album_link_keeps_the_selected_edition(client, monkeypatch):
+    import html.parser
+    import urllib.parse
+
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    class Forms(html.parser.HTMLParser):
+        def __init__(self, markup):
+            super().__init__()
+            self.forms = []
+            self.current = None
+            self.feed(markup)
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form":
+                self.current = (attrs["action"], {})
+                self.forms.append(self.current)
+            elif tag == "input" and self.current and attrs.get("name"):
+                self.current[1][attrs["name"]] = attrs.get("value", "")
+
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.current = None
+
+    album = {
+        "id": "zuma-2014", "title": "Zuma", "year": 2014,
+        "artist": {"id": 123, "name": "Neil Young"}, "tracks_count": 9,
+    }
+    other_edition = {**album, "id": "zuma-1975", "year": 1975}
+    fetched, searched = [], []
+
+    def get_album(album_id, _token):
+        fetched.append(album_id)
+        return {album["id"]: album, other_edition["id"]: other_edition}[album_id]
+
+    def search_albums(*args, **_kwargs):
+        searched.append(args)
+        return [other_edition, album]
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: None)
+    monkeypatch.setattr(search_mod, "get_album", get_album)
+    monkeypatch.setattr(search_mod, "search_albums", search_albums)
+    monkeypatch.setattr(search_mod, "search_tracks", lambda *_a, **_kw: [{
+        "id": 456, "title": "Cortez the Killer", "album": album, "track_number": 8,
+    }])
+
+    response = client.post(
+        "/search", data={"kind": "track", "q": "Cortez the Killer"},
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 200
+    links = [
+        (action, data) for action, data in Forms(response.text).forms
+        if action == "/search" and data.get("kind") == "album"
+    ]
+    assert len(links) == 3  # Phone, desktop and grid.
+    for action, data in links:
+        assert data["_csrf_token"] == client.cookies.get("ql_csrf")
+        response = client.post(action, data=data, headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        location = urllib.parse.urlsplit(response.headers["HX-Push-Url"])
+        assert urllib.parse.parse_qs(location.query)["album_id"] == [album["id"]]
+        downloads = [
+            data for action, data in Forms(response.text).forms
+            if action == "/download"
+        ]
+        assert downloads
+        assert {data["album_id"] for data in downloads} == {album["id"]}
+    assert fetched == [album["id"]] * len(links)
+    assert not searched
+
+
 def test_large_artist_catalog_keeps_results_without_caching_both_views(
         client, monkeypatch):
     import qobuz_librarian.api.search as search_mod
