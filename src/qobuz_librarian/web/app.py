@@ -5054,9 +5054,9 @@ def _make_download_run(
                 j.error = "Downloaded, but the import failed. See job log."
             elif retryable:
                 j.error = (
-                    f"Qobuz sent {plural(retryable, 'track')} incomplete, so "
-                    "nothing was added to your library. Running it again "
-                    "usually fixes this.")
+                    f"{plural(retryable, 'track')} did not arrive as a "
+                    "complete file, so nothing was added to your library. "
+                    "The job log names them.")
             elif lossy_only:
                 j.error = (
                     f"Qobuz offered {plural(lossy_only, 'track')} only in a "
@@ -11335,9 +11335,8 @@ async def queue_history(
      total, pages, p, rows) = await loop.run_in_executor(
         None, lambda: _load_page(p, jp))
     if attention:
-        # Acknowledge the rows this page actually shows, the same way opening
-        # one job acknowledges it. Clearing the backlog before the query
-        # emptied the very list the reader had just opened.
+        # Only the rows this page shows: clearing the backlog before the
+        # query emptied the list the reader had just opened.
         shown = [row.get("id") for row in (*bulk_jobs, *rows)]
         await loop.run_in_executor(
             None, lambda: job_persistence.acknowledge_listed_attention(shown))

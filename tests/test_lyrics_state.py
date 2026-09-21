@@ -1,15 +1,10 @@
-"""Lyrics checkpoints, retry handoffs, and library-only maintenance."""
+"""Lyrics checkpoints and library-only maintenance."""
 
 import logging
-import os
-import threading
-from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-
 from qobuz_librarian import config as cfg
-from qobuz_librarian.integrations import lyric_fetch, lyrics, rip
+from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library import lyrics as library_lyrics
 
 

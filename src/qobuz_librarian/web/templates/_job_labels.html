@@ -192,7 +192,7 @@
    does not auto-resume, which the generic wording never said. #}
 {% macro cancel_confirm(job) -%}
   {%- if job.status.value == 'scanning' and job.execute_kind in ('library', 'repair') -%}
-    Stop this scan? The artists it has already checked are discarded, and the next scan starts from the beginning.
+    Stop this scan? Its progress through the artists it has checked is discarded, and the next scan starts from the beginning.
   {%- else -%}
     Cancel this job? It will stop after the current safe step.
   {%- endif -%}

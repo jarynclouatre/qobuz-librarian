@@ -143,10 +143,9 @@ def test_a_provider_error_never_reaches_the_stored_job_record(
     assert "nobody@example.test" not in "".join(stored)
 
 
-def test_the_history_list_clears_the_markers_it_shows(monkeypatch, tmp_path):
-    # The nav dot counts finished jobs needing attention. Only opening each
-    # job in turn cleared one, and the list they are gathered on cleared
-    # nothing, so a backlog of old failures kept the dot lit for good.
+def test_only_the_listed_attention_markers_are_cleared(monkeypatch, tmp_path):
+    # A backlog of old failures kept the nav dot lit: only opening each job
+    # in turn cleared one, and the list they gather on cleared nothing.
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     job_persistence._reset_for_tests()
     monkeypatch.setattr(job_persistence, "_disabled", False)

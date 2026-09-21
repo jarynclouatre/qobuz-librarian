@@ -648,5 +648,6 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
             log.info(fmt(C.GRAY, f"     … and {len(missing) - 25} more"))
         if downloads_whole_album(n_present, n_missing, n_total):
             log.info(fmt(C.YELLOW,
-                "  Too little is present to patch: the whole album is "
+                "  Too few tracks are present to fill one by one: the whole "
+                "album is "
                 "downloaded and replaces the tracks already here."))

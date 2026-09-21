@@ -7139,7 +7139,7 @@ def test_repair_approve_parks_the_unticked_remnant(client, monkeypatch):
             _remove_job(remnant)
 
 
-def test_partial_download_gap_fill_can_be_approved(monkeypatch, tmp_path):
+def test_partial_download_gap_fill_carries_its_receipts(monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import backup, catalog
     from qobuz_librarian.modes import process as process_mod

@@ -176,9 +176,8 @@ def test_get_album_cached_by_id(tmp_path, monkeypatch):
 
 
 def test_get_album_fetches_every_page_of_a_long_album(tmp_path, monkeypatch):
-    # A box set longer than one page arrived as its first page, and everything
-    # downstream reads that list as the album: gap fill found no gaps past the
-    # page, and a download fetched only what the page held.
+    # A box set longer than one page arrived as its first page, and gap fill
+    # and downloads both read that page as the whole album.
     import qobuz_librarian.config as cfg
     from qobuz_librarian.api import album_cache, search
 

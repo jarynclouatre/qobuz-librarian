@@ -423,7 +423,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
 
         if downloads_whole_album(len(present), len(missing), n_total):
             log.info(fmt(C.YELLOW,
-                "    Too little is present to patch: the whole album is "
+                "    Too few tracks are present to fill one by one: the whole "
+                "album is "
                 "downloaded and replaces the tracks already here."))
 
         if args.dry_run:

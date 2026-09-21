@@ -289,10 +289,7 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
                 continue
             try:
                 # Suffix first: an errors caller walks to the end, and
-                # stat'ing every entry on the way would cost a syscall per
-                # file in the library. It also means an unreadable file that
-                # is not audio no longer stops the walk, and it could not
-                # have changed the answer.
+                # stat'ing every entry would cost a syscall per file.
                 if f.suffix.lower() in exts and f.is_file():
                     found = True
                     if walk_errors is None:
@@ -307,9 +304,8 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
             raise
         walk_errors.append(f"{d}: {e}")
     if walk_errors is not None and len(walk_errors) > error_count:
-        # A subtree could not be listed. Audio that was seen is still audio,
-        # but "no audio" would be a conclusion about the part that was not
-        # read. Nothing is cached from here, so the next walk reports it again.
+        # A subtree could not be listed, so "no audio" would be a conclusion
+        # about the part that was not read. Nothing is cached from here.
         return True if found else None
     _HAS_AUDIO_CACHE[key] = found
     return found

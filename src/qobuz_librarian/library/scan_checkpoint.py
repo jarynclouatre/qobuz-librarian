@@ -156,9 +156,8 @@ class Writer(AbstractContextManager):
         return saved
 
     def clear(self) -> bool:
-        # Drop the buffer rather than flushing it: writing the whole file out
-        # to delete the entry a moment later is the cost this class exists to
-        # avoid.
+        # Drop the buffer rather than flushing it: writing the file out only
+        # to delete the entry a moment later.
         self._pending = None
         self._last_write = None
         return clear(self.kind)

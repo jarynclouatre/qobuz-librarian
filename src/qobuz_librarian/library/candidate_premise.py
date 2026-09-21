@@ -466,10 +466,8 @@ def validate_container(candidate: dict) -> dict:
 def validate_all(candidates) -> None:
     """Check every row against its files as they are right now.
 
-    Deliberately unshared. This runs immediately before the flow touches
-    anything, so each row is sealed afresh: sharing one artist's capture
-    across rows would check the first row's files and take the rest on
-    trust, widening the window in which an edit lands unnoticed.
+    Unshared on purpose: this runs immediately before the flow writes, and
+    a shared capture would take every row after the first on trust.
     """
     for candidate in candidates:
         validate(candidate)
