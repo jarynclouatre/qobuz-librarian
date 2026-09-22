@@ -360,6 +360,12 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
             if walk_errors is not None:
                 walk_errors.append(f"{d}: {e}")
             log.info(f"  ⚠  Couldn't read artist folder {d}: {e}.")
+            # Keep it anyway. This check stops at the first track it finds, so
+            # whether it met the unreadable part before or after that track is
+            # directory order, and dropping the artist on it made the same
+            # library scan differently on different disks. The album listing
+            # reads what it can and reports the rest.
+            artists.append(d)
     if empties:
         names = ", ".join(sorted(empties)[:5])
         more = f" (+{len(empties) - 5} more)" if len(empties) > 5 else ""

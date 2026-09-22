@@ -230,3 +230,29 @@ def test_transient_read_error_is_a_walk_error_not_untagged(monkeypatch, tmp_path
     tracks2 = scanner.read_album_dir(album, walk_errors=errs2)
     assert not errs2
     assert [t["isrc"] for t in tracks2] == ["USAAA0000001"]
+
+
+def test_an_artist_with_audio_survives_an_unreadable_subfolder(tmp_path, monkeypatch):
+    # The audio check stops at the first track it finds, so whether it meets an
+    # unreadable subfolder before or after that track is directory order. It
+    # decided whether the artist was scanned at all, which made the same
+    # library behave differently on CI than on a developer's disk.
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    artist = music / "Partly readable"
+    (artist / "Album").mkdir(parents=True)
+    (artist / "Album" / "01.flac").write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+
+    def raises(_d, walk_errors=None):
+        raise PermissionError(13, "Permission denied", str(artist / "Blocked"))
+
+    monkeypatch.setattr(scanner, "_has_audio_anywhere", raises)
+    reported = []
+    found = scanner.list_library_artists(
+        on_artist_error=lambda path, error: reported.append(path))
+
+    assert found == [artist]
+    assert reported == [artist]
