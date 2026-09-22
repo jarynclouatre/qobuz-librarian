@@ -4,9 +4,9 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 
 ## [1.2.0] - 2026-09-21
 
-1.2.0 makes the app account for itself. A scan of a large library costs a
-fraction of what it did, Search says Owned only when it can prove it, and the
-messages that guessed at a cause now report what happened.
+A scan of a large library costs a fraction of what it did, Search says Owned
+only when it can prove it, and the messages that guessed at a cause now report
+what happened.
 
 - Search says Owned only when the track list accounts for the whole album, and fetches every page of a long one, so a box set is no longer judged complete from its first page. A result's artist and album open that artist and that exact album. Downloading an album a running scan has listed queues it, instead of answering "Already queued" and queuing nothing.
 - A download that ends badly says how many tracks arrived incomplete, or that Qobuz would only serve the album lossy, rather than suggesting rate limiting every time. A part-finished download from Search no longer creates a "Library scan" review of its own, and Search warns before replacing an album you partly own.
