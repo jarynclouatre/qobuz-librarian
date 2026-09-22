@@ -2712,17 +2712,31 @@ def _queue_done_line(results, n_items):
 
     A parked, blocked, cancelled, or interrupted album downloads its tracks
     without one of them failing, so the verdict reads the album tally as well
-    as the track tally.
+    as the track tally. A cancelled album is tallied as cancelled rather than
+    by its tracks. An album Qobuz could not deliver whole was discarded, so
+    every track it asked for is still unresolved.
     """
     n_success = sum(1 for r in results if r.get("result") == "downloaded")
-    n_total_ok = sum(r.get("n_ok", 0) for r in results)
-    n_total_missing = sum(sum(incomplete_track_counts(r)) for r in results)
-    n_unfinished = max(0, n_items - n_success)
-    clear = n_total_missing == 0 and n_unfinished == 0
+    n_cancelled = sum(1 for r in results if r.get("result") == "cancelled")
+    n_total_ok = n_total_missing = 0
+    for r in results:
+        if r.get("result") == "cancelled":
+            continue
+        missing = sum(incomplete_track_counts(r))
+        if r.get("result") == "incomplete":
+            missing += r.get("n_ok", 0)
+        else:
+            n_total_ok += r.get("n_ok", 0)
+        n_total_missing += missing
+    n_unfinished = max(0, n_items - n_success - n_cancelled)
+    clear = n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
     text = (f"  {'✓' if clear else '⚠'} Queue done: "
             f"{n_success}/{n_items} albums OK · "
             f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
             f"{n_total_missing} track{'s' if n_total_missing != 1 else ''} unresolved")
+    if n_cancelled:
+        text += (f" · {n_cancelled} album"
+                 f"{'s' if n_cancelled != 1 else ''} cancelled")
     if n_unfinished:
         text += (f" · {n_unfinished} album"
                  f"{'s' if n_unfinished != 1 else ''} unfinished")

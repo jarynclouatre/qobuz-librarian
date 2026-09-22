@@ -47,7 +47,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
-from qobuz_librarian.library import library_scan_state, new_releases, scan_checkpoint
+from qobuz_librarian.library import generation_state, library_scan_state, scan_checkpoint
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
@@ -401,8 +401,8 @@ class Job:
 
     @property
     def interrupted_by_restart(self) -> bool:
-        return (self.status is JobStatus.CANCELED
-                and self.summary.startswith("Interrupted by a restart."))
+        return job_persistence.interrupted_by_restart(
+            self.status.value, self.summary)
 
     @property
     def display_title(self) -> str:
@@ -2135,8 +2135,8 @@ def restore_jobs(
             _persist_restored_transition(job, previous_status)
         elif unknown_recovery_status:
             job.error = ("This saved Repair job had an unrecognised state. "
-                         "Original files remain at the recovery location "
-                         "shown below; check them before retrying.")
+                         "The original files were kept; check them before "
+                         "retrying.")
             job.attention = "recovery"
             job.finished_at = job.finished_at or time.time()
             interrupted += 1
@@ -2146,7 +2146,7 @@ def restore_jobs(
             # Only an album download / single-track download carries an
             # album_id, and only those get a Retry button on the job + history
             # pages.
-            restart = "Interrupted by a container restart. "
+            restart = job_persistence.RESTART_INTERRUPTED + " "
             if job.execute_args_unreadable:
                 job.error = (
                     restart
@@ -2164,36 +2164,40 @@ def restore_jobs(
             else:
                 job.error = restart + "Run it again to retry."
             if job.recoveries:
-                job.error = (restart + "Original files remain at the recovery "
-                             "location shown below. Check them before retrying.")
+                job.error = (restart + "The original files were kept; check "
+                             "them before retrying.")
             job.finished_at = time.time()
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.SCANNING:
             job.status = JobStatus.CANCELED
-            # Library scans auto-resume from their checkpoint when the app next
-            # opens; the whole-library repair sweep also checkpoints but only
-            # picks up when its scan is started again; every other kind restarts.
+            restart = job_persistence.RESTART_INTERRUPTED + " "
+            # A library scan resumes from its checkpoint: by itself when the
+            # Search page opens, if AUTO_LIBRARY_SCAN is on and the baseline
+            # is incomplete (the test the auto-resume makes), and from the
+            # notice there otherwise. The whole-library repair sweep also
+            # checkpoints but only picks up when its scan is started again;
+            # every other kind restarts.
             if job.execute_kind == "library":
                 if scan_checkpoint.pending() is None:
-                    job.summary = ("Interrupted by a restart. Start the scan "
-                                   "again from the Library page.")
-                elif new_releases.is_baseline_complete():
-                    job.summary = ("Interrupted by a restart. Resume it from "
-                                   "the notice on the Search page.")
+                    job.summary = (restart + "Start the scan again from the "
+                                   "Library page.")
+                elif (cfg.AUTO_LIBRARY_SCAN
+                        and not generation_state.baseline_complete()):
+                    job.summary = (restart + "It resumes from where it left "
+                                   "off the next time the Search page opens.")
                 else:
-                    job.summary = ("Interrupted by a restart. It resumes from "
-                                   "where it left off the next time you open "
-                                   "the app.")
+                    job.summary = (restart + "Resume it from the notice on "
+                                   "the Search page.")
             elif job.execute_kind == "repair":
                 if scan_checkpoint.load("repair") is None:
-                    job.summary = ("Interrupted by a restart. Start the scan "
-                                   "again from the Repair page.")
+                    job.summary = (restart + "Start the scan again from the "
+                                   "Repair page.")
                 else:
-                    job.summary = ("Interrupted by a restart. Start the repair scan "
-                                   "again and it continues from where it left off.")
+                    job.summary = (restart + "Start the repair scan again and "
+                                   "it continues from where it left off.")
             else:
-                job.summary = "Interrupted by a restart. Run the scan again to retry."
+                job.summary = restart + "Run the scan again to retry."
             job.finished_at = job_persistence.previous_write_at() or job.created_at
             interrupted += 1
             _persist_restored_transition(job, previous_status)
@@ -2202,9 +2206,8 @@ def restore_jobs(
                 # Older builds could re-park a Repair after its originals had
                 # already been retained.
                 job.status = JobStatus.FAILED
-                job.error = ("Original files remain at the recovery location "
-                             "shown below. Check or restore them before "
-                             "retrying this repair.")
+                job.error = ("The original files were kept. Check or "
+                             "restore them before retrying this repair.")
                 job.finished_at = time.time()
                 interrupted += 1
                 _persist_restored_transition(job, previous_status)

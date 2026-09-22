@@ -984,8 +984,10 @@ def run_album_download(
         # count the ERROR markers so a "succeeded" line can't hide a gap.
         n_errors = len(re.findall(r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?ERROR\b", out, re.MULTILINE))
         if rc != 0:
-            log.info(fmt(C.RED, f"  ✗  rip exit {rc}; last 300 chars:"))
-            log.info(fmt(C.GRAY, "  " + out[-300:].replace("\n", "\n  ")))
+            # Cancelling also ends rip with a non-zero exit, which is not a failure.
+            if not is_cancel_requested():
+                log.info(fmt(C.RED, f"  ✗  rip exit {rc}; last 300 chars:"))
+                log.info(fmt(C.GRAY, "  " + out[-300:].replace("\n", "\n  ")))
         elif n_errors:
             log.info(
                 fmt(
@@ -1273,7 +1275,8 @@ def run_album_download(
         # n_tracks_total tracks), including the already-present ones we moved
         # to the gap-fill backup - so n_ok (every clean FLAC that landed) is
         # counted against the total, NOT len(missing).
-        if n_fail == 0 and full_album_rc != 0 and n_ok > 0:
+        if (n_fail == 0 and full_album_rc != 0 and n_ok > 0
+                and not is_cancel_requested()):
             log.info(
                 fmt(
                     C.GRAY,

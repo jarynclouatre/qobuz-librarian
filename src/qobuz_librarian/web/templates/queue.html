@@ -15,7 +15,7 @@
 {% macro queue_job_row(job) -%}
 <article class="ql-activity-row ql-activity-row--queue{% if job.status.value == 'running' %} is-running{% endif %}"
      data-queue-row
-     {%- if job.status.value in ('running', 'scanning') %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}"{% endif %}>
+     {%- if job.status.value in ('running', 'scanning') %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}"{% if job.importing %} data-job-importing="1"{% endif %}{% endif %}>
   {{ labels.kind_tile(job, 'is-live' if job.status.value in ('running', 'scanning') else '') }}
 
   <div class="ql-activity-main">
@@ -92,7 +92,7 @@
             title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}{{ labels.cancel_confirm(job) }}{% endif %}"
-            data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-irreversible{% endif %}>{{ _act }}</button>
+            data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{{ _act }}</button>
   </form>
   {% endif %}
   {% endif %}
@@ -147,11 +147,12 @@
 {% if (active_jobs | length) + (waiting_jobs | length) > 1 %}
 {# What clearing does is spelled out by the confirm dialog the button opens;
    repeating it here as standing text made two jobs read like a warning. #}
+{% set _scan = active_jobs | selectattr('status.value', 'equalto', 'scanning') | selectattr('execute_kind', 'in', ['library', 'repair']) | first %}
 <div class="ql-activity-maintenance">
   <form action="/queue/cancel-pending" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear the queue? Waiting jobs are removed and other running jobs stop after their current step.{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %} Completed work and parked reviews are untouched."
+            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %} Completed work and parked reviews are untouched."
             data-confirm-action="Clear queue" data-irreversible>Clear the queue</button>
   </form>
 </div>

@@ -2943,7 +2943,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             "durable_recovery_control",
             _durable_recovery_control(),
         )
-    if name in {"job.html", "_job_body.html", "queue.html"}:
+    if name in {"job.html", "_job_body.html", "queue.html", "index.html"}:
         context.setdefault(
             "cancel_protected_job_id",
             job_mgr.durable_recovery_job_id(),
@@ -4001,9 +4001,11 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_artist_id = str(artist_id or "").strip()[:64]
     search_artist_name = str(artist_name or "").strip()[:200]
     search_album_id = str(album_id or "").strip()[:64] if search_kind == "album" else ""
+    pending = job_mgr.registry.pending_and_running()
     return _tr(request, "index.html", {
         "active_jobs": active_jobs,
-        "pending": job_mgr.registry.pending_and_running(),
+        "pending": pending,
+        "queue_waits": {j.id: _queue_wait(j) for j in pending},
         "review": job_mgr.registry.awaiting_review(),
         "creds_token_valid": _token_valid_for(),
         "search_q": search_q,
@@ -8913,6 +8915,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
         return RedirectResponse(url=f"/library{query}", status_code=303)
     review_badge_ack = _review_badge_ack_for(job)
     nav_page, _return_href, _return_label = _job_nav_destination(job)
+    shown_attention = job.attention
     if job.attention and job.attention not in ("recovery", "catalog"):
         # Opening the page is the acknowledgement: the History chip and the
         # nav's warning dot stand down once the user has seen the job.
@@ -8945,7 +8948,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
             "stale": not current,
             "reason": str(output.get("reason") or ""),
         }
-    ctx = {"job": job, "page": nav_page,
+    ctx = {"job": job, "page": nav_page, "shown_attention": shown_attention,
            "approved": approved, "stale": stale, "noselection": noselection,
            "waiting": waiting,
            "error": error,

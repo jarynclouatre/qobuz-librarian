@@ -4148,7 +4148,8 @@ def test_interrupted_scan_only_promises_resume_with_a_checkpoint(monkeypatch):
         "id": "interrupted-scan", "kind": "scan", "execute_kind": "library",
         "status": "scanning", "created_at": 1700000000,
     }])
-    monkeypatch.setattr(jm.new_releases, "is_baseline_complete", lambda: False)
+    monkeypatch.setattr(jm.cfg, "AUTO_LIBRARY_SCAN", True)
+    monkeypatch.setattr(jm.generation_state, "baseline_complete", lambda: False)
     monkeypatch.setattr(jm.scan_checkpoint, "pending", lambda: None)
 
     jm.restore_jobs({})
@@ -4186,6 +4187,29 @@ def test_a_finished_job_keeps_its_log_across_a_restart(monkeypatch):
         "  ✓  Download succeeded.",
         "  ✓  beets import succeeded.",
     ]
+
+
+def test_history_keeps_a_scan_cut_short_by_a_restart_apart_from_a_cancel(
+        client, monkeypatch):
+    """History renders rows read back from jobs.db rather than live jobs, so
+    the restart has to survive that trip or the scan reads as one the user
+    cancelled and its way to resume is dropped."""
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+
+    scan = jm.Job(title="Library scan", status=jm.JobStatus.SCANNING)
+    scan.kind = "scan"
+    scan.execute_kind = "library"
+    job_persistence.persist(scan)
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs({})
+    assert jm.registry.get(scan.id).interrupted_by_restart
+
+    r = client.get("/queue/history")
+    assert "ql-row-reason--summary" in r.text
 
 
 def test_a_long_finished_log_is_stored_as_a_marked_tail(monkeypatch):

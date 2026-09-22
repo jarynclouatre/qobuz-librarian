@@ -1,4 +1,7 @@
 {% import "_job_labels.html" as labels %}
+{# Opening the job page clears a warning marker before this renders; the route
+   hands over the one the visit found so the page can still explain it. #}
+{% set _attention = shown_attention | default(job.attention) %}
 
 <div id="job-content" class="ql-job-shell" data-job-id="{{ job.id }}"
   data-job-kind="{{ job.execute_kind }}"
@@ -18,7 +21,7 @@
       <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}{{ job.display_title }}{% elif job.execute_kind == 'new_releases' %}New releases{% elif job.execute_kind == 'downsample' and job.status.value == 'awaiting_review' %}{{ labels.review_title(job) }}{% else %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}{% endif %}</h1>
     </div>
     <span id="job-status-badge" class="ql-status-chip ql-job-status
-      {%- if job.status.value == 'done' and job.attention == 'cancel_late' %} is-warning
+      {%- if job.status.value == 'done' and _attention == 'cancel_late' %} is-warning
       {%- elif job.status.value == 'done' %} is-success
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
@@ -181,7 +184,7 @@
         <button type="submit" class="ql-btn ql-btn-sm{% if _pending %} ql-btn-secondary ql-secondary-action{% endif %}"
                 data-cancel-button
                 data-confirm="{% if _pending %}Remove this waiting job from the queue?{% else %}{{ labels.cancel_confirm(job) }}{% endif %}"
-                data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-irreversible{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
+                data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
       </form>
       {# Beets runs to its own end, so Cancel would be a dead control here. Say
          what is happening, the way the Queue rows do, instead of greying a
@@ -252,7 +255,7 @@
     {% if job.summary and job.summary != job.error %}
     <div class="ql-job-summary ql-job-summary--terminal"><span>{{ job.summary }}</span></div>
     {% endif %}
-    {% if job.attention == 'cancel_late' %}
+    {% if _attention == 'cancel_late' %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
       <div class="ql-notice-copy">
         <strong>Cancelled too late</strong>

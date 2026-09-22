@@ -342,6 +342,9 @@ def _album_candidate_spec(
         detail = (f"{year or '?'} · {album_quality_label(album)} · "
                   f"{n if n is not None else '?'} track{'' if n == 1 else 's'}")
     payload = {"album_id": album.get("id"), "year": year, "cover": _album_cover(album)}
+    version = (album.get("version") or "").strip()
+    if version:
+        payload["version"] = version
     if partial_n:
         payload["gap_fill"] = partial_n
     if extra_payload:

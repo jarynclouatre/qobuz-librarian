@@ -297,7 +297,7 @@
         {% set _detail = labels.phase_detail(j, labels.job_activity(j)) | trim %}
         <div class="ql-active-row"
              data-job-card data-job-id="{{ j.id }}" data-job-surface="dashboard"
-             data-job-status="{{ j.status.value }}" data-job-kind="{{ j.execute_kind or j.kind }}">
+             data-job-status="{{ j.status.value }}" data-job-kind="{{ j.execute_kind or j.kind }}"{% if j.importing %} data-job-importing="1"{% endif %}>
           <div class="ql-active-main">
             <div class="ql-row-status">
               <span class="ql-status-chip">{{ labels.job_activity(j) }}</span>
@@ -314,20 +314,48 @@
               {%- endif -%}
             </p>
           </div>
+          {% if j.id == cancel_protected_job_id %}
+          <div class="ql-row-action">
+            <span class="ql-status-chip is-warning"
+                  title="This interrupted-download recovery stays active until its saved step settles.">Recovery protected</span>
+          </div>
+          {% elif j.importing %}
+          <div class="ql-row-action">
+            <span class="ql-status-chip"
+                  title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
+          </div>
+          {% else %}
           <form action="/jobs/{{ j.id }}/cancel" method="post" class="ql-row-action ql-active-action">
             <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
             <button type="submit" class="ql-btn ql-btn-sm"
                     title="Cancel job" aria-label="Cancel job"
                     data-confirm="{{ labels.cancel_confirm(j) }}"
-                    data-confirm-action="Stop job" data-irreversible>Cancel</button>
+                    data-confirm-action="Stop job" data-confirm-dismiss="Keep running" data-irreversible>Cancel</button>
           </form>
+          {% endif %}
         </div>
         {% endfor %}
         {% if queued_jobs %}
+        {% set _wait = namespace(behind=false, paused=none) %}
+        {% for qj in queued_jobs %}
+        {% set qw = (queue_waits or {}).get(qj.id) %}
+        {% if qw %}{% set _wait.behind = true %}{% endif %}
+        {% if qw and qw.paused_for and not _wait.paused %}{% set _wait.paused = qw.paused_for %}{% endif %}
+        {% endfor %}
         <div class="ql-active-row">
           <div class="ql-active-main">
             <p class="ql-row-title">{{ queued_jobs | length }} job{{ 's' if queued_jobs|length != 1 }} queued</p>
-            <p class="ql-row-meta">Starts after the current job finishes.</p>
+            <p class="ql-row-meta">
+              {%- if _wait.paused -%}
+              Waiting until {% if _wait.paused.album %}“{{ _wait.paused.album }}”{% else %}the interrupted download{% endif %} is retried or given up.
+              {%- elif queued_jobs | length > 1 -%}
+              Each starts automatically when the jobs ahead of it finish.
+              {%- elif _wait.behind -%}
+              Starts automatically after the current job finishes.
+              {%- else -%}
+              Starts automatically.
+              {%- endif -%}
+            </p>
           </div>
           <a href="/queue" class="ql-btn ql-btn-secondary ql-btn-sm shrink-0">View queue</a>
         </div>

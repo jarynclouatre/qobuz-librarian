@@ -666,6 +666,9 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     for i, gap in enumerate(ordered, 1):
         a = gap.qobuz_album
         title  = a.get("title") or "?"
+        ver    = (a.get("version") or "").strip()
+        if ver and ver.lower() not in title.lower():
+            title = f"{title} ({ver})"
         year   = album_year(a) or "?"
         tracks = a.get("tracks_count") or "?"
         track_word = "track" if tracks == 1 else "tracks"

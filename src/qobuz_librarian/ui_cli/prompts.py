@@ -14,6 +14,7 @@ from qobuz_librarian.library.catalog import (
     album_year_int,
     is_lossless_album,
 )
+from qobuz_librarian.library.tags import normalize, strip_album_decorations
 from qobuz_librarian.quality import decision as quality_decision
 from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
@@ -268,11 +269,20 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
     if not albums:
         return None
     if prefer_hires:
-        # Sort by bit depth desc, sample rate desc, then year asc so the
-        # original pressing leads.
+        # Qobuz lists results by relevance. Keep that order between albums and
+        # put the best resolution first among one album's editions, so a
+        # hi-res single by someone else never outranks the album searched for.
+        def edition_key(a):
+            artist = ((a.get("artist") or {}).get("name") or "").casefold()
+            bare = strip_album_decorations(a.get("title") or "")
+            return artist, normalize(bare) or bare.strip().casefold()
+        first_seen = {}
+        for position, a in enumerate(albums):
+            first_seen.setdefault(edition_key(a), position)
         albums = sorted(
             albums,
-            key=lambda a: (-(a.get("maximum_bit_depth") or 0),
+            key=lambda a: (first_seen[edition_key(a)],
+                           -(a.get("maximum_bit_depth") or 0),
                            -(a.get("maximum_sampling_rate") or 0),
                            album_year_int(a)),
         )

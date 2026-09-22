@@ -177,6 +177,15 @@ def test_dedup_album_versions_collapses_editions_but_keeps_distinct_years():
     assert len(result) == 1 and result[0][0]["maximum_bit_depth"] == 24
 
 
+def test_dedup_album_versions_prefers_the_album_to_a_smaller_companion():
+    album = _qalbum("The Reminder", 2007, tc=13)
+    bonus = {**_qalbum("The Reminder", 2007, bd=24, sr=96, tc=9),
+             "version": "Bonus Content"}
+    for prefer_hires in (False, True):
+        [(picked, _)] = dedup_album_versions([bonus, album], prefer_hires)
+        assert picked is album
+
+
 def test_filter_owned_albums_doesnt_swallow_sequels_or_distinct_years():
     pairs = [({"title": "Reload", "release_date_original": "1997"}, 1),
              ({"title": "Album (Deluxe Edition)", "release_date_original": "2010"}, 1)]

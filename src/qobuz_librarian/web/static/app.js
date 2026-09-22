@@ -870,7 +870,10 @@
       okButton.classList.toggle("ql-btn-primary", !opts.irreversible);
       var choice = false;
       okButton.onclick = function () { choice = true; d.close(); };
-      d.querySelector("[data-confirm-cancel]").onclick = function () { choice = false; d.close(); };
+      var cancelButton = d.querySelector("[data-confirm-cancel]");
+      // Asked whether to cancel a job, a button labelled "Cancel" reads as yes.
+      cancelButton.textContent = opts.dismiss || "Cancel";
+      cancelButton.onclick = function () { choice = false; d.close(); };
       d.addEventListener("close", function h() {
         d.removeEventListener("close", h);
         resolve(choice);
@@ -903,6 +906,7 @@
     }
     window.qlConfirm(msg, {
       action: el.getAttribute("data-confirm-action") || "",
+      dismiss: el.getAttribute("data-confirm-dismiss") || "",
       irreversible: isIrreversible(el),
     }).then(function (ok) {
       if (!ok) return;
@@ -927,6 +931,7 @@
     var source = evt.detail && evt.detail.elt;
     window.qlConfirm(q, {
       action: (source && source.getAttribute("data-confirm-action")) || "",
+      dismiss: (source && source.getAttribute("data-confirm-dismiss")) || "",
       irreversible: isIrreversible(source),
     }).then(function (ok) {
       if (ok) evt.detail.issueRequest(true);
@@ -1925,7 +1930,7 @@
     var kind = card.dataset.jobKind || "";
     var runFallback = jobActivityFallback(kind, status);
     if (!id || !surface) return;
-    var flippedToImport = false;
+    var importing = card.dataset.jobImporting === "1";
     var progId = (surface === "dashboard" ? "dash-prog-" : "card-prog-") + id;
     var containerId = surface === "dashboard" ? "dashboard-active"
                     : "queue-body";
@@ -2019,14 +2024,13 @@
       streamAlive();
       var p; try { p = JSON.parse(e.data); } catch (_) { return; }
       // Beets runs to its own end, so the server draws Finishing in place of
-      // Cancel once the import starts; redraw the card when that happens.
-      if (surface === "queue" && p.importing && !flippedToImport) {
-        flippedToImport = true;
+      // Cancel while an import runs; redraw the card when that starts or ends.
+      // The redrawn card carries the state it was drawn with, so the snapshot
+      // its own stream opens with does not redraw it again.
+      if (!!p.importing !== importing) {
+        importing = !!p.importing;
         shut();
-        if (window.htmx) {
-          window.htmx.ajax("GET", "/queue",
-            { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
-        }
+        refreshSurface();
         return;
       }
       var el = document.getElementById(progId);

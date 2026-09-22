@@ -825,23 +825,24 @@ _MIN_ALBUM_TRACKS = 4  # below this an edition is a stray single/EP, not the
 def _standard_track_count(group):
     """Track count of the real album among a group of editions.
 
-    Deluxe/anniversary/expanded editions only ADD tracks and remasters keep
-    the original count, so the smallest real edition is the album. None when
-    no edition reports a usable count.
+    The plain release is the album. Qobuz can file a smaller companion under
+    the same title with a version such as 'Bonus Content', so the smallest
+    edition only stands in when there is no plain one: deluxe, anniversary
+    and expanded editions add tracks and remasters keep the original count.
+    None when no edition reports a usable count.
 
     Editions below ``_MIN_ALBUM_TRACKS`` (3 tracks or fewer) are treated as
     stray singles/EPs that happen to dedup into the same group as the album
     by title and ignored when sizing - so a same-titled 3-track EP filed
     next to a 15-track deluxe doesn't win the canonical pick. (An EP with
-    4+ tracks that shares the album's normalized name is a rarer edge that
-    needs Qobuz release-type metadata to distinguish reliably; until then
-    it can still mislead the canonical pick.)
+    4+ tracks, no version and the album's title can still mislead it.)
     """
-    counts = [tc for a in group if (tc := a.get("tracks_count") or 0) > 0]
-    if not counts:
+    sized = [a for a in group if (a.get("tracks_count") or 0) > 0]
+    if not sized:
         return None
-    full = [c for c in counts if c >= _MIN_ALBUM_TRACKS]
-    return min(full) if full else min(counts)
+    full = [a for a in sized if a["tracks_count"] >= _MIN_ALBUM_TRACKS]
+    plain = [a for a in full if _is_plain_release(a)]
+    return min(a["tracks_count"] for a in (plain or full or sized))
 
 
 def _is_decorated_edition(album):
@@ -850,6 +851,13 @@ def _is_decorated_edition(album):
     title = album.get("title") or ""
     return (strip_album_decorations(title).casefold().strip()
             != title.casefold().strip())
+
+
+def _is_plain_release(album):
+    """True when neither the title nor Qobuz's version field names an
+    edition."""
+    return (not (album.get("version") or "").strip()
+            and not _is_decorated_edition(album))
 
 
 def _best_edition(group, prefer_hires):
@@ -877,7 +885,7 @@ def _best_edition(group, prefer_hires):
         ))
     return min(group, key=lambda a: (
         off_standard(a),
-        _is_decorated_edition(a),
+        not _is_plain_release(a),
         album_year_int(a),
         str(a.get("id") or ""),
     ))
@@ -986,8 +994,9 @@ def dedup_album_versions(albums, prefer_hires=False):
     Within a group, picks (see _best_edition):
       - prefer_hires=True:  best resolution at the standard track count
       - prefer_hires=False: the original (untagged) edition
-    The standard track count is the smallest real edition, so a padded
-    deluxe/anniversary release never wins on track count alone.
+    The standard track count is the plain release's, or else the smallest
+    real edition's, so a padded deluxe/anniversary release never wins on
+    track count alone and a smaller companion never stands in for the album.
 
     Returns list of (canonical_album, n_versions_in_group) tuples, sorted by
     canonical's release year ascending.

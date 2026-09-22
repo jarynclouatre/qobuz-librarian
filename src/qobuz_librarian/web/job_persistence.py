@@ -1669,6 +1669,15 @@ _TERMINAL_SQL = "status IN ({})".format(
 # surface), but clearing and pruning must never touch them.
 _HISTORY_SQL = "status IN ('done', 'failed', 'canceled', 'awaiting_review')"
 
+# A scan cut short by a restart is saved as cancelled, and only the opening
+# of its summary tells it apart from one the user stopped.
+RESTART_INTERRUPTED = "Interrupted by a restart."
+
+
+def interrupted_by_restart(status: str, summary: str) -> bool:
+    return status == "canceled" and (summary or "").startswith(
+        RESTART_INTERRUPTED)
+
 
 # History splits finished work into two layers: meaningful jobs get cards,
 # plain downloads get a compact table. The kinds below are the card layer.
@@ -1759,6 +1768,7 @@ def history_page(limit: int, offset: int,
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
+            "interrupted_by_restart": interrupted_by_restart(row[4], row[6]),
             "execute_args": execute_args,
             "execute_args_unreadable": execute_args_unreadable,
             "created_at": _decode_timestamp(row[9]),
@@ -1805,6 +1815,7 @@ def recovery_history(*, attention_only: bool = False) -> list[dict]:
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
+            "interrupted_by_restart": interrupted_by_restart(row[4], row[6]),
             "execute_args": execute_args,
             "execute_args_unreadable": execute_args_unreadable,
             "created_at": _decode_timestamp(row[9]),
