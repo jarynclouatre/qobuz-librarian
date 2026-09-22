@@ -5,14 +5,14 @@ All notable changes to Qobuz Librarian are recorded here, newest first. The proj
 ## [1.2.0] - 2026-09-21
 
 A scan of a large library costs a fraction of what it did, Search says Owned
-only when it can prove it, and the messages that guessed at a cause now report
-what happened.
+only when it has the album's whole track list, and a failed download says which
+tracks went wrong rather than pointing at Qobuz.
 
 - Search says Owned only when the track list accounts for the whole album, and fetches every page of a long one, so a box set is no longer judged complete from its first page. A result's artist and album open that artist and that exact album. Downloading an album a running scan has listed queues it, instead of answering "Already queued" and queuing nothing.
-- A download that ends badly says how many tracks arrived incomplete, or that Qobuz would only serve the album lossy, rather than suggesting rate limiting every time. A part-finished download from Search no longer creates a "Library scan" review of its own, and Search warns before replacing an album you partly own.
+- A failed download says how many tracks arrived incomplete, or that Qobuz would only serve the album lossy, rather than suggesting rate limiting every time. A part-finished download from Search no longer creates a "Library scan" review of its own, and Search warns before replacing an album you partly own.
 - Scanning a large library is far cheaper: an artist folder is sealed once per scan instead of once per missing album, progress is written on a timer, and a saved review holds an artist's evidence once rather than on every row. A 300 artist scan that used to exceed a 1 GB container finishes well inside it.
 - A scan carries on past a folder it cannot read, names it, and will not record a baseline from a pass that skipped one; an unreadable second disc inside a readable album is noticed too. A forced rescan starts over instead of resuming, the scan names which pass is running, and the Library page stops offering a scan while one is under way.
-- Repair says what it does: both paths remove your originals once the replacement is proven, and an unverified replacement keeps them. Lyrics look up a live, acoustic or demo recording under its own title instead of searching for the studio take, and an instrumental is skipped. Downsampling keeps repeated tags separate, keeps each picture's role, and no longer stops on a cover it cannot carry.
+- Repair removes your originals once the replacement is proven, and an unverified replacement keeps them. Lyrics look up a live, acoustic or demo recording under its own title instead of searching for the studio take, and an instrumental is skipped. Downsampling keeps repeated tags separate, keeps each picture's role, and no longer stops on a cover it cannot carry.
 - The warning dot beside Queue clears the items the list shows and says how many when more are waiting. Files held back from earlier downloads say so and point at Diagnostics, which lists them and offers Remove. The Queue no longer holds a browser connection for every waiting album, and an empty music folder reads as "No music yet".
 - In the terminal, an answer a question does not recognise is asked again rather than taken as the riskier one: "n" at an album prompt no longer starts a download, and a typo no longer saves "delete the originals". A backup restored from a copy is recognised by the job that made it, and the backup listing and its removal agree on which are redundant.
 - The app raises its own open-file limit at start, so a large library no longer leaves artists unchecked where the container inherited a low one. Docker moves to the current python:3.14-slim, with idna, multidict and platformdirs refreshed.
