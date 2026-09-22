@@ -2,7 +2,7 @@
 
 [← README](../README.md)
 
-The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and download lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands as `qobuz-librarian …` (drop the `docker compose run --rm` prefix). Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
+The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and download lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands with `qobuz-librarian` in place of everything up to and including `cli`. Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
 
 ## The download lock
 
@@ -22,8 +22,9 @@ Every menu mode has a flag that jumps straight to it; `--help` lists them all. T
 # The artist walk over every artist, queueing as you go
 docker compose run --rm -it qobuz-librarian cli --library-walk
 
-# Fill the gaps in albums you own (an album missing 4 or more tracks, or
-# 70% of them, is refetched whole and the tracks you have are replaced)
+# Fill the gaps in albums you own (an album missing at least 70% of its
+# tracks, and at least 4, is refetched whole and the tracks you have are
+# replaced)
 docker compose run --rm -it qobuz-librarian cli --album-gaps
 
 # Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)

@@ -9,9 +9,7 @@ on:
 permissions:
   contents: read
 
-# Run the bundled JS actions on Node 24 (the pinned majors still ship
-# Node 20, which GitHub deprecates mid-2026). This is GitHub's documented
-# opt-in and avoids chasing per-action major bumps.
+# Run the bundled JS actions on Node 24, GitHub's documented opt-in.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

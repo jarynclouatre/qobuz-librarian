@@ -11602,8 +11602,9 @@ def _diagnostics():
         p = Path(path)
         display, _is_host = _resolve_host_path(str(p))
         if not p.exists():
+            hint = " (volume not mounted?)" if cfg.in_container() else ""
             checks.append({"label": label, "ok": False,
-                           "detail": f"{display} does not exist (volume not mounted?)"})
+                           "detail": f"{display} does not exist{hint}"})
             return
         if not p.is_dir():
             checks.append({"label": label, "ok": False,
@@ -11680,12 +11681,15 @@ def _diagnostics():
         checks.append({"label": "Beets database", "ok": False,
                        "detail": f"{parent_display} does not exist"})
 
+    missing_tool_fix = ("Pull the image again (docker compose pull)"
+                        if cfg.in_container()
+                        else "Install it on the PATH the app runs with")
     for binary in ("rip", "ffmpeg", "flac"):
         found = shutil.which(binary)
         checks.append({"label": f"{binary} binary",
                        "ok": bool(found),
                        "detail": found or f"{binary} not on PATH. "
-                       "Rebuild the image (docker compose build)"})
+                       f"{missing_tool_fix}"})
     beets_python, beets_detail = _beets_runtime_diagnostic()
     checks.append({
         "label": "Beets 2.14.0 runtime",

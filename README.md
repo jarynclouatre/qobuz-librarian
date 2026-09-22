@@ -63,7 +63,8 @@ mkdir qobuz-librarian && cd qobuz-librarian
 curl -O https://raw.githubusercontent.com/jarynclouatre/qobuz-librarian/main/compose.yaml
 curl -O https://raw.githubusercontent.com/jarynclouatre/qobuz-librarian/main/.env.example
 cp .env.example .env
-# edit .env: at minimum, point QL_MUSIC_DIR at your music folder
+# edit .env: at minimum, point QL_MUSIC_DIR at your music folder, and set
+# PUID/PGID if `id -u` / `id -g` are not 1000
 mkdir -p music   # skip if QL_MUSIC_DIR points at an existing folder
 docker compose up -d
 ```
@@ -144,6 +145,7 @@ To build the Docker image from a checkout:
 git clone https://github.com/jarynclouatre/qobuz-librarian.git
 cd qobuz-librarian
 cp .env.example .env
+mkdir -p music   # skip if QL_MUSIC_DIR points at an existing folder
 docker compose -f compose.yaml -f compose.dev.yaml up -d --build
 ```
 

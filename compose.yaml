@@ -85,7 +85,7 @@ services:
 
       # beets (bundled, no separate container needed)
       BEETS_CONFIG_DIR:     /config/beets
-      BEETS_DB_PATH:        /config/beets/musiclibrary.db
+      BEETS_DB_PATH:        "${BEETS_DB_PATH:-/config/beets/musiclibrary.db}"
       # Optional folder/file naming. Empty = use the fully-editable
       # /config/beets/config.yaml. beets path syntax ($albumartist, $album,
       # $year, $track, $title, ...). In .env, single-quote the whole template

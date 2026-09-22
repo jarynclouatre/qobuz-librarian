@@ -798,10 +798,12 @@ def parse_args():
                    help="auto-confirm the confirmations; a gap fill, an "
                         "upgrade, a downsample, a repair or an in-place "
                         "migration can replace or move files you already have. "
-                        "Questions that are choices rather than confirmations "
-                        "still ask: which artist to walk, which release to "
-                        "take, and whether a first downsample keeps the "
-                        "originals")
+                        "Choices still ask (which artist to walk, which "
+                        "release to take, consolidating sibling folders, "
+                        "whether a first downsample keeps the originals), and "
+                        "so do the backup and collision questions of --force, "
+                        "discarding a saved queue, and migrating to a disk "
+                        "short on space")
     # Unattended upgrade-walk gate.
     getting.add_argument("--auto-safe",    action="store_true",
                    help="auto-confirm only the safe upgrades (requires --upgrade-walk).")
