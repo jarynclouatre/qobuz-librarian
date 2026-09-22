@@ -311,10 +311,15 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
     return found
 
 
+def is_library_system_folder(name: str) -> bool:
+    """A dot-folder, or the lost+found a filesystem keeps at its root."""
+    return name.startswith(".") or name == "lost+found"
+
+
 def list_library_artists(walk_errors=None, *, on_artist_error=None):
     """List artist directories under MUSIC_ROOT.
 
-    Skips dot-folders (startswith(".")) and the staging
+    Skips dot-folders, lost+found and the staging
     directory. Sorted by name (case-insensitive). Empty artist directories
     (no audio files anywhere in the tree) are also skipped - they cost an
     API round-trip during scans for zero gain and clutter the walk output.
@@ -341,7 +346,7 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
         try:
             if not d.is_dir():
                 continue
-            if d.name.startswith("."):          # skip hidden dirs (.Trash, .DS_Store/, etc.)
+            if is_library_system_folder(d.name):  # .Trash, lost+found, etc.
                 continue
             if d.resolve() == config.STAGING_DIR.resolve():
                 continue

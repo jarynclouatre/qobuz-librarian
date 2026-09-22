@@ -397,6 +397,34 @@ def test_beets_runtime_check_rejects_an_unrelated_executable(monkeypatch):
     assert beets.beets_runtime_path() is None
 
 
+def test_beets_output_is_read_past_the_select_descriptor_limit():
+    import resource
+
+    from qobuz_librarian.integrations import beets
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 2048:
+        pytest.skip("the hard open-file limit is too low")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 2048), hard))
+    held = []
+    try:
+        while len(held) < 1100:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        read_fd, write_fd = os.pipe()
+        assert read_fd >= 1024
+        os.write(write_fd, b"Tagging:\n    Artist - Album\n")
+        os.close(write_fd)
+        received = bytearray()
+        with os.fdopen(read_fd, "rb", buffering=0) as stream:
+            beets._read_cancellable_beets_pipe(
+                stream, threading.Event(), received.extend)
+        assert received == b"Tagging:\n    Artist - Album\n"
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
 def test_forget_beets_entries_resolves_relative_catalogue_paths(
     monkeypatch, tmp_path
 ):

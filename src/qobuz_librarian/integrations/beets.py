@@ -5720,12 +5720,16 @@ def _read_cancellable_beets_pipe(stream, stop, consume):
             consume(chunk)
         return
 
+    # poll, not select: with the open-file limit raised, a scan holding an
+    # artist folder open can push this pipe past select's 1024 ceiling.
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN)
     remaining_stop_drains = 16
     while True:
         stopping = stop.is_set()
         try:
-            ready, _, _ = select.select([descriptor], [], [], 0 if stopping else 0.1)
-        except (OSError, ValueError):
+            ready = poller.poll(0 if stopping else 100)
+        except OSError:
             return
         if not ready:
             if stopping:

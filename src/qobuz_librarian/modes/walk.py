@@ -322,6 +322,7 @@ def run_album_walk_mode(args, token):
     unplaced_names = []
     n_albums_filled = 0
     interrupted = False
+    walk_stopped = False
     partial_completion = False
     retry_needed = False
 
@@ -423,7 +424,7 @@ def run_album_walk_mode(args, token):
                 n_artists_scanned += 1
                 if stopped:
                     log.info(fmt(C.GRAY, "  Stopping the album walk."))
-                    interrupted = True
+                    walk_stopped = True
                     break
             except KeyboardInterrupt:
                 # Persist NOW: the current artist's just-approved albums are in
@@ -449,8 +450,8 @@ def run_album_walk_mode(args, token):
 
     if shared_queue and not interrupted and not args.dry_run:
         _q = ask(
-            f"\n  Walk done. {len(shared_queue)} album(s) still queued."
-            " Download now? [Y/n]: ")
+            f"\n  Walk {'stopped' if walk_stopped else 'done'}. "
+            f"{len(shared_queue)} album(s) still queued. Download now? [Y/n]: ")
         if _q is not None and _q in ("", "y", "yes"):
             try:
                 _flush_queue()
@@ -466,10 +467,11 @@ def run_album_walk_mode(args, token):
                 f"persisted to {cfg.PENDING_QUEUE_FILE.name} for next launch."))
 
     print()
-    needs_attention = (interrupted or partial_completion or retry_needed
-                       or bool(discovery_errors))
+    needs_attention = (interrupted or walk_stopped or partial_completion
+                       or retry_needed or bool(discovery_errors))
     if needs_attention:
-        outcome = "stopped early" if interrupted else "needs attention"
+        outcome = ("stopped early" if interrupted or walk_stopped
+                   else "needs attention")
         log.warning(fmt(C.YELLOW,
             f"  ⚠ Album walk {outcome}. "
             f"Artists scanned: {n_artists_scanned} · "

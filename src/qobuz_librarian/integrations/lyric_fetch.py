@@ -1533,11 +1533,14 @@ _TITLE_NOISE_KEYWORDS = (
 # performance and a different master, and stripping it for the master lost the
 # performance with it.
 _PERFORMANCE_KEYWORDS = (
-    "live", "acoustic", "unplugged", "demo", "session", "instrumental",
-    "alternate take", "alternate version", "re-recorded", "rerecorded",
+    "live", "acoustic", "unplugged", "demo", "demos", "session", "sessions",
+    "instrumental", "alternate take", "alternate version", "re-recorded",
+    "rerecorded",
 )
+# Whole words only: "Oliver" is not a live recording, nor "Obsession" a session.
 _PERFORMANCE_RE = re.compile(
-    "|".join(re.escape(k) for k in _PERFORMANCE_KEYWORDS), re.IGNORECASE)
+    r"\b(?:" + "|".join(re.escape(k) for k in _PERFORMANCE_KEYWORDS) + r")\b",
+    re.IGNORECASE)
 _kw_alt = "|".join(re.escape(k) for k in _TITLE_NOISE_KEYWORDS)
 _TITLE_NOISE_RE = re.compile(
     rf"\s*\([^()]*(?:{_kw_alt})[^()]*\)|"

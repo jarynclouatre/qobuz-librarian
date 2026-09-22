@@ -20,6 +20,7 @@ def test_performance_markers_survive_and_master_markers_fold():
     folds = {
         "Come Together (Remastered 2009)": "Come Together",
         "Bohemian Rhapsody - 2011 Remaster": "Bohemian Rhapsody",
+        "Gecko (Oliver Heldens Remix)": "Gecko",
     }
     for title, expected in folds.items():
         assert lyric_fetch._clean_title(title) == expected, title

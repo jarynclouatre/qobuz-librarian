@@ -38,6 +38,7 @@
   {# Until a baseline exists this is the page's purpose, so it is drawn
      above whatever else owns the surface rather than instead of it. #}
   {% if library_scan_state.ready and not library_baseline_exists
+        and not library_refresh_scanning
         and (not library_job or library_job.status == JobStatus.AWAITING_REVIEW) %}
   <section class="ql-scan-hero">
     <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">

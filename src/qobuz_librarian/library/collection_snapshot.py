@@ -106,7 +106,7 @@ def music_root_write_state() -> tuple[str, int]:
         if not root.is_dir():
             return "not_folder", 0
         has_artist_folder = any(
-            entry.is_dir() and not entry.name.startswith(".")
+            entry.is_dir() and not scanner.is_library_system_folder(entry.name)
             for entry in root.iterdir()
         )
     except OSError:
