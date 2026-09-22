@@ -6,7 +6,7 @@ const CACHE = CACHE_PREFIX + VERSION;
 const PRECACHE = [
   '/static/dist/app.css?v=' + VERSION,
   '/static/app.js?v=' + VERSION,
-  '/static/vendor/htmx-2.0.10.min.js',
+  '/static/vendor/htmx-2.0.11.min.js',
   '/static/vendor/inter/inter-latin.woff2',
   '/static/vendor/inter/inter-latin-ext.woff2',
   // The offline page's heading face and theme script: everything it names

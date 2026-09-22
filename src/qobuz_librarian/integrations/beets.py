@@ -4297,7 +4297,7 @@ def _strip_ownership_markers(root_fd, records, nonce):
     return stripped
 
 
-_SUPPORTED_BEETS_VERSION = "2.14.0"
+_SUPPORTED_BEETS_VERSION = "2.14.1"
 _BEETS_CONFIG_PROTOCOL_VERSION = 1
 
 
@@ -4536,6 +4536,16 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
         # the pre-existing album's files off disk on a gap-fill collision.
         "  duplicate_action: merge\n"
     )
+    # A database this import creates has nothing a migration could lose, and
+    # beets would leave a copy of it beside the new file for every migration.
+    try:
+        new_database = os.path.getsize(database_path) == 0
+    except FileNotFoundError:
+        new_database = True
+    except OSError:
+        new_database = False
+    if new_database:
+        override_yaml += "create_backup_before_migrations: no\n"
     # Path templates are deployer-supplied and can contain single quotes
     # (e.g. `$albumartist's stuff/$album`); _yaml_sq keeps the scalar safe.
     # Settings refuses a template that files outside the library; one set in
@@ -4634,7 +4644,7 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
         log.info(
             fmt(
                 C.GRAY,
-                "     Install beets 2.14.0 or set BEETS_PYTHON to its Python executable.",
+                "     Install beets 2.14.1 or set BEETS_PYTHON to its Python executable.",
             )
         )
         return None, None, None
@@ -4656,7 +4666,7 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
         log.info(
             fmt(
                 C.RED,
-                "  ✗  The configured Python does not provide the supported Beets 2.14.0 runtime.",
+                "  ✗  The configured Python does not provide the supported Beets 2.14.1 runtime.",
             )
         )
         return None, None, None

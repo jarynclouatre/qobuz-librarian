@@ -194,7 +194,7 @@ def _beets_runtime_diagnostic() -> tuple[str | None, str]:
     if beets_mod._configured_beets_plugins(runtime) is None:
         return (
             None,
-            "Could not verify a Beets 2.14.0 runtime and readable "
+            "Could not verify a Beets 2.14.1 runtime and readable "
             f"configuration using {runtime.python}",
         )
     return runtime.python, runtime.python
@@ -11692,7 +11692,7 @@ def _diagnostics():
                        f"{missing_tool_fix}"})
     beets_python, beets_detail = _beets_runtime_diagnostic()
     checks.append({
-        "label": "Beets 2.14.0 runtime",
+        "label": "Beets 2.14.1 runtime",
         "ok": beets_python is not None,
         "detail": beets_detail,
     })
