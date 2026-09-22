@@ -290,6 +290,96 @@ def test_failed_download_leaving_only_art_stays_retryable(
     assert saved.recovery_references == ()
 
 
+def test_incomplete_gap_fill_puts_the_owned_tracks_back(
+    tmp_path, monkeypatch, authority
+):
+    # A whole-album gap fill moves the owned tracks aside before the rip. When
+    # Qobuz withholds a track nothing is imported, so they must go back and
+    # the queue must carry on instead of waiting on the backup.
+    from qobuz_librarian.integrations.staging import create_staging_run
+    from qobuz_librarian.library.backup import (
+        backup_gap_fill_files,
+        library_backup_record,
+    )
+
+    album_dir = tmp_path / "music" / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    owned = album_dir / "01.flac"
+    owned.write_bytes(b"owned original")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
+    tracks = [
+        {"id": str(number), "media_number": 1, "track_number": number}
+        for number in range(1, 6)
+    ]
+    item = _build_queue_item(
+        album={
+            "id": "42",
+            "title": "Album",
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 96,
+            "tracks": {"items": tracks},
+        },
+        album_dir=album_dir,
+        label="Album",
+        missing=tracks[1:],
+        present=tracks[:1],
+        upgrade_only=False,
+        auto_upgrade=False,
+        quality=4,
+    )
+    args = Namespace(no_import=False, no_downsample=True)
+    plan = plan_durable_new_album(item, args)
+    assert plan is not None and plan.library_backup_kind == "gap-fill"
+    monkeypatch.setattr(durable_runner, "snapshot_staging", lambda: set())
+
+    def short_download(**kwargs):
+        owner = kwargs["recovery_owner"]
+        checkpoint = kwargs["recovery_checkpoint"]
+        result = kwargs["result"]
+        backup = backup_gap_fill_files(
+            [owned], album_dir, owner=owner, on_intent=checkpoint)
+        result["gap_fill_backup_path"] = backup
+        checkpoint({
+            "version": 1,
+            "kind": "library-backup-carrier",
+            "owner": dict(owner),
+            "carrier": library_backup_record(backup, expected_owner=owner),
+        })
+
+        def created(record):
+            result["_staging_run"] = record
+            checkpoint({
+                "version": 1,
+                "kind": "staging-run",
+                "owner": dict(owner),
+                "record": record,
+            })
+
+        run = create_staging_run(owner=owner, on_created=created)
+        (run.path / "02.flac").write_bytes(b"partial")
+        assert not owned.exists()
+
+    monkeypatch.setattr(durable_runner, "run_album_download", short_download)
+
+    result = durable_runner.execute_durable_new_album(
+        [item],
+        item,
+        args,
+        plan=plan,
+        origin=CompletionOrigin(CompletionOriginKind.CLI, "album queue"),
+        mode="cli:album",
+        authority=authority,
+    )
+
+    assert result.status is durable_runner.DurableAlbumStatus.INCOMPLETE
+    assert owned.read_bytes() == b"owned original"
+    assert list((tmp_path / "backups").iterdir()) == []
+    assert queue_state.list_queue_journals() == ()
+
+
 def test_durable_album_removes_queue_only_under_live_completion_proof(
     tmp_path, monkeypatch, authority
 ):

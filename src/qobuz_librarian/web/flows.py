@@ -546,6 +546,16 @@ def _fold_row(c):
     }
 
 
+def _row_shows_change(fresh, old):
+    """Whether a refreshed row differs in more than the file evidence it
+    carries, which every scan seals again."""
+    def visible(row):
+        payload = {key: value for key, value in row["payload"].items()
+                   if key not in ("_premise", "_gap_fill_receipts")}
+        return {**row, "payload": payload}
+    return visible(fresh) != visible(old)
+
+
 def fold_new_candidates(parked, cands, *, review_generation=None):
     """Merge a refresh's finds into a parked review, keyed by Qobuz album id
     (falling back to artist+title for keyless carry-overs).
@@ -584,7 +594,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None):
                 "selected": bool(c.get("selected")),
             })
             keep.append(replacement)
-            updated += 1
+            if _row_shows_change(_fold_row(fresh), _fold_row(c)):
+                updated += 1
         parked.candidates = keep
         seen = {_key(c) for c in keep}
         added = 0
@@ -1801,7 +1812,8 @@ def _scan_library_impl(
             job.push_progress(_step("Scanning library"), done, n, artist_name or name,
                               found=total, hit=hit, unit="artist")
             if shown:
-                tail = "with Gap Fill candidates" if partial_only else "to fill"
+                # A full scan's count holds missing albums and gaps together.
+                tail = "with Gap Fill candidates" if partial_only else "found"
                 log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
             checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     # Reached here only without an AuthLost/outage abort (that re-raises out
@@ -3626,7 +3638,8 @@ def _repair_item(artist, albums, flagged):
     if not artist and not albums:
         return "Starting…"
     who = artist or "your library"
-    return f"{who} · {albums:,} albums checked · {flagged:,} flagged"
+    albums_word = "album" if albums == 1 else "albums"
+    return f"{who} · {albums:,} {albums_word} checked · {flagged:,} flagged"
 
 
 def _emit_repair_heartbeat(beat, job, artist_name):

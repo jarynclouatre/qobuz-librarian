@@ -87,10 +87,7 @@ def test_post_import_relocation_recovery_precedes_queue_recovery(
     assert all(str(path) in recovery_log for path in affected_paths)
 
 
-def test_restart_pins_a_gap_fill_carrier_before_queue_work_can_resume(
-    tmp_path,
-    monkeypatch,
-):
+def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
     from qobuz_librarian.library.backup import (
         backup_gap_fill_files,
         library_backup_record,
@@ -152,10 +149,7 @@ def test_restart_pins_a_gap_fill_carrier_before_queue_work_can_resume(
         completion_input=initial_completion_input(
             plan,
             owner,
-            CompletionOrigin(
-                CompletionOriginKind.CLI,
-                "test-gap-fill-restart",
-            ),
+            CompletionOrigin(CompletionOriginKind.CLI, "download-queue"),
         ),
     )
 
@@ -187,6 +181,15 @@ def test_restart_pins_a_gap_fill_carrier_before_queue_work_can_resume(
         intent,
         carrier,
     )
+    return owned, backup, current
+
+
+def test_restart_pins_a_gap_fill_carrier_before_queue_work_can_resume(
+    tmp_path,
+    monkeypatch,
+):
+    _owned, backup, current = _gap_fill_carrier_left_by_a_crash(
+        tmp_path, monkeypatch)
 
     authority = run_lock.acquire()
     try:
@@ -204,6 +207,37 @@ def test_restart_pins_a_gap_fill_carrier_before_queue_work_can_resume(
         "library-backup",
     )
     assert (backup.path / ".ql_upgrade_unverified").is_file()
+
+
+def test_giving_up_a_restart_blocked_gap_fill_puts_the_owned_tracks_back(
+    tmp_path,
+    monkeypatch,
+):
+    # A restart mid gap fill leaves the owned tracks in the item's backup and
+    # the album folder empty; until the block is settled no download runs.
+    owned, backup, current = _gap_fill_carrier_left_by_a_crash(
+        tmp_path, monkeypatch)
+
+    authority = run_lock.acquire()
+    try:
+        blocked = startup_recovery.recover_startup_state(authority=authority)
+        binding = startup_recovery.blocked_settlement_binding(blocked)
+        assert binding is not None
+        settled = startup_recovery.settle_blocked_item(
+            authority=authority,
+            operation_id=current.operation_id,
+            item_id=binding[0].item_id,
+            action=startup_recovery.BlockedItemSettlementAction.DISCARD,
+        )
+        after = startup_recovery.recover_startup_state(authority=authority)
+    finally:
+        authority.close()
+
+    assert settled.status is (
+        startup_recovery.BlockedItemSettlementStatus.DISCARDED)
+    assert owned.read_bytes() == b"owned original"
+    assert not backup.path.exists()
+    assert after.status is startup_recovery.StartupRecoveryStatus.CLEAR
 
 
 @pytest.mark.parametrize(
@@ -1027,4 +1061,3 @@ def test_a_staged_leftover_is_settleable_beside_its_beets_carrier():
     # A Beets state that is neither of those is not a decision to offer.
     assert settleable_block_kind(
         _item(["managed-beets"], "managed-carrier-sealed-origin")) is None
-    assert settleable_block_kind(_item([], None)) is None

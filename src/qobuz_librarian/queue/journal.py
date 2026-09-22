@@ -3031,6 +3031,55 @@ def finish_library_backup_settlement(
 
 
 @_locked_transaction
+def forget_restored_library_backup(
+    journal: QueueJournal,
+    item_id: str,
+    carrier: RecoveryReference,
+) -> QueueJournal:
+    """Forget only the exact carrier whose files are proved back at origin."""
+    previous = _reload_matching_journal(journal)
+    target_index = next(
+        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
+        None,
+    )
+    if target_index is None:
+        raise KeyError(f"unknown queue journal item: {item_id}")
+    target = previous.items[target_index]
+    inventory = _recovery_reference_inventory(
+        target.recovery_references,
+        expected_operation_id=previous.operation_id,
+        expected_item_id=item_id,
+    )
+    canonical = _parse_reference(_reference_payload(carrier))
+    if (
+        target.phase not in {QueuePhase.ACTIVE, QueuePhase.BLOCKED}
+        or inventory["backup_carriers"] != (canonical,)
+        or not _strict_library_backup_carrier(
+            canonical,
+            expected_operation_id=previous.operation_id,
+            expected_item_id=item_id,
+        )
+    ):
+        raise QueueJournalBlocked(
+            "library backup carrier changed before its restore was recorded"
+        )
+    updated = replace(
+        target,
+        recovery_references=tuple(
+            reference
+            for reference in target.recovery_references
+            if reference != canonical
+        ),
+    )
+    items = list(previous.items)
+    items[target_index] = _parse_item(
+        _item_payload(updated),
+        expected_operation_id=previous.operation_id,
+    )
+    return _compare_and_commit(previous, replace(previous, items=tuple(items)))
+
+
+@_locked_transaction
 def reset_unstarted_item_to_pending(
     journal: QueueJournal,
     item_id: str,
@@ -3964,6 +4013,36 @@ def _commit_absent_managed_settlement(
                 target,
                 phase=QueuePhase.PENDING,
                 recovery_references=(),
+                block_reason=None,
+                completion_input=None,
+                multi_artist_filing=False,
+            )),
+            expected_operation_id=previous.operation_id,
+        )
+    else:
+        del items[target_index]
+    return _compare_and_commit(previous, replace(previous, items=tuple(items)))
+
+
+@_locked_transaction
+def _commit_unreferenced_blocked_settlement(
+    journal: QueueJournal,
+    *,
+    item_id: str,
+    action: str,
+) -> QueueJournal:
+    """Settle a blocked item that no longer holds any recovery state."""
+    action = _validate_settlement_action(action)
+    previous = _reload_matching_journal(journal)
+    target_index, target = _settlement_target(previous, item_id)
+    if target.recovery_references:
+        raise QueueJournalBlocked("blocked item still holds recovery state")
+    items = list(previous.items)
+    if action == "retry":
+        items[target_index] = _parse_item(
+            _item_payload(replace(
+                target,
+                phase=QueuePhase.PENDING,
                 block_reason=None,
                 completion_input=None,
                 multi_artist_filing=False,

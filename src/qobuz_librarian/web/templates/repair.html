@@ -44,7 +44,7 @@
 {% if repair_resume %}
 <div class="ql-tool-note ql-tool-note-info">
   <p class="ql-tool-note-title">Scan can resume</p>
-  <p>A repair scan was interrupted{% if repair_resume.found %} with {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found so far{% endif %}. Starting it again reuses saved artists only when their exact files are unchanged, and checks changed or older saved work again.</p>
+  <p>A repair scan did not finish{% if repair_resume.found %} with {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found so far{% endif %}. Starting it again reuses saved artists only when their exact files are unchanged, and checks changed or older saved work again.</p>
 </div>
 {% endif %}
 

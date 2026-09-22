@@ -65,6 +65,23 @@
   {% endif %}
 
   {% if library_job %}
+  {% if library_resume and library_baseline_exists %}
+  <div class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
+    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
+         viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    </svg>
+    <span class="min-w-0 flex-1 text-sm">
+      <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. Resume to finish it.
+    </span>
+    <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume.kind == 'partial' else 'missing_albums' }}">
+      <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Resume scan</button>
+    </form>
+  </div>
+  {% endif %}
   {# Single surface: the scan's live progress and the Missing Albums / Gap
      Fill review render right here, same as /repair. A dead token banners the
      reconnect ABOVE the review instead of replacing it - ticking and

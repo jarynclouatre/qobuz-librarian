@@ -14,10 +14,13 @@ from qobuz_librarian.library.backup import (
     carry_backup_companions,
     dispose_backup,
     library_backup_disposal_record,
+    library_backup_origin_state,
     library_backup_record_absent,
     load_library_backup_record,
     pin_unverified_upgrade_backup,
     reconcile_library_backup_disposal,
+    restore_gap_fill_backup,
+    restore_upgrade_backup,
     warn_pin_failed,
 )
 from qobuz_librarian.library.catalog import folder_holds_all_tracks
@@ -461,6 +464,80 @@ def finish_library_backup_settlement(
     except (OSError, queue_state.QueueJournalError) as exc:
         raise LibraryBackupPersistenceError(
             "library backup settlement could not be persisted"
+        ) from exc
+    authority_check()
+    return LibraryBackupResolution(
+        saved,
+        LibraryBackupResolutionStatus.SETTLED,
+    )
+
+
+def restore_library_backup(
+    journal,
+    item_id,
+    owner,
+    *,
+    authority_check,
+):
+    """Put back what a download moved aside, for work that never reached Beets.
+
+    The carrier is forgotten only once its backup is gone and every file it
+    held is back at the origin with its receipt bytes, so a restore that
+    stops part way is finished by the next attempt. Nothing already at the
+    origin is replaced.
+    """
+    if not callable(authority_check):
+        raise ValueError("authority_check must be callable")
+    owner_data = _owner_record(owner)
+    references = _backup_references(_item(journal, item_id))
+    if not references:
+        return LibraryBackupResolution(
+            journal,
+            LibraryBackupResolutionStatus.NONE,
+        )
+    reference = references[0]
+    if len(references) != 1 or reference.kind != _BACKUP_CARRIER:
+        return _attention(journal, "library-backup-restore-unavailable")
+    record = reference.data
+    origin = Path(record["origin"])
+    authority_check()
+    backup = load_library_backup_record(record, expected_owner=owner_data)
+    authority_check()
+    state = library_backup_origin_state(record, expected_owner=owner_data)
+    authority_check()
+    if backup is not None:
+        if state == "conflict":
+            return _attention(
+                journal, f"library-backup-restore-conflict:{record['path']}")
+        if record["kind"] == "gap-fill" and state in {"clear", "restored"}:
+            restore_gap_fill_backup(
+                backup,
+                origin,
+                keep_larger_dst=False,
+                replace_dst=False,
+                expected_owner=owner_data,
+            )
+        elif record["kind"] == "upgrade" and state == "clear":
+            restore_upgrade_backup(backup, origin, expected_owner=owner_data)
+        authority_check()
+        state = library_backup_origin_state(record, expected_owner=owner_data)
+        authority_check()
+    if state != "restored" or not library_backup_record_absent(
+        record,
+        expected_owner=owner_data,
+    ):
+        return _attention(
+            journal, f"library-backup-restore-unsettled:{record['path']}")
+    authority_check()
+    try:
+        saved = queue_state.forget_restored_library_backup(
+            journal,
+            item_id,
+            reference,
+        )
+    except (OSError, queue_state.QueueJournalError) as exc:
+        raise LibraryBackupPersistenceError(
+            "restored library backup could not be recorded"
         ) from exc
     authority_check()
     return LibraryBackupResolution(

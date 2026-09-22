@@ -65,6 +65,7 @@ from qobuz_librarian.queue.library_backup_recovery import (
     LibraryBackupResolutionStatus,
     finish_library_backup_settlement,
     prepare_library_backup_settlement,
+    restore_library_backup,
 )
 from qobuz_librarian.queue.post_import_finalizer import (
     finalize_carrier_retirement,
@@ -323,6 +324,19 @@ def _reconcile_absent_staging(
     return reconciled
 
 
+def _restore_library_backup(operation_id, item_id, owner, result, *, authority):
+    _require_authority(authority)
+    restored = restore_library_backup(
+        _load_exact(operation_id),
+        item_id,
+        owner,
+        authority_check=lambda: _require_authority(authority),
+    )
+    if restored.status is LibraryBackupResolutionStatus.SETTLED:
+        result["backup_path"] = result["gap_fill_backup_path"] = None
+    return restored
+
+
 def _retry_or_attention_after_download(
     *,
     operation_id: str,
@@ -390,6 +404,19 @@ def _retry_or_attention_after_download(
         _require_authority(authority)
     except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
         pass
+    # Nothing reached Beets, so tracks moved aside for this download go back
+    # whatever becomes of the staged part. A restore that cannot finish keeps
+    # the backup and the block, and settling the block tries it again.
+    try:
+        restored = _restore_library_backup(
+            operation_id, item_id, owner, result, authority=authority)
+    except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
+        restored = None
+    if (
+        restored is not None
+        and restored.status is LibraryBackupResolutionStatus.ATTENTION
+    ):
+        reason = restored.reason
     journal = _load_exact(operation_id)
     references = _staging_references(journal, item_id)
     if references:
@@ -431,9 +458,9 @@ def _cancel_after_download(
 ) -> DurableAlbumResult | None:
     # A cancel is a deliberate stop, not a crash: throw the partial download
     # away: the run root and any groups it parked, such as a rejected
-    # broken track. Settle the journal item so the queue never waits on
-    # recovery. Anything that cannot be proved settled falls back to the
-    # blocking path.
+    # broken track, and put back any tracks it moved aside. Settle the
+    # journal item so the queue never waits on recovery. Anything that
+    # cannot be proved settled falls back to the blocking path.
     try:
         _require_authority(authority)
         discard_download_staging(result, recovery_checkpoint=checkpoint_group)
@@ -471,6 +498,14 @@ def _cancel_after_download(
         )
         if journal is None:
             return None
+    try:
+        restored = _restore_library_backup(
+            operation_id, item_id, owner, result, authority=authority)
+    except (OSError, ValueError, queue_state.QueueJournalError):
+        return None
+    if restored.status is LibraryBackupResolutionStatus.ATTENTION:
+        return None
+    journal = restored.journal
     if _journal_item(journal, item_id).recovery_references:
         return None
     try:
@@ -493,6 +528,7 @@ def _abandon_blocked_item(
     *,
     operation_id: str,
     item_id: str,
+    result: dict,
     fallback: DurableAlbumResult,
     authority: RunLockLease,
 ) -> DurableAlbumResult:
@@ -502,8 +538,8 @@ def _abandon_blocked_item(
     rip that caused this one already ran to its own end, so a retry repeats the
     same request. Throw the partial away and clear the recovery instead of
     waiting for a person to notice. This is the same settlement the interface
-    offers by hand, so a live library backup still keeps the item blocked
-    rather than losing what it holds.
+    offers by hand, so a library backup that cannot be put back still keeps
+    the item blocked rather than losing what it holds.
     """
     try:
         settled = startup_recovery.settle_blocked_item(
@@ -516,6 +552,7 @@ def _abandon_blocked_item(
         return fallback
     if settled.status is not startup_recovery.BlockedItemSettlementStatus.DISCARDED:
         return fallback
+    result["backup_path"] = result["gap_fill_backup_path"] = None
     return DurableAlbumResult(
         DurableAlbumStatus.INCOMPLETE,
         fallback.reason,
@@ -886,6 +923,7 @@ def execute_durable_new_album(
         return _abandon_blocked_item(
             operation_id=operation_id,
             item_id=item_id,
+            result=item,
             fallback=outcome,
             authority=authority,
         )

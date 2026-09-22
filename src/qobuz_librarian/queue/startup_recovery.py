@@ -59,6 +59,7 @@ from qobuz_librarian.queue.library_backup_recovery import (
     LibraryBackupResolutionStatus,
     finish_library_backup_settlement,
     prepare_library_backup_settlement,
+    restore_library_backup,
 )
 from qobuz_librarian.queue.post_import_finalizer import (
     finalize_carrier_retirement,
@@ -1051,16 +1052,66 @@ def _discard_parked_item_staging(authority, journal, item):
     return current, current_item
 
 
+def _put_back_library_backup(authority, journal, item):
+    """Return the tracks a blocked download moved aside before settling it."""
+    references = _references(item, _LIBRARY_BACKUP_KINDS)
+    if not references:
+        return journal, item
+    paths = references[0].data.get("carrier", references[0].data)
+    _require_authority(authority)
+    restored = restore_library_backup(
+        journal,
+        item.item_id,
+        RecoveryOwner(journal.operation_id, item.item_id),
+        authority_check=lambda: _require_authority(authority),
+    )
+    _require_authority(authority)
+    if restored.status is LibraryBackupResolutionStatus.SETTLED:
+        return restored.journal, _find_item(restored.journal, item.item_id)
+    reason = restored.reason
+    if item.block_reason != reason:
+        queue_state.transition_journal_item(
+            journal,
+            item.item_id,
+            queue_state.QueuePhase.BLOCKED,
+            block_reason=reason,
+        )
+        _require_authority(authority)
+    if reason.startswith("library-backup-restore-conflict:"):
+        return _blocked_settlement(
+            f"A different file is already in {paths['origin']}, so the tracks "
+            f"backed up to {paths['path']} were not put back and this item "
+            "remains blocked. Move that file out of the album folder, then "
+            "try again."
+        )
+    return _blocked_settlement(
+        f"The tracks backed up to {paths['path']} could not be put back into "
+        f"{paths['origin']}, so this item remains blocked. Check that both "
+        "folders are writable and have free space, then try again."
+    )
+
+
 def _settle_unstarted_download(authority, journal, item, action):
     """Finish settling a download that blocked before any library mutation."""
     frozen = parse_completion_input_record(
         item.completion_input,
         expected_owner=RecoveryOwner(journal.operation_id, item.item_id),
     )
-    if frozen is None or frozen.lineages or frozen.counts is not None:
+    if frozen is None:
         return _blocked_settlement(
             "This item has no exact pre-launch Beets state to settle."
         )
+    if frozen.lineages or frozen.counts is not None:
+        # Staged but never reserved for Beets, and every reference is already
+        # settled, so nothing is left to resume.
+        _require_authority(authority)
+        queue_state._commit_unreferenced_blocked_settlement(
+            journal,
+            item_id=item.item_id,
+            action=action.value,
+        )
+        _require_authority(authority)
+        return _settled_result(action)
     _require_authority(authority)
     journal = queue_state.transition_journal_item(
         journal,
@@ -1104,14 +1155,21 @@ def settleable_block_kind(item) -> str | None:
     download; a staged leftover is the opposite, and parking the file is the
     whole of what its recovery waits on. The staged case is read off
     ``block_reason``, not the reference list - an import that stranded a file
-    keeps its Beets carrier listed beside the staging record.
+    keeps its Beets carrier listed beside the staging record. A block that
+    holds nothing, or only the tracks its download moved out of the library,
+    never reached Beets either; settling it puts those tracks back first.
     """
     references = tuple(item.recovery_references or ())
-    if not references:
-        return None
+    held = tuple(
+        reference
+        for reference in references
+        if reference.kind != _LIBRARY_BACKUP_CARRIER_KIND
+    )
+    if not held:
+        return SETTLEABLE_PRELAUNCH
     if (
-        len(references) == 1
-        and (references[0].kind, item.block_reason)
+        len(held) == 1
+        and (held[0].kind, item.block_reason)
         in _PRELAUNCH_SETTLEMENT_BLOCKS
     ):
         return SETTLEABLE_PRELAUNCH
@@ -1219,7 +1277,8 @@ def settle_blocked_item(
     action: BlockedItemSettlementAction,
 ) -> BlockedItemSettlementResult:
     """Retry or discard a live-proved pre-launch abort: a parked download
-    or a managed Beets state that never launched."""
+    or a managed Beets state that never launched. Library tracks the
+    download moved aside go back first."""
     if type(action) is not BlockedItemSettlementAction:
         raise ValueError("action must be retry or discard")
     try:
@@ -1256,6 +1315,10 @@ def settle_blocked_item(
         managed_references = _references(item, _MANAGED_KINDS)
         reference = managed_references[0] if len(managed_references) == 1 else None
         if reference is None:
+            restored = _put_back_library_backup(authority, journal, item)
+            if type(restored) is BlockedItemSettlementResult:
+                return restored
+            journal, item = restored
             if item.recovery_references:
                 return _blocked_settlement(
                     "This item has no exact pre-launch Beets state to settle."
@@ -1277,6 +1340,10 @@ def settle_blocked_item(
             inspection = inspect_managed_reservation(reference.data, owner)
             _require_authority(authority)
             if inspection.outcome is ManagedReservationInspectionOutcome.ABSENT:
+                restored = _put_back_library_backup(authority, journal, item)
+                if type(restored) is BlockedItemSettlementResult:
+                    return restored
+                journal, item = restored
                 queue_state._commit_absent_managed_settlement(
                     journal,
                     item_id=item.item_id,
@@ -1324,6 +1391,10 @@ def settle_blocked_item(
                 "The app could not prove the exact pre-launch Beets state, so "
                 "this item remains blocked."
             )
+        restored = _put_back_library_backup(authority, journal, item)
+        if type(restored) is BlockedItemSettlementResult:
+            return restored
+        journal, item = restored
         committed = queue_state._begin_prelaunch_managed_settlement(
             journal,
             item_id=item.item_id,

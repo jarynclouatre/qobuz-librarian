@@ -3471,11 +3471,12 @@ def _repair_current_job():
               job_mgr.JobStatus.FAILED, job_mgr.JobStatus.CANCELED)
     cur = None
     for j in job_mgr.registry.all():
-        if getattr(j, "execute_kind", "") != "repair" or j.status not in states:
+        if getattr(j, "execute_kind", "") != "repair":
             continue
         if cur is None or (j.created_at or 0) >= (cur.created_at or 0):
             cur = j
-    return cur
+    # A run that finished after a failed or interrupted one supersedes it.
+    return cur if cur is not None and cur.status in states else None
 
 
 # Library follows the same single-surface rule as Repair: the scan, its live
@@ -7766,30 +7767,28 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
         ljob = await loop.run_in_executor(None, _review_job_from_library_state)
     ctx["library_job"] = ljob
     ctx["census"] = None
+    # Resume hint: an interrupted scan's checkpoint, while no scan runs. A
+    # parked review can sit above it, so it is not tied to an idle surface.
+    latest_status = str(
+        (ctx["library_generation"].get("latest_attempt") or {}).get(
+            "status"
+        )
+        or "never"
+    )
+    ctx["library_resume"] = (
+        scan_checkpoint.pending()
+        if not ctx["library_refresh_scanning"] and (
+            not int(ctx["library_generation"].get("generation") or 0)
+            or latest_status in {"running", "failed", "incomplete"}
+        )
+        else None
+    )
     if ljob is not None:
         ctx["queue_wait"] = _queue_wait(ljob)
         # A full load has to be able to land on either tab: the address is the
         # only thing a reload or a bookmark still carries.
         ctx.update(_review_context(ljob, page, q, tab=tab))
-        ctx["library_resume"] = None
     else:
-        # Resume hint: only when an interrupted baseline checkpoint exists and
-        # nothing is running above.
-        latest_status = str(
-            (ctx["library_generation"].get("latest_attempt") or {}).get(
-                "status"
-            )
-            or "never"
-        )
-        cp = (
-            scan_checkpoint.pending()
-            if (
-                not int(ctx["library_generation"].get("generation") or 0)
-                or latest_status in {"running", "failed", "incomplete"}
-            )
-            else None
-        )
-        ctx["library_resume"] = cp if cp is not None else None
         # Finished-state copy: the "Review complete" vs "Review discarded"
         # card keys off why the review retired.
         if ctx["library_baseline_exists"]:

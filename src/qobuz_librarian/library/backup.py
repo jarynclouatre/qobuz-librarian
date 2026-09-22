@@ -3686,6 +3686,71 @@ def library_backup_record_absent(value, *, expected_owner=None) -> bool:
             os.close(root_fd)
 
 
+def library_backup_origin_state(value, *, expected_owner=None):
+    """Compare a carried backup's origin with the files its receipt holds.
+
+    "restored" means every backed-up file is at the origin with its receipt
+    bytes, "conflict" that something else sits where one belongs (for a whole
+    album, any other content in the folder), and "clear" that a restore would
+    replace nothing. None when the origin cannot be read.
+    """
+    canonical = canonical_library_backup_record(
+        value,
+        expected_owner=expected_owner,
+    )
+    if canonical is None:
+        return None
+    manifest = {
+        tuple(PurePosixPath(relative).parts): (
+            snapshot["size"], snapshot["sha256"])
+        for relative, snapshot in canonical["receipt"]["tree"]["files"].items()
+        if PurePosixPath(relative).name not in _SIDECARS
+    }
+    origin = Path(canonical["origin"])
+    opened = _open_rooted_directory(cfg.MUSIC_ROOT, origin)
+    if opened is None:
+        try:
+            if (
+                _rooted_path_parts(cfg.MUSIC_ROOT, origin) is None
+                or os.path.lexists(origin)
+            ):
+                return None
+        except (OSError, ValueError):
+            return None
+        return "clear"
+    descriptors = opened[-1]
+    album_fd = descriptors[-1]
+    matched = 0
+    try:
+        for relative, (size, digest) in manifest.items():
+            try:
+                parents, _parent_fd, file_fd = _open_tree_file(
+                    album_fd, relative)
+            except FileNotFoundError:
+                continue
+            try:
+                if (
+                    os.fstat(file_fd).st_size != size
+                    or _file_digest_fd(file_fd) != digest
+                ):
+                    return "conflict"
+            finally:
+                os.close(file_fd)
+                _close_descriptors(parents)
+            matched += 1
+        if matched == len(manifest):
+            return "restored"
+        if canonical["kind"] == "upgrade":
+            with os.scandir(album_fd) as entries:
+                if next(entries, None) is not None:
+                    return "conflict"
+        return "clear"
+    except OSError:
+        return None
+    finally:
+        _close_descriptors(descriptors)
+
+
 def library_backup_matches_intent(backup_record, intent, *, expected_owner=None):
     """Bind a returned or restart-adopted carrier to its pre-mutation intent."""
     carrier = canonical_library_backup_record(
@@ -8120,6 +8185,7 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
 
 def restore_gap_fill_backup(backup, album_dir: Path,
                             *, keep_larger_dst: bool = True,
+                            replace_dst: bool = True,
                             expected_owner=None) -> int:
     """Move every file in a carried gap-fill or downsample ``BackupResult``
     back under album_dir, preserving relative structure. Returns the number of
@@ -8132,6 +8198,10 @@ def restore_gap_fill_backup(backup, album_dir: Path,
     a larger dst is the good refill. Gap-fill callers pass False: there the
     backup IS the good original, so a larger-but-corrupt partial re-rip at dst
     must NOT win - always restore the backup.
+
+    replace_dst=False never replaces a file already at the destination: one
+    holding the backup's exact bytes counts as restored, and any other file
+    fails that track and keeps the backup.
 
     Crash-safe across filesystems: each file is copied into a private random
     workspace on the destination filesystem, then published without overwrite
@@ -8241,6 +8311,39 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                         destination_parent_fd, relative[-1])
                 except FileNotFoundError:
                     existing_fd = None
+
+                if existing_fd is not None and not replace_dst:
+                    existing_lease = acquire_inode_write_exclusion(
+                        existing_fd)
+                    if (
+                        existing_lease is None
+                        or not existing_lease.intact()
+                        or os.fstat(existing_fd).st_size != source_size
+                        or _file_digest_fd(existing_fd) != source_digest
+                    ):
+                        raise OSError(
+                            "a different file is already at the destination")
+                    if not (
+                        _fsync(_held_directory_path(existing_fd))
+                        and _fsync(_held_directory_path(
+                            destination_parent_fd))
+                        and _fsync_directory_fds(destination_parent_fd)
+                    ):
+                        raise OSError("kept destination could not be flushed")
+                    held_destinations.append({
+                        "relative": relative,
+                        "parents": destination_parents,
+                        "parent_fd": destination_parent_fd,
+                        "descriptor": existing_fd,
+                        "lease": existing_lease,
+                        "minimum_size": source_size,
+                        "digest": source_digest,
+                    })
+                    destination_parents = []
+                    existing_fd = None
+                    existing_lease = None
+                    n_restored += 1
+                    continue
 
                 if (
                     keep_larger_dst

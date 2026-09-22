@@ -2344,7 +2344,7 @@ def index_existing(
 
     log.info("indexing %d files with %d workers (no provider calls)",
              total, workers)
-    progress_every = max(1, min(250, total // 50 or 1))
+    progress_every = max(25, min(250, total // 50))
     completed = 0
     stopped = False
     last_log = time.monotonic()
