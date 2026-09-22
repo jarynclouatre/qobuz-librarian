@@ -236,7 +236,8 @@ def test_full_album_backs_up_present_tracks_before_rip(monkeypatch, tmp_path):
     bp = result["gap_fill_backup_path"]
     assert bp is not None and bp.complete and not owned.exists()
     assert any(f.read_bytes() == b"the-owned-original" for f in bp.rglob("*"))
-    assert events == [
+    # Nothing lands from the fake album rip, so per-track retries follow it.
+    assert events[:4] == [
         "gap-fill",
         "library-backup-carrier",
         "staging-run",

@@ -414,19 +414,11 @@ def _gap_candidate_spec(
     extra_payload = {"_artist_dir": artist_key} if artist_key else {}
     if gap.on_disk_dir is not None:
         extra_payload["album_dir"] = str(gap.on_disk_dir)
-        receipts = {}
-        for track in gap.present:
-            source = track.get("path") if isinstance(track, dict) else None
-            sealed = (
-                backup_mod.capture_gap_fill_source_receipt(source, gap.on_disk_dir)
-                if source else None
-            )
-            if sealed is None:
-                receipts = {}
-                break
-            receipts[sealed["relative"]] = sealed["file"]
-        extra_payload["_gap_fill_receipts"] = receipts
         premise = candidate_premise.capture("gap-fill", gap.on_disk_dir)
+        # The present tracks are Qobuz's, with no local path; the album seal
+        # already holds every file the whole-album path would move aside.
+        extra_payload["_gap_fill_receipts"] = (
+            candidate_premise.gap_fill_receipts(premise) or {})
     else:
         artist_dir = cfg.MUSIC_ROOT / artist_key if artist_key else None
         extra_payload["_artist_dir_path"] = str(artist_dir or "")
@@ -2446,6 +2438,11 @@ def execute_albums(job, chosen, token):
                                        expected_gap_fill_receipts=(
                                            cand["payload"].get(
                                                "_gap_fill_receipts")
+                                           # A review saved without them:
+                                           # the files were just proved
+                                           # unchanged, so seal them now.
+                                           or candidate_premise.gap_fill_receipts(
+                                               premise)
                                            if premise["kind"] == "gap-fill"
                                            else None
                                        ))

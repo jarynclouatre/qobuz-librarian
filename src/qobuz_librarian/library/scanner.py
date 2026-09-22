@@ -139,6 +139,7 @@ def read_audio_meta(path: Path):
         "albumartist": first("albumartist") or first("artist"),
         "tracknumber": parse_track_num(first("tracknumber")),
         "discnumber":  parse_track_num(first("discnumber")) or 1,
+        "disc_tagged": bool(parse_track_num(first("discnumber"))),
         "bits":        getattr(info, "bits_per_sample", 0) if info else 0,
         "sample_rate": getattr(info, "sample_rate", 0) if info else 0,
         "channels":    getattr(info, "channels", 0) if info else 0,

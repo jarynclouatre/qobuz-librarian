@@ -42,6 +42,23 @@ def test_album_candidate_receipt_accepts_unchanged_and_rejects_changed_bytes(
         validate(candidate)
 
 
+def test_library_gap_fill_row_seals_the_files_a_whole_album_fill_moves(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.library.discovery import AlbumGap
+    from qobuz_librarian.web import flows
+
+    _root, album, track = _music_album(tmp_path, monkeypatch)
+    qobuz_album = {"id": "A1", "title": "Album", "artist": {"name": "Artist"},
+                   "tracks_count": 10}
+    # Discovery hands over Qobuz's track dicts, which carry no local path.
+    gap = AlbumGap(qobuz_album, album, [{"id": n} for n in range(2, 11)],
+                   [{"id": 1, "title": "One", "track_number": 1}])
+
+    spec = flows._gap_candidate_spec(gap, "Artist")
+
+    assert set(spec["payload"]["_gap_fill_receipts"]) == {track.name}
+
+
 def test_saved_artist_receipt_does_not_replace_row_evidence(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import (

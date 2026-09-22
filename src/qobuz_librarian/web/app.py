@@ -11725,7 +11725,12 @@ def _diagnostics():
 
     inventory = {"orphans": [], "undo": [], "leftovers": []}
     try:
-        inventory["orphans"] = backup_mod.list_retained_backups()
+        # An upgrade's backup inside its retention window is expected, not a
+        # fault; the age sweep settles it.
+        inventory["orphans"] = [
+            item for item in backup_mod.list_retained_backups()
+            if not backup_mod.awaiting_retention(item[0])
+        ]
     except Exception as exc:
         logging.getLogger("qobuz_librarian").warning(
             "couldn't inspect kept recovery backups: %s", exc)
@@ -12753,6 +12758,29 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         status = "ok" if classification.removable else "error"
         icon = "OK" if classification.removable else "!"
         aria = "OK" if classification.removable else "Needs attention"
+        where = dest if origin else "the album folder it came from"
+        if re.match(r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|downsample)_", path.name):
+            # These restore file by file and the backup wins each swap.
+            restore_confirm = (
+                f"Put these files back in {where}? Any file of the same name "
+                "there is replaced and cannot be brought back.")
+        else:
+            restore_confirm = (
+                f"Put this album back in {where}? Restore goes ahead only "
+                "while that folder holds less than the backup, and replaces "
+                "what it holds.")
+        # Remove proves every file back first, so it can only succeed where
+        # the listing could not finish its own check.
+        remove_form = (
+            f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
+            f'<input type="hidden" name="_csrf_token" value="{tok}">'
+            f'<input type="hidden" name="backup" value="{name}">'
+            f'<button type="submit" class="ql-btn ql-btn-sm" '
+            f'data-confirm="Remove this backup? It is deleted only after '
+            f'every file it holds is verified byte-for-byte back in {where}." '
+            f'data-confirm-action="Remove" data-irreversible>Remove</button>'
+            f'</form>'
+        ) if classification.status != "retained" else ""
         rows.append(
             f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
@@ -12764,20 +12792,10 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Put these files back at {dest}? Any file of the '
-            f'same name there is replaced and cannot be brought back, so an '
-            f'upgrade or re-download of this album since the backup was made '
-            f'is undone." '
+            f'data-confirm="{restore_confirm}" '
             f'data-confirm-action="Restore" data-irreversible>Restore</button>'
             f'</form>'
-            f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
-            f'<input type="hidden" name="_csrf_token" value="{tok}">'
-            f'<input type="hidden" name="backup" value="{name}">'
-            f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Remove this backup? It is deleted only after '
-            f'every file it holds is verified byte-for-byte back at {dest}." '
-            f'data-confirm-action="Remove" data-irreversible>Remove</button>'
-            f'</form>'
+            f'{remove_form}'
             f'</div></div></div>'
         )
     undo = report["undo"]

@@ -125,7 +125,7 @@ def _file_track_identity(path, context_tracks):
     context_discs = {_positive_int(track.get("media_number")) or 1 for track in context_tracks}
     meta_disc = _positive_int(meta.get("discnumber"))
     # read_audio_meta defaults a missing DISCNUMBER to 1.
-    if meta_disc == 1 and len(context_discs) > 1:
+    if meta_disc == 1 and len(context_discs) > 1 and not meta.get("disc_tagged"):
         meta_disc = None
     explicit_disc = parent_disc or stem_disc
     if parent_disc and stem_disc and parent_disc != stem_disc:
@@ -1139,6 +1139,20 @@ def run_album_download(
             if recovered:
                 n_ok = len(kept)
                 log.info(fmt(C.GREEN, f"  ✓  Retry recovered {recovered} track(s)"))
+
+    # The album URL does not say which tracks it failed on, so a track that
+    # never landed from it counts as a failed pull, and one that timed out
+    # with the whole album gets its own full timeout on the retry below.
+    if download_full_album and not is_cancel_requested():
+        landed_ids = {
+            id(track)
+            for _, track in _pair_files_to_tracks(
+                kept + lossy + broken, attempted_tracks, file_identities, qobuz_tracks
+            )
+        }
+        failed_track_objs = [
+            track for track in attempted_tracks if id(track) not in landed_ids
+        ]
 
     # A HARD failure (rip errored with no file landing at all - distinct from
     # a file that landed lossy/broken, retried above) gets one more per-track

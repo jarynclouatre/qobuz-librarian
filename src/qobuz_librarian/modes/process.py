@@ -1426,10 +1426,12 @@ def process_album(album, args, *, allow_force=True, label=None,
                     "\n  ⚠  Upgrade couldn't be verified as complete; "
                     "keeping your original."))
                 log.info(fmt(C.GRAY,
-                    f"     Original preserved at {upgrade_backup_path} "
-                    f"(kept until you confirm the upgrade landed)."))
+                    f"     Original kept at {upgrade_backup_path}; it is not "
+                    "removed automatically."))
                 log.info(fmt(C.WHITE,
-                    f"     Restore: mv {upgrade_backup_path!s} {album_dir!s}"))
+                    f"     To go back to it, move {album_dir!s} out of the "
+                    "library, then move the backup's files, not its "
+                    f"dot-files, into {album_dir!s}."))
             elif download_phase_completed and args.no_import:
                 upgrade_unverified = True
                 if not pin_unverified_upgrade_backup(
@@ -1464,7 +1466,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                         f"  ✗  Auto-restore failed. Original folder is at: "
                         f"{upgrade_backup_path}"))
                     log.info(fmt(C.WHITE,
-                        f"     Manual restore: mv {upgrade_backup_path!s} {album_dir!s}"))
+                        f"     To put it back, move anything left in "
+                        f"{album_dir!s} out of the library, then move the "
+                        "backup's files, not its dot-files, into it."))
 
         # ── Gap-fill backup resolution ───────────────────────────────────────
         # run_album_download records this the moment it stashes present tracks,

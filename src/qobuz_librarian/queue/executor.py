@@ -1829,7 +1829,10 @@ def _resolve_queue_item(
                         "complete"):
                     warn_pin_failed(bp)
                 log.info(fmt(C.RED, f"  ✗  Auto-restore failed. Backup: {bp}"))
-                log.info(fmt(C.WHITE, f"     Manual: mv {bp} {album_dir}"))
+                log.info(fmt(C.WHITE,
+                    f"     To put it back, move anything left in {album_dir} "
+                    "out of the library, then move the backup's files, not "
+                    "its dot-files, into it."))
 
     # Gap-fill backup: present tracks moved to backup before rip.
     # Drop on success; restore in place if the queue item failed.

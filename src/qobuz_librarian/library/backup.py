@@ -3829,7 +3829,10 @@ def _write_receipt_marker(backup, name, note) -> bool:
         except FileNotFoundError:
             existing = None
         if existing is not None:
-            return existing == expected
+            # A marker this receipt already owns keeps the backup whatever
+            # note it was written with.
+            return existing == expected or _receipt_owned_marker(
+                directory_fd, name, backup.receipt)
         if not _named_entry_missing(directory_fd, name):
             return False
         if not _write_text_noreplace_at(directory_fd, name, expected):
@@ -6061,6 +6064,39 @@ def find_only_copy_backups():
     """Retained backups not verified removable, as (path, origin)."""
     return [(path, origin) for path, origin, result in list_retained_backups()
             if not result.removable]
+
+
+def awaiting_retention(path: Path) -> bool:
+    """Whether the age sweep will settle this backup on schedule.
+
+    Inside the retention window, unpinned, and every file it holds back at its
+    origin at least as large: an upgrade's own backup looks like this for its
+    whole window. The sweep's proof decides it later; this reads metadata only.
+    """
+    m = re.match(r"^(\d{8}_\d{6})_", path.name)
+    if m is None or backup_keep_markers_present(path):
+        return False
+    try:
+        made = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").timestamp()
+    except ValueError:
+        return False
+    if made < time.time() - cfg.UPGRADE_BACKUP_RETENTION_DAYS * 86400:
+        return False
+    origin = _read_backup_origin(path)
+    entries = _list_tree(path)
+    if origin is None or entries is None:
+        return False
+    try:
+        for source in entries:
+            if not source.is_file() or source.name in _SIDECARS:
+                continue
+            destination = origin / source.relative_to(path)
+            if (not destination.is_file()
+                    or destination.stat().st_size < source.stat().st_size):
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def list_retained_backups():
