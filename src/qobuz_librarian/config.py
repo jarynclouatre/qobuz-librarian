@@ -358,9 +358,9 @@ def collection_backup_dir_conflict(value) -> str:
     """What stops ``value`` serving as the collection backup folder, or "".
 
     "control" for a control character, "unresolvable" for a path that cannot
-    be resolved, else the storage root it is or resolves inside. Snapshots
-    there would go down with the files they record, in a tree the app files,
-    clears and prunes on its own.
+    be resolved, else the storage root it is or resolves inside, where the
+    app clears and prunes on its own. Inside the music folder is allowed, as
+    it always was; Diagnostics warns about it.
     """
     raw = str(value or "").strip()
     if not raw:
@@ -371,7 +371,7 @@ def collection_backup_dir_conflict(value) -> str:
         path = Path(os.path.abspath(raw)).resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return "unresolvable"
-    for name, root in (("MUSIC_ROOT", MUSIC_ROOT), ("STAGING_DIR", STAGING_DIR),
+    for name, root in (("STAGING_DIR", STAGING_DIR),
                        ("UPGRADE_BACKUP_DIR", UPGRADE_BACKUP_DIR)):
         try:
             other = Path(os.path.abspath(os.fspath(root))).resolve(strict=False)
@@ -380,6 +380,19 @@ def collection_backup_dir_conflict(value) -> str:
         if path == other or other in path.parents:
             return name
     return ""
+
+
+def collection_backup_dir_in_music(value) -> bool:
+    """Whether snapshots would sit in the music folder they record."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        path = Path(os.path.abspath(raw)).resolve(strict=False)
+        music = Path(os.path.abspath(os.fspath(MUSIC_ROOT))).resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return path == music or music in path.parents
 
 
 # ── Web UI ────────────────────────────────────────────────────────────────────

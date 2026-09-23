@@ -294,7 +294,7 @@ def write_snapshot(snapshot, *, force=False):
     # The lock lives with the app's data, not in the backup folder: that folder
     # is synced offsite, and a stray .lock file riding along in it is noise.
     with state_file.store_lock(cfg.DATA_DIR / ".qobuz_collection_backup"):
-        previous = None if force else _load_snapshot(latest)
+        previous = None if force else _guard_baseline(latest)
         refusal = None if force else shrink_verdict(snapshot, previous)
         if refusal:
             # Kept beside the good copy rather than dropped: if the drive really
@@ -307,6 +307,39 @@ def write_snapshot(snapshot, *, force=False):
         # A confirmed write settles whatever the guard was holding out for.
         suspect_path().unlink(missing_ok=True)
     return True, None
+
+
+def _guard_baseline(latest):
+    """The snapshot the shrink guard compares against.
+
+    A damaged latest copy must not switch the guard off, or the next scan of
+    a half-mounted drive becomes the latest backup and pushes the good dated
+    copies out. The newest dated copy that still reads stands in for it.
+    """
+    previous = _load_snapshot(latest)
+    if previous is not None:
+        return previous
+    try:
+        dated = sorted(
+            (path for path in snapshot_dir().glob("collection-*.json")
+             if _DATED_NAME_RE.fullmatch(path.name)),
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for path in dated:
+        try:
+            snapshot = _load_snapshot(path)
+        except OSError:
+            continue
+        if snapshot is not None:
+            # Put the latest copy back too, so Settings and Restore see it.
+            try:
+                state_file.write_json(latest, snapshot)
+            except OSError:
+                pass
+            return snapshot
+    return None
 
 
 def _dated_path() -> Path:

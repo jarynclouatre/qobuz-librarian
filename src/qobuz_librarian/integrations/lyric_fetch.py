@@ -1260,6 +1260,36 @@ def write_lyrics(f, content: str, *, path=None, **save_kwargs) -> None:
         f, Path(f.filename) if path is None else Path(path), **save_kwargs)
 
 
+def _open_up_private_sidecar(parent_fd, path) -> None:
+    """Give an owner-only sidecar the track's read access.
+
+    Earlier versions wrote every .lrc as 0600, which a media server running
+    as another user cannot read.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None or parent_fd is None:
+        return
+    try:
+        track = os.stat(Path(path).name, dir_fd=parent_fd,
+                        follow_symlinks=False)
+        descriptor = os.open(Path(path).with_suffix(".lrc").name,
+                             os.O_RDONLY | nofollow | os.O_NONBLOCK,
+                             dir_fd=parent_fd)
+    except OSError:
+        return
+    try:
+        sidecar = os.fstat(descriptor)
+        if (stat.S_ISREG(sidecar.st_mode)
+                and stat.S_IMODE(sidecar.st_mode) == 0o600
+                and stat.S_IMODE(track.st_mode) & 0o044
+                and sidecar.st_uid == os.geteuid()):
+            os.fchmod(descriptor, stat.S_IMODE(track.st_mode) & 0o666)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _new_file_mode(parent_fd: int, track_name: str) -> int:
     """Permissions for a new sidecar: the track's, else what the umask allows."""
     try:
@@ -1990,6 +2020,8 @@ def _process_bound_file(
         binding.chain_is_named,
         track_guard,
     )
+    if sidecar is not None:
+        _open_up_private_sidecar(binding.parent_fd, path)
     if not track_guard():
         log.warning("track changed during lyric discovery: %s", path)
         st.status = "transient"
@@ -2022,8 +2054,12 @@ def _process_bound_file(
         "embed": bool(tagged) and len(tagged) == 1 and (
             _lyrics_digest(tagged[0]) == st.written if st.written
             else unchanged_since_fetch),
-        "sidecar": bool(sidecar) and bool(st.written)
-        and _lyrics_digest(sidecar) == st.written,
+        # Before the written digest was kept, the format "both" wrote the
+        # same text to the sidecar as to the tag.
+        "sidecar": bool(sidecar) and (
+            _lyrics_digest(sidecar) == st.written if st.written
+            else unchanged_since_fetch and bool(tagged) and len(tagged) == 1
+            and sidecar.strip() == tagged[0].strip()),
     }
     representation_kinds = {
         name: classify(value) for name, value in representations.items()

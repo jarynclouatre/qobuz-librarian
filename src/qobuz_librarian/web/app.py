@@ -11937,6 +11937,15 @@ def _diagnostics():
     else:
         checks.append({"label": "Stranded upgrade backups", "ok": True,
                        "detail": "none"})
+    backup_dir = collection_snapshot.snapshot_dir()
+    if cfg.collection_backup_dir_in_music(backup_dir):
+        checks.append({
+            "label": "Backup folder",
+            "ok": False,
+            "detail": f"{_resolve_host_path(str(backup_dir))[0]} is inside "
+                      "the music folder, so a music disk that fails takes "
+                      "the backups with it.",
+        })
 
     inventory = {"orphans": [], "undo": [], "leftovers": []}
     try:
