@@ -41,7 +41,7 @@ from qobuz_librarian.ui_cli.prompts import (
     print_album_summary,
     prompt_album_selection,
 )
-from qobuz_librarian.ui_cli.sentinels import MORE, URL_QUERY
+from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 
 _DIRECT_QUEUE_MODE = "album-now"
 _SETTLED_ONE_SHOT_RESULTS = {
@@ -126,11 +126,15 @@ def _download_album_now(
                         "\n  --dry-run: stopping here, nothing downloaded.\n",
                     ))
                     return {"result": "dry_run", "n_missing": len(missing)}
-                if not confirm(
+                proceed = confirm(
                     f"\n  Proceed with downloading {len(missing)} track(s)?",
                     default_yes=False,
                     auto_yes=bool(getattr(args, "yes", False)),
-                ):
+                    on_eof=None,
+                )
+                if proceed is None:
+                    return {"result": "no_answer", "n_missing": len(missing)}
+                if not proceed:
                     log.info(fmt(C.GRAY, "  Skipped."))
                     return {"result": "user_skipped", "n_missing": len(missing)}
             try:
@@ -239,6 +243,8 @@ def resolve_album_from_args(args, token):
                                         can_load_more=can_load_more)
         if chosen is None:
             raise Aborted("user cancelled at album selection")
+        if chosen == NO_ANSWER:
+            raise Aborted("no answer at album selection")
         if chosen == MORE:
             search_limit = min(search_limit * 2, 50)
             continue
@@ -389,16 +395,17 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                     raise SystemExit(1)
                 continue
             except Aborted as e:
+                no_answer = "no answer" in str(e)
                 # Cancelling at the result picker (not the top-level query
                 # prompt) should re-prompt in loop mode, NOT return. A return
                 # falls through to the finally block and flushes the queue.
-                if loop and "selection" in str(e):
+                if loop and not no_answer and "selection" in str(e):
                     log.info(fmt(C.GRAY, "  Cancelled; back to album prompt."))
                     args.query = saved_query
                     continue
                 log.info(fmt(C.GRAY, "  Cancelled."))
                 args.query = saved_query
-                return 0
+                return EXIT_GENERAL if no_answer else 0
             finally:
                 args.query = saved_query
 

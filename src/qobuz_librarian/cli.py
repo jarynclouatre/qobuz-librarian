@@ -49,10 +49,12 @@ from qobuz_librarian.ui_cli.errors import (
     EXIT_LOCK_BUSY,
     EXIT_TRANSIENT,
     die,
+    plural,
 )
 from qobuz_librarian.ui_cli.logging import attach_file_handler, log, set_quiet, set_verbose, vlog
 
 _STARTUP_RECOVERY_RESULT = None
+_RUN_LEASE = None
 
 # ── URL parsers ───────────────────────────────────────────────────────────────
 
@@ -365,6 +367,21 @@ def _die_unsettled_startup_recovery(
             print(fmt(C.RED, f"     {path}"), file=sys.stderr)
         print(fmt(C.RED, block(outro)), file=sys.stderr)
         raise SystemExit(EXIT_GENERAL)
+    elif getattr(result, "reason", None) == "queue-namespace-blocked":
+        paths = getattr(result, "paths", ())
+        print(fmt(C.RED, block(
+            "\n✗  The saved download queue can't be read.\n"
+            "   Nothing was changed and no work was started. The file "
+            "involved:" + ("" if paths else " not reported")
+        )), file=sys.stderr)
+        for path in paths:
+            print(fmt(C.RED, f"     {path}"), file=sys.stderr)
+        print(fmt(C.RED, block(
+            "   Fix its permissions, or if it is damaged, move it out of the "
+            "data folder (the downloads it listed will need queuing again), "
+            "then run Qobuz Librarian again.\n"
+        )), file=sys.stderr)
+        raise SystemExit(EXIT_GENERAL)
     else:
         from qobuz_librarian.queue.startup_recovery import (
             BLOCKED_DOWNLOAD_LOG_ENTRY,
@@ -374,7 +391,7 @@ def _die_unsettled_startup_recovery(
         # message names. Nothing else writes it, and the message used to point
         # at a log entry that was never recorded.
         detail = "; ".join(
-            f"{entry.item_id}: {entry.block_reason or 'reason not reported'}"
+            f"{entry.item_id}: {entry.reason or 'reason not reported'}"
             for entry in getattr(result, "items", ())
             if entry.phase is queue_state.QueuePhase.BLOCKED
         )
@@ -414,6 +431,7 @@ def _compose_service_name() -> str:
 
 def acquire_run_lock():
     """Acquire the single-writer run lock or exit."""
+    global _RUN_LEASE
     try:
         lease = run_lock.acquire()
     except run_lock.LockBusy as busy:
@@ -474,6 +492,7 @@ def acquire_run_lock():
             result, kept, note = _offer_blocked_cli_settlement(lease, result)
         if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
             _die_unsettled_startup_recovery(lease, result, kept=kept, note=note)
+        _RUN_LEASE = lease
         return lease
     if lease is not None:
         lease.close()
@@ -540,6 +559,25 @@ def check_media_tools():
     ):
         if shutil.which(tool) is None:
             die(fmt(C.RED, _missing_tool_hint(tool, hint)), EXIT_CONFIG)
+
+
+def check_beets():
+    # The import runs after the whole album is downloaded, so a missing Beets
+    # would leave it stranded in staging.
+    from qobuz_librarian.integrations import beets
+
+    problem = beets.beets_runtime_problem()
+    if problem is None:
+        return
+    fix = (
+        "Check that the Beets config volume is mounted writably, or rebuild "
+        "the image with `docker compose build --no-cache`."
+        if _in_container() else
+        "Install beets 2.14.1 and give it a config, or run with --no-import."
+    )
+    die(fmt(C.RED, block(
+        f"\n✗  Beets cannot import downloads: {problem}\n   {fix}\n")),
+        EXIT_CONFIG)
 
 
 def require_music_root():
@@ -619,7 +657,7 @@ _HELP_EXAMPLES = (
 
 def _wrap_shell_command(command, width, *, initial_indent="  ",
                         continuation_indent="    "):
-    tokens = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", command)
+    tokens = re.findall(r"(?:'[^']*'|\"[^\"]*\"|[^\s'\"]+)+", command)
     command_lines = []
     line = initial_indent
     for token in tokens:
@@ -662,12 +700,24 @@ def _help_description():
     )
 
 
-def _beets_recovery_command():
-    staging = shlex.quote(str(cfg.STAGING_DIR))
+def _beets_recovery_command(album_dirs=()):
+    """The manual import for staged albums: the given folders, or every
+    download run folder."""
+    if album_dirs:
+        targets = " ".join(shlex.quote(str(path)) for path in album_dirs)
+    else:
+        # Beets skips names starting with a dot, so a run folder has to be
+        # named itself; importing the staging folder finds nothing.
+        targets = f"{shlex.quote(str(cfg.STAGING_DIR))}/.qobuz-run-*"
+    command = f"beet import {targets}"
     if _in_container():
         service = shlex.quote(_compose_service_name())
-        return f"docker compose run --rm {service} beet import {staging}"
-    return f"beet import {staging}"
+        if not album_dirs:
+            command = f"sh -c {shlex.quote(command)}"
+        return f"docker compose run --rm {service} {command}"
+    if cfg.BEETS_CONFIG_DIR != cfg.HOME / ".config" / "beets":
+        command = f"BEETSDIR={shlex.quote(str(cfg.BEETS_CONFIG_DIR))} {command}"
+    return command
 
 
 def _help_epilog():
@@ -996,26 +1046,44 @@ def main():
     _lockfile = acquire_run_lock()  # noqa: F841
 
     from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
-    resume_interrupted_queue = (
+    saved_queue = (
         _startup_recovery_status() is StartupRecoveryStatus.RESUME_REQUIRED)
-    if resume_interrupted_queue and any((
-        args.reset_walk_seen,
-        args.migrate,
-        args.lyrics_walk,
-        args.downsample_walk,
+    queue_started = saved_queue and any(
+        item.phase is not queue_state.QueuePhase.PENDING
+        for item in _STARTUP_RECOVERY_RESULT.items
+    )
+    # These download through the one saved queue, so a kept queue that
+    # nothing has started from holds up only them.
+    queue_modes = (
         args.artist,
         args.library_walk,
         args.album_gaps,
         args.repair,
-        args.upgrade_walk,
         args.query,
-    )):
+    )
+    other_modes = (
+        args.reset_walk_seen,
+        args.migrate,
+        args.lyrics_walk,
+        args.downsample_walk,
+        args.upgrade_walk,
+    )
+    if queue_started and any(queue_modes + other_modes):
         die(fmt(
             C.YELLOW,
             "\n⚠  An interrupted download must be resumed before other work.\n"
             "   Run Qobuz Librarian without a mode or search argument and "
             "choose Resume when it offers the saved queue.\n",
         ), EXIT_GENERAL)
+    if saved_queue and any(queue_modes):
+        die(fmt(
+            C.YELLOW,
+            "\n⚠  A saved download queue must be resumed or discarded before "
+            "another download.\n"
+            f"   It is in {cfg.QUEUE_JOURNAL_DIR}. Run Qobuz Librarian without "
+            "a mode or search argument to choose.\n",
+        ), EXIT_GENERAL)
+    resume_saved_queue = saved_queue and not any(queue_modes + other_modes)
 
     if args.reset_walk_seen:
         removed = []
@@ -1074,6 +1142,8 @@ def main():
             return
         check_rip()
         check_media_tools()
+        if not args.no_import and not args.dry_run:
+            check_beets()
         from qobuz_librarian.api.auth import (
             sync_streamrip_creds_from_env,
             verify_streamrip_downloads_folder,
@@ -1141,7 +1211,7 @@ def main():
     def download_token():
         return remote_token(QobuzAccess.DOWNLOAD_ACTION)
 
-    if resume_interrupted_queue:
+    if resume_saved_queue:
         # Keep this launch recovery-only.
         try:
             offer_resume_startup_recovery(
@@ -1162,42 +1232,53 @@ def main():
         if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
             _die_unsettled_startup_recovery(_lockfile, result)
         if result.status is StartupRecoveryStatus.RESUME_REQUIRED:
-            log.info(fmt(
-                C.YELLOW,
-                "  Interrupted queue kept. Other work remains paused until it "
-                "is resumed.",
-            ))
+            if queue_started:
+                log.info(fmt(
+                    C.YELLOW,
+                    "  Interrupted queue kept. Other work remains paused until "
+                    "it is resumed.",
+                ))
+            else:
+                log.info(fmt(C.YELLOW, wrap(
+                    f"Queue kept in {cfg.QUEUE_JOURNAL_DIR}. Other downloads "
+                    "wait until it is resumed or discarded.")))
+            # Kept work means the run stopped short, as when a blocked
+            # download is kept at startup.
+            raise SystemExit(EXIT_GENERAL)
         return
 
-    # Sweep upgrade-backup dir of anything older than retention window.
-    # Cheap (just stat + rmtree on stale dirs); silent unless something happens.
-    try:
-        n_swept = cleanup_old_upgrade_backups()
-        if n_swept:
-            log.info(fmt(C.GRAY,
-                f"  ⟳  Cleaned up {n_swept} old upgrade backup(s) "
-                f"(>{cfg.UPGRADE_BACKUP_RETENTION_DAYS} days)."))
-    except Exception as e:
-        # Don't let backup-housekeeping fail the run.
-        vlog(f"upgrade-backup cleanup error: {e}")
-    # Prune orphan staging-path entries from lyric_fetch's
-    # state file (created during pre-import lyric runs).
-    try:
-        _prune_lyric_state_orphans()
-    except Exception as e:
-        vlog(f"lyric-state prune error: {e}")
-    # Drop tag-cache rows whose file has since been moved or deleted.
-    try:
-        from qobuz_librarian.library import flac_cache
-        flac_cache.prune_missing()
-    except Exception as e:
-        vlog(f"flac-cache prune error: {e}")
-    # Drop repair-cache ISRC lookups that have aged past the TTL.
-    try:
-        from qobuz_librarian.library import repair_cache
-        repair_cache.prune_expired()
-    except Exception as e:
-        vlog(f"repair-cache prune error: {e}")
+    # Housekeeping deletes expired backups and rewrites state files, so a
+    # dry run skips it.
+    if not args.dry_run:
+        # Sweep upgrade-backup dir of anything older than retention window.
+        # Cheap (just stat + rmtree on stale dirs); silent unless something happens.
+        try:
+            n_swept = cleanup_old_upgrade_backups()
+            if n_swept:
+                log.info(fmt(C.GRAY,
+                    f"  ⟳  Cleaned up {n_swept} old upgrade backup(s) "
+                    f"(>{cfg.UPGRADE_BACKUP_RETENTION_DAYS} days)."))
+        except Exception as e:
+            # Don't let backup-housekeeping fail the run.
+            vlog(f"upgrade-backup cleanup error: {e}")
+        # Prune orphan staging-path entries from lyric_fetch's
+        # state file (created during pre-import lyric runs).
+        try:
+            _prune_lyric_state_orphans()
+        except Exception as e:
+            vlog(f"lyric-state prune error: {e}")
+        # Drop tag-cache rows whose file has since been moved or deleted.
+        try:
+            from qobuz_librarian.library import flac_cache
+            flac_cache.prune_missing()
+        except Exception as e:
+            vlog(f"flac-cache prune error: {e}")
+        # Drop repair-cache ISRC lookups that have aged past the TTL.
+        try:
+            from qobuz_librarian.library import repair_cache
+            repair_cache.prune_expired()
+        except Exception as e:
+            vlog(f"repair-cache prune error: {e}")
     # ── Decide the entry mode ─────────────────────────────────────────────────
     # Single-shot flag paths first (each skips the menu loop), then positional
     # args / URL → album mode, then the interactive menu. The single-shot paths
@@ -1307,22 +1388,42 @@ def main():
 
 
 def _check_staging_occupied():
-    """Warn if STAGING_DIR has content left behind by a --no-import run or crash."""
+    """Name the album folders a --no-import run left in staging."""
+    # Only while this run still holds the lock: otherwise a run folder may be
+    # another writer's download in progress.
+    if _RUN_LEASE is None or _RUN_LEASE.intact() is not True:
+        return
+    from qobuz_librarian import download
+    from qobuz_librarian.queue.startup_recovery import unclaimed_staging_run_names
+
     try:
         if not cfg.STAGING_DIR.exists():
             return
-        subdirs = [
-            d for d in cfg.STAGING_DIR.iterdir()
+        # A run folder a saved queue claims is still the queue's to finish.
+        unclaimed = unclaimed_staging_run_names()
+        if unclaimed is None:
+            return
+        roots = [cfg.STAGING_DIR / name for name in unclaimed] + [
+            d for d in sorted(cfg.STAGING_DIR.iterdir())
             if d.is_dir() and not d.name.startswith(".")
         ]
-        if subdirs:
+        album_dirs = [
+            album_dir
+            for root in roots
+            for album_dir in download.staged_album_dirs(root)
+        ]
+        if album_dirs:
+            one = len(album_dirs) == 1
             location = " from the Compose host" if _in_container() else ""
             notice = wrap(
-                f"{len(subdirs)} album folder(s) remain in {cfg.STAGING_DIR}. "
-                f"Keep other downloads paused, then run{location}:",
+                f"{plural(len(album_dirs), 'album folder')} in "
+                f"{cfg.STAGING_DIR} {'was' if one else 'were'} not imported. "
+                "The next run moves unimported downloads to "
+                f"{cfg.BEETS_RETRY_DIR}, so import {'it' if one else 'them'} "
+                f"first{location}:",
                 indent="  ⚠  ", hanging="     ")
             command = "\n".join(_wrap_shell_command(
-                _beets_recovery_command(), text_width(),
+                _beets_recovery_command(album_dirs), text_width(),
                 initial_indent="    ", continuation_indent="      "))
             log.info(fmt(C.YELLOW, f"\n{notice}\n{command}"))
     except OSError:
@@ -1406,6 +1507,13 @@ def _entry():
             die(fmt(C.RED,
                 "\n✗  Qobuz accepted the token, but this account cannot perform "
                 "the requested action. Nothing changed.\n"), EXIT_AUTH)
+        except PermissionError as e:
+            if not e.filename:
+                raise
+            die(fmt(C.RED,
+                f"\n✗  Can't use {e.filename}: permission denied.\n"
+                "   Check that it belongs to the user Qobuz Librarian runs as "
+                "(PUID and PGID in Docker), then try again.\n"), EXIT_GENERAL)
     finally:
         # Persist any artist resolutions this run discovered (no-op when none),
         # so the next CLI walk skips the search calls; only the web flows

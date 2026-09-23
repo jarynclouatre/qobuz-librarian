@@ -9795,6 +9795,33 @@ def _audio_duration_seconds(path: Path):
         return None
 
 
+def _audio_isrc(path: Path):
+    try:
+        parsed = scanner.mutagen.File(os.fspath(path), easy=True)
+        values = (parsed.tags or {}).get("isrc") if parsed is not None else None
+    except Exception:
+        return None
+    value = str(values[0]).strip().upper() if values else ""
+    return value or None
+
+
+def _same_recording(replacement_view: Path, source: Path, taken):
+    """An album track, not yet matched, carrying the backup file's ISRC."""
+    isrc = _audio_isrc(source)
+    if isrc is None:
+        return None
+    entries = _list_tree(replacement_view)
+    for candidate in sorted(entries or ()):
+        if (
+            candidate.is_file()
+            and candidate.suffix.lower() in cfg.AUDIO_EXTS
+            and candidate.relative_to(replacement_view) not in taken
+            and _audio_isrc(candidate) == isrc
+        ):
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class BackupClassification:
     status: str
@@ -9843,20 +9870,34 @@ def _classify_backup_contents(
         *,
         audio_replacement=False,
         allow_smaller_audio=False,
+        match_recordings=False,
         budget=None,
 ):
-    """Compare payloads; retention permits verified replacement audio."""
+    """Compare payloads; retention permits verified replacement audio.
+
+    ``match_recordings`` lets a backed-up track whose name is gone from the
+    album be matched to the album track with its ISRC, for a refill that the
+    import filed under a different name."""
     try:
         entries = _list_tree(backup_view)
         if entries is None:
             return BackupClassification("unverified", "unreadable")
         files = [f for f in entries if f.is_file() and f.name not in _SIDECARS]
         files.sort(key=lambda f: (f.suffix.lower() in cfg.AUDIO_EXTS, str(f)))
+        taken = {f.relative_to(backup_view) for f in files}
         skipped = False
         for source in files:
             relative = source.relative_to(backup_view)
             destination = replacement_view / relative
-            if not destination.is_file():
+            if (
+                not destination.is_file()
+                and match_recordings
+                and source.suffix.lower() in cfg.AUDIO_EXTS
+            ):
+                destination = _same_recording(replacement_view, source, taken)
+                if destination is not None:
+                    taken.add(destination.relative_to(replacement_view))
+            if destination is None or not destination.is_file():
                 return BackupClassification("retained", "missing", str(relative))
             if audio_replacement and source.suffix.lower() in cfg.AUDIO_EXTS:
                 source_duration = _audio_duration_seconds(source)
@@ -9940,14 +9981,17 @@ def _classify_retained_backup(path, origin, budget):
 
 def _retention_view_is_redundant(
         replacement_view: Path, backup_view: Path, *, allow_smaller_audio=False,
+        match_recordings=False,
 ) -> bool:
     return _classify_backup_contents(
         replacement_view, backup_view, audio_replacement=True,
         allow_smaller_audio=allow_smaller_audio,
+        match_recordings=match_recordings,
     ).removable
 
 
-def _dispose_retention_candidate(candidate, *, allow_smaller_audio=False):
+def _dispose_retention_candidate(
+        candidate, *, allow_smaller_audio=False, match_recordings=False):
     if not isinstance(candidate, BackupResult) or candidate.receipt is None:
         return False
     replacement = Path(candidate.receipt["origin"])
@@ -9963,6 +10007,7 @@ def _dispose_retention_candidate(candidate, *, allow_smaller_audio=False):
                 replacement_view,
                 backup_view,
                 allow_smaller_audio=allow_smaller_audio,
+                match_recordings=match_recordings,
             )
         ),
     )
@@ -9991,15 +10036,17 @@ def retire_verified_repair_backup(backup) -> bool:
     """Dispose a repair's originals once each is verifiably superseded.
 
     The same proof the age sweep applies: every file the backup holds must
-    have, at its exact path in the album, a decode-clean track of at least
-    its duration. Size may shrink - the backup holds the damaged copies."""
+    have in the album a decode-clean track of at least its duration, at its
+    exact path or, when Beets filed the refill under another name, carrying
+    its ISRC. Size may shrink - the backup holds the damaged copies."""
     if (
         not isinstance(backup, BackupResult)
         or not isinstance(backup.receipt, dict)
         or not backup.receipt.get("origin")
     ):
         return False
-    return _dispose_retention_candidate(backup, allow_smaller_audio=True)
+    return _dispose_retention_candidate(
+        backup, allow_smaller_audio=True, match_recordings=True)
 
 
 def _views_are_byte_identical(replacement_view: Path, backup_view: Path) -> bool:

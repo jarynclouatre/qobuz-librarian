@@ -1168,11 +1168,15 @@ def process_album(album, args, *, allow_force=True, label=None,
     # Default NO: the missing-tracks list above is the user's chance to
     # decide; defaulting yes would mean every enter-press starts a download
     # they may not want. Press y to proceed.
-    if not already_confirmed and not confirm(
+    if not already_confirmed:
+        proceed = confirm(
             f"\n  Proceed with downloading {len(missing)} track(s)?",
-            default_yes=False, auto_yes=args.yes):
-        log.info(fmt(C.GRAY, "  Skipped."))
-        return {"result": "user_skipped", "n_missing": len(missing)}
+            default_yes=False, auto_yes=args.yes, on_eof=None)
+        if proceed is None:
+            return {"result": "no_answer", "n_missing": len(missing)}
+        if not proceed:
+            log.info(fmt(C.GRAY, "  Skipped."))
+            return {"result": "user_skipped", "n_missing": len(missing)}
 
     expected_generation = getattr(token, "credential_generation", "")
     if expected_generation:

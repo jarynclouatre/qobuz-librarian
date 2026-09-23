@@ -149,6 +149,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             "per-folder fallback."))
 
     skip_set = set()  # folders set aside while picking among duplicate groups
+    no_answer = False
     sibling_groups = detect_sibling_album_groups(album_dirs)
     if sibling_groups:
         log.info(fmt(C.YELLOW,
@@ -182,6 +183,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 while True:
                     rr = ask(f"    Pick [1-{len(dirs)}, enter=skip]: ",
                              lower=False)
+                    if rr is None:
+                        no_answer = True
                     if not rr:
                         break
                     if rr.isdigit() and 1 <= int(rr) <= len(dirs):
@@ -189,6 +192,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                         break
                     log.info(fmt(C.GRAY,
                         f"    Enter 1-{len(dirs)} or blank to skip."))
+            if no_answer:
+                break
             if picked is None:
                 log.info(fmt(C.GRAY, "    Skipped entire group."))
                 for d in dirs:
@@ -225,7 +230,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     # for them.
     for d in sorted(skip_set, key=lambda p: p.name):
         results.append({"dir": d, "result": "sibling_skipped"})
-    stopped_early = False
+    # A closed input answered nothing, so nothing is recorded as decided.
+    if no_answer:
+        results.append({"dir": artist_dir, "result": "no_answer"})
+    stopped_early = no_answer
     # 'a' at any gap-fill prompt auto-confirms the rest of THIS artist's albums.
     # Scoped local; it doesn't bleed into step 2 or the next artist in a walk.
     auto_yes_rest = False
@@ -444,7 +452,6 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 _flush_stdin()
                 answer = ask(_q)
                 if answer is None:
-                    answer = "n"
                     break
                 if answer == "d" and flush_callback is not None:
                     try:
@@ -460,6 +467,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                         "    Auto-yes for the rest of this artist's albums."))
                 break
 
+        if answer is None:
+            results.append({"dir": ad, "result": "no_answer"})
+            break
         if answer == "s":
             log.info(fmt(C.GRAY, "    Stopping artist scan."))
             stopped_early = True
@@ -692,7 +702,9 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     _flush_stdin()
     raw = ask(
         "  Pick numbers to download (e.g. 1,3,5-7 / a=all / blank=skip): ",
-        lower=False) or ""
+        lower=False)
+    if raw is None:
+        return 0, True
     picks = parse_number_list(raw, len(ordered))
     if not picks:
         return 0, False

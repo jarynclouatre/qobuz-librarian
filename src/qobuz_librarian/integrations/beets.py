@@ -4427,6 +4427,29 @@ def beets_runtime_path():
     return runtime.python
 
 
+def beets_runtime_problem():
+    """Say what stops a Beets import from running here, or None."""
+    runtime = _resolve_beets_runtime()
+    if runtime is None:
+        if not getattr(cfg, "BEETS_PYTHON", "") and not shutil.which("beet"):
+            return "`beet` is not on PATH and BEETS_PYTHON is unset."
+        return (
+            "The Python behind the Beets launcher could not be found or run. "
+            "Set BEETS_PYTHON to the Python executable Beets is installed in."
+        )
+    user_config = (
+        Path(os.path.abspath(os.fspath(cfg.BEETS_CONFIG_DIR))) / "config.yaml"
+    )
+    if not user_config.exists():
+        return f"There is no Beets config at {user_config}."
+    if _configured_beets_plugins(runtime) is None:
+        return (
+            f"{runtime.python} does not provide Beets {_SUPPORTED_BEETS_VERSION} "
+            "with a readable config."
+        )
+    return None
+
+
 def _managed_beets_entrypoint():
     return Path(os.path.abspath(__file__)).with_name("managed_beets.py")
 
@@ -5279,6 +5302,9 @@ def beets_import_managed(
     except Exception:
         return ManagedBeetsImportResult("refused", None)
     if prepared is None:
+        problem = beets_runtime_problem()
+        if problem is not None:
+            log.info(fmt(C.RED, f"  ✗  Beets cannot import: {problem}"))
         return ManagedBeetsImportResult("refused", None)
     cleanup, capture, intent, plugin_config = prepared
     reference = capture["reference"]

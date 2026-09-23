@@ -21,7 +21,7 @@ from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, term_width, truncate
 from qobuz_librarian.ui_cli.logging import log, vlog
-from qobuz_librarian.ui_cli.sentinels import MORE, URL_QUERY
+from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 
 # ── Fetch log ─────────────────────────────────────────────────────────────────
 
@@ -319,7 +319,7 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
     while True:
         r = ask(f"  Pick a number ({hint}): ")
         if r is None:
-            return None
+            return NO_ANSWER
         if r in ("q", "quit", "exit", ""):
             return None
         if can_load_more and r == "m":

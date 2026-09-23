@@ -26,7 +26,7 @@ from qobuz_librarian.quality.decision import (
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
+from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, EXIT_INTERRUPT, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 from qobuz_librarian.web import review_badges
@@ -166,8 +166,10 @@ def run_upgrade_walk_mode(args, token):
             "  Saved Upgrade results are missing, incomplete, or stale. "
             "Run a Library refresh first."))
         return EXIT_GENERAL
+    # The saved rows carry no kind; the web review adds it when it lists them,
+    # and the premise check reads it to know what was sealed.
     saved = [
-        c for c in upgrade_state.visible_candidates(
+        {**c, "kind": "upgrade"} for c in upgrade_state.visible_candidates(
             saved_state, hidden_mod.load())
         if (c.get("payload") or {}).get("album_id")
     ]
@@ -471,4 +473,6 @@ def run_upgrade_walk_mode(args, token):
                     f"       · {truncate(_t, 50)}: {'; '.join(_rs)}"))
         log.info(fmt(C.GRAY,
             "     Re-run without --auto-safe to review these interactively."))
-    return EXIT_GENERAL if interrupted or no_answer or n_failed_attempts else 0
+    if interrupted:
+        return EXIT_INTERRUPT
+    return EXIT_GENERAL if no_answer or n_failed_attempts else 0

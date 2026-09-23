@@ -15,7 +15,13 @@ from qobuz_librarian.library.lyrics import (
 )
 from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.ui_cli.colors import C, banner, fmt
-from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, die, plural
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_CONFIG,
+    EXIT_GENERAL,
+    EXIT_INTERRUPT,
+    die,
+    plural,
+)
 from qobuz_librarian.ui_cli.logging import log
 
 
@@ -76,11 +82,13 @@ def run_library_lyrics_mode(args):
         print()
         log.warning(fmt(C.YELLOW,
             "  Interrupted. What was done is saved; re-run to continue."))
-        return EXIT_GENERAL
+        return EXIT_INTERRUPT
     finally:
         signal.signal(signal.SIGINT, previous_handler)
 
     failed = _report_summary(res, dry_run=args.dry_run)
+    if stop_requested.is_set():
+        return EXIT_INTERRUPT
     return EXIT_GENERAL if failed else 0
 
 

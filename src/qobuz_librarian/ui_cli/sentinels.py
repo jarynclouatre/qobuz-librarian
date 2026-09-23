@@ -24,3 +24,4 @@ class Mode(str, Enum):
 # call sites keep working without forcing every caller to import.
 MORE = "__more__"
 URL_QUERY = "__url__"
+NO_ANSWER = "__no_answer__"

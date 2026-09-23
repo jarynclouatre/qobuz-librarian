@@ -5,7 +5,9 @@ resample is irreversible (the hi-res original is overwritten in place, with no
 re-download fallback), so the walk confirms per artist with default NO and each
 file is decode-verified before it replaces anything.
 """
+import signal
 import sys
+import threading
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
@@ -16,10 +18,35 @@ from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import mark_local_album_capped
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, format_size, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, plural
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_CONFIG,
+    EXIT_GENERAL,
+    EXIT_INTERRUPT,
+    plural,
+)
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 from qobuz_librarian.web import review_badges, settings_store
+
+
+def _downsample_album(album_dir, keep_originals):
+    """Rewrite one album; a first Ctrl-C lets it finish the tracks in flight
+    and report them before the walk stops."""
+    stop = threading.Event()
+
+    def request_stop(signum, frame):
+        if stop.is_set():
+            signal.default_int_handler(signum, frame)
+        stop.set()
+
+    previous = signal.signal(signal.SIGINT, request_stop)
+    try:
+        res = downsample_dir(album_dir, verbose=True, base_dir=album_dir,
+                             log=log.info, keep_originals=keep_originals,
+                             cancel_check=stop.is_set)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    return res, stop.is_set()
 
 
 def run_downsample_walk_mode(args):
@@ -224,9 +251,7 @@ def run_downsample_walk_mode(args):
                         ),
                     )
                     state_refresh_warnings += 1
-                res = downsample_dir(c.album_dir, verbose=True,
-                                     base_dir=c.album_dir, log=log.info,
-                                     keep_originals=keep_originals)
+                res, stopped = _downsample_album(c.album_dir, keep_originals)
                 if res.get("resampled"):
                     n_albums_done += 1
                 total_saved += res.get("saved_bytes", 0)
@@ -235,6 +260,9 @@ def run_downsample_walk_mode(args):
                     1 for entry in res.get("failed_files") or []
                     if entry.get("damaged"))
                 total_flush_warns += res.get("flush_warnings", 0)
+                if stopped:
+                    interrupted = True
+                    break
             if artist_attempted:
                 downsample_state.update_artist(artist_dir)
                 saved_state = downsample_state.load()
@@ -243,6 +271,9 @@ def run_downsample_walk_mode(args):
                     downsample_state.has_visible_candidates(saved_state, hidden),
                 )
             log.info("")
+            if interrupted:
+                log.info(fmt(C.GRAY, "  Interrupted."))
+                break
     except KeyboardInterrupt:
         log.info("")
         log.info(fmt(C.GRAY, "  Interrupted."))
@@ -309,6 +340,8 @@ def run_downsample_walk_mode(args):
             "  Files were changed, but the saved Upgrade view needs a "
             "Library refresh.",
         ))
-    return EXIT_GENERAL if (no_answer or interrupted or unchecked
+    if interrupted:
+        return EXIT_INTERRUPT
+    return EXIT_GENERAL if (no_answer or unchecked
                             or total_errors or total_flush_warns
                             or state_refresh_warnings) else 0

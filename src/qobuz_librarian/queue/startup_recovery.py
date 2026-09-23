@@ -374,6 +374,14 @@ def _unclaimed_staging_run_names(journals):
         name for name in isolated_staging_run_names() if name not in claimed)
 
 
+def unclaimed_staging_run_names():
+    """Run roots no saved queue claims, or None when a queue cannot be read."""
+    loads = queue_state.list_queue_journals()
+    if any(loaded.status is queue_state.QueueLoadStatus.BLOCKED for loaded in loads):
+        return None
+    return _unclaimed_staging_run_names(_sorted_journals(loads))
+
+
 def _retain_unclaimed_staging_runs(authority, names) -> bool:
     """Park run roots no journal claims; the terminal lane leaves them behind.
 

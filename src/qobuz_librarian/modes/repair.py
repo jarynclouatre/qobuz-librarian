@@ -64,8 +64,9 @@ from qobuz_librarian.queue.executor import (
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, die
+from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, EXIT_INTERRUPT, die
 from qobuz_librarian.ui_cli.logging import log, vlog
+from qobuz_librarian.ui_cli.sentinels import NO_ANSWER
 
 
 @dataclass(frozen=True)
@@ -1549,7 +1550,7 @@ def _prompt_library_album_for_repair(args, token):
         r = ask("  Artist (blank/q to return, '*' for whole library): ",
                 lower=False)
         if r is None:
-            return None, None
+            return NO_ANSWER, None
         if not r or r.lower() in ("q", "quit", "exit"):
             return None, None
         if r in ("*", "all") or r.lower() == "library":
@@ -1587,7 +1588,7 @@ def _prompt_library_album_for_repair(args, token):
     while True:
         r = ask(f"  Pick album (1-{len(albums)}, q to cancel): ", lower=False)
         if r is None:
-            return None, None
+            return NO_ANSWER, None
         if not r or r.lower() in ("q", "quit", "exit"):
             return None, None
         try:
@@ -2500,7 +2501,9 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
 
     if not args.yes:
         r = ask(f"\n  Re-download {len(verified_truncated)} "
-                "ISRC-verified track(s)? [y/N]: ") or ""
+                "ISRC-verified track(s)? [y/N]: ")
+        if r is None:
+            return "attention"
         if r not in ("y", "yes"):
             log.info(fmt(C.GRAY, "  Skipped."))
             return "attention" if unverified else "skipped"
@@ -2565,6 +2568,8 @@ def run_album_repair_mode(args, token, *, loop=False):
             except AuthLost:
                 die(fmt(C.RED, _REPAIR_AUTH_LOST), EXIT_AUTH)
 
+            if artist_dir == NO_ANSWER:
+                return EXIT_GENERAL
             if artist_dir == "__ALL__":
                 unreadable = []
 
@@ -2646,6 +2651,8 @@ def run_album_repair_mode(args, token, *, loop=False):
                     fmt(C.YELLOW if needs_attention else C.GRAY, _summary)
                 )
                 if not loop:
+                    if interrupted:
+                        return EXIT_INTERRUPT
                     return EXIT_GENERAL if needs_attention else 0
                 continue
 

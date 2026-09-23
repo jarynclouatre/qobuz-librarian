@@ -725,6 +725,18 @@ def validated_staged_album_dirs(result):
     return sorted(album_dirs)
 
 
+def staged_album_dirs(root):
+    """Album folders holding audio under ``root``, disc folders merged."""
+    album_dirs = set()
+    for directory, _dirs, files in os.walk(root):
+        if any(Path(name).suffix.lower() in cfg.AUDIO_EXTS for name in files):
+            parent = Path(directory)
+            if _DISC_DIR_RE.match(parent.name):
+                parent = parent.parent
+            album_dirs.add(parent)
+    return sorted(album_dirs)
+
+
 def downloads_whole_album(n_present, n_missing, n_total):
     """Whether a gap fill fetches the whole album instead of the gaps."""
     return n_present == 0 or n_missing >= max(4, int(n_total * 0.7))

@@ -572,6 +572,75 @@ def test_library_walk_carries_web_dismissals_into_the_missing_step(
             hidden.SCOPE_MISSING, "Artist", "Dismissed", handed[step])
 
 
+def _album_gaps_over_one_album(monkeypatch, tmp_path, status, answers):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library.discovery import DirMatch
+    from qobuz_librarian.modes import artist, walk
+
+    monkeypatch.setattr(cfg, "ALBUM_WALK_SEEN_FILE", tmp_path / "seen.txt")
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    tracks = [{"title": "One", "track_number": 1},
+              {"title": "Two", "track_number": 2}]
+    match = DirMatch(
+        status, album_dir,
+        qobuz_album={"id": "1", "title": "Album", "tracks": {"items": tracks}},
+        missing=tracks[1:] if status == "partial" else [],
+        present=tracks[:1] if status == "partial" else tracks,
+    )
+    monkeypatch.setattr(walk, "list_library_artists",
+                        lambda **_k: [album_dir.parent])
+    for module in (walk, artist):
+        monkeypatch.setattr(module, "list_artist_album_dirs",
+                            lambda _d: [album_dir])
+        monkeypatch.setattr(module, "_flush_stdin", lambda: None)
+    monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(artist, "resolve_artist", lambda *_a: (None, None))
+    monkeypatch.setattr(artist, "match_album_dir", lambda *_a, **_k: match)
+    monkeypatch.setattr(artist.time, "sleep", lambda *_a: None)
+    replies = iter(answers)
+
+    def _input(_prompt=""):
+        try:
+            return next(replies)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("builtins.input", _input)
+    return cfg.ALBUM_WALK_SEEN_FILE
+
+
+def test_album_gaps_does_not_remember_a_prompt_nobody_answered(
+        monkeypatch, tmp_path):
+    """A closed input read as "no" at the fill prompt, so the album was saved
+    as skipped and every later walk passed over it without asking."""
+    from qobuz_librarian.modes import walk
+
+    seen = _album_gaps_over_one_album(monkeypatch, tmp_path, "partial", [""])
+    args = SimpleNamespace(yes=False, dry_run=False, consolidate=False,
+                           prefer_hires=True)
+
+    code = walk.run_album_walk_mode(args, "tok")
+
+    assert not seen.exists()
+    assert code == walk.EXIT_GENERAL
+
+
+def test_album_gaps_dry_run_records_no_decisions(monkeypatch, tmp_path):
+    """A preview saved each complete album as decided, so the next real walk
+    skipped it silently."""
+    from qobuz_librarian.modes import walk
+
+    seen = _album_gaps_over_one_album(monkeypatch, tmp_path, "complete", [""])
+    args = SimpleNamespace(yes=False, dry_run=True, consolidate=False,
+                           prefer_hires=True)
+
+    walk.run_album_walk_mode(args, "tok")
+
+    assert not seen.exists()
+
+
 def test_cli_file_changes_keep_generation_state_truthful(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import (
