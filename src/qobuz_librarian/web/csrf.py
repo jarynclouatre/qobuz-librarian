@@ -1,5 +1,6 @@
 """CSRF protection - double-submit cookie with SameSite=Strict."""
 import secrets
+import urllib.parse
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
@@ -10,8 +11,9 @@ CSRF_HEADER = "X-CSRF-Token"
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _MAX_FORM_BYTES = 1 * 1024 * 1024  # 1 MB - no form on this app gets close
-# One route takes a file instead of a form. A collection backup is a few MB for
-# a large library, and the route enforces this same bound as it reads.
+# One route takes a file instead of a form. A collection backup runs about
+# 2.8 KB an album, so this holds about 23,000 albums; the route enforces the
+# same bound, and the backup's shape, as it reads.
 _UPLOAD_LIMITS = {"/collection/restore": 64 * 1024 * 1024}
 
 
@@ -123,6 +125,53 @@ def _set_csrf_cookie(request, response, token):
     )
 
 
+def _without_default_port(netloc: str, scheme: str) -> str:
+    default = ":443" if scheme == "https" else ":80"
+    return netloc[:-len(default)] if netloc.endswith(default) else netloc
+
+
+def cross_origin(request) -> bool:
+    """Whether the browser says this request came from another origin.
+
+    Sec-Fetch-Site decides when present: browsers send it on HTTPS and
+    localhost, and it stays right when a proxy rewrites Host. Without it,
+    an Origin header has to name the host the request was sent to, or the
+    X-Forwarded-Host a proxy that rewrites Host passes on, which a page on
+    another site cannot set. A request with neither is not from a browser
+    page and falls to the token check.
+    """
+    site = request.headers.get("sec-fetch-site", "").strip().lower()
+    if site:
+        return site in ("cross-site", "same-site")
+    origin = request.headers.get("origin")
+    if origin is None:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(origin.strip().lower())
+    except ValueError:
+        return True
+    hosts = {
+        _without_default_port(value.strip().lower(), parsed.scheme)
+        for value in (
+            request.headers.get("host", ""),
+            request.headers.get("x-forwarded-host", "").split(",")[0],
+        )
+        if value.strip()
+    }
+    if not parsed.netloc or not hosts:
+        return True
+    return _without_default_port(parsed.netloc, parsed.scheme) not in hosts
+
+
+def _csrf_cookie_count(request) -> int:
+    return sum(
+        1
+        for header in request.headers.getlist("cookie")
+        for part in header.split(";")
+        if part.split("=", 1)[0].strip() == CSRF_COOKIE_NAME
+    )
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
@@ -130,6 +179,21 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         request.state.csrf_token = token
 
         if request.method not in _SAFE_METHODS:
+            from qobuz_librarian.web.app import render_error_page
+            if cross_origin(request):
+                return render_error_page(
+                    request, 403, "Request refused",
+                    "That request came from another site, so nothing was "
+                    "changed.")
+            if _csrf_cookie_count(request) > 1:
+                # Only a cookie set for a parent domain or another path can
+                # sit beside this app's own, and the server would otherwise
+                # pick whichever came last.
+                return render_error_page(
+                    request, 403, "Request refused",
+                    "This browser sent two Qobuz Librarian security cookies, "
+                    "so nothing was changed. Clear this site's cookies, then "
+                    "try again.")
             try:
                 content_length = int(request.headers.get("content-length") or 0)
             except ValueError:

@@ -840,7 +840,7 @@ def _job_admission_response(request):
             status_code=200,
         )
     return RedirectResponse(
-        url="/queue?error=" + urllib.parse.quote(message),
+        url="/queue?error=" + _notice_key(message),
         status_code=303,
     )
 
@@ -2957,6 +2957,37 @@ def _is_htmx(request):
     return request.headers.get("HX-Request") == "true"
 
 
+# What a redirect tells the page it lands on. The URL carries a random key and
+# the wording stays here, so a link cannot make a page show text the app never
+# wrote.
+_NOTICE_TTL = 600
+_MAX_NOTICES = 256
+_notices: dict[str, tuple[float, str]] = {}
+_notices_lock = threading.Lock()
+
+
+def _notice_key(text) -> str:
+    """Hold ``text`` for the page a redirect lands on; returns its URL key."""
+    now = time.monotonic()
+    key = secrets.token_urlsafe(12)
+    with _notices_lock:
+        for old in [k for k, (until, _) in _notices.items() if until <= now]:
+            del _notices[old]
+        while len(_notices) >= _MAX_NOTICES:
+            del _notices[next(iter(_notices))]
+        _notices[key] = (now + _NOTICE_TTL, str(text))
+    return key
+
+
+def _notice_text(key) -> str:
+    """The notice held under ``key``, or "" for anything else."""
+    with _notices_lock:
+        held = _notices.get(str(key or ""))
+    if held is None or held[0] <= time.monotonic():
+        return ""
+    return held[1]
+
+
 def render_error_page(request, code, title, msg):
     """Render the app's styled error page from routes or middleware.
 
@@ -3644,7 +3675,7 @@ def _scan_submission_failure_response(request, destination):
         return busy
     separator = "&" if "?" in destination else "?"
     return RedirectResponse(
-        url=destination + separator + "error=" + urllib.parse.quote(
+        url=destination + separator + "error=" + _notice_key(
             job_mgr.JOB_ADMISSION_ERROR
         ),
         status_code=303,
@@ -7430,7 +7461,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
             # 200, not 400: htmx only swaps 2xx/3xx responses, so a 400
             # fragment is silently dropped and the user sees no feedback.
             return _download_fragment("error", html.escape(msg), "failed")
-        return RedirectResponse(url="/queue?error=" + urllib.parse.quote(msg),
+        return RedirectResponse(url="/queue?error=" + _notice_key(msg),
                                 status_code=303)
     # "Get this edition too": download a different edition of an album the
     # user already owns, as a separate album.
@@ -7456,7 +7487,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         if _is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
+            url="/queue?error=" + _notice_key(msg), status_code=303)
     try:
         credentials = await _authorize_qobuz_for_web(
             QobuzAccess.DOWNLOAD_ACTION
@@ -7476,7 +7507,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 return _download_fragment(
                     "warning", html.escape(msg), "owned")
             return RedirectResponse(
-                url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
+                url="/queue?error=" + _notice_key(msg), status_code=303)
         if not download_as_new_edition and track_id:
             # A single track was excluded from the guard entirely, so nothing
             # checked whether that track was already on disk before fetching it
@@ -7504,7 +7535,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     return _download_fragment(
                         "warning", html.escape(msg), "owned")
                 return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
+                    url="/queue?error=" + _notice_key(msg), status_code=303)
 
         if not download_as_new_edition and not track_id:
             def _already_complete():
@@ -7552,7 +7583,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                         headers={"X-QL-Download-Outcome": "owned"},
                     )
                 return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(msg),
+                    url="/queue?error=" + _notice_key(msg),
                     status_code=303)
         title  = album.get("title") or "?"
         artist = (album.get("artist") or {}).get("name") or "?"
@@ -7569,7 +7600,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     return _download_fragment(
                         "error", html.escape(msg), "failed")
                 return RedirectResponse(
-                    url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
+                    url="/queue?error=" + _notice_key(msg), status_code=303)
         job = job_mgr.Job(
             title=(single_track.get("title") or title) if single_track else title,
             artist=artist,
@@ -7639,7 +7670,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         if _is_htmx(request):
             return _download_fragment(
                 "error", html.escape(user_msg), "failed")
-        msg = urllib.parse.quote(user_msg, safe="")
+        msg = _notice_key(user_msg)
         return RedirectResponse(url=f"/queue?error={msg}", status_code=303)
 
 
@@ -7739,7 +7770,7 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     # Bring all back redirects here with what happened, a store-write failure
     # included. Without this the page dropped the message and a restore that
     # never ran looked exactly like one that worked.
-    _notice = (request.query_params.get("notice") or "").strip()[:300]
+    _notice = _notice_text(request.query_params.get("notice"))
     if _notice:
         notice_bits.append(_notice)
     notice = " ".join(notice_bits)
@@ -7748,7 +7779,7 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
         "creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(), "page": "library",
         "library_scan_state": _library_scan_state(),
         "library_notice": notice,
-        "error": request.query_params.get("error", ""),
+        "error": _notice_text(request.query_params.get("error")),
         # Freshness line: when a full gap scan last completed, and whether one
         # ever has (the new-release baseline is only seeded by a clean finish).
         "last_full_scan": _last_scan_age(),
@@ -7913,7 +7944,7 @@ async def library_scan(
                     f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                     status_code=200)
             return RedirectResponse(
-                url="/library?error=" + urllib.parse.quote(msg), status_code=303)
+                url="/library?error=" + _notice_key(msg), status_code=303)
         existing = _active_new_release_check()
         if existing is not None:
             # A check already crawling. Land on it rather than starting a
@@ -7939,7 +7970,7 @@ async def library_scan(
                     status_code=200,
                 )
             return RedirectResponse(
-                url="/library?error=" + urllib.parse.quote(msg),
+                url="/library?error=" + _notice_key(msg),
                 status_code=303,
             )
         # Same job the dashboard auto-check submits; its own execute_kind so
@@ -7959,7 +7990,7 @@ async def library_scan(
                 f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                 status_code=200)
         return RedirectResponse(
-            url=error_home + "?error=" + urllib.parse.quote(msg), status_code=303)
+            url=error_home + "?error=" + _notice_key(msg), status_code=303)
     existing = _active_library_scan()
     if existing is not None:
         return RedirectResponse(url="/library", status_code=303)
@@ -7982,7 +8013,7 @@ async def library_scan(
                 status_code=200,
             )
         return RedirectResponse(
-            url=error_home + "?error=" + urllib.parse.quote(msg), status_code=303)
+            url=error_home + "?error=" + _notice_key(msg), status_code=303)
     # "library" (not "album") so the review screen knows this is the paced triage
     # surface; both modes run the same album executor and resume from a matching
     # checkpoint if one's waiting (see _start_library_scan / scan_library).
@@ -8080,7 +8111,7 @@ def _hidden_view(request, scope, *, page, restore_action, back_url,
         "restore_action": restore_action,
         "restore_all_action": restore_all_action,
         "restore_all_count": total_rows,
-        "notice": request.query_params.get("notice", ""),
+        "notice": _notice_text(request.query_params.get("notice")),
         "hidden_q": q,
         "hidden_total_artists": len(groups),
         "hidden_page": pg, "hidden_pages": n_pages,
@@ -8132,7 +8163,7 @@ def _hidden_query(q, notice, p=None):
     """Back to the Dismissed page with its filter and page still on, so a
     restore does not silently widen the list the next click acts on or drop
     the user back at page 1."""
-    parts = "?notice=" + urllib.parse.quote(notice)
+    parts = "?notice=" + _notice_key(notice)
     if q:
         parts += "&q=" + urllib.parse.quote(q)
     if p:
@@ -8280,12 +8311,12 @@ async def library_bring_back_all(request: Request):
         changed = await loop.run_in_executor(None, _bring_back)
     except OSError as e:
         return RedirectResponse(
-            url="/library?notice=" + urllib.parse.quote(str(e)),
+            url="/library?notice=" + _notice_key(str(e)),
             status_code=303)
     msg = ("Brought your dismissed results back to the Library review."
            if changed else "Nothing to bring back.")
     return RedirectResponse(
-        url="/library?notice=" + urllib.parse.quote(msg), status_code=303)
+        url="/library?notice=" + _notice_key(msg), status_code=303)
 
 
 # ── Discover ──────────────────────────────────────────────────────────────────
@@ -8635,7 +8666,7 @@ async def repair_page(request: Request, page: int = 1):
     rjob = _repair_current_job()
     ctx = {"creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(),
            "page": "repair", "repair_job": rjob,
-           "error": request.query_params.get("error", ""),
+           "error": _notice_text(request.query_params.get("error")),
            "JobStatus": job_mgr.JobStatus}
     if rjob is not None:
         ctx["queue_wait"] = _queue_wait(rjob)
@@ -8692,7 +8723,7 @@ async def repair_scan(request: Request):
     ) as exc:
         msg = _qobuz_action_error_message(exc, unchanged=True)
         return RedirectResponse(
-            url="/repair?error=" + urllib.parse.quote(msg), status_code=303)
+            url="/repair?error=" + _notice_key(msg), status_code=303)
     job = job_mgr.Job(title="Repair scan")
     job.execute_kind = "repair"
     job.review_verb = "Repair"  # the action refills damaged tracks, not a download
@@ -8918,7 +8949,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
         job = job_mgr.load_historical_job(job_id)
         if job is None:
             return RedirectResponse(
-                url="/queue?error=" + urllib.parse.quote(
+                url="/queue?error=" + _notice_key(
                     "That job is no longer in the record."),
                 status_code=303)
     if job.execute_kind == "library":
@@ -8972,7 +9003,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
     ctx = {"job": job, "page": nav_page, "shown_attention": shown_attention,
            "approved": approved, "stale": stale, "noselection": noselection,
            "waiting": waiting,
-           "error": error,
+           "error": _notice_text(error),
            "new_release_state": new_release_state,
            "queue_wait": _queue_wait(job),
            "JobStatus": job_mgr.JobStatus}
@@ -9209,7 +9240,7 @@ async def job_approve(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id)
     if not job:
         return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
+            url="/queue?error=" + _notice_key(
                 "That job is no longer in the record."),
             status_code=303)
     # A parked review can outlive its feature: credentials can be pulled after
@@ -9234,7 +9265,7 @@ async def job_approve(request: Request, job_id: str):
             and (job.execute_args or {}).get("quality_signature")
             != _effective_upgrade_quality_signature()):
         return RedirectResponse(
-            url=f"/jobs/{job.id}?error=" + urllib.parse.quote(
+            url=f"/jobs/{job.id}?error=" + _notice_key(
                 "Download quality changed since this Upgrade review was "
                 "built. Run a Library refresh before approving it."
             ),
@@ -9255,7 +9286,7 @@ async def job_approve(request: Request, job_id: str):
         and not migration_low_space_accepted
     ):
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
+            url=dest + "?error=" + _notice_key(
                 "Confirm the low-space risk before approving this in-place "
                 "move. Your review is untouched."
             ),
@@ -9305,7 +9336,7 @@ async def job_approve(request: Request, job_id: str):
                 stale_message = await loop.run_in_executor(
                     None, lambda: _all_stale_message_for(job))
                 return RedirectResponse(
-                    url=dest + "?error=" + urllib.parse.quote(stale_message),
+                    url=dest + "?error=" + _notice_key(stale_message),
                     status_code=303,
                 )
         # Only now that the run is going to happen: the keep-vs-delete answer is
@@ -9325,7 +9356,7 @@ async def job_approve(request: Request, job_id: str):
                 or rendered_choice != current_choice
             ):
                 return RedirectResponse(
-                    url=dest + "?error=" + urllib.parse.quote(
+                    url=dest + "?error=" + _notice_key(
                         "The keep-or-delete setting changed after this review "
                         "was shown. No music files were changed; review the "
                         "updated warning and approve again."
@@ -9366,7 +9397,7 @@ async def job_approve(request: Request, job_id: str):
         ) as exc:
             message = _qobuz_action_error_message(exc, unchanged=True)
             return RedirectResponse(
-                url=dest + "?error=" + urllib.parse.quote(message),
+                url=dest + "?error=" + _notice_key(message),
                 status_code=303,
             )
         if job.execute_kind in _LIBRARY_SURFACE_KINDS:
@@ -9597,19 +9628,19 @@ async def job_approve(request: Request, job_id: str):
         stale_message = await loop.run_in_executor(
             None, lambda: _all_stale_message_for(job))
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(stale_message),
+            url=dest + "?error=" + _notice_key(stale_message),
             status_code=303,
         )
     if (isinstance(approved, tuple)
             and len(approved) == 2
             and approved[0] == "candidate_stale"):
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(approved[1]),
+            url=dest + "?error=" + _notice_key(approved[1]),
             status_code=303,
         )
     if approved == "review_changed":
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
+            url=dest + "?error=" + _notice_key(
                 "That review changed while approval was being checked. "
                 "Nothing changed; review the current selections and try again."
             ),
@@ -9617,7 +9648,7 @@ async def job_approve(request: Request, job_id: str):
         )
     if approved == "downsample_policy_failed":
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
+            url=dest + "?error=" + _notice_key(
                 "Couldn't save the keep-or-delete choice. No music files "
                 "were changed; check the data folder and try again."
             ),
@@ -9629,12 +9660,12 @@ async def job_approve(request: Request, job_id: str):
             unchanged=True,
         )
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(message),
+            url=dest + "?error=" + _notice_key(message),
             status_code=303,
         )
     if approved == "sync_failed":
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
+            url=dest + "?error=" + _notice_key(
                 "The refreshed review could not be saved. Your existing "
                 "choices are untouched; check the data folder and try again."
             ),
@@ -9647,7 +9678,7 @@ async def job_approve(request: Request, job_id: str):
         return RedirectResponse(url=dest, status_code=303)
     if approved is None:
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(
+            url=dest + "?error=" + _notice_key(
                 job_mgr.JOB_ADMISSION_ERROR
             ) + _skip_q,
             status_code=303,
@@ -9663,7 +9694,7 @@ async def job_approve(request: Request, job_id: str):
             c for c in selected_candidate_snapshot
             if c.get("cid") in stale_premise_candidate_ids
         ])
-        local_stale_q = "&error=" + urllib.parse.quote(
+        local_stale_q = "&error=" + _notice_key(
             f"Started the rest. {skipped_names} changed on disk after this "
             f"review was built, so "
             f"{'it was' if local_stale == 1 else 'they were'} skipped and "
@@ -10286,7 +10317,7 @@ async def job_give_up(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
+            url="/queue?error=" + _notice_key(
                 "That job is no longer in the record."),
             status_code=303)
     form = await request.form()
@@ -10348,7 +10379,7 @@ async def discard_interrupted_terminal_download(request: Request):
         or str(form.get("recovery_item_id") or "") != offer["item_id"]
     ):
         return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
+            url="/queue?error=" + _notice_key(
                 "That interrupted download is no longer the one holding things "
                 "up. Nothing was changed. Reload the page."),
             status_code=303)
@@ -10360,14 +10391,14 @@ async def discard_interrupted_terminal_download(request: Request):
         else f"refused: {(reason or 'no reason given').rstrip('.')}")
     if not settled:
         return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(
+            url="/queue?error=" + _notice_key(
                 reason or "The interrupted download could not be discarded."),
             status_code=303)
     # No album name here: the banner it was clicked from names it, and the
     # query the queue page reads is capped, so a long title cut the sentence
     # off mid-word.
     return RedirectResponse(
-        url="/queue?notice=" + urllib.parse.quote(
+        url="/queue?notice=" + _notice_key(
             "Gave up on the interrupted download. Nothing reached your "
             "library."),
         status_code=303)
@@ -10404,10 +10435,12 @@ async def job_retry(request: Request, job_id: str):
     return_to = form.get("return_to")
 
     def _land(started: str = "", error: str = "") -> RedirectResponse:
+        if error:
+            error = _notice_key(error)
         dest = _retry_return_url(return_to, started=started, error=error)
         if dest is None:
             dest = (f"/jobs/{started}" if started
-                    else "/queue?error=" + urllib.parse.quote(error))
+                    else "/queue?error=" + error)
         return RedirectResponse(url=dest, status_code=303)
 
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
@@ -10945,7 +10978,7 @@ async def job_undo(request: Request, job_id: str):
         msg = ("That job is no longer in the record." if not job
                else "Nothing to undo for that job.")
         return RedirectResponse(
-            url="/queue?error=" + urllib.parse.quote(msg), status_code=303)
+            url="/queue?error=" + _notice_key(msg), status_code=303)
 
     def _refresh_after_undo():
         artist = info.get("artist") or ""
@@ -11241,7 +11274,7 @@ async def job_cancel(
             )
         dest = "/queue" if return_to_queue else f"/jobs/{job_id}"
         return RedirectResponse(
-            url=dest + "?error=" + urllib.parse.quote(message),
+            url=dest + "?error=" + _notice_key(message),
             status_code=303,
         )
     if return_to_queue:
@@ -11253,7 +11286,7 @@ async def job_cancel(
         if was_review and job.execute_kind in ("library", "new_releases"):
             label = ("New-release review" if job.execute_kind == "new_releases"
                      else "Library review")
-            dest += "?notice=" + urllib.parse.quote(f"{label} discarded.")
+            dest += "?notice=" + _notice_key(f"{label} discarded.")
     else:
         dest = "/queue" if (was_review or was_pending) else f"/jobs/{job_id}"
     return RedirectResponse(url=dest, status_code=303)
@@ -11286,8 +11319,8 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
         "queue_has_cancel_protected": any(
             j.id == protected_id for j in pending
         ),
-        "error": error[:200],
-        "notice": notice[:200],
+        "error": _notice_text(error),
+        "notice": _notice_text(notice),
         "page": "queue",
         "active_tab": "queue",
     })
@@ -11385,7 +11418,7 @@ async def queue_history(
         "cur_page": p, "pages": pages, "total": total,
         "attention_only": attention,
         "history_unavailable": not job_persistence.ready_for_admission(),
-        "error": error[:200],
+        "error": _notice_text(error),
         # What a Retry from this page just did. Retry no longer opens the job
         # card, so the page it left the user on has to say what started and
         # offer the way in.
@@ -11411,7 +11444,7 @@ async def queue_clear(request: Request):
                 "was removed; check the data volume and try again."
             )
             return RedirectResponse(
-                url="/queue/history?error=" + urllib.parse.quote(message),
+                url="/queue/history?error=" + _notice_key(message),
                 status_code=303,
             )
         job_mgr.registry.clear_finished()
@@ -11457,7 +11490,7 @@ async def queue_cancel_pending():
             )
         message = " ".join(parts)
         return RedirectResponse(
-            url="/queue?notice=" + urllib.parse.quote(message), status_code=303
+            url="/queue?notice=" + _notice_key(message), status_code=303
         )
     return RedirectResponse(url="/queue", status_code=303)
 
@@ -11887,7 +11920,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        rerendered=False,
                        error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
-                       quality_note=False, password_error="", lastfm_check=""):
+                       quality_note=False, password_error="",
+                       password_locked=False, lastfm_check="",
+                       status_code=200):
     creds = _read_creds()
     values = settings_store.current()
     # If credentials come from environment or a secret-file declaration,
@@ -11984,13 +12019,23 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         # downsample policy revert to the env defaults and this page then shows
         # them as if they were chosen.
         "corrupt_stores": state_file.preserved_corrupt_stores(),
+        "backup_dir_cleared": settings_store.cleared_backup_dir_notice(),
         "diagnostics_html": _diagnostics_fragment(request, diagnostics),
         "web_login_available": (not web_auth.auth_disabled()
                                 and web_auth.credentials_configured()),
         "web_login_username": web_auth.current_username(),
         "web_login_env_managed": _web_login_env_managed(),
         "password_error": password_error,
-    })
+        "password_locked": password_locked,
+    }, status_code=status_code)
+
+
+# The outcomes Settings words itself; any other error in its URL is a notice key.
+_SETTINGS_ERROR_CODES = frozenset({
+    "creds", "credsbusy", "credschanged", "credsmode", "empty", "envcreds",
+    "envrejected", "envunreachable", "invalidsettings", "needuser", "persist",
+    "rejected", "settingschanged", "unreachable",
+})
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -12002,6 +12047,8 @@ async def settings_page(request: Request, saved: bool = False,
                         lastfm: str = ""):
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, _diagnostics)
+    if error not in _SETTINGS_ERROR_CODES:
+        error = _notice_text(error)
     return _settings_response(request, saved=saved, queued=queued,
                               connected=connected, unverified=unverified,
                               envchecked=envchecked,
@@ -12235,6 +12282,13 @@ async def save_behavior(request: Request):
     for k in settings_store.TEXT_KEYS:
         if k in allowed_keys and k in form:
             values[k] = form.get(k, "")
+    # The saved Last.fm key is never sent to the page, so its box always
+    # arrives blank: blank keeps the key, and only Remove key clears it.
+    if anchor == "discover":
+        if form.get("lastfm_remove") == "1":
+            values["LASTFM_API_KEY"] = ""
+        elif not str(values.get("LASTFM_API_KEY") or "").strip():
+            values.pop("LASTFM_API_KEY", None)
     effective_before = settings_store.current()
     quality_before = (
         str(effective_before.get("STREAMRIP_QUALITY", "")),
@@ -12328,12 +12382,33 @@ async def change_web_password(request: Request):
         web_auth.current_username_and_generation()
     )
     loop = asyncio.get_running_loop()
+    # The sign-in throttle covers this form too: a session left open is
+    # otherwise an unlimited guesser of the password it was opened with.
+    ip = web_auth.client_ip(request)
+    if not web_auth.begin_login_attempt(ip, username):
+        diags = await loop.run_in_executor(None, _diagnostics)
+        return _settings_response(
+            request,
+            password_error=(_lockout_notice(ip, username)
+                            or "Sign-in checks are busy. Try again shortly."),
+            password_locked=True, diagnostics=diags, rerendered=True,
+            status_code=429)
     # The KDF is deliberately slow, so it runs off the event loop; on the loop
     # it would stall every other request for the length of the hash.
-    holder = await loop.run_in_executor(
-        None, lambda: web_auth.verify_login(username, current))
+    try:
+        holder = await loop.run_in_executor(
+            None, lambda: web_auth.verify_login(username, current))
+    except BaseException:
+        web_auth.cancel_login_attempt(ip, username)
+        raise
+    web_auth.finish_login_attempt(ip, username, success=holder)
+    password_locked = False
     if not holder:
         error = "That is not your current password."
+        wait = _lockout_notice(ip, username, after_failure=True)
+        if wait:
+            error += f" {wait}"
+            password_locked = True
     elif fresh != confirm:
         error = "The two new passwords don't match."
     else:
@@ -12357,6 +12432,7 @@ async def change_web_password(request: Request):
     if error:
         diags = await loop.run_in_executor(None, _diagnostics)
         return _settings_response(request, password_error=error,
+                                  password_locked=password_locked,
                                   diagnostics=diags, rerendered=True)
     return RedirectResponse(url="/login?changed=1", status_code=303)
 
@@ -12373,7 +12449,7 @@ async def clear_corrupt_stores(request: Request):
     if ok:
         return RedirectResponse(url="/settings", status_code=303)
     return RedirectResponse(
-        url="/settings?error=" + urllib.parse.quote(
+        url="/settings?error=" + _notice_key(
             "One of the unreadable copies couldn't be deleted. Check the "
             "data folder's permissions, then try again."),
         status_code=303)
@@ -12410,14 +12486,14 @@ async def collection_snapshot_download(request: Request):
         None, collection_snapshot.latest_status)
     if state == "unreadable":
         return RedirectResponse(
-            url="/settings?error=" + urllib.parse.quote(
+            url="/settings?error=" + _notice_key(
                 "The current collection backup couldn't be read safely, so it "
                 "was not downloaded. Check the backup folder in Settings."),
             status_code=303)
     path = collection_snapshot.latest_path()
     if state != "ready" or not path.is_file():
         return RedirectResponse(
-            url="/settings?error=" + urllib.parse.quote(
+            url="/settings?error=" + _notice_key(
                 "There is no snapshot yet. Run a library scan, or use Back up "
                 "now, and it will be here."),
             status_code=303)
@@ -12434,21 +12510,31 @@ def _restore_response(request, message, *, redirect=None, kind="error"):
     if redirect:
         return RedirectResponse(url=redirect, status_code=303)
     return RedirectResponse(
-        url="/settings?error=" + urllib.parse.quote(message), status_code=303)
+        url="/settings?error=" + _notice_key(message), status_code=303)
 
 
-async def _read_upload(upload, limit):
-    """The whole uploaded file, or None once it passes ``limit`` bytes."""
-    chunks = []
-    size = 0
+async def _read_backup_upload(upload):
+    """The uploaded backup and "", or None and why it was refused.
+
+    Counted as it arrives, so a file larger than any backup, or shaped like
+    none, is turned away before the JSON parser builds an object for every
+    brace in it.
+    """
+    limit = body_limit("/collection/restore")
+    raw = bytearray()
+    containers = commas = 0
     while True:
         chunk = await upload.read(64 * 1024)
         if not chunk:
-            return b"".join(chunks)
-        size += len(chunk)
-        if size > limit:
-            return None
-        chunks.append(chunk)
+            return raw, ""
+        raw += chunk
+        if len(raw) > limit:
+            return None, "That file is far too large to be a collection backup."
+        containers += chunk.count(b"{") + chunk.count(b"[")
+        commas += chunk.count(b",")
+        if (containers > collection_snapshot.UPLOAD_MAX_CONTAINERS
+                or commas > collection_snapshot.UPLOAD_MAX_COMMAS):
+            return None, "That file isn't a collection backup from this app."
 
 
 @app.post("/collection/restore")
@@ -12474,12 +12560,16 @@ async def collection_restore_upload(request: Request,
                 f'<a href="/jobs/{existing.id}" class="ql-inline-link">'
                 "Open the restore review</a>."))
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
-    raw = await _read_upload(backup, body_limit("/collection/restore"))
+    raw, refusal = await _read_backup_upload(backup)
     if raw is None:
-        return _restore_response(
-            request, "That file is far too large to be a collection backup.")
+        return _restore_response(request, refusal)
+    # Each copy goes as soon as the next exists; a large backup otherwise sits
+    # in memory three times over while it parses.
     try:
-        data = json.loads(raw.decode("utf-8"))
+        text = raw.decode("utf-8")
+        del raw
+        data = json.loads(text)
+        del text
     except (UnicodeDecodeError, ValueError, RecursionError):
         return _restore_response(
             request, "That file isn't a collection backup from this app.")
@@ -12626,7 +12716,7 @@ async def set_mode(request: Request, target: str = Form("")):
 
         loop = asyncio.get_running_loop()
         if not await loop.run_in_executor(None, _handoff):
-            return RedirectResponse(url="/settings?error=" + urllib.parse.quote(
+            return RedirectResponse(url="/settings?error=" + _notice_key(
                 "Finish or cancel the running library work before handing off to the "
                 "terminal."), status_code=303)
         return RedirectResponse(url="/settings?mode=cli", status_code=303)
@@ -12634,7 +12724,7 @@ async def set_mode(request: Request, target: str = Form("")):
         # Durable recovery cannot inspect or reconcile saved work without
         # exact single-writer authority.
         return RedirectResponse(
-            url="/settings?error=" + urllib.parse.quote(
+            url="/settings?error=" + _notice_key(
                 "The safety lock is required. Fix the data-folder filesystem "
                 "or permissions, then restart Qobuz Librarian."),
             status_code=303,
@@ -12670,7 +12760,7 @@ async def set_mode(request: Request, target: str = Form("")):
                         "could not be read"
                     )
                     return RedirectResponse(
-                        url="/settings?error=" + urllib.parse.quote(
+                        url="/settings?error=" + _notice_key(
                             "Saved recovery state could not be checked. Web "
                             "mode stayed paused and its safety lock was "
                             "released; check the data-folder permissions, "
@@ -12684,7 +12774,7 @@ async def set_mode(request: Request, target: str = Form("")):
             return RedirectResponse(url="/settings?mode=web", status_code=303)
         except run_lock.LockBusy:
             # A CLI session still holds the lock, so we can't take it back yet.
-            return RedirectResponse(url="/settings?error=" + urllib.parse.quote(
+            return RedirectResponse(url="/settings?error=" + _notice_key(
                 "The terminal is still using it. Finish your CLI command, then "
                 "resume."), status_code=303)
     return RedirectResponse(url="/settings", status_code=303)
@@ -13271,12 +13361,23 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
     return note + _diagnostics_fragment(request)
 
 
-def _discard_staging_group_sync(request: Request, group: str) -> str:
+def _staging_group_target(group):
+    """The kept group a Remove button names, or None for anything but a plain
+    folder name. The form posts a bare directory name; ".." or a path is
+    someone probing, not a group this page listed."""
     name = (group or "").strip()
-    target = Path(str(cfg.STAGING_DIR)) / cfg.BEETS_RETRY_DIR / name
-    # The form posts a bare directory name; anything path-shaped is someone
-    # probing, not a group this page listed.
-    if not name or name != Path(name).name or not target.is_dir():
+    if not name or name in (".", "..") or name != Path(name).name:
+        return None
+    return Path(str(cfg.STAGING_DIR)) / cfg.BEETS_RETRY_DIR / name
+
+
+def _discard_staging_group_sync(request: Request, group: str) -> str:
+    target = _staging_group_target(group)
+    if target is None:
+        return (_diagnostics_result_notice(
+                    "error", "That isn't a group of kept files.")
+                + _diagnostics_fragment(request))
+    if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
                 + _diagnostics_fragment(request))
     state, operation_token, lock = _begin_direct_library_operation(
@@ -13316,9 +13417,12 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
 
 
 def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
-    name = (group or "").strip()
-    target = Path(str(cfg.STAGING_DIR)) / cfg.BEETS_RETRY_DIR / name
-    if not name or name != Path(name).name or not target.is_dir():
+    target = _staging_group_target(group)
+    if target is None:
+        return (_diagnostics_result_notice(
+                    "error", "That isn't a group of kept files.")
+                + _diagnostics_fragment(request))
+    if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
                 + _diagnostics_fragment(request))
     state, operation_token, lock = _begin_direct_library_operation(

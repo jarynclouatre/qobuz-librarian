@@ -316,6 +316,34 @@ def _path_template_problem(key, value):
             "Remove the \u201c..\u201d parts.")
 
 
+_ROOT_NAMES = {
+    "MUSIC_ROOT": "the music folder",
+    "STAGING_DIR": "the staging folder",
+    "UPGRADE_BACKUP_DIR": "the upgrade backup folder",
+}
+
+
+def _backup_dir_problem(value):
+    """Why a Backup folder cannot be saved, in the user's words, or ""."""
+    conflict = cfg.collection_backup_dir_conflict(value)
+    if not conflict:
+        return ""
+    label = _FIELD_LABELS["COLLECTION_BACKUP_DIR"]
+    if conflict == "control":
+        return f"\u201c{label}\u201d can't contain control characters."
+    if conflict == "unresolvable":
+        return f"\u201c{label}\u201d isn't a folder path this server can use."
+    return f"\u201c{label}\u201d has to be outside {_ROOT_NAMES[conflict]}."
+
+
+# The saved Backup folder the last load cleared, and why, for Settings to say.
+_cleared_backup_dir = ""
+
+
+def cleared_backup_dir_notice() -> str:
+    return _cleared_backup_dir
+
+
 def _restored_default_warning(key, value):
     """Said when emptying a field hands it back to a value the environment
     supplies, so the box refilling itself doesn't read as a save that failed.
@@ -430,7 +458,15 @@ def _blank_overrides(data) -> list:
 
 def _normalise(data) -> bool:
     """Correct a saved settings dict in place. True when something changed."""
+    global _cleared_backup_dir
     changed = False
+    # A backup folder that can't be used loads as unset rather than failing
+    # every page that asks where backups go; Settings says it was cleared.
+    problem = _backup_dir_problem(data.get("COLLECTION_BACKUP_DIR"))
+    if problem:
+        del data["COLLECTION_BACKUP_DIR"]
+        _cleared_backup_dir = f"The saved backup folder was cleared. {problem}"
+        changed = True
     # A persisted lossy STREAMRIP_QUALITY (0/1) is a tier the FLAC pipeline
     # discards; _apply already coerces it to 2 in cfg.
     if str(data.get("STREAMRIP_QUALITY", "")).strip() in ("0", "1"):
@@ -605,7 +641,9 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             # Match _apply's strip so an incidental trailing space doesn't
             # read as a change and pin the field.
             value = str(values[key] or "").strip()
-            problem = _path_template_problem(key, value)
+            problem = (_backup_dir_problem(value)
+                       if key == "COLLECTION_BACKUP_DIR"
+                       else _path_template_problem(key, value))
             if problem:
                 # Same rule as the enum branch: reject the whole submission
                 # rather than apply the siblings and leave a path that would
@@ -655,4 +693,7 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             _pending_apply = None
             _apply(merged)
 
+    if "COLLECTION_BACKUP_DIR" in clean:
+        global _cleared_backup_dir
+        _cleared_backup_dir = ""
     return True, warnings

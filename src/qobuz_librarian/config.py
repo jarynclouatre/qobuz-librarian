@@ -345,6 +345,41 @@ def validate_storage_roots() -> None:
                     f"{name} and {other_name} must be separate, non-nested "
                     "directories"
                 )
+    conflict = collection_backup_dir_conflict(COLLECTION_BACKUP_DIR)
+    if conflict == "control":
+        raise ValueError("COLLECTION_BACKUP_DIR contains a control character")
+    if conflict == "unresolvable":
+        raise ValueError("COLLECTION_BACKUP_DIR cannot be resolved safely")
+    if conflict:
+        raise ValueError(f"COLLECTION_BACKUP_DIR must be outside {conflict}")
+
+
+def collection_backup_dir_conflict(value) -> str:
+    """What stops ``value`` serving as the collection backup folder, or "".
+
+    "control" for a control character, "unresolvable" for a path that cannot
+    be resolved, else the storage root it is or resolves inside. Snapshots
+    there would go down with the files they record, in a tree the app files,
+    clears and prunes on its own.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if any(ord(ch) < 0x20 or ch == "\x7f" for ch in raw):
+        return "control"
+    try:
+        path = Path(os.path.abspath(raw)).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return "unresolvable"
+    for name, root in (("MUSIC_ROOT", MUSIC_ROOT), ("STAGING_DIR", STAGING_DIR),
+                       ("UPGRADE_BACKUP_DIR", UPGRADE_BACKUP_DIR)):
+        try:
+            other = Path(os.path.abspath(os.fspath(root))).resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if path == other or other in path.parents:
+            return name
+    return ""
 
 
 # ── Web UI ────────────────────────────────────────────────────────────────────
@@ -353,6 +388,14 @@ WEB_PORT = _env("WEB_PORT", 8666)
 # Compose always binds WEB_PORT=8666 inside the container, but may publish a
 # different host port. CLI recovery links must name the public side.
 WEB_PUBLIC_PORT = _env("WEB_PUBLIC_PORT", WEB_PORT)
+# Host names the first-run setup screen and a WEB_AUTH=none UI answer to, on
+# top of IP addresses, localhost, single-label names and local suffixes such
+# as .lan. See web/auth.py host_allowed().
+WEB_ALLOWED_HOSTS = [
+    name.strip().lower().rstrip(".")
+    for name in os.environ.get("WEB_ALLOWED_HOSTS", "").split(",")
+    if name.strip()
+]
 
 # ── Versioned file schemas ────────────────────────────────────────────────────
 PENDING_QUEUE_VERSION = 2

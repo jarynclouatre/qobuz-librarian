@@ -572,7 +572,6 @@ def test_web_download_surfaces_a_retained_backup_without_calling_it_lossy(
         client, monkeypatch):
     import contextlib
     from types import SimpleNamespace
-    from urllib.parse import unquote
 
     from qobuz_librarian.library import catalog as catalog_mod
     from qobuz_librarian.library import hidden as hidden_mod
@@ -631,7 +630,8 @@ def test_web_download_surfaces_a_retained_backup_without_calling_it_lossy(
     try:
         response = client.post(f"/jobs/{job.id}/retry", follow_redirects=False)
         assert response.status_code == 303
-        assert "retained safety backup" in unquote(response.headers["location"])
+        assert "retained safety backup" in client.get(
+            response.headers["location"]).text
     finally:
         _remove_job(job)
 
@@ -1668,8 +1668,6 @@ def test_lyrics_submission_never_checks_qobuz(client, monkeypatch):
 )
 def test_remote_scan_preflight_precedes_job_admission(
         client, monkeypatch, path, data):
-    from urllib.parse import unquote
-
     from qobuz_librarian.api.auth import QobuzUnavailable
     from qobuz_librarian.library import new_releases
     from qobuz_librarian.web import app as app_mod
@@ -1694,8 +1692,9 @@ def test_remote_scan_preflight_precedes_job_admission(
     response = client.post(path, data=data, follow_redirects=False)
 
     assert response.status_code == 303
-    assert "Qobuz could not be reached" in unquote(response.headers["location"])
-    assert "Nothing changed" in unquote(response.headers["location"])
+    landed = client.get(response.headers["location"]).text
+    assert "Qobuz could not be reached" in landed
+    assert "Nothing changed" in landed
     assert admitted == []
 
 
@@ -1887,7 +1886,8 @@ def test_quality_change_flags_the_stale_upgrade_review(client, tmp_path, monkeyp
     refused = client.post(f"/jobs/{review.id}/approve", follow_redirects=False)
 
     assert refused.status_code == 303
-    assert "Download%20quality%20changed" in refused.headers["location"]
+    assert "Download quality changed" in client.get(
+        refused.headers["location"]).text
     assert review.status == job_mgr.JobStatus.AWAITING_REVIEW
 
 
@@ -5877,7 +5877,7 @@ def test_login_page_says_so_while_locked_out(monkeypatch, tmp_path):
     monkeypatch.setattr(web_auth, "_login_failures", {})
     monkeypatch.setattr(web_auth, "_user_failures", {})
     monkeypatch.setattr(web_auth, "_login_pending", {})
-    monkeypatch.setattr(web_auth, "_user_pending", {})
+    monkeypatch.setattr(web_auth, "_user_paused_until", {})
 
     with _enable_auth(monkeypatch, tmp_path) as c:
         for _ in range(6):
@@ -5899,7 +5899,7 @@ def test_concurrent_login_attempts_reserve_the_limit_atomically(monkeypatch):
     monkeypatch.setattr(web_auth, "_login_failures", {})
     monkeypatch.setattr(web_auth, "_user_failures", {})
     monkeypatch.setattr(web_auth, "_login_pending", {})
-    monkeypatch.setattr(web_auth, "_user_pending", {})
+    monkeypatch.setattr(web_auth, "_user_paused_until", {})
     start = threading.Barrier(20)
 
     def reserve():
@@ -5918,20 +5918,21 @@ def test_an_untrusted_proxy_address_is_called_out(monkeypatch, caplog):
     deployment, so a stranger's wrong guesses lock the owner out."""
     from qobuz_librarian.web import auth as web_auth
 
-    def req(peer, forwarded):
-        return SimpleNamespace(client=SimpleNamespace(host=peer),
+    def req(peer, forwarded, port=41000):
+        return SimpleNamespace(client=SimpleNamespace(host=peer, port=port),
                                headers={"x-forwarded-for": forwarded})
 
-    monkeypatch.setattr(web_auth, "_warned_untrusted_proxy", False)
+    monkeypatch.setattr(web_auth, "_warned_proxy_peers", {})
     with caplog.at_level("WARNING"):
         assert web_auth.client_ip(req("172.30.0.1", "203.0.113.7")) == "172.30.0.1"
     assert "FORWARDED_ALLOW_IPS=172.30.0.1" in caplog.text
 
-    # Resolved by uvicorn: the address is one of the forwarded entries.
-    monkeypatch.setattr(web_auth, "_warned_untrusted_proxy", False)
+    # Resolved by uvicorn: the address is one of the forwarded entries, port
+    # and all, and came from a header, so the warning must not name it.
     caplog.clear()
     with caplog.at_level("WARNING"):
-        assert web_auth.client_ip(req("203.0.113.7", "203.0.113.7")) == "203.0.113.7"
+        assert web_auth.client_ip(req("203.0.113.7", "203.0.113.7", 0)) == "203.0.113.7"
+        assert web_auth.client_ip(req("203.0.113.9", "203.0.113.9:1", 1)) == "203.0.113.9"
     assert "FORWARDED_ALLOW_IPS" not in caplog.text
 
 
@@ -5943,7 +5944,7 @@ def test_a_signed_in_browser_is_never_locked_out(monkeypatch, tmp_path):
     monkeypatch.setattr(web_auth, "_login_failures", {})
     monkeypatch.setattr(web_auth, "_user_failures", {})
     monkeypatch.setattr(web_auth, "_login_pending", {})
-    monkeypatch.setattr(web_auth, "_user_pending", {})
+    monkeypatch.setattr(web_auth, "_user_paused_until", {})
 
     with _enable_auth(monkeypatch, tmp_path) as c:
         c.get("/login")
@@ -7351,6 +7352,40 @@ def test_approve_rechecks_the_write_pause_after_awaits(client, monkeypatch):
     assert r.status_code in (200, 303, 503)
     assert job.status == job_mgr.JobStatus.AWAITING_REVIEW
     assert any(c.get("selected") for c in job.candidates)
+
+
+def test_a_write_from_another_site_is_refused_even_with_its_token(client):
+    """The token was the only check, so a page elsewhere that held one could
+    post; a cookie planted beside this app's own picked which token that was."""
+    token = client.cookies.get("ql_csrf")
+    for headers in ({"Origin": "http://evil.example"},
+                    {"Sec-Fetch-Site": "cross-site"},
+                    {"Cookie": f"ql_csrf={token}; ql_csrf={token}"}):
+        r = client.post("/queue/clear", headers=headers, follow_redirects=False)
+        assert r.status_code == 403, headers
+
+    r = client.post("/queue/clear", headers={"Origin": "http://testserver"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_a_rebound_host_name_reaches_no_page_without_a_sign_in(
+        client, monkeypatch, tmp_path):
+    """A site that points its own name at this server reached the whole app
+    from the owner's browser with sign-in off, and the first-run setup."""
+    from qobuz_librarian import config as cfg
+
+    rebound = {"Host": "rebind.attacker.example"}
+    assert client.get("/queue", headers=rebound).status_code == 400
+    monkeypatch.setattr(cfg, "WEB_ALLOWED_HOSTS", ["rebind.attacker.example"])
+    assert client.get("/queue", headers=rebound).status_code == 200
+    monkeypatch.setattr(cfg, "WEB_ALLOWED_HOSTS", [])
+
+    with _enable_auth(monkeypatch, tmp_path, configure=False) as c:
+        r = c.get("/setup", headers=rebound)
+        assert r.status_code == 400
+        assert "ql_csrf" not in r.headers.get("set-cookie", "")
+        assert c.get("/setup", headers={"Host": "nas.lan:8666"}).status_code == 200
 
 
 def test_stale_csrf_mints_a_usable_token(client):

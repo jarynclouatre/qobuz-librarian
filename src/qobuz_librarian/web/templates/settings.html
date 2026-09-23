@@ -89,6 +89,14 @@
 </div>
 {% endif %}
 
+{% if backup_dir_cleared %}
+<div class="ql-notice ql-notice-warning mb-6">
+  <span>{{ backup_dir_cleared }} Collection backups go to
+    <code>{{ collection_backup.folder }}</code> until another is set under
+    <a href="#collection-backup" class="ql-inline-link">Collection backup</a>.</span>
+</div>
+{% endif %}
+
 {% if corrupt_stores %}
 <div class="ql-notice ql-notice-warning mb-6 flex items-start flex-wrap gap-3">
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -110,8 +118,8 @@
 
 {% if password_error %}
 <div class="ql-notice ql-notice-error mb-6" data-flash>
-  <span>{{ password_error }} Try again under
-    <a href="#web-login" class="ql-inline-link">Web login</a>.</span>
+  <span>{{ password_error }}{% if not password_locked %} Try again under
+    <a href="#web-login" class="ql-inline-link">Web login</a>.{% endif %}</span>
 </div>
 {% endif %}
 
@@ -570,18 +578,25 @@
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'LASTFM_API_KEY' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
+        {% if behavior[key] %}
+        <p class="ql-field-state">Key saved. Leave this field blank to keep it.</p>
+        {% endif %}
         <div class="relative max-w-lg">
           <input type="password" name="{{ key }}" id="f-{{ key }}"
-                 value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
+                 value="" placeholder="{% if not behavior[key] %}{{ placeholder }}{% endif %}"
                  autocomplete="off" autocorrect="off" spellcheck="false"
                  class="ql-input pr-12 font-mono text-base sm:text-sm">
           {{ secret_toggle("f-" ~ key, "key") }}
         </div>
-        <p class="ql-field-help">{{ help }}</p>
+        <p class="ql-field-help">{% if behavior[key] %}Paste a new key here to replace it.{% else %}{{ help }}{% endif %}</p>
       </div>
       {% endfor %}
       <div class="ql-settings-actions">
         <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save key</button>
+        {% if behavior['LASTFM_API_KEY'] %}
+        <button type="submit" name="lastfm_remove" value="1"
+                class="ql-btn ql-btn-secondary w-full sm:w-auto">Remove key</button>
+        {% endif %}
       </div>
     </form>
   </div>

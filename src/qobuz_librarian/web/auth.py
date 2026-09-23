@@ -12,6 +12,7 @@ ordinary restart does not sign browsers out while a password rotation cannot
 revive stale sessions; a session also ends on logout or expiry.
 """
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -149,13 +150,15 @@ _LOGIN_LOCKOUT = 900
 # table; stale buckets are pruned continuously, this caps the live set.
 _MAX_TRACKED_IPS = 2048
 
-# Per-username failure tracking, in ADDITION to per-IP: an attacker on a /64 of
-# residential IPv6 can rotate source addresses to dodge the per-IP throttle, so
-# also lock the targeted account after _USER_LOGIN_MAX failures regardless of
-# source IP.
+# Per-username failure tracking, in addition to per address. Once the account
+# collects _USER_LOGIN_MAX failures from anywhere, every address that has
+# itself failed waits _USER_PAUSE. The pause does not grow with further guesses
+# and never holds back an address with no failures, so a stranger's guesses
+# cannot keep the owner out.
 _user_failures: dict[str, list[float]] = {}
-_user_pending: dict[str, int] = {}
+_user_paused_until: dict[str, float] = {}
 _USER_LOGIN_MAX = 10
+_USER_PAUSE = 60
 _MAX_TRACKED_USERS = 1024
 _MAX_CONCURRENT_LOGIN_CHECKS = 8
 
@@ -628,13 +631,34 @@ def _prune_failures(now: float) -> None:
                  if not any(now - t < _LOGIN_WINDOW for t in ts)]
         for k in stale:
             del bucket[k]
+    for k in [k for k, until in _user_paused_until.items() if until <= now]:
+        del _user_paused_until[k]
+
+
+def _address_key(ip: str) -> str:
+    """The throttle bucket for an address. IPv6 counts per /64, the block one
+    subscriber is given, so hopping between its addresses buys no guesses."""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if address.version == 6 and address.ipv4_mapped is None:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+    return ip
+
+
+def _user_paused(uname: str, now: float) -> bool:
+    return bool(uname) and now < _user_paused_until.get(uname, 0)
 
 
 def _norm_user(username: str) -> str:
     return (username or "").strip().casefold()
 
 
-_warned_untrusted_proxy = False
+# Peers already named by the warning below, oldest first. Bounded by dropping
+# the oldest, so no run of strangers can use up the warning for good.
+_warned_proxy_peers: dict[str, None] = {}
+_MAX_WARNED_PROXY_PEERS = 64
 
 
 def client_ip(request) -> str:
@@ -644,18 +668,23 @@ def client_ip(request) -> str:
     FORWARDED_ALLOW_IPS names, and its default (127.0.0.1) never matches a
     proxy on a Docker network. Left unset, every visitor arrives as the proxy
     and the per-address throttle becomes one bucket for the whole deployment,
-    so one visitor's wrong guesses can affect everyone behind it. Say so once,
-    naming the peer for the operator to verify rather than silently sharing one
-    throttle bucket.
+    so one visitor's wrong guesses can affect everyone behind it. Say so once
+    per peer, naming it for the operator to verify rather than silently sharing
+    one throttle bucket.
     """
-    global _warned_untrusted_proxy
-    peer = (request.client.host if request.client else "") or ""
+    client = request.client
+    peer = (client.host if client else "") or ""
+    port = getattr(client, "port", None) if client else None
+    forms = {peer, f"[{peer}]", f"{peer}:{port}", f"[{peer}]:{port}"}
     chain = {p.strip() for p in
              request.headers.get("x-forwarded-for", "").split(",") if p.strip()}
-    # A resolved address is one of the forwarded entries; the raw peer is not,
-    # because a proxy appends the client it saw rather than itself.
-    if chain and peer and peer not in chain and not _warned_untrusted_proxy:
-        _warned_untrusted_proxy = True
+    # A resolved address is one of the forwarded entries, possibly with the
+    # port the entry carried; the raw peer is not, because a proxy appends the
+    # client it saw rather than itself. Only then is this the socket peer.
+    if chain and peer and not (chain & forms) and peer not in _warned_proxy_peers:
+        _warned_proxy_peers[peer] = None
+        if len(_warned_proxy_peers) > _MAX_WARNED_PROXY_PEERS:
+            del _warned_proxy_peers[next(iter(_warned_proxy_peers))]
         log.warning(
             "Sign-ins are arriving through a proxy at %s whose forwarded "
             "address isn't trusted, so the failed-login limit counts every "
@@ -663,6 +692,60 @@ def client_ip(request) -> str:
             "FORWARDED_ALLOW_IPS=%s in .env and restart; never trust an "
             "address that belongs to a visitor.", peer, peer, peer)
     return peer or "unknown"
+
+
+def via_trusted_proxy(request) -> bool:
+    """Whether uvicorn took this request's client from X-Forwarded-For.
+
+    It does that only for a peer FORWARDED_ALLOW_IPS names, and the address a
+    proxy forwards carries no port, while a direct connection always has its
+    real source port.
+    """
+    client = request.scope.get("client")
+    return bool(client and client[1] == 0
+                and request.headers.get("x-forwarded-for"))
+
+
+_LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal")
+
+
+def request_host_name(request) -> str:
+    """The Host header's name, lower-cased, without its port."""
+    host = request.headers.get("host", "").strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else host
+    if host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    return host.rstrip(".")
+
+
+def host_allowed(request) -> bool:
+    """Whether a page that needs no sign-in may answer this Host.
+
+    A site that points its own name at this server's address (DNS rebinding)
+    reaches it from the owner's browser under that name, and no public name
+    takes any of the forms accepted below. Through a trusted proxy, the
+    proxy's own host routing decides instead.
+    """
+    if via_trusted_proxy(request):
+        return True
+    name = request_host_name(request)
+    if not name or name == "localhost" or "." not in name:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    return name.endswith(_LOCAL_SUFFIXES) or name in cfg.WEB_ALLOWED_HOSTS
+
+
+def host_refusal(request) -> Response:
+    return Response(
+        f"{request_host_name(request)} is not an address Qobuz Librarian "
+        "answers to. To use it, add it to WEB_ALLOWED_HOSTS and restart.\n",
+        status_code=400, media_type="text/plain")
 
 
 def _locked(times: list[float], limit: int, now: float) -> bool:
@@ -691,7 +774,7 @@ def _reservation_victim(failures, pending, key, maximum):
 
 
 def begin_login_attempt(ip: str, username: str = "") -> bool:
-    """Atomically reserve a password check for this IP and account.
+    """Atomically reserve a password check for this address.
 
     Completed failures and checks already running both consume the limit. This
     closes the gap where a burst of requests could all pass a read-only check
@@ -699,77 +782,61 @@ def begin_login_attempt(ip: str, username: str = "") -> bool:
     Every successful reservation must be finished or cancelled.
     """
     now = time.monotonic()
+    key = _address_key(ip)
     uname = _norm_user(username)
     with _login_lock:
         _prune_failures(now)
         if sum(_login_pending.values()) >= _MAX_CONCURRENT_LOGIN_CHECKS:
             return False
-        times = _login_failures.get(ip, [])
+        times = _login_failures.get(key, [])
         if not _has_attempt_slot(
-                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
+                times, _login_pending.get(key, 0), _LOGIN_MAX, now):
             return False
-        if uname:
-            utimes = _user_failures.get(uname, [])
-            if not _has_attempt_slot(
-                    utimes, _user_pending.get(uname, 0),
-                    _USER_LOGIN_MAX, now):
-                return False
-
-        ip_room, ip_victim = _reservation_victim(
-            _login_failures, _login_pending, ip, _MAX_TRACKED_IPS)
-        user_room, user_victim = True, None
-        if uname:
-            user_room, user_victim = _reservation_victim(
-                _user_failures, _user_pending, uname, _MAX_TRACKED_USERS)
-        if not ip_room or not user_room:
+        if times and _user_paused(uname, now):
             return False
-        if ip_victim is not None:
-            _login_failures.pop(ip_victim, None)
-        if user_victim is not None:
-            _user_failures.pop(user_victim, None)
-        _login_pending[ip] = _login_pending.get(ip, 0) + 1
-        if uname:
-            _user_pending[uname] = _user_pending.get(uname, 0) + 1
+        room, victim = _reservation_victim(
+            _login_failures, _login_pending, key, _MAX_TRACKED_IPS)
+        if not room:
+            return False
+        if victim is not None:
+            _login_failures.pop(victim, None)
+        _login_pending[key] = _login_pending.get(key, 0) + 1
         return True
 
 
-def _release_login_attempt(ip: str, uname: str) -> None:
+def _release_login_attempt(key: str) -> None:
     """Release one reservation. Caller holds _login_lock."""
-    pending = _login_pending.get(ip, 0)
+    pending = _login_pending.get(key, 0)
     if pending <= 1:
-        _login_pending.pop(ip, None)
+        _login_pending.pop(key, None)
     else:
-        _login_pending[ip] = pending - 1
-    if uname:
-        pending = _user_pending.get(uname, 0)
-        if pending <= 1:
-            _user_pending.pop(uname, None)
-        else:
-            _user_pending[uname] = pending - 1
+        _login_pending[key] = pending - 1
 
 
 def finish_login_attempt(ip: str, username: str = "", *, success: bool) -> None:
     """Finish a reserved check, recording failure or clearing old failures."""
     now = time.monotonic()
+    key = _address_key(ip)
     uname = _norm_user(username)
     with _login_lock:
-        _release_login_attempt(ip, uname)
+        _release_login_attempt(key)
         if success:
-            _login_failures.pop(ip, None)
+            _login_failures.pop(key, None)
             if uname:
                 _user_failures.pop(uname, None)
+                _user_paused_until.pop(uname, None)
             return
-        _record_login_failure(ip, uname, now)
+        _record_login_failure(key, uname, now)
 
 
 def cancel_login_attempt(ip: str, username: str = "") -> None:
     """Release a check that did not reach a password verdict."""
     with _login_lock:
-        _release_login_attempt(ip, _norm_user(username))
+        _release_login_attempt(_address_key(ip))
 
 
 def login_lockout_remaining(ip: str, username: str = "") -> int:
-    """Seconds until this IP or account may try again; 0 when not locked.
+    """Seconds until this address may try again; 0 when not locked.
 
     The throttle is deliberately checked before the password is verified, so a
     correct password cannot clear it. That is what stops an attacker learning
@@ -777,48 +844,48 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
     the message that says "wait an hour" is wrong for all but the first second.
     """
     now = time.monotonic()
+    key = _address_key(ip)
     uname = _norm_user(username)
     with _login_lock:
         waits = []
-        times = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
+        times = [t for t in _login_failures.get(key, [])
+                 if now - t < _LOGIN_WINDOW]
         if _locked(times, _LOGIN_MAX, now):
             waits.append(_LOGIN_LOCKOUT - (now - max(times)))
         elif not _has_attempt_slot(
-                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
+                times, _login_pending.get(key, 0), _LOGIN_MAX, now):
             waits.append(1)
-        if uname:
-            utimes = [t for t in _user_failures.get(uname, [])
-                      if now - t < _LOGIN_WINDOW]
-            if _locked(utimes, _USER_LOGIN_MAX, now):
-                waits.append(_LOGIN_LOCKOUT - (now - max(utimes)))
-            elif not _has_attempt_slot(
-                    utimes, _user_pending.get(uname, 0),
-                    _USER_LOGIN_MAX, now):
-                waits.append(1)
+        if times and _user_paused(uname, now):
+            waits.append(_user_paused_until[uname] - now)
     # A live lockout never rounds down to nothing, or the refusal it drives
     # would have no wait to name.
     return max(1, int(max(waits))) if waits else 0
 
 
-def _record_login_failure(ip: str, uname: str, now: float) -> None:
+def _record_login_failure(key: str, uname: str, now: float) -> None:
     """Record one failure. Caller holds _login_lock."""
     _prune_failures(now)
-    if ip not in _login_failures and len(_login_failures) >= _MAX_TRACKED_IPS:
+    if key not in _login_failures and len(_login_failures) >= _MAX_TRACKED_IPS:
         del _login_failures[min(_login_failures,
                                 key=lambda k: min(_login_failures[k]))]
-    _login_failures.setdefault(ip, []).append(now)
-    if uname:
-        if (uname not in _user_failures
-                and len(_user_failures) >= _MAX_TRACKED_USERS):
-            del _user_failures[min(_user_failures,
-                                   key=lambda k: min(_user_failures[k]))]
-        _user_failures.setdefault(uname, []).append(now)
+    _login_failures.setdefault(key, []).append(now)
+    if not uname or _user_paused(uname, now):
+        return
+    if (uname not in _user_failures
+            and len(_user_failures) >= _MAX_TRACKED_USERS):
+        del _user_failures[min(_user_failures,
+                               key=lambda k: min(_user_failures[k]))]
+    times = _user_failures.setdefault(uname, [])
+    times.append(now)
+    if len(times) >= _USER_LOGIN_MAX:
+        _user_paused_until[uname] = now + _USER_PAUSE
+        del _user_failures[uname]
 
 
 def record_login_failure(ip: str, username: str = "") -> None:
     now = time.monotonic()
     with _login_lock:
-        _record_login_failure(ip, _norm_user(username), now)
+        _record_login_failure(_address_key(ip), _norm_user(username), now)
 
 
 def clear_login_failures(ip: str, username: str = "") -> None:
@@ -826,9 +893,10 @@ def clear_login_failures(ip: str, username: str = "") -> None:
     earlier typo run doesn't leave the next session one slip from a lockout."""
     uname = _norm_user(username)
     with _login_lock:
-        _login_failures.pop(ip, None)
+        _login_failures.pop(_address_key(ip), None)
         if uname:
             _user_failures.pop(uname, None)
+            _user_paused_until.pop(uname, None)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -840,8 +908,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request, call_next):
-        if auth_disabled():
-            return await call_next(request)
         # Decide on the raw ASGI path, not request.url.path: Starlette rebuilds
         # request.url from the client-supplied Host header, so a malformed Host
         # ("example.com/login?x=") can make url.path read "/login" and turn a
@@ -849,6 +915,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # real routed path and is immune to Host-header confusion.
         path = request.scope["path"]
         if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES):
+            return await call_next(request)
+        if auth_disabled():
+            if not host_allowed(request):
+                return host_refusal(request)
             return await call_next(request)
 
         creds = _read()
@@ -863,6 +933,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     "now. Try again shortly.", status_code=503)
             # Nothing protects the box yet. Force the setup screen, but let
             # the setup GET/POST through so a login can actually be created.
+            if not host_allowed(request):
+                return host_refusal(request)
             if path == SETUP_PATH:
                 return await call_next(request)
             return self._reject(request, SETUP_PATH)

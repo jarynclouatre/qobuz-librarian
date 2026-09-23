@@ -125,6 +125,10 @@ services:
       # Behind a reverse proxy, set this to the proxy's IP(s) so the failed-login
       # throttle keys on the real client IP instead of the shared proxy address.
       FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+      # Extra host names the UI answers to while login is off or not yet set
+      # up, comma-separated. IP addresses, localhost, single-label names and
+      # .local/.lan/.home.arpa/.internal names always work.
+      WEB_ALLOWED_HOSTS: "${WEB_ALLOWED_HOSTS:-}"
       # Refuse downloads/scans at startup if /music or /staging aren't writable
       # by the container user (typical on a NAS with the wrong PUID/PGID).
       # Set QL_CHECK_VOLUMES=0 in .env for a read-only (:ro) /music share.

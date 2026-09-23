@@ -27,6 +27,13 @@ _CORRUPT_LATEST_RE = re.compile(r"collection\.json\.corrupt(?:\.\d+)?")
 # the owner confirms the albums really are gone.
 SHRINK_TOLERANCE = 0.10
 
+# A backup as written runs about 2.8 KB an album of eleven tracks: an object or
+# list per 200 bytes and a comma per 50. An upload holding twice what the
+# largest accepted file of that shape holds is refused while it is read, so a
+# file of bare empty objects cannot build millions of them first.
+UPLOAD_MAX_CONTAINERS = 700_000
+UPLOAD_MAX_COMMAS = 2_800_000
+
 _LOST = ("the record of what the library held (without it a lost disk can "
          "only be rebuilt by hand)")
 
