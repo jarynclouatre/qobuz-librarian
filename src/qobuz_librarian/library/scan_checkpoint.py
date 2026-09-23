@@ -200,10 +200,15 @@ class Writer(AbstractContextManager):
 
 def clear(kind) -> bool:
     with _lock:
-        data = _read()
-        if kind not in data:
-            return True
-        del data[kind]
+        path = str(cfg.SCAN_CHECKPOINT_FILE)
+        if _sole_entry is not None and _sole_entry == (
+                path, state_file.file_identity(path), kind):
+            data = {}
+        else:
+            data = _read()
+            if kind not in data:
+                return True
+            del data[kind]
         if data:
             return _write(data)
         try:

@@ -272,55 +272,65 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
               generation: int = 0, revision: int = 0,
               limited: bool = False):
     with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
-        header = summary()
-        # Keep the previous file's bytes for a failed publication's rollback,
-        # rather than a parsed copy several times their size.
+        # The replaced file stays readable through this handle, so a failed
+        # publication can put it back without a copy held in memory.
         try:
-            previous = cfg.LIBRARY_SCAN_STATE_FILE.read_bytes()
+            previous = open(cfg.LIBRARY_SCAN_STATE_FILE, "rb")
         except FileNotFoundError:
             previous = None
-        # Only another kind's saved rows need the whole file read.
-        data = load() if set(header["kinds"]) - {kind} else header
-        data = dict(data)
-        kinds = data["kinds"] = {
-            name: bucket for name, bucket in data["kinds"].items()
-            if name != kind
-        }
-        now = time.time()
-        kinds[kind] = {
-            "updated_at": now,
-            "generation": int(generation or 0),
-            "revision": int(revision or 0),
-            "complete": bool(complete),
-            "limited": bool(limited),
-            "quality_signature": str(quality_sig or ""),
-            "artists": {
-                str(name): candidate_premise.compact_artist(_clean_artist_state(entry))
-                for name, entry in (artists or {}).items()
-            },
-        }
-        data["updated_at"] = now
-        data["version"] = STATE_VERSION
-        saved = _write_state(data)
-        if not saved:
-            return None
-        if generation and revision:
-            from qobuz_librarian.library import generation_state
+        try:
+            return _save_kind_locked(
+                kind, previous, artists=artists, complete=complete,
+                quality_sig=quality_sig, generation=generation,
+                revision=revision, limited=limited)
+        finally:
+            if previous is not None:
+                previous.close()
 
-            if not generation_state.mark_output_current(
-                "library",
-                generation=generation,
-                revision=revision,
-                complete=complete,
-                limited=limited,
-                policy_signature=quality_sig,
-            ):
-                # The snapshot write landed but its authority record did not.
-                # No other snapshot writer can enter until the prior file is
-                # restored.
-                _write_state(_normalise(
-                    json.loads(previous) if previous is not None else None))
-                return None
+
+def _save_kind_locked(kind, previous, *, artists, complete, quality_sig,
+                      generation, revision, limited):
+    header = summary()
+    # Only another kind's saved rows need the whole file read.
+    data = dict(load() if set(header["kinds"]) - {kind} else header)
+    kinds = data["kinds"] = {
+        name: bucket for name, bucket in data["kinds"].items()
+        if name != kind
+    }
+    now = time.time()
+    kinds[kind] = {
+        "updated_at": now,
+        "generation": int(generation or 0),
+        "revision": int(revision or 0),
+        "complete": bool(complete),
+        "limited": bool(limited),
+        "quality_signature": str(quality_sig or ""),
+        "artists": {
+            str(name): candidate_premise.compact_artist(_clean_artist_state(entry))
+            for name, entry in (artists or {}).items()
+        },
+    }
+    data["updated_at"] = now
+    data["version"] = STATE_VERSION
+    if not _write_state(data):
+        return None
+    if generation and revision:
+        from qobuz_librarian.library import generation_state
+
+        if not generation_state.mark_output_current(
+            "library",
+            generation=generation,
+            revision=revision,
+            complete=complete,
+            limited=limited,
+            policy_signature=quality_sig,
+        ):
+            # The snapshot write landed but its authority record did not.
+            # No other snapshot writer can enter until the prior file is
+            # restored.
+            _write_state(_normalise(
+                json.load(previous) if previous is not None else None))
+            return None
     return int(generation) if generation else now
 
 
