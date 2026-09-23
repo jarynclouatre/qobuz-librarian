@@ -1495,7 +1495,10 @@ def stop_for_restart() -> None:
         if cancel_is_protected(job):
             continue
         with job._lock:
-            if job.status in TERMINAL:
+            # A cancel already asked for stays a cancel, and an import under
+            # way finishes and is recorded as it ends.
+            if (job.status in TERMINAL or job.cancel_requested
+                    or job.importing):
                 continue
             job.stopping_for_restart = True
             job.cancel_requested = True

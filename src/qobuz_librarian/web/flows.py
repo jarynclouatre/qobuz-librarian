@@ -2061,7 +2061,8 @@ def _scan_library_impl(
     if (not job.cancel_requested and unchecked > 0
             and publication is not None
             and unchecked == len(unreadable_artists)):
-        _record_unchecked_artists(job, unchecked)
+        # Left out rather than unchecked: nothing here is waiting to resume.
+        _record_unchecked_artists(job, 0)
     elif not job.cancel_requested and unchecked > 0:
         _record_unchecked_artists(job, unchecked)
         job.summary += f" {plural(unchecked, 'artist')} couldn't be checked"

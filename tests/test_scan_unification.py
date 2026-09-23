@@ -723,11 +723,11 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
     assert not job.error
     assert checked == list(readable_names)
     assert len(job.candidates) == len(readable_names)
-    assert job.unchecked_artists == 1
     assert blocked.name in job.summary
     # The readable part of the library finishes; a library with nothing
     # readable does not.
     finished = bool(readable_names)
+    assert job.unchecked_artists == (0 if finished else 1)
     assert library_scan_state.kind_state("missing")["complete"] is finished
     assert new_releases.is_baseline_complete() is finished
     assert blocked.name not in new_releases.load()["seen"]
@@ -1728,7 +1728,7 @@ def test_unreadable_album_is_left_out_of_a_finished_baseline(
     flows.scan_library(job, "")
 
     assert checked == [good.name]
-    assert job.unchecked_artists == 1
+    assert job.unchecked_artists == 0
     assert partial.name in job.summary
     assert str(blocked) in caplog.text
     assert scan_checkpoint.load("missing") is None

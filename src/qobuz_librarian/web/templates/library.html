@@ -65,7 +65,7 @@
   </div>
   {% endif %}
 
-  {% if library_scan_state.ready and library_scan_state.message %}
+  {% if library_scan_state.ready and library_scan_state.message and not unreadable_artists %}
   <div class="ql-notice ql-notice-warning" role="status">
     <span class="ql-notice-copy">{{ library_scan_state.message }}</span>
   </div>

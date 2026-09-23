@@ -12,6 +12,7 @@ import secrets
 import stat
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -1974,6 +1975,21 @@ def _load_journal_path(path: Path, operation_id: str) -> QueueLoad:
     )
 
 
+_JOURNAL_TEMPORARY = re.compile(r"\.([0-9a-f]{64})\.[A-Za-z0-9_]+\.tmp")
+
+
+def _abandoned_journal_temporary(path: Path) -> bool:
+    """A save's temporary copy left behind by a kill, not one being written."""
+    match = _JOURNAL_TEMPORARY.fullmatch(path.name)
+    if match is None:
+        return False
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and time.time() - info.st_mtime > 60
+
+
 def _discover_journal_paths() -> tuple[Path, ...]:
     directory = cfg.QUEUE_JOURNAL_DIR
     if not _path_exists(directory):
@@ -1991,6 +2007,15 @@ def _discover_journal_paths() -> tuple[Path, ...]:
             and _HEX_ID.fullmatch(path.stem) is not None
         ):
             journal_paths.append(path)
+        elif _abandoned_journal_temporary(path):
+            # A save killed before its rename: the journal beside it is the
+            # committed state, and this copy never was.
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                ambiguous_paths.append(path)
         else:
             ambiguous_paths.append(path)
     if ambiguous_paths:

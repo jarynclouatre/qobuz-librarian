@@ -3986,6 +3986,10 @@ def _fold_into_parked_library_review(job):
         bits.append(f"{unchecked} artist{'s' if unchecked != 1 else ''} "
                     "couldn't be checked; scan again to resume from where it "
                     "left off.")
+    elif (left_out := unreadable_artists_mod.load()):
+        bits.append(f"{plural(len(left_out), 'artist folder')} couldn't be "
+                    "read and "
+                    f"{'was' if len(left_out) == 1 else 'were'} left out.")
     if job.candidate_cap_hit or parked.candidate_cap_hit:
         bits.append("The scan hit the result cap, so some finds may not be "
                     "listed.")

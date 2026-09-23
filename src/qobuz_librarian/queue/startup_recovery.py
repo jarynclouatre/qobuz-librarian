@@ -1101,9 +1101,14 @@ def _settle_unstarted_download(authority, journal, item, action):
         return _blocked_settlement(
             "This item has no exact pre-launch Beets state to settle."
         )
-    if frozen.lineages or frozen.counts is not None:
-        # Staged but never reserved for Beets, and every reference is already
-        # settled, so nothing is left to resume.
+    discard_one_of_several = (
+        action is BlockedItemSettlementAction.DISCARD
+        and (len(journal.items) != 1 or bool(journal.retirements))
+    )
+    if frozen.lineages or frozen.counts is not None or discard_one_of_several:
+        # Staged but never reserved for Beets, or one item dropped from a
+        # longer queue, with every reference already settled: nothing of it
+        # is left to resume.
         _require_authority(authority)
         queue_state._commit_unreferenced_blocked_settlement(
             journal,

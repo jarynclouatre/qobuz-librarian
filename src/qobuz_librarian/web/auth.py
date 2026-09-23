@@ -706,7 +706,8 @@ def via_trusted_proxy(request) -> bool:
                 and request.headers.get("x-forwarded-for"))
 
 
-_LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal")
+_LOCAL_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
+                   ".localdomain", ".fritz.box")
 
 
 def request_host_name(request) -> str:

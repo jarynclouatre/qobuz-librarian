@@ -146,6 +146,12 @@ def cross_origin(request) -> bool:
     origin = request.headers.get("origin")
     if origin is None:
         return False
+    if (request.headers.get("x-forwarded-for")
+            or request.headers.get("forwarded")):
+        # Only a proxy adds these, and one that rewrites Host without saying
+        # so leaves nothing to compare. The token check still stands: the
+        # cookie it needs is never sent with another site's request.
+        return False
     try:
         parsed = urllib.parse.urlsplit(origin.strip().lower())
     except ValueError:
