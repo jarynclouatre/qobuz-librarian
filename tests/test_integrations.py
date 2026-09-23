@@ -260,18 +260,18 @@ def test_lyric_retry_read_error_does_not_replace_manifest(
 
 
 
-def test_write_lyrics_saves_atomically_and_clears_legacy_tag(tmp_path):
+def test_write_lyrics_saves_atomically_and_keeps_unsynced_lyrics(tmp_path):
     from qobuz_librarian.integrations import lyric_fetch
 
     real = tmp_path / "track.flac"
     real.write_bytes(b"original-audio")
 
     f = _FakeLyricFLAC(real)
-    f.tags["UNSYNCEDLYRICS"] = ["stale plain text"]
+    f.tags["UNSYNCEDLYRICS"] = ["hand-typed words"]
     lyric_fetch.write_lyrics(f, "[00:01.00]hello")
 
     assert f.tags["lyrics"] == ["[00:01.00]hello"]
-    assert "unsyncedlyrics" not in f.tags
+    assert f.tags["unsyncedlyrics"] == ["hand-typed words"]
     # The live file must never be written in place. Mutagen saves into a temp
     # copy that is then atomically swapped in, so a crash can't truncate it.
     assert f.save_targets and all(t != f.filename for t in f.save_targets)
@@ -298,6 +298,12 @@ def test_both_lyrics_repairs_a_plain_sibling_without_provider(
         synced if plain_representation == "embed" else plain,
         encoding="utf-8",
     )
+    lyric_fetch.save_state(
+        {str(track): lyric_fetch.TrackState(
+            status="plain", source="Lrclib",
+            written=lyric_fetch._lyrics_digest(plain))},
+        tmp_path / "state.json",
+    )
     monkeypatch.setattr(
         lyric_fetch,
         "search_lyrics",
@@ -318,6 +324,37 @@ def test_both_lyrics_repairs_a_plain_sibling_without_provider(
     assert counts == {"wrote-synced": 1}
     assert FLAC(track)["lyrics"] == [synced]
     assert track.with_suffix(".lrc").read_text(encoding="utf-8") == synced
+
+
+def test_lyrics_pass_leaves_lyrics_it_did_not_write(
+        tmp_path, monkeypatch, _need_ffmpeg):
+    from mutagen.flac import FLAC
+
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    track = tmp_path / "Artist" / "Album" / "track.flac"
+    _make_silent_flac(track)
+    tagged = FLAC(track)
+    tagged["title"] = "Song"
+    tagged["artist"] = "Artist"
+    tagged["LYRICS"] = "words typed in by hand"
+    tagged.save()
+    monkeypatch.setattr(
+        lyric_fetch, "search_lyrics",
+        lambda *_args, **_kwargs: ("[00:00.50]provider line", "Lrclib",
+                                   "synced", 1, 0))
+
+    lyric_fetch.fetch_for_paths(
+        [track],
+        owned_root=tmp_path,
+        state_path=tmp_path / "state.json",
+        rescan=True,
+        workers=1,
+        lyrics_format="embed",
+    )
+
+    assert FLAC(track)["lyrics"] == ["words typed in by hand"]
 
 
 

@@ -521,7 +521,7 @@ def test_no_isrc_redownload_keeps_an_unprovable_backup(
     )
     monkeypatch.setattr(
         "qobuz_librarian.modes.process._carry_non_audio_from_backup",
-        lambda *_args: (album_dir, {"exact": "replacement"}),
+        lambda *_args: (album_dir, {"exact": "replacement"}, []),
     )
 
     result = flows._redownload_damaged_album(
@@ -613,7 +613,7 @@ def test_no_isrc_redownload_retires_replaced_beets_rows(
     )
     monkeypatch.setattr(
         "qobuz_librarian.modes.process._carry_non_audio_from_backup",
-        lambda *args: (album_dir, {"tree": {"files": {"01.flac": {}}}}),
+        lambda *args: (album_dir, {"tree": {"files": {"01.flac": {}}}}, []),
     )
     monkeypatch.setattr(
         "qobuz_librarian.library.backup.retire_verified_repair_backup",
@@ -986,10 +986,11 @@ def test_repair_counts_a_verified_refill_and_settles_its_backup(
     assert result["imported"] is False
 
 
-def test_repair_backup_kept_when_downloads_fail_and_skipped_when_backup_fails(tmp_path, monkeypatch):
-    # Downloads fail → backup is preserved for manual recovery.
+def test_repair_originals_restored_when_downloads_fail_and_skipped_when_backup_fails(tmp_path, monkeypatch):
+    # Downloads fail → the originals go back into the album.
     _call_repair_album_dir(tmp_path / "kept", monkeypatch, n_ok=0, n_fail=1, imported=False)
-    assert _backup_files(tmp_path / "kept")
+    assert [f for f in _backup_files(tmp_path / "kept") if f.is_file()] == []
+    assert (tmp_path / "kept" / "Artist" / "Album (2020)" / "01 - Track.flac").exists()
 
     # Backup itself fails → original must NOT be queued for replacement.
     import qobuz_librarian.modes.repair as repair_mod

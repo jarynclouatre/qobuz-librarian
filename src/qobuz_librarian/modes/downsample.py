@@ -154,6 +154,7 @@ def run_downsample_walk_mode(args):
     n_albums_found = 0
     est_total_saving = 0
     total_errors = 0
+    total_damaged = 0
     total_flush_warns = 0
     state_refresh_warnings = 0
     interrupted = False
@@ -230,6 +231,9 @@ def run_downsample_walk_mode(args):
                     n_albums_done += 1
                 total_saved += res.get("saved_bytes", 0)
                 total_errors += res.get("errors", 0)
+                total_damaged += sum(
+                    1 for entry in res.get("failed_files") or []
+                    if entry.get("damaged"))
                 total_flush_warns += res.get("flush_warnings", 0)
             if artist_attempted:
                 downsample_state.update_artist(artist_dir)
@@ -275,11 +279,24 @@ def run_downsample_walk_mode(args):
     else:
         log.info(fmt(C.GRAY,
             f"     Checked {plural(n_scanned, 'artist')}; downsampled "
-            f"{plural(n_albums_done, 'album')}, reclaimed {format_size(total_saved)}."))
+            f"{plural(n_albums_done, 'album')}, "
+            f"{format_size(total_saved)} smaller."))
+        if keep_originals and n_albums_done:
+            log.info(fmt(C.GRAY,
+                "     The hi-res originals are kept for "
+                f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}, so "
+                "nothing is freed until they expire. Until then they can be "
+                "put back from Settings."))
     if total_errors:
         log.info(fmt(C.YELLOW,
             f"     {plural(total_errors, 'file')} could not be downsampled "
             "(left unchanged)."))
+    if total_damaged:
+        log.info(fmt(C.YELLOW,
+            f"     {plural(total_damaged, 'file')} "
+            f"{'doesn' if total_damaged == 1 else 'don'}'t decode cleanly "
+            "and may be damaged; Repair can re-download "
+            f"{'it' if total_damaged == 1 else 'them'}."))
     if total_flush_warns:
         log.warning(block(fmt(C.YELLOW,
             f"  ⚠  Downsample walk needs attention: "

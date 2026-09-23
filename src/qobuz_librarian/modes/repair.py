@@ -2241,28 +2241,25 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "to be any better than the original, which is kept here. "
                     "Restore puts the original back.",
                 )
-            elif n_fail_final > 0:
-                pin_repair_recovery(
-                    "repair backup kept, one or more refills failed")
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  {n_fail_final} track(s) failed to re-download. "
-                    f"Truncated originals preserved at:\n     {backup_path}"))
-                checkpoint_recovery(
-                    backup_path,
-                    "refill",
-                    "One or more replacement tracks failed to download.",
-                )
             else:
-                # Downloaded but the replacement never made it back into
-                # album_dir (beets didn't import, or filed it where we
-                # couldn't reclaim it). Restore so the album is at least back
-                # to its pre-repair state instead of silently short a track.
-                log.info(fmt(C.YELLOW,
-                    "  ⚠  Refill didn't return to the album folder, "
-                    "restoring truncated originals so it isn't left short."))
+                # A refill failed to download, or the replacement never made
+                # it back into album_dir (beets didn't import, or filed it
+                # where we couldn't reclaim it). Restore so the album is at
+                # least back to its pre-repair state instead of silently short
+                # a track. A refill that did land keeps its place.
+                if n_fail_final > 0:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  {n_fail_final} track(s) failed to re-download, "
+                        "restoring the damaged originals so the album isn't "
+                        "left short."))
+                else:
+                    log.info(fmt(C.YELLOW,
+                        "  ⚠  Refill didn't return to the album folder, "
+                        "restoring truncated originals so it isn't left "
+                        "short."))
                 try:
                     n_restored = restore_gap_fill_backup(
-                        backup_path, album_dir)
+                        backup_path, album_dir, replace_dst=not n_fail_final)
                 except BaseException as exc:
                     pin_repair_recovery(
                         "repair backup kept, automatic restore was "
@@ -2276,11 +2273,11 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 if n_restored and not backup_path.exists():
                     resolve_recovery(
                         backup_path,
-                        "The refill did not return to the album, so every "
-                        "original was restored.",
+                        "The refill did not complete, so every original was "
+                        "restored.",
                     )
                     log.info(fmt(C.GREEN,
-                        "  ✓  Restored truncated originals; re-run Repair to retry."))
+                        "  ✓  Restored the originals; re-run Repair to retry."))
                 else:
                     pin_repair_recovery(
                         "repair backup kept, automatic restore was partial or "
@@ -2291,7 +2288,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     checkpoint_recovery(
                         backup_path,
                         "restore",
-                        "The refill did not return to the album and automatic "
+                        "The refill did not complete and automatic "
                         "restoration was incomplete.",
                     )
 

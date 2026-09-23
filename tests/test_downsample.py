@@ -177,6 +177,21 @@ def test_resample_keeps_truncated_source_untouched(tmp_path, _need_ffmpeg, _need
     assert not list(tmp_path.glob(".compress-*.flac"))
 
 
+def test_resample_leaves_a_corrupt_master_untouched(tmp_path, _need_ffmpeg, _need_flac):
+    src = tmp_path / "track.flac"
+    _hires_flac(src, 3.0)
+    data = bytearray(src.read_bytes())
+    data[len(data) // 2:len(data) // 2 + 64] = bytes(64)   # one bad frame
+    src.write_bytes(bytes(data))
+    af, _ = detect_resampler_filter()
+
+    rel, sr, rate, saved, err = resample_one("track.flac", 96000, 48000, af,
+                                             base_dir=tmp_path)
+    assert saved is None and err is not None
+    assert src.read_bytes() == bytes(data)             # damage left for Repair
+    assert not list(tmp_path.glob(".compress-*.flac"))
+
+
 def test_resample_keeps_original_when_source_bit_depth_unreadable(
         tmp_path, monkeypatch, _need_ffmpeg, _need_flac):
     src = tmp_path / "track.flac"
@@ -213,7 +228,8 @@ def test_resample_keeps_original_when_decode_fails(tmp_path, monkeypatch,
     src = tmp_path / "track.flac"
     _hires_flac(src, 2.0)
     before = src.read_bytes()
-    monkeypatch.setattr(de, "_decode_ok", lambda p, **_kwargs: False)
+    verdicts = iter([True, False])                     # source, then encode
+    monkeypatch.setattr(de, "_decode_ok", lambda p, **_kwargs: next(verdicts))
     af, _ = detect_resampler_filter()
 
     rel, sr, rate, saved, err = resample_one("track.flac", 96000, 48000, af,

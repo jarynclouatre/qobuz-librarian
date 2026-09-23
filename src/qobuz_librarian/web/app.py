@@ -12867,6 +12867,28 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'</div></div>'
             )
             continue
+        if backup_mod.is_set_aside_replacement(path):
+            # Restore would put this download over the album's original.
+            rows.append(
+                f'<div class="ql-diagnostic-row" data-backup-status="set-aside">'
+                f'<span class="ql-diagnostic-status ql-diagnostic-status-error" '
+                f'aria-label="Needs attention">!</span>'
+                f'<div class="min-w-0"><div class="ql-diagnostic-label">'
+                f'Download set aside{f": {album}" if album else ""}</div>'
+                f'<div class="ql-diagnostic-detail">An upgrade couldn\'t '
+                f'verify this download, so the original album was put back in '
+                f'{dest}.</div>'
+                f'<form hx-post="/backups/discard-unchecked" '
+                f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
+                f'<input type="hidden" name="_csrf_token" value="{tok}">'
+                f'<input type="hidden" name="backup" value="{name}">'
+                f'<button type="submit" class="ql-btn ql-btn-sm" '
+                f'data-confirm="Delete this download? The album keeps its '
+                f'original files." data-confirm-action="Delete" '
+                f'data-irreversible>Delete</button>'
+                f'</form></div></div>'
+            )
+            continue
         reason = html.escape(classification.detail)
         status = "ok" if classification.removable else "error"
         icon = "OK" if classification.removable else "!"

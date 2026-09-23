@@ -15,6 +15,7 @@ Quality settings:
   - Source bit depth preserved (16-bit stays 16-bit, 24-bit stays 24-bit).
   - FLAC compression level 5 (default, lossless, fast encode).
 """
+import copy
 import hashlib
 import os
 import secrets
@@ -364,6 +365,27 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
 # dot keeps the library scanner from indexing an in-flight encode.
 _TMP_PREFIX = ".compress-"
 
+# ffmpeg's FLAC muxer writes no seek table, so one is built on the encode.
+_SEEKPOINT_SECONDS = 10
+
+# The reason a source that fails its own decode test is left alone. Callers
+# match on it to report the file as damaged rather than as a failed rewrite.
+SOURCE_DAMAGED = ("it doesn't decode cleanly, so it may be damaged; left it "
+                  "untouched. Repair can re-download it")
+
+
+def _write_seektable(target_fd: int) -> bool:
+    """Add seek points every few seconds to the encode, in its padding."""
+    try:
+        r = subprocess.run(
+            ["metaflac", f"--add-seekpoint={_SEEKPOINT_SECONDS}s",
+             f"/proc/self/fd/{target_fd}"],
+            capture_output=True, timeout=120, stdin=subprocess.DEVNULL,
+            pass_fds=(target_fd,))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
 
 class _BoundSource:
     """One regular file beneath a fully held, no-follow absolute root chain."""
@@ -524,12 +546,43 @@ def _make_encode_temp(parent_fd: int):
     raise FileExistsError("couldn't reserve a downsample temporary file")
 
 
+def _rescaled_cuesheet(cuesheet, source_rate, target_rate, total_samples):
+    """The source's cue sheet with every sample offset moved to the new rate."""
+    from mutagen.flac import CueSheetTrack, CueSheetTrackIndex
+
+    def scale(offset):
+        return round(offset * target_rate / source_rate)
+
+    rescaled = copy.copy(cuesheet)
+    rescaled.lead_in_samples = scale(cuesheet.lead_in_samples)
+    rescaled.tracks = []
+    for track in cuesheet.tracks:
+        moved = CueSheetTrack(track.track_number, scale(track.start_offset),
+                              track.isrc, track.type, track.pre_emphasis)
+        moved.indexes = [
+            CueSheetTrackIndex(index.index_number, scale(index.index_offset))
+            for index in track.indexes
+        ]
+        rescaled.tracks.append(moved)
+    if rescaled.tracks:
+        # The lead-out marks the end of the stream, which rounding can miss.
+        rescaled.tracks[-1].start_offset = total_samples
+    offsets = [track.start_offset for track in rescaled.tracks[:-1]]
+    offsets += [index.index_offset for track in rescaled.tracks
+                for index in track.indexes]
+    rescaled.compact_disc = bool(
+        cuesheet.compact_disc and target_rate == 44100
+        and all(offset % 588 == 0 for offset in offsets))
+    return rescaled
+
+
 def _copy_source_metadata(source_fd: int, target_fd: int):
-    """Carry the source's comments and pictures onto the encode.
+    """Carry the source's comments, pictures and cue sheet onto the encode.
 
     Repeated keys, their capitalisation, and each picture's type and
-    description all survive; the encode keeps its own encoder tag. Returns
-    None when it worked, or why it did not.
+    description all survive; the encode keeps its own encoder tag. Cue sheet
+    offsets are counted in samples, so they are rescaled to the new rate.
+    Returns None when it worked, or why it did not.
     """
     from mutagen.flac import FLAC
     try:
@@ -546,7 +599,16 @@ def _copy_source_metadata(source_fd: int, target_fd: int):
         target.clear_pictures()
         for picture in source.pictures:
             target.add_picture(picture)
-        target.save(f"/proc/self/fd/{target_fd}")
+        if source.cuesheet is not None:
+            target.cuesheet = _rescaled_cuesheet(
+                source.cuesheet, source.info.sample_rate,
+                target.info.sample_rate, target.info.total_samples)
+        # Leave room for the seek table written next, so it lands in place.
+        seek_points = target.info.total_samples // (
+            max(target.info.sample_rate, 1) * _SEEKPOINT_SECONDS) + 2
+        room = 4 + 18 * seek_points + 4096
+        target.save(f"/proc/self/fd/{target_fd}",
+                    padding=lambda info: max(info.get_default_padding(), room))
     except Exception as e:
         # The reader is handed descriptor paths, so its message names them.
         reason = (str(e) or e.__class__.__name__)
@@ -682,6 +744,11 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             return (rel, sr, rate, None,
                     "source sample rate changed after the scan; "
                     "left the original untouched")
+        # ffmpeg decodes past a damaged frame, so a corrupt master would come
+        # back as a clean, slightly shorter file that no later check can tell
+        # from a good one.
+        if not _decode_ok(source_path, pass_fds=source_fds):
+            return (rel, sr, rate, None, SOURCE_DAMAGED)
 
         bps = read_local_bit_depth(source_path, pass_fds=source_fds)
         # An unreadable source bit depth (bps == 0) can't be pinned. The
@@ -749,6 +816,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "couldn't carry the source tags and artwork onto the "
                     f"resampled file ({carry_error}); left the original "
                     "untouched")
+        _write_seektable(temp_fd)
         readonly_fd, temp_identity = _reopen_encode_temp_readonly(
             binding.parent_fd, temp_name, temp_fd)
         writable_fd = temp_fd
@@ -801,15 +869,15 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "couldn't verify resampled length (source/output STREAMINFO "
                     "reports unknown sample count); left the original untouched")
         expected = in_samples * rate / sr
-        # Cap the relative term at ~1s of output. expected*0.005 alone scales
-        # with length (~21s on a 70-min master), which would let a long source
-        # lose many seconds and still pass, the opposite of this gate's job.
-        tol = max(rate // 10, min(expected * 0.005, rate))
-        if abs(out_samples - expected) > tol:
+        # soxr and swresample both land within one sample of the exact count.
+        # A lost frame costs hundreds of output samples or more, which a limit
+        # of one part in a million still catches on tracks of a few hours.
+        gap = out_samples - expected
+        if abs(gap) > max(2.0, expected / 1_000_000):
             return (rel, sr, rate, None,
-                    f"resampled to {out_samples / rate:.1f}s, expected "
-                    f"~{in_samples / sr:.1f}s; left the original untouched "
-                    "(source may be truncated)")
+                    f"resampled file came out {abs(gap) * 1000 / rate:.0f} ms "
+                    f"{'short' if gap < 0 else 'long'}; left the original "
+                    "untouched (the source may be damaged)")
         # With art copied bit-for-bit a real downsample always shrinks the file;
         # if it somehow didn't, replacing the source only churns it (and a
         # larger output would drive saved_bytes negative), so keep the original.
@@ -1050,7 +1118,8 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                 log(f"  ⚠ {Path(rel).name}: {err}")
         elif err is not None:
             errors += 1
-            failed_files.append({"name": Path(rel).name, "reason": str(err)})
+            failed_files.append({"name": Path(rel).name, "reason": str(err),
+                                 "damaged": err == SOURCE_DAMAGED})
             if verbose:
                 log(f"  ✗ {Path(rel).name}: {err}")
         else:

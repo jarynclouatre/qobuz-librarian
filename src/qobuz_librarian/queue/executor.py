@@ -1720,6 +1720,8 @@ def _resolve_queue_item(
             # so without this they'd skip the completeness gate.
             from qobuz_librarian.modes.process import (
                 _carry_non_audio_from_backup,
+                _keep_backup_for_companions,
+                _put_original_back,
                 _upgrade_replacement_verified,
                 _upgrade_trees_verified,
             )
@@ -1735,7 +1737,7 @@ def _resolve_queue_item(
                         item["album"], album_dir, bp,
                         replacement_dir=post_dir)
                 if carried is not None:
-                    replacement_path, replacement_receipt = carried
+                    replacement_path, replacement_receipt, left = carried
                     if not retire_backup_beets_entries(
                         bp,
                         replacement_path,
@@ -1752,6 +1754,10 @@ def _resolve_queue_item(
                             f"  ⚠  Couldn't safely reconcile the Beets "
                             f"catalogue for {truncate(album_dir.name, 40)}; "
                             "keeping the exact backup."))
+                    elif left:
+                        item["companions_kept"] = left
+                        log.info(fmt(C.YELLOW,
+                            _keep_backup_for_companions(bp, left)))
                     elif not dispose_backup(
                         bp,
                         replacement_path=replacement_path,
@@ -1779,15 +1785,27 @@ def _resolve_queue_item(
                         f"     Backup at {bp}; keep it until you've confirmed "
                         "the rebuilt album is safe."))
             else:
+                # The walk still flags the album: its upgrade did not happen.
                 item["upgrade_unverified"] = True
-                if not pin_unverified_upgrade_backup(bp):
-                    warn_pin_failed(bp)
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  {truncate(album_dir.name, 40)}: upgrade couldn't be "
-                    f"verified as complete; keeping your original."))
-                log.info(fmt(C.GRAY,
-                    f"     Original preserved at {bp} "
-                    f"(kept until you confirm the upgrade landed)."))
+                put_back = _put_original_back(
+                    bp, album_dir, post_dir if post_dir_exact else None)
+                if put_back is not None:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  {truncate(album_dir.name, 40)}: upgrade "
+                        "couldn't be verified as complete, so your original "
+                        "album was put back."))
+                    if put_back is not True:
+                        log.info(fmt(C.GRAY,
+                            f"     The new download was set aside at "
+                            f"{put_back}."))
+                else:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  {truncate(album_dir.name, 40)}: upgrade "
+                        "couldn't be verified as complete, and your original "
+                        "couldn't be put back automatically."))
+                    log.info(fmt(C.GRAY,
+                        f"     Original preserved at {bp}; it is not removed "
+                        "automatically."))
         elif _item_strict_success:
             # The download and import succeeded cleanly, but the imported album
             # couldn't be relocated (beets renamed the folder past what the

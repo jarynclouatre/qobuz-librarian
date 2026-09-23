@@ -722,7 +722,7 @@ def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypa
 
     monkeypatch.setattr(proc, "_upgrade_replacement_verified", lambda *a: True)
     monkeypatch.setattr(proc, "_carry_non_audio_from_backup",
-                        lambda *_a, **_k: (album_dir, {"sealed": True}))
+                        lambda *_a, **_k: (album_dir, {"sealed": True}, []))
     item["backup_path"] = backup
     item["upgrade_unverified"] = False
     verified = executor._resolve_queue_item(
@@ -884,6 +884,7 @@ def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, 
     monkeypatch.setattr(proc, "find_album_dir_filesystem", lambda _a: album_dir)
     monkeypatch.setattr(proc, "_upgrade_replacement_verified", lambda *a: True)
     monkeypatch.setattr(proc, "_upgrade_trees_verified", lambda *_a: True)
+    monkeypatch.setattr(proc, "_carry_track_annotations", lambda *_a: True)
     monkeypatch.setattr(executor, "retire_backup_beets_entries",
                         lambda *_a, **_k: True)
 

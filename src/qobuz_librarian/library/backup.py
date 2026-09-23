@@ -2656,6 +2656,11 @@ _PARTIAL_RESTORE_SENTINEL = ".ql_partial_restore"
 # dropped). The backup is then the only fully-verified copy.
 _UNVERIFIED_UPGRADE_SENTINEL = ".ql_upgrade_unverified"
 
+# Dropped into the backup that holds a replacement an upgrade could not
+# verify, after the original album was put back in its place. It is a
+# download, not the user's album, and Diagnostics says so.
+_SET_ASIDE_SENTINEL = ".ql_set_aside_replacement"
+
 # Dropped into a backup that exists only as an undo window - the downsample
 # keep-originals copy. Its origin deliberately holds the SMALLER rewrite, so
 # the content-presence proof below can never call it redundant; without this
@@ -2702,6 +2707,7 @@ _SIDECARS = (
     _ORIGIN_SIDECAR,
     _PARTIAL_RESTORE_SENTINEL,
     _UNVERIFIED_UPGRADE_SENTINEL,
+    _SET_ASIDE_SENTINEL,
     _REAP_AFTER_RETENTION_SENTINEL,
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
@@ -2717,6 +2723,7 @@ _SIDECARS = (
 _OPTIONAL_RECEIPT_MARKERS = (
     _PARTIAL_RESTORE_SENTINEL,
     _UNVERIFIED_UPGRADE_SENTINEL,
+    _SET_ASIDE_SENTINEL,
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
     _COMPANION_CARRY_INTENT_SENTINEL,
@@ -5840,6 +5847,7 @@ def carry_backup_companions(
         *,
         expected_replacement_receipt=None,
         expected_owner=None,
+        skip_conflicts=False,
 ):
     """Carry absent non-audio payload from an exact backup without overwrite.
 
@@ -5847,8 +5855,11 @@ def carry_backup_companions(
     replacement receipt must describe the exact public album before this call.
     Both trees stay writer-excluded.  Existing byte-identical companions count
     as already carried; every conflict is left untouched and keeps the backup.
-    On success, returns the replacement's new receipt for the later semantic
-    disposal gate.  Any uncertainty returns ``None`` and leaves the backup.
+    A conflict returns ``None`` unless ``skip_conflicts`` is set, in which case
+    the other companions are still carried; ``companion_conflicts`` names what
+    stayed behind.  On success, returns the replacement's new receipt for the
+    later semantic disposal gate.  Any uncertainty returns ``None`` and leaves
+    the backup.
     """
     if not _backup_owner_authorized(backup, expected_owner):
         return None
@@ -5925,28 +5936,37 @@ def carry_backup_companions(
                     if _file_digest_fd(existing["descriptor"]) != (
                             backup_snapshot["files"][relative_text][
                                 "sha256"]):
+                        if skip_conflicts:
+                            continue
                         return None
                     continue
                 if relative_text in replacement_proof[
                         "receipt"]["tree"]["directories"]:
+                    if skip_conflicts:
+                        continue
                     return None
                 missing_files.append(relative_text)
-            if not missing_files:
-                return _canonical_receipt(replacement_proof["receipt"])
 
             pre_directories = set(
                 replacement_proof["receipt"]["tree"]["directories"])
+            replacement_files = replacement_proof["receipt"]["tree"]["files"]
+            carried_files = []
             missing_directories = set()
             for relative_text in missing_files:
                 parts = _companion_relative_parts(relative_text)
-                for depth in range(1, len(parts)):
-                    relative_directory = "/".join(parts[:depth])
-                    if relative_directory in pre_directories:
+                parents = ["/".join(parts[:depth])
+                           for depth in range(1, len(parts))]
+                if any(parent in replacement_files for parent in parents):
+                    if skip_conflicts:
                         continue
-                    if relative_directory in replacement_proof[
-                            "receipt"]["tree"]["files"]:
-                        return None
-                    missing_directories.add(relative_directory)
+                    return None
+                carried_files.append(relative_text)
+                missing_directories.update(
+                    parent for parent in parents
+                    if parent not in pre_directories)
+            missing_files = carried_files
+            if not missing_files:
+                return _canonical_receipt(replacement_proof["receipt"])
             directory_items = []
             for index, relative_text in enumerate(sorted(
                     missing_directories,
@@ -6017,6 +6037,26 @@ def carry_backup_companions(
     )
 
 
+def companion_conflicts(backup, replacement_receipt):
+    """The backup's non-audio files that the album holds different bytes for.
+
+    After a carry with ``skip_conflicts`` these exist only in the backup.
+    """
+    try:
+        backup_files = backup.receipt["tree"]["files"]
+        album_files = replacement_receipt["tree"]["files"]
+        return sorted(
+            relative for relative, expected in backup_files.items()
+            if PurePosixPath(relative).name not in _SIDECARS
+            and Path(PurePosixPath(relative).name).suffix.lower()
+                not in cfg.AUDIO_EXTS
+            and (album_files.get(relative) or {}).get("sha256")
+                != expected["sha256"]
+        )
+    except (AttributeError, KeyError, TypeError):
+        return None
+
+
 def _write_backup_origin(bp: Path, origin: Path) -> bool:
     """Write the protective origin sidecar. Returns True only if it's actually
     on disk afterwards - the sidecar is the sole signal that keeps the age sweep
@@ -6053,6 +6093,7 @@ def _read_backup_origin(bp: Path):
 _KEEP_MARKERS = (
     _PARTIAL_RESTORE_SENTINEL,
     _UNVERIFIED_UPGRADE_SENTINEL,
+    _SET_ASIDE_SENTINEL,
     _COMPANION_CARRY_INTENT_SENTINEL,
     _COMPANION_CARRY_READY_SENTINEL,
     _COMPANION_CARRY_COMMITTED_SENTINEL,
@@ -9699,6 +9740,43 @@ def restore_upgrade_backup(
             os.close(original_fd)
         _close_descriptors(parent_fds)
         _close_descriptors(backup_fds)
+
+
+def upgrade_backup_restorable(backup, original_path: Path) -> bool:
+    """Whether restore_upgrade_backup's checks on the backup itself pass now."""
+    if not _backup_owner_authorized(backup, None):
+        return False
+    opened = _validated_backup_result(
+        backup,
+        origin=original_path,
+        kinds={"upgrade"},
+        require_complete=True,
+    )
+    if opened is None:
+        return False
+    backup_fds = opened[-1]
+    try:
+        snapshot = _receipt_disposal_snapshot(backup_fds[-1], backup.receipt)
+        return (snapshot is not None
+                and _exact_tree_snapshot(backup_fds[-1]) == snapshot)
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        _close_descriptors(backup_fds)
+
+
+def mark_set_aside_replacement(backup) -> bool:
+    """Label a backup as the download an upgrade put aside, not an album."""
+    return _write_receipt_marker(
+        backup,
+        _SET_ASIDE_SENTINEL,
+        "the download an upgrade could not verify; the original album was "
+        "put back",
+    )
+
+
+def is_set_aside_replacement(path) -> bool:
+    return (Path(path) / _SET_ASIDE_SENTINEL).is_file()
 
 
 def _audio_duration_seconds(path: Path):

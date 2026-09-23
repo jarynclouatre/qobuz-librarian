@@ -817,6 +817,54 @@ def test_upgrade_verification_keeps_backup_when_replacement_is_short(monkeypatch
     assert proc._upgrade_replacement_verified({"id": "x"}, complete, backup) is True
 
 
+def test_upgrade_carries_hand_added_tags_to_the_replacement(monkeypatch, tmp_path):
+    import shutil
+    import subprocess
+
+    from mutagen.flac import FLAC, Picture
+
+    from qobuz_librarian.library.backup import backup_album_dir
+    from qobuz_librarian.modes import process as proc
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not available")
+
+    def track(path, **tags):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=d=1", "-c:a", "flac", "-y", str(path)], check=True)
+        f = FLAC(path)
+        for key, value in {"TITLE": "Song", "TRACKNUMBER": "1",
+                           "DISCNUMBER": "1", "ISRC": "USAAA2100001",
+                           **tags}.items():
+            f[key] = value
+        f.save()
+        return f
+
+    music = tmp_path / "music"
+    album_dir = music / "Artist" / "Album"
+    original = track(album_dir / "01 Song.flac", COMMENT="my note",
+                     MY_TAG="mine", REPLAYGAIN_TRACK_GAIN="-3 dB")
+    back = Picture()
+    back.type, back.mime, back.data = 4, "image/png", b"back-cover"
+    original.add_picture(back)
+    original.save()
+    monkeypatch.setattr(proc.cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(proc.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    backup = backup_album_dir(album_dir)
+    assert backup is not None and backup.complete
+    track(album_dir / "01 Song.flac")
+
+    proc._carry_non_audio_from_backup({"id": "x"}, album_dir, backup,
+                                      replacement_dir=album_dir)
+
+    replacement = FLAC(album_dir / "01 Song.flac")
+    assert replacement["COMMENT"] == ["my note"]
+    assert replacement["MY_TAG"] == ["mine"]
+    assert "REPLAYGAIN_TRACK_GAIN" not in replacement
+    assert [p.data for p in replacement.pictures] == [b"back-cover"]
+
+
 def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path):
     import os
     import sqlite3

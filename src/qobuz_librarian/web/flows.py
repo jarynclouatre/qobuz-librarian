@@ -2888,6 +2888,8 @@ def execute_upgrades(job, chosen, token):
     _skip = BENIGN_UPGRADE_RESULTS
     ok = 0
     kept = 0
+    companion_notes = []
+    put_back_notes = []
     catalogue_failed = 0
     quality_attention = 0
     processing_attention = 0
@@ -2975,6 +2977,10 @@ def execute_upgrades(job, chosen, token):
                 _skip | {"upgrade_aborted_backup_failed"}):
             ok += 1
             job._imported_any = True
+            if result.get("companions_kept"):
+                companion_notes.append((
+                    f"{cand.get('artist', '')} - {cand.get('title') or '?'}",
+                    result["companions_kept"]))
             verdict = result.get("quality_verdict")
             if attention_kind == "quality":
                 quality_attention += 1
@@ -3015,6 +3021,10 @@ def execute_upgrades(job, chosen, token):
         elif _res not in _skip:
             failed += 1
             failed_cands.append(cand)
+            if result and result.get("upgrade_put_back"):
+                put_back_notes.append((
+                    f"{cand.get('artist', '')} - {cand.get('title') or '?'}",
+                    result.get("upgrade_set_aside")))
         if current_interrupted:
             break
         time.sleep(cfg.ARTIST_API_DELAY)
@@ -3037,6 +3047,8 @@ def execute_upgrades(job, chosen, token):
             job.summary += (
                 f" {plural(kept, 'replacement')} retained a safety backup."
             )
+        job.summary += _kept_companions_note(companion_notes)
+        job.summary += _put_back_note(put_back_notes)
         if catalogue_failed:
             job.summary += (
                 f" {plural(catalogue_failed, 'replacement')} needs catalogue "
@@ -3078,6 +3090,8 @@ def execute_upgrades(job, chosen, token):
     if kept:
         msg += (f" {kept} kept the original (upgrade couldn't be verified "
                 f"complete; backup retained).")
+    msg += _kept_companions_note(companion_notes)
+    msg += _put_back_note(put_back_notes)
     if catalogue_failed:
         msg += (f" {plural(catalogue_failed, 'replacement')} needs catalogue "
                 "attention; backup retained.")
@@ -3448,11 +3462,29 @@ def execute_downsamples(
     if total_errors:
         detail = _named_files(failed_files, total_errors)
         reason = _lone_reason(failed_files, total_errors)
-        job.error = (
-            f"Couldn't downsample {detail}: {reason}" if reason else
-            f"Couldn't downsample {detail}. "
-            f"{'It was' if total_errors == 1 else 'They were'} left unchanged."
-        )
+        damaged = [e for e in failed_files if e.get("damaged")]
+        if reason:
+            job.error = f"Couldn't downsample {detail}: {reason}"
+        elif len(damaged) == total_errors:
+            job.error = (
+                f"Couldn't downsample {detail}. They don't decode cleanly and "
+                "may be damaged, so they were left unchanged; Repair can "
+                "re-download them.")
+        else:
+            job.error = (
+                f"Couldn't downsample {detail}. "
+                f"{'It was' if total_errors == 1 else 'They were'} left "
+                "unchanged.")
+            if damaged:
+                names = "; ".join(
+                    f"{e['album']}, {e['name']}" if e.get("album")
+                    else e["name"] for e in damaged[:3])
+                if len(damaged) > 3:
+                    names += f" and {len(damaged) - 3} more"
+                job.error += (
+                    f" {names} {'doesn' if len(damaged) == 1 else 'don'}'t "
+                    "decode cleanly and may be damaged; Repair can "
+                    f"re-download {'it' if len(damaged) == 1 else 'them'}.")
     if total_flush_warns:
         # These files WERE rewritten, only the folder flush failed
         # afterwards, so the swap may not survive a power loss.
@@ -3469,6 +3501,43 @@ def execute_downsamples(
         _mark_job_failed(job)
     else:
         _close_completed_job(job)
+
+
+def _kept_companions_note(notes):
+    """Where an upgrade left original files the new album has its own copy of.
+
+    ``notes`` pairs each album's label with the files kept in its backup.
+    """
+    if not notes:
+        return ""
+    if len(notes) == 1:
+        label, names = notes[0]
+        one = len(names) == 1
+        return (f" {label}: the original {', '.join(names)} "
+                f"{'differs' if one else 'differ'} from the new album's and "
+                f"{'is' if one else 'are'} kept in a backup under Settings > "
+                "Diagnostics.")
+    return (f" {plural(len(notes), 'album')} had original files that differ "
+            "from the new album's; they are kept in backups under Settings > "
+            "Diagnostics.")
+
+
+def _put_back_note(notes):
+    """Name the albums whose unverified upgrade was undone.
+
+    ``notes`` pairs each album's label with where its download was set aside.
+    """
+    if not notes:
+        return ""
+    aside = any(where for _label, where in notes)
+    tail = (" and the new download set aside under Settings > Diagnostics"
+            if aside else "")
+    if len(notes) == 1:
+        return (f" {notes[0][0]}: the new download couldn't be verified as "
+                f"complete, so the original album was put back{tail}.")
+    return (f" {plural(len(notes), 'album')} couldn't be verified as complete "
+            f"after downloading, so the originals were put back"
+            f"{tail.replace('download', 'downloads')}.")
 
 
 def _named_files(entries, total, limit=3):
@@ -4088,7 +4157,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
             carried = process_mode._carry_non_audio_from_backup(
                 full, album_dir, backup)
             if carried is not None:
-                replacement_path, replacement_receipt = carried
+                replacement_path, replacement_receipt, left = carried
                 if not beets_mod.retire_replaced_beets_entries(
                     catalogue_snapshot,
                     replacement_path,
@@ -4108,6 +4177,18 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                         "verification",
                         "The re-download verified, but the replaced Beets "
                         "entries could not be reconciled safely.",
+                    )
+                elif left:
+                    result["companions_kept"] = left
+                    log.info(process_mode._keep_backup_for_companions(
+                        backup, left))
+                    one = len(left) == 1
+                    checkpoint_recovery(
+                        "verification",
+                        "The re-download verified. The original album's "
+                        f"{', '.join(left)} {'differs' if one else 'differ'} "
+                        "from the new album's and "
+                        f"{'is' if one else 'are'} kept here.",
                     )
                 elif backup_mod.retire_verified_repair_backup(backup):
                     checkpoint_recovery(

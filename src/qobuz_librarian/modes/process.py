@@ -38,11 +38,14 @@ from qobuz_librarian.library.backup import (
     backup_album_dir,
     capture_album_source_receipt,
     carry_backup_companions,
+    companion_conflicts,
     dispose_backup,
+    mark_set_aside_replacement,
     pin_unverified_upgrade_backup,
     restore_gap_fill_backup,
     restore_incomplete_upgrade_backup,
     restore_upgrade_backup,
+    upgrade_backup_restorable,
     warn_pin_failed,
 )
 from qobuz_librarian.library.catalog import (
@@ -392,7 +395,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
         log.info(fmt(C.YELLOW,
             "  ⚠  Couldn't fully read the "
             f"{'backup' if old_degraded else 'imported album'} while verifying "
-            "the upgrade; keeping the backup."))
+            "the upgrade."))
         return False
     new_n, new_secs = len(new_tracks), _tracks_seconds(new_tracks)
     old_n, old_secs = len(old_tracks), _tracks_seconds(old_tracks)
@@ -401,26 +404,24 @@ def _upgrade_trees_verified(post_dir, backup_path):
     # copy. Treat an unreadable/empty backup as unverifiable and keep it.
     if old_n == 0:
         log.info(fmt(C.YELLOW,
-            "  ⚠  Couldn't read the upgrade backup (empty or unreadable) "
-            "; keeping it."))
+            "  ⚠  Couldn't read the upgrade backup (empty or unreadable)."))
         return False
     if new_n < old_n:
         log.info(fmt(C.YELLOW,
             f"  ⚠  Upgrade landed {new_n} track(s) but the original held "
-            f"{old_n}; keeping the backup."))
+            f"{old_n}."))
         return False
     if old_secs > 0 and new_secs < old_secs * _UPGRADE_VERIFY_DURATION_RATIO:
         log.info(fmt(C.YELLOW,
             f"  ⚠  Upgrade playtime {int(new_secs)}s falls short of the "
-            f"original {int(old_secs)}s (a track may be truncated); "
-            f"keeping the backup."))
+            f"original {int(old_secs)}s (a track may be truncated)."))
         return False
     # Every original must have one identity-paired replacement.
     pairs = _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks)
     if pairs is None:
         log.info(fmt(C.YELLOW,
             "  ⚠  Couldn't prove one unique replacement for every original "
-            "track; keeping the backup."))
+            "track."))
         return False
     for ot, nt in pairs:
         oq, nq = _track_quality(ot), _track_quality(nt)
@@ -428,7 +429,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
         if _track_identity_conflicts(ot, nt):
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Upgrade matched {title} to a different recording "
-                "identity; keeping the backup."))
+                "identity."))
             return False
         relation = quality_relation(nq, oq)
         if relation not in ("equal", "higher"):
@@ -438,31 +439,28 @@ def _upgrade_trees_verified(post_dir, backup_path):
                 else f"returned at {_fmt_quality(nq)} instead of {_fmt_quality(oq)}"
             )
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Upgrade for {title} {detail}; keeping the backup."))
+                f"  ⚠  Upgrade for {title} {detail}."))
             return False
         old_channels = _known_track_channels(ot)
         new_channels = _known_track_channels(nt)
         if old_channels is None or new_channels is None:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't verify the channel layout for {title} "
-                "; keeping the backup."))
+                f"  ⚠  Couldn't verify the channel layout for {title}."))
             return False
         if new_channels != old_channels:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Upgrade for {title} changed from {old_channels} to "
-                f"{new_channels} channels; keeping the backup."))
+                f"{new_channels} channels."))
             return False
         old_duration = _known_track_duration(ot)
         new_duration = _known_track_duration(nt)
         if old_duration is None or new_duration is None:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't verify the playtime for {title} "
-                "; keeping the backup."))
+                f"  ⚠  Couldn't verify the playtime for {title}."))
             return False
         if new_duration < old_duration * _UPGRADE_VERIFY_DURATION_RATIO:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Upgrade for {title} is shorter than the original "
-                "; keeping the backup."))
+                f"  ⚠  Upgrade for {title} is shorter than the original."))
             return False
     return True
 
@@ -473,14 +471,103 @@ def _intentional_replacement_verified(replacement_path, _backup_path):
     return bool(tracks) and not degraded
 
 
+# Tags the new download and its tagging own, or that describe the old master
+# rather than the recording (gain, encoder, catalogue ids). Whatever else an
+# original track carries is the user's own.
+_REPLACEMENT_OWNED_TAGS = frozenset({
+    "title", "titlesort", "version", "subtitle", "artist", "artists",
+    "artistsort", "artists_sort", "artist_credit", "artists_credit", "album",
+    "albumsort", "albumartist", "album artist", "albumartists",
+    "albumartistsort", "albumartists_sort", "albumartist_credit",
+    "albumartists_credit", "tracknumber", "tracktotal", "totaltracks",
+    "discnumber", "disctotal", "totaldiscs", "discsubtitle", "date", "year",
+    "originaldate", "originalyear", "genre", "composer", "composersort",
+    "lyricist", "arranger", "conductor", "performer", "producer", "remixer",
+    "label", "publisher", "organization", "copyright", "isrc", "barcode",
+    "upc", "ean", "catalognumber", "catalogid", "media", "releasecountry",
+    "releasestatus", "releasetype", "script", "language", "asin", "bpm",
+    "initialkey", "compilation", "encoder", "encodedby", "encoded_by",
+    "encodersettings", "encoder_settings", "length", "itunesadvisory",
+    "explicit", "url", "website",
+})
+_REPLACEMENT_OWNED_PREFIXES = (
+    "replaygain_", "r128_", "musicbrainz_", "acoustid_", "discogs_",
+)
+
+
+def _carry_track_annotations(backup_path, replacement_path):
+    """Give each replacement track the user's own tags and pictures.
+
+    A tag the new file has no value for is copied from its original, unless
+    the new download owns that kind of tag. Embedded pictures other than a
+    front cover the new file already has are added. Returns False when a
+    track could not be paired or written.
+    """
+    from mutagen.flac import FLAC
+
+    from qobuz_librarian.integrations import lyric_fetch
+
+    new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
+    old_tracks, old_degraded = _folder_tracks_checked(backup_path)
+    pairs = (None if new_degraded or old_degraded
+             else _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks))
+    if pairs is None:
+        return False
+    carried_to = 0
+    for old, new in pairs:
+        target_path = Path(new["path"])
+        if (Path(old["path"]).suffix.lower() != ".flac"
+                or target_path.suffix.lower() != ".flac"):
+            continue
+        try:
+            source = FLAC(old["path"])
+            target = FLAC(str(target_path))
+            if target.tags is None:
+                target.add_tags()
+            held = {key.lower() for key, _value in target.tags}
+            tags = [
+                (key, value) for key, value in (source.tags or [])
+                if key.lower() not in held
+                and key.lower() not in _REPLACEMENT_OWNED_TAGS
+                and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
+            ]
+            embedded = {picture.data for picture in target.pictures}
+            has_front = any(picture.type == 3 for picture in target.pictures)
+            pictures = [
+                picture for picture in source.pictures
+                if picture.data not in embedded
+                and not (picture.type == 3 and has_front)
+            ]
+            if not tags and not pictures:
+                continue
+            target.tags.extend(tags)
+            for picture in pictures:
+                target.add_picture(picture)
+            lyric_fetch.save_flac_tags(target, target_path)
+        except Exception as e:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Couldn't carry your own tags onto "
+                f"{truncate(target_path.name, 40)} ({e}); keeping the "
+                "backup."))
+            return False
+        carried_to += 1
+    if carried_to:
+        log.info(fmt(C.GRAY,
+            f"  ⤷  Carried your own tags and pictures onto "
+            f"{plural(carried_to, 'track')}."))
+    return True
+
+
 def _carry_non_audio_from_backup(album, album_dir, backup_path,
                                  replacement_dir=None):
-    """Carry companions between exact held trees.
+    """Carry companions and the user's own track tags between exact trees.
 
-    The returned pair is the exact replacement path and its updated receipt;
-    callers must use both for the final held-view disposal decision. Any
-    changed name, conflicting companion, symlink, active writer, or uncertain
-    durability keeps the backup and returns ``None``.
+    Returns the exact replacement path, its updated receipt, and the
+    companions left in the backup because the replacement has a different
+    file of that name. Callers must use the path and receipt for the final
+    held-view disposal decision, and keep the backup while anything was left
+    in it. Any changed name, symlink, active writer, or uncertain durability
+    keeps the backup and returns ``None``.
     """
     dest = replacement_dir
     if not dest or not dest.exists():
@@ -489,6 +576,8 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
         dest = album_dir
     if not dest or not dest.exists():
         return None
+    if not _carry_track_annotations(backup_path, dest):
+        return None
     receipt = capture_album_source_receipt(dest)
     if receipt is None:
         return None
@@ -496,8 +585,74 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
         backup_path,
         dest,
         expected_replacement_receipt=receipt,
+        skip_conflicts=True,
     )
-    return (dest, updated) if updated is not None else None
+    if updated is None:
+        return None
+    left = companion_conflicts(backup_path, updated)
+    if left is None:
+        return None
+    return dest, updated, left
+
+
+def _keep_backup_for_companions(backup_path, left):
+    """Pin a backup that holds the only copy of companions it could not carry.
+
+    Returns the log line naming them and where they are.
+    """
+    names = ", ".join(left[:3]) + (
+        f" and {len(left) - 3} more" if len(left) > 3 else "")
+    one = len(left) == 1
+    if not pin_unverified_upgrade_backup(
+            backup_path,
+            f"kept for the original {names}, which the new album holds a "
+            "different file for"):
+        warn_pin_failed(backup_path)
+    return (
+        f"  ⚠  The original {names} {'differs' if one else 'differ'} from "
+        f"the new album's, so the new {'one stays' if one else 'ones stay'} "
+        f"in the album and the original {'is' if one else 'are'} kept in "
+        f"the backup at {backup_path}.")
+
+
+def _put_original_back(backup, album_dir, replacement_dir):
+    """Undo an upgrade whose replacement failed verification.
+
+    ``replacement_dir`` is the exactly located folder the replacement was
+    imported into, or None when it could not be told apart. That folder is
+    moved into the backup area as a backup of its own and the original album
+    is restored to ``album_dir``. Returns the set-aside backup, or True when
+    there was no replacement folder to move, once the original is back.
+    Otherwise returns None with the original's backup pinned; the library is
+    then left holding the replacement.
+    """
+    aside = None
+    if not upgrade_backup_restorable(backup, album_dir):
+        if not pin_unverified_upgrade_backup(backup):
+            warn_pin_failed(backup)
+        return None
+    if replacement_dir is not None and replacement_dir.is_dir():
+        aside = backup_album_dir(replacement_dir)
+        if aside is not None and not aside.complete:
+            _recover_incomplete_upgrade_backup(
+                aside, replacement_dir, operation="move of the new download")
+            aside = None
+        if aside is None:
+            if not pin_unverified_upgrade_backup(backup):
+                warn_pin_failed(backup)
+            return None
+    if restore_upgrade_backup(backup, album_dir):
+        if aside is not None:
+            mark_set_aside_replacement(aside)
+        return aside or True
+    if aside is not None and not restore_upgrade_backup(
+            aside, replacement_dir):
+        log.info(fmt(C.RED,
+            f"  ✗  The new download could not be put back either; it is at "
+            f"{aside}."))
+    if not pin_unverified_upgrade_backup(backup):
+        warn_pin_failed(backup)
+    return None
 
 
 def _replacement_audio_paths(replacement_path, receipt):
@@ -1146,6 +1301,9 @@ def process_album(album, args, *, allow_force=True, label=None,
     imported = False
     upgrade_unverified = False
     catalogue_unverified = False
+    companions_kept = []
+    upgrade_put_back = False
+    upgrade_set_aside = None
     elapsed = 0.0
     download_phase_completed = False
     transient_lyric_sigs = []
@@ -1404,7 +1562,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 carried = _carry_non_audio_from_backup(
                     album, album_dir, upgrade_backup_path)
                 if carried is not None:
-                    replacement_path, replacement_receipt = carried
+                    replacement_path, replacement_receipt, left = carried
                     validator = (
                         _upgrade_trees_verified
                         if auto_upgrade_active
@@ -1434,6 +1592,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                         log.info(fmt(C.GRAY,
                             f"     Backup remains at {upgrade_backup_path} "
                             "until you reconcile it."))
+                    elif left:
+                        companions_kept = left
+                        log.info(fmt(C.YELLOW, _keep_backup_for_companions(
+                            upgrade_backup_path, left)))
                     elif dispose_backup(
                         upgrade_backup_path,
                         replacement_path=replacement_path,
@@ -1469,21 +1631,40 @@ def process_album(album, args, *, allow_force=True, label=None,
                         "until you've confirmed the rebuilt album is safe."))
             elif upgrade_succeeded and auto_upgrade_active:
                 # Passed the decode/lossy gate but the rebuilt folder isn't
-                # verifiably as complete as the original. Keep the only full
-                # copy instead of deleting it.
-                upgrade_unverified = True
-                if not pin_unverified_upgrade_backup(upgrade_backup_path):
-                    warn_pin_failed(upgrade_backup_path)
-                log.info(fmt(C.YELLOW,
-                    "\n  ⚠  Upgrade couldn't be verified as complete; "
-                    "keeping your original."))
-                log.info(fmt(C.GRAY,
-                    f"     Original kept at {upgrade_backup_path}; it is not "
-                    "removed automatically."))
-                log.info(fmt(C.WHITE,
-                    f"     To go back to it, move {album_dir!s} out of the "
-                    "library, then move the backup's files, not its "
-                    f"dot-files, into {album_dir!s}."))
+                # verifiably as complete as the original. Put the original
+                # back and move the replacement out of the library.
+                put_back = _put_original_back(
+                    upgrade_backup_path,
+                    album_dir,
+                    find_album_dir_by_track_signatures(post_import_signatures)
+                    if post_import_signatures else None,
+                )
+                if put_back is not None:
+                    upgrade_restored = upgrade_put_back = True
+                    imported = False
+                    upgrade_set_aside = put_back if put_back is not True else None
+                    log.info(fmt(C.YELLOW,
+                        "\n  ⚠  Upgrade couldn't be verified as complete, so "
+                        f"your original album was put back in {album_dir}."))
+                    if upgrade_set_aside is not None:
+                        log.info(fmt(C.GRAY,
+                            "     The new download was set aside at "
+                            f"{upgrade_set_aside}."))
+                    log.info(fmt(C.GRAY,
+                        "     If beets still lists the new download, run "
+                        "`beet update`."))
+                else:
+                    upgrade_unverified = True
+                    log.info(fmt(C.YELLOW,
+                        "\n  ⚠  Upgrade couldn't be verified as complete, and "
+                        "your original couldn't be put back automatically."))
+                    log.info(fmt(C.GRAY,
+                        f"     Original kept at {upgrade_backup_path}; it is "
+                        "not removed automatically."))
+                    log.info(fmt(C.WHITE,
+                        f"     To go back to it, move {album_dir!s} out of the "
+                        "library, then move the backup's files, not its "
+                        f"dot-files, into {album_dir!s}."))
             elif download_phase_completed and args.no_import:
                 upgrade_unverified = True
                 if not pin_unverified_upgrade_backup(
@@ -1835,7 +2016,12 @@ def process_album(album, args, *, allow_force=True, label=None,
         if downsample_outcome["downsample_cancelled"]:
             log.info(f"  {fmt(C.YELLOW, '⚠ downsample:')}     stopped early")
         log.info(f"  {fmt(C.GRAY, '  runtime:')}        {int(elapsed)}s")
-        log.info(f"  {fmt(C.GRAY, '  beets:')}          {'imported' if imported else 'skipped/failed'}")
+        beets_outcome = (
+            "imported" if imported
+            else "imported, then the original was put back" if upgrade_put_back
+            else "skipped/failed"
+        )
+        log.info(f"  {fmt(C.GRAY, '  beets:')}          {beets_outcome}")
         if args.consolidate:
             if consolidation_interrupted:
                 log.info(f"  {fmt(C.YELLOW, '⚠ consolidated:')} stopped early")
@@ -1934,6 +2120,9 @@ def process_album(album, args, *, allow_force=True, label=None,
         "upgrade_unverified": upgrade_unverified,
         "catalogue_unverified": catalogue_unverified,
         "recovery_unverified": recovery_unverified,
+        "companions_kept": companions_kept,
+        "upgrade_put_back": upgrade_put_back,
+        "upgrade_set_aside": str(upgrade_set_aside) if upgrade_set_aside else None,
         "auto_upgrade": bool(auto_upgrade_active),
         "quality_verdict": quality_verdict,
         "consolidation_interrupted": consolidation_interrupted,

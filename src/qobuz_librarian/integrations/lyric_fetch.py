@@ -7,6 +7,7 @@ writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
     doesn't fit the track length.
   • Falls back to plain lyrics across the providers; only writes plain
     lyrics when the track has no existing lyrics at all.
+  • Replaces only lyrics it wrote itself, as recorded in the state file.
   • Per-run circuit breaker disables a provider after several consecutive
     connection-style failures.
   • State file tracks per-file status so subsequent passes only re-check
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import logging
 import math
 import os
@@ -226,6 +228,7 @@ class TrackState:
     source: str = ""        # provider that succeeded
     last_seen: float = 0.0  # epoch of last attempt
     representations: str = ""  # embed | sidecar | both
+    written: str = ""       # sha256 of the lyrics this app last wrote
 
 
 _SAVED_STATUSES = frozenset({
@@ -233,6 +236,15 @@ _SAVED_STATUSES = frozenset({
     "unsafe_path",
 })
 _SAVED_REPRESENTATIONS = frozenset({"", "embed", "sidecar", "both"})
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+
+# Where a saved status/source pair shows the app did not fetch the lyrics.
+_NOT_FETCHED_SOURCES = frozenset({
+    "", "indexed", "kept-existing", "existing-representation"})
+
+
+def _lyrics_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _track_state_from_dict(value) -> TrackState | None:
@@ -257,6 +269,7 @@ def _track_state_from_dict(value) -> TrackState | None:
     status = value.get("status", "")
     source = value.get("source", "")
     representations = value.get("representations", "")
+    written = value.get("written", "")
     return TrackState(
         mtime=float(mtime),
         size=size,
@@ -267,6 +280,11 @@ def _track_state_from_dict(value) -> TrackState | None:
             representations
             if isinstance(representations, str)
             and representations in _SAVED_REPRESENTATIONS
+            else ""
+        ),
+        written=(
+            written
+            if isinstance(written, str) and _DIGEST_RE.fullmatch(written)
             else ""
         ),
     )
@@ -1235,30 +1253,45 @@ def save_flac_tags(
 
 def write_lyrics(f, content: str, *, path=None, **save_kwargs) -> None:
     # Vorbis comments are case-insensitive in mutagen, so assigning
-    # "lyrics" already replaces any existing lyrics/LYRICS value - and
-    # only the distinct `unsyncedlyrics` field needs explicit removal
-    # (deleting it is likewise case-insensitive, so it also clears
-    # UNSYNCEDLYRICS). The previous implementation deleted key "LYRICS"
-    # *after* writing it which, being case-insensitive, wiped the lyrics
-    # just written - embed/both silently stored nothing.
-    if "unsyncedlyrics" in f.tags:
-        del f.tags["unsyncedlyrics"]
+    # "lyrics" replaces any lyrics/LYRICS value. The caller decides whether
+    # that value may go; a separate UNSYNCEDLYRICS field is never touched.
     f.tags["lyrics"] = [content]
     save_flac_tags(
         f, Path(f.filename) if path is None else Path(path), **save_kwargs)
 
 
+def _new_file_mode(parent_fd: int, track_name: str) -> int:
+    """Permissions for a new sidecar: the track's, else what the umask allows."""
+    try:
+        track = os.stat(track_name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISREG(track.st_mode):
+            return stat.S_IMODE(track.st_mode) & 0o666
+    except OSError:
+        pass
+    try:
+        with open("/proc/self/status", encoding="ascii") as status:
+            for line in status:
+                if line.startswith("Umask:"):
+                    return 0o666 & ~int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0o644
+
+
 def write_sidecar(
         path: Path, content: str, *, creation_out=None,
         directory_mutation_out=None, parent_fd=None,
-        parent_guard=None, track_guard=None, sidecar_identity_out=None) -> bool:
+        parent_guard=None, track_guard=None, sidecar_identity_out=None,
+        replaces=None) -> bool:
     """Write lyrics to a .lrc file next to the track (UTF-8).
 
     Never downgrades a user's sidecar: if a non-empty .lrc already exists and is
     SYNCED while the new content is not, keep the existing one. Bound discovery
     recognises the sidecar before any provider fetch, while this final check
-    stops a plain result from overwriting a hand-synced .lrc. Return True when a
-    sidecar was written and False when the better existing file was kept."""
+    stops a plain result from overwriting a hand-synced .lrc. ``replaces``,
+    when given, is the only non-blank text an existing sidecar may hold for it
+    to be replaced. Return True when a sidecar was written and False when the
+    existing file was kept."""
     path = Path(path)
     target = path.with_suffix(".lrc")
     if isinstance(creation_out, dict):
@@ -1303,10 +1336,9 @@ def write_sidecar(
                     break
                 chunks.append(chunk)
             old = b"".join(chunks).decode("utf-8", errors="replace")
-            if (
-                old.strip()
-                and classify(old) == "synced"
-                and classify(content) != "synced"
+            if old.strip() and (
+                (classify(old) == "synced" and classify(content) != "synced")
+                or (replaces is not None and old != replaces)
             ):
                 if (
                     not _guard_passes(track_guard)
@@ -1330,6 +1362,11 @@ def write_sidecar(
         temp_name, temp_fd = _make_temp(owned_parent_fd, target.name)
         if isinstance(directory_mutation_out, dict):
             directory_mutation_out["mutated"] = True
+        os.fchmod(temp_fd, (
+            stat.S_IMODE(os.fstat(existing_fd).st_mode)
+            if existing_fd is not None
+            else _new_file_mode(owned_parent_fd, path.name)
+        ))
         intended_content = content.encode("utf-8")
         _write_all(temp_fd, intended_content)
         temp_path = Path(f"/proc/self/fd/{owned_parent_fd}/{temp_name}")
@@ -1464,8 +1501,11 @@ def write_sidecar(
 
 
 def write_output(
-        path: Path, f, content: str, fmt: str, *, binding):
-    """Persist lyrics per fmt: 'embed' (FLAC tag), 'sidecar' (.lrc), 'both'."""
+        path: Path, f, content: str, fmt: str, *, binding,
+        sidecar_replaces=None):
+    """Persist lyrics per fmt: 'embed' (FLAC tag), 'sidecar' (.lrc), 'both'.
+
+    ``sidecar_replaces`` is passed to write_sidecar as ``replaces``."""
     fmt = _normalise_lyrics_format(fmt)
     if not binding.exact_track_is_named():
         raise OSError(f"{path.name}: track changed before lyric write")
@@ -1509,6 +1549,7 @@ def write_output(
                 parent_fd=binding.parent_fd,
                 parent_guard=binding.chain_is_named,
                 track_guard=track_guard,
+                replaces=sidecar_replaces,
             )
     finally:
         if replacement_fd is not None:
@@ -1909,6 +1950,15 @@ def _process_bound_file(
         return "error"
 
     track_stat = os.fstat(binding.track_fd)
+    # Older state has no digest; a file untouched since this app wrote plain
+    # lyrics into it still holds those lyrics.
+    unchanged_since_fetch = (
+        not st.written
+        and st.status == "plain"
+        and st.source not in _NOT_FETCHED_SOURCES
+        and int(track_stat.st_mtime) == int(st.mtime)
+        and track_stat.st_size == st.size
+    )
     st.mtime = track_stat.st_mtime
     st.size = track_stat.st_size
 
@@ -1966,23 +2016,34 @@ def _process_bound_file(
     kind = ""
     write_format = requested_format
 
+    # Only lyrics this app wrote may be replaced; anything else stays as it is.
+    tagged = f.tags.get("lyrics") if f.tags is not None else None
+    ours = {
+        "embed": bool(tagged) and len(tagged) == 1 and (
+            _lyrics_digest(tagged[0]) == st.written if st.written
+            else unchanged_since_fetch),
+        "sidecar": bool(sidecar) and bool(st.written)
+        and _lyrics_digest(sidecar) == st.written,
+    }
     representation_kinds = {
         name: classify(value) for name, value in representations.items()
     }
+    stale_plain = next(
+        (name for name, kind in representation_kinds.items() if kind == "plain"),
+        None)
     mismatched_both = (
         requested_format == "both"
         and not missing
         and set(representation_kinds.values()) == {"plain", "synced"}
+        and ours[stale_plain]
     )
 
     if mismatched_both:
-        # Both requested copies exist, but one is a weaker stale plain lyric.
-        # Repair that representation from the locally held synced copy. Treating
-        # the pair as already-synced leaves the disagreement cached forever.
-        write_format = next(
-            name for name, value in representation_kinds.items()
-            if value == "plain"
-        )
+        # Both requested copies exist, but one is a weaker stale plain lyric
+        # this app wrote. Repair that representation from the locally held
+        # synced copy. Treating the pair as already-synced leaves the
+        # disagreement cached forever.
+        write_format = stale_plain
         lyrics = next(
             value for name, value in representations.items()
             if representation_kinds[name] == "synced"
@@ -2021,6 +2082,21 @@ def _process_bound_file(
             st.last_seen = time.time()
             commit(state, key, st)
             return "already-plain"
+
+        if not missing and existing_kind == "plain":
+            # Only plain lyrics this app wrote are upgraded to synced ones.
+            upgradable = [name for name in required if ours[name]]
+            if not upgradable:
+                st.status = "plain"
+                st.source = "kept-existing"
+                st.representations = _representation_state(present)
+                st.last_seen = time.time()
+                commit(state, key, st)
+                return "already-plain"
+            write_format = (
+                "both" if len(upgradable) == 2 else upgradable[0])
+            if ours["embed"] and not st.written:
+                st.written = _lyrics_digest(tagged[0])
 
         query = build_query(f)
         if not query:
@@ -2081,7 +2157,8 @@ def _process_bound_file(
 
     try:
         final_identity = write_output(
-            path, f, lyrics, write_format, binding=binding)
+            path, f, lyrics, write_format, binding=binding,
+            sidecar_replaces=sidecar if ours["sidecar"] else "")
     except Exception as e:
         log.error("write failed: %s - %s", path, e)
         if binding.exact_track_is_named():
@@ -2099,6 +2176,8 @@ def _process_bound_file(
 
     st.status = kind
     st.source = source
+    if source != "existing-representation":
+        st.written = _lyrics_digest(lyrics)
     if not _valid_regular_identity(final_identity):
         log.error("write completed without an exact file identity: %s", path)
         st.status = "error"
@@ -2338,6 +2417,7 @@ def index_existing(
                 status=kind, source="indexed",
                 last_seen=time.time(),
                 representations="embed",
+                written=cached.written if cached is not None else "",
             )
             _commit(state, key, st)
             return f"indexed-{kind}"
