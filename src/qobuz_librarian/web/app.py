@@ -4046,6 +4046,7 @@ def _fold_into_parked_library_review(job):
         review_generation=(job.execute_args or {}).get(
             "_library_review_generation"
         ),
+        coverage=job.scan_coverage,
     )
     if folded is False:
         job.status = job_mgr.JobStatus.FAILED
@@ -9227,10 +9228,10 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
                 url="/queue?error=" + _notice_key(
                     "That job is no longer in the record."),
                 status_code=303)
-    if job.execute_kind == "library":
+    if job.execute_kind == "library" and job.status not in job_mgr.TERMINAL:
         # /library is the single Library review surface (launcher, live scan,
-        # and the parked review all render there). A library-kind job never
-        # gets its own page, whatever a History card or an old link says.
+        # and the parked review all render there), so a library-kind job gets
+        # its own page only once it has finished, for its outcome and log.
         params = {}
         if tab:
             params["tab"] = tab
@@ -11203,6 +11204,15 @@ async def job_retry(request: Request, job_id: str):
                           else job_mgr.submit)
                 if submit(new_job, run) is None:
                     return _job_admission_response(request)
+                # The retry is the answer to the failure, so the old row stops
+                # holding the Queue warning dot.
+                attention = job.attention
+                if attention and attention != "recovery" and (
+                    job_persistence.acknowledge_attention(job.id, attention)
+                ):
+                    with job._lock:
+                        if job.attention == attention:
+                            job.attention = ""
         return _land(started=new_job.id)
     except NoCredsError as exc:
         message = _qobuz_action_error_message(exc, unchanged=True)

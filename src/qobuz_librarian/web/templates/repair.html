@@ -23,7 +23,12 @@
 {# A failed or cancelled run stays on the page, but with the launcher under
    it, or the surface owned by a dead job had no way to start another scan. #}
 {% if repair_job %}
-{% if repair_job.status.value == 'failed' %}
+{% if repair_job.status.value == 'failed' and repair_resume and not repair_job.candidates %}
+<div class="ql-work-status" role="alert">
+  <span class="ql-status-chip is-warning">Scan incomplete</span>
+  <span>Part of the library couldn't be scanned. Resume the scan below to check it.</span>
+</div>
+{% elif repair_job.status.value == 'failed' %}
 <div class="ql-work-status" role="alert">
   <span class="ql-status-chip is-error">Repair failed</span>
   <span>{% if repair_job.candidates %}Review the saved album details below, then start a new scan when you are ready.{% else %}No repair choices were saved from that run. Review its log, then start a new scan when you are ready.{% endif %}</span>

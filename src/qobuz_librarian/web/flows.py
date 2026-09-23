@@ -574,16 +574,31 @@ def _row_shows_change(fresh, old):
     return visible(fresh) != visible(old)
 
 
-def fold_new_candidates(parked, cands, *, review_generation=None):
+def _scan_would_offer(c, coverage):
+    """Whether a scan with this coverage decides this row: it re-derived the
+    row's artist, and it looks for the row's kind of album."""
+    artists, partial_only = coverage
+    payload = c.get("payload") or {}
+    artist = str(payload.get("_artist_dir") or c.get("artist") or "")
+    return (
+        c.get("kind", "album") == "album"
+        and artist.casefold() in artists
+        and (not partial_only or bool(payload.get("gap_fill")))
+    )
+
+
+def fold_new_candidates(parked, cands, *, review_generation=None,
+                        coverage=None):
     """Merge a refresh's finds into a parked review, keyed by Qobuz album id
     (falling back to artist+title for keyless carry-overs).
 
     Entries the refresh didn't touch, and the user's ticks on them, are
     never changed. A same-key row found by the refresh takes its fresh title,
     detail, class, and payload while keeping the review row's cid, sequence,
-    and user tick. Absence from the refresh is NOT evidence of change (the
-    cheap refresh skips unchanged artists), so nothing is removed on that
-    basis. Candidates the user dismissed while the refresh ran are checked
+    and user tick. Absence is evidence only inside ``coverage``, the artists a
+    finished scan derived again and whether it looked at Gap Fill alone: a row
+    there that the scan no longer offers is removed. Candidates the user
+    dismissed while the refresh ran are checked
     against a fresh hidden snapshot so the fold can't resurrect them. Returns
     (added, updated), False when the changed review could not be saved, or None
     when the review stopped being parked mid-refresh (approved/discarded)."""
@@ -597,11 +612,17 @@ def fold_new_candidates(parked, cands, *, review_generation=None):
         fresh_by_key = {}
         for c in cands:
             fresh_by_key.setdefault(_key(c), c)
+        covered = None
+        if coverage is not None:
+            covered = ({name.casefold() for name in coverage[0]}, coverage[1])
         updated = 0
         keep = []
         for c in parked.candidates:
             key = _key(c)
             fresh = fresh_by_key.get(key)
+            if fresh is None and covered and _scan_would_offer(c, covered):
+                updated += 1
+                continue
             if fresh is None or _fold_row(fresh) == _fold_row(c):
                 keep.append(c)
                 continue
@@ -1872,6 +1893,8 @@ def _scan_library_impl(
             checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     # Reached here only without an AuthLost/outage abort (that re-raises out
     # above, leaving the checkpoint for resume and not seeding the baseline).
+    # job.candidates now holds everything this scan offers for these artists.
+    job.scan_coverage = (frozenset(scanned), partial_only)
     checkpoint.flush()
     flush_resolve_cache()
     baseline_save_failed = False

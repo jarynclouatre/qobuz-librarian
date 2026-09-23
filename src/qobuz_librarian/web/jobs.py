@@ -367,6 +367,9 @@ class Job:
     # cancel, but its saved row still says it was running, so the next start
     # reports it as interrupted by the restart.
     stopping_for_restart: bool = False
+    # A finished Library scan's artist folders and whether it looked at Gap
+    # Fill alone, so its fold can drop what it no longer offers for them.
+    scan_coverage: tuple | None = field(default=None, repr=False)
     # True only while beets is putting an album into the library. That runs to
     # its own end, so a cancel arriving now cannot stop it.
     importing: bool = False

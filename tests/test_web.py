@@ -6836,7 +6836,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         selected=False,
     )
     jm.registry.add(scan)
-    changed_scan = None
+    changed_scan = rescan = None
     try:
         webapp._fold_into_parked_library_review(scan)
 
@@ -6894,11 +6894,43 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         assert fresh_gap["payload"]["refresh_generation"] == "fresh"
         assert parked.execute_args["_library_review_generation"] == 124.0
         assert badge_calls == ["library"]
+
+        # A finished scan that derived Portishead again settles the rows it
+        # no longer offers there; another artist's rows are left alone.
+        parked.add_candidate(
+            kind="album",
+            title="Mezzanine",
+            artist="Massive Attack",
+            detail="1998 · 16-bit/44.1 kHz · 11 tracks",
+            payload={"album_id": "ma1"},
+            selected=False,
+        )
+        rescan = jm.Job(title="Library scan")
+        rescan.execute_kind = "library"
+        rescan.status = jm.JobStatus.SCANNING
+        rescan.add_candidate(
+            kind="album",
+            title="Dummy",
+            artist="Portishead",
+            detail="1994 · 16-bit/44.1 kHz · 11 tracks",
+            payload={"album_id": "al1"},
+            selected=False,
+        )
+        rescan.scan_coverage = (frozenset({"Portishead"}), False)
+        jm.registry.add(rescan)
+
+        webapp._fold_into_parked_library_review(rescan)
+
+        assert [c["payload"]["album_id"] for c in parked.candidates] == [
+            "al1", "ma1"]
+        assert parked.candidates[0]["selected"] is True
     finally:
         _remove_job(parked)
         _remove_job(scan)
         if changed_scan is not None:
             _remove_job(changed_scan)
+        if rescan is not None:
+            _remove_job(rescan)
 
 
 def test_refresh_fold_refuses_to_publish_an_unsaved_review(monkeypatch, tmp_path):

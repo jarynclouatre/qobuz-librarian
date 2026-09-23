@@ -1334,11 +1334,13 @@ def run_album_download(
         for d in lossy[:5]:
             log.info(fmt(C.GRAY, f"     {_reject_label(d)}"))
     if broken:
+        why = ("the stop cut them off" if is_cancel_requested()
+               else "a re-run usually fixes these")
         log.info(
             fmt(
                 C.YELLOW,
                 f"  ⚠  {len(broken)} track(s) downloaded incomplete and were "
-                f"discarded (a re-run usually fixes these):",
+                f"discarded ({why}):",
             )
         )
         for d in broken[:5]:

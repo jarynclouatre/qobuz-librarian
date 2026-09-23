@@ -11,6 +11,10 @@ from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
+# Raised when the rules that decide which albums a scan offers change, so a
+# refresh derives results saved under older rules again instead of reusing
+# them for unchanged folders.
+CANDIDATE_RULES = 2
 
 # save_kind and mark_review_retired both read-modify-write the shared file;
 # serialise them so a scan's periodic save and a review retire (discard /
@@ -67,7 +71,8 @@ def quality_signature() -> str:
             f"|{bool(getattr(cfg, 'SUPPRESS_SINGLE_TRACK_GAPS', False))}"
             f"|{getattr(cfg, 'ARTIST_CATALOG_LIMIT', '')}"
             f"|{getattr(cfg, 'MISSING_ALBUMS_MIN_TRACKS', '')}"
-            f"|{bool(getattr(cfg, 'EXCLUDE_LIVE_ALBUMS', False))}")
+            f"|{bool(getattr(cfg, 'EXCLUDE_LIVE_ALBUMS', False))}"
+            f"|rules{CANDIDATE_RULES}")
 
 
 def _nonnegative_int(value):
