@@ -267,6 +267,7 @@ CAPPED_FILE          = DATA_DIR / ".qobuz_upgrade_capped.json"
 UPGRADE_STATE_FILE   = DATA_DIR / ".qobuz_upgrade_state.json"
 DOWNSAMPLE_STATE_FILE = DATA_DIR / ".qobuz_downsample_state.json"
 LIBRARY_SCAN_STATE_FILE = DATA_DIR / ".qobuz_library_scan_state.json"
+UNREADABLE_ARTISTS_FILE = DATA_DIR / ".qobuz_unreadable_artists.json"
 
 # Where collection snapshots are written. A plain string, not a Path,
 # because Settings edits it like any other text field; the default lives in

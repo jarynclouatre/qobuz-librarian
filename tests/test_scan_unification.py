@@ -675,6 +675,7 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
         new_releases,
         scan_checkpoint,
         scanner,
+        unreadable_artists,
     )
     from qobuz_librarian.web import flows
 
@@ -689,6 +690,7 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
     for setting in (
         "LIBRARY_SCAN_STATE_FILE", "LIBRARY_GENERATION_STATE_FILE",
         "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "DOWNSAMPLE_STATE_FILE",
+        "UNREADABLE_ARTISTS_FILE",
     ):
         monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
     scandir = scanner.os.scandir
@@ -723,21 +725,29 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
     assert len(job.candidates) == len(readable_names)
     assert job.unchecked_artists == 1
     assert blocked.name in job.summary
+    # The readable part of the library finishes; a library with nothing
+    # readable does not.
+    finished = bool(readable_names)
+    assert library_scan_state.kind_state("missing")["complete"] is finished
+    assert new_releases.is_baseline_complete() is finished
+    assert blocked.name not in new_releases.load()["seen"]
+    assert generation_state.load()["latest_attempt"]["status"] == (
+        "complete" if finished else "incomplete")
+    assert unreadable_artists.load() == ([blocked.name] if finished else [])
     checkpoint = scan_checkpoint.load("missing")
-    assert set(checkpoint["scanned"]) == set(readable_names)
-    assert set(checkpoint["artists"]) == set(readable_names)
-    assert blocked.name not in checkpoint["seen"]
-    assert not library_scan_state.kind_state("missing")["complete"]
-    assert not new_releases.load()["seen"]
-    assert not new_releases.is_baseline_complete()
-    assert generation_state.load()["latest_attempt"]["status"] == "incomplete"
+    if finished:
+        assert checkpoint is None
+    else:
+        assert set(checkpoint["scanned"]) == set(readable_names)
 
     monkeypatch.setattr(scanner.os, "scandir", scandir)
+    assert unreadable_artists.readable_again([blocked.name]) == [blocked.name]
     checked.clear()
     flows.scan_library(jm.Job(title="retry"), "")
 
     assert checked == [blocked.name]
     assert scan_checkpoint.load("missing") is None
+    assert unreadable_artists.load() == []
     assert set(library_scan_state.kind_state("missing")["artists"]) == {
         blocked.name, *readable_names,
     }
@@ -1633,15 +1643,15 @@ def test_a_new_release_check_with_nothing_parked_still_parks_its_own_review(
     assert job.status is jm.JobStatus.PENDING
 
 
-def test_unreadable_album_cannot_finish_library_baseline(
+def test_unreadable_album_is_left_out_of_a_finished_baseline(
         unreadable_album, tmp_path, monkeypatch, caplog):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import (
         downsample_state,
-        generation_state,
         library_scan_state,
         new_releases,
         scan_checkpoint,
+        unreadable_artists,
     )
     from qobuz_librarian.web import flows
 
@@ -1651,6 +1661,7 @@ def test_unreadable_album_cannot_finish_library_baseline(
     for setting in (
         "LIBRARY_SCAN_STATE_FILE", "LIBRARY_GENERATION_STATE_FILE",
         "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "DOWNSAMPLE_STATE_FILE",
+        "UNREADABLE_ARTISTS_FILE",
     ):
         monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
     checked, stamps = [], []
@@ -1673,11 +1684,8 @@ def test_unreadable_album_cannot_finish_library_baseline(
     assert job.unchecked_artists == 1
     assert partial.name in job.summary
     assert str(blocked) in caplog.text
-    saved = scan_checkpoint.load("missing")
-    assert saved["scanned"] == [good.name]
-    assert set(saved["artists"]) == {good.name}
-    assert not stamps
-    assert not library_scan_state.kind_state("missing")["complete"]
-    assert not new_releases.load()["seen"]
-    assert not new_releases.is_baseline_complete()
-    assert generation_state.load()["latest_attempt"]["status"] == "incomplete"
+    assert scan_checkpoint.load("missing") is None
+    assert stamps
+    assert set(library_scan_state.kind_state("missing")["artists"]) == {good.name}
+    assert new_releases.is_baseline_complete()
+    assert unreadable_artists.load() == [partial.name]

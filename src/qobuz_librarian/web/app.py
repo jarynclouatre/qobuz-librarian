@@ -92,6 +92,7 @@ from qobuz_librarian.library import (
 )
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import migrate as migrate_engine
+from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.post_import_relocation import PostImportRelocationAttention
 from qobuz_librarian.modes import process as process_mode
@@ -3893,6 +3894,10 @@ def _fold_into_parked_library_review(job):
     job.status = job_mgr.JobStatus.DONE
 
 
+_UNREADABLE_RECHECK_SECONDS = 300
+_unreadable_checked_at = float("-inf")
+
+
 def _maybe_resume_library_scan():
     """Resume an interrupted library scan when the app is idle, driving it to
     completion across restarts.
@@ -3906,8 +3911,20 @@ def _maybe_resume_library_scan():
         return
     if not _qobuz_ready():
         return
+    readable_again = False
     if generation_state.baseline_complete():
-        return
+        # A folder the last scan left out as unreadable is looked at again
+        # every few minutes, and only a refresh of what changed follows.
+        global _unreadable_checked_at
+        now = time.monotonic()
+        if now - _unreadable_checked_at < _UNREADABLE_RECHECK_SECONDS:
+            return
+        _unreadable_checked_at = now
+        listed = unreadable_artists_mod.load()
+        readable_again = bool(
+            listed and unreadable_artists_mod.readable_again(listed))
+        if not readable_again:
+            return
     try:
         credentials = _authorize_qobuz_live(QobuzAccess.CATALOGUE_ACTION)
     except (
@@ -3922,6 +3939,9 @@ def _maybe_resume_library_scan():
         if any(j.status != job_mgr.JobStatus.AWAITING_REVIEW
                for j in job_mgr.registry.pending_and_running()):
             return  # something already working
+        if readable_again:
+            _start_library_scan(credentials)
+            return
         cp = scan_checkpoint.pending()
         if cp is not None:
             _start_library_scan(
@@ -7513,16 +7533,15 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 if _is_htmx(request):
                     # Offer the deliberate second-edition path instead of a
                     # dead end: a remaster or a different mix can be kept
-                    # alongside the owned copy (it imports into its own (year)
-                    # folder).
+                    # alongside the owned copy, under its edition's name.
                     aid = html.escape(album_id)
                     return HTMLResponse(
                         f'<div class="ql-download-choice">'
                         f'<div class="ql-download-choice-copy">'
                         f'<p>{html.escape(msg)}</p>'
-                        f'<span>A remaster or different mix downloads into its '
-                        f'own folder, kept alongside the existing library copy; '
-                        f'same-year editions may merge in your player.</span></div>'
+                        f'<span>A remaster or different mix downloads into a '
+                        f'folder of its own, named after its edition, beside '
+                        f'the existing library copy.</span></div>'
                         f'<form hx-post="/download" hx-target="#download-toast" '
                         f'hx-swap="innerHTML">'
                         f'<input type="hidden" name="album_id" value="{aid}">'
@@ -7755,6 +7774,8 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
         "library_refresh_scanning": _active_scan(
             "library", statuses=("pending", "scanning")) is not None,
         "library_refresh_failure": _library_refresh_failure(),
+        "unreadable_artists": unreadable_artists_mod.load(),
+        "auto_library_scan": cfg.AUTO_LIBRARY_SCAN,
     }
     # Single-surface rule (same as /repair): a scan in flight or a parked
     # review renders inline right here, so results never hide behind the

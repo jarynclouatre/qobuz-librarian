@@ -5,6 +5,7 @@ process_album) but without any terminal prompts, a scan attaches review
 candidates to the job, and execution runs over the candidates the user kept.
 """
 import argparse
+import dataclasses
 import shutil
 import threading
 import time
@@ -38,6 +39,7 @@ from qobuz_librarian.library import (
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import migrate as migrate_engine
 from qobuz_librarian.library import new_releases as new_releases_mod
+from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
@@ -135,6 +137,15 @@ def _close_completed_job(job):
         if job.status is job_mgr.JobStatus.RUNNING:
             job.cancel_requested = False
             job.status = job_mgr.JobStatus.DONE
+
+
+def _without_unreadable(refresh, unreadable):
+    """A quality pass whose only failures are folders left out as unreadable,
+    counted complete for the rest."""
+    if (refresh is None or refresh.complete or not refresh.errors
+            or set(refresh.errors) - set(unreadable)):
+        return refresh
+    return dataclasses.replace(refresh, errors={}, complete=True)
 
 
 def _record_unchecked_artists(job, count):
@@ -1697,6 +1708,7 @@ def _scan_library_impl(
     done = len(scanned)
     reused = 0
     scan_errors = discovery_errors
+    read_errors = 0
     # Ids for the collection snapshot written when the scan finishes. Artists
     # whose folders haven't changed are skipped by the scan and so aren't here;
     # the snapshot carries their ids forward from the last one.
@@ -1772,6 +1784,7 @@ def _scan_library_impl(
                 # resume retries it rather than baking in a transient miss.
                 scan_errors += 1
                 if isinstance(e, OSError):
+                    read_errors += 1
                     unreadable_artists.add(futures[fut].name)
                 log.info(f"    skipped {futures[fut].name}: {e}")
                 job.push_progress(_step("Scanning library"), done, n, futures[fut].name,
@@ -1839,13 +1852,22 @@ def _scan_library_impl(
         if not partial_only:
             generation_state.finish_attempt(attempt_id, "cancelled")
     else:
-        # Only a reached-all-artists crawl stamps "last scanned" or seeds the
-        # new-release baseline.
+        # A crawl that reached every artist it could read stamps "last
+        # scanned" and seeds the new-release baseline. A folder that cannot be
+        # read is left out and recorded; it has no saved state, so the next
+        # refresh after it becomes readable checks it like a new artist.
+        readable_names = {ad.name for ad in artists} - unreadable_artists
         catalog_complete = (
-            len(state_artists) == len(artists)
-            and len(scanned) == len(artists)
-            and scan_errors == 0
+            bool(readable_names)
+            and readable_names <= set(state_artists)
+            and readable_names <= scanned
+            and scan_errors - discovery_errors - read_errors == 0
         )
+        if catalog_complete and unreadable_artists and not partial_only:
+            downsample_refresh = _without_unreadable(
+                downsample_refresh, unreadable_artists)
+            upgrade_refresh = _without_unreadable(
+                upgrade_refresh, unreadable_artists)
         publication = None
         if catalog_complete and kind == "missing":
             publication = generation_state.commit_catalog_generation(
@@ -1981,7 +2003,26 @@ def _scan_library_impl(
     # state_artists; the checkpoint stays for them and the last-scan stamp is
     # withheld.
     unchecked = len(artists) - len(state_artists) + discovery_errors
-    if not job.cancel_requested and unchecked > 0:
+    if not job.cancel_requested and not partial_only and publication is not None:
+        unreadable_artists_mod.record(unreadable_artists)
+    if (not job.cancel_requested and publication is not None
+            and unchecked == len(unreadable_artists) and unreadable_artists):
+        # Finished for everything readable: the rest is not a resume.
+        names = ", ".join(sorted(unreadable_artists, key=str.casefold)[:5])
+        more = (f" (+{len(unreadable_artists) - 5} more)"
+                if len(unreadable_artists) > 5 else "")
+        job.summary += (
+            f" {plural(len(unreadable_artists), 'artist folder')} couldn't be "
+            f"read and {'was' if len(unreadable_artists) == 1 else 'were'} "
+            f"left out: {names}{more}. "
+            + ("Each is checked by itself once it can be read."
+               if cfg.AUTO_LIBRARY_SCAN
+               else "Scan again once they can be read."))
+    if (not job.cancel_requested and unchecked > 0
+            and publication is not None
+            and unchecked == len(unreadable_artists)):
+        _record_unchecked_artists(job, unchecked)
+    elif not job.cancel_requested and unchecked > 0:
         _record_unchecked_artists(job, unchecked)
         job.summary += f" {plural(unchecked, 'artist')} couldn't be checked"
         if unreadable_artists:

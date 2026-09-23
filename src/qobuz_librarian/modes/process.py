@@ -539,6 +539,56 @@ def pick_canonical_sibling(dirs):
     return max(dirs, key=score)
 
 
+def _name_kept_edition(album, staged_dirs):
+    """Name a kept-alongside edition in its album tag before beets files it.
+
+    Beets names the folder from the album tag and year, so a same-year edition
+    would otherwise land in the owned copy's folder. Every file is renamed or
+    none is: a split tag would split the album across two folders.
+    """
+    title = (album.get("title") or "").strip()
+    name = (album.get("version") or "").strip()
+    if not name and album.get("parental_warning"):
+        name = "Explicit"
+    if not name:
+        name = f"Qobuz {album.get('id')}"
+    if not title or name.casefold() in title.casefold():
+        return
+    audio = [f for d in staged_dirs for f in sorted(Path(d).rglob("*"))
+             if f.is_file() and f.suffix.lower() in cfg.AUDIO_EXTS]
+    if not audio or any(f.suffix.lower() != ".flac" for f in audio):
+        log.info(fmt(C.YELLOW,
+            "  ⚠  Couldn't name this edition in its tags; it may share the "
+            "owned album's folder."))
+        return
+    from mutagen.flac import FLAC
+
+    edition_title = f"{title} ({name})"
+    renamed = []
+    try:
+        for f in audio:
+            tags = FLAC(f)
+            renamed.append((f, list(tags.get("album") or [])))
+            tags["album"] = edition_title
+            tags.save()
+    except Exception as exc:
+        for f, previous in renamed:
+            try:
+                tags = FLAC(f)
+                if previous:
+                    tags["album"] = previous
+                elif "album" in tags:
+                    del tags["album"]
+                tags.save()
+            except Exception:
+                pass
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  Couldn't name this edition in its tags ({exc}); it may "
+            "share the owned album's folder."))
+        return
+    log.info(fmt(C.GRAY, f"  · Filed as {edition_title!r}, beside the owned copy."))
+
+
 def _offer_expanded_edition(album, album_dir, existing, extras, token, args):
     """Look for an expanded Qobuz edition that also covers the on-disk extras
     and let the user pick one. Returns (edition, edition_extras, edition_qual)
@@ -1274,6 +1324,8 @@ def process_album(album, args, *, allow_force=True, label=None,
             if not staged_dirs_for_import:
                 staged_dirs_for_import = validated_staged_album_dirs(
                     download_result)
+            if treat_as_new:
+                _name_kept_edition(album, staged_dirs_for_import)
             prepared = _pre_import_staging_hooks(args, staged_dirs_for_import)
             transient_lyric_sigs, resampled_n = prepared
             downsample_outcome = _pre_import_outcome_fields(prepared)

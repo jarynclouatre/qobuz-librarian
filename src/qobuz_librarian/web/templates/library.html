@@ -58,6 +58,13 @@
   </section>
   {% endif %}
 
+  {% if unreadable_artists %}
+  {% set _n = unreadable_artists|length %}
+  <div class="ql-notice ql-notice-warning" role="status">
+    <span class="ql-notice-copy">{{ _n }} artist folder{{ 's' if _n != 1 }} couldn't be read and {{ 'is' if _n == 1 else 'are' }} left out of these results: {{ unreadable_artists[:5]|join(', ') }}{% if _n > 5 %} and {{ _n - 5 }} more{% endif %}. Check {{ 'its' if _n == 1 else 'their' }} permissions; {% if auto_library_scan %}{{ 'it is' if _n == 1 else 'each is' }} checked by itself once it can be read.{% else %}scan again once {{ 'it' if _n == 1 else 'they' }} can be read.{% endif %}</span>
+  </div>
+  {% endif %}
+
   {% if library_scan_state.ready and library_scan_state.message %}
   <div class="ql-notice ql-notice-warning" role="status">
     <span class="ql-notice-copy">{{ library_scan_state.message }}</span>
