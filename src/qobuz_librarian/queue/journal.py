@@ -12,6 +12,7 @@ import secrets
 import stat
 import tempfile
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -395,9 +396,8 @@ def _reject_duplicate_object_pairs(
     return value
 
 
-def _serialize_queue_item(item):
-    """Pull the planned, JSON-safe inputs out of an in-memory queue item."""
-    return _validate_planned({
+def _queue_item_inputs(item):
+    return {
         "album": item["album"],
         "album_dir": str(item["album_dir"]) if item["album_dir"] else None,
         "label": item["label"],
@@ -409,7 +409,12 @@ def _serialize_queue_item(item):
         "quality": item.get("quality"),
         "force_track_by_track": item.get("force_track_by_track", False),
         "source_premise": item.get("_source_premise"),
-    })
+    }
+
+
+def _serialize_queue_item(item):
+    """Pull the planned, JSON-safe inputs out of an in-memory queue item."""
+    return _validate_planned(_queue_item_inputs(item))
 
 
 def _deserialize_queue_item(data):
@@ -430,7 +435,41 @@ def _deserialize_queue_item(data):
     )
 
 
+# Digests of the exact JSON text of planned inputs that passed the full check.
+# Every save checks the whole queue again; re-checking thousands of unchanged
+# albums on each one made a long library walk slower the more it queued.
+_VALIDATED_PLANNED: OrderedDict[bytes, None] = OrderedDict()
+_VALIDATED_PLANNED_LIMIT = 50_000
+_VALIDATED_PLANNED_LOCK = threading.Lock()
+
+
 def _validate_planned(value: Any) -> dict[str, Any]:
+    try:
+        text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        text = None
+    if text is not None:
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        with _VALIDATED_PLANNED_LOCK:
+            known = digest in _VALIDATED_PLANNED
+            if known:
+                _VALIDATED_PLANNED.move_to_end(digest)
+        if known:
+            copied = json.loads(text)
+            # The same text can come from a tuple or a non-string key, which
+            # the full check refuses; only an exact match skips it.
+            if copied == value:
+                return copied
+    validated = _checked_planned(value)
+    if text is not None:
+        with _VALIDATED_PLANNED_LOCK:
+            _VALIDATED_PLANNED[digest] = None
+            while len(_VALIDATED_PLANNED) > _VALIDATED_PLANNED_LIMIT:
+                _VALIDATED_PLANNED.popitem(last=False)
+    return validated
+
+
+def _checked_planned(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != _PLANNED_KEYS:
         raise ValueError("planned queue inputs have an invalid schema")
     if not isinstance(value["album"], dict):
@@ -1613,6 +1652,54 @@ def _journal_path(operation_id: str) -> Path:
     return cfg.QUEUE_JOURNAL_DIR / f"{_validate_id(operation_id, 'operation_id')}.json"
 
 
+def _file_identity(info) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+# The journal each path held when this process last wrote it, parsed as a
+# reader would parse it, with the file identity it was written as. Writers
+# replace the whole file under the namespace lock, so a matching identity
+# means the file has not changed since.
+_COMMITTED: dict[Path, tuple[tuple[int, ...], QueueJournal]] = {}
+
+
+def _remember_committed(path: Path, journal: QueueJournal) -> None:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        _COMMITTED.pop(path, None)
+        return
+    if stat.S_ISREG(info.st_mode):
+        _COMMITTED[path] = (_file_identity(info), journal)
+    else:
+        _COMMITTED.pop(path, None)
+
+
+def _committed_journal(path: Path, operation_id: str) -> QueueJournal | None:
+    remembered = _COMMITTED.get(path)
+    if remembered is None:
+        return None
+    identity, journal = remembered
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or _file_identity(info) != identity
+        or journal.operation_id != operation_id
+    ):
+        _COMMITTED.pop(path, None)
+        return None
+    return journal
+
+
 def _write_durable_json(path: Path, payload: dict[str, Any]) -> None:
     directory = _ensure_journal_dir()
     if path.parent != directory:
@@ -1692,6 +1779,7 @@ def _read_regular_file(path: Path) -> bytes:
 
 
 def _unlink_and_sync(path: Path) -> None:
+    _COMMITTED.pop(path, None)
     path.unlink()
     _fsync_directory(path.parent)
 
@@ -1763,8 +1851,9 @@ def _publish_initial_journal(
         )
     saved = replace(journal, saved_at=_utc_now(), generation=1)
     payload = _journal_payload(saved)
-    _parse_journal(payload, saved.operation_id)
+    checked = _parse_journal(payload, saved.operation_id)
     _write_durable_json(path, payload)
+    _remember_committed(path, checked)
     return saved
 
 
@@ -1796,7 +1885,9 @@ def _reload_matching_journal(
             "legacy migration must be resolved before queue state can change"
         )
     try:
-        matches = _journal_snapshot_bytes(current) == _journal_snapshot_bytes(previous)
+        matches = current is previous or (
+            _journal_snapshot_bytes(current) == _journal_snapshot_bytes(previous)
+        )
     except (AttributeError, RecursionError, TypeError, ValueError) as exc:
         raise QueueJournalBlocked("provided queue journal snapshot is invalid") from exc
     if not matches:
@@ -1840,13 +1931,22 @@ def _compare_and_commit(
         generation=current.generation + 1,
     )
     payload = _journal_payload(saved)
-    _parse_journal(payload, saved.operation_id)
-    _write_durable_json(_journal_path(saved.operation_id), payload)
+    checked = _parse_journal(payload, saved.operation_id)
+    path = _journal_path(saved.operation_id)
+    _write_durable_json(path, payload)
+    _remember_committed(path, checked)
     return saved
 
 
 @_locked_transaction
 def _load_journal_path(path: Path, operation_id: str) -> QueueLoad:
+    committed = _committed_journal(path, operation_id)
+    if committed is not None:
+        return QueueLoad(
+            status=QueueLoadStatus.READY,
+            journal=committed,
+            paths=(path,),
+        )
     try:
         raw = _read_regular_file(path)
         value = json.loads(
@@ -2250,23 +2350,33 @@ def _replace_pending_items(journal: QueueJournal, items) -> QueueJournal:
         )
     if any(item.phase is not QueuePhase.PENDING for item in journal.items):
         raise QueueJournalBlocked("an active queue operation cannot be replaced as pending")
-    available = list(journal.items)
+    by_label: dict[Any, list[JournalItem]] = {}
+    for item in journal.items:
+        by_label.setdefault(_planned_label(item.planned), []).append(item)
     replacement = []
     for queue_item in items:
-        planned = _serialize_queue_item(queue_item)
+        inputs = _queue_item_inputs(queue_item)
+        # A saved item equal to these inputs was checked when it was saved.
+        candidates = by_label.get(_planned_label(inputs), [])
         match_index = next(
-            (index for index, item in enumerate(available) if item.planned == planned),
+            (index for index, item in enumerate(candidates)
+             if item.planned == inputs),
             None,
         )
         if match_index is None:
             replacement.append(JournalItem(
                 item_id=_new_id(),
                 phase=QueuePhase.PENDING,
-                planned=planned,
+                planned=_validate_planned(inputs),
             ))
         else:
-            replacement.append(available.pop(match_index))
+            replacement.append(candidates.pop(match_index))
     return replace(journal, items=tuple(replacement))
+
+
+def _planned_label(planned) -> str | None:
+    label = planned.get("label") if isinstance(planned, dict) else None
+    return label if isinstance(label, str) else None
 
 
 @_locked_transaction

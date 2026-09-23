@@ -1469,6 +1469,21 @@ def _validated_repair_checkpoint_bundle(artist_dir, value):
     }
 
 
+def _finished_pass(cp, name):
+    """A pass an interrupted scan finished, shaped as the saved state its
+    refresh would otherwise reuse, or None."""
+    result = ((cp or {}).get("passes") or {}).get(name)
+    if (
+        not isinstance(result, dict)
+        or result.get("complete") is not True
+        or not isinstance(result.get("fingerprints"), dict)
+        or not isinstance(result.get("candidates"), list)
+        or not all(isinstance(c, dict) for c in result["candidates"])
+    ):
+        return None
+    return result
+
+
 def scan_library(job, token, partial_only=False, force_full=False):
     previous_generation = generation_state.load()
     previous_attempt_status = str(
@@ -1578,19 +1593,28 @@ def _scan_library_impl(
     # so the parallel workers below see the same consistent view.
     hidden = hidden_mod.load()
     quality_sig = library_scan_state.quality_signature()
-    previous_scan = library_scan_state.kind_state(kind)
     # Dismissing and restoring deliberately do NOT bar the cheap path. The
     # snapshot holds every candidate the last crawl found, dismissed or not, so
     # both directions are a filter over saved data, not a reason to ask Qobuz
     # about the whole library again.
-    cheap_refresh = (
-        not force_full
-        and not resuming
-        and previous_scan.get("complete")
-        # Saved candidates computed under a different quality policy must not
-        # carry forward, a settings change re-derives even unchanged folders.
-        and previous_scan.get("quality_signature", "") == quality_sig
-    )
+    def _reusable(snapshot):
+        return bool(
+            not force_full
+            and not resuming
+            and snapshot.get("complete")
+            # Saved candidates computed under a different quality policy must
+            # not carry forward, a settings change re-derives even unchanged
+            # folders.
+            and snapshot.get("quality_signature", "") == quality_sig
+        )
+
+    previous_scan = library_scan_state.kind_summary(kind)
+    cheap_refresh = _reusable(previous_scan)
+    if cheap_refresh:
+        # Only the cheap path reuses the saved artists; a full rescan would
+        # hold them in memory for its whole run for nothing.
+        previous_scan = library_scan_state.kind_state(kind)
+        cheap_refresh = _reusable(previous_scan)
     # The two refreshes and the fingerprint pass below run before the main
     # artist loop, and on a first scan of a large library each takes real
     # minutes, without progress ticks the job sits on "Waiting for output"
@@ -1621,6 +1645,9 @@ def _scan_library_impl(
     upgrade_refresh_started_at = None
     if not job.cancel_requested and cfg.UPGRADE_SCAN_ENABLED:
         upgrade_refresh_started_at = time.time()
+        # A resume carries over the upgrade pass the interrupted scan finished.
+        # Folders whose fingerprint changed since are checked again.
+        finished_upgrade = _finished_pass(cp, "upgrade") if resuming else None
         log.info("Comparing owned albums against the editions Qobuz can serve…")
         upgrade_refresh = upgrade_state.refresh_for_artists(
             artists,
@@ -1631,12 +1658,16 @@ def _scan_library_impl(
             cancel_check=lambda: bool(job.cancel_requested),
             workers=max(1, int(cfg.ARTIST_SCAN_WORKERS)),
             pool_kwargs=job_mgr.pool_initializer_kwargs(),
-            skip_unchanged=cheap_refresh,
+            skip_unchanged=cheap_refresh or finished_upgrade is not None,
+            previous=finished_upgrade,
             persist=False,
             on_artist=lambda ad, _specs, _err, done_i, total_i: job.push_progress(
                 _step("Checking upgrade quality"),
                 done_i, total_i, ad.name, unit="artist"),
         )
+        if upgrade_refresh.complete and not job.cancel_requested:
+            checkpoint.keep_pass(
+                "upgrade", upgrade_state.reusable_result(upgrade_refresh))
     elif not cfg.UPGRADE_SCAN_ENABLED:
         review_badges.set_ready("upgrade", False)
     target = "Gap Fill candidates in owned albums" if partial_only else "missing albums"
@@ -1847,7 +1878,12 @@ def _scan_library_impl(
     downsample_save_failed = False
     upgrade_save_failed = False
     catalog_complete = False
-    if job.cancel_requested:
+    publication = None
+    if job.stopping_for_restart:
+        # Not a deliberate stop: the progress stays for the next start, as it
+        # would after a crash.
+        pass
+    elif job.cancel_requested:
         # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
         if not checkpoint.clear():
             job.push_line(
@@ -1873,7 +1909,6 @@ def _scan_library_impl(
                 downsample_refresh, unreadable_artists)
             upgrade_refresh = _without_unreadable(
                 upgrade_refresh, unreadable_artists)
-        publication = None
         if catalog_complete and kind == "missing":
             publication = generation_state.commit_catalog_generation(
                 attempt_id,
@@ -3939,7 +3974,9 @@ def _scan_repairs_impl(job, token, checkpoint):
                 job.summary = stopped + _repair_scan_caveats(
                     n_unverified, n_failed_albums, n_failed_artists)
                 log.info("Cancelled. Stopping scan.")
-                if checkpoint.clear() is False:
+                if job.stopping_for_restart:
+                    save_checkpoint(force=True)
+                elif checkpoint.clear() is False:
                     warning = (
                         " Old resume data could not be cleared; check the data "
                         "folder before running Repair again."

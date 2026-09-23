@@ -147,7 +147,9 @@ def test_scan_checkpoint_batches_writes_without_losing_final_progress(tmp_path, 
     assert saved["seen"] == seen
     assert saved["artists"] == artists
     assert saved["meta"] == meta
-    assert set(saved) == {"scanned", "candidates", "seen", "artists", "meta", "ts"}
+    assert set(saved) == {
+        "scanned", "candidates", "seen", "artists", "meta", "passes", "ts",
+    }
     assert scan_checkpoint.load("repair")["scanned"] == ["Other"]
 
 

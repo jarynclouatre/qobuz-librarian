@@ -1,4 +1,6 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
+import copy
+import json
 import math
 import threading
 import time
@@ -90,10 +92,7 @@ def _optional_time(value):
     return parsed, True
 
 
-def load():
-    data = state_file.load_json_object(
-        cfg.LIBRARY_SCAN_STATE_FILE, "the saved library scan",
-        "your parked Library review (it would need a full rescan)")
+def _normalise(data):
     # A version the build doesn't know is a deliberate schema signal, not
     # corruption: leave the file alone and rebuild from a fresh scan.
     if data is None or data.get("version") != STATE_VERSION:
@@ -115,56 +114,134 @@ def load():
     return base
 
 
-def kind_state(kind: str):
-    data = load()
-    bucket = (data.get("kinds") or {}).get(kind)
-    if not isinstance(bucket, dict):
-        return _empty_kind()
+def load():
+    return _normalise(state_file.load_json_object(
+        cfg.LIBRARY_SCAN_STATE_FILE, "the saved library scan",
+        "your parked Library review (it would need a full rescan)"))
+
+
+def _kind_from(data, kind, *, keep_artists=True):
     base = _empty_kind()
-    updated_at, updated_ok = _optional_time(bucket.get("updated_at"))
-    generation, generation_ok = _nonnegative_int(bucket.get("generation"))
-    revision, revision_ok = _nonnegative_int(bucket.get("revision"))
-    raw_artists = bucket.get("artists")
-    artists_ok = raw_artists is None or isinstance(raw_artists, dict)
-    artists = {}
-    for name, entry in (raw_artists or {}).items() if artists_ok else ():
-        if not isinstance(entry, dict):
-            artists_ok = False
-            continue
-        cleaned = _clean_artist_state(entry)
-        raw_candidates = entry.get("candidates")
-        if (
-            raw_candidates is not None
-            and (
-                not isinstance(raw_candidates, list)
-                or len(cleaned["candidates"]) != len(raw_candidates)
-            )
-        ):
-            artists_ok = False
-        artists[str(name)] = cleaned
-    base.update({
-        "updated_at": updated_at,
-        "generation": generation,
-        "revision": revision,
-        "complete": bool(bucket.get("complete")) and all((
-            updated_ok, generation_ok, revision_ok, artists_ok,
-        )),
-        "limited": bool(bucket.get("limited")),
-        "quality_signature": str(bucket.get("quality_signature") or ""),
-        "artists": artists,
-    })
+    bucket = (data.get("kinds") or {}).get(kind)
+    if isinstance(bucket, dict):
+        updated_at, updated_ok = _optional_time(bucket.get("updated_at"))
+        generation, generation_ok = _nonnegative_int(bucket.get("generation"))
+        revision, revision_ok = _nonnegative_int(bucket.get("revision"))
+        raw_artists = bucket.get("artists")
+        artists_ok = raw_artists is None or isinstance(raw_artists, dict)
+        artists = {}
+        for name, entry in (raw_artists or {}).items() if artists_ok else ():
+            if not isinstance(entry, dict):
+                artists_ok = False
+                continue
+            cleaned = _clean_artist_state(entry)
+            raw_candidates = entry.get("candidates")
+            if (
+                raw_candidates is not None
+                and (
+                    not isinstance(raw_candidates, list)
+                    or len(cleaned["candidates"]) != len(raw_candidates)
+                )
+            ):
+                artists_ok = False
+            if keep_artists:
+                artists[str(name)] = cleaned
+        base.update({
+            "updated_at": updated_at,
+            "generation": generation,
+            "revision": revision,
+            "complete": bool(bucket.get("complete")) and all((
+                updated_ok, generation_ok, revision_ok, artists_ok,
+            )),
+            "limited": bool(bucket.get("limited")),
+            "quality_signature": str(bucket.get("quality_signature") or ""),
+            "artists": artists,
+        })
+    if not keep_artists:
+        del base["artists"]
     return base
+
+
+def kind_state(kind: str, data=None):
+    """One kind of the saved snapshot, from ``data`` when the caller already
+    holds load()."""
+    return _kind_from(load() if data is None else data, kind)
+
+
+# A page and its poll need only each kind's header, which a large library
+# buries under every saved candidate. The file is parsed once per version.
+_summary_lock = threading.Lock()
+_summary_read_lock = threading.Lock()
+_summary_cache = None
+
+
+def _summarise(data):
+    return {
+        "updated_at": data["updated_at"],
+        "review_retired_at": data["review_retired_at"],
+        "review_retired_generation": data["review_retired_generation"],
+        "review_retired_reason": data["review_retired_reason"],
+        "kinds": {
+            str(kind): _kind_from(data, kind, keep_artists=False)
+            for kind in data["kinds"]
+        },
+    }
+
+
+def _remember_summary(identity, value):
+    global _summary_cache
+    with _summary_lock:
+        _summary_cache = (str(cfg.LIBRARY_SCAN_STATE_FILE), identity, value)
+
+
+def _cached_summary(path, identity):
+    with _summary_lock:
+        cached = _summary_cache
+    if cached is not None and cached[:2] == (str(path), identity):
+        return copy.deepcopy(cached[2])
+    return None
+
+
+def summary():
+    """load() without the artists of any kind."""
+    path = cfg.LIBRARY_SCAN_STATE_FILE
+    value = _cached_summary(path, state_file.file_identity(path))
+    if value is not None:
+        return value
+    # One parse at a time: a page and its poll arriving together would
+    # otherwise each hold a whole copy of the file.
+    with _summary_read_lock:
+        identity = state_file.file_identity(path)
+        value = _cached_summary(path, identity)
+        if value is not None:
+            return value
+        value = _summarise(load())
+        # Only a file that stayed put while it was read can stand for it.
+        if state_file.file_identity(path) == identity:
+            _remember_summary(identity, value)
+    return copy.deepcopy(value)
+
+
+def kind_summary(kind: str):
+    """kind_state() without the artists."""
+    header = summary()["kinds"].get(kind)
+    if header is None:
+        header = _empty_kind()
+        del header["artists"]
+    return header
 
 
 def _write_state(data):
     try:
-        state_file.write_json(cfg.LIBRARY_SCAN_STATE_FILE, data)
-        return True
+        identity = state_file.write_json(
+            cfg.LIBRARY_SCAN_STATE_FILE, data, indent=None)
     except OSError as e:
         # Losing this file only costs a slower next scan, but say so (verbose)
         # rather than going stale with zero signal on a full/read-only volume.
         cli_logging.vlog(f"library scan state write failed ({e}); next scan re-crawls")
         return False
+    _remember_summary(identity, _summarise(_normalise(data)))
+    return True
 
 
 def _clean_artist_state(entry):
@@ -195,10 +272,20 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
               generation: int = 0, revision: int = 0,
               limited: bool = False):
     with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
-        previous = load()
-        # Keep the previous snapshot intact for a failed publication's rollback.
-        data = dict(previous)
-        kinds = data["kinds"] = dict(previous.get("kinds") or {})
+        header = summary()
+        # Keep the previous file's bytes for a failed publication's rollback,
+        # rather than a parsed copy several times their size.
+        try:
+            previous = cfg.LIBRARY_SCAN_STATE_FILE.read_bytes()
+        except FileNotFoundError:
+            previous = None
+        # Only another kind's saved rows need the whole file read.
+        data = load() if set(header["kinds"]) - {kind} else header
+        data = dict(data)
+        kinds = data["kinds"] = {
+            name: bucket for name, bucket in data["kinds"].items()
+            if name != kind
+        }
         now = time.time()
         kinds[kind] = {
             "updated_at": now,
@@ -231,7 +318,8 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
                 # The snapshot write landed but its authority record did not.
                 # No other snapshot writer can enter until the prior file is
                 # restored.
-                _write_state(previous)
+                _write_state(_normalise(
+                    json.loads(previous) if previous is not None else None))
                 return None
     return int(generation) if generation else now
 

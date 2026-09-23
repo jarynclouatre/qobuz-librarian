@@ -4161,6 +4161,34 @@ def test_interrupted_scan_only_promises_resume_with_a_checkpoint(monkeypatch):
     assert "resumes" in jm.registry.get("interrupted-scan").summary
 
 
+def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
+        monkeypatch):
+    # Hundreds of queued albums came back as failed rows to retry one by
+    # one. Only the download that had started may be failed: replaying it
+    # could repeat work that already touched the library.
+    from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import job_persistence
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+    started = jm.Job(title="First", album_id="1", created_at=100.0,
+                     status=jm.JobStatus.RUNNING)
+    third = jm.Job(title="Third", album_id="3", created_at=300.0)
+    second = jm.Job(title="Second", album_id="2", created_at=200.0)
+    for job in (started, third, second):
+        job_persistence.persist(job)
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    monkeypatch.setattr(jm, "_held_downloads", [])
+
+    jm.restore_jobs({}, requeue=app_mod._requeued_download_run)
+
+    assert jm.registry.get(started.id).status == jm.JobStatus.FAILED
+    assert [job.id for job, _run in jm._held_downloads] == [second.id, third.id]
+    assert {job.status for job, _run in jm._held_downloads} == {
+        jm.JobStatus.PENDING}
+
+
 def test_a_finished_job_keeps_its_log_across_a_restart(monkeypatch):
     """A finished job's log is the record of what a download actually did, so
     it has to outlive the process that wrote it.
@@ -5805,7 +5833,7 @@ def test_resuming_web_mode_restores_saved_jobs_before_unpausing(
     restored_under = []
 
     def restore_jobs(factories, *, durable_recovery_clear,
-                     durable_recovery_job_id):
+                     durable_recovery_job_id, requeue):
         assert factories is app_mod._RESUME_EXECUTE
         assert durable_recovery_clear is True
         assert durable_recovery_job_id is None

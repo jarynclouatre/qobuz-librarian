@@ -49,6 +49,36 @@ def _publish_library_generation(monkeypatch, tmp_path):
     return publication["generation"]
 
 
+def test_baseline_check_reparses_the_saved_scan_only_when_it_changes(
+        monkeypatch, tmp_path):
+    # The Library page and its poll ask this on every request, and parsing a
+    # large library's saved scan each time cost hundreds of MB. A snapshot
+    # another process replaced must still be the one read.
+    import json
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import state_file
+    from qobuz_librarian.library import generation_state, library_scan_state
+
+    _publish_library_generation(monkeypatch, tmp_path)
+    parsed = []
+    load = library_scan_state.load
+    monkeypatch.setattr(library_scan_state, "load",
+                        lambda: parsed.append(True) or load())
+
+    assert generation_state.baseline_complete()
+    assert generation_state.baseline_complete()
+    assert parsed == []
+
+    saved = json.loads(cfg.LIBRARY_SCAN_STATE_FILE.read_text())
+    saved["kinds"]["missing"]["complete"] = False
+    state_file.write_json(cfg.LIBRARY_SCAN_STATE_FILE, saved)
+
+    assert not generation_state.baseline_complete()
+    assert not generation_state.baseline_complete()
+    assert parsed == [True]
+
+
 def test_failed_attempt_keeps_previous_complete_generation(monkeypatch, tmp_path):
     from qobuz_librarian.library import generation_state
 

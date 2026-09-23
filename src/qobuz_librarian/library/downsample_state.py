@@ -454,7 +454,7 @@ def refresh_for_artists(
     complete = not errors
     total = len(artist_list)
     fingerprints: dict[str, str] = {}
-    previous = load()
+    previous = load() if skip_unchanged else {}
     # Keeping or bringing back a hi-res album is a filter over the saved
     # candidates, not a reason to re-read every artist's files.
     can_reuse = skip_unchanged and previous.get("complete")

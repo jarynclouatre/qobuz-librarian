@@ -363,6 +363,10 @@ class Job:
     execute_args: dict = field(default_factory=dict)
     execute_args_unreadable: bool = False
     cancel_requested: bool = False
+    # Set when the app is stopping. The job winds down as it would for a
+    # cancel, but its saved row still says it was running, so the next start
+    # reports it as interrupted by the restart.
+    stopping_for_restart: bool = False
     # True only while beets is putting an album into the library. That runs to
     # its own end, so a cancel arriving now cannot stop it.
     importing: bool = False
@@ -994,6 +998,7 @@ _scan_worker_thread: Optional[threading.Thread] = None
 _download_queue: "queue.Queue" = queue.Queue()
 _scan_queue: "queue.Queue" = queue.Queue()
 _stop_event = threading.Event()
+_restart_stop = threading.Event()
 _worker_lifecycle_lock = threading.Lock()
 _POST_JOB_HOOK_WORKERS = 4
 _POST_JOB_HOOK_QUEUE_CAP = job_persistence.FINISHED_HISTORY_KEEP
@@ -1142,6 +1147,9 @@ def _mark_final_save_failure(job: Job) -> None:
 
 def _finish_task_phase(job: Job) -> None:
     """Durably close one worker phase after its final status is known."""
+    if job.stopping_for_restart and job.status is JobStatus.CANCELED:
+        job.end_stream()
+        return
     if job.status in TERMINAL and job.finished_at is None:
         job.finished_at = time.time()
     if job.status is JobStatus.FAILED and not job.attention:
@@ -1190,7 +1198,8 @@ def _run_task(job: Job, fn):
         # only auto-complete a job that's still RUNNING.
         elif job.status == JobStatus.RUNNING:
             job.status = JobStatus.DONE
-        if job.cancel_requested and job.status == JobStatus.DONE:
+        if (job.cancel_requested and job.status == JobStatus.DONE
+                and not job.stopping_for_restart):
             # The work finished before the stop could take effect. Saying only
             # "Done" would hide that a cancel was asked for and ignored.
             job.attention = job.attention or "cancel_late"
@@ -1387,6 +1396,12 @@ def _worker_loop(work_queue: "queue.Queue"):
             except Exception:
                 pass
             continue
+        if _restart_stop.is_set():
+            # Stopping: leave it queued. Its saved row still says pending, so
+            # the next start queues it again.
+            work_queue.put((job, fn))
+            work_queue.task_done()
+            break
         # Settings changes deferred while we were busy are applied BEFORE the
         # next job so "apply now" takes effect for it, but NOT while the
         # OTHER lane is mid-execution.
@@ -1453,6 +1468,7 @@ def start_worker():
         with _library_operations_condition:
             _library_operations_accepting = True
         _stop_event.clear()
+        _restart_stop.clear()
         if not (_download_worker_thread and _download_worker_thread.is_alive()):
             _download_worker_thread = threading.Thread(
                 target=_worker_loop, args=(_download_queue,), daemon=True,
@@ -1463,6 +1479,26 @@ def start_worker():
                 target=_worker_loop, args=(_scan_queue,), daemon=True,
                 name="job-worker-scan")
             _scan_worker_thread.start()
+
+
+def stop_for_restart() -> None:
+    """Start winding down because the app is stopping.
+
+    Nothing more leaves the queues, and each running job stops as it would
+    for a cancel. An album already importing finishes first. A job that owns
+    an unsettled durable recovery is left to finish, as a cancel would leave
+    it.
+    """
+    _restart_stop.set()
+    _stop_event.set()
+    for job in registry.executing():
+        if cancel_is_protected(job):
+            continue
+        with job._lock:
+            if job.status in TERMINAL:
+                continue
+            job.stopping_for_restart = True
+            job.cancel_requested = True
 
 
 def stop_worker():
@@ -1988,6 +2024,7 @@ def restore_jobs(
     *,
     durable_recovery_clear: bool = False,
     durable_recovery_job_id: str | None = None,
+    requeue: Callable[[Job], Optional[Callable]] | None = None,
 ) -> None:
     """Rehydrate the registry from the on-disk job table at app startup.
 
@@ -2006,7 +2043,9 @@ def restore_jobs(
       * PENDING / RUNNING / SCANNING: the closures that drove them are
         gone, so they're rebadged FAILED("interrupted on restart; submit
         again") and saved back. The user sees them rather than them
-        silently vanishing.
+        silently vanishing. The exception is a PENDING job ``requeue``
+        returns a run function for: it never started, so it waits in the
+        queue again, in the order it was first queued.
     """
     job_persistence.init()
     rows = job_persistence.load_all()
@@ -2016,6 +2055,7 @@ def restore_jobs(
     review = 0
     historical = 0
     restored = []
+    requeued = []
     terminal_payloads = []
 
     unreadable_review_error = (
@@ -2141,6 +2181,14 @@ def restore_jobs(
             job.finished_at = job.finished_at or time.time()
             interrupted += 1
             _persist_restored_transition(job, previous_status)
+        elif (
+            status == JobStatus.PENDING
+            and requeue is not None
+            and not row.get("single_unreadable")
+            and job.id != durable_recovery_job_id
+            and (run := requeue(job)) is not None
+        ):
+            requeued.append((job, run))
         elif status in (JobStatus.PENDING, JobStatus.RUNNING):
             job.status = JobStatus.FAILED
             # Only an album download / single-track download carries an
@@ -2262,13 +2310,19 @@ def restore_jobs(
             registry._jobs[job.id] = job
             registry._order.append(job.id)
         registry._prune_locked()
+    # Behind the same pause as any download that arrives while the library is
+    # paused, and in the order they were queued.
+    requeued.sort(key=lambda pair: pair[0].created_at)
+    with _held_downloads_lock:
+        _held_downloads.extend(requeued)
     for payload in terminal_payloads:
         _start_post_job_hook(payload)
-    if interrupted or review:
+    if interrupted or review or requeued:
         logging.getLogger("qobuz_librarian").info(
-            "Restored %s / %s / %s from the previous run.",
+            "Restored %s / %s / %s / %s from the previous run.",
             plural(historical, "historical job"),
             plural(review, "review job"),
+            plural(len(requeued), "queued download"),
             plural(interrupted, "interrupted job"),
         )
 

@@ -14,6 +14,7 @@ import queue
 import re
 import secrets
 import shutil
+import signal
 import stat
 import threading
 import time
@@ -150,6 +151,10 @@ _STARTUP_RECOVERY_LOCK = threading.RLock()
 # Set before lifespan shutdown starts so no new mutating request can register
 # while the workers and request-owned library operations are draining.
 _SHUTTING_DOWN = False
+# Set the moment a stop signal arrives. The server waits for open requests
+# before it shuts the app down, and a live-progress stream never ends by
+# itself, so the streams close on this and running work starts to wind down.
+_STOP_SIGNALLED = threading.Event()
 # Persisted Web jobs are restored only after this process holds exact write
 # authority.
 _JOBS_RESTORED = False
@@ -1178,6 +1183,8 @@ async def _finish_web_lifespan(
     global _SHUTTING_DOWN
     with _auto_check_lock:
         _SHUTTING_DOWN = True
+    # First, so running work unwinds while the rest shuts down.
+    job_mgr.stop_for_restart()
     for task in (ticker, lock_retry_task, token_probe_task):
         if task is not None:
             task.cancel()
@@ -1870,26 +1877,35 @@ def _review_job_from_library_state():
     primary (callers only reach here when _library_current_job() is None).
     """
 
-    with library_scan_state.review_state_lock(), _SAVED_REVIEW_LOCK:
-        mstate = library_scan_state.kind_state("missing")
-        if not mstate.get("complete"):
-            return None
-        full = library_scan_state.load()
-        missing_generation = int(mstate.get("generation") or 0)
+    def _review_retired(state, missing):
+        if not missing.get("complete"):
+            return True
+        missing_generation = int(missing.get("generation") or 0)
         # Generation is the durable review identity. Keep the timestamp
         # fallback only for a pre-generation saved snapshot.
-        missing_updated = float(mstate.get("updated_at") or 0.0)
-        retired_generation = int(full.get("review_retired_generation") or 0)
-        retired_at = float(full.get("review_retired_at") or 0.0)
-        if (
+        missing_updated = float(missing.get("updated_at") or 0.0)
+        retired_generation = int(state.get("review_retired_generation") or 0)
+        retired_at = float(state.get("review_retired_at") or 0.0)
+        return bool((
             missing_generation
             and retired_generation == missing_generation
         ) or (
             not missing_generation
             and retired_at
             and retired_at >= missing_updated
-        ):
+        ))
+
+    with library_scan_state.review_state_lock(), _SAVED_REVIEW_LOCK:
+        # The header settles most calls without reading every saved row.
+        header = library_scan_state.summary()
+        if _review_retired(header, header["kinds"].get("missing") or {}):
             return None
+        full = library_scan_state.load()
+        mstate = library_scan_state.kind_state("missing", full)
+        if _review_retired(full, mstate):
+            return None
+        missing_generation = int(mstate.get("generation") or 0)
+        missing_updated = float(mstate.get("updated_at") or 0.0)
         hidden = hidden_mod.load()
         specs = []
         for name, entry in (mstate.get("artists") or {}).items():
@@ -1965,6 +1981,7 @@ def _restore_jobs_once() -> None:
                     _startup_recovery_status_value() == "clear"
                 ),
                 durable_recovery_job_id=_startup_recovery_web_job_id(),
+                requeue=_requeued_download_run,
             )
         except Exception as exc:
             logging.getLogger("qobuz_librarian").warning(
@@ -2038,6 +2055,24 @@ def _scrub_stored_credentials(logger) -> None:
             "Stored credential cleanup was incomplete and will retry next start.")
 
 
+def _watch_stop_signal(loop) -> None:
+    """Close live streams and start winding down work on SIGTERM, then let
+    the server's own handler begin its shutdown."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    if not callable(previous):
+        return
+
+    def _on_stop(signum, frame):
+        _STOP_SIGNALLED.set()
+        loop.call_soon_threadsafe(
+            lambda: loop.run_in_executor(None, job_mgr.stop_for_restart))
+        previous(signum, frame)
+
+    signal.signal(signal.SIGTERM, _on_stop)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     global _RUN_LOCK_HANDLE, _LOCK_BUSY_PID, _CLI_MODE, _LOCK_UNENFORCEABLE
@@ -2045,6 +2080,8 @@ async def _lifespan(_app: FastAPI):
     global _JOBS_RESTORED
     raise_open_file_limit()
     _SHUTTING_DOWN = False
+    _STOP_SIGNALLED.clear()
+    _watch_stop_signal(asyncio.get_running_loop())
     with _JOBS_RESTORE_LOCK:
         _JOBS_RESTORED = False
     _STARTUP_RECOVERY_RESULT = None
@@ -7259,6 +7296,46 @@ def _persist_single_download_undo(
         ) from exc
 
 
+def _requeued_download_run(job):
+    """The run for a Search download still queued when the app stopped, or
+    None for any other job.
+
+    Its album and token lived only in memory, so both are fetched again when
+    its turn comes.
+    """
+    args = job.execute_args or {}
+    if (
+        not job.album_id
+        or job.kind != "download"
+        or job.execute_kind
+        or job.recoveries
+        or job.execute_args_unreadable
+        or set(args) - {"new_edition"}
+    ):
+        return None
+    album_id = str(job.album_id)
+    track_id = str((job.single or {}).get("track_id") or "")
+    if job.single and not track_id:
+        return None
+    treat_as_new = bool(args.get("new_edition"))
+
+    def run(j):
+        token = _authorize_qobuz_live(QobuzAccess.DOWNLOAD_ACTION).token
+        album = qobuz_search.get_album(album_id, token)
+        if not track_id:
+            return _make_download_run(album, token, treat_as_new=treat_as_new)(j)
+        track = next(
+            (t for t in (album.get("tracks") or {}).get("items") or []
+             if str(t.get("id")) == track_id),
+            None,
+        )
+        if track is None:
+            raise RuntimeError("That track isn't on this album any more.")
+        return _make_single_track_run(album, track, token)(j)
+
+    return run
+
+
 def _make_single_track_run(album, track, token):
     """Run a single-track download: download just ``track`` via the per-track
     queue path (the same isolation repair uses, never a whole-album rip)."""
@@ -7818,41 +7895,18 @@ def _census_view():
     return view
 
 
-@app.get("/library", response_class=HTMLResponse)
-async def library_page(request: Request, page: int = 1, tab: str = "",
-                       q: str = ""):
+def _library_page_context(page, tab, q):
+    """Everything /library reads from the data and music volumes."""
     badge_generation = review_badges.ready_generation("library")
     # Albums a terminal run downloaded are still listed by the review this
     # process holds in memory until they are applied. Do it before anything
     # reads the review, so the counts and the tabs agree with the library.
-    await asyncio.get_running_loop().run_in_executor(
-        None, flows.apply_pending_review_removals)
-    creds_ok = bool(_read_creds().get("auth_token"))
-    notice_bits = []
-    _skipped = request.query_params.get("skipped", "")
-    if _skipped.isdigit() and int(_skipped):
-        n = int(_skipped)
-        notice_bits.append(
-            f"{n} album{'s' if n != 1 else ''} already in your library, skipped.")
-    if request.query_params.get("noselection"):
-        notice_bits.append("Nothing else is selected on that tab."
-                           if notice_bits else
-                           "Nothing is selected on that tab yet.")
-    elif request.query_params.get("approved"):
-        notice_bits.append("Download started. It's running in the queue.")
-    # Bring all back redirects here with what happened, a store-write failure
-    # included. Without this the page dropped the message and a restore that
-    # never ran looked exactly like one that worked.
-    _notice = _notice_text(request.query_params.get("notice"))
-    if _notice:
-        notice_bits.append(_notice)
-    notice = " ".join(notice_bits)
+    flows.apply_pending_review_removals()
     library_generation = _truthful_library_generation()
     ctx = {
-        "creds_ok": creds_ok, "qobuz_ready": _qobuz_ready(), "page": "library",
+        "creds_ok": bool(_read_creds().get("auth_token")),
+        "qobuz_ready": _qobuz_ready(), "page": "library",
         "library_scan_state": _library_scan_state(),
-        "library_notice": notice,
-        "error": _notice_text(request.query_params.get("error")),
         # Freshness line: when a full gap scan last completed, and whether one
         # ever has (the new-release baseline is only seeded by a clean finish).
         "last_full_scan": _last_scan_age(),
@@ -7889,9 +7943,7 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
         # No live job holds the surface, but the baseline is complete, so rebuild
         # the parked review from saved scan state so post-baseline ALWAYS shows
         # the Missing Albums / Gap Fill tabs, never "Baseline ready" with none.
-        # Off the loop: a large library builds thousands of candidate dicts.
-        loop = asyncio.get_running_loop()
-        ljob = await loop.run_in_executor(None, _review_job_from_library_state)
+        ljob = _review_job_from_library_state()
     ctx["library_job"] = ljob
     ctx["census"] = None
     # Resume hint: an interrupted scan's checkpoint, while no scan runs. A
@@ -7915,23 +7967,50 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
         # A full load has to be able to land on either tab: the address is the
         # only thing a reload or a bookmark still carries.
         ctx.update(_review_context(ljob, page, q, tab=tab))
-    else:
+    elif ctx["library_baseline_exists"]:
         # Finished-state copy: the "Review complete" vs "Review discarded"
         # card keys off why the review retired.
-        if ctx["library_baseline_exists"]:
-            ctx["library_review_retired_reason"] = (
-                library_scan_state.load().get("review_retired_reason") or "")
+        ctx["library_review_retired_reason"] = (
+            library_scan_state.summary()["review_retired_reason"])
     # The census renders whenever the page is calm (no job, or a parked
     # review below it), so it doesn't blink in and out with review state.
     if ctx["library_baseline_exists"] and (
             ljob is None or ljob.status == job_mgr.JobStatus.AWAITING_REVIEW):
-        loop = asyncio.get_running_loop()
-        ctx["census"] = await loop.run_in_executor(None, _census_view)
+        ctx["census"] = _census_view()
     badge_ack = None
     if (ljob is not None
             and ljob.status == job_mgr.JobStatus.AWAITING_REVIEW
             and (ctx.get("review_counts") or {}).get("total")):
         badge_ack = ("library", badge_generation)
+    return ctx, badge_ack
+
+
+@app.get("/library", response_class=HTMLResponse)
+async def library_page(request: Request, page: int = 1, tab: str = "",
+                       q: str = ""):
+    notice_bits = []
+    _skipped = request.query_params.get("skipped", "")
+    if _skipped.isdigit() and int(_skipped):
+        n = int(_skipped)
+        notice_bits.append(
+            f"{n} album{'s' if n != 1 else ''} already in your library, skipped.")
+    if request.query_params.get("noselection"):
+        notice_bits.append("Nothing else is selected on that tab."
+                           if notice_bits else
+                           "Nothing is selected on that tab yet.")
+    elif request.query_params.get("approved"):
+        notice_bits.append("Download started. It's running in the queue.")
+    # Bring all back redirects here with what happened, a store-write failure
+    # included. Without this the page dropped the message and a restore that
+    # never ran looked exactly like one that worked.
+    _notice = _notice_text(request.query_params.get("notice"))
+    if _notice:
+        notice_bits.append(_notice)
+    loop = asyncio.get_running_loop()
+    ctx, badge_ack = await loop.run_in_executor(
+        None, lambda: _library_page_context(page, tab, q))
+    ctx["library_notice"] = " ".join(notice_bits)
+    ctx["error"] = _notice_text(request.query_params.get("error"))
     return _tr(request, "library.html", ctx, review_badge_ack=badge_ack)
 
 
@@ -9532,8 +9611,10 @@ async def job_approve(request: Request, job_id: str):
             } != selected_candidate_ids:
                 return "review_changed"
             if job.execute_kind in _PREMISE_REVIEW_KINDS:
+                # Still admission: the worker's unshared check runs before
+                # anything is written, so one seal per artist is enough here.
                 stale_premise_candidate_ids = candidate_premise.stale_candidate_ids(
-                    current_selected)
+                    current_selected, share_artist_captures=True)
                 if {
                     c.get("cid") for c in current_selected
                 } <= stale_premise_candidate_ids:
@@ -9552,7 +9633,7 @@ async def job_approve(request: Request, job_id: str):
                     return job_mgr.APPROVAL_NO_SELECTION
                 if job.execute_kind in _PREMISE_REVIEW_KINDS:
                     stale_premise_candidate_ids = candidate_premise.stale_candidate_ids(
-                        current_selected)
+                        current_selected, share_artist_captures=True)
                     if {
                         c.get("cid") for c in current_selected
                     } <= stale_premise_candidate_ids:
@@ -13645,7 +13726,7 @@ async def job_stream(request: Request, job_id: str):
         loop = asyncio.get_running_loop()
         empty_ticks = 0
         try:
-            while True:
+            while not _STOP_SIGNALLED.is_set():
                 if not _stream_session_active(request):
                     yield "event: auth\ndata: signed_out\n\n"
                     break
@@ -13715,7 +13796,7 @@ async def job_review_stream(request: Request, job_id: str):
         loop = asyncio.get_running_loop()
         empty_ticks = 0
         try:
-            while True:
+            while not _STOP_SIGNALLED.is_set():
                 if not _stream_session_active(request):
                     yield "event: auth\ndata: signed_out\n\n"
                     break

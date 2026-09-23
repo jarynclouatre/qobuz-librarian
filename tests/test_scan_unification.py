@@ -755,6 +755,53 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
     assert blocked.name in new_releases.load()["seen"]
 
 
+def test_a_scan_stopped_for_a_restart_keeps_its_progress(tmp_path, monkeypatch):
+    # Stopping the app winds a scan down the way a cancel does, but a cancel
+    # throws its progress away. After a restart the scan has to resume.
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import (
+        discovery,
+        downsample_state,
+        generation_state,
+        scan_checkpoint,
+    )
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    for name in ("One", "Two"):
+        album = music / name / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
+    for setting in (
+        "LIBRARY_SCAN_STATE_FILE", "LIBRARY_GENERATION_STATE_FILE",
+        "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "DOWNSAMPLE_STATE_FILE",
+    ):
+        monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
+    job = jm.Job(title="baseline")
+
+    def scan_artist(artist, *_a, **_k):
+        job.stopping_for_restart = True
+        job.cancel_requested = True
+        gap = discovery.AlbumGap(
+            qobuz_album={"id": artist.name, "title": "Missing album"},
+            on_disk_dir=None,
+        )
+        return artist.name, artist.name, [gap], artist.name, [artist.name], {}
+
+    monkeypatch.setattr(flows, "_scan_library_artist", scan_artist)
+    monkeypatch.setattr(
+        downsample_state, "refresh_for_artists",
+        lambda artists, **_k: downsample_state.RefreshResult(
+            [], [artist.name for artist in artists], {}, True),
+    )
+    flows.scan_library(job, "")
+
+    assert scan_checkpoint.load("missing") is not None
+    assert generation_state.load()["latest_attempt"]["status"] == "running"
+
+
 def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import downsample_state, library_scan_state

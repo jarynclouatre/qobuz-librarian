@@ -204,6 +204,18 @@ def _state_from_result(result: RefreshResult, *, generation: int, revision: int)
     }
 
 
+def reusable_result(result: RefreshResult) -> dict:
+    """A finished refresh shaped as the saved state a refresh reuses."""
+    return {
+        "complete": bool(result.complete),
+        "quality_signature": (
+            getattr(result, "quality_signature", "") or quality_signature()
+        ),
+        "fingerprints": dict(getattr(result, "fingerprints", None) or {}),
+        "candidates": list(result.candidates),
+    }
+
+
 def _preserve_concurrent_artist_updates(
     data,
     refresh_started_at,
@@ -487,8 +499,13 @@ def refresh_for_artists(
     skip_unchanged: bool = False,
     persist: bool = True,
     discovery_errors: dict[str, str] | None = None,
+    previous: dict | None = None,
 ):
-    """Refresh upgrade candidates for ``artists`` and persist review specs."""
+    """Refresh upgrade candidates for ``artists`` and persist review specs.
+
+    ``previous`` stands in for the saved state as the result unchanged
+    artists are carried over from.
+    """
     refresh_started_at = time.time()
     refresh_started_revision = generation_state.revision()
     scan_quality_signature = quality_signature()
@@ -502,7 +519,8 @@ def refresh_for_artists(
     complete = not errors
     total = len(artist_list)
     fingerprints: dict[str, str] = {}
-    previous = load()
+    if previous is None:
+        previous = load() if skip_unchanged else {}
     # Dismissing or bringing back an upgrade is a filter over the saved
     # candidates, not a reason to ask Qobuz about every artist again.
     can_reuse = (

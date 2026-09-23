@@ -87,6 +87,22 @@ def store_lock(path):
                 os.close(descriptor)
 
 
+def _identity(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def file_identity(path):
+    """The store's (device, inode, size, mtime), or None when it is absent.
+
+    Every writer here replaces the whole file, so an unchanged identity means
+    unchanged contents.
+    """
+    try:
+        return _identity(os.stat(path))
+    except FileNotFoundError:
+        return None
+
+
 def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
     """Atomically replace the store at `path` with `data` as JSON.
 
@@ -94,7 +110,8 @@ def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
     rename: a fixed ".tmp" name lets two processes clobber each other's
     half-written file into place, and an unsynced rename can leave an empty
     store after a power cut. `load_json_object` exists to preserve that damaged
-    store. Raises OSError; callers keep their own policy for surfacing it."""
+    store. Returns the new file's `file_identity`. Raises OSError; callers keep
+    their own policy for surfacing it."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".",
@@ -105,6 +122,7 @@ def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
                       separators=separators)
             f.flush()
             os.fsync(f.fileno())
+            identity = _identity(os.fstat(f.fileno()))
         os.replace(tmp, path)
     except OSError:
         try:
@@ -122,6 +140,7 @@ def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
             os.close(dfd)
     except OSError:
         pass
+    return identity
 
 
 def preserve_corrupt(path, what, reason, lost):
@@ -206,7 +225,10 @@ def load_json_object(path, what, lost):
         log.warning("%s could not be read (%s); leaving it unchanged.", what, e)
         raise
     try:
-        data = json.loads(raw.decode("utf-8"))
+        text = raw.decode("utf-8")
+        # A large store would otherwise sit in memory twice while it parses.
+        del raw
+        data = json.loads(text)
     except (RecursionError, ValueError) as e:
         if not preserve_corrupt(path, what, e, lost):
             raise

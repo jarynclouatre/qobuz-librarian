@@ -35,6 +35,11 @@ CHECKPOINT_INTERVAL_SECONDS = 5.0
 # scan kinds progressing in parallel can't clobber each other's entry.
 _lock = threading.Lock()
 
+# Set when this process last wrote the file holding nothing but one kind's
+# entry: (path, file identity, kind). The next save of that kind then has
+# nothing to preserve and skips re-reading its own progress.
+_sole_entry = None
+
 
 def _read() -> dict:
     data = state_file.load_json_object(
@@ -45,8 +50,14 @@ def _read() -> dict:
 
 
 def _write(data) -> bool:
+    global _sole_entry
+    _sole_entry = None
     try:
-        state_file.write_json(cfg.SCAN_CHECKPOINT_FILE, data, indent=None)
+        identity = state_file.write_json(
+            cfg.SCAN_CHECKPOINT_FILE, data, indent=None)
+        if len(data) == 1:
+            (kind,) = data
+            _sole_entry = (str(cfg.SCAN_CHECKPOINT_FILE), identity, kind)
         return True
     except OSError as e:
         # Surface (verbose) rather than fail completely silent. On a full or
@@ -61,8 +72,8 @@ def load(kind) -> dict | None:
 
     Shape: ``{"scanned": [folder_name, ...], "candidates": [candidate_dict, ...],
     "seen": {artist_id: [album_id, ...]}, "artists": {folder_name: snapshot},
-    "meta": {...}}``. ``artists`` and ``meta`` are optional for older
-    checkpoints.
+    "meta": {...}, "passes": {name: result}}``. ``artists``, ``meta`` and
+    ``passes`` are optional for older checkpoints.
     """
     cp = _read().get(kind)
     if not isinstance(cp, dict):
@@ -97,6 +108,8 @@ def load(kind) -> dict | None:
     }
     if not isinstance(cp.get("meta"), dict):
         cp["meta"] = {}
+    if not isinstance(cp.get("passes"), dict):
+        cp["passes"] = {}
     return cp
 
 
@@ -109,9 +122,15 @@ def _artist_premise(candidate, artists):
     return entry.get("_premise") if isinstance(entry, dict) else None
 
 
-def save(kind, scanned, candidates, seen, artists=None, meta=None) -> bool:
+def save(kind, scanned, candidates, seen, artists=None, meta=None,
+         passes=None) -> bool:
     with _lock:
-        data = _read()
+        path = str(cfg.SCAN_CHECKPOINT_FILE)
+        if _sole_entry is not None and _sole_entry == (
+                path, state_file.file_identity(path), kind):
+            data = {}
+        else:
+            data = _read()
         artists = {
             name: candidate_premise.compact_artist(entry)
             for name, entry in (artists or {}).items()
@@ -125,6 +144,7 @@ def save(kind, scanned, candidates, seen, artists=None, meta=None) -> bool:
             "seen": seen,
             "artists": artists,
             "meta": meta or {},
+            "passes": passes or {},
             "ts": time.time(),
         }
         return _write(data)
@@ -135,30 +155,42 @@ class Writer(AbstractContextManager):
 
     def __init__(self, kind):
         self.kind = kind
-        self._pending = None
+        self.passes = {}
+        self._latest = None
+        self._pending = False
         self._last_write = None
 
     def save(self, scanned, candidates, seen, artists=None, meta=None) -> bool:
         # Keep the single writer's live containers, without copying receipts.
-        self._pending = (scanned, candidates, seen, artists, meta)
+        self._latest = (scanned, candidates, seen, artists, meta)
+        self._pending = True
         if (self._last_write is None
                 or time.monotonic() - self._last_write >= CHECKPOINT_INTERVAL_SECONDS):
             return self.flush()
         return True
 
+    def keep_pass(self, name, result) -> bool:
+        """Save a finished pass with the progress, for a resume to reuse."""
+        self.passes[name] = result
+        if self._latest is None:
+            return True
+        self._pending = True
+        return self.flush()
+
     def flush(self) -> bool:
-        if self._pending is None:
+        if not self._pending:
             return True
         self._last_write = time.monotonic()
-        saved = save(self.kind, *self._pending)
+        saved = save(self.kind, *self._latest, passes=self.passes)
         if saved is not False:
-            self._pending = None
+            self._pending = False
         return saved
 
     def clear(self) -> bool:
         # Drop the buffer rather than flushing it: writing the file out only
         # to delete the entry a moment later.
-        self._pending = None
+        self._latest = None
+        self._pending = False
         self._last_write = None
         return clear(self.kind)
 

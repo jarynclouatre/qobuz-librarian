@@ -236,7 +236,7 @@ def library_snapshot_available(state=None) -> bool:
     state = load() if state is None else state
     from qobuz_librarian.library import library_scan_state
 
-    snapshot = library_scan_state.kind_state("missing")
+    snapshot = library_scan_state.kind_summary("missing")
     output = output_state("library", state)
     return bool(
         int(state.get("generation") or 0) > 0
