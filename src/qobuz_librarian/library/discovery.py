@@ -782,5 +782,12 @@ def classify_owned_match(result, m, hidden, single_store, artist_name,
                 year=album_year(m.qobuz_album or {}),
                 album_id=(m.qobuz_album or {}).get("id"),
             )
+        # The edition that completed the folder can carry another album id than
+        # the single's, so also clear the mark the way _collecting reads it:
+        # by folder name and year.
+        folder_year = _dir_year(ad.name)
+        if single_store is not None and hidden_mod.is_single(
+                artist_name, ad.name, single_store, year=folder_year):
+            hidden_mod.unmark_single(artist_name, ad.name, year=folder_year)
         result.complete.append({"dir": ad, "qobuz_album": m.qobuz_album,
                                  "existing": m.existing})

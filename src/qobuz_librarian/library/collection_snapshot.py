@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .. import config as cfg
 from .. import state_file
+from ..ui_cli.errors import plural
 from . import discovery, scanner
 
 FORMAT = "qobuz-librarian-collection-snapshot"
@@ -391,10 +392,16 @@ def validate_upload(data, *, allow_empty=False):
                 return False, "That snapshot has an invalid album entry."
             album_count += 1
             track_count += len(album["tracks"])
-    if counts != {
-        "artists": len(artists),
-        "albums": album_count,
-        "tracks": track_count,
-    }:
-        return False, "That snapshot's collection totals do not match its contents."
+    listed = {"artists": len(artists), "albums": album_count,
+              "tracks": track_count}
+    changed = [name for name in listed if counts.get(name) != listed[name]]
+    if changed:
+        lists = [plural(listed[name], name[:-1]) for name in changed]
+        says = [f"{counts[name]:,}" for name in changed]
+        if len(changed) > 1:
+            lists = [", ".join(lists[:-1]), lists[-1]]
+            says = [", ".join(says[:-1]), says[-1]]
+        return False, ("That backup file was changed after it was saved: it "
+                       f"lists {' and '.join(lists)}, but its totals say "
+                       f"{' and '.join(says)}.")
     return True, None

@@ -1352,6 +1352,8 @@ def execute_consolidation(summary):
     removed = [item.path for item in binding.files]
     if binding.database.tracked:
         log.info(fmt(C.GRAY, "    ⤷  Updated the beets library."))
+    if backup_result is not None:
+        log.info(fmt(C.GRAY, f"    ⤷  Backup folder: {backup_result.path}"))
     scanner.clear_scan_caches()
     binding.sibling.remove_empty_directories(binding.files)
     for path in removed:
@@ -1477,7 +1479,8 @@ def consolidate_albums(album, args):
                     ))
                 print_per_track_consolidation(summary)
 
-            log.info(fmt(C.WHITE, "    [d] delete overlapping tracks (default)"))
+            log.info(fmt(C.WHITE, "    [d] move overlapping tracks to the backup "
+                                  "folder (default)"))
             log.info(fmt(C.WHITE, "    [s] show per-track details"))
             log.info(fmt(C.WHITE, "    [k] keep this sibling untouched"))
             log.info(fmt(C.WHITE, "    [q] stop consolidation entirely"))
@@ -1509,7 +1512,8 @@ def consolidate_albums(album, args):
                                 C.GRAY, "    Confirmation not given. Skipped."))
                             break
                     elif not confirm(
-                        f"    Delete {overlap_count} track(s) from this sibling?",
+                        f"    Move {overlap_count} track(s) from this sibling "
+                        "to the backup folder?",
                         default_yes=True,
                         auto_yes=False,
                     ):
@@ -1520,12 +1524,14 @@ def consolidate_albums(album, args):
                     if deleted_count:
                         log.info(fmt(
                             C.GREEN,
-                            f"    ✓  Deleted {plural(deleted_count, 'track')}.",
+                            f"    ✓  Moved {plural(deleted_count, 'track')} "
+                            "to the backup folder.",
                         ))
                     if failures:
                         log.info(fmt(
                             C.RED,
-                            f"    ✗  Failed to delete {plural(failures, 'track')}.",
+                            f"    ✗  {plural(failures, 'track')} not "
+                            "consolidated; see above.",
                         ))
                     n_actioned += deleted_count
                     break

@@ -1,6 +1,8 @@
 """Build a download review from a collection snapshot."""
 from __future__ import annotations
 
+from collections import Counter
+
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
 from qobuz_librarian.api.search import (
@@ -8,7 +10,7 @@ from qobuz_librarian.api.search import (
     get_album,
     search_albums,
 )
-from qobuz_librarian.library import candidate_premise, discovery, scanner
+from qobuz_librarian.library import candidate_premise, catalog, discovery, scanner
 from qobuz_librarian.library.catalog import (
     dedup_album_versions,
     is_lossless_album,
@@ -31,6 +33,7 @@ ISRC_LOOKUP_TRIES = 3
 NO_QOBUZ_ALBUM = "no longer on Qobuz"
 NO_ISRC_MATCH = "no track matched by ISRC"
 NO_SEARCH_MATCH = "no album matched by name"
+NO_QOBUZ_TRACKS = "its missing tracks are not on Qobuz"
 UNSAFE_NAME = "the backup names a folder the library can't hold"
 
 
@@ -81,6 +84,7 @@ class _OnDisk:
             self.by_normalized.setdefault(normalize(artist_dir.name),
                                           artist_dir)
         self._albums = {}
+        self._tracks = {}
         self._isrcs = {}
 
     def artist_dir(self, name):
@@ -95,36 +99,76 @@ class _OnDisk:
                 artist_dir)
         return self._albums[artist_dir]
 
-    def isrcs(self, artist_dir):
-        """Every ISRC under one artist. Read only when a name match fails, so
-        an untouched library never pays for the tag walk."""
-        if artist_dir not in self._isrcs:
-            found = set()
-            for album_dir in self.album_dirs(artist_dir):
-                for track in scanner.read_album_dir(album_dir):
-                    code = _isrc(track.get("isrc"))
-                    if code:
-                        found.add(code)
-            self._isrcs[artist_dir] = found
-        return self._isrcs[artist_dir]
+    def tracks(self, album_dir):
+        if album_dir not in self._tracks:
+            self._tracks[album_dir] = scanner.read_album_dir(album_dir)
+        return self._tracks[album_dir]
+
+    def isrcs(self, album_dir):
+        if album_dir not in self._isrcs:
+            self._isrcs[album_dir] = {
+                code for code in (_isrc(t.get("isrc"))
+                                  for t in self.tracks(album_dir)) if code}
+        return self._isrcs[album_dir]
 
 
-def _still_owned(disk, artist_dir, album) -> bool:
-    """Is this backed-up album still in the library under some name?"""
+def _owned_folder(disk, artist_dir, album, backup_ids):
+    """The folder that holds this backed-up album now, or None.
+
+    ``backup_ids`` maps the backup's folder names to their Qobuz ids. A folder
+    the backup also names carries that id, and two known ids settle whether a
+    same-titled folder is this album; without one the year must agree, so a
+    2001 "Weezer" is not taken for the 1994 one.
+    """
     album_dirs = disk.album_dirs(artist_dir)
-    if any(d.name == album.get("name") for d in album_dirs):
-        return True
-    owned_titles = discovery.owned_album_titles(album_dirs)
-    for candidate in (album.get("name"), album.get("title")):
-        key = discovery.owned_title_key(candidate)
-        if key and key in owned_titles:
-            return True
+    name = album.get("name") or ""
+    for d in album_dirs:
+        if d.name == name:
+            return d
+    wanted_id = str(album.get("qobuz_album_id") or "")
+    wanted_year = catalog._dir_year(name)
+    keys = {discovery.owned_title_key(album.get("name")),
+            discovery.owned_title_key(album.get("title"))} - {""}
+    for d in album_dirs:
+        if discovery.owned_title_key(d.name) not in keys:
+            continue
+        held_id = backup_ids.get(d.name)
+        if wanted_id and held_id:
+            if held_id == wanted_id:
+                return d
+            continue
+        held_year = catalog._dir_year(d.name)
+        if wanted_year is None or held_year is None or held_year == wanted_year:
+            return d
     wanted = _album_isrcs(album)
     if not wanted:
-        return False
-    have = disk.isrcs(artist_dir)
-    matched = sum(1 for code in wanted if code in have)
-    return matched / len(wanted) >= ISRC_OWNED_RATIO
+        return None
+    best, best_matched = None, 0
+    for d in album_dirs:
+        have = disk.isrcs(d)
+        matched = sum(1 for code in wanted if code in have)
+        if matched > best_matched:
+            best, best_matched = d, matched
+    if best is not None and best_matched / len(wanted) >= ISRC_OWNED_RATIO:
+        return best
+    return None
+
+
+def _lost_tracks(disk, album_dir, album) -> int:
+    """How many of the backup's tracks for this album its folder lacks."""
+    isrcs = disk.isrcs(album_dir)
+    titles = Counter(normalize(t.get("title") or "")
+                     for t in disk.tracks(album_dir))
+    lost = 0
+    for track in album.get("tracks") or []:
+        if not isinstance(track, dict):
+            continue
+        title = normalize(track.get("title") or "")
+        if titles[title] > 0:
+            titles[title] -= 1
+        elif _isrc(track.get("isrc")) not in isrcs:
+            lost += 1
+    return lost
 
 
 def _usable(album) -> bool:
@@ -233,6 +277,8 @@ def scan_restore(job, snapshot, token):
     total = len(artists)
     owned = 0
     queued = 0
+    gap_fills = 0
+    unlisted = 0
     unresolved = []
     seen_album_ids = set()
 
@@ -247,11 +293,14 @@ def scan_restore(job, snapshot, token):
             continue
         artist_dir = disk.artist_dir(artist_name)
         artist_key = artist_dir.name if artist_dir is not None else None
-        for album in entry.get("albums") or []:
-            if not isinstance(album, dict):
-                continue
+        albums = [a for a in entry.get("albums") or [] if isinstance(a, dict)]
+        backup_ids = {a["name"]: str(a["qobuz_album_id"]) for a in albums
+                      if a.get("name") and a.get("qobuz_album_id")}
+        for album in albums:
             title = _snapshot_album_title(album) or "?"
-            if artist_dir is not None and _still_owned(disk, artist_dir, album):
+            folder = (_owned_folder(disk, artist_dir, album, backup_ids)
+                      if artist_dir is not None else None)
+            if folder is not None and not _lost_tracks(disk, folder, album):
                 owned += 1
                 continue
             found, reason = _resolve(album, artist_name, token)
@@ -262,14 +311,26 @@ def scan_restore(job, snapshot, token):
             album_id = str(found.get("id"))
             if album_id in seen_album_ids:
                 continue
+            missing = []
+            if folder is not None:
+                missing, _present = catalog.compute_missing(
+                    (found.get("tracks") or {}).get("items") or [],
+                    disk.tracks(folder))
+                if not missing:
+                    unlisted += 1
+                    job.push_line(f"{artist_name} - {title}: {NO_QOBUZ_TRACKS}.")
+                    continue
             added = flows.add_restore_candidate(
-                job, found, artist_name, artist_key=artist_key)
+                job, found, artist_name, artist_key=artist_key,
+                album_dir=folder, missing=missing)
             if added is None:
                 unresolved.append((artist_name, title, UNSAFE_NAME))
                 job.push_line(f"{artist_name} - {title}: {UNSAFE_NAME}.")
                 continue
             seen_album_ids.add(album_id)
             queued += 1
+            if folder is not None:
+                gap_fills += 1
         job.push_progress("Checking the backup", done, total, artist_name,
                           found=queued, unit="artist")
 
@@ -279,7 +340,12 @@ def scan_restore(job, snapshot, token):
         log.info(job.summary)
         return
 
-    parts = [f"Restore review ready: {plural(queued, 'album')} to download."
+    ready = []
+    if queued > gap_fills:
+        ready.append(f"{plural(queued - gap_fills, 'album')} to download")
+    if gap_fills:
+        ready.append(f"{plural(gap_fills, 'album')} with missing tracks")
+    parts = [f"Restore review ready: {' and '.join(ready)}."
              if queued else "Nothing to restore."]
     if disk.unreadable:
         if not queued:
@@ -292,5 +358,8 @@ def scan_restore(job, snapshot, token):
     if unresolved:
         parts.append(f"{plural(len(unresolved), 'album')} couldn't be matched "
                      "on Qobuz; see the job log.")
+    if unlisted:
+        parts.append("Qobuz no longer lists the missing tracks of "
+                     f"{plural(unlisted, 'album')}; see the job log.")
     job.summary = " ".join(parts)
     log.info(job.summary)

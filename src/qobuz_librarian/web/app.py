@@ -3361,6 +3361,64 @@ def _new_release_review():
     return None
 
 
+# A failed live check holds off the next automatic one: five minutes, doubling
+# per failure up to an hour. An outage then costs one check per window instead
+# of one per dashboard load.
+_AUTO_START_RETRY_FIRST = 300.0
+_AUTO_START_RETRY_MAX = 3600.0
+_auto_start_backoff = {"until": 0.0, "delay": 0.0}
+_auto_start_busy = threading.Lock()
+
+
+def _auto_start_credentials():
+    """The live Qobuz check before an automatic start, or None when it fails
+    or a recent failure is still being backed off."""
+    if time.time() < _auto_start_backoff["until"]:
+        return None
+    try:
+        credentials = _authorize_qobuz_live(QobuzAccess.CATALOGUE_ACTION)
+    except (
+        NoCredsError,
+        AuthLost,
+        QobuzUnavailable,
+        QobuzEntitlementError,
+        CredentialChanged,
+    ):
+        delay = min(max(_auto_start_backoff["delay"] * 2,
+                        _AUTO_START_RETRY_FIRST), _AUTO_START_RETRY_MAX)
+        _auto_start_backoff.update(until=time.time() + delay, delay=delay)
+        return None
+    _auto_start_backoff.update(until=0.0, delay=0.0)
+    return credentials
+
+
+def _new_release_check_due():
+    """Whether the automatic new-release check should run, from local state
+    alone: nothing here touches the network."""
+    if cfg.NEW_RELEASE_CHECK_INTERVAL <= 0 or _web_writes_paused():
+        return False
+    # Don't bother (or thrash) when there's no token, or one we already know
+    # Qobuz is rejecting; it would just fail on the first call every load.
+    if not _qobuz_ready():
+        return False
+    # Only after a full library scan has established the baseline; otherwise the
+    # check would crawl every artist just to record a starting point and surface
+    # nothing. A completed library scan seeds it (flows.scan_library).
+    if not new_releases.is_baseline_complete():
+        return False
+    # And never ahead of an interrupted library scan waiting to resume: finishing
+    # that takes priority (it's what the user's resume needs the scan lane for),
+    # and a delta check can wait until the library is whole again.
+    if scan_checkpoint.pending() is not None:
+        return False
+    if time.time() < _auto_start_backoff["until"]:
+        return False
+    # Avoid a network probe until the interval says a run is due. This first
+    # read is repeated under the lock after the probe.
+    last = new_releases.last_run()
+    return last is None or (time.time() - last) >= cfg.NEW_RELEASE_CHECK_INTERVAL
+
+
 def _maybe_auto_check_new_releases():
     """Quietly run the new-release check on dashboard load when it's due.
 
@@ -3371,36 +3429,10 @@ def _maybe_auto_check_new_releases():
     the run folds its finds into that list, so the timer keeps the review
     current instead of going quiet until the list is cleared.
     """
-    if cfg.NEW_RELEASE_CHECK_INTERVAL <= 0 or _web_writes_paused():
+    if not _new_release_check_due():
         return
-    # Don't bother (or thrash) when there's no token, or one we already know
-    # Qobuz is rejecting; it would just fail on the first call every load.
-    if not _qobuz_ready():
-        return
-    # Only after a full library scan has established the baseline; otherwise the
-    # check would crawl every artist just to record a starting point and surface
-    # nothing. A completed library scan seeds it (flows.scan_library).
-    if not new_releases.is_baseline_complete():
-        return
-    # And never ahead of an interrupted library scan waiting to resume: finishing
-    # that takes priority (it's what the user's resume needs the scan lane for),
-    # and a delta check can wait until the library is whole again.
-    if scan_checkpoint.pending() is not None:
-        return
-    # Avoid a network probe until the interval says a run is due. This first
-    # read is repeated under the lock after the probe.
-    last = new_releases.last_run()
-    if last is not None and (time.time() - last) < cfg.NEW_RELEASE_CHECK_INTERVAL:
-        return
-    try:
-        credentials = _authorize_qobuz_live(QobuzAccess.CATALOGUE_ACTION)
-    except (
-        NoCredsError,
-        AuthLost,
-        QobuzUnavailable,
-        QobuzEntitlementError,
-        CredentialChanged,
-    ):
+    credentials = _auto_start_credentials()
+    if credentials is None:
         return
     # Serialise the check-and-submit so two concurrent dashboard loads can't
     # both pass the gate and queue the check twice.
@@ -3929,6 +3961,58 @@ _UNREADABLE_RECHECK_SECONDS = 300
 _unreadable_checked_at = float("-inf")
 
 
+def _unreadable_recheck_pending():
+    """Whether folders the last scan left out as unreadable are due another
+    look, from local state alone."""
+    return bool(
+        cfg.AUTO_LIBRARY_SCAN
+        and not _web_writes_paused()
+        and _qobuz_ready()
+        and generation_state.baseline_complete()
+        and time.monotonic() - _unreadable_checked_at
+            >= _UNREADABLE_RECHECK_SECONDS
+        and unreadable_artists_mod.load()
+    )
+
+
+def _library_scan_resume_due():
+    """Whether an interrupted library scan is waiting to resume, from local
+    state alone."""
+    return bool(
+        cfg.AUTO_LIBRARY_SCAN
+        and not _web_writes_paused()
+        and _qobuz_ready()
+        and not generation_state.baseline_complete()
+        and scan_checkpoint.pending() is not None
+    )
+
+
+def _start_due_jobs_in_background():
+    """Run the dashboard's automatic starts off the request. Each begins with a
+    live Qobuz check, which must never hold up the page."""
+    if not (_library_scan_resume_due() or _unreadable_recheck_pending()
+            or _new_release_check_due()):
+        return
+    if not _auto_start_busy.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            _maybe_resume_library_scan()
+            _maybe_auto_check_new_releases()
+        except Exception as e:
+            logging.getLogger("qobuz_librarian").warning(
+                "automatic start from the dashboard failed: %s", e)
+        finally:
+            _auto_start_busy.release()
+
+    try:
+        threading.Thread(target=run, name="dashboard-auto-start",
+                         daemon=True).start()
+    except RuntimeError:
+        _auto_start_busy.release()
+
+
 def _maybe_resume_library_scan():
     """Resume an interrupted library scan when the app is idle, driving it to
     completion across restarts.
@@ -3938,33 +4022,22 @@ def _maybe_resume_library_scan():
     network-heavy job unprompted. Once they start one and it gets interrupted, it
     leaves a checkpoint and resumes from here. Off entirely via AUTO_LIBRARY_SCAN.
     """
-    if not cfg.AUTO_LIBRARY_SCAN or _web_writes_paused():
-        return
-    if not _qobuz_ready():
+    resume_due = _library_scan_resume_due()
+    if not resume_due and not _unreadable_recheck_pending():
         return
     readable_again = False
-    if generation_state.baseline_complete():
+    if not resume_due:
         # A folder the last scan left out as unreadable is looked at again
         # every few minutes, and only a refresh of what changed follows.
         global _unreadable_checked_at
-        now = time.monotonic()
-        if now - _unreadable_checked_at < _UNREADABLE_RECHECK_SECONDS:
-            return
-        _unreadable_checked_at = now
+        _unreadable_checked_at = time.monotonic()
         listed = unreadable_artists_mod.load()
         readable_again = bool(
             listed and unreadable_artists_mod.readable_again(listed))
         if not readable_again:
             return
-    try:
-        credentials = _authorize_qobuz_live(QobuzAccess.CATALOGUE_ACTION)
-    except (
-        NoCredsError,
-        AuthLost,
-        QobuzUnavailable,
-        QobuzEntitlementError,
-        CredentialChanged,
-    ):
+    credentials = _auto_start_credentials()
+    if credentials is None:
         return
     with _auto_check_lock:
         if any(j.status != job_mgr.JobStatus.AWAITING_REVIEW
@@ -3991,10 +4064,10 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     # the fetch log, the creds file, the lyric-retry file, and a staging
     # iterdir().
     def _gather_disk_state():
-        # These read state files and may submit a background job, so they run
-        # here (off the event loop) alongside the other disk work.
-        _maybe_resume_library_scan()
-        _maybe_auto_check_new_releases()
+        # These read state files, so they run here (off the event loop)
+        # alongside the other disk work; any job they start is submitted from
+        # a background thread.
+        _start_due_jobs_in_background()
         scan_state = _library_scan_state()
         library_generation = _truthful_library_generation()
         return {
@@ -9276,7 +9349,6 @@ async def job_approve(request: Request, job_id: str):
     form = await request.form()
     migration_low_space_required = bool(
         job.execute_kind == "migration"
-        and (job.execute_args or {}).get("in_place")
         and (job.execute_args or {}).get("requires_low_space_override")
     )
     migration_low_space_accepted = form.get("allow_low_space") == "on"
@@ -9285,10 +9357,12 @@ async def job_approve(request: Request, job_id: str):
         and migration_low_space_required
         and not migration_low_space_accepted
     ):
+        action = ("in-place move" if (job.execute_args or {}).get("in_place")
+                  else "copy")
         return RedirectResponse(
             url=dest + "?error=" + _notice_key(
-                "Confirm the low-space risk before approving this in-place "
-                "move. Your review is untouched."
+                f"Confirm the low-space risk before approving this {action}. "
+                "Your review is untouched."
             ),
             status_code=303,
         )
@@ -12565,12 +12639,18 @@ async def collection_restore_upload(request: Request,
         return _restore_response(request, refusal)
     # Each copy goes as soon as the next exists; a large backup otherwise sits
     # in memory three times over while it parses.
+    head = raw[:200]
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8-sig")
         del raw
         data = json.loads(text)
         del text
     except (UnicodeDecodeError, ValueError, RecursionError):
+        # A backup cut short (a partial download or copy) still opens with
+        # this app's format name.
+        if collection_snapshot.FORMAT.encode() in head:
+            return _restore_response(
+                request, "That backup file is incomplete or damaged.")
         return _restore_response(
             request, "That file isn't a collection backup from this app.")
     ok, reason = collection_snapshot.validate_upload(data)

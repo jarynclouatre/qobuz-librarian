@@ -26,6 +26,7 @@ on it.
 import re
 import threading
 import unicodedata
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -67,6 +68,12 @@ def _fingerprint_text(value):
         char for char in text
         if char.isalnum() or unicodedata.category(char).startswith("S")
     )
+
+
+def artist_key(artist):
+    """The folded artist name dismissals are grouped and restored by, so
+    "Jay-Z" and "JAY-Z" are one artist."""
+    return _fingerprint_text(artist)
 
 
 _TRAILING_YEAR_RE = re.compile(r"^(.*)\s\((\d{4})\)$")
@@ -312,9 +319,9 @@ def restore(scope, artists):
     with _store_lock():
         store = load()
         bucket = store.get(scope) or {}
-        targets = {_fingerprint_text(a) for a in artists if _fingerprint_text(a)}
+        targets = {artist_key(a) for a in artists if artist_key(a)}
         drop = [fp for fp, e in bucket.items()
-                if _fingerprint_text(e.get("artist") or "") in targets]
+                if artist_key(e.get("artist") or "") in targets]
         rows = sum(len(_entry_rows(bucket[fp])) for fp in drop)
         for fp in drop:
             bucket.pop(fp, None)
@@ -448,15 +455,19 @@ def hidden_by_artist(scope, store=None):
     every edition under a key was dismissed together and comes back together.
     ``others`` lists the further titles the key covers so the page can say so
     instead of appearing to have lost them, and ``rows`` is how many review rows
-    the artist's entries account for.
+    the artist's entries account for. Artists group by :func:`artist_key`, the
+    match :func:`restore` uses, under their most common spelling.
     """
     bucket = (store if store is not None else load()).get(scope) or {}
     groups = {}
+    spellings = {}
     for fp, e in bucket.items():
         artist = e.get("artist") or "Unknown artist"
+        key = artist_key(artist) or artist
+        spellings.setdefault(key, Counter())[artist] += 1
         rows = _entry_rows(e)
         first = rows[0]
-        groups.setdefault(artist, []).append({
+        groups.setdefault(key, []).append({
             "title": first.get("title") or e.get("title") or "?",
             "year": first.get("year") or "",
             "ts": first.get("ts") or e.get("ts") or "",
@@ -469,14 +480,15 @@ def hidden_by_artist(scope, store=None):
                        for r in rows[1:]],
         })
     out = []
-    for artist in sorted(groups, key=str.lower):
-        albums = sorted(groups[artist], key=lambda a: (a["title"].lower(), a["year"]))
+    for key, albums in groups.items():
+        names = spellings[key]
+        albums = sorted(albums, key=lambda a: (a["title"].lower(), a["year"]))
         out.append({
-            "artist": artist,
+            "artist": max(sorted(names), key=names.__getitem__),
             "albums": albums,
             "rows": sum(1 + len(a["others"]) for a in albums),
         })
-    return out
+    return sorted(out, key=lambda g: g["artist"].lower())
 
 
 def count(scope, store=None):

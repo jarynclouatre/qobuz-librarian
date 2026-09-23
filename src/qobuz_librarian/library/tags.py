@@ -296,6 +296,19 @@ def _strip_trailing_paren_tag(s):
     return s[: m.start()].strip()
 
 
+_TRAILING_BRACKET_CAPTURE_RE = re.compile(r"\s*\[([^\[\]]*)\]\s*$")
+
+
+def _strip_trailing_bracket_tag(s):
+    """Drop a trailing square-bracketed tag that reads as an edition or a year,
+    as folder names write "[Remastered]". Anything else in brackets stays."""
+    m = _TRAILING_BRACKET_CAPTURE_RE.search(s)
+    if (not m or _ALBUM_VARIANT_RE.search(m.group(1))
+            or not _paren_tag_is_decoration(m.group(1))):
+        return s
+    return s[: m.start()].strip()
+
+
 # Normalized forms of the markers above, for callers comparing already-
 # normalized bare titles where normalize() has dropped the spaces that
 # _ALBUM_VARIANT_RE's word boundaries rely on. Keep in step with it.
@@ -369,15 +382,18 @@ def strip_album_decorations(name):
     distinct releases), in either the parenthesized or colon/dash form:
     'Cassadaga: A Companion' (companion EP - different recordings) 'Album:
     Live in Tokyo' / 'Album (Live)' (live album) 'Album: B-Sides' / 'Greatest
-    Hits (Acoustic)' (rarities / acoustic set) Iterates up to 8 times so
-    combined decorations like 'Foo: Deluxe Edition (2023)' fully strip in a
-    single call.
+    Hits (Acoustic)' (rarities / acoustic set) Square brackets strip only
+    edition words or a year: 'Album [Remastered]' → 'Album'. Iterates up to 8
+    times so combined decorations like 'Foo: Deluxe Edition (2023)' fully
+    strip in a single call.
     """
     s = name
     for _ in range(8):
         new = _LEADING_YEAR_RE.sub("", s).strip()
         if new == s:
             new = _strip_trailing_paren_tag(s)
+        if new == s:
+            new = _strip_trailing_bracket_tag(s)
         if new == s:
             new = _EDITION_TAIL_RE.sub("", s).strip()
         if new == s or not new:

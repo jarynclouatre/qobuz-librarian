@@ -74,9 +74,10 @@ def _primary_artist_of(qartist):
 
     Qobuz returns the same album with different artist-string formats
     depending on which edition is queried: "Jay Z and Kanye West"
-    (album-level) vs. "Jay Z, Kanye West" (track-level). The migration
-    check needs a canonical primary so it matches the on-disk folder
-    regardless of which form Qobuz happened to return.
+    (album-level) vs. "Jay Z, Kanye West" (track-level). The folder lookup
+    needs a canonical primary so it finds the on-disk folder regardless of
+    which form Qobuz happened to return. Only a lookup: a split name is never
+    a folder to create, since band names carry the same separators.
     """
     if not qartist:
         return qartist
@@ -2044,14 +2045,34 @@ def multi_artist_migration_destination(album, source_dir):
     }:
         return None
 
-    primary = beets_sanitize(_primary_artist_of(qartist_raw))
+    # Qobuz's main artist, whole: "Simon & Garfunkel" and "Tyler, The Creator"
+    # are one artist each, so splitting the name would file under "Simon/".
+    primary = beets_sanitize(qartist_raw.strip())
     if not primary or normalize(current.parent.name) == normalize(primary):
         return None
 
     # Keep the historical comma-only guard.
     if not _is_migration_candidate(current.parent.name, qartist_raw):
         return None
-    return Path(config.MUSIC_ROOT) / primary / current.name
+    return _artist_folder(primary, exclude=current.parent) / current.name
+
+
+def _artist_folder(name, *, exclude=None):
+    """The library's folder for an artist: an existing one whose name matches,
+    exactly, then by case, then normalized, else a new one named ``name``."""
+    root = Path(config.MUSIC_ROOT)
+    try:
+        folders = [d for d in _list_artist_subdirs_cached(root)
+                   if exclude is None or d.name != Path(exclude).name]
+    except OSError:
+        folders = []
+    for same in (lambda d: d.name == name,
+                 lambda d: d.name.casefold() == name.casefold(),
+                 lambda d: normalize(d.name) == normalize(name)):
+        found = next((d for d in folders if same(d)), None)
+        if found is not None:
+            return found
+    return root / name
 
 
 def prompt_and_migrate_multi_artist_folder(

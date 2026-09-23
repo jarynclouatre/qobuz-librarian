@@ -49,6 +49,20 @@ def test_destination_matches_beets_layout(tmp_path):
     assert plan.placed[0].dest_rel == Path("Artist/Album (2017)/04 - Hey.flac")
 
 
+def test_tracks_tagged_with_different_years_stay_in_one_album_folder(tmp_path):
+    source = tmp_path / "source" / "Album"
+    source.mkdir(parents=True)
+    items = []
+    for number, year in enumerate((1999, 2005, 2005), 1):
+        track = source / f"{number:02d}.flac"
+        track.write_bytes(b"audio %d" % number)
+        items.append((track, _meta(track=number, title=f"Song {number}",
+                                   year=year), "tags"))
+    plan = m.build_plan(items, tmp_path / "dest")
+    assert {e.dest_rel.parent for e in plan.placed} == {
+        Path("Artist/Album (2005)")}
+
+
 # ── classification ─────────────────────────────────────────────────────────────
 
 def test_missing_artist_or_album_is_unplaceable_not_guessed(tmp_path):

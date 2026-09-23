@@ -38,6 +38,7 @@ import stat
 import subprocess
 import sys
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,8 +140,11 @@ class ExecResult:
     # the audio into the destination so a migrated album keeps its artwork.
     companions: int = 0
     # Empty source directories removed through their preview-sealed identities
-    # after all exact in-place file retirements have completed.
+    # once every track of their source folder has left.
     pruned: int = 0
+    # In-place runs: source folders every track left that still hold files
+    # (cover art and sidecars are copied, not moved), as relative paths.
+    left_in_source: list = field(default_factory=list)
     cancelled: bool = False
     # One (source, dest_rel, status, reason) per attempted file - the record of
     # what actually happened, surfaced to the user and written to the results
@@ -293,16 +297,28 @@ def _is_compilation(tags: Mapping, albumartist: str) -> bool:
     return normalize(albumartist) in VA_NORMALIZED
 
 
-def normalize_tags(tags: Mapping, stem: str, ext: str) -> dict:
+_DISC_FOLDER_RE = re.compile(r"(?:disc|cd)\s*0*(\d+)", re.IGNORECASE)
+
+
+def _folder_disc(name: str) -> int:
+    """The disc a "Disc 2" / "CD2" folder name stands for, 0 for any other."""
+    m = _DISC_FOLDER_RE.match(name or "")
+    return int(m.group(1)) if m else 0
+
+
+def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str = "") -> dict:
     """Map a raw tag mapping to the fields placement needs.
 
     Pure: takes an already-read mapping (so it's testable without a real audio
     file). ``stem`` is the source filename minus extension, used as the title
-    fallback when no title tag is present.
+    fallback when no title tag is present; ``folder`` is the name of the folder
+    holding the file, which gives the disc number when no tag does.
     """
     albumartist = _first(tags, "albumartist", "album artist", "artist")
     track, _ = _num_and_total(_first(tags, "tracknumber", "track"))
     disc, disc_total_inline = _num_and_total(_first(tags, "discnumber", "disc"))
+    if not disc:
+        disc = _folder_disc(folder)
     disc_total, _ = _num_and_total(_first(tags, "disctotal", "totaldiscs"))
     return {
         "albumartist": albumartist,
@@ -339,7 +355,7 @@ def extract_metadata(path: Path, *, descriptor=None) -> Optional[dict]:
     except Exception:
         return None
     tags = dict(f.tags) if (f is not None and f.tags) else {}
-    return normalize_tags(tags, path.stem, path.suffix)
+    return normalize_tags(tags, path.stem, path.suffix, path.parent.name)
 
 
 # ── Placement ────────────────────────────────────────────────────────────────
@@ -402,6 +418,22 @@ def track_filename(meta: dict) -> str:
 
 def _album_key(meta: dict) -> tuple:
     return album_components(meta)
+
+
+def _album_source_dir(source) -> Path:
+    """The folder an album came from, above any "Disc N" folder of its own."""
+    parent = Path(source).parent
+    return parent.parent if _folder_disc(parent.name) else parent
+
+
+def _album_year(metas) -> int:
+    """The one year an album's folder is named with: the year most of its
+    tracks carry, the later one on a tie."""
+    counts = Counter(meta.get("year") or 0 for meta in metas)
+    counts.pop(0, None)
+    if not counts:
+        return 0
+    return max(counts, key=lambda year: (counts[year], year))
 
 
 # ── Sealed filesystem evidence ──────────────────────────────────────────────
@@ -1845,13 +1877,26 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
         if source_binding is not None:
             source_binding.close()
 
+    # The year is decided once per album, so tracks tagged with different
+    # years (a compilation's own, or one original date) share one folder. An
+    # album is its tags plus the folder it came from, which keeps two
+    # same-titled albums in separate folders apart.
+    albums: dict = {}
+    for row in placeable:
+        source, meta = row[0], row[1]
+        albums.setdefault(
+            (_album_key({**meta, "year": 0}), _album_source_dir(source)), []
+        ).append(row)
+
     # Group by album so multi-disc can be decided from the whole album, not one
     # track: a disc tag of 2 only means "Disc 2/" if the album really spans
     # discs (disctotal > 1, or some track carries a higher disc number).
     groups: dict = {}
-    for source, meta, sot, source_receipt in placeable:
-        groups.setdefault(_album_key(meta), []).append(
-            (source, meta, sot, source_receipt))
+    for members in albums.values():
+        year = _album_year(meta for _, meta, _, _ in members)
+        for row in members:
+            groups.setdefault(
+                _album_key({**row[1], "year": year}), []).append(row)
 
     seen_dest: dict = {}
     built = []
@@ -2333,6 +2378,7 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                            cancel_check: Optional[Callable[[], bool]] = None,
                            source_root_binding=None,
                            destination_root_binding=None,
+                           done_pairs=frozenset(),
                            ) -> None:
     """Copy each migrated album folder's non-audio companions into the
     destination folder(s) that received its audio. Always a copy (never a
@@ -2340,6 +2386,9 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
     destinations (for example, AcoustID splitting one source folder), the
     source folder may still hold audio that failed/skipped, and a duplicated
     cover image is harmless.
+
+    ``done_pairs`` holds the (source folder, destination folder) pairs an
+    in-place run already carried as their tracks landed.
     """
     folder_map: dict = {}
 
@@ -2495,138 +2544,153 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
     for src_folder, dst_folders in folder_map.items():
         if _cancelled():
             return
-        companions = receipts_by_folder.get(src_folder, ())
-        for dst_folder in dst_folders:
-            for receipt in companions:
-                if _cancelled():
-                    return
-                opened = None
-                published = None
-                discard_publication = False
-                fatal_exception = None
-                cleanup_primary = None
-                cleanup_failures = []
-                name = Path(receipt["relative"][-1]).name
-                source_path = source_root_binding.path.joinpath(
-                    *receipt["relative"])
-                destination_path = Path(dst_folder) / name
-                try:
-                    if progress:
-                        progress(
-                            "Carrying cover art and sidecars", 0, 0, name)
-                    if _cancelled():
-                        return
-                    opened = _open_file_receipt(
-                        source_root_binding, receipt)
-                    published = _stream_copy_noreplace(
-                        opened,
-                        receipt,
-                        destination_root_binding,
-                        destination_path,
-                    )
-                    result.companions += 1
-                    result.companion_outcomes.append((
-                        source_path, destination_path, COPIED, ""))
-                except _PublishedCopyFailure as exc:
-                    published = exc.published
-                    discard_publication = True
-                    result.companion_outcomes.append((
-                        source_path,
-                        destination_path,
-                        FAILED,
-                        str(exc.cause),
-                    ))
-                    if exc.interrupted:
-                        result.cancelled = True
-                        cleanup_primary = exc.cause
-                    elif not isinstance(exc.cause, Exception):
-                        result.cancelled = True
-                        fatal_exception = exc.cause
-                except FileExistsError:
-                    result.companion_outcomes.append((
-                        source_path,
-                        destination_path,
-                        SKIPPED,
-                        "destination already exists",
-                    ))
-                except KeyboardInterrupt as exc:
-                    discard_publication = published is not None
+        targets = [folder for folder in dst_folders
+                   if (src_folder, folder) not in done_pairs]
+        if not _copy_companions(
+                result, receipts_by_folder.get(src_folder, ()), targets,
+                progress=progress, cancelled=_cancelled,
+                source_root_binding=source_root_binding,
+                destination_root_binding=destination_root_binding):
+            return
+
+
+def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
+                     source_root_binding, destination_root_binding) -> bool:
+    """Copy one source folder's companions into each of ``dst_folders``.
+    Returns False once the run has been cancelled."""
+    for dst_folder in dst_folders:
+        for receipt in companions:
+            if cancelled():
+                return False
+            opened = None
+            published = None
+            discard_publication = False
+            fatal_exception = None
+            cleanup_primary = None
+            cleanup_failures = []
+            name = Path(receipt["relative"][-1]).name
+            source_path = source_root_binding.path.joinpath(
+                *receipt["relative"])
+            destination_path = Path(dst_folder) / name
+            try:
+                if progress:
+                    progress(
+                        "Carrying cover art and sidecars", 0, 0, name)
+                if cancelled():
+                    return False
+                opened = _open_file_receipt(
+                    source_root_binding, receipt)
+                published = _stream_copy_noreplace(
+                    opened,
+                    receipt,
+                    destination_root_binding,
+                    destination_path,
+                )
+                result.companions += 1
+                result.companion_outcomes.append((
+                    source_path, destination_path, COPIED, ""))
+            except _PublishedCopyFailure as exc:
+                published = exc.published
+                discard_publication = True
+                result.companion_outcomes.append((
+                    source_path,
+                    destination_path,
+                    FAILED,
+                    str(exc.cause),
+                ))
+                if exc.interrupted:
                     result.cancelled = True
-                    cleanup_primary = exc
-                    result.companion_outcomes.append((
-                        source_path,
-                        destination_path,
-                        FAILED,
-                        "migration was interrupted",
-                    ))
-                except (OSError, shutil.Error) as exc:
-                    log.info(f"  ⚠  couldn't carry {name}: {exc}")
-                    result.companion_outcomes.append((
-                        source_path,
-                        destination_path,
-                        FAILED,
-                        str(exc),
-                    ))
-                except BaseException as exc:
-                    discard_publication = published is not None
+                    cleanup_primary = exc.cause
+                elif not isinstance(exc.cause, Exception):
                     result.cancelled = True
-                    result.companion_outcomes.append((
-                        source_path,
-                        destination_path,
-                        FAILED,
-                        str(exc) or type(exc).__name__,
-                    ))
-                    fatal_exception = exc
-                finally:
-                    if discard_publication and published is not None:
-                        discarded = False
+                    fatal_exception = exc.cause
+            except FileExistsError:
+                result.companion_outcomes.append((
+                    source_path,
+                    destination_path,
+                    SKIPPED,
+                    "destination already exists",
+                ))
+            except KeyboardInterrupt as exc:
+                discard_publication = published is not None
+                result.cancelled = True
+                cleanup_primary = exc
+                result.companion_outcomes.append((
+                    source_path,
+                    destination_path,
+                    FAILED,
+                    "migration was interrupted",
+                ))
+            except (OSError, shutil.Error) as exc:
+                log.info(f"  ⚠  couldn't carry {name}: {exc}")
+                result.companion_outcomes.append((
+                    source_path,
+                    destination_path,
+                    FAILED,
+                    str(exc),
+                ))
+            except BaseException as exc:
+                discard_publication = published is not None
+                result.cancelled = True
+                result.companion_outcomes.append((
+                    source_path,
+                    destination_path,
+                    FAILED,
+                    str(exc) or type(exc).__name__,
+                ))
+                fatal_exception = exc
+            finally:
+                if discard_publication and published is not None:
+                    discarded = False
+                    try:
+                        discarded = _discard_owned_publication(
+                            published,
+                            receipt["file"],
+                            recoveries=result.recoveries,
+                        )
+                    except BaseException as exc:
+                        cleanup_failures.append((
+                            "companion publication rollback", exc))
+                    if not discarded:
                         try:
-                            discarded = _discard_owned_publication(
+                            recovery = _owned_publication_recovery(
                                 published,
-                                receipt["file"],
-                                recoveries=result.recoveries,
+                                source_path,
+                                receipt,
+                                "companion publication was interrupted and "
+                                "the exact same-run destination could not be "
+                                "removed safely",
                             )
+                            if recovery not in result.recoveries:
+                                result.recoveries.append(recovery)
                         except BaseException as exc:
                             cleanup_failures.append((
-                                "companion publication rollback", exc))
-                        if not discarded:
-                            try:
-                                recovery = _owned_publication_recovery(
-                                    published,
-                                    source_path,
-                                    receipt,
-                                    "companion publication was interrupted and "
-                                    "the exact same-run destination could not be "
-                                    "removed safely",
-                                )
-                                if recovery not in result.recoveries:
-                                    result.recoveries.append(recovery)
-                            except BaseException as exc:
-                                cleanup_failures.append((
-                                    "companion recovery recording", exc))
+                                "companion recovery recording", exc))
+                _capture_cleanup(
+                    cleanup_failures,
+                    "companion destination teardown",
+                    lambda: _close_published_file(published),
+                )
+                if opened is not None:
                     _capture_cleanup(
                         cleanup_failures,
-                        "companion destination teardown",
-                        lambda: _close_published_file(published),
+                        "companion source teardown",
+                        opened.close,
                     )
-                    if opened is not None:
-                        _capture_cleanup(
-                            cleanup_failures,
-                            "companion source teardown",
-                            opened.close,
-                        )
-                _raise_cleanup_abort(
-                    result,
-                    cleanup_failures,
-                    primary=(
-                        fatal_exception
-                        if fatal_exception is not None
-                        else cleanup_primary
-                    ),
-                )
-                if fatal_exception is not None:
-                    raise MigrationExecutionAbort(
-                        result, fatal_exception) from fatal_exception
+            _raise_cleanup_abort(
+                result,
+                cleanup_failures,
+                primary=(
+                    fatal_exception
+                    if fatal_exception is not None
+                    else cleanup_primary
+                ),
+            )
+            if fatal_exception is not None:
+                raise MigrationExecutionAbort(
+                    result, fatal_exception) from fatal_exception
+
+    return True
 
 
 def collect_items(source_root: Path, *, use_acoustid: bool = False,
@@ -4484,6 +4548,28 @@ def _prune_retired_source_parents(binding, receipts, *, recoveries=None,
     return removed
 
 
+def _source_folders_left(binding, chains) -> list:
+    """The finished source folders, of ``{folder: sealed parent chain}``, that
+    still hold anything, as relative paths."""
+    left = []
+    for folder, chain in sorted(chains.items()):
+        if not chain:
+            continue
+        try:
+            descriptors = _open_sealed_directory_chain(binding, list(chain))
+        except OSError:
+            continue
+        try:
+            if os.listdir(descriptors[-1]):
+                left.append(os.path.join(*folder))
+        except OSError:
+            continue
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+    return left
+
+
 def _close_published_file(published) -> None:
     if published is None:
         return
@@ -4923,6 +5009,17 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             result, plan, supplied_resume_entries, reason)
     placed = plan.placed
     retired_receipts = []
+    # Tracks still to leave each source folder, and the sealed chain of every
+    # folder a track has left, for the in-place bookkeeping below.
+    waiting = Counter()
+    folder_chains: dict = {}
+
+    def finished_folders_left():
+        return _source_folders_left(
+            source_root,
+            {folder: chain for folder, chain in folder_chains.items()
+             if not waiting[folder]})
+
     source_root = destination_root = None
     try:
         try:
@@ -4948,6 +5045,27 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             return _record_plan_refusal(
                 result, plan, resume_entries, reason)
 
+        # An in-place run carries a source folder's cover art and sidecars to
+        # a destination folder as soon as a track lands there, and removes the
+        # folders a source folder emptied once its last track has left. A run
+        # stopped part way then leaves nothing behind that a later run, which
+        # no longer sees the moved tracks, would miss.
+        def source_folder(entry):
+            return tuple((entry.source_receipt or {}).get("relative", ())[:-1])
+
+        def cancelled():
+            if cancel_check is not None and cancel_check():
+                result.cancelled = True
+            return result.cancelled
+
+        companions_by_folder: dict = {}
+        for receipt in plan.companion_receipts:
+            companions_by_folder.setdefault(
+                tuple(receipt["relative"][:-1]), []).append(receipt)
+        waiting.update(source_folder(entry) for entry in placed)
+        retired_by_folder: dict = {}
+        carried_pairs = set()
+
         total = len(placed)
         for i, entry in enumerate(placed, 1):
             if cancel_check and cancel_check():
@@ -4962,6 +5080,7 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             stop_after_item = False
             discard_publication = False
             source_retired = False
+            moved = False
             fatal_exception = None
             cleanup_primary = None
             cleanup_failures = []
@@ -5015,6 +5134,7 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                         result.copied += 1
                         result.outcomes.append(
                             (src, entry.dest_rel, COPIED, ""))
+                        moved = True
                     else:
                         discard_publication = True
                         raise OSError(
@@ -5164,13 +5284,39 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             if stop_after_item:
                 result.cancelled = True
                 break
+            if in_place:
+                folder = source_folder(entry)
+                waiting[folder] -= 1
+                pair = (folder, Path(entry.dest_rel).parent)
+                if moved:
+                    retired_by_folder.setdefault(folder, []).append(
+                        entry.source_receipt)
+                    folder_chains[folder] = entry.source_receipt["parents"]
+                if moved and pair not in carried_pairs:
+                    carried_pairs.add(pair)
+                    _copy_companions(
+                        result, companions_by_folder.get(folder, ()),
+                        [pair[1]], progress=None, cancelled=cancelled,
+                        source_root_binding=source_root,
+                        destination_root_binding=destination_root)
+                if not waiting[folder] and not result.cancelled:
+                    _prune_retired_source_parents(
+                        source_root,
+                        retired_by_folder.pop(folder, ()),
+                        recoveries=result.recoveries,
+                        result=result,
+                        cancel_check=cancel_check,
+                    )
+                if result.cancelled:
+                    break
         if not result.cancelled and plan.companion_receipts:
             _carry_companion_files(
                 plan, result, entry_map=entry_map,
                 resume_entries=resume_entries,
                 progress=progress, cancel_check=cancel_check,
                 source_root_binding=source_root,
-                destination_root_binding=destination_root)
+                destination_root_binding=destination_root,
+                done_pairs=carried_pairs)
         if in_place and not result.cancelled:
             _prune_retired_source_parents(
                 source_root,
@@ -5179,9 +5325,16 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 result=result,
                 cancel_check=cancel_check,
             )
+        if in_place:
+            result.left_in_source = finished_folders_left()
         return result
     except KeyboardInterrupt:
         result.cancelled = True
+        if in_place and folder_chains:
+            try:
+                result.left_in_source = finished_folders_left()
+            except BaseException:
+                pass
         return result
     except MigrationExecutionAbort:
         raise

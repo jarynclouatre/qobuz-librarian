@@ -61,6 +61,7 @@ from qobuz_librarian.library.scanner import (
     clear_scan_caches,
     list_artist_album_dirs,
     list_library_artists,
+    read_album_dir,
 )
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes import process as process_mode
@@ -459,16 +460,19 @@ def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False,
             missing_premises=missing_premises))
 
 
-def add_restore_candidate(job, album, artist_name, *, artist_key=None):
+def add_restore_candidate(job, album, artist_name, *, artist_key=None,
+                          album_dir=None, missing=()):
     """Add one album a collection restore has to fetch back.
 
     Ticked on arrival: uploading a backup file is the intent, and the review is
     where it gets confirmed. ``artist_key`` is the artist's folder when the
     library still has one; without it the row seals the music folder itself,
-    because there is no artist tree left to receipt.
+    because there is no artist tree left to receipt. ``album_dir`` makes the
+    row a Gap Fill for a folder that lost the ``missing`` tracks.
     """
     spec = _gap_candidate_spec(
-        AlbumGap(qobuz_album=album, on_disk_dir=None),
+        AlbumGap(qobuz_album=album, on_disk_dir=album_dir,
+                 missing=list(missing)),
         artist_name,
         selected=True,
         artist_key=artist_key,
@@ -725,7 +729,8 @@ def refold_restored_missing(artists, fingerprints):
                            .get("qobuz_album") or {})
             if qobuz_album.get("id"):
                 active_album_ids.add(str(qobuz_album["id"]))
-    wanted_artists = {(a or "").lower() for a in artists}
+    wanted_artists = {hidden_mod.artist_key(a) for a in artists}
+    wanted_artists.discard("")
     wanted_fps = set(fingerprints)
     specs = []
     try:
@@ -737,7 +742,7 @@ def refold_restored_missing(artists, fingerprints):
         for spec in (entry or {}).get("candidates") or []:
             artist = spec.get("artist") or name
             title = spec.get("title") or ""
-            if ((artist or "").lower() in wanted_artists
+            if (hidden_mod.artist_key(artist) in wanted_artists
                     or hidden_mod.album_fingerprint(artist, title)
                     in wanted_fps):
                 spec = dict(spec)
@@ -2476,7 +2481,14 @@ def execute_albums(job, chosen, token):
                     # artist tree. That is safe only while this exact edition
                     # still has no local folder of its own.
                     clear_scan_caches()
-                    if find_album_dir_filesystem(full) is not None:
+                    found = find_album_dir_filesystem(full)
+                    # A folder holding none of this edition's tracks is
+                    # another album that shares its title, such as an
+                    # artist's second self-titled record.
+                    if found is not None and catalog.compute_missing(
+                        (full.get("tracks") or {}).get("items") or [],
+                        read_album_dir(found),
+                    )[1]:
                         raise CandidateStale(
                             "This missing album appeared locally after the "
                             "review was built. Refresh the review; nothing "
@@ -4921,18 +4933,15 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     need, free = engine.space_estimate(
         plan, in_place=in_place, resume_entries=resume_entries)
     job.execute_args["requires_low_space_override"] = bool(
-        in_place and free is not None and need > free
+        free is not None and need > free
     )
     if need and free is not None:
         space = f"≈{format_size(need)} to {verb}, {format_size(free)} free at the destination"
         if need > free:
             space = ("⚠ not enough free space: needs "
-                     f"≈{format_size(need)} but only {format_size(free)} is free")
-            if in_place:
-                space += (
-                    ". The in-place move stays blocked until you confirm the "
-                    "low-space risk below"
-                )
+                     f"≈{format_size(need)} but only {format_size(free)} is free. "
+                     f"The {'in-place move' if in_place else 'copy'} stays "
+                     "blocked until you confirm the low-space risk below")
         parts.append(space)
     # Show the manifest where the user can actually find it, the container
     # path means nothing from a phone. Settings does the same for every path
@@ -5091,19 +5100,18 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             # as execution.
             need, free = migrate_engine.space_estimate(
                 plan, in_place=in_place, resume_entries=resume_entries)
-            if (
-                in_place
-                and free is not None
-                and need > free
-                and not allow_low_space
-            ):
+            if free is not None and need > free and not allow_low_space:
+                risk = ("An in-place move that runs out mid-run would leave "
+                        "your library half-relocated." if in_place else
+                        "A copy that runs out stops partway, with the new "
+                        "library incomplete.")
                 job.error = (
-                    f"Not enough free space at {dest}: the move needs about "
+                    f"Not enough free space at {dest}: the "
+                    f"{'move' if in_place else 'copy'} needs about "
                     f"{format_size(need)} but only {format_size(free)} is free. "
-                    "An in-place move that runs out mid-run would leave your "
-                    "library half-relocated. Free up space, choose another "
-                    "destination, or scan again and confirm the low-space "
-                    "risk on the new review.")
+                    f"{risk} Free up space, choose another destination, or "
+                    "scan again and confirm the low-space risk on the new "
+                    "review.")
                 job.summary = job.error
                 _mark_job_failed(job)
                 log.info(job.summary)
@@ -5205,6 +5213,14 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         job.error = f"{plural(result.failed, 'file')} couldn't be migrated; see the log."
     if pruned:
         parts.append(f"cleared {plural(pruned, 'empty source folder')}")
+    left = getattr(result, "left_in_source", ())
+    if left:
+        parts.append(
+            f"kept {plural(len(left), 'source folder')} with files still in "
+            f"{'it' if len(left) == 1 else 'them'} (cover art and sidecars "
+            "are copied, not moved)")
+        for folder in left[:50]:
+            job.push_line(f"kept in the source: {folder}")
     if result.cancelled:
         parts.append("the destination may contain a partial migration")
     if recoveries:

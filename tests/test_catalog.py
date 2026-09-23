@@ -98,6 +98,17 @@ def test_multi_artist_migration_uses_the_exact_imported_source(
     )]
 
 
+def test_multi_artist_migration_keeps_a_band_name_whole(tmp_path, monkeypatch):
+    music_root = tmp_path / "music"
+    source = music_root / "Earth, Wind & Fire, The Emotions" / "Boogie Wonderland"
+    source.mkdir(parents=True)
+    monkeypatch.setattr(config, "MUSIC_ROOT", music_root)
+
+    assert catalog.multi_artist_migration_destination(
+        {"artist": {"name": "Earth, Wind & Fire"}}, source,
+    ) == music_root / "Earth, Wind & Fire" / "Boogie Wonderland"
+
+
 def _qt(title, isrc="", disc=1, **kw):
     return {"title": title, "isrc": isrc, "media_number": disc, **kw}
 

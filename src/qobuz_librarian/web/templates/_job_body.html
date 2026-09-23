@@ -120,13 +120,13 @@
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       {% if job.execute_kind == 'downsample' %}<input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">{% endif %}
       {% if review_tab %}<input type="hidden" name="tab" id="review-tab-field" value="{{ review_tab }}">{% endif %}
-      {% if job.execute_kind == 'migration' and job.execute_args.get('in_place') and job.execute_args.get('requires_low_space_override') %}
+      {% if job.execute_kind == 'migration' and job.execute_args.get('requires_low_space_override') %}
       <label class="ql-option-row">
         <input type="checkbox" name="allow_low_space" class="ql-checkbox" required>
         <span>
           <span class="ql-option-title">I understand the low-space risk</span>
           <span class="ql-option-help ql-option-help-warning">
-            The preview above shows that this in-place move needs more free space than the destination reports. If it runs out, the library can be left partly relocated.
+            {% if job.execute_args.get('in_place') %}The preview above shows that this in-place move needs more free space than the destination reports. If it runs out, the library can be left partly relocated.{% else %}The preview above shows that this copy needs more free space than the destination reports. If it runs out, the copy stops partway and the new library is incomplete.{% endif %}
           </span>
         </span>
       </label>

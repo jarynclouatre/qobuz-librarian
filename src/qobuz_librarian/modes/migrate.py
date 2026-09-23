@@ -179,10 +179,13 @@ def run_migrate_mode(args):
             "the library. Free up space or pick another destination."))
         return EXIT_GENERAL
     if short:
+        risk = ("a move that runs out leaves the library half-relocated"
+                if in_place else
+                "a copy that runs out stops partway, with the new library "
+                "incomplete")
         log.info(fmt(C.YELLOW,
             f"  ⚠  The destination is short on space (needs ~{format_size(need)}, "
-            f"only {format_size(free)} free); a move that runs out leaves the "
-            "library half-relocated."))
+            f"only {format_size(free)} free); {risk}."))
         ack = ask("  Type 'yes' to migrate anyway: ", colour=C.RED) or ""
         if ack != "yes":
             log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
@@ -303,6 +306,16 @@ def run_migrate_mode(args):
     if pruned:
         log.info(fmt(C.GRAY,
             f"  Cleared {pruned} now-empty folder(s) from the source."))
+    left = getattr(result, "left_in_source", ())
+    if left:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  Kept {len(left)} source folder(s) with files still in "
+            f"{'it' if len(left) == 1 else 'them'}; cover art and sidecars "
+            "are copied, not moved:"))
+        for folder in left[:20]:
+            log.info(fmt(C.YELLOW, f"       {truncate(folder, 70)}"))
+        if len(left) > 20:
+            log.info(fmt(C.YELLOW, f"       … and {len(left) - 20} more"))
     if result.failed:
         log.info(fmt(C.RED, f"  ✗  {result.failed} failed:"))
         for src, reason in result.failures[:50]:

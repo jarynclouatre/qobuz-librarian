@@ -102,6 +102,7 @@ def test_a_folder_renamed_past_recognition_is_matched_by_its_isrcs(library,
     library.add("Bonobo", "unsorted rip 03", [
         _track("Migration", 1, isrc="GBCEL1600123"),
         _track("Break Apart", 2, isrc="GBCEL1600124"),
+        _track("Outlier", 3, isrc="GBCEL2100001"),
     ])
     job = _run(_snapshot([{"name": "Bonobo", "albums": [
         {"name": "Migration", "qobuz_album_id": "a1", "tracks": [
@@ -159,6 +160,19 @@ def test_an_unmounted_library_refuses_an_absent_artist_row(library, qobuz,
                         lambda: None)
     with pytest.raises(candidate_premise.CandidateStale):
         candidate_premise.validate(job.candidates[0])
+
+
+def test_a_same_titled_album_from_another_year_is_still_restored(library,
+                                                                 qobuz):
+    library.add("Weezer", "Weezer (1994)", [_track("My Name Is Jonas", 1)])
+    qobuz["albums"]["w01"] = _qobuz_album("w01", "Weezer", artist="Weezer")
+    job = _run(_snapshot([{"name": "Weezer", "albums": [
+        {"name": "Weezer (1994)", "qobuz_album_id": "w94",
+         "tracks": [_track("My Name Is Jonas", 1)]},
+        {"name": "Weezer (2001)", "qobuz_album_id": "w01",
+         "tracks": [_track("Don't Let Go", 1)]}]}]))
+
+    assert [c["payload"]["album_id"] for c in job.candidates] == ["w01"]
 
 
 def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
