@@ -28,6 +28,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.web.csrf import request_is_https
 
 log = logging.getLogger("qobuz_librarian")
@@ -347,6 +348,29 @@ def creds_file_present_but_unreadable() -> bool:
     return present and not credentials_configured()
 
 
+def _set_aside_damaged_credentials() -> bool:
+    """Move a login file that is damaged or locked against us, rather than
+    briefly unreadable, out of the way so the environment can seed a new one."""
+    try:
+        data = json.loads(cfg.WEB_AUTH_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (PermissionError, ValueError) as exc:
+        reason = exc
+    except OSError:
+        return False
+    else:
+        if (isinstance(data, dict) and data.get("username")
+                and data.get("password_hash") and data.get("session_secret")):
+            return False
+        reason = "no complete login in it"
+    global _cred_cache, _cred_cache_path
+    _cred_cache = None
+    _cred_cache_path = None
+    return state_file.preserve_corrupt(
+        cfg.WEB_AUTH_FILE, "The web login file", reason, "the web login")
+
+
 def set_credentials(username: str, password: str, *,
                     env_password_hash: str = "",
                     require_unconfigured: bool = False,
@@ -483,6 +507,8 @@ def apply_env_credentials() -> str:
         return "noop"
     if not user or not password:
         return "partial"
+    if creds_file_present_but_unreadable():
+        _set_aside_damaged_credentials()
     d = _read()
     same_user = _constant_time_eq(user, d.get("username") or "")
     if d.get("password_hash") and same_user:
@@ -930,8 +956,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # The creds file is there but unreadable (transient I/O or a
                 # corrupt/half-written file).
                 return Response(
-                    "Login is configured but its credentials can't be read right "
-                    "now. Try again shortly.", status_code=503)
+                    f"Login is configured but {cfg.WEB_AUTH_FILE.name} in the "
+                    "data folder can't be read. If this persists, set "
+                    "WEB_AUTH_USER and WEB_AUTH_PASSWORD and restart, or stop "
+                    "the app and delete that file to set a new login.",
+                    status_code=503)
             # Nothing protects the box yet. Force the setup screen, but let
             # the setup GET/POST through so a login can actually be created.
             if not host_allowed(request):

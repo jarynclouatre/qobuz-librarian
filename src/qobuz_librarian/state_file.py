@@ -156,6 +156,11 @@ def preserve_corrupt(path, what, reason, lost):
         n += 1
     try:
         path.replace(dest)
+        try:
+            dest.with_name(dest.name + _CORRUPT_NOTE_SUFFIX).write_text(
+                str(lost), encoding="utf-8")
+        except OSError:
+            pass
         where = (f"the unreadable copy is kept at {dest.name}; recover from "
                  "it if you need what was in it")
         log.warning("%s was corrupt (%s); %s may have been reset and %s.",
@@ -168,6 +173,9 @@ def preserve_corrupt(path, what, reason, lost):
 
 
 _CORRUPT_SUFFIX_RE = re.compile(r"\.corrupt(\.\d+)?$")
+# Beside each kept copy, what its reset lost, for the notice to name.
+_CORRUPT_NOTE_SUFFIX = ".about"
+KEPT_CORRUPT_DIR = "unreadable-copies"
 
 
 def preserved_corrupt_stores():
@@ -186,6 +194,45 @@ def preserved_corrupt_stores():
         )
     except OSError:
         return []
+
+
+def corrupt_store_details():
+    """Each kept copy with the file it came from and what its reset lost."""
+    details = []
+    for name in preserved_corrupt_stores():
+        try:
+            lost = (Path(cfg.DATA_DIR) / (name + _CORRUPT_NOTE_SUFFIX)).read_text(
+                encoding="utf-8").strip()
+        except (OSError, ValueError):
+            lost = ""
+        details.append({"name": name, "lost": lost,
+                        "original": _CORRUPT_SUFFIX_RE.sub("", name)})
+    return details
+
+
+def keep_corrupt_stores() -> bool:
+    """Move every kept copy and its note into KEPT_CORRUPT_DIR, which the
+    notice does not list, so it can be dismissed without deleting them."""
+    kept = Path(cfg.DATA_DIR) / KEPT_CORRUPT_DIR
+    ok = True
+    for name in preserved_corrupt_stores():
+        try:
+            kept.mkdir(exist_ok=True)
+            dest = kept / name
+            n = 2
+            while dest.exists():
+                dest = kept / f"{name}.{n}"
+                n += 1
+            (Path(cfg.DATA_DIR) / name).replace(dest)
+        except OSError:
+            ok = False
+            continue
+        note = Path(cfg.DATA_DIR) / (name + _CORRUPT_NOTE_SUFFIX)
+        try:
+            note.replace(dest.with_name(dest.name + _CORRUPT_NOTE_SUFFIX))
+        except OSError:
+            pass
+    return ok
 
 
 def clear_corrupt_stores() -> bool:
@@ -207,6 +254,11 @@ def clear_corrupt_stores() -> bool:
                 entry.unlink()
             except OSError:
                 ok = False
+                continue
+            try:
+                entry.with_name(entry.name + _CORRUPT_NOTE_SUFFIX).unlink()
+            except OSError:
+                pass
     return ok
 
 

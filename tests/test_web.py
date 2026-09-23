@@ -5333,7 +5333,12 @@ def test_download_partial_album_proceeds_to_gap_fill(client, monkeypatch):
     import qobuz_librarian.library.catalog as cat_mod
     import qobuz_librarian.modes.process as proc_mod
     import qobuz_librarian.web.app as app_mod
+    from qobuz_librarian.web import job_persistence
 
+    # History reads the archive, which the suite switches off by default.
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
     monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
     album = {"id": "gap1", "title": "Gappy", "version": "Expanded Edition",
              "artist": {"name": "A"},
@@ -6156,6 +6161,13 @@ def test_a_password_set_in_settings_survives_a_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("WEB_AUTH_PASSWORD", "distant meadow signal")
     assert web_auth.apply_env_credentials() == "applied"
     assert web_auth.verify_login("admin", "distant meadow signal")
+
+    # Including when the saved login itself is what broke.
+    cfg.WEB_AUTH_FILE.write_text("{", encoding="utf-8")
+    web_auth._cred_cache = None
+    assert web_auth.apply_env_credentials() == "applied"
+    assert web_auth.verify_login("admin", "distant meadow signal")
+    assert (tmp_path / "auth.json.corrupt").read_text(encoding="utf-8") == "{"
 
 
 @pytest.mark.parametrize(

@@ -54,6 +54,9 @@ _conn: Optional[sqlite3.Connection] = None
 _schema_ready = False
 _admission_ready = False
 _previous_write_at: Optional[float] = None
+# jobs.db itself is not a readable database, as opposed to a folder that
+# can't be written.
+_damaged = False
 # The db opened fine but a write later failed (typically a full disk).
 _warned_write_failure = False
 
@@ -323,6 +326,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     on every status change.
     """
     global _disabled, _conn, _schema_ready, _admission_ready, _previous_write_at
+    global _damaged
     if _disabled:
         return None
     if _conn is not None:
@@ -347,6 +351,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
             except sqlite3.Error:
                 pass
         _log.info("job persistence disabled (%s); jobs won't survive restart.", e)
+        _damaged = _is_damage(e)
         _disabled = True
         _schema_ready = False
         _admission_ready = False
@@ -441,7 +446,7 @@ def scrub_stored_secrets() -> int | None:
 
 def init() -> None:
     """Create the schema (and run additive migrations). Safe to call repeatedly."""
-    global _schema_ready, _admission_ready
+    global _schema_ready, _admission_ready, _damaged
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -492,6 +497,7 @@ def init() -> None:
             _rollback_failed_write(conn)
             _schema_ready = False
             _admission_ready = False
+            _damaged = _is_damage(e)
             # A transient/locked/full/corrupt jobs.db here would otherwise
             # propagate out of restore_jobs() into the caller's broad
             # "couldn't restore prior jobs; starting fresh" handler, masking
@@ -500,6 +506,20 @@ def init() -> None:
             _log.warning("job persistence schema/migration failed; running "
                          "without crash durability until the volume recovers "
                          "and the app restarts: %s", e)
+
+
+def _is_damage(exc) -> bool:
+    return getattr(exc, "sqlite_errorcode", None) in (
+        sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_CORRUPT)
+
+
+def database_damaged() -> bool:
+    """Whether jobs.db failed to open because the file itself is damaged."""
+    return _damaged
+
+
+def database_path():
+    return _path()
 
 
 def ready_for_admission() -> bool:
@@ -2014,7 +2034,7 @@ def load_all() -> list[dict]:
 def _reset_for_tests() -> None:
     """Test-only hook: drop the on-disk db so a fresh test starts clean."""
     global _disabled, _conn, _schema_ready, _admission_ready
-    global _warned_write_failure
+    global _warned_write_failure, _damaged
     if _conn is not None:
         try:
             _conn.close()
@@ -2025,6 +2045,7 @@ def _reset_for_tests() -> None:
     _schema_ready = False
     _admission_ready = False
     _warned_write_failure = False
+    _damaged = False
     p = _path()
     for q in (p, p.with_suffix(".db-wal"), p.with_suffix(".db-shm")):
         try:

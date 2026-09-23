@@ -10116,7 +10116,7 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
     sweep_stamp = cfg.DATA_DIR / ".last_backup_sweep"
     if not force and sweep_stamp.exists():
         try:
-            if (time.time() - sweep_stamp.stat().st_mtime) < 86400:
+            if 0 <= (time.time() - sweep_stamp.stat().st_mtime) < 86400:
                 return 0
         except OSError:
             pass

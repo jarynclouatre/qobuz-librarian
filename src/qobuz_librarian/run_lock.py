@@ -339,6 +339,11 @@ def current_lease() -> Optional[RunLockLease]:
     return lease
 
 
+# Why the last acquire() could not hold the lock, so a caller can tell a lock
+# file owned by another user from a mount without file locking.
+unavailable_reason: Optional[OSError] = None
+
+
 def _warn_lockless(detail: str) -> None:
     """Explain that writes remain paused without the run-lock boundary."""
     import logging
@@ -352,10 +357,13 @@ def _warn_lockless(detail: str) -> None:
 
 def acquire() -> Optional[RunLockLease]:
     """Acquire the exact no-follow run lock, or report that it is unavailable."""
+    global unavailable_reason
+    unavailable_reason = None
     try:
         path, leaf, chain, names = _open_lock_parent(cfg.LOCK_FILE)
     except OSError as exc:
         _warn_lockless(f"couldn't open run-lock at {cfg.LOCK_FILE} ({exc})")
+        unavailable_reason = exc
         return None
 
     parent_descriptor = chain[-1]
@@ -369,6 +377,7 @@ def acquire() -> Optional[RunLockLease]:
     except OSError as exc:
         _close_lock_resources(None, chain)
         _warn_lockless(f"run-lock not enforceable on {path} ({exc})")
+        unavailable_reason = exc
         return None
 
     descriptor = -1
@@ -418,6 +427,7 @@ def acquire() -> Optional[RunLockLease]:
                 pass
         _close_lock_resources(stream, chain)
         _warn_lockless(f"couldn't open run-lock at {path} ({exc})")
+        unavailable_reason = exc
         return None
 
     try:

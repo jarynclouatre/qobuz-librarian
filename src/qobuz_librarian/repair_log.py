@@ -721,7 +721,8 @@ def read_repair_log_entries(limit=None):
         return []
     entries = []
     try:
-        with cfg.REPAIR_LOG_PATH.open("r", encoding="utf-8") as f:
+        with cfg.REPAIR_LOG_PATH.open("r", encoding="utf-8",
+                                      errors="replace") as f:
             for raw in f:
                 line = raw.rstrip("\n")
                 if not line or line.startswith("#"):

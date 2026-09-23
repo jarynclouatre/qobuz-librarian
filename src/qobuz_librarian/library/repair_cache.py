@@ -226,7 +226,7 @@ def prune_expired(force: bool = False) -> int:
     stamp = Path(str(cfg.DATA_DIR)) / ".repair_cache_prune"
     if not force and stamp.exists():
         try:
-            if (time.time() - stamp.stat().st_mtime) < 86400:
+            if 0 <= (time.time() - stamp.stat().st_mtime) < 86400:
                 return 0
         except OSError:
             pass

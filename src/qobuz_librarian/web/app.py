@@ -285,6 +285,16 @@ def _post_import_relocation_recovery():
     return getattr(_STARTUP_RECOVERY_RESULT, "post_import_relocation", None)
 
 
+def _unreadable_queue_paths():
+    if (
+        _STARTUP_RECOVERY_UNKNOWN
+        or getattr(_STARTUP_RECOVERY_RESULT, "reason", None)
+        != "queue-namespace-blocked"
+    ):
+        return None
+    return getattr(_STARTUP_RECOVERY_RESULT, "paths", ())
+
+
 def _recovery_status_value(result) -> str | None:
     status = getattr(result, "status", None)
     return getattr(status, "value", None)
@@ -882,6 +892,13 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                f"{'; '.join(unwritable)}. On a NAS, set "
                "PUID/PGID to the share owner and confirm the host "
                "directories exist. Downloads can't run until fixed.")
+    elif _LOCK_UNENFORCEABLE and isinstance(run_lock.unavailable_reason,
+                                            PermissionError):
+        reason = "The safety lock file can't be opened."
+        msg = (f"Qobuz Librarian can't open {cfg.LOCK_FILE}: permission "
+               "denied. Downloads and scans are paused. Set its owner to the "
+               "user Qobuz Librarian runs as (PUID and PGID in Docker), then "
+               "restart.")
     elif _LOCK_UNENFORCEABLE:
         reason = "The data folder can't hold the safety lock."
         msg = ("The data folder can't hold the single-writer safety lock "
@@ -913,14 +930,26 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                "are paused so another process cannot write to the library "
                "at the same time. Restart Qobuz Librarian before continuing.")
     elif not job_mgr.job_persistence.ready_for_admission():
-        reason = "Queue and History cannot be saved to the data folder."
-        action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
-        msg = (
-            "Qobuz Librarian can't save Queue and History to the data folder, "
-            "so downloads and scans are paused before any work starts. Nothing "
-            "new was queued. Check the data-folder permissions and free space, "
-            "then restart Qobuz Librarian."
-        )
+        jobs_db = job_mgr.job_persistence.database_path()
+        if job_mgr.job_persistence.database_damaged():
+            reason = "The Queue and History file is damaged."
+            msg = (
+                f"Qobuz Librarian can't read {jobs_db}, so downloads and scans "
+                "are paused before any work starts. Nothing new was queued. "
+                f"Move it, and any {jobs_db.name}-wal and {jobs_db.name}-shm "
+                "beside it, out of the data folder and restart Qobuz "
+                "Librarian; History and any review waiting in it will be lost."
+            )
+        else:
+            reason = "Queue and History cannot be saved to the data folder."
+            action = {"href": "/settings#diagnostics",
+                      "label": "Open Diagnostics"}
+            msg = (
+                f"Qobuz Librarian can't open or write {jobs_db}, so downloads "
+                "and scans are paused before any work starts. Nothing new was "
+                "queued. Check the permissions of that file and the data "
+                "folder, and free space, then restart Qobuz Librarian."
+            )
     elif (_startup_recovery_status_value() == "attention_required"):
         relocation = _post_import_relocation_recovery()
         if relocation is not None:
@@ -943,6 +972,16 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                 + "Restart Qobuz Librarian; if this screen comes back, the "
                 f"“{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the container "
                 "log has the technical detail."
+            )
+        elif _unreadable_queue_paths() is not None:
+            files = "; ".join(str(path) for path in _unreadable_queue_paths())
+            reason = "The saved download queue can't be read."
+            msg = (
+                "Downloads and scans are paused and nothing was changed. "
+                + (f"The file involved: {files}. " if files else "")
+                + "Fix its permissions, or if it is damaged, move it out of "
+                "the data folder (the downloads it listed will need queuing "
+                "again), then restart Qobuz Librarian."
             )
         elif _recovery_pause_is_another_download(queue_behind_job):
             return None
@@ -2111,8 +2150,9 @@ async def _lifespan(_app: FastAPI):
                     "WEB_AUTH_PASSWORD (or WEB_AUTH_PASSWORD_FILE)."
                 )
             raise RuntimeError(
-                "The seeded web login could not be saved; refusing to start "
-                "with an open first-run setup screen."
+                "The seeded web login could not be saved to "
+                f"{cfg.WEB_AUTH_FILE}; refusing to start with an open "
+                "first-run setup screen."
             )
         if cred_status == "applied":
             _log.info("Configured the web login from WEB_AUTH_USER / "
@@ -2126,7 +2166,13 @@ async def _lifespan(_app: FastAPI):
         elif cred_status == "failed":
             _log.warning("Couldn't write the web login from the environment; "
                          "the data volume may not be writable.")
-        if not web_auth.credentials_configured():
+        if web_auth.creds_file_present_but_unreadable():
+            _log.warning(
+                "The web login in %s can't be read, so every page will answer "
+                "503. Set WEB_AUTH_USER / WEB_AUTH_PASSWORD and restart to "
+                "replace it, or stop the app and delete the file to set a new "
+                "login.", cfg.WEB_AUTH_FILE)
+        elif not web_auth.credentials_configured():
             _log.warning(
                 "No web login configured. The open /setup screen is reachable "
                 "to whoever hits the port first, who would then own the admin "
@@ -3075,6 +3121,17 @@ async def _validation_exception_handler(request: Request,
     return JSONResponse({"detail": exc.errors()}, status_code=422)
 
 
+def _file_error(exc):
+    """The OSError naming a file behind ``exc``, if there is one."""
+    for _ in range(3):
+        if isinstance(exc, OSError) and exc.filename:
+            return exc
+        exc = exc.__cause__ or exc.__context__
+        if exc is None:
+            return None
+    return None
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     """An uncaught route error renders the styled page for browser paths instead
@@ -3082,6 +3139,16 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     shown, since it can carry internals."""
     logging.getLogger("qobuz_librarian").exception(
         "Unhandled error on %s", request.scope.get("path", "?"))
+    file_error = _file_error(exc)
+    if file_error is not None and not request.scope["path"].startswith("/api/"):
+        advice = ("Check that it belongs to the user Qobuz Librarian runs as "
+                  "(PUID and PGID in Docker) and can be read and written."
+                  if isinstance(file_error, PermissionError) else
+                  "Check the file and the folder it is in, then try again.")
+        return render_error_page(
+            request, 500, "A file can't be used",
+            f"Qobuz Librarian can't use {file_error.filename}: "
+            f"{file_error.strerror or file_error}. {advice}")
     if not request.scope["path"].startswith("/api/"):
         return render_error_page(
             request, 500, "Something went wrong",
@@ -3452,8 +3519,20 @@ def _new_release_check_due():
         return False
     # Avoid a network probe until the interval says a run is due. This first
     # read is repeated under the lock after the probe.
-    last = new_releases.last_run()
-    return last is None or (time.time() - last) >= cfg.NEW_RELEASE_CHECK_INTERVAL
+    return _new_release_interval_elapsed()
+
+
+_new_release_submitted_at = 0.0
+
+
+def _new_release_interval_elapsed():
+    """A saved run time ahead of the clock counts as no run, and this
+    process's own last submit counts even when the data folder could not
+    take the stamp."""
+    now = time.time()
+    last = new_releases.last_run() or 0.0
+    stamps = [t for t in (last, _new_release_submitted_at) if t <= now]
+    return now - max(stamps, default=0.0) >= cfg.NEW_RELEASE_CHECK_INTERVAL
 
 
 def _maybe_auto_check_new_releases():
@@ -3466,6 +3545,7 @@ def _maybe_auto_check_new_releases():
     the run folds its finds into that list, so the timer keeps the review
     current instead of going quiet until the list is cleared.
     """
+    global _new_release_submitted_at
     if not _new_release_check_due():
         return
     credentials = _auto_start_credentials()
@@ -3478,12 +3558,12 @@ def _maybe_auto_check_new_releases():
         working = any(j.status != job_mgr.JobStatus.AWAITING_REVIEW for j in active)
         if working:
             return
-        last = new_releases.last_run()
-        if last is not None and (time.time() - last) < cfg.NEW_RELEASE_CHECK_INTERVAL:
+        if not _new_release_interval_elapsed():
             return
         # Stamp the attempt before submitting: the scan only advances the stamp
         # on a clean finish, so without this a failed/cancelled run would re-fire
         # on every load.
+        _new_release_submitted_at = time.time()
         new_releases.touch_run()
         _start_new_release_check(credentials)
 
@@ -4031,8 +4111,14 @@ def _library_scan_resume_due():
 def _start_due_jobs_in_background():
     """Run the dashboard's automatic starts off the request. Each begins with a
     live Qobuz check, which must never hold up the page."""
-    if not (_library_scan_resume_due() or _unreadable_recheck_pending()
-            or _new_release_check_due()):
+    try:
+        due = (_library_scan_resume_due() or _unreadable_recheck_pending()
+               or _new_release_check_due())
+    except OSError as e:
+        logging.getLogger("qobuz_librarian").warning(
+            "automatic start from the dashboard skipped: %s", e)
+        return
+    if not due:
         return
     if not _auto_start_busy.acquire(blocking=False):
         return
@@ -4152,7 +4238,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
             # A store that couldn't be read was kept aside and the run fell back
             # to defaults, and only the container log said so, which nobody reads.
-            "corrupt_stores": state_file.preserved_corrupt_stores(),
+            "corrupt_stores": state_file.corrupt_store_details(),
             # Says the pause here rather than leaving it to the 503 a press
             # earns. It probes the volumes, so it belongs off the event loop.
         }
@@ -11874,6 +11960,21 @@ def _diagnostics():
                skip_names={cfg.BEETS_RETRY_DIR}, show_size=True,
                unit=("album waiting to import", "albums waiting to import"))
     _dir_check("Data folder", cfg.DATA_DIR, want_writable=True)
+    # A single file left owned by another user, as a command run as root or a
+    # PUID change leaves behind, passes the folder check above.
+    try:
+        locked = sorted(
+            entry.name for entry in Path(cfg.DATA_DIR).iterdir()
+            if not os.access(entry, os.R_OK | os.W_OK
+                             | (os.X_OK if entry.is_dir() else 0)))
+    except OSError:
+        locked = []
+    if locked:
+        shown = ", ".join(locked[:5]) + (
+            f" and {len(locked) - 5} more" if len(locked) > 5 else "")
+        checks.append({"label": "Data folder files", "ok": False,
+                       "detail": f"Not readable and writable by the container "
+                       f"user: {shown}. Set their owner to PUID/PGID"})
     # A whole-directory count and size, the same shape as the Staging area
     # row above. The rows further down (Stranded upgrade backups, Backups
     # needing review) each cover one problem subset; this is the total the
@@ -12186,7 +12287,10 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         # The worst store to lose without being told: quality tier and
         # downsample policy revert to the env defaults and this page then shows
         # them as if they were chosen.
-        "corrupt_stores": state_file.preserved_corrupt_stores(),
+        "corrupt_stores": state_file.corrupt_store_details(),
+        "settings_file_reset": any(
+            store["original"] == settings_store.SETTINGS_FILE.name
+            for store in state_file.corrupt_store_details()),
         "backup_dir_cleared": settings_store.cleared_backup_dir_notice(),
         "diagnostics_html": _diagnostics_fragment(request, diagnostics),
         "web_login_available": (not web_auth.auth_disabled()
@@ -12620,6 +12724,20 @@ async def clear_corrupt_stores(request: Request):
         url="/settings?error=" + _notice_key(
             "One of the unreadable copies couldn't be deleted. Check the "
             "data folder's permissions, then try again."),
+        status_code=303)
+
+
+@app.post("/settings/corrupt-stores/keep")
+async def keep_corrupt_stores(request: Request):
+    """Clear the notice but keep the copies, in a folder it doesn't list."""
+    loop = asyncio.get_running_loop()
+    ok = await loop.run_in_executor(None, state_file.keep_corrupt_stores)
+    if ok:
+        return RedirectResponse(url="/settings", status_code=303)
+    return RedirectResponse(
+        url="/settings?error=" + _notice_key(
+            "One of the unreadable copies couldn't be moved. Check the data "
+            "folder's permissions, then try again."),
         status_code=303)
 
 
@@ -14012,7 +14130,11 @@ def _collection_backup_status():
         "held_back": None,
         "held_back_unreadable": False,
         "unreadable": state == "unreadable",
+        "failed": None,
     }
+    failure = collection_snapshot.last_failure()
+    if failure is not None:
+        info["failed"] = {"age": _format_age(failure[0]), "error": failure[1]}
     if isinstance(latest, dict):
         info["counts"] = latest.get("counts")
         stamp = latest.get("updated_at_epoch")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -283,6 +284,15 @@ def shrink_verdict(snapshot, previous):
             f"was kept.")
 
 
+# (when, error) for the last backup that could not be written, cleared by the
+# next one that is, so Settings can say so rather than only the scan's log.
+_last_failure = None
+
+
+def last_failure():
+    return _last_failure
+
+
 def write_snapshot(snapshot, *, force=False):
     """Write the snapshot, honouring the shrink guard. Returns (ok, reason).
 
@@ -290,6 +300,18 @@ def write_snapshot(snapshot, *, force=False):
     interleave a compare with a write. Raises OSError; callers decide how a
     failure surfaces, and never fail a scan over it.
     """
+    global _last_failure
+    try:
+        written, refusal = _write_snapshot(snapshot, force=force)
+    except OSError as e:
+        _last_failure = (time.time(), str(e))
+        raise
+    if written:
+        _last_failure = None
+    return written, refusal
+
+
+def _write_snapshot(snapshot, *, force):
     latest = latest_path()
     # The lock lives with the app's data, not in the backup folder: that folder
     # is synced offsite, and a stray .lock file riding along in it is noise.

@@ -20,11 +20,10 @@
       </svg>
       <span class="min-w-0 break-words text-sm">
         <strong>{{ corrupt_stores | length }} saved file{{ 's' if corrupt_stores | length != 1 }}
-          couldn't be read and {{ 'was' if corrupt_stores | length == 1 else 'were' }} reset.</strong>
-        Check download quality and downsampling in
-        <a href="/settings#diagnostics" class="ql-inline-link">Settings</a>, which can also
-        delete the unreadable {{ 'copy' if corrupt_stores | length == 1 else 'copies' }} and
-        clear this notice.
+          couldn't be read and {{ 'was' if corrupt_stores | length == 1 else 'were' }} reset:</strong>
+        {% for store in corrupt_stores %}{{ store.lost or store.original }}{{ '; ' if not loop.last else '.' }}{% endfor %}
+        <a href="/settings" class="ql-inline-link">Settings</a> names the kept
+        {{ 'copy' if corrupt_stores | length == 1 else 'copies' }} and clears this notice.
       </span>
     </div>
     {% endif %}

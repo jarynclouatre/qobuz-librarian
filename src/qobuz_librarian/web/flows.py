@@ -1126,9 +1126,10 @@ def _record_last_scan():
 def _write_collection_snapshot(job, owned_qobuz, artist_ids, source="scan"):
     """Leave a rebuild record after a completed scan.
 
-    Returns the guard's refusal so the caller can put it in the job summary, or
-    None when the snapshot was written. A snapshot that cannot be written never
-    fails the scan: the review the user is waiting for is already good.
+    Returns the guard's refusal or the write error so the caller can put it in
+    the job summary, or None when the snapshot was written. A snapshot that
+    cannot be written never fails the scan: the review the user is waiting for
+    is already good.
     """
     try:
         previous = collection_snapshot.load_latest()
@@ -1140,8 +1141,9 @@ def _write_collection_snapshot(job, owned_qobuz, artist_ids, source="scan"):
             previous=previous, source=source)
         written, refusal = collection_snapshot.write_snapshot(document)
     except OSError as e:
-        job.push_line(f"The collection snapshot could not be written: {e}")
-        return None
+        failure = f"The collection backup couldn't be written: {e}"
+        job.push_line(failure)
+        return failure
     if not written:
         # With no earlier snapshot there is nothing being protected and nothing
         # to tell the user about; the guard just declines to save an empty one.

@@ -100,6 +100,7 @@ POST_IMPORT_RELOCATION_LOG_ENTRY = (
 BLOCKED_DOWNLOAD_LOG_ENTRY = (
     "Interrupted download recovery needs attention"
 )
+UNREADABLE_QUEUE_LOG_ENTRY = "The saved download queue could not be read"
 
 
 class StartupRecoveryStatus(str, Enum):
@@ -143,6 +144,7 @@ class StartupRecoveryResult:
     items: tuple[StartupRecoveryItem, ...] = ()
     reason: str | None = None
     post_import_relocation: RelocationRecoveryResult | None = None
+    paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1448,10 +1450,23 @@ def recover_startup_state(
             )
         while True:
             loads = _load_namespace(authority)
-            if any(loaded.status is queue_state.QueueLoadStatus.BLOCKED for loaded in loads):
+            blocked = [loaded for loaded in loads
+                       if loaded.status is queue_state.QueueLoadStatus.BLOCKED]
+            if blocked:
+                logging.getLogger("qobuz_librarian").error(
+                    "%s: %s.",
+                    UNREADABLE_QUEUE_LOG_ENTRY,
+                    "; ".join(
+                        f"{', '.join(map(os.fspath, loaded.paths)) or 'queue'}: "
+                        f"{loaded.reason or 'reason not reported'}"
+                        for loaded in blocked
+                    ),
+                )
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     reason="queue-namespace-blocked",
+                    paths=tuple(dict.fromkeys(
+                        Path(path) for loaded in blocked for path in loaded.paths)),
                 )
             journals = _sorted_journals(loads)
             _require_authority(authority)
