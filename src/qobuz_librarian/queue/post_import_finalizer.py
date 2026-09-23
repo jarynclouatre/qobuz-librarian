@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import errno
+import os
 import secrets
 from pathlib import Path
 
+from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import (
     CompletionOriginKind,
     RecoveryOwner,
@@ -53,6 +55,14 @@ def _retirement(journal, item_id):
     return retirement
 
 
+def _artist_album_folder(path):
+    try:
+        relative = Path(path).relative_to(os.path.abspath(cfg.MUSIC_ROOT))
+    except ValueError:
+        return False
+    return len(relative.parts) == 2
+
+
 def plan_post_import_action(
     journal,
     item_id,
@@ -77,6 +87,10 @@ def plan_post_import_action(
         else None
     )
     artist = (album.get("artist") or {}).get("name") or ""
+    if not _artist_album_folder(post_path):
+        return None
+    if album_dir is not None and not _artist_album_folder(album_dir):
+        album_dir = None
 
     # Reuniting a split gap-fill already lands in the primary artist folder,
     # so it takes precedence over the optional whole-folder filing pass.

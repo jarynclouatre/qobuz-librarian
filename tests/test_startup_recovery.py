@@ -1037,6 +1037,7 @@ def test_a_staged_leftover_is_settleable_beside_its_beets_carrier():
     from types import SimpleNamespace
 
     from qobuz_librarian.queue.startup_recovery import (
+        SETTLEABLE_IMPORTED,
         SETTLEABLE_PRELAUNCH,
         SETTLEABLE_STAGED_LEFTOVER,
         settleable_block_kind,
@@ -1058,6 +1059,7 @@ def test_a_staged_leftover_is_settleable_beside_its_beets_carrier():
         ["managed-beets-reservation"], "managed-reservation-absent")
     assert settleable_block_kind(prelaunch) is SETTLEABLE_PRELAUNCH
 
-    # A Beets state that is neither of those is not a decision to offer.
+    # A carrier on its own means Beets already ran; that is offered too.
     assert settleable_block_kind(
-        _item(["managed-beets"], "managed-carrier-sealed-origin")) is None
+        _item(["managed-beets"], "managed-completion-proof-unavailable")
+    ) is SETTLEABLE_IMPORTED

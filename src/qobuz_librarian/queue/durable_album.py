@@ -141,6 +141,12 @@ def plan_durable_new_album(item, args) -> DurableNewAlbumPlan | None:
     bits, rate = album_max_quality(album, effective_tier)
     if type(bits) is not int or type(rate) is not int or bits <= 0 or rate <= 0:
         return None
+    # Late: loading the Beets integration reads the Beets config, which only
+    # an album that qualifies so far needs.
+    from qobuz_librarian.integrations import beets
+
+    if not beets.path_templates_give_albums_own_folders():
+        return None
     expectation = CompletionExpectation(
         album_id=album_id,
         scope=CompletionScope.ALBUM,

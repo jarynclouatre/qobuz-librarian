@@ -596,7 +596,12 @@ def _canonical_recovery_references(references):
     return tuple(sorted(references, key=_reference_sort_key))
 
 
-def _canonical_library_album_path(value, field_name):
+def _canonical_library_album_path(value, field_name, *, artist_album=True):
+    """An absolute album folder inside the music library.
+
+    Folder moves after an import only handle an Artist/Album folder; a
+    completed album may sit wherever the path template put it.
+    """
     if type(value) is not str or not os.path.isabs(value) or "\x00" in value:
         raise ValueError(f"{field_name} must be an absolute album path")
     root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
@@ -605,7 +610,11 @@ def _canonical_library_album_path(value, field_name):
         relative = path.relative_to(root)
     except ValueError:
         raise ValueError(f"{field_name} is outside the music library") from None
-    if len(relative.parts) != 2 or os.fspath(path) != value:
+    if (
+        not relative.parts
+        or artist_album and len(relative.parts) != 2
+        or os.fspath(path) != value
+    ):
         raise ValueError(f"{field_name} is not an exact album path")
     return value
 
@@ -1109,9 +1118,10 @@ def _parse_retirement(
             completion_evidence.album_path,
         ),
         "carrier retirement completion path",
+        artist_album=False,
     )
     final_path = _canonical_library_album_path(
-        value["final_path"], "carrier retirement final_path"
+        value["final_path"], "carrier retirement final_path", artist_album=False
     )
     action = (
         None
@@ -3172,6 +3182,20 @@ def forget_restored_library_backup(
     carrier: RecoveryReference,
 ) -> QueueJournal:
     """Forget only the exact carrier whose files are proved back at origin."""
+    return _forget_library_backup_carrier(journal, item_id, carrier)
+
+
+@_locked_transaction
+def forget_kept_library_backup(
+    journal: QueueJournal,
+    item_id: str,
+    carrier: RecoveryReference,
+) -> QueueJournal:
+    """Forget an exact carrier whose backup stays, pinned, where it is."""
+    return _forget_library_backup_carrier(journal, item_id, carrier)
+
+
+def _forget_library_backup_carrier(journal, item_id, carrier):
     previous = _reload_matching_journal(journal)
     target_index = next(
         (index for index, item in enumerate(previous.items) if item.item_id == item_id),
@@ -3196,7 +3220,7 @@ def forget_restored_library_backup(
         )
     ):
         raise QueueJournalBlocked(
-            "library backup carrier changed before its restore was recorded"
+            "library backup carrier changed before it was forgotten"
         )
     updated = replace(
         target,
@@ -3545,6 +3569,7 @@ def _commit_completed_retirement(
                 live_record["library"]["album"]["path"],
             ),
             "completed album path",
+            artist_album=False,
         )
         action = (
             None

@@ -323,9 +323,6 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     sync below both go through here, so streamrip always sees the same
     credential shape regardless of how the user provided them.
     """
-    import os
-    import tempfile
-
     import tomlkit
     try:
         config.STREAMRIP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
@@ -379,6 +376,7 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     if "downloads" not in doc:
         doc["downloads"] = tomlkit.table()
     doc["downloads"]["folder"] = str(config.STAGING_DIR)
+    doc["downloads"]["disc_subdirectories"] = True
     # The bundled default hardcodes the container's /config paths; point
     # streamrip's databases at the actual config dir so a non-/config
     # deployment (bare-metal, custom mount) doesn't hit
@@ -389,6 +387,14 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
         config.STREAMRIP_CONFIG.parent / "downloads.db")
     doc["database"]["failed_downloads_path"] = str(
         config.STREAMRIP_CONFIG.parent / "failed_downloads.db")
+    return _save_streamrip_config(doc)
+
+
+def _save_streamrip_config(doc) -> bool:
+    import os
+    import tempfile
+
+    import tomlkit
     try:
         target = config.STREAMRIP_CONFIG
         fd, tmp = tempfile.mkstemp(dir=str(target.parent),
@@ -427,6 +433,37 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     except OSError:
         return False
     return True
+
+
+def streamrip_disc_folders_off() -> bool:
+    """True when streamrip's config turns off its Disc N folders."""
+    try:
+        with open(config.STREAMRIP_CONFIG, "rb") as f:
+            downloads = tomllib.load(f).get("downloads") or {}
+    except (OSError, ValueError):
+        return False
+    return downloads.get("disc_subdirectories") is False
+
+
+def enforce_streamrip_disc_folders() -> None:
+    """Turn streamrip's Disc N folders back on; without them, tracks that
+    share a number and title on different discs overwrite each other."""
+    if not streamrip_disc_folders_off():
+        return
+    import logging
+
+    import tomlkit
+    try:
+        doc = tomlkit.parse(config.STREAMRIP_CONFIG.read_text(encoding="utf-8"))
+        doc["downloads"]["disc_subdirectories"] = True
+    except Exception:
+        return
+    if _save_streamrip_config(doc):
+        logging.getLogger("qobuz_librarian").info(fmt(
+            C.GRAY,
+            f"  Turned on disc_subdirectories in {config.STREAMRIP_CONFIG}: "
+            "tracks that share a number and title on different discs "
+            "overwrite each other without it."))
 
 
 def sync_streamrip_creds_from_env():

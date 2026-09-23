@@ -112,19 +112,29 @@ Set folder and file naming with `BEETS_PATH_DEFAULT`, `BEETS_PATH_SINGLETON`, an
 BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'
 ```
 
-Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field, the artwork plugins required by `ARTWORK`, and its internal import guards. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
+Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field and its internal import guards. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
 
 For a `pip` or `pipx` installation, install beets 2.14.1 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused because the import and recovery contract is verified against 2.14.1.
 
 Treat enabled beets plugins as trusted code. A plugin must finish all database work before its `beet` command exits; detached or background database writers are unsupported. Stop Qobuz Librarian completely before running a manual `beet` command, since external commands do not participate in the app's database coordination.
 
-For its own imports, the downloader pins five beets settings regardless of your config:
+For its own imports, the downloader pins these beets settings regardless of your config:
 
 - `autotag: no` keeps Qobuz's tags
 - `write: no` prevents beets from rewriting media tags during the move
 - `move: yes` clears staging, including across filesystems
 - `incremental: no` rescans on retry
-- `duplicate_action: merge` gap-fills into the existing folder without deleting your files
+- `duplicate_action: merge` keeps an import from deleting files already in your library
+- `singletons: no` imports each download as one album
+- `timeout: 60` waits up to a minute for another program using the beets database, such as `beet web` (half of `BEETS_TIMEOUT` when that is under two minutes)
+
+It also handles these itself:
+
+- Tracks a gap fill adds go into the album's existing folder, named by your path template's file name. If beets would rename that folder (your `replace`, `asciify_paths` or `max_filename_length` settings change its name), the tracks are not imported and stay in staging recovery.
+- A release tagged as a compilation or credited to Various Artists is filed with the compilation template.
+- `ARTWORK` works whatever plugins you choose. With `embed` or `both`, the cover the download saved is embedded in any track that has none before beets imports it. With `sidecar` or `both`, `fetchart` files that cover from the album folder. `embed` leaves no cover file.
+- `filefilter` is not loaded, since it would drop tracks from a download.
+- Before beets updates an older database to its current schema, one copy of it is kept beside it, named with `-before-migrations.bak` added, instead of the copy beets makes before each step.
 
 Your own `beet` commands read your config unchanged. Edits apply on the next import, no restart.
 

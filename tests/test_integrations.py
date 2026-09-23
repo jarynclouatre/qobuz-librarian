@@ -733,6 +733,7 @@ def test_managed_override_seals_pinned_database_root_and_plugin_order(
             "write": False,
             "move": True,
             "duplicate_action": "merge",
+            "singletons": False,
         }
         assert configured["plugins"] == [
             "fetchart",
@@ -849,8 +850,11 @@ def test_managed_import_identifies_one_complete_album_beside_legacy_rows(
     finally:
         beets._close_beets_database_anchor(anchor)
 
-    assert matches is (catalogue_shape == "proved")
-    if catalogue_shape != "proved":
+    # A library imported in place elsewhere keeps rows outside the music
+    # folder; one in another album doesn't stop the proof.
+    proved = catalogue_shape in ("proved", "outside-library-row")
+    assert matches is proved
+    if not proved:
         assert boundary is None
     else:
         assert boundary is not None

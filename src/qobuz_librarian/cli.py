@@ -192,6 +192,7 @@ def _cli_blocked_item_settled(result, target) -> bool:
 def _offer_blocked_cli_settlement(authority, result):
     """Offer an explicit decision for one settleable blocked download."""
     from qobuz_librarian.queue.startup_recovery import (
+        SETTLEABLE_IMPORTED,
         SETTLEABLE_STAGED_LEFTOVER,
         BlockedItemSettlementAction,
         BlockedItemSettlementStatus,
@@ -204,6 +205,7 @@ def _offer_blocked_cli_settlement(authority, result):
         return result, False, None
     item, label, settleable = binding
     leftover = settleable == SETTLEABLE_STAGED_LEFTOVER
+    imported = settleable == SETTLEABLE_IMPORTED
 
     if leftover:
         # The file in staging holds the queue, not the saved entry, so a retry
@@ -217,6 +219,16 @@ def _offer_blocked_cli_settlement(authority, result):
         )
         retry_words = {"c", "clear", "r", "retry"}
         again = "  Enter c to clear it, or press Enter to keep it: "
+    elif imported:
+        prompt = (
+            f"\n  Beets had already filed “{label}” when the download "
+            "stopped.\n"
+            "  Check it again, keep it blocked for later, or clear it and keep "
+            "what Beets filed?\n"
+            "  Choice [r=check again, Enter=keep, d=clear]: "
+        )
+        retry_words = {"r", "retry"}
+        again = "  Enter r to check again, d to clear, or press Enter to keep it: "
     else:
         prompt = (
             f"\n  The interrupted download “{label}” stopped before Beets "
@@ -256,6 +268,10 @@ def _offer_blocked_cli_settlement(authority, result):
 
     if leftover:
         settled_line = f"Cleared the leftover that was blocking “{label}”."
+    elif imported and action is BlockedItemSettlementAction.DISCARD:
+        settled_line = None
+    elif imported:
+        settled_line = f"“{label}” will be checked again."
     elif action is BlockedItemSettlementAction.DISCARD:
         settled_line = f"Removed the saved queue entry for “{label}”."
     else:
@@ -307,7 +323,7 @@ def _offer_blocked_cli_settlement(authority, result):
     # Say the choice took effect whether or not the run can carry on: the
     # warning that may follow is about the rest of the recovery, and on its own
     # it read as though the decision had been refused.
-    log.info(fmt(C.GREEN, f"  ✓ {settled_line}"))
+    log.info(fmt(C.GREEN, f"  ✓ {settled_line or settled.reason}"))
     if _cli_settlement_cleared_recovery(current, item):
         return current, False, None
     return current, False, (
@@ -1145,10 +1161,12 @@ def main():
         if not args.no_import and not args.dry_run:
             check_beets()
         from qobuz_librarian.api.auth import (
+            enforce_streamrip_disc_folders,
             sync_streamrip_creds_from_env,
             verify_streamrip_downloads_folder,
         )
         verify_streamrip_downloads_folder()
+        enforce_streamrip_disc_folders()
         if sync_streamrip_creds_from_env() is False:
             log.info(fmt(C.YELLOW,
                 "  ⚠  Couldn't write env credentials into the streamrip "

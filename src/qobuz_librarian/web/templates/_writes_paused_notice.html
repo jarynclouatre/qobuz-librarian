@@ -9,7 +9,7 @@
     <input type="hidden" name="recovery_operation_id" value="{{ writes_paused_notice.settle.operation_id }}">
     <input type="hidden" name="recovery_item_id" value="{{ writes_paused_notice.settle.item_id }}">
     <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
-            data-confirm="Give up on this download? The staged files are discarded."
+            data-confirm="Give up on this download? {% if writes_paused_notice.settle.imported %}What Beets filed stays in your library; any staged files are discarded.{% else %}The staged files are discarded.{% endif %}"
             data-confirm-action="Give up" data-irreversible>Give up on it</button>
   </form>
   <a href="/settings#mode" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>

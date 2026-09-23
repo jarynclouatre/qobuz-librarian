@@ -22,6 +22,7 @@ from qobuz_librarian.api.auth import (
     detect_auth_lost,
     detect_disk_full,
     detect_rate_limited,
+    streamrip_disc_folders_off,
 )
 from qobuz_librarian.completion import (
     DownloadCounts,
@@ -737,6 +738,23 @@ def staged_album_dirs(root):
     return sorted(album_dirs)
 
 
+def disc_names_overwrite(album):
+    """True when streamrip would save two of this album's tracks under one
+    name: two discs each hold a track with the same number and title, and
+    its config turns off the Disc N folders that keep them apart."""
+    seen = {}
+    for track in (album.get("tracks") or {}).get("items") or ():
+        key = (
+            track.get("track_number"),
+            (track.get("title") or "").strip().casefold(),
+            (track.get("version") or "").strip().casefold(),
+        )
+        disc = track.get("media_number") or 1
+        if seen.setdefault(key, disc) != disc:
+            return streamrip_disc_folders_off()
+    return False
+
+
 def downloads_whole_album(n_present, n_missing, n_total):
     """Whether a gap fill fetches the whole album instead of the gaps."""
     return n_present == 0 or n_missing >= max(4, int(n_total * 0.7))
@@ -881,6 +899,14 @@ def run_album_download(
                 f"(below the {cfg.MIN_FREE_STAGING_MB} MB MIN_FREE_STAGING_MB "
                 f"floor) - refusing to start the download.",
             )
+
+    if download_full_album and disc_names_overwrite(album):
+        log.info(fmt(
+            C.RED,
+            f"  ✗  disc_subdirectories is off in {cfg.STREAMRIP_CONFIG}, so "
+            "tracks that share a number and title on different discs "
+            "overwrite each other. Turn it on and download this album again.",
+        ))
 
     if download_full_album:
         url = f"https://play.qobuz.com/album/{album_id}"

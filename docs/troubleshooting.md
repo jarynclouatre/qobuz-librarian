@@ -12,6 +12,8 @@
 | Token rejected (Save & connect) | Expired, copied with quotes, or trailing whitespace. Get a fresh token from play.qobuz.com (dev tools → Local Storage → `localuser` → `token`) and paste it cleanly. |
 | Token connects but downloads are disabled | Search and catalogue scans can use a token alone, but streamrip also needs the Qobuz email or numeric user ID. Add it on Settings. |
 | Downloads paused after one finished "couldn't be confirmed as finished cleanly" | Something the download staged was left behind, so the app can't call it finished and holds the queue rather than guessing. Open that job from Queue or History and press **Retry**: it clears the leftover and settles the job. |
+| Downloads paused after beets filed an album that couldn't be verified | Open that job from Queue or History. **Retry** checks the import again; **Give up on this album** clears the download and keeps what beets filed in your library, so downloads can run again. |
+| "The beets database is busy" | Another program, such as `beet web` or a backup tool, held the beets database for longer than the import waits. Retry once it has finished. |
 | A download warns that files are being kept in staging | Something was set aside rather than filed: a track Qobuz only served in a lossy format, a file with no usable tags, or what a stopped download had already fetched. **Settings → Diagnostics** names each one and offers **Remove**. |
 | Stalls at "Importing into your library" | A beets plugin is loaded without its required config block (lastgenre key, replaygain backend). Disable it via `BEETS_PLUGINS` or add the block to `config.yaml`. |
 | `docker compose pull` 404 | Image not published under that tag yet. [Build from source](../README.md#development). |

@@ -404,11 +404,12 @@ def _terminal_recovery_offer():
         _STARTUP_RECOVERY_RESULT)
     if binding is None:
         return None
-    item, label, _settleable = binding
+    item, label, settleable = binding
     return {
         "operation_id": item.operation_id,
         "item_id": item.item_id,
         "album": _startup_recovery_album_label() or label,
+        "imported": settleable == startup_recovery.SETTLEABLE_IMPORTED,
     }
 
 
@@ -570,6 +571,10 @@ def _settle_blocked_recovery(action, *, job=None):
         if binding is None:
             return False, "The blocked recovery identity could not be verified."
         recovery_item = binding[0]
+        imported = (
+            startup_recovery.settleable_block_kind(binding[2])
+            == startup_recovery.SETTLEABLE_IMPORTED
+        )
         try:
             settled = startup_recovery.settle_blocked_item(
                 authority=_RUN_LOCK_HANDLE,
@@ -595,6 +600,12 @@ def _settle_blocked_recovery(action, *, job=None):
         except Exception:
             return False, "The settled recovery could not be verified safely."
         if action is BlockedItemSettlementAction.RETRY:
+            if imported and _recovery_status_value(refreshed) == "attention_required":
+                return False, (
+                    "Beets filed this album, but it still couldn't be "
+                    "verified. Give up on it to keep what Beets filed and let "
+                    "downloads run again."
+                )
             if _recovery_status_value(refreshed) != "resume_required" or (
                 job is not None and not _durable_recovery_matches_job(job)
             ):
@@ -610,7 +621,7 @@ def _durable_recovery_control():
     job_id = _startup_recovery_web_job_id()
     if binding is None or job_id is None:
         return None
-    recovery_item, _journal, _queued_item, _origin = binding
+    recovery_item, _journal, queued_item, _origin = binding
     try:
         row = job_persistence.load_one(job_id)
         if row is None or job_persistence.durable_completion_acknowledged(
@@ -626,6 +637,10 @@ def _durable_recovery_control():
         "operation_id": recovery_item.operation_id,
         "item_id": recovery_item.item_id,
         "status": _startup_recovery_status_value(),
+        "imported": (
+            startup_recovery.settleable_block_kind(queued_item)
+            == startup_recovery.SETTLEABLE_IMPORTED
+        ),
     }
 
 
@@ -1009,13 +1024,23 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                     # go back to one to get out of it, and giving up on the
                     # album is the one decision that lifts the pause on its own.
                     action = {"href": "/queue", "label": "Settle it"}
-                    msg = (f"An interrupted terminal download{of_album} could "
-                           "not be verified safely. " + paused + "Giving up on "
-                           "it clears the pause, and because nothing reached "
-                           "your library the album is still there to download "
-                           "again from the Library review or a search. Trying "
-                           "that same download again needs terminal mode in "
-                           "Settings.")
+                    if settle["imported"]:
+                        msg = (f"An interrupted terminal download{of_album} "
+                               "stopped after Beets had filed it, and it "
+                               "could not be verified. Downloads and scans "
+                               "are paused. Giving up on it clears the pause "
+                               "and keeps what Beets filed in your library. "
+                               "Checking it again needs terminal mode in "
+                               "Settings.")
+                    else:
+                        msg = (f"An interrupted terminal download{of_album} "
+                               "could not be verified safely. " + paused +
+                               "Giving up on it clears the pause, and because "
+                               "nothing reached your library the album is "
+                               "still there to download again from the "
+                               "Library review or a search. Trying that same "
+                               "download again needs terminal mode in "
+                               "Settings.")
                 else:
                     action = {"href": "/settings#mode", "label": "Open Settings"}
                     msg = (f"An interrupted terminal download{of_album} could "
@@ -2192,6 +2217,7 @@ async def _lifespan(_app: FastAPI):
         _log.warning("Couldn't write env credentials into the streamrip "
                      "config; web downloads may fail until creds are set "
                      "via the Settings page.")
+    api_auth.enforce_streamrip_disc_folders()
     # Acquire the shared run lock so separate CLI runs cannot overlap Web work.
     if os.environ.get("QL_CLI_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
         # Terminal-first deployment leaves the lock free for a CLI process.
@@ -4990,8 +5016,15 @@ def _summarize_download_result(r):
     return ", ".join(parts) + "."
 
 
-def _undeliverable_album_error(r):
+def _undeliverable_album_error(r, album=None):
     """Say how short the album came, and what the user can do about it."""
+    if album is not None and download.disc_names_overwrite(album):
+        return (
+            "Tracks that share a number and title on different discs "
+            "overwrote each other because disc_subdirectories is off in the "
+            "streamrip config, so nothing was added to your library. Turn it "
+            "on and try again."
+        )
     landed = r.get("n_ok", 0)
     short = (
         r.get("n_fail", 0) + r.get("n_broken", 0) + r.get("n_lossy_only", 0)
@@ -5309,7 +5342,7 @@ def _make_download_run(
             j.status = job_mgr.JobStatus.FAILED
             retryable, lossy_only = download_result.incomplete_track_counts(r)
             if r.get("result") == "incomplete":
-                j.error = _undeliverable_album_error(r)
+                j.error = _undeliverable_album_error(r, album)
             elif r.get("n_fail"):
                 j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
             elif r.get("n_ok"):
@@ -10576,6 +10609,8 @@ async def job_give_up(request: Request, job_id: str):
             "That interrupted download is no longer the one holding things "
             "up. Nothing was changed. Reload the page.",
         )
+    control = _durable_recovery_control()
+    imported = bool(control and control.get("imported"))
     settled, reason = _settle_durable_web_recovery(
         job,
         BlockedItemSettlementAction.DISCARD,
@@ -10592,6 +10627,8 @@ async def job_give_up(request: Request, job_id: str):
     with job._lock:
         job.attention = ""
         job.error = (
+            f"Abandoned. {reason} Downloads and scans can run again."
+            if imported else
             "Abandoned. The interrupted download was discarded and nothing "
             "was added to your library. Downloads and scans can run again, "
             "and you can start this album whenever you like."
@@ -10599,10 +10636,11 @@ async def job_give_up(request: Request, job_id: str):
     if not job_persistence.persist(job):
         return _durable_recovery_response(
             request,
-            "The interrupted download was discarded and downloads can run "
-            "again, but its outcome could not be saved to History. Nothing "
-            "was added to your library. Check the data-folder permissions "
-            "before restarting Qobuz Librarian.",
+            "The interrupted download was cleared and downloads can run "
+            "again, but its outcome could not be saved to History. "
+            + (reason if imported else "Nothing was added to your library.")
+            + " Check the data-folder permissions before restarting Qobuz "
+            "Librarian.",
         )
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
@@ -10644,6 +10682,8 @@ async def discard_interrupted_terminal_download(request: Request):
     # off mid-word.
     return RedirectResponse(
         url="/queue?notice=" + _notice_key(
+            f"Gave up on the interrupted download. {reason}"
+            if offer["imported"] else
             "Gave up on the interrupted download. Nothing reached your "
             "library."),
         status_code=303)

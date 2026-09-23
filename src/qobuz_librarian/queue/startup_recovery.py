@@ -28,6 +28,7 @@ from qobuz_librarian.integrations.beets import (
     ManagedReservationInspectionOutcome,
     inspect_managed_carrier,
     inspect_managed_reservation,
+    managed_sources_untouched,
     reopen_managed_evidence,
     retire_prelaunch_managed_carrier,
 )
@@ -1153,8 +1154,113 @@ def _settle_unstarted_download(authority, journal, item, action):
     return _settled_result(action)
 
 
+def _untouched_import_hash(authority, journal, item):
+    """The manifest hash of a started import that changed nothing, else None.
+
+    Read before any staged file is discarded: the untouched sources are the
+    proof.
+    """
+    references = _references(item, {_MANAGED_CARRIER_KIND})
+    if len(references) != 1:
+        return None
+    _require_authority(authority)
+    inspection = inspect_managed_carrier(
+        references[0].data,
+        RecoveryOwner(journal.operation_id, item.item_id),
+    )
+    _require_authority(authority)
+    if (
+        inspection.outcome is ManagedCarrierInspectionOutcome.UNSEALED_ACTIVITY
+        and managed_sources_untouched(inspection.snapshot)
+    ):
+        return inspection.manifest_hash
+    return None
+
+
+def _check_import_again(authority, journal, item):
+    """Send a finished import back to be proved once more."""
+    _require_authority(authority)
+    queue_state.transition_journal_item(
+        journal,
+        item.item_id,
+        queue_state.QueuePhase.RESOLVING,
+    )
+    _require_authority(authority)
+    return BlockedItemSettlementResult(
+        BlockedItemSettlementStatus.RETRYABLE,
+        "Beets finished filing this album; it will be checked again.",
+    )
+
+
+def _keep_library_backup(authority, journal, item):
+    """Pin the tracks a download moved aside and let the journal forget them."""
+    references = _references(item, _LIBRARY_BACKUP_KINDS)
+    if not references:
+        return journal, item, None
+    if (
+        len(references) != 1
+        or references[0].kind != _LIBRARY_BACKUP_CARRIER_KIND
+    ):
+        return _blocked_settlement(
+            "The tracks this download moved aside are still being settled, "
+            "so this item remains blocked."
+        )
+    owner = {"operation_id": journal.operation_id, "item_id": item.item_id}
+    _require_authority(authority)
+    backup = load_library_backup_record(references[0].data, expected_owner=owner)
+    _require_authority(authority)
+    if backup is None or not pin_unverified_upgrade_backup(
+        backup,
+        "queue backup kept - the download was cleared after Beets filed it",
+        expected_owner=owner,
+    ):
+        return _blocked_settlement(
+            "The tracks this download moved aside could not be marked to "
+            "keep, so this item remains blocked."
+        )
+    _require_authority(authority)
+    journal = queue_state.forget_kept_library_backup(
+        journal,
+        item.item_id,
+        references[0],
+    )
+    _require_authority(authority)
+    return journal, _find_item(journal, item.item_id), backup.path
+
+
+def _keep_imported_files(authority, journal, item, reference, manifest_hash):
+    """Clear a download Beets already filed, leaving the library as it is."""
+    kept = _keep_library_backup(authority, journal, item)
+    if type(kept) is BlockedItemSettlementResult:
+        return kept
+    journal, item, backup_path = kept
+    committed = queue_state._begin_prelaunch_managed_settlement(
+        journal,
+        item_id=item.item_id,
+        source_reference=reference,
+        carrier=reference.data,
+        manifest_hash=manifest_hash,
+        action=BlockedItemSettlementAction.DISCARD.value,
+    )
+    _require_authority(authority)
+    committed_item = _find_item(committed, item.item_id)
+    settled = _continue_prelaunch_settlement(
+        authority,
+        committed,
+        committed_item,
+        requested_action=BlockedItemSettlementAction.DISCARD,
+    )
+    if settled.status is not BlockedItemSettlementStatus.DISCARDED:
+        return settled
+    reason = "The download was cleared; what Beets filed stays in your library."
+    if backup_path is not None:
+        reason += f" The tracks it replaced are kept in {backup_path}."
+    return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
+
+
 SETTLEABLE_PRELAUNCH = "prelaunch"
 SETTLEABLE_STAGED_LEFTOVER = "staged-leftover"
+SETTLEABLE_IMPORTED = "imported"
 
 _PRELAUNCH_SETTLEMENT_BLOCKS = frozenset({
     (_MANAGED_RESERVATION_KIND, "managed-reservation-absent"),
@@ -1193,6 +1299,8 @@ def settleable_block_kind(item) -> str | None:
         and any(reference.kind in _STAGING_KINDS for reference in references)
     ):
         return SETTLEABLE_STAGED_LEFTOVER
+    if len(held) == 1 and held[0].kind == _MANAGED_CARRIER_KIND:
+        return SETTLEABLE_IMPORTED
     return None
 
 
@@ -1312,6 +1420,7 @@ def settle_blocked_item(
         if item.phase is not queue_state.QueuePhase.BLOCKED:
             return _blocked_settlement("Only a blocked item can be settled.")
 
+        untouched_hash = _untouched_import_hash(authority, journal, item)
         journal, item, staging_reason, _changed = _reconcile_item_staging(
             authority,
             journal,
@@ -1383,15 +1492,27 @@ def settle_blocked_item(
             _require_authority(authority)
             inspection = inspect_managed_carrier(reference.data, owner)
             _require_authority(authority)
-            if inspection.outcome is ManagedCarrierInspectionOutcome.UNSEALED_ORIGIN:
-                carrier = reference.data
-                manifest_hash = inspection.manifest_hash
-            elif inspection.outcome in {
+            launched = inspection.outcome in {
                 ManagedCarrierInspectionOutcome.SEALED,
                 ManagedCarrierInspectionOutcome.UNSEALED_ACTIVITY,
-            }:
+            }
+            if inspection.outcome is ManagedCarrierInspectionOutcome.UNSEALED_ORIGIN or (
+                launched and inspection.manifest_hash == untouched_hash
+            ):
+                # Beets either never started or stopped before it moved or
+                # recorded anything: the library is as it was.
+                carrier = reference.data
+                manifest_hash = inspection.manifest_hash
+            elif launched and action is BlockedItemSettlementAction.DISCARD:
+                return _keep_imported_files(
+                    authority, journal, item, reference, inspection.manifest_hash
+                )
+            elif inspection.outcome is ManagedCarrierInspectionOutcome.SEALED:
+                return _check_import_again(authority, journal, item)
+            elif launched:
                 return _blocked_settlement(
-                    "Beets may have started or changed the library, so this item remains blocked."
+                    "Beets had already filed part of this album, so it can't be "
+                    "downloaded again from here. Discard keeps what it filed."
                 )
             else:
                 return _blocked_settlement(

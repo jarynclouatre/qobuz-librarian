@@ -21,6 +21,7 @@ from qobuz_librarian.completion import (
     parse_completion_input_record,
 )
 from qobuz_librarian.download import (
+    disc_names_overwrite,
     download_staged_files,
     retain_download_staging,
     retire_download_staging_after_import,
@@ -1144,8 +1145,21 @@ def _queue_outcome_needs_attention(item):
     )
 
 
+def _album_dir_added_to(item):
+    """The existing album folder a download only adds tracks to, or None."""
+    album_dir = item.get("album_dir")
+    if (
+        album_dir is None
+        or not item.get("present")
+        or item.get("auto_upgrade")
+        or item.get("gap_fill_backup_path") is not None
+    ):
+        return None
+    return album_dir
+
+
 def _import_album_with_retry(
-        album_dirs, *, ownership_out=None, source_receipts=None):
+        album_dirs, *, ownership_out=None, source_receipts=None, album_dir=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
     attempts, retrying only on idle-timeout (other failures aren't transient).
     Returns True on import success, False on permanent failure."""
@@ -1158,14 +1172,16 @@ def _import_album_with_retry(
         if source_receipts is not None and not all(
                 tree_matches(receipt) for receipt in source_receipts):
             return False
+        pin = {} if album_dir is None else {"album_dir": album_dir}
         if ownership_out is None:
-            kind = beets_import_albums(album_dirs)
+            kind = beets_import_albums(album_dirs, **pin)
             attempt_capture = None
         else:
             attempt_capture = {}
             kind = beets_import_albums(
                 album_dirs,
                 ownership_out=attempt_capture,
+                **pin,
             )
         if kind == "ok":
             if ownership_out is not None:
@@ -3294,6 +3310,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 # of the queue carries on.
                 item["result"] = "incomplete"
                 log.info(fmt(C.YELLOW,
+                    "    ⚠  Tracks overwrote each other in the download; "
+                    "nothing was imported and the partial download was "
+                    "discarded." if disc_names_overwrite(album) else
                     "    ⚠  Qobuz didn't deliver every track; nothing was "
                     "imported and the partial download was discarded."))
                 results.append(_resolve_queue_item(
@@ -3508,12 +3527,16 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         {} if item.get("_capture_import_ownership") is True
                         else None
                     )
+                    added_to = _album_dir_added_to(item)
+                    pin = {} if added_to is None else {"album_dir": added_to}
                     if ownership_capture is None:
-                        item_imported = _import_album_with_retry(album_dirs)
+                        item_imported = _import_album_with_retry(
+                            album_dirs, **pin)
                     else:
                         item_imported = _import_album_with_retry(
                             album_dirs,
                             ownership_out=ownership_capture,
+                            **pin,
                         )
                     if item_imported and ownership_capture is not None:
                         ownership_result = ownership_capture.get("result")

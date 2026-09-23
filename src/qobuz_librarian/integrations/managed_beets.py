@@ -13,7 +13,7 @@ _NONCE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_NONCE"
 _MANAGED_MODE = "managed-v3"
 _PLUGIN_MODULE = "beetsplug.qobuz_ownership"
 _SUPPORTED_BEETS_VERSION = "2.14.1"
-_CONFIG_PROTOCOL_VERSION = 1
+_CONFIG_PROTOCOL_VERSION = 2
 
 
 def _valid_invocation(args):
@@ -27,9 +27,31 @@ def _valid_invocation(args):
     )
 
 
-def _inspect_config():
+def _legal_folder(resolved, folder):
+    """The folder Beets would write for ``folder`` taken literally."""
+    import re
+
+    from beets import util
+
+    replacements = [
+        (re.compile(pattern), repl or "")
+        for pattern, repl in resolved["replace"].get(dict).items()
+    ]
+    if resolved["asciify_paths"].get(bool):
+        folder = util.asciify_path(folder)
+    folder = util.sanitize_path(folder, replacements)
+    length = resolved["max_filename_length"].get(int)
+    if length:
+        folder = os.path.join(*(
+            util.truncate_str(part, length) for part in util.components(folder)
+        ))
+    return folder
+
+
+def _inspect_config(folder=None):
     import beets
     from beets import IncludeLazyConfig
+    from beets.library import Library
     from confuse import ConfigReadError, NotFoundError
 
     config_dir = os.environ.get("BEETSDIR", "")
@@ -69,6 +91,16 @@ def _inspect_config():
         ],
         "musicbrainz_enabled": (
             resolved["musicbrainz"].flatten().get("enabled")
+        ),
+        "paths": {
+            str(key): str(view.get())
+            for key, view in resolved["paths"].items()
+        },
+        "folder": None if folder is None else _legal_folder(resolved, folder),
+        "migrations": sorted(
+            [migration.name, model._table]
+            for migration, models in Library._migrations
+            for model in models
         ),
     }
     encoded = json.dumps(
@@ -113,8 +145,8 @@ def _install_qobuz_package():
 
 def main(args=None):
     values = list(sys.argv[1:] if args is None else args)
-    if values == ["--inspect-config"]:
-        _inspect_config()
+    if values[:1] == ["--inspect-config"] and len(values) <= 2:
+        _inspect_config(*values[1:])
         return
 
     _install_qobuz_package()

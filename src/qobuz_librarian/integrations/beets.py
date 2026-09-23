@@ -20,6 +20,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import select
 import shlex
@@ -53,6 +54,7 @@ from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.library.sqlite_atomic import (
     AtomicSQLiteWrite,
     _SQLiteDatabaseExclusion,
+    canonical_sidecars_clear,
     inspect_sqlite_source,
 )
 from qobuz_librarian.recovery import (
@@ -114,6 +116,73 @@ def unsafe_path_template(value: str) -> str:
     if any(part == ".." for part in parts):
         return "climbs"
     return ""
+
+
+def _template_components(template):
+    """Split a beets path template at the slashes outside function braces."""
+    components = []
+    current = []
+    depth = 0
+    index = 0
+    while index < len(template):
+        char = template[index]
+        if char == "$" and template[index + 1:index + 2] in ("$", "%", "}", ","):
+            current.append(template[index:index + 2])
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+        elif char == "/" and not depth:
+            components.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    components.append("".join(current))
+    return components
+
+
+def _template_uses(component, fields):
+    unescaped = re.sub(r"\$[$%},]", "", component)
+    return any(
+        re.search(rf"\$(?:\{{{field}\}}|{field}(?![A-Za-z0-9_]))", unescaped)
+        for field in fields
+    )
+
+
+def _effective_path_templates(plugin_config):
+    """The album path templates an import runs with: Settings first, then the
+    user's config.yaml, keyed like beets' ``paths:``."""
+    templates = dict((plugin_config or {}).get("paths") or {})
+    for name, template in (("default", cfg.BEETS_PATH_DEFAULT),
+                           ("comp", cfg.BEETS_PATH_COMP)):
+        if template and not unsafe_path_template(template):
+            templates[name] = template
+    templates.pop("singleton", None)
+    return templates
+
+
+def path_templates_give_albums_own_folders(plugin_config=None):
+    """True unless a path template files several albums in one folder.
+
+    The durable download lane proves an import by the exact contents of the
+    album's folder, which a shared folder never matches. Without a readable
+    Beets config the answer is True, and the import itself refuses.
+    """
+    if plugin_config is None:
+        runtime = _resolve_beets_runtime()
+        if runtime is None:
+            return True
+        plugin_config = _configured_beets_plugins(runtime)
+        if plugin_config is None:
+            return True
+    return all(
+        _template_uses("/".join(_template_components(template)[:-1]), ("album",))
+        for template in _effective_path_templates(plugin_config).values()
+    )
 
 
 def _yaml_sq(value):
@@ -889,6 +958,10 @@ def _prepare_staging_tags(
     except OSError:
         return moved
     uncertain_quarantines = 0
+    # Beets embeds art only when it may write tags, which the import forbids,
+    # so the cover the download saved goes into tracks that lack one here.
+    embed_art = getattr(cfg, "ARTWORK", "sidecar") in ("embed", "both")
+    pictures = {}
     for f in flacs:
         if authority_check is not None:
             authority_check()
@@ -970,6 +1043,11 @@ def _prepare_staging_tags(
             cleaned = [tags_mod.clean_qobuz_string(v) for v in vals]
             if cleaned != list(vals):
                 tags[key] = cleaned
+                changed = True
+        if embed_art and not tags.pictures:
+            picture = _staged_cover_picture(f, pictures)
+            if picture is not None:
+                tags.add_picture(picture)
                 changed = True
         if changed and managed is not None and not allow_managed_rewrite:
             raise OSError("managed beets source requires a tag-clean rewrite")
@@ -1062,6 +1140,45 @@ def _prepare_staging_tags(
         refreshed.sort(key=lambda record: order[record["slot"]])
         return tuple(refreshed)
     return moved
+
+
+def _staged_cover_picture(flac, pictures):
+    """The cover streamrip saved for ``flac``'s album, as a FLAC picture.
+
+    It sits beside the tracks, or in the album folder above a disc folder, or
+    beside the first disc's tracks once moved there for fetchart.
+    """
+    from mutagen.flac import Picture
+
+    directory = Path(flac).parent
+    places = [directory]
+    if re.fullmatch(r"(?i)(disc|cd)\s*\d+", directory.name):
+        try:
+            places += [directory.parent, *sorted(
+                entry for entry in directory.parent.iterdir()
+                if entry.is_dir() and entry != directory
+            )]
+        except OSError:
+            pass
+    for place in places:
+        for stem in ("cover", "folder", "front"):
+            for suffix in (".jpg", ".jpeg", ".png"):
+                cover = place / f"{stem}{suffix}"
+                if cover in pictures:
+                    return pictures[cover]
+                try:
+                    if not cover.is_file():
+                        continue
+                    data = cover.read_bytes()
+                except OSError:
+                    continue
+                picture = Picture()
+                picture.type = 3
+                picture.mime = "image/png" if suffix == ".png" else "image/jpeg"
+                picture.data = data
+                pictures[cover] = picture
+                return picture
+    return None
 
 
 def prepare_managed_staging_tags(
@@ -1507,6 +1624,9 @@ def _prepare_managed_override(capture, plugin_config):
         payload = _build_import_override_yaml(
             plugin_config,
             ownership_enabled=True,
+            compilation=_staged_compilation(
+                Path(record["path"]) for record in capture.get("intent") or ()
+            ),
         ).encode("utf-8")
         offset = 0
         while offset < len(payload):
@@ -1707,6 +1827,10 @@ def _managed_catalogue_album(connection, destinations, root):
     root_path = os.path.abspath(root)
     destination_counts = {}
     album_paths = {}
+    # A library imported in place elsewhere keeps rows outside the music
+    # folder. They can't be a destination, only a reason to distrust an album
+    # that also holds one.
+    outside_albums = set()
     for raw, album_id in connection.execute("SELECT path, album_id FROM items"):
         if isinstance(raw, bytes):
             raw = os.fsdecode(raw)
@@ -1718,7 +1842,8 @@ def _managed_catalogue_album(connection, destinations, root):
         try:
             relative = Path(absolute).relative_to(root_path).as_posix()
         except ValueError:
-            return None
+            outside_albums.add(album_id)
+            continue
         valid_album_id = type(album_id) is int and album_id > 0
         if relative in destinations and not valid_album_id:
             return None
@@ -1739,7 +1864,7 @@ def _managed_catalogue_album(connection, destinations, root):
         if set(counts) == destinations
         and all(count == 1 for count in counts.values())
     ]
-    if len(candidates) != 1:
+    if len(candidates) != 1 or candidates[0] in outside_albums:
         return None
     album_id = candidates[0]
     album_rows = connection.execute(
@@ -1776,15 +1901,14 @@ def _managed_album_boundary(destinations, root, root_identity, *, database_ancho
             if catalogue_album is None:
                 return None
             _album_id, paths = catalogue_album
-            directories = {str((Path(root_path) / relative).parent) for relative in paths}
-            if len(directories) == 1:
-                album_directory = next(iter(directories))
-            else:
-                disc_parents = {_consolidation_disc_parent(directory) for directory in directories}
-                if None in disc_parents or len(disc_parents) != 1:
-                    return None
-                album_directory = next(iter(disc_parents))
-            album_path = Path(album_directory).relative_to(root_path).as_posix()
+            # The album folder is wherever the user's path template put this
+            # album's tracks: their deepest shared folder, so disc folders of
+            # any name stay inside it.
+            album_path = os.path.commonpath(
+                [os.path.dirname(relative) for relative in paths]
+            )
+            if album_path in ("", "."):
+                return None
             album_identity = _managed_album_directory_identity(root_path, root_identity, album_path)
             if album_identity is None:
                 return None
@@ -2176,6 +2300,7 @@ class ManagedCarrierInspectionOutcome(str, Enum):
 class ManagedCarrierInspectionResult:
     outcome: ManagedCarrierInspectionOutcome
     manifest_hash: str | None = None
+    snapshot: dict | None = None
 
 
 class ManagedReservationInspectionOutcome(str, Enum):
@@ -2442,10 +2567,20 @@ def _managed_prelaunch_retirement_history(
     final = history.final_snapshot
     if (
         final["version"] != _MANAGED_SNAPSHOT_VERSION
-        or history.generation_count != 1
-        or final["generation"] != 0
-        or final["sealed"] is not False
         or final["hash"] != expected_manifest_hash
+    ):
+        return None
+    if final["sealed"] is True:
+        # Settled on the user's word after Beets finished: what it filed
+        # stays in the library.
+        if (
+            history.mapped_slots != history.intent_slots
+            or len(final["mappings"]) != len(final["intent"])
+        ):
+            return None
+        return final
+    if (
+        final["sealed"] is not False
         or final["mappings"]
         or final["cleanup_directories"]
         or history.mapped_slots
@@ -2701,7 +2836,7 @@ def _inspect_managed_carrier_with_interrupts_deferred(
             )
         ):
             return unavailable
-        return ManagedCarrierInspectionResult(outcome, final["hash"])
+        return ManagedCarrierInspectionResult(outcome, final["hash"], final)
     except (OSError, TypeError, ValueError):
         return unavailable
     except BaseException as exc:
@@ -3415,12 +3550,37 @@ def retire_managed_carrier(
         )
 
 
+def managed_sources_untouched(snapshot):
+    """True when a started import left no trace: nothing mapped, no folder of
+    its own left behind, and every declared source still where it was."""
+    try:
+        return (
+            snapshot["sealed"] is False
+            and not snapshot["mappings"]
+            and not snapshot["cleanup_directories"]
+            and all(
+                staging_mod.capture_file(
+                    record["path"], expected=tuple(record["identity"])
+                )
+                is not None
+                for record in snapshot["intent"]
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def retire_prelaunch_managed_carrier(
     carrier_reference,
     expected_owner,
     expected_manifest_hash,
 ):
-    """Retire only an exact generation-zero carrier from before launch."""
+    """Retire an exact carrier whose settlement the user already decided.
+
+    The settlement is only begun for a carrier from before launch, one whose
+    import left every source untouched, or a finished one whose files the
+    user chose to keep; the hash binds it to that inspected state.
+    """
     try:
         nonce = carrier_reference["nonce"]
     except (KeyError, TypeError):
@@ -4298,7 +4458,7 @@ def _strip_ownership_markers(root_fd, records, nonce):
 
 
 _SUPPORTED_BEETS_VERSION = "2.14.1"
-_BEETS_CONFIG_PROTOCOL_VERSION = 1
+_BEETS_CONFIG_PROTOCOL_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -4454,8 +4614,12 @@ def _managed_beets_entrypoint():
     return Path(os.path.abspath(__file__)).with_name("managed_beets.py")
 
 
-def _configured_beets_plugins(runtime=None):
-    """Inspect config inside Beets' own environment without loading plugins."""
+def _configured_beets_plugins(runtime=None, folder=None):
+    """Inspect config inside Beets' own environment without loading plugins.
+
+    With ``folder``, also report the folder Beets would write for that
+    literal library-relative path.
+    """
     runtime = runtime or _resolve_beets_runtime()
     if runtime is None or not _beets_runtime_matches(runtime):
         return None
@@ -4470,6 +4634,7 @@ def _configured_beets_plugins(runtime=None):
                 "-I",
                 str(_managed_beets_entrypoint()),
                 "--inspect-config",
+                *(() if folder is None else (folder,)),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -4500,6 +4665,9 @@ def _configured_beets_plugins(runtime=None):
             "plugin_paths",
             "disabled",
             "musicbrainz_enabled",
+            "paths",
+            "folder",
+            "migrations",
         }
         or payload["version"] != _BEETS_CONFIG_PROTOCOL_VERSION
         or payload["beets_version"] != _SUPPORTED_BEETS_VERSION
@@ -4510,6 +4678,8 @@ def _configured_beets_plugins(runtime=None):
         or not (
             payload["musicbrainz_enabled"] is None or type(payload["musicbrainz_enabled"]) is bool
         )
+        or (payload["folder"] is None) != (folder is None)
+        or not (payload["folder"] is None or isinstance(payload["folder"], str))
     ):
         return None
     limits = {
@@ -4525,20 +4695,182 @@ def _configured_beets_plugins(runtime=None):
             or any(not isinstance(value, str) or len(value) > length for value in values)
         ):
             return None
+    migrations = payload["migrations"]
+    if (
+        not isinstance(migrations, list)
+        or len(migrations) > 256
+        or any(
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not all(isinstance(value, str) for value in pair)
+            for pair in migrations
+        )
+    ):
+        return None
+    paths = payload["paths"]
+    if (
+        not isinstance(paths, dict)
+        or len(paths) > 256
+        or any(
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or len(key) > 4096
+            or len(value) > 4096
+            for key, value in paths.items()
+        )
+    ):
+        return None
     return {
         "plugins": payload["plugins"],
         "plugin_paths": payload["plugin_paths"],
         "disabled": payload["disabled"],
         "musicbrainz_enabled": payload["musicbrainz_enabled"],
+        "paths": paths,
+        "folder": payload["folder"],
+        "migrations": migrations,
     }
 
 
-def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
+def _beets_lock_wait():
+    """Seconds an import waits on a database another program has locked:
+    long enough for a brief reader or writer, and inside the idle limit that
+    would otherwise stop Beets first."""
+    idle = float(cfg.BEETS_TIMEOUT or 0)
+    return 60.0 if not idle or idle >= 120 else idle / 2
+
+
+def _staged_compilation(paths):
+    """True when every staged FLAC is tagged as a compilation or credited to
+    Various Artists."""
+    if not HAVE_MUTAGEN:
+        return False
+    from mutagen.flac import FLAC
+
+    found = False
+    for path in paths:
+        if Path(path).suffix.lower() != ".flac":
+            continue
+        try:
+            tags = FLAC(str(path))
+        except Exception:
+            return False
+        flag = (tags.get("compilation") or [""])[0].strip().lower()
+        artist = (tags.get("albumartist") or tags.get("artist") or [""])[0]
+        if (
+            flag not in ("1", "yes", "true")
+            and tags_mod.normalize(artist) not in tags_mod.VA_NORMALIZED
+        ):
+            return False
+        found = True
+    return found
+
+
+def _library_folder(album_dir):
+    """``album_dir`` relative to the music library, or None outside it."""
+    try:
+        relative = Path(os.path.abspath(album_dir)).relative_to(
+            os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+    except (TypeError, ValueError):
+        return None
+    return relative.as_posix() if relative.parts else None
+
+
+def _template_tail(template):
+    """The file name part of a path template, with any disc folders above it."""
+    components = _template_components(template)
+    tail = [components.pop()]
+    while components and _template_uses(components[-1], ("disc", "disctitle")):
+        tail.insert(0, components.pop())
+    return "/".join(tail)
+
+
+def _template_literal(text):
+    return text.replace("$", "$$").replace("%", "$%").replace("}", "$}")
+
+
+def _back_up_before_migrations(plugin_config, database_path):
+    """Keep one copy of a database Beets is about to migrate.
+
+    Beets copies the whole database before each migration it runs, so an older
+    library would gain one copy per migration. Returns True when this copy
+    stands in for them.
+    """
+    expected = {
+        tuple(pair) for pair in (plugin_config or {}).get("migrations") or ()
+    }
+    if not expected:
+        return False
+    backup = Path(f"{database_path}-before-migrations.bak")
+    anchor = None
+    try:
+        anchor = _open_beets_database_anchor()
+        if anchor is None or anchor.get("descriptor") is None:
+            return False
+
+        def inspect(connection):
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            done = set()
+            if "migrations" in tables:
+                done = {
+                    (row[0], row[1]) for row in connection.execute(
+                        "SELECT name, table_name FROM migrations")
+                }
+            if expected <= done:
+                return False
+            if backup.exists():
+                return True
+            # The inspection holds the database's write lock, so the file
+            # on disk is a whole, settled copy.
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{backup.name}.", dir=backup.parent)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    offset = 0
+                    while chunk := os.pread(anchor["descriptor"], 1 << 20, offset):
+                        out.write(chunk)
+                        offset += len(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(temporary, backup)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            log.info(fmt(C.GRAY, f"  Saved a copy of the beets database at {backup} "
+                                 "before Beets updates it."))
+            return True
+
+        return bool(inspect_sqlite_source(
+            anchor,
+            _beets_database_anchor_matches,
+            inspect,
+            connect=sqlite3.connect,
+            timeout=_beets_lock_wait(),
+        ))
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
+    finally:
+        if anchor is not None:
+            _close_beets_database_anchor(anchor)
+
+
+def _build_import_override_yaml(
+    plugin_config=None,
+    *,
+    ownership_enabled=False,
+    album_folder=None,
+    compilation=False,
+):
     """The beets config override the import runs with, as a YAML string. Forces
     the keys the import contract depends on: library/directory, non-
     interactive, non-incremental, autotagging and tag writes off, and move on.
-    It lets
-    everything else fall through to the user's config.yaml.
+    It lets everything else fall through to the user's config.yaml.
+
+    ``album_folder`` is the library-relative folder of an album the import adds
+    tracks to, which every path template is pinned to. ``compilation`` files
+    the album as one.
     """
     import re as _re
 
@@ -4558,7 +4890,17 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
         # `duplicate_action: remove` in config.yaml would have beets delete
         # the pre-existing album's files off disk on a gap-fill collision.
         "  duplicate_action: merge\n"
+        # Each download is one album; as singletons its tracks have no album
+        # for the import to be checked against.
+        "  singletons: no\n"
     )
+    # Beets takes an as-is album whose tracks share one album artist, as
+    # Qobuz's Various Artists releases do, for a single-artist album.
+    if compilation:
+        override_yaml += "  set_fields:\n    comp: 'True'\n"
+    # Another program reading the library, such as `beet web`, can hold it
+    # longer than Beets' default five seconds.
+    override_yaml += f"timeout: {_beets_lock_wait():g}\n"
     # A database this import creates has nothing a migration could lose, and
     # beets would leave a copy of it beside the new file for every migration.
     try:
@@ -4567,14 +4909,14 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
         new_database = True
     except OSError:
         new_database = False
-    if new_database:
+    if new_database or _back_up_before_migrations(plugin_config, database_path):
         override_yaml += "create_backup_before_migrations: no\n"
     # Path templates are deployer-supplied and can contain single quotes
     # (e.g. `$albumartist's stuff/$album`); _yaml_sq keeps the scalar safe.
     # Settings refuses a template that files outside the library; one set in
     # the environment never passed through that, so check here too and fall
     # back to the user's own config.yaml rather than scattering the import.
-    _paths = []
+    _paths = {}
     for _name, _template in (("default", cfg.BEETS_PATH_DEFAULT),
                              ("singleton", cfg.BEETS_PATH_SINGLETON),
                              ("comp", cfg.BEETS_PATH_COMP)):
@@ -4586,35 +4928,40 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
                 f"imports outside {cfg.MUSIC_ROOT}. Make it relative."
             )
             continue
-        _paths.append(f"  {_name}: {_yaml_sq(_template)}\n")
+        _paths[_name] = _template
+    if album_folder is not None:
+        # Tracks added to an album go into its folder, named as the user's
+        # templates name files. Beets only merges into an existing album when
+        # it autotags, which this import doesn't.
+        _paths = {
+            _name: f"{_template_literal(album_folder)}/{_template_tail(_template)}"
+            for _name, _template in _effective_path_templates(plugin_config).items()
+        }
     if _paths:
-        override_yaml += "paths:\n" + "".join(_paths)
+        override_yaml += "paths:\n" + "".join(
+            f"  {_yaml_sq(_name)}: {_yaml_sq(_template)}\n"
+            for _name, _template in _paths.items()
+        )
 
-    # fetchart saves a cover file; embedart embeds it into the tracks. ARTWORK
-    # picks which. Start from the user's plugin override (or the seeded
-    # `fetchart` default) and add what the art mode needs.
     preserve_effective_plugins = plugin_config is not None and not cfg.BEETS_PLUGINS
     if preserve_effective_plugins:
         _plugins = list(plugin_config["plugins"])
     else:
         _plugins = list(cfg.BEETS_PLUGINS) if cfg.BEETS_PLUGINS else ["fetchart"]
+    # filefilter drops tracks from an import, which would leave the album
+    # short of what was downloaded.
+    _plugins = [plugin for plugin in _plugins if plugin != "filefilter"]
+    # Cover art is embedded in the staged tracks before the import, since Beets
+    # only embeds when it may write tags. fetchart files the cover the download
+    # saved beside them, whatever sources config.yaml lists.
     _art = getattr(cfg, "ARTWORK", "sidecar")
-    # fetchart saves cover.jpg for sidecar too, so a custom BEETS_PLUGINS list
-    # that omits it (and replaces config.yaml's) mustn't silently turn art off.
-    if (
-        not preserve_effective_plugins
-        and _art in ("sidecar", "embed", "both")
-        and "fetchart" not in _plugins
-    ):
-        _plugins.append("fetchart")
-    if _art in ("embed", "both"):
-        for _p in ("fetchart", "embedart"):
-            if _p not in _plugins:
-                _plugins.append(_p)
-        # auto: embed after fetchart fetches the cover. remove_art_file drops
-        # the on-disk cover for embed-only; both keeps it.
+    if _art == "embed":
+        _plugins = [plugin for plugin in _plugins if plugin != "fetchart"]
+    else:
+        if "fetchart" not in _plugins:
+            _plugins.append("fetchart")
         override_yaml += (
-            f"embedart:\n  auto: yes\n  remove_art_file: {'yes' if _art == 'embed' else 'no'}\n"
+            "fetchart:\n  auto: yes\n  cautious: no\n  sources: [filesystem]\n"
         )
     plugin_paths = [str(Path(__file__).parent / "beets_plugins")]
     if plugin_config is not None:
@@ -4630,6 +4977,8 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
     disabled.discard(_ART_GUARD_PLUGIN)
     if ownership_enabled:
         disabled.discard(_OWNERSHIP_PLUGIN)
+    if _art != "embed":
+        disabled.discard("fetchart")
     _plugins = [plugin for plugin in _plugins if plugin not in disabled]
     override_yaml += (
         "disabled_plugins: [" + ", ".join(_yaml_sq(plugin) for plugin in sorted(disabled)) + "]\n"
@@ -4656,11 +5005,14 @@ def _build_import_override_yaml(plugin_config=None, *, ownership_enabled=False):
     return override_yaml
 
 
-def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None):
+def _prepare_for_beets_run(
+    roots=None, ownership_out=None, source_files_out=None, album_dir=None,
+):
     """Common setup shared by the whole-staging and per-album entry points:
     resolve Beets' own runtime, prep tags on the staged FLACs, and write the
     one-shot override yaml. Returns ``(override_path, cleanup_fn, runtime)``
-    or three ``None`` values if a precondition failed."""
+    or three ``None`` values if a precondition failed. ``album_dir`` is an
+    existing album the staged tracks are added to."""
     runtime = _resolve_beets_runtime()
     if runtime is None:
         log.info(fmt(C.RED, "  ✗  A supported Beets Python runtime could not be found."))
@@ -4684,12 +5036,32 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
         )
         return None, None, None
 
-    plugin_config = _configured_beets_plugins(runtime)
+    album_folder = None
+    if album_dir is not None and Path(album_dir).is_dir():
+        album_folder = _library_folder(album_dir)
+    plugin_config = _configured_beets_plugins(runtime, album_folder)
     if plugin_config is None:
         log.info(
             fmt(
                 C.RED,
                 "  ✗  The configured Python does not provide the supported Beets 2.14.1 runtime.",
+            )
+        )
+        return None, None, None
+    if album_folder is not None and plugin_config["folder"] != album_folder:
+        log.info(
+            fmt(
+                C.RED,
+                f"  ✗  Beets would file these tracks in “{plugin_config['folder']}”, "
+                f"not the album's folder “{album_folder}”, so they were not "
+                "imported.",
+            )
+        )
+        log.info(
+            fmt(
+                C.GRAY,
+                "     Your beets replace, asciify_paths or max_filename_length "
+                "settings change the folder's name.",
             )
         )
         return None, None, None
@@ -4748,6 +5120,13 @@ def _prepare_for_beets_run(roots=None, ownership_out=None, source_files_out=None
                 _build_import_override_yaml(
                     plugin_config,
                     ownership_enabled=ownership_enabled,
+                    album_folder=album_folder,
+                    compilation=_staged_compilation(
+                        path
+                        for root in (roots or [cfg.STAGING_DIR])
+                        for path in Path(root).rglob("*.flac")
+                        if not _under_retry_dir(path)
+                    ),
                 )
             )
             handle.flush()
@@ -5196,7 +5575,9 @@ def relocate_disc_album_artwork(album_dir) -> bool:
     return moved
 
 
-def beets_import_paths(consolidate=True, *, source_files_out=None, album_dirs=None):
+def beets_import_paths(
+    consolidate=True, *, source_files_out=None, album_dirs=None, album_dir=None,
+):
     """Run beets on explicit staged albums and return a success bool.
 
     With no explicit list, legacy preflight recovery derives only public audio
@@ -5219,7 +5600,7 @@ def beets_import_paths(consolidate=True, *, source_files_out=None, album_dirs=No
         return True
     prepared_sources = source_files_out if source_files_out is not None else []
     override_path, cleanup, runtime = _prepare_for_beets_run(
-        roots=roots, source_files_out=prepared_sources
+        roots=roots, source_files_out=prepared_sources, album_dir=album_dir
     )
     if cleanup is None:
         return False
@@ -5238,7 +5619,7 @@ def beets_import_paths(consolidate=True, *, source_files_out=None, album_dirs=No
     return ok
 
 
-def beets_import_albums(album_dirs, *, ownership_out=None):
+def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None):
     """Run beets import scoped to ``album_dirs`` and return a tri-state code:
 
     - ``"ok"``: import succeeded.
@@ -5257,6 +5638,7 @@ def beets_import_albums(album_dirs, *, ownership_out=None):
         roots=album_dirs,
         ownership_out=ownership_out,
         source_files_out=prepared_sources,
+        album_dir=album_dir,
     )
     if cleanup is None:
         return "error"
@@ -6098,13 +6480,25 @@ def _beets_direct(
     result = None
     caught = None
     database_ready = False
+    database_busy = False
     try:
         database_anchor = _open_beets_database_anchor()
         if database_anchor is None:
             raise OSError("configured beets database is unavailable")
         exclusion.acquire(database_anchor["parent_chain"][-1])
-        _bootstrap_beets_database_anchor(database_anchor)
-        _preflight_beets_database_anchor(database_anchor)
+        # Another program part-way through a write leaves its journal beside
+        # the database; wait for it to finish rather than give up at once.
+        deadline = time.monotonic() + _beets_lock_wait()
+        while True:
+            try:
+                _bootstrap_beets_database_anchor(database_anchor)
+                _preflight_beets_database_anchor(database_anchor)
+                break
+            except (OSError, sqlite3.Error):
+                database_busy = not canonical_sidecars_clear(database_anchor)
+                if not database_busy or time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
         database_ready = True
         result = _beets_direct_guarded(
             override_path,
@@ -6145,12 +6539,22 @@ def _beets_direct(
         if not database_ready and isinstance(
             caught, (OSError, sqlite3.Error, TypeError, ValueError)
         ):
-            log.info(
-                fmt(
-                    C.RED,
-                    f"  ✗  The beets database is not safe to open ({caught}).",
+            if database_busy:
+                log.info(
+                    fmt(
+                        C.RED,
+                        "  ✗  The beets database is busy: another program is "
+                        "writing to it. Nothing was imported; retry once it "
+                        "has finished.",
+                    )
                 )
-            )
+            else:
+                log.info(
+                    fmt(
+                        C.RED,
+                        f"  ✗  The beets database is not safe to open ({caught}).",
+                    )
+                )
             return False, "error"
         raise caught.with_traceback(caught.__traceback__)
     return result
@@ -6572,6 +6976,12 @@ def _beets_direct_guarded(
         _report_staging_remnants()
         return False, "error"
     _reclaim_ownership_capture(ownership_capture, ownership_payload)
+    if "database is locked" in full_out:
+        log.info(fmt(
+            C.RED,
+            "  ✗  The beets database was busy: another program held it for "
+            f"over {_beets_lock_wait():g} seconds. Retry once it has finished.",
+        ))
     log.info(fmt(C.RED, f"  ✗  beets exited {proc.returncode}."))
     log.info(fmt(C.GRAY, f"     Config: {cfg.BEETS_CONFIG_DIR}/config.yaml"))
     if override_path:
