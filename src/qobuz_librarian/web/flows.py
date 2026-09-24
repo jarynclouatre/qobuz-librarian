@@ -616,12 +616,13 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         if coverage is not None:
             covered = ({name.casefold() for name in coverage[0]}, coverage[1])
         updated = 0
+        removed = 0
         keep = []
         for c in parked.candidates:
             key = _key(c)
             fresh = fresh_by_key.get(key)
             if fresh is None and covered and _scan_would_offer(c, covered):
-                updated += 1
+                removed += 1
                 continue
             if fresh is None or _fold_row(fresh) == _fold_row(c):
                 keep.append(c)
@@ -670,7 +671,18 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 **(parked.execute_args or {}),
                 "_library_review_generation": int(review_generation),
             }
-        return added, updated
+        if coverage is not None and (added or updated or removed):
+            # The log above still carries the counts of the scan that built
+            # this review, so say what the refresh changed.
+            changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
+                ("added", added), ("updated", updated), ("removed", removed))
+                if n]
+            # Saved with this change; the review's lock is already held.
+            parked.log_lines.append(
+                "A later refresh " + ", ".join(changes[:-1])
+                + (" and " if len(changes) > 1 else "") + changes[-1] + ".")
+            parked._trim_log_lines_locked()
+        return added, updated + removed
 
     saved, result = job_persistence.persist_review_mutation(parked, _fold)
     return result if saved else False

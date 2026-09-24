@@ -190,7 +190,7 @@
   the safety lock. Finish the other Qobuz Librarian run or resume the web app,
   then try again.</span>
 </div>
-{% elif error and error not in ("invalidsettings", "persist") %}
+{% elif error and error not in ("invalidsettings", "persist", "settingschanged") %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash><span>{{ error }}</span></div>
 {% endif %}
 

@@ -83,6 +83,11 @@
     <span class="ql-status-chip"
           title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
   </div>
+  {% elif job.cancel_requested %}
+  <div class="ql-activity-actions">
+    <span class="ql-status-chip is-neutral"
+          title="It stops as soon as it safely can.">Stopping</span>
+  </div>
   {% else %}
   <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-activity-actions">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

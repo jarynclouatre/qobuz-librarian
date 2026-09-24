@@ -1097,9 +1097,14 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
         return None
     unwritable_now = _unwritable_volumes()
     if _is_htmx(request):
-        return HTMLResponse(
+        response = HTMLResponse(
             _ql_notice_html("error", html.escape(notice["msg"])),
             status_code=200)
+        if request.headers.get("HX-Target") == "diagnostics-list":
+            # The list is the whole Diagnostics panel; the notice goes above
+            # it rather than in its place.
+            response.headers["HX-Reswap"] = "beforebegin"
+        return response
     return _tr(request, "lock_busy.html",
                {"msg": notice["msg"], "reason": notice["reason"],
                 "action": notice["action"],
@@ -7749,7 +7754,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
             return _download_fragment(
                 "warning",
                 f'Already queued. <a href="/jobs/{existing.id}" '
-                f'class="ql-inline-link">view job</a>.',
+                f'class="ql-inline-link">View job</a>.',
                 "duplicate",
             )
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
@@ -7907,7 +7912,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     return _download_fragment(
                         "warning",
                         f'Already queued. <a href="/jobs/{dup.id}" '
-                        f'class="ql-inline-link">view job</a>.',
+                        f'class="ql-inline-link">View job</a>.',
                         "duplicate",
                     )
                 return RedirectResponse(url=f"/jobs/{dup.id}", status_code=303)
@@ -9576,6 +9581,8 @@ async def job_approve(request: Request, job_id: str):
     selected_candidate_ids = set()
     selected_candidate_snapshot = []
     stale_premise_candidate_ids = set()
+    # Ticked albums a download already running covers, left ticked.
+    already_downloading = []
     downsample_keep_originals = None
     downsample_choice_to_save = ""
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
@@ -9767,6 +9774,7 @@ async def job_approve(request: Request, job_id: str):
             # one partial batch cannot eat unreviewed candidates.
             split_review = None
             admission_decisions = {}
+            already_downloading.clear()
 
             def selection_filter(candidate):
                 key = candidate.get("cid")
@@ -9794,6 +9802,8 @@ async def job_approve(request: Request, job_id: str):
                         admission_decisions[key] = False
                         return False
                     admitted = _duplicate_download_job(album_id) is None
+                    if not admitted:
+                        already_downloading.append(candidate)
                 else:
                     admitted = True
                 admission_decisions[key] = admitted
@@ -9962,7 +9972,18 @@ async def job_approve(request: Request, job_id: str):
             ) + _skip_q,
             status_code=303,
         )
+    running_q = ""
+    if already_downloading:
+        names = _named_albums(already_downloading)
+        running_q = "&error=" + _notice_key(
+            f"{names} {'is' if len(already_downloading) == 1 else 'are'} "
+            "already downloading, so "
+            f"{'it was' if len(already_downloading) == 1 else 'they were'} "
+            "not started again.")
     if approved is job_mgr.APPROVAL_NO_SELECTION:
+        if running_q:
+            return RedirectResponse(
+                url=f"{dest}?{running_q[1:]}{_skip_q}", status_code=303)
         return RedirectResponse(url=f"{dest}?noselection=1{_skip_q}",
                                 status_code=303)
     flag = "approved=1" if approved else "stale=1"
@@ -9985,7 +10006,8 @@ async def job_approve(request: Request, job_id: str):
         # is what the page has to say instead.
         flag = ""
     return RedirectResponse(
-        url=f"{dest}?{flag}{_skip_q}{local_stale_q}".replace("?&", "?"),
+        url=f"{dest}?{flag}{_skip_q}{local_stale_q or running_q}".replace(
+            "?&", "?"),
         status_code=303,
     )
 
@@ -11886,6 +11908,11 @@ def _staging_leftovers():
         if held is not None:
             source = held.original or held.retained
             what = _staging_display_name(source)
+        elif inspection.planned_trees and not any(
+                tree.files or any(rel for rel, _identity in tree.directories)
+                for tree in inspection.planned_trees):
+            label = "Empty folder from a stopped download"
+            reason = "The download stopped before any file arrived."
         elif inspection.planned_trees:
             what = ", ".join(
                 _staging_tree_contents(tree)

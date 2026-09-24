@@ -117,7 +117,9 @@ FORM_KEYS = {
     "discover": ("LASTFM_API_KEY",),
     "collection-backup": ("COLLECTION_BACKUP_DIR",),
 }
-_FORM_GENERATION_KEY = secrets.token_bytes(32)
+# Fixed, so a form opened before a restart still matches settings that did
+# not change. The one secret it covers is a random API key.
+_FORM_GENERATION_KEY = b"qobuz-librarian settings form"
 
 
 class SettingsChanged(RuntimeError):
