@@ -1142,6 +1142,10 @@ def execute_durable_new_album(
 
     try:
         _require_authority(authority)
+        replaced = (
+            {} if item.get("album_dir") is None
+            else {"album_dir": item["album_dir"]}
+        )
         imported = beets_import_managed(
             album_dirs,
             binding_records,
@@ -1149,6 +1153,7 @@ def execute_durable_new_album(
             on_reservation=checkpoint_reservation,
             on_intent=checkpoint_carrier,
             authority_check=lambda: _require_authority(authority),
+            **replaced,
         )
         _require_authority(authority)
     except BaseException:

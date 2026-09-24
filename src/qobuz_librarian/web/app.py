@@ -410,6 +410,7 @@ def _terminal_recovery_offer():
         "item_id": item.item_id,
         "album": _startup_recovery_album_label() or label,
         "imported": settleable == startup_recovery.SETTLEABLE_IMPORTED,
+        "partial": settleable == startup_recovery.SETTLEABLE_PARTIAL,
     }
 
 
@@ -571,10 +572,8 @@ def _settle_blocked_recovery(action, *, job=None):
         if binding is None:
             return False, "The blocked recovery identity could not be verified."
         recovery_item = binding[0]
-        imported = (
-            startup_recovery.settleable_block_kind(binding[2])
-            == startup_recovery.SETTLEABLE_IMPORTED
-        )
+        imported = startup_recovery.import_was_filed(
+            recovery_item.operation_id, binding[2])
         try:
             settled = startup_recovery.settle_blocked_item(
                 authority=_RUN_LOCK_HANDLE,
@@ -637,10 +636,10 @@ def _durable_recovery_control():
         "operation_id": recovery_item.operation_id,
         "item_id": recovery_item.item_id,
         "status": _startup_recovery_status_value(),
-        "imported": (
-            startup_recovery.settleable_block_kind(queued_item)
-            == startup_recovery.SETTLEABLE_IMPORTED
-        ),
+        "imported": startup_recovery.import_was_filed(
+            recovery_item.operation_id, queued_item),
+        "partial": startup_recovery.import_stopped_part_way(
+            recovery_item.operation_id, queued_item),
     }
 
 
@@ -1011,7 +1010,18 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             paused = ("Downloads and scans are paused, and its saved queue and "
                       "staged files were left unchanged. ")
             held_job_id = _startup_recovery_web_job_id()
-            if origin != "cli" and held_job_id is not None:
+            partial = startup_recovery.partial_import_note(
+                _STARTUP_RECOVERY_RESULT)
+            if partial is not None:
+                msg = (f"{partial} Downloads and scans are paused until it "
+                       "is given up, which keeps the tracks Beets moved and "
+                       "sets the rest aside in Settings > Diagnostics.")
+                if origin == "cli":
+                    settle = _terminal_recovery_offer()
+                elif held_job_id is not None:
+                    action = {"href": f"/jobs/{held_job_id}",
+                              "label": "Open that download"}
+            elif origin != "cli" and held_job_id is not None:
                 action = {"href": f"/jobs/{held_job_id}",
                           "label": "Open that download"}
                 msg = ("Downloads and scans are paused until the interrupted "
@@ -10612,8 +10622,9 @@ async def job_give_up(request: Request, job_id: str):
 
     Retry is the right first move, but a download can be stuck on something a
     retry repeats exactly, and until it is settled every download and scan
-    stays paused. This throws the interrupted download away and leaves the
-    album to be started again whenever the user wants.
+    stays paused. This throws the interrupted download away, keeps an album
+    Beets finished filing in the library, and otherwise leaves the album to
+    be started again whenever the user wants.
     """
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
@@ -10633,7 +10644,7 @@ async def job_give_up(request: Request, job_id: str):
             "up. Nothing was changed. Reload the page.",
         )
     control = _durable_recovery_control()
-    imported = bool(control and control.get("imported"))
+    imported = bool(control and (control.get("imported") or control.get("partial")))
     settled, reason = _settle_durable_web_recovery(
         job,
         BlockedItemSettlementAction.DISCARD,
@@ -10706,7 +10717,7 @@ async def discard_interrupted_terminal_download(request: Request):
     return RedirectResponse(
         url="/queue?notice=" + _notice_key(
             f"Gave up on the interrupted download. {reason}"
-            if offer["imported"] else
+            if offer["imported"] or offer["partial"] else
             "Gave up on the interrupted download. Nothing reached your "
             "library."),
         status_code=303)

@@ -926,14 +926,18 @@ def _acquire_tree_exclusions(tree):
         raise
 
 
-def retain_staging_run(run, *, label="interrupted", on_intent=None):
-    """Move one quiescent exact run tree outside import for later review."""
+def retain_staging_run(run, *, label="interrupted", on_intent=None, release=False):
+    """Move one quiescent exact run tree outside import for later review.
+
+    ``release`` keeps it as an ordinary kept group, no longer tied to the
+    download that owned the run, so the user can remove it.
+    """
     if isinstance(run, dict):
         run = staging_run_from_record(run)
     if not isinstance(run, StagingRun):
         return None
     try:
-        owner = normalise_recovery_owner(run.owner)
+        owner = None if release else normalise_recovery_owner(run.owner)
     except ValueError:
         return None
     if (owner is None) != (on_intent is None):

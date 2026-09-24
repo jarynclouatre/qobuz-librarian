@@ -390,18 +390,20 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     return _save_streamrip_config(doc)
 
 
-def _save_streamrip_config(doc) -> bool:
+def _save_streamrip_config(doc, *, mode=0o600) -> bool:
+    """Replace the file the config path names, through any symlink. It holds
+    the account token, so by default only its owner can read it."""
     import os
     import tempfile
 
     import tomlkit
     try:
-        target = config.STREAMRIP_CONFIG
+        target = Path(os.path.realpath(config.STREAMRIP_CONFIG))
         fd, tmp = tempfile.mkstemp(dir=str(target.parent),
                                    prefix=".streamrip.", suffix=".tmp")
         fd_owned = False
         try:
-            os.fchmod(fd, 0o600)  # holds the account token - keep it owner-only
+            os.fchmod(fd, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 fd_owned = True
                 f.write(tomlkit.dumps(doc))
@@ -447,23 +449,25 @@ def streamrip_disc_folders_off() -> bool:
 
 def enforce_streamrip_disc_folders() -> None:
     """Turn streamrip's Disc N folders back on; without them, tracks that
-    share a number and title on different discs overwrite each other."""
+    share a number and title on different discs overwrite each other. The
+    file keeps its permissions, and a symlinked config stays a symlink."""
     if not streamrip_disc_folders_off():
         return
     import logging
+    import os
+    import stat
 
     import tomlkit
     try:
         doc = tomlkit.parse(config.STREAMRIP_CONFIG.read_text(encoding="utf-8"))
         doc["downloads"]["disc_subdirectories"] = True
+        mode = stat.S_IMODE(os.stat(config.STREAMRIP_CONFIG).st_mode)
     except Exception:
         return
-    if _save_streamrip_config(doc):
+    if _save_streamrip_config(doc, mode=mode):
         logging.getLogger("qobuz_librarian").info(fmt(
             C.GRAY,
-            f"  Turned on disc_subdirectories in {config.STREAMRIP_CONFIG}: "
-            "tracks that share a number and title on different discs "
-            "overwrite each other without it."))
+            f"  Turned on disc_subdirectories in {config.STREAMRIP_CONFIG}."))
 
 
 def sync_streamrip_creds_from_env():

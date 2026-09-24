@@ -172,6 +172,28 @@ def test_restore_overwrites_partial_but_keeps_larger_good_file(tmp_path, monkeyp
     assert not (b / "bk").exists()
 
 
+def test_released_queue_backup_restores_from_settings(tmp_path, monkeypatch):
+    """A download cleared while its backup stays hands the backup over, so
+    Settings' Restore, which names no owner, can still put the tracks back."""
+    import qobuz_librarian.library.backup as bk
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", tmp_path)
+    monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path)
+    owner = {"operation_id": "a" * 64, "item_id": "b" * 64}
+    (tmp_path / "bk").mkdir()
+    (tmp_path / "album").mkdir()
+    (tmp_path / "bk" / "01.flac").write_bytes(b"original")
+    backup = _seal_test_backup(
+        bk, tmp_path / "bk", tmp_path / "album", owner=owner)
+    assert bk.restore_gap_fill_backup(backup, tmp_path / "album") == 0
+
+    assert bk.pin_unverified_upgrade_backup(backup, "kept", expected_owner=owner)
+    assert bk.release_backup_owner(backup, expected_owner=owner)
+    released = bk.load_backup_result(tmp_path / "bk")
+    assert bk.restore_gap_fill_backup(
+        released, tmp_path / "album", keep_larger_dst=False) == 1
+    assert (tmp_path / "album" / "01.flac").read_bytes() == b"original"
+
+
 def test_restore_does_not_keep_larger_but_corrupt_dst(tmp_path, monkeypatch):
     import qobuz_librarian.library.backup as bk
     monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", tmp_path)

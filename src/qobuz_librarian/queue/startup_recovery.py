@@ -26,6 +26,8 @@ from qobuz_librarian.integrations.beets import (
     ManagedCarrierRetirementOutcome,
     ManagedEvidenceUnavailable,
     ManagedReservationInspectionOutcome,
+    clear_stopped_import_folders,
+    forget_staged_beets_rows,
     inspect_managed_carrier,
     inspect_managed_reservation,
     managed_sources_untouched,
@@ -35,6 +37,8 @@ from qobuz_librarian.integrations.beets import (
 from qobuz_librarian.integrations.staging import (
     StagingReferenceStatus,
     bind_unclaimed_staging_run,
+    capture_file,
+    capture_staging_run,
     discard_file_group,
     discard_group,
     inspect_staging_group_reference,
@@ -48,6 +52,7 @@ from qobuz_librarian.library.backup import (
     load_backup_result,
     load_library_backup_record,
     pin_unverified_upgrade_backup,
+    release_backup_owner,
     warn_pin_failed,
 )
 from qobuz_librarian.library.post_import_relocation import (
@@ -67,6 +72,7 @@ from qobuz_librarian.queue.post_import_finalizer import (
     plan_post_import_action,
 )
 from qobuz_librarian.run_lock import RunLockLease
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import job_persistence
 
 _STAGING_RUN_KIND = "download-staging-run"
@@ -982,7 +988,8 @@ def _continue_prelaunch_settlement(
         ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
     }:
         return _blocked_settlement(
-            "The pre-launch Beets state could not be retired safely. The item remains blocked."
+            "The record of this Beets import could not be retired safely. The "
+            "item remains blocked."
         )
     try:
         queue_state._finish_prelaunch_managed_settlement(
@@ -1154,27 +1161,70 @@ def _settle_unstarted_download(authority, journal, item, action):
     return _settled_result(action)
 
 
-def _untouched_import_hash(authority, journal, item):
-    """The manifest hash of a started import that changed nothing, else None.
+_IMPORT_FILED = "filed"
+_IMPORT_UNTOUCHED = "untouched"
+_IMPORT_PARTIAL = "partial"
 
-    Read before any staged file is discarded: the untouched sources are the
-    proof.
+
+def _launched_import(operation_id, item):
+    """How far the item's started Beets import got, from its carrier.
+
+    Returns (state, manifest hash, snapshot), or None when the item holds
+    no carrier of an import that started. Filed means Beets finished and
+    sealed its record; untouched, that it stopped before moving any file;
+    partial, anything between.
     """
     references = _references(item, {_MANAGED_CARRIER_KIND})
     if len(references) != 1:
         return None
-    _require_authority(authority)
     inspection = inspect_managed_carrier(
         references[0].data,
-        RecoveryOwner(journal.operation_id, item.item_id),
+        RecoveryOwner(operation_id, item.item_id),
     )
-    _require_authority(authority)
-    if (
-        inspection.outcome is ManagedCarrierInspectionOutcome.UNSEALED_ACTIVITY
-        and managed_sources_untouched(inspection.snapshot)
-    ):
-        return inspection.manifest_hash
-    return None
+    if inspection.outcome is ManagedCarrierInspectionOutcome.SEALED:
+        state = _IMPORT_FILED
+    elif inspection.outcome is not ManagedCarrierInspectionOutcome.UNSEALED_ACTIVITY:
+        return None
+    elif managed_sources_untouched(inspection.snapshot):
+        state = _IMPORT_UNTOUCHED
+    else:
+        state = _IMPORT_PARTIAL
+    return state, inspection.manifest_hash, inspection.snapshot
+
+
+def _partial_import_reason(item, snapshot):
+    """Where a download Beets stopped part-way through filing has left things."""
+    intent = snapshot.get("intent") or ()
+    staged = sum(
+        capture_file(record["path"], expected=tuple(record["identity"])) is not None
+        for record in intent
+    )
+    staging = next(
+        (
+            reference.data.get("path")
+            for reference in _staging_references(item)
+            if isinstance(reference.data.get("path"), str)
+        ),
+        None,
+    )
+    if staged == 0:
+        reason = (
+            "Beets moved this album's tracks into your library but stopped "
+            "before it finished recording them."
+        )
+    else:
+        reason = (
+            "Beets stopped part-way through filing this album: "
+            f"{staged} of {len(intent)} tracks are still in "
+            f"{staging or 'staging'} and the others are in your library."
+        )
+    for reference in _references(item, _LIBRARY_BACKUP_KINDS):
+        paths = reference.data.get("carrier", reference.data)
+        path = paths.get("path") if isinstance(paths, dict) else None
+        if isinstance(path, str):
+            reason += f" The tracks it replaced are kept in {path}."
+            break
+    return reason
 
 
 def _check_import_again(authority, journal, item):
@@ -1192,48 +1242,56 @@ def _check_import_again(authority, journal, item):
     )
 
 
-def _keep_library_backup(authority, journal, item):
-    """Pin the tracks a download moved aside and let the journal forget them."""
-    references = _references(item, _LIBRARY_BACKUP_KINDS)
-    if not references:
-        return journal, item, None
-    if (
-        len(references) != 1
-        or references[0].kind != _LIBRARY_BACKUP_CARRIER_KIND
-    ):
+def _keep_backup_for_settings(authority, journal, item, note):
+    """Pin the tracks a download moved aside and hand the backup to Settings,
+    where it can be restored or removed once this download is cleared.
+
+    Returns (reference, backup), (None, None) when the item holds no backup,
+    or a refusal.
+    """
+    backups = _references(item, _LIBRARY_BACKUP_KINDS)
+    if not backups:
+        return None, None
+    if len(backups) != 1 or backups[0].kind != _LIBRARY_BACKUP_CARRIER_KIND:
         return _blocked_settlement(
             "The tracks this download moved aside are still being settled, "
             "so this item remains blocked."
         )
     owner = {"operation_id": journal.operation_id, "item_id": item.item_id}
+    data = backups[0].data
     _require_authority(authority)
-    backup = load_library_backup_record(references[0].data, expected_owner=owner)
-    _require_authority(authority)
-    if backup is None or not pin_unverified_upgrade_backup(
-        backup,
-        "queue backup kept - the download was cleared after Beets filed it",
-        expected_owner=owner,
+    backup = load_library_backup_record(data, expected_owner=owner)
+    keeper = owner
+    if backup is None:
+        # A settlement that stopped after handing the backup over.
+        backup = load_backup_result(data.get("path", ""))
+        receipt = data.get("receipt") if isinstance(data, dict) else None
+        if (
+            backup is None
+            or "owner" in backup.receipt
+            or not isinstance(receipt, dict)
+            or backup.receipt.get("token") != receipt.get("token")
+        ):
+            return _blocked_settlement(
+                "The tracks this download moved aside could not be found "
+                "where they were kept, so this item remains blocked."
+            )
+        keeper = None
+    if not pin_unverified_upgrade_backup(backup, note, expected_owner=keeper) or (
+        keeper is not None
+        and not release_backup_owner(backup, expected_owner=keeper)
     ):
         return _blocked_settlement(
             "The tracks this download moved aside could not be marked to "
             "keep, so this item remains blocked."
         )
     _require_authority(authority)
-    journal = queue_state.forget_kept_library_backup(
-        journal,
-        item.item_id,
-        references[0],
-    )
-    _require_authority(authority)
-    return journal, _find_item(journal, item.item_id), backup.path
+    return backups[0], backup
 
 
-def _keep_imported_files(authority, journal, item, reference, manifest_hash):
-    """Clear a download Beets already filed, leaving the library as it is."""
-    kept = _keep_library_backup(authority, journal, item)
-    if type(kept) is BlockedItemSettlementResult:
-        return kept
-    journal, item, backup_path = kept
+def _retire_cleared_download(authority, journal, item, reference, manifest_hash,
+                             backup_reference):
+    """Retire the Beets record of a cleared download and drop the item."""
     committed = queue_state._begin_prelaunch_managed_settlement(
         journal,
         item_id=item.item_id,
@@ -1241,26 +1299,178 @@ def _keep_imported_files(authority, journal, item, reference, manifest_hash):
         carrier=reference.data,
         manifest_hash=manifest_hash,
         action=BlockedItemSettlementAction.DISCARD.value,
+        kept_backup=backup_reference,
     )
     _require_authority(authority)
-    committed_item = _find_item(committed, item.item_id)
-    settled = _continue_prelaunch_settlement(
+    return _continue_prelaunch_settlement(
         authority,
         committed,
-        committed_item,
+        _find_item(committed, item.item_id),
         requested_action=BlockedItemSettlementAction.DISCARD,
     )
+
+
+def _backup_sentence(backup):
+    return (
+        " The tracks it replaced are kept in a backup listed in Settings > "
+        "Diagnostics, where Restore puts them back in "
+        f"{backup.receipt['origin']}."
+    )
+
+
+def _keep_imported_files(authority, journal, item, reference, manifest_hash):
+    """Clear a download Beets finished filing, leaving the library as it is."""
+    kept = _keep_backup_for_settings(
+        authority, journal, item,
+        "queue backup kept - the download was cleared after Beets filed it",
+    )
+    if type(kept) is BlockedItemSettlementResult:
+        return kept
+    backup_reference, backup = kept
+    settled = _retire_cleared_download(
+        authority, journal, item, reference, manifest_hash, backup_reference)
     if settled.status is not BlockedItemSettlementStatus.DISCARDED:
         return settled
     reason = "The download was cleared; what Beets filed stays in your library."
-    if backup_path is not None:
-        reason += f" The tracks it replaced are kept in {backup_path}."
+    if backup is not None:
+        reason += _backup_sentence(backup)
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
+
+
+def _set_partial_import_aside(authority, journal, item, reference, launched):
+    """Clear a download Beets stopped part-way through filing.
+
+    What Beets moved stays in the library, rows pointing at files still in
+    staging go, the rest is kept as an ordinary kept staging group, and any
+    backup is handed to Settings. Each step is proved before the next; one
+    that can't be leaves the item blocked.
+    """
+    _state, manifest_hash, snapshot = launched
+    owner = {"operation_id": journal.operation_id, "item_id": item.item_id}
+    intent = snapshot["intent"]
+    staged = sum(
+        capture_file(record["path"], expected=tuple(record["identity"])) is not None
+        for record in intent
+    )
+    blocked = _partial_import_reason(item, snapshot)
+    for reference_ in _staging_references(item):
+        if reference_.kind != _STAGING_RUN_KIND:
+            return _blocked_settlement(blocked)
+    _require_authority(authority)
+    if not clear_stopped_import_folders(snapshot):
+        return _blocked_settlement(
+            blocked + " The folders it made in your library could not be "
+            "checked, so it stays blocked."
+        )
+    if not forget_staged_beets_rows(record["path"] for record in intent):
+        return _blocked_settlement(
+            blocked + " The records beets kept for the unfiled tracks could "
+            "not be removed, so it stays blocked."
+        )
+    _require_authority(authority)
+    kept = _keep_backup_for_settings(
+        authority, journal, item,
+        "queue backup kept - the download was cleared after Beets stopped "
+        "part-way",
+    )
+    if type(kept) is BlockedItemSettlementResult:
+        return kept
+    backup_reference, backup = kept
+    set_aside = False
+    for staging in _staging_references(item):
+        _require_authority(authority)
+        inspection = _staging_inspection(staging, owner)
+        status = getattr(inspection, "status", None)
+        if status is StagingReferenceStatus.ABSENT:
+            continue
+        run = staging_run_from_record(staging.data)
+        current = capture_staging_run(run) if run is not None else None
+        if status is not StagingReferenceStatus.MATCH or current is None:
+            return _blocked_settlement(blocked)
+        if not current.files:
+            continue
+        if retain_staging_run(run, label="stopped-import", release=True) is None:
+            return _blocked_settlement(
+                blocked + " The files still in staging could not be set "
+                "aside, so it stays blocked."
+            )
+        set_aside = True
+    _require_authority(authority)
+    journal, item, staging_reason, _changed = _reconcile_item_staging(
+        authority, journal, item, block_unsettled=False,
+    )
+    if staging_reason is not None:
+        # Only an empty run folder can still be there.
+        discarded = _discard_parked_item_staging(authority, journal, item)
+        if discarded is None:
+            return _blocked_settlement(blocked)
+        journal, item = discarded
+    settled = _retire_cleared_download(
+        authority, journal, item, _single_reference(item, _MANAGED_CARRIER_KIND),
+        manifest_hash, backup_reference,
+    )
+    if settled.status is not BlockedItemSettlementStatus.DISCARDED:
+        return settled
+    moved = len(intent) - staged
+    reason = (
+        f"The download was cleared. Beets had moved {plural(moved, 'track')} "
+        "into your library, and they stay there."
+    )
+    listed = (
+        "listed in Settings > Diagnostics as “Files from a stopped download”, "
+        "where you can remove"
+    )
+    if set_aside and staged:
+        reason += (
+            f" The {plural(staged, 'track')} it hadn't filed "
+            f"{'was' if staged == 1 else 'were'} set aside and "
+            f"{'is' if staged == 1 else 'are'} {listed} "
+            f"{'it' if staged == 1 else 'them'}."
+        )
+    elif set_aside:
+        reason += f" What it left in staging was set aside and is {listed} it."
+    if backup is not None:
+        reason += _backup_sentence(backup)
+    return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
+
+
+def partial_import_note(result) -> str | None:
+    """Where a blocked download Beets stopped part-way through filing has
+    left things, or None when no blocked download is one."""
+    for entry in getattr(result, "items", ()):
+        if entry.phase is not queue_state.QueuePhase.BLOCKED:
+            continue
+        loaded = queue_state.load_queue_journal(entry.operation_id)
+        if loaded.status is not queue_state.QueueLoadStatus.READY or loaded.journal is None:
+            continue
+        item = next(
+            (value for value in loaded.journal.items if value.item_id == entry.item_id),
+            None,
+        )
+        launched = None if item is None else _launched_import(entry.operation_id, item)
+        if launched is not None and launched[0] == _IMPORT_PARTIAL:
+            return _partial_import_reason(item, launched[2])
+    return None
+
+
+def import_stopped_part_way(operation_id, item) -> bool:
+    """True when the blocked item's Beets import stopped after moving some
+    of its files, so giving up keeps those and sets the rest aside."""
+    launched = _launched_import(operation_id, item)
+    return launched is not None and launched[0] == _IMPORT_PARTIAL
+
+
+def import_was_filed(operation_id, item) -> bool:
+    """True when the blocked item's Beets import finished and sealed its
+    record, so clearing it keeps a whole album in the library."""
+    launched = _launched_import(operation_id, item)
+    return launched is not None and launched[0] == _IMPORT_FILED
 
 
 SETTLEABLE_PRELAUNCH = "prelaunch"
 SETTLEABLE_STAGED_LEFTOVER = "staged-leftover"
 SETTLEABLE_IMPORTED = "imported"
+SETTLEABLE_PARTIAL = "partial"
 
 _PRELAUNCH_SETTLEMENT_BLOCKS = frozenset({
     (_MANAGED_RESERVATION_KIND, "managed-reservation-absent"),
@@ -1278,7 +1488,9 @@ def settleable_block_kind(item) -> str | None:
     ``block_reason``, not the reference list - an import that stranded a file
     keeps its Beets carrier listed beside the staging record. A block that
     holds nothing, or only the tracks its download moved out of the library,
-    never reached Beets either; settling it puts those tracks back first.
+    never reached Beets either; settling it puts those tracks back first. A
+    block holding only its Beets carrier ran Beets, and whether it finished
+    is read from the carrier when the decision is offered.
     """
     references = tuple(item.recovery_references or ())
     held = tuple(
@@ -1388,6 +1600,15 @@ def blocked_settlement_binding(result):
         != normalise_album_id(completion_input.expectation.album_id)
     ):
         return None
+    # Offer nothing the settlement would refuse: an import Beets stopped
+    # part-way through can only be given up, and only a finished one kept.
+    launched = _launched_import(target.operation_id, queued)
+    if launched is not None and launched[0] == _IMPORT_PARTIAL:
+        settleable = SETTLEABLE_PARTIAL
+    elif settleable == SETTLEABLE_IMPORTED and (
+        launched is None or launched[0] != _IMPORT_FILED
+    ):
+        return None
     label = planned_album.get("title") or queued.planned.get("label") or "download"
     return target, str(label), settleable
 
@@ -1399,9 +1620,11 @@ def settle_blocked_item(
     item_id: str,
     action: BlockedItemSettlementAction,
 ) -> BlockedItemSettlementResult:
-    """Retry or discard a live-proved pre-launch abort: a parked download
-    or a managed Beets state that never launched. Library tracks the
-    download moved aside go back first."""
+    """Retry or discard one blocked download. One that never reached Beets,
+    or whose import moved nothing, is settled as if Beets never ran, and the
+    tracks it moved aside go back first. One Beets finished can be kept or
+    checked again, and one it stopped part-way through can only be cleared,
+    keeping what it moved."""
     if type(action) is not BlockedItemSettlementAction:
         raise ValueError("action must be retry or discard")
     try:
@@ -1420,7 +1643,31 @@ def settle_blocked_item(
         if item.phase is not queue_state.QueuePhase.BLOCKED:
             return _blocked_settlement("Only a blocked item can be settled.")
 
-        untouched_hash = _untouched_import_hash(authority, journal, item)
+        _require_authority(authority)
+        launched = _launched_import(journal.operation_id, item)
+        _require_authority(authority)
+        if launched is not None and launched[0] == _IMPORT_PARTIAL:
+            carrier = _single_reference(item, _MANAGED_CARRIER_KIND)
+            if action is BlockedItemSettlementAction.DISCARD and carrier is not None:
+                return _set_partial_import_aside(
+                    authority, journal, item, carrier, launched)
+            return _blocked_settlement(
+                _partial_import_reason(item, launched[2]) + " It can't be "
+                "downloaded again from here; giving up on it keeps what beets "
+                "moved and sets the rest aside."
+            )
+        if launched is not None and launched[0] == _IMPORT_UNTOUCHED:
+            # Beets adds an album's rows before it moves the files; rows for
+            # files still in staging are dropped so nothing points at them.
+            if not forget_staged_beets_rows(
+                record["path"] for record in launched[2]["intent"]
+            ):
+                return _blocked_settlement(
+                    "Beets recorded this album's tracks before it stopped, and "
+                    "those records could not be removed, so this item remains "
+                    "blocked."
+                )
+            _require_authority(authority)
         journal, item, staging_reason, _changed = _reconcile_item_staging(
             authority,
             journal,
@@ -1492,28 +1739,27 @@ def settle_blocked_item(
             _require_authority(authority)
             inspection = inspect_managed_carrier(reference.data, owner)
             _require_authority(authority)
-            launched = inspection.outcome in {
-                ManagedCarrierInspectionOutcome.SEALED,
-                ManagedCarrierInspectionOutcome.UNSEALED_ACTIVITY,
-            }
-            if inspection.outcome is ManagedCarrierInspectionOutcome.UNSEALED_ORIGIN or (
-                launched and inspection.manifest_hash == untouched_hash
+            state = (
+                launched[0]
+                if launched is not None
+                and launched[1] == inspection.manifest_hash
+                else None
+            )
+            if (
+                inspection.outcome is ManagedCarrierInspectionOutcome.UNSEALED_ORIGIN
+                or state == _IMPORT_UNTOUCHED
             ):
-                # Beets either never started or stopped before it moved or
-                # recorded anything: the library is as it was.
+                # Beets either never started or stopped before it moved a
+                # file, and any rows it added are gone: the library is as it
+                # was.
                 carrier = reference.data
                 manifest_hash = inspection.manifest_hash
-            elif launched and action is BlockedItemSettlementAction.DISCARD:
+            elif state == _IMPORT_FILED and action is BlockedItemSettlementAction.DISCARD:
                 return _keep_imported_files(
                     authority, journal, item, reference, inspection.manifest_hash
                 )
-            elif inspection.outcome is ManagedCarrierInspectionOutcome.SEALED:
+            elif state == _IMPORT_FILED:
                 return _check_import_again(authority, journal, item)
-            elif launched:
-                return _blocked_settlement(
-                    "Beets had already filed part of this album, so it can't be "
-                    "downloaded again from here. Discard keeps what it filed."
-                )
             else:
                 return _blocked_settlement(
                     "The app could not prove that Beets stayed pre-launch, so "

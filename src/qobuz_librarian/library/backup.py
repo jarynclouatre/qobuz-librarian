@@ -6124,6 +6124,81 @@ def _backup_safe_to_reap(bp: Path) -> bool:
         origin, bp, audio_replacement=True).removable
 
 
+def release_backup_owner(backup: BackupResult, *, expected_owner) -> bool:
+    """Hand a queue-owned backup over as an ordinary kept one.
+
+    Settings restores and removes only backups no download owns, so a
+    download that is cleared while its backup stays lets go of it here. The
+    receipt keeps its token, so its markers, such as the keep pin, still
+    belong to it.
+    """
+    if (
+        expected_owner is None
+        or not _backup_owner_authorized(backup, expected_owner)
+    ):
+        return False
+    opened = _validated_backup_result(backup)
+    if opened is None:
+        return False
+    _public, _root, _parts, descriptors = opened
+    directory_fd = descriptors[-1]
+    temporary = f".ql-receipt-{secrets.token_hex(12)}"
+    descriptor = None
+    try:
+        current = _read_backup_receipt(directory_fd)
+        if current is None or current.get("version") != _OWNED_RECEIPT_VERSION:
+            return False
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            return False
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        released = {
+            key: value for key, value in current.items() if key != "owner"
+        }
+        released["version"] = _RECEIPT_VERSION
+        released["receipt_identity"] = list(
+            _entry_identity(os.fstat(descriptor)))
+        data = json.dumps(
+            released, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                return False
+            offset += written
+        os.fsync(descriptor)
+        os.replace(
+            temporary, _RECEIPT_SIDECAR,
+            src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+        )
+        if not _fsync_directory_fds(directory_fd):
+            return False
+        reread = _read_backup_receipt(directory_fd)
+        return (
+            reread is not None
+            and reread.get("version") == _RECEIPT_VERSION
+            and "owner" not in reread
+            and reread.get("token") == current.get("token")
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except OSError:
+            pass
+        _close_descriptors(descriptors)
+
+
 def pin_unverified_upgrade_backup(backup: BackupResult,
                                   note: str | None = None, *,
                                   expected_owner=None) -> bool:

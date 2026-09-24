@@ -91,8 +91,14 @@ def queue_item_may_create_library_backup(item) -> bool:
     )
 
 
-def plan_durable_new_album(item, args) -> DurableNewAlbumPlan | None:
-    """Freeze one full-album lane the live completion proof can authorise."""
+def plan_durable_new_album(
+    item, args, *, check_beets=True,
+) -> DurableNewAlbumPlan | None:
+    """Freeze one full-album lane the live completion proof can authorise.
+
+    ``check_beets`` also asks whether the beets config lets the import
+    prove the album by its folder.
+    """
     if (
         type(item) is not dict
         or getattr(args, "no_import", False)
@@ -141,12 +147,13 @@ def plan_durable_new_album(item, args) -> DurableNewAlbumPlan | None:
     bits, rate = album_max_quality(album, effective_tier)
     if type(bits) is not int or type(rate) is not int or bits <= 0 or rate <= 0:
         return None
-    # Late: loading the Beets integration reads the Beets config, which only
-    # an album that qualifies so far needs.
-    from qobuz_librarian.integrations import beets
+    if check_beets:
+        # Late: only an album that qualifies so far needs the Beets
+        # integration, whose check runs Beets to read its config.
+        from qobuz_librarian.integrations import beets
 
-    if not beets.path_templates_give_albums_own_folders():
-        return None
+        if not beets.durable_import_possible(item.get("album_dir")):
+            return None
     expectation = CompletionExpectation(
         album_id=album_id,
         scope=CompletionScope.ALBUM,

@@ -331,7 +331,7 @@
       {% endif %}
       {% if recovery_retry and job.attention == 'recovery' %}
       <form action="/jobs/{{ job.id }}/give-up" method="post"
-            data-confirm="Discard this interrupted download? {% if durable_recovery_control.imported %}What Beets already filed stays in your library.{% else %}Nothing is added to your library.{% endif %}"
+            data-confirm="Discard this interrupted download? {% if durable_recovery_control.partial %}The tracks Beets moved stay in your library. The rest are kept in Settings > Diagnostics, along with any backup of the album's earlier tracks, which Restore there puts back.{% elif durable_recovery_control.imported %}What Beets already filed stays in your library.{% else %}Nothing is added to your library.{% endif %}"
             data-confirm-action="Give up">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">

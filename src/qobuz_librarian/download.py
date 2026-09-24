@@ -902,10 +902,10 @@ def run_album_download(
 
     if download_full_album and disc_names_overwrite(album):
         log.info(fmt(
-            C.RED,
-            f"  ✗  disc_subdirectories is off in {cfg.STREAMRIP_CONFIG}, so "
-            "tracks that share a number and title on different discs "
-            "overwrite each other. Turn it on and download this album again.",
+            C.YELLOW,
+            f"  ⚠  disc_subdirectories is off in {cfg.STREAMRIP_CONFIG}, so "
+            "tracks that share a number and title on different discs will "
+            "overwrite each other.",
         ))
 
     if download_full_album:

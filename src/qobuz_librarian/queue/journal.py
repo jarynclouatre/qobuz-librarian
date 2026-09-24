@@ -4027,12 +4027,28 @@ def _begin_prelaunch_managed_settlement(
     carrier: dict[str, Any],
     manifest_hash: str,
     action: str,
+    kept_backup: RecoveryReference | None = None,
 ) -> QueueJournal:
-    """Commit explicit settlement authority before private state is retired."""
+    """Commit explicit settlement authority before private state is retired.
+
+    ``kept_backup`` is a library backup carrier that stays listed, pinned,
+    until the discarded item is removed.
+    """
     previous = _reload_matching_journal(journal)
     target_index, target = _settlement_target(previous, item_id)
     canonical_source = _parse_reference(_reference_payload(source_reference))
-    if target.recovery_references != (canonical_source,):
+    kept = ()
+    if kept_backup is not None:
+        kept = (_parse_reference(_reference_payload(kept_backup)),)
+        if action != "discard" or not _strict_library_backup_carrier(
+            kept[0],
+            expected_operation_id=previous.operation_id,
+            expected_item_id=item_id,
+        ):
+            raise QueueJournalBlocked("only a discard keeps its library backup")
+    if target.recovery_references != _canonical_recovery_references(
+        (canonical_source, *kept)
+    ):
         raise QueueJournalBlocked(
             "managed recovery state changed before settlement"
         )
@@ -4088,7 +4104,7 @@ def _begin_prelaunch_managed_settlement(
     )
     updated = replace(
         target,
-        recovery_references=(settlement,),
+        recovery_references=_canonical_recovery_references((settlement, *kept)),
         block_reason="managed-prelaunch-settlement-pending",
     )
     items = list(previous.items)
@@ -4112,14 +4128,28 @@ def _finish_prelaunch_managed_settlement(
     previous = _reload_matching_journal(journal)
     target_index, target = _settlement_target(previous, item_id)
     canonical = _parse_reference(_reference_payload(settlement_reference))
+    kept = tuple(
+        reference
+        for reference in target.recovery_references
+        if reference != canonical
+    )
     if (
         not _strict_managed_prelaunch_settlement(
             canonical,
             expected_operation_id=previous.operation_id,
             expected_item_id=item_id,
         )
-        or target.recovery_references != (canonical,)
+        or canonical not in target.recovery_references
         or canonical.data["action"] != action
+        or (kept and (
+            action != "discard"
+            or len(kept) != 1
+            or not _strict_library_backup_carrier(
+                kept[0],
+                expected_operation_id=previous.operation_id,
+                expected_item_id=item_id,
+            )
+        ))
     ):
         raise QueueJournalBlocked(
             "pre-launch settlement authority changed before completion"

@@ -1516,12 +1516,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             imported = beets_import_paths(
                 consolidate=album_dir is not None,
                 album_dirs=staged_dirs_for_import,
-                album_dir=(
-                    album_dir
-                    if present and not auto_upgrade_active
-                    and download_result.get("gap_fill_backup_path") is None
-                    else None
-                ),
+                album_dir=album_dir,
             )
             if (
                 imported

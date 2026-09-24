@@ -130,7 +130,7 @@ For its own imports, the downloader pins these beets settings regardless of your
 
 It also handles these itself:
 
-- Tracks a gap fill adds go into the album's existing folder, named by your path template's file name. If beets would rename that folder (your `replace`, `asciify_paths` or `max_filename_length` settings change its name), the tracks are not imported and stay in staging recovery.
+- A download for an album you already have, a gap fill or an upgrade, goes into the album's existing folder, with files named by your path template. If beets would rename that folder, as its default `replace` rules do to a trailing dot, the tracks are not imported and stay in staging recovery. A whole-album download can still be filed by the template when the folder holds audio that isn't part of the release.
 - A release tagged as a compilation or credited to Various Artists is filed with the compilation template.
 - `ARTWORK` works whatever plugins you choose. With `embed` or `both`, the cover the download saved is embedded in any track that has none before beets imports it. With `sidecar` or `both`, `fetchart` files that cover from the album folder. `embed` leaves no cover file.
 - `filefilter` is not loaded, since it would drop tracks from a download.

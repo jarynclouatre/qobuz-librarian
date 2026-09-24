@@ -44,7 +44,7 @@ def _legacy_executor_runtime(monkeypatch):
     if acquired_here:
         lease = run_lock.acquire()
     assert lease is not None
-    monkeypatch.setattr(executor, "plan_durable_new_album", lambda *_a: None)
+    monkeypatch.setattr(executor, "plan_durable_new_album", lambda *_a, **_k: None)
     monkeypatch.setattr(
         executor,
         "queue_item_may_create_library_backup",

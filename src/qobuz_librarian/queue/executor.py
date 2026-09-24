@@ -34,6 +34,7 @@ from qobuz_librarian.integrations import rip
 from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
     beets_import_albums,
+    durable_import_possible,
     relocate_disc_album_artwork,
     retire_backup_beets_entries,
     staging_preflight,
@@ -1143,19 +1144,6 @@ def _queue_outcome_needs_attention(item):
         or item.get("_siblings_preserved")
         or (verdict.get("under") and not verdict.get("recovered"))
     )
-
-
-def _album_dir_added_to(item):
-    """The existing album folder a download only adds tracks to, or None."""
-    album_dir = item.get("album_dir")
-    if (
-        album_dir is None
-        or not item.get("present")
-        or item.get("auto_upgrade")
-        or item.get("gap_fill_backup_path") is not None
-    ):
-        return None
-    return album_dir
 
 
 def _import_album_with_retry(
@@ -3049,13 +3037,18 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     for idx, item in enumerate(items, 1):
         _require_executor_authority(authority)
         requires_library_backup = queue_item_may_create_library_backup(item)
-        plan = plan_durable_new_album(item, args)
+        plan = plan_durable_new_album(item, args, check_beets=False)
         if plan is not None and not _durable_plan_allowed(
             items,
             item,
             execution_mode=execution_mode,
             web_album_id=web_album_id,
         ):
+            plan = None
+        # An album that finished before a restart is acknowledged even if a
+        # beets path template changed since; it is already filed.
+        recoverable = plan is not None
+        if plan is not None and not durable_import_possible(item.get("album_dir")):
             plan = None
 
         recovered_completion = {}
@@ -3069,7 +3062,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             planned,
             post_dir,
         ):
-            if plan is None:
+            if not recoverable:
                 return False
             details = _recovered_completion_details(
                 item,
@@ -3527,8 +3520,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         {} if item.get("_capture_import_ownership") is True
                         else None
                     )
-                    added_to = _album_dir_added_to(item)
-                    pin = {} if added_to is None else {"album_dir": added_to}
+                    pin = (
+                        {} if item.get("album_dir") is None
+                        else {"album_dir": item["album_dir"]}
+                    )
                     if ownership_capture is None:
                         item_imported = _import_album_with_retry(
                             album_dirs, **pin)

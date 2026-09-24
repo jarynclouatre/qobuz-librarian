@@ -193,6 +193,7 @@ def _offer_blocked_cli_settlement(authority, result):
     """Offer an explicit decision for one settleable blocked download."""
     from qobuz_librarian.queue.startup_recovery import (
         SETTLEABLE_IMPORTED,
+        SETTLEABLE_PARTIAL,
         SETTLEABLE_STAGED_LEFTOVER,
         BlockedItemSettlementAction,
         BlockedItemSettlementStatus,
@@ -206,6 +207,7 @@ def _offer_blocked_cli_settlement(authority, result):
     item, label, settleable = binding
     leftover = settleable == SETTLEABLE_STAGED_LEFTOVER
     imported = settleable == SETTLEABLE_IMPORTED
+    partial = settleable == SETTLEABLE_PARTIAL
 
     if leftover:
         # The file in staging holds the queue, not the saved entry, so a retry
@@ -229,6 +231,18 @@ def _offer_blocked_cli_settlement(authority, result):
         )
         retry_words = {"r", "retry"}
         again = "  Enter r to check again, d to clear, or press Enter to keep it: "
+    elif partial:
+        prompt = (
+            f"\n  Beets stopped part-way through filing “{label}”.\n"
+            "  Clearing it keeps the tracks Beets moved in the library. The "
+            "rest are kept in Settings >\n"
+            "  Diagnostics, along with any backup of the album's earlier "
+            "tracks, which Restore there puts back.\n"
+            "  Clear it, or keep it blocked for later?\n"
+            "  Choice [d=clear, Enter=keep]: "
+        )
+        retry_words = set()
+        again = "  Enter d to clear it, or press Enter to keep it: "
     else:
         prompt = (
             f"\n  The interrupted download “{label}” stopped before Beets "
@@ -268,7 +282,7 @@ def _offer_blocked_cli_settlement(authority, result):
 
     if leftover:
         settled_line = f"Cleared the leftover that was blocking “{label}”."
-    elif imported and action is BlockedItemSettlementAction.DISCARD:
+    elif (imported or partial) and action is BlockedItemSettlementAction.DISCARD:
         settled_line = None
     elif imported:
         settled_line = f"“{label}” will be checked again."
@@ -416,11 +430,15 @@ def _die_unsettled_startup_recovery(
             BLOCKED_DOWNLOAD_LOG_ENTRY,
             detail or (getattr(result, "reason", "") or "reason not reported"),
         )
+        from qobuz_librarian.queue.startup_recovery import partial_import_note
+
         # A state this stop is reached in survives a restart, so the message
         # names where the outstanding work is instead of prescribing one.
+        partial = partial_import_note(result)
         message = (
             "\n✗  An interrupted download could not be verified safely.\n"
-            "   The saved queue and staged files were left unchanged, and no "
+            + (f"   {partial}\n" if partial else "")
+            + "   The saved queue and staged files were left unchanged, and no "
             "other work was started.\n"
             f"   What is still outstanding is under {cfg.STAGING_DIR}. The "
             f"“{BLOCKED_DOWNLOAD_LOG_ENTRY}” entry in the application "
