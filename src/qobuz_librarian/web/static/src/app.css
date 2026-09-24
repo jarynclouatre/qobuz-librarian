@@ -1083,8 +1083,9 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-search-field:focus-within {
   border-color: color-mix(in oklab, var(--ql-gold) 55%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ql-gold) 14%, transparent),
-              0 0 2.5rem -1rem color-mix(in oklab, var(--ql-gold) 24%, transparent);
+  outline: 2px solid var(--ql-gold-strong);
+  outline-offset: 2px;
+  box-shadow: 0 0 2.5rem -1rem color-mix(in oklab, var(--ql-gold) 24%, transparent);
 }
 .ql-search-field-icon {
   width: 1.05rem;

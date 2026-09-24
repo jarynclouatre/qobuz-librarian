@@ -85,6 +85,12 @@ self.addEventListener('fetch', event => {
   // Page navigations: network-first; fall back to offline page when the
   // server is unreachable (container stopped, network down).
   if (event.request.mode === 'navigate') {
+    // Back or Forward onto a page drawn from a form post asks for that post's
+    // response from the HTTP cache only. Pages are no-store, so it always
+    // misses; leave it to the browser rather than report a lost connection.
+    if (event.request.method !== 'GET' && event.request.cache === 'only-if-cached') {
+      return;
+    }
     event.respondWith(
       fetch(event.request).catch(() => {
         if (event.request.method !== 'GET') {

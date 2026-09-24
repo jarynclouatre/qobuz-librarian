@@ -715,6 +715,39 @@
     showToast("Couldn't reach the server. Check your connection and try again.", "error");
   });
 
+  // A control htmx disables while its request runs drops keyboard focus to
+  // the page body. Hand it back when the request ends, or, when the control
+  // stays disabled (a search result that is now queued), to the control
+  // before it.
+  function previousFocusable(el) {
+    var found = null;
+    document.querySelectorAll(
+      "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), summary"
+    ).forEach(function (candidate) {
+      if (candidate.getClientRects().length
+          && candidate.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        found = candidate;
+      }
+    });
+    return found;
+  }
+  document.addEventListener("htmx:beforeRequest", function (evt) {
+    var elt = evt.detail && evt.detail.elt;
+    var active = document.activeElement;
+    if (!elt || !elt.hasAttribute || !elt.hasAttribute("hx-disabled-elt")) return;
+    if (active && active !== document.body && elt.contains(active)) evt.detail.xhr.qlFocus = active;
+  });
+  document.addEventListener("htmx:afterRequest", function (evt) {
+    var lost = evt.detail && evt.detail.xhr && evt.detail.xhr.qlFocus;
+    if (!lost) return;
+    setTimeout(function () {
+      var now = document.activeElement;
+      if ((now && now !== document.body) || !lost.isConnected) return;
+      var target = lost.disabled ? previousFocusable(lost) : lost;
+      if (target) target.focus({ preventScroll: true });
+    });
+  });
+
   // Animate a fully hidden artist group before htmx removes it. Dismissals
   // target the group's positioning SHELL (the dismiss button lives beside the
   // <details>, not inside it), so match the shell as well as a bare details;
@@ -910,16 +943,53 @@
       irreversible: isIrreversible(el),
     }).then(function (ok) {
       if (!ok) return;
-      if (el.tagName === "FORM") {
-        // A form's click() never submits it. Fire a real submit event so
-        // htmx (or the browser) takes it from here.
-        el.requestSubmit();
+      // A redraw while the dialog was open (the queue ticking over, a job
+      // finishing) can replace the control that asked. Act through its
+      // redrawn copy, or say nothing happened rather than click a button
+      // that is no longer on the page.
+      var target = el.isConnected ? el : redrawnConfirmControl(el);
+      if (!target) {
+        var main = document.getElementById("main-content");
+        if (main) main.focus({ preventScroll: true });
+        showToast("The page changed before you confirmed, so nothing was done.", "warning");
         return;
       }
-      el.dataset.confirmBypass = "1";
-      el.click();
+      if (target.tagName === "FORM") {
+        // A form's click() never submits it. Fire a real submit event so
+        // htmx (or the browser) takes it from here.
+        target.requestSubmit();
+        return;
+      }
+      if (target !== el) target.focus();
+      target.dataset.confirmBypass = "1";
+      target.click();
     });
   }, true);
+
+  // Everything a confirmed control would send, so its redrawn copy can be
+  // told apart from the same button on another row.
+  function confirmControlKey(el) {
+    var form = el.tagName === "FORM" ? el : el.form;
+    var key = [el.tagName, el.getAttribute("data-confirm"), el.getAttribute("formaction"),
+               el.getAttribute("name"), el.getAttribute("value"), el.getAttribute("href"),
+               el.getAttribute("hx-post"), el.getAttribute("hx-get")];
+    if (form) {
+      key.push(form.getAttribute("action"));
+      form.querySelectorAll("input[type=hidden]").forEach(function (input) {
+        if (input.name !== "_csrf_token") key.push(input.name + "=" + input.value);
+      });
+    }
+    return key.join("\n");
+  }
+
+  function redrawnConfirmControl(el) {
+    var key = confirmControlKey(el);
+    var found = null;
+    document.querySelectorAll("[data-confirm]").forEach(function (candidate) {
+      if (!found && !candidate.disabled && confirmControlKey(candidate) === key) found = candidate;
+    });
+    return found;
+  }
 
   // hx-confirm attributes go through the same styled dialog instead of the
   // browser's native popup (htmx asks via this event before it would call
@@ -2295,12 +2365,17 @@
       var body = document.getElementById("job-content");
       if (!body) { stopWatching(); return; }
       if (!window.htmx) { reloadToRecover(); return; }
-      var repairPage = body.dataset.embedded && document.getElementById("repair-page");
-      if (repairPage) {
+      // The Library and Repair pages draw more than the job around it, such
+      // as the Library header's refresh controls, and hide that while a job
+      // runs, so the whole page is fetched again.
+      var surfacePage = body.dataset.embedded
+        && (document.getElementById("repair-page") || document.getElementById("library-page"));
+      if (surfacePage) {
         stopWatching();
         hideGap();
-        window.htmx.ajax("GET", "/repair",
-          { target: "#repair-page", swap: "outerHTML", select: "#repair-page" });
+        var surface = "#" + surfacePage.id;
+        window.htmx.ajax("GET", surfacePage.id === "repair-page" ? "/repair" : "/library",
+          { target: surface, swap: "outerHTML", select: surface });
         return;
       }
       var embedded = body.dataset.embedded ? "?embedded=1" : "";
@@ -2985,6 +3060,51 @@
       }
     }
 
+    // A redraw of the list replaces the control that had keyboard focus. Note
+    // what it acted on, and after the redraw focus the same control, the same
+    // one on the next or previous artist when its group has gone, or the
+    // Select all box.
+    var pendingReviewFocus = null;
+    function reviewFocusSpot(el) {
+      var host = document.getElementById("review-page");
+      if (!el || !host || !host.contains(el)) return null;
+      var shell = el.closest(".ql-review-group-shell");
+      var group = shell && shell.querySelector("details[data-artist]");
+      function artistOf(s) {
+        var d = s && s.querySelector && s.querySelector("details[data-artist]");
+        return d ? d.getAttribute("data-artist") : null;
+      }
+      return {
+        cid: el.matches("input.cb") ? el.value : "",
+        kind: el.matches("[data-hide]") ? "[data-hide]"
+          : el.matches("[data-artist-select]") ? "[data-artist-select]" : "summary",
+        artists: [group ? group.getAttribute("data-artist") : null,
+                  artistOf(shell && shell.nextElementSibling),
+                  artistOf(shell && shell.previousElementSibling)]
+      };
+    }
+    function restoreReviewFocus(spot) {
+      var now = document.activeElement;
+      if (!spot || (now && now !== document.body)) return;
+      var target = spot.cid
+        ? cont.querySelector('input.cb[value="' + CSS.escape(spot.cid) + '"]') : null;
+      for (var i = 0; !target && i < spot.artists.length; i++) {
+        if (spot.artists[i] === null) continue;
+        var group = cont.querySelector('details[data-artist="' + CSS.escape(spot.artists[i]) + '"]');
+        var shell = group && group.closest(".ql-review-group-shell");
+        if (!shell) continue;
+        // The group's rows arrive after the redraw; wait for the box.
+        if (spot.cid && i === 0 && group.open
+            && group.querySelector("[data-lazy-items]:not([data-loaded])")) {
+          loadGroupItems(group, false).then(function () { restoreReviewFocus(spot); });
+          return;
+        }
+        target = shell.querySelector(spot.kind) || group.querySelector("summary");
+      }
+      target = target || cont.querySelector("[data-select-master]");
+      if (target) target.focus({ preventScroll: true });
+    }
+
     // Fetch and swap one review page. Requests are generation-tagged and only
     // the newest response may render: a tab click while a fetch is in flight
     // issues its own request instead of being dropped, and the slow old-tab
@@ -3035,6 +3155,8 @@
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;
             if (filterInput) filterInput.value = requestedQuery;
+            var focusSpot = pendingReviewFocus || reviewFocusSpot(document.activeElement);
+            pendingReviewFocus = null;
             host.innerHTML = txt;
             applyCounts(reviewPageCounts(host.querySelector("#review-groups")));
             host.querySelectorAll("details[data-artist]").forEach(function (d) {
@@ -3044,6 +3166,7 @@
             updateHideLabels();
             updateArtistChecks();
             updateDismissRest();
+            restoreReviewFocus(focusSpot);
           } else {
             pageLoading = false;
             pendingTab = null;
@@ -3219,11 +3342,12 @@
         loadGen += 1;
         applyFilter();
       });
-      // Enter should filter, not submit the review form.
-      filterInput.addEventListener("keydown", function (e) {
-        if (e.key === "Enter") e.preventDefault();
-      });
     }
+    // Enter in the filter or on a checkbox would submit the form through its
+    // first submit button, which is Discard.
+    form.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && e.target.tagName === "INPUT") e.preventDefault();
+    });
 
     // Back and Forward move between the entries above. The browser has set
     // the address already, so this only has to make the page match it.
@@ -3263,13 +3387,26 @@
       var box = pageBox();
       var empty = box && box.querySelectorAll(
         ":scope > .ql-review-group-shell, :scope > details").length === 0;
+      var spot = dismissFocus;
+      dismissFocus = null;
       if (empty || document.getElementById("review-loadmore")) {
+        pendingReviewFocus = spot;
         loadPage(1, curQuery());
       } else {
         updateHideLabels();
+        restoreReviewFocus(spot);
       }
     }
     document.body.addEventListener("qlHidden", onQlHidden);
+    // A group's Dismiss redraws the group, or removes it, once its request
+    // is done; note where focus was before the button is disabled.
+    var dismissFocus = null;
+    function onDismissRequest(e) {
+      var btn = e.detail && e.detail.elt;
+      if (!btn || !btn.matches || !btn.matches("[data-hide]") || !cont.contains(btn)) return;
+      dismissFocus = btn === document.activeElement ? reviewFocusSpot(btn) : null;
+    }
+    document.addEventListener("htmx:beforeRequest", onDismissRequest);
 
     // A refresh or Back rebuilds the page collapsed, so the browser's own
     // scroll restore lands past the end of a list fifteen times shorter and
@@ -3360,6 +3497,7 @@
       try { rsrc.close(); } catch (e) {}
       form.removeEventListener("submit", beginReviewNavigation);
       document.body.removeEventListener("qlHidden", onQlHidden);
+      document.removeEventListener("htmx:beforeRequest", onDismissRequest);
       document.removeEventListener("htmx:beforeSwap", onReviewSwap);
       window.removeEventListener("popstate", onPopState);
       window.removeEventListener("scroll", savePlace);

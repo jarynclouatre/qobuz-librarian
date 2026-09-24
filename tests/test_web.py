@@ -5921,7 +5921,8 @@ def test_login_page_says_so_while_locked_out(monkeypatch, tmp_path):
                                 "_csrf_token": tok},
                           headers={"X-CSRF-Token": tok}, follow_redirects=False)
         # The sixth attempt is past the limit, so it is refused before the KDF.
-        assert last.status_code == 429
+        assert last.status_code == 303
+        assert last.headers["location"].startswith("/login?error=")
 
         assert "ql-notice-error" in c.get("/login").text
 
@@ -6204,7 +6205,8 @@ def test_login_rejects_wrong_password(monkeypatch, tmp_path):
                    data={"username": "admin", "password": "nope",
                          "_csrf_token": tok},
                    headers={"X-CSRF-Token": tok}, follow_redirects=False)
-        assert r.status_code == 401
+        assert r.status_code == 303
+        assert r.headers["location"].startswith("/login?error=")
         assert "ql_session" not in r.cookies
         # Still locked out afterwards.
         assert c.get("/", follow_redirects=False).status_code == 303
@@ -7498,7 +7500,7 @@ def test_blank_login_does_not_spend_a_strike(client, monkeypatch):
     r = client.post("/login", data={"username": "", "password": ""},
                     follow_redirects=False)
 
-    assert r.status_code == 400
+    assert r.headers["location"].startswith("/login?error=")
     assert calls == [], "a blank submit must not reach the throttle or the KDF"
 
 
@@ -7520,9 +7522,9 @@ def test_lockout_stops_before_the_kdf_and_keeps_the_username(client, monkeypatch
     r = client.post("/login", data={"username": "dink", "password": "x"},
                     follow_redirects=False)
 
-    assert r.status_code == 429
+    assert r.headers["location"].startswith("/login?error=")
     assert checked == [], "a locked attempt must not reach the KDF"
-    assert 'value="dink"' in r.text
+    assert 'value="dink"' in client.get(r.headers["location"]).text
 
 
 def test_a_missing_column_is_added_whatever_the_version_stamp_says(

@@ -721,12 +721,8 @@ def client_ip(request) -> str:
 
 
 def via_trusted_proxy(request) -> bool:
-    """Whether uvicorn took this request's client from X-Forwarded-For.
-
-    It does that only for a peer FORWARDED_ALLOW_IPS names, and the address a
-    proxy forwards carries no port, while a direct connection always has its
-    real source port.
-    """
+    """Whether uvicorn took the client from X-Forwarded-For, as it does only
+    for a FORWARDED_ALLOW_IPS peer: a forwarded address carries no port."""
     client = request.scope.get("client")
     return bool(client and client[1] == 0
                 and request.headers.get("x-forwarded-for"))

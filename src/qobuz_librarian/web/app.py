@@ -2783,10 +2783,24 @@ async def login_page(request: Request):
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(
         request=request, name="login.html",
-        context={"error": _lockout_notice(web_auth.client_ip(request)),
+        context={"error": (_notice_text(request.query_params.get("error"))
+                           or _lockout_notice(web_auth.client_ip(request))),
+                 "username": _notice_text(request.query_params.get("u")),
                  "changed": request.query_params.get("changed") == "1",
                  "next_path": web_auth.safe_next_path(
                      request.query_params.get("next"))})
+
+
+def _login_again(error, username, next_path):
+    """Send a refused sign-in back to the form by redirect, so Back from
+    the page that follows never lands on a form post."""
+    params = {"error": _notice_key(error)}
+    if username:
+        params["u"] = _notice_key(username)
+    if next_path:
+        params["next"] = next_path
+    return RedirectResponse(url="/login?" + urllib.parse.urlencode(params),
+                            status_code=303)
 
 
 @app.post("/login", response_class=HTMLResponse)
@@ -2809,12 +2823,8 @@ async def login_submit(request: Request, username: str = Form(""),
     # A submission that could never succeed shouldn't cost a strike: an empty
     # field is a slip, not an attempt, and five of them locked the owner out.
     if not username.strip() or not password:
-        return templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": "Enter your username and password.",
-                     "username": username.strip(),
-                     "next_path": next_path},
-            status_code=400)
+        return _login_again("Enter your username and password.",
+                            username.strip(), next_path)
     # Checked before the password is verified, so a correct one can't clear the
     # wait and a guess costs an attacker the wait rather than a KDF they can
     # keep spending. The counters live in memory, so a restart is the way back
@@ -2826,12 +2836,7 @@ async def login_submit(request: Request, username: str = Form(""),
             refusal = _lockout_notice(ip, username) or (
                 "Sign-in checks are busy. Try again shortly."
             )
-            return templates.TemplateResponse(
-                request=request, name="login.html",
-                context={"error": refusal,
-                         "username": username.strip(),
-                         "next_path": next_path},
-                status_code=429)
+            return _login_again(refusal, username.strip(), next_path)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
@@ -2847,14 +2852,10 @@ async def login_submit(request: Request, username: str = Form(""),
         web_auth.finish_login_attempt(ip, username, success=ok)
     if not ok:
         wait = _lockout_notice(ip, username, after_failure=True)
-        return templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": ("Incorrect username or password."
-                               + (f" {wait}" if wait else "")),
-                     # Keep what they typed, as the setup screen already does.
-                     "username": username.strip(),
-                     "next_path": next_path},
-            status_code=401)
+        # Keep what they typed, as the setup screen already does.
+        return _login_again(
+            "Incorrect username or password." + (f" {wait}" if wait else ""),
+            username.strip(), next_path)
     web_auth.clear_login_failures(ip, username)
     resp = RedirectResponse(url=next_path or "/", status_code=303)
     try:
@@ -3725,7 +3726,8 @@ def _library_header_note():
     if job is None:
         return None
     if job.status.value == "running":
-        return {"label": "Downloading…", "detail": ""}
+        return {"label": "Downloading…", "detail": "",
+                "title": "Downloading the albums selected in the review."}
     total = int(getattr(job, "progress_total", 0) or 0)
     current = int(getattr(job, "progress_current", 0) or 0)
     unit = str(getattr(job, "progress_unit", "") or "").strip()
@@ -3734,7 +3736,8 @@ def _library_header_note():
         detail = f"{current:,} of {total:,}"
         if unit:
             detail += f" {unit}s"
-    return {"label": "Refreshing…", "detail": detail}
+    return {"label": "Refreshing…", "detail": detail,
+            "title": "Checking your folders for music added outside the app."}
 
 
 def _last_finished_library_job():
