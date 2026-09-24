@@ -2,24 +2,26 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
 
-## [1.2.0] - 2026-09-21
+## [1.2.0] - 2026-09-24
 
-A scan of a large library costs a fraction of what it did, Search says Owned
-only when it has the album's whole track list, and a failed download says which
-tracks went wrong rather than pointing at Qobuz.
+Imports follow your Beets setup, a large library scans for a fraction of
+what it cost, and a download that stops early puts back whatever it set
+aside.
 
-- Search says Owned only when the track list accounts for the whole album, and fetches every page of a long one, so a box set is no longer judged complete from its first page. A result's artist and album open that artist and that exact album. Downloading an album a running scan has listed queues it, instead of answering "Already queued" and queuing nothing.
-- A failed download says how many tracks arrived incomplete, or that Qobuz would only serve the album lossy, rather than suggesting rate limiting every time. A part-finished download from Search no longer creates a "Library scan" review of its own, and Search warns before replacing an album you partly own.
-- Scanning a large library is far cheaper: an artist folder is sealed once per scan instead of once per missing album, progress is written on a timer, and a saved review holds an artist's evidence once rather than on every row. A 300 artist scan that used to exceed a 1 GB container finishes well inside it.
-- A scan carries on past a folder it cannot read, names it, and will not record a baseline from a pass that skipped one; an unreadable second disc inside a readable album is noticed too. A forced rescan starts over instead of resuming, the scan names which pass is running, and the Library page stops offering a scan while one is under way.
-- Repair removes your originals once the replacement is proven, and an unverified replacement keeps them. Lyrics look up a live, acoustic or demo recording under its own title instead of searching for the studio take, and an instrumental is skipped. Downsampling keeps repeated tags separate, keeps each picture's role, and no longer stops on a cover it cannot carry.
-- The warning dot beside Queue clears the items the list shows and says how many when more are waiting. Files held back from earlier downloads say so and point at Diagnostics, which lists them and offers Remove. The Queue no longer holds a browser connection for every waiting album, and an empty music folder reads as "No music yet".
-- In the terminal, an answer a question does not recognise is asked again rather than taken as the riskier one: "n" at an album prompt no longer starts a download, and a typo no longer saves "delete the originals". A backup restored from a copy is recognised by the job that made it, and the backup listing and its removal agree on which are redundant.
-- The app raises its own open-file limit at start, so a large library no longer leaves artists unchecked where the container inherited a low one. Docker moves to the current python:3.14-slim, with idna, multidict and platformdirs refreshed.
+- An import goes wherever your Beets path template files it, Gap Fill and Upgrade add tracks to the album's existing folder, the artwork setting works whatever plugins you choose, and compilations use your compilation path. A Beets database another program is using is waited for.
+- Search marks an album Owned when its track list accounts for the whole album, reading every page of a long one such as a box set. A result's artist and album open that exact artist and album, and Search warns before replacing an album you partly own.
+- A track the album download missed is fetched on its own, and a download that stops early puts back the tracks it set aside, with Retry and Give up on its page. Queued downloads stay queued across a restart, and stopping the container lets a running import finish first.
+- A 1,000-artist library rescans inside a 1 GB container. A scan carries on past a folder it cannot read and checks it once it can, an interrupted scan offers to resume, and the first refresh after updating checks every artist again.
+- Missing Albums offers the album itself over a bonus or remix release sharing its title, names the edition on each row, and can download an artist's second self-titled album. A Gap Fill that has to fetch the whole album downloads it, and a kept edition gets a folder of its own.
+- Upgrade and Repair carry booklets, logs, cue sheets and your own tags and pictures to the new tracks, and remove the originals only once the replacement is proven. Lyrics leave lyrics you added yourself alone and skip instrumentals, and Downsampling keeps cue sheets, repeated tags and each picture's role.
+- Restore offers albums that share a title with one you own, and a half-lost album as a Gap Fill. Migrate gives each album one folder whatever its tracks' years, reads discs from Disc folders, and keeps a band name such as Simon & Garfunkel whole.
+- The web UI refuses forms sent from another site, and on first setup or with WEB_AUTH=none answers only to an address, a local name or a name in WEB_ALLOWED_HOSTS; behind a proxy not listed in FORWARDED_ALLOW_IPS, add its name there. A stranger's wrong passwords cannot lock you out.
+- The terminal checks for Beets before it downloads, asks again when an answer is not one it knows, and records nothing for a prompt nobody answered. A dry run leaves backups and decisions as they are, and the upgrade walk works from what the Library saved.
+- Docker moves to python:3.14-slim with beets 2.14.1, htmx 2.0.11 and starlette 1.7.0, and the app raises its own open-file limit at start. Bare CLI installations need beets 2.14.1.
 
 ## [1.1.1] - 2026-09-16
 
-Scan no longer lose
+Scans no longer lose
 their place when the app is stopped under it, History says what actually
 happened, and Search and Queue keep themselves straight while jobs run.
 
