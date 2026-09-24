@@ -1,4 +1,5 @@
-"""Upgrade walk mode: review saved baseline quality upgrade candidates."""
+"""Upgrade walk mode: review library quality upgrade candidates."""
+import sys
 import time
 from pathlib import Path
 
@@ -17,14 +18,14 @@ from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.catalog import (
     find_album_dir_filesystem,
 )
-from qobuz_librarian.library.scanner import clear_scan_caches
+from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
+from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes.process import process_album
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import (
     load_capped,
     mark_album_capped,
 )
-from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, EXIT_INTERRUPT, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -130,11 +131,7 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
 
 
 def run_upgrade_walk_mode(args, token):
-    """Upgrade walk over saved Library/baseline upgrade candidates.
-
-    The Library refresh is the source of truth for upgrade discovery. The CLI
-    keeps its walk value by grouping saved candidates by artist, but it no
-    longer performs a separate live upgrade scan.
+    """Review current saved upgrades or discover candidates for this walk.
 
     Returns the exit code: 0 when the walk finished cleanly, non-zero when it
     was cut short or approved replacement work failed. The interactive menu
@@ -144,7 +141,7 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(C.YELLOW, "  Upgrade scanning is turned off."))
         return 0
     clear_scan_caches()
-    banner("Upgrade walk: saved Library candidates")
+    banner("Upgrade walk")
 
     saved_state = upgrade_state.load()
     authority = generation_state.load()
@@ -162,10 +159,42 @@ def run_upgrade_walk_mode(args, token):
         == upgrade_state.quality_signature()
     )
     if not saved_current:
-        log.warning(fmt(C.YELLOW,
-            "  Saved Upgrade results are missing, incomplete, or stale. "
-            "Run a Library refresh first."))
-        return EXIT_GENERAL
+        discovery_errors = {}
+
+        def artist_read_failed(artist_dir, error):
+            if normalize(artist_dir.name) not in VA_NORMALIZED:
+                discovery_errors[artist_dir.name] = str(error)
+
+        artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
+                   if normalize(d.name) not in VA_NORMALIZED]
+        log.info(f"  Checking upgrade quality for {plural(len(artists), 'artist')}…")
+
+        def on_artist(artist_dir, _candidates, error, done, total):
+            if sys.stdout.isatty():
+                line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46)}…"
+                print(f"\r{line:<80}", end="", flush=True)
+            if error is not None:
+                log.info("")
+                log.info(fmt(C.YELLOW, f"  Skipped {artist_dir.name}: {error}"))
+
+        refresh = upgrade_state.refresh_for_artists(
+            artists,
+            token=token,
+            args=args,
+            capped=load_capped(),
+            hidden=hidden_mod.load(),
+            workers=max(1, int(cfg.ARTIST_SCAN_WORKERS)),
+            on_artist=on_artist,
+            discovery_errors=discovery_errors,
+            persist=False,
+        )
+        if sys.stdout.isatty():
+            print()
+        if not refresh.complete:
+            log.warning(fmt(C.YELLOW,
+                "  Not every artist could be checked, so nothing was upgraded."))
+            return EXIT_GENERAL
+        saved_state = {"complete": True, "candidates": refresh.candidates}
     # The saved rows carry no kind; the web review adds it when it lists them,
     # and the premise check reads it to know what was sealed.
     saved = [
@@ -174,8 +203,7 @@ def run_upgrade_walk_mode(args, token):
         if (c.get("payload") or {}).get("album_id")
     ]
     if not saved:
-        log.info(fmt(C.YELLOW,
-            "  No saved upgrade candidates. Run a Library refresh first."))
+        log.info(fmt(C.YELLOW, "  No upgrade candidates."))
         return 0
 
     # A saved candidate is a record of a past scan, not a fact about the
@@ -225,12 +253,13 @@ def run_upgrade_walk_mode(args, token):
     n_gone_albums = 0
     n_stale_albums = 0
     no_answer = False
+    n_attempted = 0
     interrupted = False
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
 
     log.info(fmt(C.GRAY,
         f"  {plural(len(saved), 'upgrade candidate')} across "
-        f"{plural(n, 'artist')} from the saved Library refresh."))
+        f"{plural(n, 'artist')}."))
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
     if not getattr(args, "dry_run", False):
         log.info(fmt(C.YELLOW,
@@ -243,14 +272,14 @@ def run_upgrade_walk_mode(args, token):
     try:
         if (not args.yes and not getattr(args, "auto_safe", False)
                 and not getattr(args, "dry_run", False)):
-            _r = ask(
-                "\n  Auto-accept all upgrades and run unattended? [y/N]: ",
-                quiet=True)
-            if _r is None:
+            answer = confirm(
+                "\n  Auto-accept all upgrades and run unattended?",
+                default_yes=False, auto_yes=False, on_eof=None, quiet=True)
+            if answer is None:
                 log.warning(fmt(C.YELLOW,
                     "\n  No answer was given. Nothing changed."))
                 return EXIT_GENERAL
-            if _r in ("y", "yes"):
+            if answer:
                 auto_accept_all = True
                 log.info(fmt(C.GREEN,
                     "  ✓ Auto-accepting every artist. Walk away."))
@@ -335,9 +364,8 @@ def run_upgrade_walk_mode(args, token):
                 except candidate_premise.CandidateStale:
                     log.info(fmt(
                         C.YELLOW,
-                        "  The local album changed after the Library refresh. "
-                        "It was left unchanged; refresh Library before "
-                        "trying this Upgrade again.",
+                        "  The local album changed after it was checked. "
+                        "It was left unchanged.",
                     ))
                     n_stale_albums += 1
                     continue
@@ -350,6 +378,7 @@ def run_upgrade_walk_mode(args, token):
                         continue
                     # Upgrade_only=True so partial-album cases
                     # only re-rip the present tracks, not download missing ones.
+                    n_attempted += 1
                     _proc_result = process_album(album, args, allow_force=False,
                                   label=label, already_confirmed=True,
                                   upgrade_only=True,
@@ -431,11 +460,12 @@ def run_upgrade_walk_mode(args, token):
     if interrupted:
         log.warning(fmt(C.YELLOW, "  ⚠  Upgrade walk stopped early."))
     elif no_answer:
-        message = ("No answer was given. Nothing changed." if not n_upgraded_albums
-                   else "No answer was given, so the walk stopped after "
-                   f"{plural(n_upgraded_albums, 'album')}.")
-        log.warning(fmt(C.YELLOW, f"  {message}"))
-        return EXIT_GENERAL
+        if not n_attempted:
+            log.warning(fmt(C.YELLOW, "  No answer was given. Nothing changed."))
+            return EXIT_GENERAL
+        log.warning(fmt(C.YELLOW,
+            "  No answer was given, so the walk stopped after "
+            f"{plural(n_attempted, 'album')}."))
     elif n_failed_attempts:
         log.warning(fmt(C.RED, "  ✗  Upgrade walk finished with errors."))
     elif n_upgraded_albums or not n_gone:
@@ -454,7 +484,7 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(
             C.YELLOW,
             f"     ⚠  {plural(n_stale_albums, 'candidate')} changed after "
-            "the saved review. Refresh Library before retrying.",
+            "being checked.",
         ))
     if n_catalogue_failed:
         log.info(fmt(C.YELLOW,

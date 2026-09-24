@@ -62,7 +62,7 @@ out of library scans and import targets.
 | `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample hi-res FLACs as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
-| `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Hide the rest of an album from gap scans once you download one track from it |
+| `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Library scans and new-release checks treat a single-track download as a single: the rest of its album is not offered, and an artist you own only singles from is skipped |
 | `EXCLUDE_LIVE_ALBUMS` | `false` | Drop obvious live/tour/session/acoustic releases from the missing-albums gap list; a studio album whose real title merely contains "Live" is never dropped |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 

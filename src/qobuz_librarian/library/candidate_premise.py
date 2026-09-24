@@ -35,6 +35,16 @@ _KINDS = {
 class CandidateStale(Exception):
     """The saved review no longer matches the local files."""
 
+    def __init__(self, message, *, cause="changed"):
+        super().__init__(message)
+        self.cause = cause
+
+
+class StaleCandidateIds(set):
+    def __init__(self):
+        super().__init__()
+        self.counts = {"changed": 0, "unreadable": 0, "older": 0}
+
 
 def _canonical_receipt(value, *, origin: str):
     """JSON-detach receipt tuples, then require backup.py's closed schema."""
@@ -351,7 +361,8 @@ def validate_premise(value) -> dict:
     if premise is None:
         raise CandidateStale(
             "This queued action is too old to verify against the current "
-            "files. Refresh or rescan before changing music files."
+            "files. Refresh or rescan before changing music files.",
+            cause="older",
         )
     current = capture(premise["kind"], premise["path"])
     if not _durable_premises_match(premise, current):
@@ -398,7 +409,8 @@ def validate(candidate: dict, *, missing_premises=None) -> dict:
     if premise is None:
         raise CandidateStale(
             "This saved review predates local file receipts. Refresh it before "
-            "changing music files."
+            "changing music files.",
+            cause="older",
         )
     if premise["kind"] == "missing" and missing_premises is not None:
         path = premise["path"]
@@ -407,6 +419,12 @@ def validate(candidate: dict, *, missing_premises=None) -> dict:
         current = missing_premises[path]
     else:
         current = capture(premise["kind"], premise["path"])
+    if current is None and os.path.lexists(premise["path"]):
+        raise CandidateStale(
+            "The local files could not be read. Refresh the review; nothing "
+            "was changed.",
+            cause="unreadable",
+        )
     if not _durable_premises_match(premise, current):
         raise CandidateStale(
             "The local files changed after this review was built. Refresh the "
@@ -429,7 +447,8 @@ def validate_container(candidate: dict) -> dict:
     if premise is None:
         raise CandidateStale(
             "This saved review predates local file receipts. Refresh it before "
-            "changing music files."
+            "changing music files.",
+            cause="older",
         )
     if premise["kind"] != "missing":
         return validate(candidate)
@@ -445,7 +464,8 @@ def validate_container(candidate: dict) -> dict:
     except OSError as exc:
         raise CandidateStale(
             "The local artist folder could not be verified. Refresh the "
-            "review; nothing was changed."
+            "review; nothing was changed.",
+            cause="unreadable",
         ) from exc
     finally:
         _close_descriptors(descriptors)
@@ -473,7 +493,7 @@ def validate_all(candidates) -> None:
         validate(candidate)
 
 
-def stale_candidate_ids(candidates, *, share_artist_captures=False) -> set:
+def stale_candidate_ids(candidates, *, share_artist_captures=False) -> StaleCandidateIds:
     """Find rows that no longer match their files.
 
     ``share_artist_captures`` seals each artist once for the whole sweep,
@@ -481,12 +501,13 @@ def stale_candidate_ids(candidates, *, share_artist_captures=False) -> set:
     is written.
     """
     missing_premises = {} if share_artist_captures else None
-    stale = set()
+    stale = StaleCandidateIds()
     for candidate in candidates:
         try:
             validate(candidate, missing_premises=missing_premises)
-        except CandidateStale:
+        except CandidateStale as exc:
             stale.add(candidate.get("cid"))
+            stale.counts[exc.cause] += 1
     return stale
 
 

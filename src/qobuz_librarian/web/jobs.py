@@ -1774,6 +1774,14 @@ def finalize_review_if_empty(
     return True
 
 
+def _merge_key(candidate):
+    album_id = str((candidate.get("payload") or {}).get("album_id") or "")
+    if album_id:
+        return album_id
+    return ((candidate.get("artist") or "").lower(),
+            (candidate.get("title") or "").lower())
+
+
 def _restore_untouched_review(
     j: Job, parked=None, *, status=JobStatus.RUNNING,
 ) -> bool:
@@ -1799,7 +1807,20 @@ def _restore_untouched_review(
                 and parked.status == JobStatus.AWAITING_REVIEW
             )
             if should_merge:
-                candidates = list(j.candidates) + list(parked.candidates)
+                # A refresh can fold the approved album back into the parked
+                # review, and the parked review mints cids from its own counter.
+                own = {_merge_key(c) for c in j.candidates}
+                cids = {c.get("cid") for c in j.candidates}
+                j.sync_cand_seq()
+                candidates = list(j.candidates)
+                for candidate in parked.candidates:
+                    if _merge_key(candidate) in own:
+                        continue
+                    if candidate.get("cid") in cids:
+                        seq = j._cand_seq
+                        j._cand_seq += 1
+                        candidate = {**candidate, "cid": f"c{seq}", "seq": seq}
+                    candidates.append(candidate)
                 candidates.sort(key=lambda candidate: (
                     int(candidate.get("seq") or 0),
                     str(candidate.get("cid") or ""),
@@ -2339,7 +2360,16 @@ def restore_jobs(
             registry._order.append(job.id)
         registry._prune_locked()
     for job in pending_reviews:
-        _restore_untouched_review(job, status=JobStatus.PENDING)
+        if not _restore_untouched_review(job, status=JobStatus.PENDING):
+            with job._lock:
+                job.status = JobStatus.FAILED
+                job.attention = "failed"
+                job.finished_at = job.finished_at or time.time()
+                job.error = (
+                    job_persistence.RESTART_INTERRUPTED + " Its picks could "
+                    "not be put back in the review. Run the scan again."
+                )
+            job_persistence.persist(job)
     # Behind the same pause as any download that arrives while the library is
     # paused, and in the order they were queued.
     requeued.sort(key=lambda pair: pair[0].created_at)
@@ -2451,10 +2481,12 @@ def request_cancel(job: Job) -> bool:
     if (job.status == JobStatus.PENDING
             and job.execute_kind in ("library", "upgrade", "downsample", "repair")
             and job.candidates):
-        restored = _restore_untouched_review(job, status=JobStatus.PENDING)
-        if restored:
+        if _restore_untouched_review(job, status=JobStatus.PENDING):
             job.notify_review_changed()
-        return restored
+            return True
+        if job.status == JobStatus.PENDING:
+            return False
+        # The worker claimed it first; stop it like any running job.
     # Either it wasn't in review, or an approve() flipped it to PENDING
     # between the check and cancel_review's locked re-check.
     with job._lock:

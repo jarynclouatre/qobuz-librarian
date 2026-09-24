@@ -1062,6 +1062,23 @@
     if (radio.value === "track") placeholder = "Track title";
     q.setAttribute("placeholder", placeholder);
     q.setAttribute("aria-label", placeholder);
+    saveSearchSnapshot();
+    latestSearchSubmission += 1;
+    activeSearchRequests.slice().forEach(function (xhr) { xhr.abort(); });
+    form.querySelectorAll("[data-deep-link]").forEach(function (node) { node.remove(); });
+    var results = document.getElementById("search-results");
+    if (results) results.replaceChildren();
+  });
+
+  document.addEventListener("click", function (evt) {
+    var button = evt.target.closest && evt.target.closest("[data-search-by-artist]");
+    var form = button && document.querySelector(".ql-search-form");
+    if (!form) return;
+    form.querySelector('input[name="q"]').value = button.dataset.searchByArtist;
+    var radio = form.querySelector('input[name="kind"][value="artist"]');
+    radio.checked = true;
+    radio.dispatchEvent(new Event("change", { bubbles: true }));
+    form.requestSubmit();
   });
 
   // Search result version lists and tracklists use a real button so the row

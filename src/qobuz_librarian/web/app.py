@@ -2577,7 +2577,13 @@ def _recovery_on_disk(recovery) -> bool:
     as licence to clear the alarm."""
     try:
         p = Path(str((recovery or {}).get("location") or ""))
-        if p.is_dir() or (recovery.get("kind") == "migration" and p.exists()):
+        if recovery.get("kind") == "migration":
+            # The kept file can sit in a private folder removed with it, so
+            # the album folder is what shows the library is still mounted.
+            anchor = str(recovery.get("album_dir") or "")
+            return p.exists() or not (
+                p.parent.is_dir() or (anchor and Path(anchor).is_dir()))
+        if p.is_dir():
             return True
         return not p.parent.is_dir()
     except OSError:
@@ -4431,6 +4437,31 @@ def _qobuz_quality_short_label(primary: dict | None,
     return format_quality(bits, rate)
 
 
+def _filter_artist_only_albums(albums, query):
+    def words(text):
+        # normalize() drops what has no ASCII form, such as a CJK title.
+        return {tags.normalize(word) or word
+                for word in re.findall(r"[^\W_]+", text.casefold())}
+
+    query_words = words(query) - {"", "the", "a", "an", "and"}
+    if not query_words:
+        return albums
+
+    def matches(word, candidates):
+        return any(word == candidate or tags.similarity(word, candidate)
+                   >= cfg.ARTIST_NAME_THRESH for candidate in candidates)
+
+    kept = []
+    for album in albums:
+        artist_words = words((album.get("artist") or {}).get("name") or "")
+        title_words = words(album.get("title") or "") | words(album.get("version") or "")
+        if (all(matches(word, artist_words) for word in query_words)
+                and not any(matches(word, title_words) for word in query_words)):
+            continue
+        kept.append(album)
+    return kept
+
+
 @app.post("/search", response_class=HTMLResponse)
 async def do_search(request: Request, q: str = Form("", max_length=500),
                     kind: str = Form("album"),
@@ -4440,6 +4471,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     results = []
     album_groups = []
     artist_results = []
+    artist_only_count = 0
     selected_artist = None
     error = None
     query = q.strip()
@@ -4601,6 +4633,11 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     )
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."
+
+                if kind == "album":
+                    kept = _filter_artist_only_albums(raw, query)
+                    artist_only_count = len(raw) - len(kept)
+                    raw = kept
 
             queued_albums, queued_tracks, scanning_albums = (
                 _active_search_downloads())
@@ -4899,10 +4936,18 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     if kind == "album" and album_id:
         search_state += f"|album:{album_id}"
     search_result_count = len(results) if results else len(artist_results)
+    search_count = (len(album_groups) if kind == "album" else
+                    len(artist_results) if kind == "artist" else len(results))
+    search_count_label = plural(search_count, kind)
+    if kind == "album":
+        search_count_label += " on Qobuz"
     defer_search_views = search_result_count > _SEARCH_SNAPSHOT_RESULT_LIMIT
     ctx = {"q": query, "results": results, "album_groups": album_groups,
            "artist_results": artist_results, "selected_artist": selected_artist,
            "error": error, "kind": kind,
+           "search_count_label": search_count_label,
+           "artist_only_count": artist_only_count,
+           "artist_only_label": plural(artist_only_count, "result"),
            "search_state": search_state,
            "search_cacheable": not defer_search_views,
            "defer_search_views": defer_search_views,
@@ -7759,30 +7804,32 @@ def _make_single_track_run(album, track, token):
                 )
             return
         j.landed_complete = True
-        # Only mark it a single when explicitly configured.
-        marked = bool(cfg.SUPPRESS_SINGLE_TRACK_GAPS and len(missing) > 1)
+        # The mark keeps Upgrade off a deliberate single whatever the toggle
+        # says; the toggle only decides whether scans read it.
+        marked = len(missing) > 1
         if marked:
             try:
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
-                j.summary = (f"Got “{t_title}”, filed under {artist} / {title}. "
-                             "The rest of the album stays out of scans.")
+                j.summary = (
+                    f"Got “{t_title}”, filed under {artist} / {title}. "
+                    + ("The rest of the album stays out of scans."
+                       if cfg.SUPPRESS_SINGLE_TRACK_GAPS
+                       else "Future scans can still offer the rest of the album.")
+                )
             except OSError as e:
                 # The track landed fine, so don't fail the job, but don't claim
                 # the exclusion stuck either.
                 marked = False
                 j.summary = (f"Got “{t_title}”, filed under {artist} / {title}.")
-                j.error = redaction.redact(
-                    f"{e} The rest of the album may still show in scans.")
-        elif len(missing) > 1:
-            hidden_mod.unmark_single(
-                artist,
-                title,
-                year=catalog.album_year(album),
-                album_id=album.get("id"),
-            )
-            j.summary = (f"Got “{t_title}”, filed under {artist} / {title}. "
-                         "Future scans can still offer the rest of the album.")
+                if cfg.SUPPRESS_SINGLE_TRACK_GAPS:
+                    j.error = redaction.redact(
+                        f"{e} The rest of the album may still show in scans.")
+                elif not cfg.UPGRADE_SINGLES_ENABLED:
+                    j.error = redaction.redact(
+                        f"{e} Upgrade may still offer the whole album.")
+                else:
+                    j.error = redaction.redact(str(e))
         else:
             # This download completed the album, so it's a normal full album
             # now, so clear any single mark an earlier partial download left
@@ -9708,7 +9755,8 @@ async def job_approve(request: Request, job_id: str):
             )
             if selected_candidate_ids <= stale_premise_candidate_ids:
                 stale_message = await loop.run_in_executor(
-                    None, lambda: _all_stale_message_for(job))
+                    None, lambda: _all_stale_message_for(
+                        job, stale_premise_candidate_ids.counts))
                 return RedirectResponse(
                     url=dest + "?error=" + _notice_key(stale_message),
                     status_code=303,
@@ -10005,7 +10053,8 @@ async def job_approve(request: Request, job_id: str):
     approved = await loop.run_in_executor(None, _split_and_approve)
     if approved == "all_candidates_stale":
         stale_message = await loop.run_in_executor(
-            None, lambda: _all_stale_message_for(job))
+            None, lambda: _all_stale_message_for(
+                job, stale_premise_candidate_ids.counts))
         return RedirectResponse(
             url=dest + "?error=" + _notice_key(stale_message),
             status_code=303,
@@ -10134,13 +10183,25 @@ def _rebuild_results_hint(execute_kind):
     return "Rebuild these results before trying again."
 
 
-def _all_candidates_stale_message(execute_kind):
-    return ("Every selected album changed on disk after this review was "
-            "built, or the review is too old to check. Nothing was started. "
+def _all_candidates_stale_message(execute_kind, counts):
+    causes = []
+    changed = counts.get("changed", 0)
+    if changed:
+        causes.append(
+            f"{plural(changed, 'album')} changed on disk after this review was built")
+    unreadable = counts.get("unreadable", 0)
+    if unreadable:
+        label = str(unreadable) if causes else plural(unreadable, "album")
+        causes.append(f"{label} could not be read")
+    older = counts.get("older", 0)
+    if older:
+        label = str(older) if causes else plural(older, "album")
+        causes.append(f"{label} {'comes' if older == 1 else 'come'} from an older review")
+    return (", ".join(causes) + ". Nothing was started. "
             + _rebuild_results_hint(execute_kind))
 
 
-def _all_stale_message_for(job):
+def _all_stale_message_for(job, counts):
     """The refusal when every selected candidate went stale.
 
     A restore review records which music-folder incarnation it was read
@@ -10156,7 +10217,7 @@ def _all_stale_message_for(job):
             return ("Nothing was started. The music folder is not the one "
                     "this review was built against. Check that your library "
                     "is mounted, then try again; the review is still here.")
-    return _all_candidates_stale_message(job.execute_kind)
+    return _all_candidates_stale_message(job.execute_kind, counts)
 
 
 def _album_label(candidate):

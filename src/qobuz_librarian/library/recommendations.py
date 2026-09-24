@@ -797,8 +797,11 @@ def _owned_on_disk(album: dict) -> bool:
             "artist": {"name": album.get("artist") or ""},
             "release_date_original": f"{album.get('year') or ''}-01-01",
         }) is not None
-    except Exception:
-        return False
+    except OSError as exc:
+        logging.getLogger("qobuz_librarian").warning(
+            "Unreadable artist %s: %s. Check permissions and retry.",
+            album.get("artist") or "", exc)
+        return True
 
 
 def _without_owned_albums(view: dict) -> dict:

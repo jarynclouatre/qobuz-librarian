@@ -286,8 +286,21 @@ def test_upgrade_walk_carries_the_reviewed_receipt_to_the_backup_gate(
     assert observed == [receipt]
 
 
-def test_upgrade_walk_refuses_incomplete_saved_state(monkeypatch, caplog):
+def test_upgrade_walk_refuses_incomplete_refresh(monkeypatch, tmp_path, caplog):
+    from qobuz_librarian import config as cfg
     from qobuz_librarian.modes import upgrade
+    from qobuz_librarian.quality import decision
+
+    root = tmp_path / "music"
+    album_dir = root / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01.flac").write_bytes(b"audio")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", root)
+
+    def scan_failed(*_args, **_kwargs):
+        raise OSError("unreadable album")
+
+    monkeypatch.setattr(decision, "scan_artist_for_upgrades", scan_failed)
 
     args = SimpleNamespace(
         yes=True,

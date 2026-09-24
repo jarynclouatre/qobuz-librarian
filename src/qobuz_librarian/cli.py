@@ -848,8 +848,9 @@ def parse_args():
                    help="re-download damaged (truncated) tracks you own. '*' at "
                         "the artist prompt sweeps the whole library.")
     modes.add_argument("--upgrade-walk", action="store_true",
-                   help="review the saved Library upgrade results. Per-artist "
-                        "confirm (enter=skip), auto-advance.")
+                   help="review quality upgrades: the Library scan's saved "
+                        "results when current, otherwise a fresh check. "
+                        "Per-artist confirm (enter=skip), auto-advance.")
     modes.add_argument("--downsample-walk", action="store_true",
                    help="scan the library for hi-res files and downsample them "
                         "to CD rate in place (per-artist confirm; --dry-run lists "
@@ -981,10 +982,9 @@ def parse_args():
     if (args.no_catalog and not (args.artist or args.library_walk)
             and (args.query or other_run_mode)):
         p.error("--no-catalog only applies to artist mode and --library-walk")
-    # The upgrade walk reviews saved Library upgrade results; a query would be
-    # silently ignored, so reject it instead of surprising the user.
+    # The upgrade walk covers the library; it cannot use a query.
     if args.upgrade_walk and args.query:
-        p.error("--upgrade-walk reviews saved Library upgrade results. Drop the "
+        p.error("--upgrade-walk covers the whole library. Drop the "
                 "query, or run a normal search without --upgrade-walk")
     # --artist dispatches before the positional query, so extra words after the
     # artist name would be silently dropped. Reject so the user picks one.

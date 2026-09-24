@@ -216,7 +216,7 @@ def test_undo_finishes_when_a_created_folder_contains_an_unowned_file(
     assert owned["directory_cleanup"]["complete"] is True
 
 
-def test_get_track_downloads_one_without_hiding_album_gaps_by_default(
+def test_get_track_marks_the_single_with_the_gap_toggle_off(
         client, monkeypatch, fresh_singles):
     import qobuz_librarian.api.search as search_mod
     import qobuz_librarian.library.catalog as cat_mod
@@ -252,7 +252,8 @@ def test_get_track_downloads_one_without_hiding_album_gaps_by_default(
     try:
         assert _wait_for(lambda: job.status in (jm.JobStatus.DONE, jm.JobStatus.FAILED))
         assert job.status == jm.JobStatus.DONE
-        assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is False
+        # Upgrade reads the mark; gap scans only do with the toggle on.
+        assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is True
     finally:
         _remove_job(job)
 

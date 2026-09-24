@@ -1179,6 +1179,32 @@ def test_large_artist_catalog_keeps_results_without_caching_both_views(
         assert response.text.count(field) == 2
 
 
+def test_album_search_drops_artist_only_matches(client, monkeypatch):
+    import qobuz_librarian.api.search as search_mod
+    import qobuz_librarian.library.catalog as catalog_mod
+    import qobuz_librarian.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: None)
+    monkeypatch.setattr(search_mod, "qobuz_get", lambda *_a, **_kw: {
+        "albums": {"items": [
+            {"id": "crystal-castles-iii", "title": "(III)",
+             "artist": {"name": "Crystal Castles"}},
+            {"id": "stan-hubbs-crystal", "title": "Crystal",
+             "artist": {"name": "Stan Hubbs"}},
+        ]},
+    })
+
+    response = client.post(
+        "/search", data={"q": "Crystal", "kind": "album"},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert 'data-search-key="album-stan-hubbs-crystal"' in response.text
+    assert 'data-search-key="album-crystal-castles-iii"' not in response.text
+
+
 def test_album_search_keeps_upgrades_out_of_search(client, monkeypatch, tmp_path):
     import qobuz_librarian.api.search as search_mod
     import qobuz_librarian.library.catalog as catalog_mod

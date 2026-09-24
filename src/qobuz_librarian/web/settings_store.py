@@ -38,8 +38,9 @@ BEHAVIOR_FIELDS = [
      "The hi-res version is not kept. The Downsample page has its own keep "
      "setting."),
     ("SUPPRESS_SINGLE_TRACK_GAPS", "Treat track downloads as singles",
-     "Hide the rest of an album from gap scans after you download one track. "
-     "Leave this off if a track download should not affect future album offers."),
+     "Library scans and new-release checks treat a single-track download as "
+     "a single: the rest of its album is not offered, and an artist you own "
+     "only singles from is skipped."),
     ("LYRICS_ENABLED", "Fetch lyrics",
      "Fetch lyrics during import, using synced lyrics when providers have them."),
 ]

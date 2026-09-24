@@ -2099,6 +2099,8 @@ def _scan_library_impl(
             f"left out: {names}{more}. "
             + ("Each is checked by itself once it can be read."
                if cfg.AUTO_LIBRARY_SCAN
+               else "Scan again once it can be read."
+               if len(unreadable_artists) == 1
                else "Scan again once they can be read."))
     if (not job.cancel_requested and unchecked > 0
             and publication is not None

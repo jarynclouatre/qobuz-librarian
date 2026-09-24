@@ -16,7 +16,6 @@ from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import mark_local_album_capped
-from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, format_size, truncate
 from qobuz_librarian.ui_cli.errors import (
     EXIT_CONFIG,
@@ -138,7 +137,7 @@ def run_downsample_walk_mode(args):
             default_yes=True, auto_yes=False, on_eof=None, quiet=True)
         if keep is None:
             log.warning(fmt(C.YELLOW,
-                "\n  No answer was given. Nothing changed."))
+                "\n  No answer was given. No music files were changed."))
             return EXIT_GENERAL
         else:
             _choice = "keep" if keep else "delete"
@@ -163,19 +162,21 @@ def run_downsample_walk_mode(args):
     # Auto-accept gate. Skipped under --yes, which has already answered it.
     auto_accept_all = False
     if offered and not args.dry_run and not args.yes:
-        _r = ask(
-            "\n  Auto-accept every artist and run unattended? [y/N]: ", quiet=True)
-        if _r is None:
+        answer = confirm(
+            "\n  Auto-accept every artist and run unattended?",
+            default_yes=False, auto_yes=False, on_eof=None, quiet=True)
+        if answer is None:
             log.warning(fmt(C.YELLOW,
-                "\n  No answer was given. Nothing changed."))
+                "\n  No answer was given. No music files were changed."))
             return EXIT_GENERAL
-        if _r in ("y", "yes"):
+        if answer:
             auto_accept_all = True
             log.info(fmt(C.GREEN, "  ✓ Auto-accepting every artist. Walk away."))
     log.info("")
 
     n_scanned = len(refresh.artists_scanned) - unchecked
     n_albums_done = 0
+    n_attempted = 0
     total_saved = 0
     # A preview never reaches the counters below, so it keeps its own running
     # total of what it listed and what that would reclaim.
@@ -253,6 +254,7 @@ def run_downsample_walk_mode(args):
                         ),
                     )
                     state_refresh_warnings += 1
+                n_attempted += 1
                 res, stopped = _downsample_album(c.album_dir, keep_originals)
                 if res.get("resampled"):
                     n_albums_done += 1
@@ -283,11 +285,13 @@ def run_downsample_walk_mode(args):
 
     log.info("")
     if no_answer:
-        message = ("No answer was given. Nothing changed." if not n_albums_done
-                   else "No answer was given, so the walk stopped after "
-                   f"{plural(n_albums_done, 'album')}.")
-        log.warning(fmt(C.YELLOW, f"  {message}"))
-        return EXIT_GENERAL
+        if not n_attempted:
+            log.warning(fmt(C.YELLOW,
+                "  No answer was given. No music files were changed."))
+            return EXIT_GENERAL
+        log.warning(fmt(C.YELLOW,
+            "  No answer was given, so the walk stopped after "
+            f"{plural(n_attempted, 'album')}."))
     elif interrupted:
         log.warning(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
     elif unchecked:

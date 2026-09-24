@@ -692,9 +692,10 @@
       <form action="/collection/snapshot" method="post" class="w-full sm:w-auto" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="force" value="1">
-        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary whitespace-nowrap"
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary whitespace-nowrap"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                 data-confirm="{% if collection_backup.counts %}Replace the last backup with what is on disk now?{% else %}Record the current library as intentionally empty?{% endif %}"
                 data-confirm-action="{% if collection_backup.counts %}Replace{% else %}Record{% endif %}">{% if collection_backup.counts %}Replace anyway{% else %}Record empty library{% endif %}</button>
+        {% include "_writes_paused_reason.html" %}
       </form>
     </div>
     {% endif %}

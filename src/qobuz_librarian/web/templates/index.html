@@ -64,8 +64,9 @@
       </svg>
       <span class="min-w-0 flex-1 text-sm">
         <strong>{{ staging_album_count }} album folder{{ 's' if staging_album_count != 1 }} left in staging.</strong>
-        Review staging before starting another download; leftover folders may be imported with the next run.
+        Downloads will not start until {{ 'it is' if staging_album_count == 1 else 'they are' }} moved out of staging. Settings &gt; Diagnostics shows where staging is.
       </span>
+      <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm shrink-0">Open Diagnostics</a>
     </div>
     {% endif %}
 

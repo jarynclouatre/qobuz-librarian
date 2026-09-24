@@ -59,6 +59,8 @@ docker compose run --rm -it qobuz-librarian cli --artist "Paysage d'Hiver"
 
 ## Common unattended forms
 
+`--upgrade-walk` uses current saved Upgrade results, or checks the library for candidates without changing the saved results.
+
 ```bash
 # Sweep every artist for quality upgrades, auto-confirming upgrades the scanner can classify safely
 docker compose run --rm qobuz-librarian cli --upgrade-walk --auto-safe
