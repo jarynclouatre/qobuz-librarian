@@ -86,6 +86,7 @@
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume.kind == 'partial' else 'missing_albums' }}">
       <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Resume scan</button>
+      {% include "_writes_paused_reason.html" %}
     </form>
   </div>
   {% endif %}
@@ -119,10 +120,16 @@
     <span class="ql-scan-status-meta">{% if not baseline_complete %}{{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }}{% elif last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full baseline has finished{% endif %}</span>
   </div>
 
-  {% if library_resume and library_resume.kind == 'missing' %}
+  {% if library_resume %}
   <div class="ql-tool-note ql-tool-note-info">
     <p class="ql-tool-note-title">Scan can resume</p>
     <p>{{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. The scan continues from there.</p>
+    <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume.kind == 'partial' else 'missing_albums' }}">
+      <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Resume scan</button>
+      {% include "_writes_paused_reason.html" %}
+    </form>
   </div>
   {% endif %}
 
@@ -153,9 +160,10 @@
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {# It restores the whole dismissed set in one press, so it asks first,
            naming the number, the same as the button on the Dismissed page. #}
-        <button type="submit" class="ql-btn ql-btn-ghost"
+        <button type="submit" class="ql-btn ql-btn-ghost"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                 data-confirm="{% if hidden_count %}Bring all {{ hidden_count }} dismissed album{% if hidden_count != 1 %}s{% endif %} back to the review?{% else %}Bring the discarded review back?{% endif %}"
                 data-confirm-action="Bring all back">Bring all back</button>
+        {% include "_writes_paused_reason.html" %}
       </form>
     </div>
     {% endif %}

@@ -5,6 +5,7 @@
 
 <div id="job-content" class="ql-job-shell" data-job-id="{{ job.id }}"
   data-job-kind="{{ job.execute_kind }}"
+  data-job-type="{{ job.kind }}"
   data-nav-return="{{ job_return_href }}"
   {%- if embedded_surface|default(false) %} data-embedded="1"{% endif %}
   data-progress-item-singular="{{ labels.progress_item_singular(job) }}"
@@ -139,7 +140,7 @@
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or writes_paused or _review_qobuz_blocked %} disabled{% endif %}{% if writes_paused %} title="{{ writes_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
-            {%- if job.execute_kind == 'downsample' %} data-confirm="{% if downsample_originals_choice not in ('keep', 'delete') %}Downsample the selected albums now? You'll first choose whether to keep your hi-res originals; nothing is rewritten until you do.{% elif downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"
+            {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Each file is replaced only after its new copy verifies, and an album too damaged to patch is downloaded again in full. Your originals are set aside while that happens and removed once the replacement is proven good, so a repair cannot be undone. A replacement that cannot be verified keeps them, restorable from Settings."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
@@ -178,13 +179,20 @@
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
       </p>
       {% if not job.cancel_requested and not _cancel_protected %}
-      <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel{% if job.importing %} hidden{% endif %}" data-cancel-form>
+      {% if s == 'pending' %}
+      <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel" data-pending-cancel-form>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        {% set _pending = s == 'pending' %}
-        <button type="submit" class="ql-btn ql-btn-sm{% if _pending %} ql-btn-secondary ql-secondary-action{% endif %}"
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action"
+                data-confirm="Remove this waiting job from the queue?"
+                data-confirm-action="Remove">Remove</button>
+      </form>
+      {% endif %}
+      <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel{% if s == 'pending' or job.importing %} hidden{% endif %}" data-cancel-form>
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <button type="submit" class="ql-btn ql-btn-sm"
                 data-cancel-button
-                data-confirm="{% if _pending %}Remove this waiting job from the queue?{% else %}{{ labels.cancel_confirm(job) }}{% endif %}"
-                data-confirm-action="{% if _pending %}Remove{% else %}Stop job{% endif %}"{% if not _pending %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{% if _pending %}Remove{% else %}Cancel{% endif %}</button>
+                data-confirm="{{ labels.cancel_confirm(job) }}"
+                data-confirm-action="Stop job" data-confirm-dismiss="Keep running" data-irreversible>Cancel</button>
       </form>
       {# Beets runs to its own end, so Cancel would be a dead control here. Say
          what is happening, the way the Queue rows do, instead of greying a
@@ -277,6 +285,8 @@
       <div class="ql-notice-copy">
         <strong>Retry unavailable</strong>
         <div>The saved details needed to retry this job could not be read. Start the download again from Search or Library.</div>
+        <a href="/" class="ql-btn ql-btn-secondary ql-btn-sm">Search again</a>
+        <a href="/library" class="ql-btn ql-btn-secondary ql-btn-sm">Open Library</a>
       </div>
     </div>
     {% endif %}
@@ -301,7 +311,15 @@
     </div>
     {% endif %}
     {% if job.error %}
-    <div class="ql-notice ql-notice-error ql-job-error"><span>{{ job.error | strip_log_pointer(job.log_lines) }}</span></div>
+    <div class="ql-notice ql-notice-error ql-job-error">
+      <span>{{ job.error | strip_log_pointer(job.log_lines) }}</span>
+      {% if recovery_holder_job_id %}
+      <a href="/jobs/{{ recovery_holder_job_id }}" class="ql-btn ql-btn-secondary ql-btn-sm">Open that download</a>
+      {% endif %}
+      {% if job.execute_args.get('retry_disabled') == 'backup' %}
+      <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm">Open Diagnostics</a>
+      {% endif %}
+    </div>
     {% endif %}
     {% if job.log_lines %}
     {# Collapsed by default: job.summary and job.error above already carry
@@ -320,13 +338,15 @@
     <div class="ql-job-actions">
       {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
       {% if s == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
+      {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% if recovery_retry %}
         <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
         <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
         {% endif %}
-        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm">Retry</button>
+        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if retry_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry</button>
+        {% if retry_paused %}{% include "_writes_paused_reason.html" %}{% endif %}
       </form>
       {% endif %}
       {% if recovery_retry and s == 'failed' %}
@@ -343,7 +363,8 @@
       <form action="/jobs/{{ job.id }}/undo" method="post"
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Retry catalogue cleanup</button>
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry catalogue cleanup</button>
+        {% include "_writes_paused_reason.html" %}
       </form>
       {% elif s in ('done', 'failed') and job.single and job.single.get('owned_path') and not job.single.get('removed') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
       <form action="/jobs/{{ job.id }}/undo" method="post"
@@ -351,7 +372,8 @@
             data-confirm="Remove the downloaded track and undo the single?"
             data-confirm-action="Remove track">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-sm" data-irreversible>Undo (removes track)</button>
+        <button type="submit" class="ql-btn ql-btn-sm" data-irreversible{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
+        {% include "_writes_paused_reason.html" %}
       </form>
       {% endif %}
       {% if not embedded_surface|default(false) %}

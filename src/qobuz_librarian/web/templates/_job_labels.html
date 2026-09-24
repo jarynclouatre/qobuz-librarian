@@ -191,7 +191,7 @@
 {# Stopping a library or repair scan clears its checkpoint so the next one
    does not auto-resume, which the generic wording never said. #}
 {% macro cancel_confirm(job) -%}
-  {%- if job.status.value == 'scanning' and job.execute_kind in ('library', 'repair') -%}
+  {%- if (job.status.value == 'scanning' or (job.status.value == 'pending' and job.kind == 'scan' and job.phase != 'execute')) and job.execute_kind in ('library', 'repair') -%}
     Stop this scan? Its progress through the artists it has checked is discarded, and the next scan starts from the beginning.
   {%- else -%}
     Cancel this job? It will stop after the current safe step.

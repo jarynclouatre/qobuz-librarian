@@ -80,6 +80,7 @@
       <div class="ql-activity-actions">
         {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
         {% if job.status == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
+        {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="return_to" value="/queue/history{% if request.url.query %}?{{ request.url.query }}{% endif %}">
@@ -87,7 +88,7 @@
           <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
           <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
           {% endif %}
-          <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action" title="Retry">Retry</button>
+          <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action"{% if retry_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
         </form>
         {% endif %}
         {% if not job.recovery_unreadable %}

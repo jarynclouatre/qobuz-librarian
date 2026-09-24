@@ -1121,6 +1121,17 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             "give_up": give_up}
 
 
+def _retry_can_queue(job) -> bool:
+    """Whether Retry would queue this job behind the paused recovery."""
+    if isinstance(job, dict):
+        job = (job_mgr.registry.get(job["id"])
+               or job_mgr.load_historical_job(job["id"]))
+    return (
+        _recovery_pause_is_another_download(job)
+        and _writes_paused_notice(queue_behind_job=job) is None
+    )
+
+
 def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
                         queue_behind_job=None):
     """Return a 503 response if web writes are paused, else None."""
@@ -3079,6 +3090,13 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     )
     if name in {"job.html", "_job_body.html"}:
         job = context.get("job")
+        holder_id = _startup_recovery_web_job_id()
+        context.setdefault("recovery_holder_job_id", (
+            holder_id
+            if (job.kind == "download" and job.attention == "recovery"
+                and not job.recoveries and holder_id != job.id)
+            else None
+        ))
         nav_page, return_href, return_label = _job_nav_destination(job)
         context.setdefault("job_nav_page", nav_page)
         context.setdefault("job_return_href", return_href)
@@ -3093,6 +3111,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             ),
         )
     if name in {"job.html", "_job_body.html", "history.html"}:
+        context.setdefault("retry_can_queue", _retry_can_queue)
         context.setdefault(
             "durable_recovery_control",
             _durable_recovery_control(),

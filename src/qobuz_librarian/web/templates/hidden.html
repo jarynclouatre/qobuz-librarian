@@ -21,6 +21,8 @@
 
 {% if notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ notice }}</span></div>{% endif %}
 
+{% include "_writes_paused_notice.html" %}
+
 {% if groups or hidden_q %}
 <div class="ql-work-status">
   <span>{% if hidden_q %}{{ labels.format_count(hidden_total_artists) }} artist{% if hidden_total_artists != 1 %}s{% endif %} match{% if hidden_total_artists == 1 %}es{% endif %} &ldquo;{{ hidden_q }}&rdquo;.{% else %}{{ labels.format_count(hidden_total_artists) }} artist{% if hidden_total_artists != 1 %}s{% endif %} with {{ kept_label }}.{% endif %}</span>
@@ -46,7 +48,7 @@
   <form action="{{ restore_all_action }}" method="post" class="ql-hidden-restore-all">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% endif %}
-    <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+    <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
             data-confirm="{% if hidden_q %}Bring back the {{ labels.format_count(restore_all_count) }} {{ _all_noun }} matching &ldquo;{{ hidden_q }}&rdquo;?{% elif is_downsample %}Bring all {{ labels.format_count(restore_all_count) }} {{ _all_noun }} back to Downsample?{% else %}Bring all {{ labels.format_count(restore_all_count) }} dismissed {{ 'album' if restore_all_count == 1 else 'albums' }} back to the review?{% endif %}"
             data-confirm-action="Bring back">{% if hidden_q %}Bring back these{% else %}Bring all back{% endif %} ({{ labels.format_count(restore_all_count) }})</button>
   </form>
@@ -87,7 +89,7 @@
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           {% if hidden_page and hidden_page > 1 %}<input type="hidden" name="p" value="{{ hidden_page }}">{% endif %}
           {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% for a in g.albums %}<input type="hidden" name="fingerprint" value="{{ a.fp }}">{% endfor %}{% else %}<input type="hidden" name="artist" value="{{ g.artist }}">{% endif %}
-          <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+          <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                   data-confirm="{% if hidden_q %}Bring back the {{ labels.format_count(g.rows) }} {{ _g_noun }} by {{ g.artist }} matching &ldquo;{{ hidden_q }}&rdquo;?{% else %}Bring all {{ labels.format_count(g.rows) }} {{ _g_noun }} by {{ g.artist }} back?{% endif %}"
                   data-confirm-action="Bring back"
                   aria-label="Bring back {{ labels.format_count(g.rows) }} {{ _g_noun }} by {{ g.artist }}">{% if hidden_q %}Bring back these{% else %}Bring all back{% endif %} ({{ labels.format_count(g.rows) }})</button>
@@ -107,7 +109,7 @@
           {% if hidden_page and hidden_page > 1 %}<input type="hidden" name="p" value="{{ hidden_page }}">{% endif %}
           {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% endif %}
           <input type="hidden" name="fingerprint" value="{{ a.fp }}">
-          <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+          <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
                   aria-label="Bring back {{ a.title }}{% if a.others %} and {{ a.others | length }} more edition{{ 's' if a.others | length != 1 }}{% endif %} by {{ g.artist }}">Bring back</button>
         </form>
       </li>

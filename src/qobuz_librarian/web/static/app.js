@@ -2222,7 +2222,8 @@
     function clearQueuedState() {
       if (waitNote) { waitNote.classList.add("hidden"); waitNote = null; }
       if (activity && (activity.textContent === "Queued" || activity.textContent === "Waiting to start")) {
-        activity.textContent = jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning";
+        activity.textContent = jc && jc.dataset.jobType === "download" && !jc.dataset.jobKind ? "Downloading"
+          : (jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning");
       }
     }
     // A stream that dies without closing is invisible to EventSource: no
@@ -2321,6 +2322,8 @@
         // into the library rather than take a stop the import will run past.
         // The chip that replaces it says so; a greyed button explains nothing.
         var cancelForm = document.querySelector("[data-cancel-form]");
+        var pendingCancel = document.querySelector("[data-pending-cancel-form]");
+        if (pendingCancel) pendingCancel.remove();
         var importChip = document.querySelector("[data-import-chip]");
         if (cancelForm && importChip) {
           cancelForm.classList.toggle("hidden", !!p.importing);
