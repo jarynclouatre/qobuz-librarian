@@ -147,6 +147,8 @@ _LOCK_UNENFORCEABLE = False
 _STARTUP_RECOVERY_RESULT = None
 # True while an authoritative refresh is running or after it raised.
 _STARTUP_RECOVERY_UNKNOWN = False
+# True only while that refresh is running.
+_STARTUP_RECOVERY_REFRESHING = False
 _STARTUP_RECOVERY_LOCK = threading.RLock()
 # Set before lifespan shutdown starts so no new mutating request can register
 # while the workers and request-owned library operations are draining.
@@ -260,13 +262,27 @@ def _recover_startup_queue(authority):
 
 def _record_startup_recovery(authority):
     global _STARTUP_RECOVERY_RESULT, _STARTUP_RECOVERY_UNKNOWN
+    global _STARTUP_RECOVERY_REFRESHING
     with _STARTUP_RECOVERY_LOCK:
         _STARTUP_RECOVERY_UNKNOWN = True
-        result = _recover_startup_queue(authority)
+        _STARTUP_RECOVERY_REFRESHING = True
+        try:
+            result = _recover_startup_queue(authority)
+        finally:
+            _STARTUP_RECOVERY_REFRESHING = False
         _STARTUP_RECOVERY_RESULT = result
         _STARTUP_RECOVERY_UNKNOWN = False
         job_mgr.set_durable_recovery_job_id(_startup_recovery_web_job_id())
         return _STARTUP_RECOVERY_RESULT
+
+
+def _await_recovery_refresh(timeout: float = 1.0) -> None:
+    """Let a refresh running in another thread finish before its outcome is
+    read. One follows every download and is quick; a page drawn in the middle
+    of it reported a failed read."""
+    if _STARTUP_RECOVERY_REFRESHING and _STARTUP_RECOVERY_LOCK.acquire(
+            timeout=timeout):
+        _STARTUP_RECOVERY_LOCK.release()
 
 
 def _startup_recovery_status_value() -> str | None:
@@ -549,8 +565,9 @@ def _settle_blocked_recovery(action, *, job=None):
     A Web job proves ownership by matching the saved queue entry exactly. A
     terminal download has no Web job to match, so the proof there is that no
     Web job claims it and the posted identity is still the blocked one. Both
-    routes end in the same settlement call the terminal uses; there is only
-    ever one way to settle.
+    routes end in the same settlement call the terminal uses. A Web download
+    still waiting on its own Retry has nothing staged, so giving it up only
+    clears its saved queue entry, as the terminal does with a pending queue.
     """
     if type(action) is not BlockedItemSettlementAction:
         raise ValueError("a blocked-item settlement action is required")
@@ -561,7 +578,14 @@ def _settle_blocked_recovery(action, *, job=None):
             recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
         except Exception:
             return False, "The saved recovery state could not be checked safely."
-        if _recovery_status_value(recovery) != "attention_required":
+        # A job running again owns its saved queue entry.
+        unstarted = (
+            _recovery_status_value(recovery) == "resume_required"
+            and action is BlockedItemSettlementAction.DISCARD
+            and job is not None
+            and job.status is job_mgr.JobStatus.FAILED
+        )
+        if _recovery_status_value(recovery) != "attention_required" and not unstarted:
             return False, "The blocked recovery does not match this exact download."
         if job is not None and not _durable_recovery_matches_job(job):
             return False, "The blocked recovery does not match this exact download."
@@ -575,12 +599,19 @@ def _settle_blocked_recovery(action, *, job=None):
         imported = startup_recovery.import_was_filed(
             recovery_item.operation_id, binding[2])
         try:
-            settled = startup_recovery.settle_blocked_item(
-                authority=_RUN_LOCK_HANDLE,
-                operation_id=recovery_item.operation_id,
-                item_id=recovery_item.item_id,
-                action=action,
-            )
+            if unstarted:
+                settled = startup_recovery.discard_unstarted_item(
+                    authority=_RUN_LOCK_HANDLE,
+                    operation_id=recovery_item.operation_id,
+                    item_id=recovery_item.item_id,
+                )
+            else:
+                settled = startup_recovery.settle_blocked_item(
+                    authority=_RUN_LOCK_HANDLE,
+                    operation_id=recovery_item.operation_id,
+                    item_id=recovery_item.item_id,
+                    action=action,
+                )
         except Exception:
             logging.getLogger("qobuz_librarian").exception(
                 "settling the blocked recovery for job %s raised",
@@ -641,6 +672,17 @@ def _durable_recovery_control():
         "partial": startup_recovery.import_stopped_part_way(
             recovery_item.operation_id, queued_item),
     }
+
+
+def _web_give_up_offer(job_id: str):
+    """The Give up control for the paused banner, while that job is stopped."""
+    control = _durable_recovery_control()
+    if control is None or control["job_id"] != job_id:
+        return None
+    job = job_mgr.registry.get(job_id)
+    if job is not None and job.status is not job_mgr.JobStatus.FAILED:
+        return None
+    return control
 
 
 def _recovery_submission_matches(job, operation_id: str, item_id: str) -> bool:
@@ -886,9 +928,11 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     is the one job allowed past another download's recovery, to wait its turn
     rather than be refused.
     """
+    _await_recovery_refresh()
     reason = ""
     action = None
     settle = None
+    give_up = None
     if _CLI_MODE:
         reason = "Terminal mode is holding the library."
         msg = ("Terminal (CLI) mode is on, so downloads and scans are paused "
@@ -930,6 +974,10 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                "and your saved review are untouched. Check that the folder "
                "still exists and that Qobuz Librarian can write to it; the "
                "app picks it up again on its own.")
+    elif _STARTUP_RECOVERY_REFRESHING:
+        reason = "Interrupted work is being checked."
+        msg = ("Qobuz Librarian is checking for interrupted downloads, so "
+               "downloads and scans wait until it finishes.")
     elif _STARTUP_RECOVERY_UNKNOWN:
         reason = "Interrupted work could not be checked safely."
         msg = (
@@ -1024,6 +1072,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             elif origin != "cli" and held_job_id is not None:
                 action = {"href": f"/jobs/{held_job_id}",
                           "label": "Open that download"}
+                give_up = _web_give_up_offer(held_job_id)
                 msg = ("Downloads and scans are paused until the interrupted "
                        f"download{of_album} is retried or given up. Its saved "
                        "queue and staged files were left unchanged.")
@@ -1084,6 +1133,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             # mode is the one to open, so that is what the notice offers.
             action = {"href": f"/jobs/{held_job_id}",
                       "label": "Open that download"}
+            give_up = _web_give_up_offer(held_job_id)
             msg = ("Downloads and scans are paused until the interrupted "
                    f"download{of_album} is retried or given up.")
         else:
@@ -1092,7 +1142,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                    "download is resumed from the interface where it started.")
     else:
         return None
-    return {"reason": reason, "msg": msg, "action": action, "settle": settle}
+    return {"reason": reason, "msg": msg, "action": action, "settle": settle,
+            "give_up": give_up}
 
 
 def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
@@ -1122,7 +1173,8 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
                 # need something fixed first and the button was false comfort.
                 "can_retry": (_LOCK_BUSY_PID is not None
                               or bool(unwritable_now)
-                              or not _data_dir_available())},
+                              or not _data_dir_available()
+                              or _STARTUP_RECOVERY_REFRESHING)},
                status_code=503)
 
 
@@ -1132,6 +1184,7 @@ def _web_writes_paused() -> bool:
     triggers (dashboard new-release check, library-scan resume) that have no
     request to bounce. Any trigger checking only part of this list quietly
     re-opens the hole the pause exists to close."""
+    _await_recovery_refresh()
     return (
         _SHUTTING_DOWN
         or _CLI_MODE
@@ -3784,6 +3837,15 @@ def _library_refresh_failure():
     latest = _last_finished_library_job()
     if latest is None or latest.status is not job_mgr.JobStatus.FAILED:
         return ""
+    # Any library work started or stopped since then supersedes it, whatever
+    # became of that work.
+    since = latest.finished_at or 0
+    for j in job_mgr.registry.all():
+        if (j is not latest
+                and getattr(j, "execute_kind", "") == "library"
+                and max(j.created_at or 0, j.started_at or 0,
+                        j.finished_at or 0) > since):
+            return ""
     return str(latest.error or latest.summary or "").strip()
 
 
@@ -5326,9 +5388,10 @@ def _make_download_run(
                     if retryable:
                         j.attention = ""
                         j.error = (
-                            "This download stopped before it finished "
-                            "importing. Everything it had was saved, so Retry "
-                            "picks up where it left off."
+                            "This download stopped before anything was "
+                            "imported, so downloads and scans are paused. Use "
+                            "Retry to download it again, or Give up on this "
+                            "album to drop it and carry on."
                         )
                     elif holds_control:
                         j.attention = "recovery"

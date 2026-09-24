@@ -2,7 +2,7 @@
 {% if writes_paused_notice and not cli_mode %}
 <div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
   <span class="min-w-0 break-words text-sm">{{ writes_paused_notice.msg }}</span>
-  {# The one pause the web can lift itself, so it carries its own control. #}
+  {# A pause the web can lift itself carries its own control. #}
   {% if writes_paused_notice.settle %}
   <form action="/queue/interrupted/discard" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -13,6 +13,19 @@
             data-confirm-action="Give up" data-irreversible>Give up on it</button>
   </form>
   <a href="/settings#mode" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>
+  {% elif writes_paused_notice.give_up %}
+  {% set give_up = writes_paused_notice.give_up %}
+  <div class="flex flex-wrap gap-3">
+    <form action="/jobs/{{ give_up.job_id }}/give-up" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="recovery_operation_id" value="{{ give_up.operation_id }}">
+      <input type="hidden" name="recovery_item_id" value="{{ give_up.item_id }}">
+      <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+              data-confirm="Discard this interrupted download? {% if give_up.partial %}The tracks Beets moved stay in your library. The rest are kept in Settings > Diagnostics, along with any backup of the album's earlier tracks, which Restore there puts back.{% elif give_up.imported %}What Beets already filed stays in your library.{% else %}Nothing is added to your library.{% endif %}"
+              data-confirm-action="Give up" data-irreversible>Give up on it</button>
+    </form>
+    <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
+  </div>
   {% elif writes_paused_notice.action %}
   <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
   {% endif %}

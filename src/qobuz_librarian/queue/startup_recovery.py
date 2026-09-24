@@ -1161,6 +1161,48 @@ def _settle_unstarted_download(authority, journal, item, action):
     return _settled_result(action)
 
 
+def discard_unstarted_item(
+    *,
+    authority: RunLockLease,
+    operation_id: str,
+    item_id: str,
+) -> BlockedItemSettlementResult:
+    """Discard a single download that is waiting to resume but never staged
+    anything. Only its saved queue entry is removed."""
+    try:
+        _require_authority(authority)
+        loaded = queue_state.load_queue_journal(operation_id)
+        _require_authority(authority)
+        journal = loaded.journal
+        if loaded.status is not queue_state.QueueLoadStatus.READY or journal is None:
+            return _blocked_settlement("The saved queue operation could not be loaded safely.")
+        item = next(
+            (value for value in journal.items if value.item_id == item_id),
+            None,
+        )
+        if item is None:
+            return _blocked_settlement("The interrupted item no longer exists.")
+        if len(journal.items) != 1 or journal.retirements:
+            return _blocked_settlement(
+                "Only a single-download operation can be discarded here."
+            )
+        try:
+            if item.phase is queue_state.QueuePhase.ACTIVE:
+                journal = queue_state.reset_unstarted_item_to_pending(
+                    journal, item.item_id
+                )
+                _require_authority(authority)
+            queue_state.clear_queue_journal(journal.operation_id, explicit_discard=True)
+            _require_authority(authority)
+        except (KeyError, OSError, ValueError, queue_state.QueueJournalError):
+            return _blocked_settlement(
+                "The discarded download could not be cleared from the saved queue."
+            )
+        return _settled_result(BlockedItemSettlementAction.DISCARD)
+    except _AuthorityLost:
+        return _blocked_settlement("Run-lock authority was lost, so the item remains saved.")
+
+
 _IMPORT_FILED = "filed"
 _IMPORT_UNTOUCHED = "untouched"
 _IMPORT_PARTIAL = "partial"

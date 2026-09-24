@@ -329,7 +329,7 @@
         <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm">Retry</button>
       </form>
       {% endif %}
-      {% if recovery_retry and job.attention == 'recovery' %}
+      {% if recovery_retry and s == 'failed' %}
       <form action="/jobs/{{ job.id }}/give-up" method="post"
             data-confirm="Discard this interrupted download? {% if durable_recovery_control.partial %}The tracks Beets moved stay in your library. The rest are kept in Settings > Diagnostics, along with any backup of the album's earlier tracks, which Restore there puts back.{% elif durable_recovery_control.imported %}What Beets already filed stays in your library.{% else %}Nothing is added to your library.{% endif %}"
             data-confirm-action="Give up">

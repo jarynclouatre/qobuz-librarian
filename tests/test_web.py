@@ -2037,6 +2037,38 @@ def test_lock_busy_refuses_destructive_routes(monkeypatch):
             assert "run-lock" not in r.text
 
 
+def test_a_page_drawn_during_a_routine_recovery_check_shows_its_outcome(
+        monkeypatch):
+    # The Queue page redrawn as a download ended caught the recovery check
+    # that follows it and said the saved recovery state could not be read.
+    from qobuz_librarian.queue.startup_recovery import (
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+    from qobuz_librarian.web import app as webapp
+
+    checking = threading.Event()
+
+    def _recover(_authority):
+        checking.set()
+        time.sleep(0.2)
+        return StartupRecoveryResult(StartupRecoveryStatus.CLEAR)
+
+    monkeypatch.setattr(webapp, "_recover_startup_queue", _recover)
+    monkeypatch.setattr(webapp, "_STARTUP_RECOVERY_UNKNOWN", False)
+    monkeypatch.setattr(webapp, "_STARTUP_RECOVERY_RESULT",
+                        StartupRecoveryResult(StartupRecoveryStatus.CLEAR))
+    monkeypatch.setattr(jm, "_durable_recovery_job_id", None)
+    refresh = threading.Thread(
+        target=webapp._record_startup_recovery, args=(None,))
+    refresh.start()
+    checking.wait(5)
+    during = webapp._writes_paused_notice()
+    refresh.join(5)
+
+    assert during == webapp._writes_paused_notice()
+
+
 def test_folder_move_recovery_pause_names_cause_and_exact_paths(
         client, monkeypatch, tmp_path, caplog):
     from qobuz_librarian.library.post_import_relocation import (
@@ -3309,6 +3341,70 @@ def test_giving_up_refuses_a_download_a_web_job_still_owns(client, monkeypatch):
     assert settled == []
 
 
+def test_giving_up_a_download_that_staged_nothing_lifts_the_pause(
+    client, monkeypatch, tmp_path,
+):
+    """A rip that fails before writing anything leaves its saved queue entry
+    waiting on Retry, which pauses every download and scan and fails the same
+    way each time. Give up has to clear it."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import run_lock
+    from qobuz_librarian.queue import journal
+    from qobuz_librarian.queue.builder import _build_queue_item
+    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+
+    job = jm.Job(title="Anvil Vapre", artist="Autechre", album_id="42")
+    job.status = jm.JobStatus.FAILED
+    job.finished_at = time.time()
+    jm.registry.add(job)
+    job_persistence.persist(job)
+    track = {"id": "101", "media_number": 1, "track_number": 1}
+    item = _build_queue_item(
+        album={"id": "42", "title": "Anvil Vapre", "maximum_bit_depth": 24,
+               "maximum_sampling_rate": 96, "tracks": {"items": [track]}},
+        album_dir=None, label="Anvil Vapre", missing=[track], present=[],
+        upgrade_only=False, auto_upgrade=False, quality=4,
+    )
+    saved = journal.save_queue_journal(
+        journal.create_queue_journal([item], mode=f"web-job:{job.id}"))
+
+    def _record(lease):
+        result = webapp._recover_startup_queue(lease)
+        webapp._STARTUP_RECOVERY_RESULT = result
+        return result
+
+    authority = run_lock.acquire()
+    monkeypatch.setattr(webapp, "_RUN_LOCK_HANDLE", authority)
+    monkeypatch.setattr(webapp, "_record_startup_recovery", _record)
+    try:
+        _record(authority)
+        assert webapp._startup_recovery_status_value() == "resume_required"
+        control = webapp._durable_recovery_control()
+
+        r = client.post(
+            f"/jobs/{job.id}/give-up",
+            data={"recovery_operation_id": control["operation_id"],
+                  "recovery_item_id": control["item_id"]},
+            follow_redirects=False,
+        )
+
+        assert r.status_code == 303
+        assert (journal.load_queue_journal(saved.operation_id).status
+                is journal.QueueLoadStatus.ABSENT)
+        assert webapp._startup_recovery_status_value() == "clear"
+    finally:
+        authority.close()
+        _remove_job(job)
+
+
 def test_undo_keeps_failed_catalog_cleanup_retryable_in_the_archive(
         client, monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
@@ -3451,6 +3547,28 @@ def test_a_running_job_page_offers_the_way_back(client):
         assert '<a href="/queue" class="ql-btn' in page.text
     finally:
         _remove_job(running)
+
+
+def test_a_library_failure_notice_gives_way_to_newer_library_work():
+    # An interrupted Library download kept its notice on the Library page
+    # above every scan and download started after it, even cancelled ones.
+    from qobuz_librarian.web import app as webapp
+
+    failed = _inject_job(jm.JobStatus.FAILED, "Library download")
+    failed.execute_kind = "library"
+    failed.error = "Interrupted by a restart before the download finished."
+    failed.finished_at = time.time()
+    newer = None
+    try:
+        assert webapp._library_refresh_failure()
+        newer = _inject_job(jm.JobStatus.CANCELED, "Library download")
+        newer.execute_kind = "library"
+        newer.created_at = failed.finished_at + 1
+        assert not webapp._library_refresh_failure()
+    finally:
+        _remove_job(failed)
+        if newer is not None:
+            _remove_job(newer)
 
 
 def test_queue_cancel_stays_on_queue_without_accepting_other_targets(client):
@@ -7951,7 +8069,8 @@ def test_retry_queues_another_album_behind_the_interrupted_download(
     monkeypatch.setattr(webapp, "_record_startup_recovery", _record)
     monkeypatch.setattr(webapp, "_run_lock_intact", lambda: True)
     monkeypatch.setattr(webapp, "_startup_recovery_binding", lambda: (
-        SimpleNamespace(operation_id="op-1", item_id="item-1"), None, None, None,
+        SimpleNamespace(operation_id="op-1", item_id="item-1"), None,
+        SimpleNamespace(recovery_references=()), None,
     ))
     monkeypatch.setattr(webapp, "_startup_recovery_web_job_id",
                         lambda: interrupted.id)

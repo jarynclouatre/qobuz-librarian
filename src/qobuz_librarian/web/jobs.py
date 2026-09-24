@@ -2207,12 +2207,19 @@ def restore_jobs(
                     + "The saved details needed to retry this job couldn't "
                     "be read. Start it again from its original page."
                 )
+            elif job.album_id and job.id == durable_recovery_job_id:
+                job.error = (restart + "Downloads and scans are paused until "
+                             "it is retried or given up.")
             elif job.album_id:
                 job.error = restart + "Use Retry to download it again."
             elif job.execute_kind == "lyrics":
                 job.error = restart + "Start it again from the Lyrics page."
             elif job.execute_kind == "migration":
                 job.error = restart + "Start it again from the Migrate page."
+            elif (job.execute_kind == "library"
+                    and job.title == RUN_TITLES["library"]):
+                job.error = ("Interrupted by a restart before the download "
+                             "finished.")
             elif job.execute_kind == "library":
                 job.error = restart + "Start the scan again from the Library page."
             else:
