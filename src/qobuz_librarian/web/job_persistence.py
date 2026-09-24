@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import redaction
+from qobuz_librarian import download_result, redaction
 from qobuz_librarian.completion import RecoveryOwner, normalise_album_id
 from qobuz_librarian.library import candidate_premise
 
@@ -78,12 +78,12 @@ _RECOVERY_FIELDS = {
 }
 
 
-def _valid_repair_recovery(record) -> bool:
+def _valid_recovery(record) -> bool:
     return (
         type(record) is dict
         and set(record) == _RECOVERY_FIELDS
         and record.get("version") == 1
-        and record.get("kind") == "repair-backup"
+        and record.get("kind") in ("repair-backup", "migration")
         and record.get("status") == "retained"
         and isinstance(record.get("location"), str)
         and bool(record["location"])
@@ -108,7 +108,7 @@ def _decode_recoveries(value) -> tuple[list[dict], bool]:
         return [], True
     if (
         type(recoveries) is not list
-        or any(not _valid_repair_recovery(record) for record in recoveries)
+        or any(not _valid_recovery(record) for record in recoveries)
     ):
         return [], True
     return recoveries, False
@@ -216,7 +216,7 @@ def _expand_candidates(value):
 
 
 def _decode_candidates(value, status) -> tuple[list[dict], bool]:
-    if status != "awaiting_review":
+    if status not in ("awaiting_review", "pending"):
         return [], False
     try:
         candidates = _expand_candidates(json.loads(value or "[]"))
@@ -603,8 +603,8 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
 _TERMINAL_DOWNLOAD_SQL = (
     "INSERT INTO jobs "
     "(id, title, artist, album_id, kind, status, summary, created_at, "
-    " finished_at, edition) "
-    "VALUES (?,?,?,?,'download','done',?,?,?,?)"
+    " finished_at, edition, attention, quality_shortfall, execute_args) "
+    "VALUES (?,?,?,?,'download',?,?,?,?,?,?,?,?)"
 )
 
 
@@ -616,6 +616,7 @@ def record_terminal_download(
     summary,
     started_at,
     finished_at,
+    result,
     edition="",
 ) -> bool:
     """Add one finished terminal download to the activity record.
@@ -629,14 +630,21 @@ def record_terminal_download(
     album_id = str(album_id or "").strip()
     if not album_id:
         return False
+    status, attention = download_result.download_job_outcome(result)
+    shortfall = (
+        download_result.quality_shortfall_record(result.get("quality_verdict"))
+        if attention == "quality" else {}
+    )
     init()
     with _lock:
         conn = _get_conn()
         if conn is None:
             return False
         values = (
-            str(title or ""), str(artist or ""), album_id, str(summary or ""),
+            str(title or ""), str(artist or ""), album_id, status, str(summary or ""),
             started_at, finished_at, str(edition or "").strip(),
+            attention, json.dumps(shortfall),
+            json.dumps({"retry_disabled": "terminal"}),
         )
         for _ in range(3):
             try:
@@ -998,7 +1006,7 @@ def persist_recoveries(job) -> bool:
 
 
 def acknowledge_missing_recoveries(job, is_missing) -> bool:
-    """Durably retire exact Repair backups confirmed missing by the caller."""
+    """Durably retire exact kept recoveries confirmed missing by the caller."""
     if not callable(is_missing):
         return False
     with job._lock:
@@ -1006,7 +1014,7 @@ def acknowledge_missing_recoveries(job, is_missing) -> bool:
         if (
             getattr(job, "attention", "") != "recovery"
             or not recoveries
-            or any(not _valid_repair_recovery(record) for record in recoveries)
+            or any(not _valid_recovery(record) for record in recoveries)
         ):
             return False
         try:
@@ -1016,19 +1024,30 @@ def acknowledge_missing_recoveries(job, is_missing) -> bool:
             _log.debug("couldn't verify missing Repair recovery: %s", exc)
             return False
 
-        resolution = (
-            "That backup is no longer on disk, so there is nothing left to "
-            "review."
-            if len(recoveries) == 1
-            else "Those backups are no longer on disk, so there is nothing "
-                 "left to review."
-        )
+        migration = all(record["kind"] == "migration" for record in recoveries)
+        if migration:
+            resolution = (
+                "That kept file is no longer there, so there is nothing left "
+                "to review."
+                if len(recoveries) == 1
+                else "Those kept files are no longer there, so there is "
+                     "nothing left to review."
+            )
+        else:
+            resolution = (
+                "That backup is no longer on disk, so there is nothing left to "
+                "review."
+                if len(recoveries) == 1
+                else "Those backups are no longer on disk, so there is nothing "
+                     "left to review."
+            )
         acknowledgement_lines = []
         for record in recoveries:
             line = (
-                "Cleared the record for a Repair backup folder that is gone: "
-                f"{record['location']}"
-            )
+                "Cleared the record for a kept migration file that is gone: "
+                if record["kind"] == "migration"
+                else "Cleared the record for a Repair backup folder that is gone: "
+            ) + record["location"]
             acknowledgement_lines.append(job._CTRL_RE.sub("", line))
 
         saved = False
@@ -1468,7 +1487,7 @@ def prepare_recovery_resolution(
             return None
         if (
             type(records) is not list
-            or any(not _valid_repair_recovery(record) for record in records)
+            or any(not _valid_recovery(record) for record in records)
         ):
             return None
         if any(
@@ -1508,7 +1527,7 @@ def resolve_recovery_resolution(
                 if (
                     type(records) is not list
                     or any(
-                        not _valid_repair_recovery(record)
+                        not _valid_recovery(record)
                         for record in records
                     )
                 ):
@@ -1986,7 +2005,9 @@ def load_all() -> list[dict]:
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 # A finished job never reopens its rows, so its text is not read back.
-                "CASE WHEN status='awaiting_review' THEN candidates END, "
+                "CASE WHEN status='awaiting_review' OR (status='pending' "
+                "AND execute_kind IN ('library','upgrade','downsample','repair')) "
+                "THEN candidates END, "
                 "error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
                 "recoveries, log_lines, quality_shortfall, edition "

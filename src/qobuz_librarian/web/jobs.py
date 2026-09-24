@@ -29,7 +29,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import redaction
+from qobuz_librarian import download_result, redaction
 from qobuz_librarian.api.auth import (
     AuthLost,
     CredentialChanged,
@@ -260,42 +260,11 @@ _MISSING = object()
 # a page open on the run must not still be headed with the scan's name.
 RUN_TITLES = {
     "library": "Library download",
+    "new_releases": "New-release download",
     "upgrade": "Upgrade run",
     "downsample": "Downsample run",
     "repair": "Repair",
 }
-
-
-def _quality_pair(value):
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return None
-    try:
-        bits, rate = int(value[0]), int(value[1])
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return [bits, rate] if bits > 0 and rate > 0 else None
-
-
-def _quality_shortfall_record(verdict):
-    if not isinstance(verdict, dict):
-        return {}
-    target = _quality_pair(verdict.get("target"))
-    if target is None:
-        return {}
-    record = {
-        "version": 1,
-        "target": target,
-        "served": _quality_pair(verdict.get("served")),
-        "source": _quality_pair(verdict.get("source")),
-        "n_below": max(0, int(verdict.get("n_below") or 0)),
-        "n_unknown": max(0, int(verdict.get("n_unknown") or 0)),
-        "retried": verdict.get("retried") is True,
-        "recovered": verdict.get("recovered") is True,
-    }
-    tier = verdict.get("effective_tier")
-    if type(tier) is int and 2 <= tier <= 4:
-        record["effective_tier"] = tier
-    return record
 
 
 def _new_id() -> str:
@@ -353,7 +322,7 @@ class Job:
     # stayed under the quality target after the automatic retry.
     attention: str = ""
     quality_shortfall: dict = field(default_factory=dict)
-    # Exact retained Repair backups.
+    # Exact retained recovery files.
     recoveries: list = field(default_factory=list)
     # The verb the review screen's submit button uses. Most jobs download what
     # you approve; the migration job copies (or moves), so it overrides this.
@@ -1444,7 +1413,7 @@ def _worker_loop(work_queue: "queue.Queue"):
                 except Exception:
                     pass
                 with job._lock:
-                    if job.cancel_requested or job.status in TERMINAL:
+                    if job.cancel_requested or job.status != JobStatus.PENDING:
                         # A queued cancel and this worker claim use the same
                         # lock. Exactly one side can move PENDING onward.
                         if job.status == JobStatus.PENDING:
@@ -1722,7 +1691,9 @@ def _library_review_state_guard(job: Job):
     return library_scan_state.review_state_lock()
 
 
-def finalize_review_if_empty(job: Job) -> Optional[bool]:
+def finalize_review_if_empty(
+    job: Job, *, summary: str | None = None,
+) -> Optional[bool]:
     """Complete a triage review once dismissal has emptied its candidate list.
 
     Dismissing the last album leaves nothing to act on, so the job must not stay
@@ -1745,7 +1716,9 @@ def finalize_review_if_empty(job: Job) -> Optional[bool]:
             job.status = JobStatus.DONE
             job.finished_at = time.time()
             unchecked = job.unchecked_artists
-            if job.candidate_cap_hit or unchecked:
+            if summary is not None:
+                job.summary = summary
+            elif job.candidate_cap_hit or unchecked:
                 parts = ["All listed albums reviewed."]
                 if job.candidate_cap_hit:
                     parts.append("The scan hit the result cap, so some finds may "
@@ -1798,6 +1771,57 @@ def finalize_review_if_empty(job: Job) -> Optional[bool]:
                 review_badges.clear_ready_if_generation(
                     "library", badge_generation)
         _start_post_job_hook_for_job(job)
+    return True
+
+
+def _restore_untouched_review(
+    j: Job, parked=None, *, status=JobStatus.RUNNING,
+) -> bool:
+    if j.execute_kind in ("library", "upgrade", "downsample", "repair"):
+        parked = next((other for other in registry.awaiting_review()
+                       if other is not j and other.execute_kind == j.execute_kind),
+                      None)
+    action_jobs = sorted(
+        [item for item in (j, parked) if item is not None],
+        key=lambda item: item.id,
+    )
+    with _library_review_state_guard(j), ExitStack() as action_locks:
+        for item in action_jobs:
+            action_locks.enter_context(item._review_action_lock)
+        with ExitStack() as job_locks:
+            for item in action_jobs:
+                job_locks.enter_context(item._lock)
+            if j.status != status or j.cancel_requested:
+                return False
+            previous = (j.status, j.finished_at, j.error, j.candidates, j._cand_seq)
+            should_merge = bool(
+                parked is not None
+                and parked.status == JobStatus.AWAITING_REVIEW
+            )
+            if should_merge:
+                candidates = list(j.candidates) + list(parked.candidates)
+                candidates.sort(key=lambda candidate: (
+                    int(candidate.get("seq") or 0),
+                    str(candidate.get("cid") or ""),
+                ))
+                j.candidates = candidates
+                j.sync_cand_seq()
+            j.status = JobStatus.AWAITING_REVIEW
+            j.finished_at = None
+            j.error = None
+            saved = (
+                job_persistence.restore_split_review(j, parked)
+                if should_merge
+                else job_persistence.admit_review_transition(j)
+            )
+            if not saved:
+                (j.status, j.finished_at, j.error,
+                 j.candidates, j._cand_seq) = previous
+                return False
+            if should_merge:
+                registry.discard_merged_review(parked)
+    if parked is not None and should_merge:
+        parked.end_stream()
     return True
 
 
@@ -1912,50 +1936,6 @@ def approve(
         registry.add(parked)
         job.notify_review_changed()
 
-    def _restore_untouched_review(j: Job) -> bool:
-        action_jobs = sorted(
-            [item for item in (j, parked) if item is not None],
-            key=lambda item: item.id,
-        )
-        with _library_review_state_guard(j), ExitStack() as action_locks:
-            for item in action_jobs:
-                action_locks.enter_context(item._review_action_lock)
-            with ExitStack() as job_locks:
-                for item in action_jobs:
-                    job_locks.enter_context(item._lock)
-                if j.status != JobStatus.RUNNING or j.cancel_requested:
-                    return False
-                previous = (j.status, j.finished_at, j.error, j.candidates)
-                should_merge = bool(
-                    parked is not None
-                    and parked.status == JobStatus.AWAITING_REVIEW
-                )
-                if should_merge:
-                    candidates = list(j.candidates) + list(parked.candidates)
-                    candidates.sort(key=lambda candidate: (
-                        int(candidate.get("seq") or 0),
-                        str(candidate.get("cid") or ""),
-                    ))
-                    j.candidates = candidates
-                    j.sync_cand_seq()
-                j.status = JobStatus.AWAITING_REVIEW
-                j.finished_at = None
-                j.error = None
-                saved = (
-                    job_persistence.restore_split_review(j, parked)
-                    if should_merge
-                    else job_persistence.admit_review_transition(j)
-                )
-                if not saved:
-                    j.status, j.finished_at, j.error, j.candidates = previous
-                    j.sync_cand_seq()
-                    return False
-                if should_merge:
-                    registry.discard_merged_review(parked)
-        if parked is not None and should_merge:
-            parked.end_stream()
-        return True
-
     def _execute(j: Job):
         # Cancelled between approve and the worker picking this up: don't
         # start the work.
@@ -1983,7 +1963,7 @@ def approve(
                                           CandidateStale,
                                           SystemExit))):
                 raise
-            if not _restore_untouched_review(j):
+            if not _restore_untouched_review(j, parked):
                 raise RuntimeError(
                     "The untouched review could not be restored durably."
                 ) from e
@@ -2086,6 +2066,7 @@ def restore_jobs(
     historical = 0
     restored = []
     requeued = []
+    pending_reviews = []
     terminal_payloads = []
 
     unreadable_review_error = (
@@ -2094,6 +2075,8 @@ def restore_jobs(
     )
 
     def _persist_restored_transition(job, previous_status):
+        if job.status == JobStatus.FAILED and not job.attention:
+            job.attention = "failed"
         saved = job_persistence.persist(job)
         if saved is not True:
             _mark_final_save_failure(job)
@@ -2151,6 +2134,11 @@ def restore_jobs(
             finished_at=row.get("finished_at"),
         )
         job._durability_required = True
+        pending_review = (
+            status == JobStatus.PENDING
+            and job.execute_kind in ("library", "upgrade", "downsample", "repair")
+            and bool(job.candidates or row.get("candidates_unreadable"))
+        )
         if row.get("single_unreadable"):
             job._preserve_persisted_single = True
             job._single_undo_unavailable = True
@@ -2213,13 +2201,14 @@ def restore_jobs(
             _persist_restored_transition(job, previous_status)
         elif (
             status == JobStatus.PENDING
+            and not pending_review
             and requeue is not None
             and not row.get("single_unreadable")
             and job.id != durable_recovery_job_id
             and (run := requeue(job)) is not None
         ):
             requeued.append((job, run))
-        elif status in (JobStatus.PENDING, JobStatus.RUNNING):
+        elif status in (JobStatus.PENDING, JobStatus.RUNNING) and not pending_review:
             job.status = JobStatus.FAILED
             # Only an album download / single-track download carries an
             # album_id, and only those get a Retry button on the job + history
@@ -2286,7 +2275,7 @@ def restore_jobs(
             job.finished_at = job_persistence.previous_write_at() or job.created_at
             interrupted += 1
             _persist_restored_transition(job, previous_status)
-        elif status == JobStatus.AWAITING_REVIEW:
+        elif status == JobStatus.AWAITING_REVIEW or pending_review:
             if job.recoveries:
                 # Older builds could re-park a Repair after its originals had
                 # already been retained.
@@ -2335,6 +2324,8 @@ def restore_jobs(
                     _persist_restored_transition(job, previous_status)
                 else:
                     job._execute_fn = execute_fn
+                    if pending_review:
+                        pending_reviews.append(job)
                     review += 1
         else:
             historical += 1
@@ -2347,6 +2338,8 @@ def restore_jobs(
             registry._jobs[job.id] = job
             registry._order.append(job.id)
         registry._prune_locked()
+    for job in pending_reviews:
+        _restore_untouched_review(job, status=JobStatus.PENDING)
     # Behind the same pause as any download that arrives while the library is
     # paused, and in the order they were queued.
     requeued.sort(key=lambda pair: pair[0].created_at)
@@ -2440,8 +2433,7 @@ def request_cancel(job: Job) -> bool:
     - scanning/running → cooperative: the flag is set and the scan/execute
       loops bail at their next iteration (so a long library scan can be
       stopped without restarting the container)
-    - pending          → finalized on the spot; it hasn't started, so there's
-      nothing to unwind and it leaves the queue at once
+    - pending          → canceled or returned to review
 
     Returns False if the job is finished, is already putting an album into the
     library, or owns unsettled durable recovery.
@@ -2456,6 +2448,13 @@ def request_cancel(job: Job) -> bool:
             return True
         if review_canceled is None:
             return False
+    if (job.status == JobStatus.PENDING
+            and job.execute_kind in ("library", "upgrade", "downsample", "repair")
+            and job.candidates):
+        restored = _restore_untouched_review(job, status=JobStatus.PENDING)
+        if restored:
+            job.notify_review_changed()
+        return restored
     # Either it wasn't in review, or an approve() flipped it to PENDING
     # between the check and cancel_review's locked re-check.
     with job._lock:
@@ -2494,7 +2493,7 @@ def request_cancel(job: Job) -> bool:
 def record_quality_shortfall(job, verdict):
     with job._lock:
         job.attention = "quality"
-        job.quality_shortfall = _quality_shortfall_record(verdict)
+        job.quality_shortfall = download_result.quality_shortfall_record(verdict)
 
 
 def note_quality_shortfall(verdict):

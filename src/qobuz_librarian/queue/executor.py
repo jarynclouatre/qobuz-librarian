@@ -2126,6 +2126,7 @@ def _record_terminal_downloads(successful):
                 started_at=finished - float(change.get("elapsed_s", 0) or 0),
                 finished_at=finished,
                 edition=album.get("version") or "",
+                result=change,
             )
         except Exception as exc:
             saved = False

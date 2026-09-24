@@ -684,8 +684,13 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
             parked._trim_log_lines_locked()
         return added, updated + removed
 
-    saved, result = job_persistence.persist_review_mutation(parked, _fold)
-    return result if saved else False
+    with job_mgr._library_review_state_guard(parked), parked._review_action_lock:
+        saved, result = job_persistence.persist_review_mutation(parked, _fold)
+        if saved and result is not None and not parked.candidates:
+            if job_mgr.finalize_review_if_empty(
+                    parked, summary="Nothing left to review.") is None:
+                return False
+        return result if saved else False
 
 
 def _refresh_restored_missing_spec(spec, token):
@@ -4082,7 +4087,8 @@ def _scan_repairs_impl(job, token, checkpoint):
     # Honest summary: report what was actually decode-verified, and never
     # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
-        n_unverified, n_failed_albums, n_failed_artists)
+        n_unverified, n_failed_albums,
+        n_failed_artists - len(unreadable_artists))
     if total:
         job.summary = (f"{plural(total, 'album')} flagged with damaged files. "
                        f"{plural(n_verified, 'track')} decode-verified clean."
@@ -4101,9 +4107,14 @@ def _scan_repairs_impl(job, token, checkpoint):
             "Check the data folder before running Repair again."
         )
     if unreadable_artists:
-        job.summary += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
+        job.summary = (
+            f"{plural(len(unreadable_artists), 'artist')} could not be read: "
+            + ", ".join(sorted(unreadable_artists)) + ". " + job.summary
+        )
     if n_failed_artists and not total:
         _mark_job_failed(job)
+    elif n_failed_artists or n_failed_albums or n_unverified:
+        job.attention = "unchecked"
     log.info(job.summary)
 
 
@@ -5200,6 +5211,29 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             except migrate_engine.MigrationExecutionAbort as exc:
                 result = exc.result
                 execution_abort = exc
+            recoveries = tuple(getattr(result, "recoveries", ()))
+            if recoveries:
+                with job._lock:
+                    for recovery in recoveries:
+                        job.recoveries.append({
+                            "version": 1,
+                            "kind": "migration",
+                            "status": "retained",
+                            "location": recovery["location"],
+                            "album_dir": str((dest / recovery["destination"]).parent),
+                            "stage": recovery.get("state", ""),
+                            "reason": recovery.get("reason", ""),
+                            "complete": False,
+                            "requested": 1,
+                            "backed_up": 1,
+                            "receipt": dict(recovery),
+                        })
+                    job.attention = "recovery"
+                job_persistence.persist_recoveries(job)
+                for recovery in recoveries:
+                    location = recovery.get("location", "unknown location")
+                    restart = recovery.get("restart", "Inspect it before another migration.")
+                    job.push_line(f"kept for recovery: {location} - {restart}")
             pruned = getattr(result, "pruned", 0)
             try:
                 results_artifact = migrate_engine.write_results_manifest(
@@ -5252,12 +5286,6 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     for source, _destination, status, reason in companion_outcomes:
         if status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}:
             job.push_line(f"sidecar failed: {source} - {reason}")
-    recoveries = tuple(getattr(result, "recoveries", ()))
-    for recovery in recoveries:
-        location = recovery.get("location", "unknown location")
-        restart = recovery.get("restart", "Inspect it before another migration.")
-        job.push_line(f"kept for recovery: {location} - {restart}")
-
     verb = "moved" if in_place else "copied"
     has_problem = bool(
         failed or companion_failed or recoveries or results_error

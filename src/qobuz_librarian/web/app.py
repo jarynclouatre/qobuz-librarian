@@ -2566,7 +2566,7 @@ def _recovery_on_disk(recovery) -> bool:
     as licence to clear the alarm."""
     try:
         p = Path(str((recovery or {}).get("location") or ""))
-        if p.is_dir():
+        if p.is_dir() or (recovery.get("kind") == "migration" and p.exists()):
             return True
         return not p.parent.is_dir()
     except OSError:
@@ -3753,6 +3753,9 @@ def _library_header_note():
         "library", statuses=("pending", "scanning", "running"))
     if job is None:
         return None
+    if job.status.value == "pending":
+        return {"label": "Queued", "detail": "",
+                "title": "Waits for the running job to finish."}
     if job.status.value == "running":
         return {"label": "Downloading…", "detail": "",
                 "title": "Downloading the albums selected in the review."}
@@ -4123,7 +4126,7 @@ def _fold_into_parked_library_review(job):
     # Open review pages re-fetch on this nudge; without it the fold is
     # invisible until a manual reload (and "Refreshing…" never resolves).
     parked.notify_review_changed()
-    if added or updated:
+    if added or (updated and parked.candidates):
         # Fresh reviewable results landed in the parked review, so light the
         # Library dot again until the user opens it.
         review_badges.mark_ready("library")
@@ -4133,7 +4136,9 @@ def _fold_into_parked_library_review(job):
     if added:
         bits.append(f"Folded {added} new find{'s' if added != 1 else ''} "
                     "into the open Library review.")
-    if updated:
+    if updated and not parked.candidates:
+        bits.append("Nothing left to review.")
+    elif updated:
         bits.append(
             f"Updated {updated} changed item{'s' if updated != 1 else ''} "
             "in the open Library review."
@@ -5105,8 +5110,8 @@ def _undeliverable_album_error(r, album=None):
 def _mark_download_attention(job, result):
     """Mark a job failed when download details still need attention."""
     retryable, lossy_only = download_result.incomplete_track_counts(result)
-    kind = download_result.download_attention_kind(result)
-    job.status = job_mgr.JobStatus.FAILED
+    status, kind = download_result.download_job_outcome(result)
+    job.status = job_mgr.JobStatus(status)
     if kind == "backup":
         job.attention = "backup"
         if not isinstance(job.execute_args, dict):
@@ -5392,16 +5397,12 @@ def _make_download_run(
                             "download holding the recovery from Queue or "
                             "History and use Retry to settle it."
                         )
-        benign = {"already_complete", "skipped_already_higher_quality",
-                  "skipped_has_extras", "dry_run", "user_skipped",
-                  "lossy_only", "no_tracks", "cancelled"}
+        status, attention = download_result.download_job_outcome(r)
         if durable_failure:
             pass
-        elif download_result.download_attention_kind(r) == "backup":
+        elif attention:
             _mark_download_attention(j, r)
-        elif r.get("result") == "partial" and r.get("imported"):
-            _mark_download_attention(j, r)
-        elif r.get("result") not in benign and not r.get("imported"):
+        elif status == "failed":
             j.status = job_mgr.JobStatus.FAILED
             retryable, lossy_only = download_result.incomplete_track_counts(r)
             if r.get("rate_limited"):
@@ -9462,9 +9463,7 @@ def _review_context(job, page=1, query="", tab=""):
 # The generated summaries that say nothing but the size of the review. A
 # review screen carries its own counts row, which is live; a summary that only
 # restates the count contradicts it the moment a row is dismissed and keeps
-# the old number until the job is rebuilt from disk. Matching the complete
-# shape means anything appended to one (a result cap, artists that could not
-# be checked) still reaches the screen.
+# the old number until the job is rebuilt from disk.
 _COUNT_ONLY_SUMMARY = re.compile(
     r"(?:[0-9][0-9,]* to review across Missing Albums \([0-9][0-9,]*\)"
     r" and Gap Fill \([0-9][0-9,]*\)(?:, from your last library scan)?"
@@ -9482,7 +9481,8 @@ def _review_summary_line(job) -> str:
     summary = str(getattr(job, "summary", "") or "").strip()
     if getattr(job, "execute_kind", "") not in _TRIAGE_KINDS or not summary:
         return summary
-    return "" if _COUNT_ONLY_SUMMARY.fullmatch(summary) else summary
+    count = _COUNT_ONLY_SUMMARY.match(summary)
+    return summary[count.end():].strip() if count else summary
 
 
 def _review_badge_ack_for(job):
@@ -10826,7 +10826,8 @@ async def job_retry(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return _land(error="That job is no longer in the record.")
-    if job.status != job_mgr.JobStatus.FAILED or not job.album_id:
+    if (job.status != job_mgr.JobStatus.FAILED or not job.album_id
+            or (job.execute_args or {}).get("retry_disabled") == "terminal"):
         return _land(error="Nothing to retry for that job.")
     if job.execute_args_unreadable:
         return _land(
@@ -11665,6 +11666,8 @@ async def job_cancel(
             url=dest + "?error=" + _notice_key(message),
             status_code=303,
         )
+    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+        return RedirectResponse(url=_job_nav_destination(job)[1], status_code=303)
     if return_to_queue:
         return RedirectResponse(url="/queue", status_code=303)
     if job.execute_kind in _JOB_NAV_SURFACES:

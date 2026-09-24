@@ -1,12 +1,15 @@
 """Fault-injection tests for the Web job durability boundary."""
 
+import queue
 import sqlite3
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.web import job_persistence
+from qobuz_librarian.web import jobs as jm
 from qobuz_librarian.web.jobs import Job, JobStatus
 
 _REAL_ADMIT = job_persistence.admit
+_REAL_ADMIT_REVIEW = job_persistence.admit_review_transition
 
 
 class _FailCommitOnce:
@@ -102,6 +105,49 @@ def test_restore_split_review_replaces_main_and_removes_remnant(
         "Picked", "Left parked",
     ]
     assert job_persistence.load_one(remnant.id) is None
+
+
+def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_path):
+    from qobuz_librarian.web import app as webapp
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    job_persistence.init()
+    monkeypatch.setattr(job_persistence, "admit", _REAL_ADMIT)
+    monkeypatch.setattr(job_persistence, "admit_review_transition", _REAL_ADMIT_REVIEW)
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    work = queue.Queue()
+    monkeypatch.setattr(jm, "_scan_queue", work)
+
+    def scan(job):
+        job.add_candidate("album", "Picked", payload={"album_id": "picked"},
+                          selected=False)
+        job.add_candidate("album", "Left parked", payload={"album_id": "parked"},
+                          selected=False)
+
+    job = jm.Job(title="Library scan", execute_kind="library")
+    assert jm.submit_scan(job, scan, lambda *_: None) is job
+    queued, run = work.get_nowait()
+    run(queued)
+    assert job.status == jm.JobStatus.AWAITING_REVIEW
+    assert job.set_selected(job.candidates[0]["cid"], True)
+    assert jm.approve(
+        job, split_review=lambda review: webapp._build_unapproved_review(review, ""),
+    ) is True
+    assert job.status == jm.JobStatus.PENDING
+    assert jm.request_cancel(job) is True
+
+    reviews = jm.registry.awaiting_review()
+    assert reviews == [job]
+    expected = [("picked", True), ("parked", False)]
+    assert [(c["payload"]["album_id"], c["selected"])
+            for c in job.candidates] == expected
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs({"library": webapp._resume_album_download})
+    reviews = jm.registry.awaiting_review()
+    assert len(reviews) == 1
+    assert [(c["payload"]["album_id"], c["selected"])
+            for c in reviews[0].candidates] == expected
 
 
 def test_a_provider_error_never_reaches_the_stored_job_record(

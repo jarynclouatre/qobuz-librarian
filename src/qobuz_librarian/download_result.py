@@ -43,3 +43,48 @@ def download_attention_kind(result):
     if result.get("result") == "partial":
         return "partial"
     return ""
+
+
+def download_job_outcome(result):
+    """The status ("done" or "failed") and attention a download earns."""
+    kind = download_attention_kind(result)
+    if kind == "backup" or (result.get("result") == "partial" and result.get("imported")):
+        return "failed", kind
+    benign = {"already_complete", "skipped_already_higher_quality",
+              "skipped_has_extras", "dry_run", "user_skipped",
+              "lossy_only", "no_tracks", "cancelled"}
+    if result.get("result") not in benign and not result.get("imported"):
+        return "failed", ""
+    return "done", ""
+
+
+def _quality_pair(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        bits, rate = int(value[0]), int(value[1])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return [bits, rate] if bits > 0 and rate > 0 else None
+
+
+def quality_shortfall_record(verdict):
+    if not isinstance(verdict, dict):
+        return {}
+    target = _quality_pair(verdict.get("target"))
+    if target is None:
+        return {}
+    record = {
+        "version": 1,
+        "target": target,
+        "served": _quality_pair(verdict.get("served")),
+        "source": _quality_pair(verdict.get("source")),
+        "n_below": max(0, int(verdict.get("n_below") or 0)),
+        "n_unknown": max(0, int(verdict.get("n_unknown") or 0)),
+        "retried": verdict.get("retried") is True,
+        "recovered": verdict.get("recovered") is True,
+    }
+    tier = verdict.get("effective_tier")
+    if type(tier) is int and 2 <= tier <= 4:
+        record["effective_tier"] = tier
+    return record

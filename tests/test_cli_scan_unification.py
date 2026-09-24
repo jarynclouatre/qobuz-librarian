@@ -1216,6 +1216,27 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     assert rows[0]["status"] == "done"
     assert rows[0]["finished_at"] - rows[0]["created_at"] == 18
 
+    # A result that stayed below the target quality is recorded the way the
+    # web records it, so History shows it with its dot and no Retry.
+    executor._record_terminal_downloads([{
+        "album": {"id": "terminal-quality", "title": "GAK",
+                  "artist": {"name": "Aphex Twin"}},
+        "result": "partial", "imported": True, "n_ok": 4,
+        "quality_verdict": {
+            "under": True, "target": (24, 96000), "served": (16, 44100),
+            "retried": True, "recovered": False,
+        },
+    }])
+    row = next(
+        row for row in job_persistence.history_page(50, 0, bulk=False)
+        if row["album_id"] == "terminal-quality"
+    )
+    assert (row["status"], row["attention"]) == ("failed", "quality")
+    assert row["execute_args"]["retry_disabled"]
+    saved = job_persistence.load_one(row["id"])
+    assert saved["quality_shortfall"]["served"] == [16, 44100]
+    assert job_persistence.acknowledge_attention(row["id"], "quality")
+
 
 def test_ctrl_c_exits_with_the_interrupt_code(monkeypatch):
     """A typo, a real failure and Ctrl-C all exited 1, so nothing reading the

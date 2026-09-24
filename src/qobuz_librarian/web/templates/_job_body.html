@@ -61,7 +61,7 @@
   {% set _review_thing = labels.discard_review_label(job) %}
   {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair', 'collection_restore') %}
   {% set _review_qobuz_blocked = _review_needs_qobuz and not qobuz_ready %}
-  {% if job.recoveries %}
+  {% if job.recoveries and job.execute_kind != 'migration' %}
   {% set kept = namespace(on_disk=false) %}
   {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
   <div class="ql-notice ql-notice-warning ql-job-error" role="alert">

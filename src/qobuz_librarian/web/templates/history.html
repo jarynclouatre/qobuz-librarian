@@ -52,7 +52,7 @@
       {% if job.recovery_unreadable %}
         <span class="ql-status-chip is-warning" title="The saved Repair recovery details could not be read.">Recovery unreadable</span>
       {% elif job.recoveries %}
-        <span class="ql-status-chip is-warning" title="Original files remain in a Repair recovery folder.">Recovery needed</span>
+        <span class="ql-status-chip is-warning"{% if job.execute_kind != 'migration' %} title="Original files remain in a Repair recovery folder."{% endif %}>Recovery needed</span>
       {% elif job.execute_args_unreadable %}
         <span class="ql-status-chip is-warning" title="The saved details needed to retry this job could not be read.">Retry unavailable</span>
       {% elif job.single_unreadable %}
@@ -67,6 +67,8 @@
         <span class="ql-status-chip is-warning" title="A retained safety backup needs review under Settings and Diagnostics.">Backup retained</span>
       {% elif job.attention == 'processing' %}
         <span class="ql-status-chip is-warning" title="Post-download work did not finish cleanly; open it for details.">Post-download attention</span>
+      {% elif job.attention == 'unchecked' %}
+        <span class="ql-status-chip is-warning" title="Some artists or tracks could not be read; open it for details.">Scan incomplete</span>
       {% elif job.attention == 'cancel_late' %}
         <span class="ql-status-chip is-warning" title="The import had already started, so the stop could not take effect.">Cancelled too late</span>
       {% elif job.attention == 'catalog' %}
@@ -124,7 +126,7 @@
           </p>
           {% if job.recovery_unreadable %}
           <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-          {% elif job.recoveries %}
+          {% elif job.recoveries and job.execute_kind != 'migration' %}
           <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% endif %}
         </div>
