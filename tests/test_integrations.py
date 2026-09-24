@@ -746,13 +746,10 @@ def test_managed_override_seals_pinned_database_root_and_plugin_order(
             str(Path(beets.__file__).parent / "beets_plugins"),
             "/user/beets-plugins",
         ]
-        required_seals = (
-            fcntl.F_SEAL_SEAL
-            | fcntl.F_SEAL_SHRINK
-            | fcntl.F_SEAL_GROW
-            | fcntl.F_SEAL_WRITE
-        )
-        assert fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & required_seals \
+        # Seal, shrink, grow and write, by their Linux values.
+        required_seals = 0x1 | 0x2 | 0x4 | 0x8
+        get_seals = getattr(fcntl, "F_GET_SEALS", 1034)
+        assert fcntl.fcntl(descriptor, get_seals) & required_seals \
             == required_seals
         with pytest.raises(OSError):
             os.pwrite(descriptor, b"x", 0)

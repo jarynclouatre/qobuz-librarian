@@ -205,6 +205,16 @@ def path_templates_give_albums_own_folders(plugin_config):
     )
 
 
+# The Linux values, for Python builds that leave the memfd seal names out of
+# fcntl, as some standalone builds do.
+_F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+_F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+_REQUIRED_SEALS = (getattr(fcntl, "F_SEAL_SEAL", 0x1)
+                   | getattr(fcntl, "F_SEAL_SHRINK", 0x2)
+                   | getattr(fcntl, "F_SEAL_GROW", 0x4)
+                   | getattr(fcntl, "F_SEAL_WRITE", 0x8))
+
+
 def _yaml_sq(value):
     """Emit *value* as a safe YAML single-quoted scalar.
 
@@ -1611,17 +1621,7 @@ def _prepare_managed_override(capture, plugin_config, *, album_folder=None):
     )
     if any(not hasattr(os, name) for name in required):
         raise OSError("anonymous managed Beets configuration is unavailable")
-    seal_names = (
-        "F_ADD_SEALS",
-        "F_GET_SEALS",
-        "F_GETFD",
-        "FD_CLOEXEC",
-        "F_SEAL_SEAL",
-        "F_SEAL_SHRINK",
-        "F_SEAL_GROW",
-        "F_SEAL_WRITE",
-    )
-    if any(not hasattr(fcntl, name) for name in seal_names):
+    if any(not hasattr(fcntl, name) for name in ("F_GETFD", "FD_CLOEXEC")):
         raise OSError("sealed managed Beets configuration is unavailable")
 
     base_flags = os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
@@ -1658,10 +1658,10 @@ def _prepare_managed_override(capture, plugin_config, *, album_folder=None):
         os.fchmod(descriptor, 0o400)
         if os.pread(descriptor, len(payload) + 1, 0) != payload:
             raise OSError("managed Beets configuration changed while writing")
-        seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        seals = _REQUIRED_SEALS
+        fcntl.fcntl(descriptor, _F_ADD_SEALS, seals)
         held = os.fstat(descriptor)
-        actual_seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+        actual_seals = fcntl.fcntl(descriptor, _F_GET_SEALS)
         if (
             not stat.S_ISREG(held.st_mode)
             or held.st_uid != os.geteuid()
@@ -6812,10 +6812,8 @@ def _beets_direct_guarded(
         try:
             descriptor = manifest.fileno()
             override_stat = os.fstat(override_descriptor)
-            required_seals = (
-                fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
-            )
-            override_seals = fcntl.fcntl(override_descriptor, fcntl.F_GET_SEALS)
+            required_seals = _REQUIRED_SEALS
+            override_seals = fcntl.fcntl(override_descriptor, _F_GET_SEALS)
         except (AttributeError, OSError, TypeError):
             descriptor = None
             override_stat = None
