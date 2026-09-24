@@ -1526,10 +1526,7 @@ def _entry():
                 "\n✗  Auth lost. Re-authenticate: Settings page in the web UI, "
                 "or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"), EXIT_AUTH)
         except QobuzUnavailable as e:
-            die(fmt(C.YELLOW,
-                f"\n⚠  Qobuz is temporarily unavailable: {e}\n"
-                "   Nothing was lost; any queued work was saved. Re-run when it's "
-                "back.\n"), EXIT_TRANSIENT)
+            die(fmt(C.YELLOW, f"\n⚠  {e}\n"), EXIT_TRANSIENT)
         except DownloaderNotReady:
             die(fmt(C.RED,
                 "\n✗  Your Qobuz token works, but downloads also need your "

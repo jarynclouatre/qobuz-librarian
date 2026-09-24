@@ -200,7 +200,7 @@ def force_cleanup_preflight(album, args, *, expected_album_receipt=None):
     move_it = confirm(
         "\n  Move this folder to a backup before re-downloading? "
         "(restored automatically if the re-download fails)",
-        default_yes=True, auto_yes=False, strict=True)
+        default_yes=True, auto_yes=False)
     if not move_it:
         log.info(fmt(C.YELLOW, "  Continuing without moving it. Expect file collisions."))
         return False
@@ -2043,7 +2043,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(f"     {truncate(t, 60)}")
         if broken_tracks:
             log.info(fmt(C.YELLOW,
-                "\n  downloaded incomplete and discarded (a re-run usually fixes these):"))
+                "\n  arrived incomplete and were discarded (another run fetches them again):"))
             for t in broken_tracks[:10]:
                 log.info(f"     {truncate(t, 60)}")
         log.info("")
@@ -2115,6 +2115,7 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     return {
         "result": result_status,
+        "rate_limited": download_result.get("rate_limited", False),
         "n_ok": n_ok, "n_fail": n_fail, "n_lossy": n_lossy,
         "n_broken": max(n_retryable - n_fail, 0),
         "n_lossy_only": n_truly_lossy,

@@ -326,7 +326,7 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
     except AuthLost:
         die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
     except QobuzUnavailable as e:
-        log.info(fmt(C.YELLOW, f"\n⚠  Qobuz is temporarily unavailable: {e}\n"))
+        log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
     except QobuzError as e:
         log.info(fmt(C.RED, f"\n✗  Qobuz API error: {friendly_qobuz_error(e)}.\n"))
 
@@ -379,7 +379,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 args.query = saved_query
                 if not loop:
                     raise
-                log.info(fmt(C.YELLOW, f"\n⚠  Qobuz is temporarily unavailable: {e}\n"))
+                log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
                 continue
             except QobuzError as e:
                 cleaned = friendly_qobuz_error(e)

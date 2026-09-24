@@ -42,7 +42,7 @@ def _pick_downsample_policy(current_value):
         note = " (not chosen yet)"
     keep = confirm(
         f"  Keep restorable backups when downsampling?{note}",
-        default_yes=default_yes, auto_yes=False, on_eof=None, strict=True)
+        default_yes=default_yes, auto_yes=False, on_eof=None)
     if keep is None:
         return current_value
     return "keep" if keep else "delete"
@@ -88,8 +88,7 @@ def run_settings_mode(args):
     for key, label, help_text in settings_store.BEHAVIOR_FIELDS:
         current_on = bool(values.get(key))
         answer = confirm(f"    {label} - {help_text}",
-                         default_yes=current_on, auto_yes=False, on_eof=None,
-                         strict=True)
+                         default_yes=current_on, auto_yes=False, on_eof=None)
         if answer is None:
             continue
         if answer != current_on:

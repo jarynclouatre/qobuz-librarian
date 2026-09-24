@@ -93,8 +93,8 @@ def request_is_https(request) -> bool:
     return request.url.scheme == "https"
 
 
-_STALE_MESSAGE = ("This page had been open too long to be trusted with that "
-                  "action, so nothing was changed. Reload and try again.")
+_STALE_MESSAGE = ("The form's security token did not match. "
+                  "Reload the page and try again.")
 
 
 def _stale_page_response(request, token):

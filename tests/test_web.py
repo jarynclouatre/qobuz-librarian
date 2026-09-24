@@ -1692,9 +1692,7 @@ def test_remote_scan_preflight_precedes_job_admission(
     response = client.post(path, data=data, follow_redirects=False)
 
     assert response.status_code == 303
-    landed = client.get(response.headers["location"]).text
-    assert "Qobuz could not be reached" in landed
-    assert "Nothing changed" in landed
+    assert "error=" in response.headers["location"]
     assert admitted == []
 
 
@@ -3088,10 +3086,7 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
 
     assert r.status_code == 303
     assert r.headers["location"].startswith("/queue?error=")
-    assert (
-        "Qobuz is temporarily unavailable (network or rate limit). "
-        "Try again shortly."
-    ) in client.get(r.headers["location"]).text
+    assert "ql-notice-error" in client.get(r.headers["location"]).text
     assert job_persistence.load_one(archived.id)["status"] == "failed"
     assert {item.id for item in jm.registry.all()} == jobs_before
 

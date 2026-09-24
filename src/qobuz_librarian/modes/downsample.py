@@ -135,7 +135,7 @@ def run_downsample_walk_mode(args):
         keep = confirm(
             "  Keep a restorable backup of the hi-res originals? "
             "(answering No deletes them to save space)",
-            default_yes=True, auto_yes=False, on_eof=None, strict=True)
+            default_yes=True, auto_yes=False, on_eof=None)
         if keep is None:
             # Closed stdin never answered.
             keep_originals = True

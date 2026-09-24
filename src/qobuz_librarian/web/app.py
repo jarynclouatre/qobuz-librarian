@@ -828,10 +828,7 @@ def _download_error_message(exc, fallback: str) -> str:
     if isinstance(exc, asyncio.TimeoutError):
         return "Timed out reaching the Qobuz API. Try again."
     if isinstance(exc, QobuzUnavailable):
-        return (
-            "Qobuz is temporarily unavailable (network or rate limit). "
-            "Try again shortly."
-        )
+        return str(exc)
     if isinstance(exc, AuthLost):
         return "Qobuz rejected the saved token. Reconnect in Settings."
     if isinstance(exc, DownloaderNotReady):
@@ -846,30 +843,8 @@ def _download_error_message(exc, fallback: str) -> str:
     if isinstance(exc, QobuzError):
         if api_auth.friendly_qobuz_error(exc).startswith("HTTP 404"):
             return "No album with that id. Check the URL or use Search."
-        return "Couldn't reach the Qobuz API. Check the container's network."
+        return "Qobuz answered with an error. Try again."
     return fallback
-
-
-def _qobuz_action_error_message(exc, *, unchanged=False) -> str:
-    """Short action-gate copy shared by scans and review approvals."""
-    if isinstance(exc, NoCredsError):
-        message = "Connect Qobuz in Settings."
-    elif isinstance(exc, AuthLost):
-        message = "Qobuz rejected the saved token. Reconnect in Settings."
-    elif isinstance(exc, DownloaderNotReady):
-        message = (
-            "Your Qobuz token works, but downloads also need your Qobuz "
-            "user ID. Add it in Settings."
-        )
-    elif isinstance(exc, CredentialChanged):
-        message = "Qobuz credentials changed while this was starting. Try again."
-    elif isinstance(exc, QobuzEntitlementError):
-        message = "Your Qobuz account cannot perform this action."
-    else:
-        message = "Qobuz could not be reached. Try again."
-    if unchanged:
-        message += " Nothing changed."
-    return message
 
 
 def _authorize_qobuz_live(access: QobuzAccess, *, expected_generation=""):
@@ -4885,9 +4860,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             error = "No Qobuz credentials set. Visit Settings."
         except AuthLost:
             error = "Token is expired or invalid. Update it in Settings."
-        except QobuzUnavailable:
-            error = ("Qobuz is temporarily unavailable (network or rate "
-                     "limit). Try again shortly.")
+        except QobuzUnavailable as exc:
+            error = str(exc)
         except QobuzError:
             error = "Search failed. Try again."
         except Exception:
@@ -4983,9 +4957,8 @@ async def search_album_tracks(request: Request, album_id: str = ""):
         error = "Timed out reaching the Qobuz API."
     except AuthLost:
         error = "Token is expired or invalid. Update it in Settings."
-    except QobuzUnavailable:
-        error = ("Qobuz is temporarily unavailable (network or rate limit). "
-                 "Try again shortly.")
+    except QobuzUnavailable as exc:
+        error = str(exc)
     except QobuzError:
         error = "Qobuz could not list these tracks. Try again."
     except Exception:
@@ -5012,6 +4985,14 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "cancelled": "Cancelled. Nothing was imported.",
     "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
+    "stale_candidate": (
+        "The album's local files changed or could not be read before the "
+        "download started, so nothing was downloaded. Try again."
+    ),
+    "replacement_aborted_catalogue_failed": (
+        "The album's Beets entries could not be read, so the replacement "
+        "was not made. Your files are unchanged."
+    ),
     "not_imported": "Downloaded, but the import didn't land. Library unchanged.",
 }
 
@@ -5423,7 +5404,9 @@ def _make_download_run(
         elif r.get("result") not in benign and not r.get("imported"):
             j.status = job_mgr.JobStatus.FAILED
             retryable, lossy_only = download_result.incomplete_track_counts(r)
-            if r.get("result") == "incomplete":
+            if r.get("rate_limited"):
+                j.error = "Qobuz rate-limited this download. Try again later."
+            elif r.get("result") == "incomplete":
                 j.error = _undeliverable_album_error(r, album)
             elif r.get("n_fail"):
                 j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
@@ -5438,9 +5421,10 @@ def _make_download_run(
                 j.error = (
                     f"Qobuz offered {plural(lossy_only, 'track')} only in a "
                     "lossy format, so nothing was added to your library.")
+            elif r.get("result") in _DOWNLOAD_SUMMARY_LABELS:
+                j.error = _DOWNLOAD_SUMMARY_LABELS[r["result"]]
             else:
-                j.error = ("No tracks were retrieved. Qobuz may be rate-limiting "
-                           "you, or the release is unavailable. Try again shortly.")
+                j.error = "No tracks were retrieved. The job log says why."
         elif r.get("imported") and r.get("n_fail", 0) > 0:
             j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
         # Surface a one-line outcome here so the /jobs page tells the user what
@@ -7541,6 +7525,18 @@ def _requeued_download_run(job):
     return run
 
 
+_SINGLE_TRACK_FAILURES = {
+    "disk_full": "Out of disk space before the track landed. The job log says where.",
+    "io_error": (
+        "A storage error stopped the track before it landed. The job log has "
+        "the error."
+    ),
+    "incomplete": (
+        "The track arrived incomplete and was discarded. Retry fetches it again."
+    ),
+}
+
+
 def _make_single_track_run(album, track, token):
     """Run a single-track download: download just ``track`` via the per-track
     queue path (the same isolation repair uses, never a whole-album rip)."""
@@ -7734,13 +7730,13 @@ def _make_single_track_run(album, track, token):
                 raise
         if not download_succeeded:
             j.status = job_mgr.JobStatus.FAILED
-            if qi.get("n_fail"):
-                j.error = f"{plural(qi.get('n_fail', 1), 'track')} failed"
-            elif qi.get("n_ok"):
-                j.error = "Downloaded, but the import failed. See job log."
-            else:
-                j.error = ("Couldn't retrieve the track. Qobuz may be rate-limiting "
-                           "you, or it's unavailable. Try again shortly.")
+            j.error = _SINGLE_TRACK_FAILURES.get(qi.get("result"))
+            if not j.error:
+                j.error = (
+                    "Downloaded, but the import failed. See job log."
+                    if qi.get("n_ok")
+                    else "The track was not retrieved. The job log says why."
+                )
             return
         j.landed_complete = True
         # Only mark it a single when explicitly configured.
@@ -8013,7 +8009,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         # Land on the new job's page so the user sees their download starting.
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
     except NoCredsError as exc:
-        msg = _qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
         if _is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(url="/settings?error=creds", status_code=303)
@@ -8320,7 +8316,7 @@ async def library_scan(
             CredentialChanged,
             asyncio.TimeoutError,
         ) as exc:
-            msg = _qobuz_action_error_message(exc, unchanged=True)
+            msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
             if _is_htmx(request):
                 return HTMLResponse(
                     _ql_notice_html("error", html.escape(msg)),
@@ -8363,7 +8359,7 @@ async def library_scan(
         CredentialChanged,
         asyncio.TimeoutError,
     ) as exc:
-        msg = _qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
         if _is_htmx(request):
             return HTMLResponse(
                 _ql_notice_html("error", html.escape(msg)),
@@ -8864,9 +8860,8 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
         error = "Timed out reaching the Qobuz API."
     except AuthLost:
         error = "Token is expired or invalid. Update it in Settings."
-    except QobuzUnavailable:
-        error = ("Qobuz is temporarily unavailable (network or rate limit). "
-                 "Try again shortly.")
+    except QobuzUnavailable as exc:
+        error = str(exc)
     except QobuzError:
         error = "Qobuz could not list this artist. Try again."
     albums = _discover_album_views(rows)
@@ -9078,7 +9073,7 @@ async def repair_scan(request: Request):
         CredentialChanged,
         asyncio.TimeoutError,
     ) as exc:
-        msg = _qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
         return RedirectResponse(
             url="/repair?error=" + _notice_key(msg), status_code=303)
     job = job_mgr.Job(title="Repair scan")
@@ -9755,7 +9750,7 @@ async def job_approve(request: Request, job_id: str):
             CredentialChanged,
             asyncio.TimeoutError,
         ) as exc:
-            message = _qobuz_action_error_message(exc, unchanged=True)
+            message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
             return RedirectResponse(
                 url=dest + "?error=" + _notice_key(message),
                 status_code=303,
@@ -10020,7 +10015,7 @@ async def job_approve(request: Request, job_id: str):
             status_code=303,
         )
     if approved == "credential_changed":
-        message = _qobuz_action_error_message(
+        message = job_mgr._qobuz_action_error_message(
             CredentialChanged(),
             unchanged=True,
         )
@@ -10897,7 +10892,7 @@ async def job_retry(request: Request, job_id: str):
         CredentialChanged,
         asyncio.TimeoutError,
     ) as exc:
-        message = _qobuz_action_error_message(exc, unchanged=True)
+        message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
 
     # A Retry is also the only user-triggered lane for an interrupted durable
@@ -10985,7 +10980,7 @@ async def job_retry(request: Request, job_id: str):
 
         with _CREDENTIAL_LOCK:
             if not _credential_generation_is_active(credentials.generation):
-                message = _qobuz_action_error_message(
+                message = job_mgr._qobuz_action_error_message(
                     CredentialChanged(),
                     unchanged=True,
                 )
@@ -11080,7 +11075,7 @@ async def job_retry(request: Request, job_id: str):
         # Re-check under the submit lock.
         with _DOWNLOAD_SUBMIT_LOCK, _CREDENTIAL_LOCK:
             if not _credential_generation_is_active(credentials.generation):
-                message = _qobuz_action_error_message(
+                message = job_mgr._qobuz_action_error_message(
                     CredentialChanged(),
                     unchanged=True,
                 )
@@ -11314,7 +11309,7 @@ async def job_retry(request: Request, job_id: str):
                             job.attention = ""
         return _land(started=new_job.id)
     except NoCredsError as exc:
-        message = _qobuz_action_error_message(exc, unchanged=True)
+        message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
     except Exception as exc:
         message = _download_error_message(
@@ -11661,11 +11656,10 @@ async def job_cancel(
                 "Import has started, so this can't be stopped now. It will "
                 "finish in a moment."
             )
+        elif job.status in job_mgr.TERMINAL:
+            message = "That job had already finished."
         else:
-            message = (
-                "That job could not be canceled. Its state may have changed, "
-                "or the update could not be saved."
-            )
+            message = "The cancel could not be saved to the data folder."
         dest = "/queue" if return_to_queue else f"/jobs/{job_id}"
         return RedirectResponse(
             url=dest + "?error=" + _notice_key(message),
@@ -13090,7 +13084,7 @@ async def collection_restore_upload(request: Request,
         asyncio.TimeoutError,
     ) as exc:
         return _restore_response(
-            request, _qobuz_action_error_message(exc, unchanged=True))
+            request, job_mgr._qobuz_action_error_message(exc, unchanged=True))
     job = job_mgr.Job(title="Restore from backup")
     job.execute_kind = "collection_restore"
 

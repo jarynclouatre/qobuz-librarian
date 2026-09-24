@@ -1107,6 +1107,30 @@ def staging_holder() -> Optional[str]:
         return _staging_holder
 
 
+def _qobuz_action_error_message(exc, *, unchanged=False) -> str:
+    """Short action-gate copy shared by scans and review approvals."""
+    if isinstance(exc, NoCredsError):
+        message = "Connect Qobuz in Settings."
+    elif isinstance(exc, AuthLost):
+        message = "Qobuz rejected the saved token. Reconnect in Settings."
+    elif isinstance(exc, DownloaderNotReady):
+        message = (
+            "Your Qobuz token works, but downloads also need your Qobuz "
+            "user ID. Add it in Settings."
+        )
+    elif isinstance(exc, CredentialChanged):
+        message = "Qobuz credentials changed while this was starting. Try again."
+    elif isinstance(exc, QobuzEntitlementError):
+        message = "Your Qobuz account cannot perform this action."
+    elif isinstance(exc, QobuzUnavailable):
+        message = str(exc)
+    else:
+        message = "Qobuz could not be reached. Try again."
+    if unchanged:
+        message += " Nothing changed."
+    return message
+
+
 def _friendly_job_error(exc, fallback: str) -> str:
     """Map common worker failures to a short user-facing summary.
 
@@ -1117,9 +1141,9 @@ def _friendly_job_error(exc, fallback: str) -> str:
     if isinstance(exc, AuthLost):
         return "Token is expired or invalid. Update it in Settings."
     if isinstance(exc, QobuzUnavailable):
-        return "Qobuz is temporarily unavailable (network or rate limit). Try again shortly."
+        return str(exc)
     if isinstance(exc, QobuzError):
-        return "Couldn't reach the Qobuz API. Check the container's network."
+        return "Qobuz answered with an error. The job log has the response."
     if isinstance(exc, CandidateStale):
         return str(exc)
     if isinstance(exc, FileNotFoundError):
@@ -1966,8 +1990,8 @@ def approve(
             message = (
                 str(e)
                 if isinstance(e, CandidateStale)
-                else "Couldn't reach Qobuz, so nothing was downloaded. Your "
-                     "review and picks are untouched. Reconnect and try again."
+                else _qobuz_action_error_message(e)
+                     + " Your review and picks are untouched."
             )
             j.push_line(message)
             j.notify_review_changed()

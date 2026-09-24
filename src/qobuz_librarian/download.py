@@ -1335,11 +1335,11 @@ def run_album_download(
             log.info(fmt(C.GRAY, f"     {_reject_label(d)}"))
     if broken:
         why = ("the stop cut them off" if is_cancel_requested()
-               else "a re-run usually fixes these")
+               else "another run fetches them again")
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  {len(broken)} track(s) downloaded incomplete and were "
+                f"  ⚠  {len(broken)} track(s) arrived incomplete and were "
                 f"discarded ({why}):",
             )
         )
