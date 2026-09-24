@@ -25,7 +25,7 @@ from qobuz_librarian.quality.decision import (
     mark_album_capped,
 )
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate
+from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, EXIT_INTERRUPT, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
@@ -232,6 +232,10 @@ def run_upgrade_walk_mode(args, token):
         f"  {plural(len(saved), 'upgrade candidate')} across "
         f"{plural(n, 'artist')} from the saved Library refresh."))
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
+    if not getattr(args, "dry_run", False):
+        log.info(fmt(C.YELLOW,
+            "  Your current copy is removed once the replacement verifies. "
+            "This cannot be undone."))
 
     # Auto-accept-all gate. Skipped under --dry-run (which changes nothing), so
     # a preview run doesn't prompt to "run unattended", matching downsample.py.
@@ -240,7 +244,12 @@ def run_upgrade_walk_mode(args, token):
         if (not args.yes and not getattr(args, "auto_safe", False)
                 and not getattr(args, "dry_run", False)):
             _r = ask(
-                "\n  Auto-accept all upgrades and run unattended? [y/N]: ") or ""
+                "\n  Auto-accept all upgrades and run unattended? [y/N]: ",
+                quiet=True)
+            if _r is None:
+                log.warning(fmt(C.YELLOW,
+                    "\n  No answer was given. Nothing changed."))
+                return EXIT_GENERAL
             if _r in ("y", "yes"):
                 auto_accept_all = True
                 log.info(fmt(C.GREEN,
@@ -305,7 +314,7 @@ def run_upgrade_walk_mode(args, token):
                 answer = confirm(f"  Upgrade {plural(n_albums, 'album')}?",
                                  default_yes=False,
                                  auto_yes=args.yes or auto_accept_all,
-                                 on_eof=None)
+                                 on_eof=None, quiet=True)
                 if answer is None:
                     no_answer = True
                     break
@@ -422,10 +431,11 @@ def run_upgrade_walk_mode(args, token):
     if interrupted:
         log.warning(fmt(C.YELLOW, "  ⚠  Upgrade walk stopped early."))
     elif no_answer:
-        log.warning(block(fmt(C.YELLOW,
-            "  ✗  The walk stopped: each artist needs a confirmation and "
-            "there is no terminal to give one. Re-run with --yes (or "
-            "--auto-safe) to accept unattended.")))
+        message = ("No answer was given. Nothing changed." if not n_upgraded_albums
+                   else "No answer was given, so the walk stopped after "
+                   f"{plural(n_upgraded_albums, 'album')}.")
+        log.warning(fmt(C.YELLOW, f"  {message}"))
+        return EXIT_GENERAL
     elif n_failed_attempts:
         log.warning(fmt(C.RED, "  ✗  Upgrade walk finished with errors."))
     elif n_upgraded_albums or not n_gone:

@@ -1358,7 +1358,7 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
             if _CLI_MODE:
                 return
         try:
-            lease = run_lock.acquire()
+            lease = run_lock.acquire("web")
         except run_lock.LockBusy as busy:
             with _auto_check_lock:
                 if _CLI_MODE:
@@ -2273,7 +2273,7 @@ async def _lifespan(_app: FastAPI):
     else:
         _CLI_MODE = False
         try:
-            _RUN_LOCK_HANDLE = run_lock.acquire()
+            _RUN_LOCK_HANDLE = run_lock.acquire("web")
             _LOCK_BUSY_PID = None
             if _RUN_LOCK_HANDLE is None:
                 # None isn't success: the lock can't be ENFORCED here, and
@@ -13173,7 +13173,7 @@ async def set_mode(request: Request, target: str = Form("")):
         with _auto_check_lock:
             prior_cli_mode = _CLI_MODE
         try:
-            lease = run_lock.acquire()
+            lease = run_lock.acquire("web")
             if lease is None:
                 # Can't enforce the lock, same stance as startup: pause
                 # destructive routes until the filesystem can enforce it.

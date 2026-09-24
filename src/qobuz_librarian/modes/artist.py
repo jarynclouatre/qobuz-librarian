@@ -762,13 +762,8 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                 log.info(fmt(C.YELLOW, f"    ⚠  Couldn't fetch: {e}. Skipping."))
                 needs_attention = True
                 continue
-            try:
-                r = process_album(full, args, allow_force=False, label=label,
-                                  already_confirmed=True, token=token)
-            except KeyboardInterrupt:
-                log.info(fmt(C.GRAY, "\n    Interrupted. Stopping step 2."))
-                needs_attention = True
-                break
+            r = process_album(full, args, allow_force=False, label=label,
+                              already_confirmed=True, token=token)
             if r.get("n_ok", 0) > 0 and r.get("imported", False):
                 n_done += 1
                 _refresh_review_state_after_downloads(

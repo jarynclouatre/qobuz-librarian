@@ -224,7 +224,7 @@ def test_publish_interrupt_keeps_the_exact_source_and_reconciles_destination(
 
     result = m.execute_plan(plan, in_place=True)
 
-    assert result.cancelled and result.failed == 1
+    assert result.cancelled and result.interrupted and result.failed == 0
     assert plan.placed[0].source.read_bytes().startswith(b"audio-bytes-")
     assert not destination.exists()
     assert result.recoveries == []
@@ -238,8 +238,10 @@ def test_publish_interrupt_keeps_the_exact_source_and_reconciles_destination(
     counters = json.loads(summary["reason"])
     assert summary["status"] == "cancelled"
     assert counters["cancelled"] is True
-    assert counters["failed"] == 1
+    assert counters["failed"] == 0
     assert counters["pruned"] == 0
+    track = next(row for row in rows if row["record"] == "track")
+    assert track["status"] == m.INTERRUPTED
 
 
 # ── web flow (scan → review candidates → execute copy) ─────────────────────────
@@ -396,7 +398,8 @@ def test_run_migrate_gates_on_insufficient_destination_space(tmp_path, monkeypat
     def _fake_execute(*a, **k):
         executed.append(1)
         return SimpleNamespace(copied=1, skipped=0, lingered=0, failed=0,
-                               cancelled=False, failures=[], outcomes=[],
+                               cancelled=False, interrupted=False,
+                               failures=[], outcomes=[],
                                companion_outcomes=[], recoveries=[])
     monkeypatch.setattr(migrate_mode.engine, "execute_plan", _fake_execute)
     monkeypatch.setattr(

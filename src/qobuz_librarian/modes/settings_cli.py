@@ -22,7 +22,7 @@ def _pick_quality(current_value):
         marker = " (current)" if choice == current_value else ""
         log.info(fmt(C.GRAY, f"    {i}) {labels[choice]}{marker}"))
     current_label = labels.get(current_value, "current")
-    r = ask(f"  Choice (Enter = keep {current_label}): ")
+    r = ask(f"  Choice (Enter = keep {current_label}): ", quiet=True)
     if r is None:
         return None
     if r == "":
@@ -42,9 +42,9 @@ def _pick_downsample_policy(current_value):
         note = " (not chosen yet)"
     keep = confirm(
         f"  Keep restorable backups when downsampling?{note}",
-        default_yes=default_yes, auto_yes=False, on_eof=None)
+        default_yes=default_yes, auto_yes=False, on_eof=None, quiet=True)
     if keep is None:
-        return current_value
+        return None
     return "keep" if keep else "delete"
 
 
@@ -74,12 +74,15 @@ def run_settings_mode(args):
 
     quality = _pick_quality(values.get("STREAMRIP_QUALITY"))
     if quality is None:
-        log.info(fmt(C.GRAY, "\n  Cancelled; nothing changed."))
-        return 0
+        log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
+        return 1
     if quality != values.get("STREAMRIP_QUALITY"):
         changes["STREAMRIP_QUALITY"] = quality
 
     policy = _pick_downsample_policy(values.get("DOWNSAMPLE_KEEP_ORIGINALS"))
+    if policy is None:
+        log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
+        return 1
     if policy != values.get("DOWNSAMPLE_KEEP_ORIGINALS"):
         changes["DOWNSAMPLE_KEEP_ORIGINALS"] = policy
 
@@ -88,9 +91,11 @@ def run_settings_mode(args):
     for key, label, help_text in settings_store.BEHAVIOR_FIELDS:
         current_on = bool(values.get(key))
         answer = confirm(f"    {label} - {help_text}",
-                         default_yes=current_on, auto_yes=False, on_eof=None)
+                         default_yes=current_on, auto_yes=False, on_eof=None,
+                         quiet=True)
         if answer is None:
-            continue
+            log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
+            return 1
         if answer != current_on:
             changes[key] = answer
 

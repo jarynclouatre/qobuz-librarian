@@ -29,9 +29,10 @@ class LockBusy(Exception):
     The other-process PID is on ``self.pid`` when readable, else "?".
     """
 
-    def __init__(self, pid: str = "?"):
+    def __init__(self, pid: str = "?", holder: Optional[str] = None):
         super().__init__(f"another run is active (pid {pid})")
         self.pid = pid
+        self.holder = holder
 
 
 def _lock_path_parts(value):
@@ -121,12 +122,12 @@ def _open_lock_parent(value):
         raise
 
 
-def _read_lock_pid(parent_descriptor, name):
+def _read_lock_holder(parent_descriptor, name):
     descriptor = -1
     try:
         nofollow = getattr(os, "O_NOFOLLOW", None)
         if nofollow is None:
-            return "?"
+            return "?", None
         descriptor = os.open(
             name,
             os.O_RDONLY
@@ -137,11 +138,14 @@ def _read_lock_pid(parent_descriptor, name):
         )
         value = os.fstat(descriptor)
         if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
-            return "?"
+            return "?", None
         raw = os.pread(descriptor, 64, 0).decode("ascii", "strict").strip()
-        return raw if raw.isdigit() else "?"
+        fields = raw.split(maxsplit=1)
+        if not fields or not fields[0].isdigit():
+            return "?", None
+        return fields[0], fields[1] if len(fields) > 1 else None
     except (OSError, UnicodeError):
-        return "?"
+        return "?", None
     finally:
         if descriptor >= 0:
             try:
@@ -355,7 +359,7 @@ def _warn_lockless(detail: str) -> None:
         "app restarts."))
 
 
-def acquire() -> Optional[RunLockLease]:
+def acquire(holder: Optional[str] = None) -> Optional[RunLockLease]:
     """Acquire the exact no-follow run lock, or report that it is unavailable."""
     global unavailable_reason
     unavailable_reason = None
@@ -371,9 +375,9 @@ def acquire() -> Optional[RunLockLease]:
         fcntl.flock(
             parent_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        other = _read_lock_pid(parent_descriptor, leaf)
+        other = _read_lock_holder(parent_descriptor, leaf)
         _close_lock_resources(None, chain)
-        raise LockBusy(other)
+        raise LockBusy(*other)
     except OSError as exc:
         _close_lock_resources(None, chain)
         _warn_lockless(f"run-lock not enforceable on {path} ({exc})")
@@ -414,9 +418,9 @@ def acquire() -> Optional[RunLockLease]:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            other = _read_lock_pid(parent_descriptor, leaf)
+            other = _read_lock_holder(parent_descriptor, leaf)
             _close_lock_resources(stream, chain)
-            raise LockBusy(other) from None
+            raise LockBusy(*other) from None
     except LockBusy:
         raise
     except OSError as exc:
@@ -434,6 +438,8 @@ def acquire() -> Optional[RunLockLease]:
         stream.seek(0)
         stream.truncate()
         stream.write(str(os.getpid()))
+        if holder:
+            stream.write(f" {holder}")
         stream.flush()
         os.fsync(stream.fileno())
         os.fsync(parent_descriptor)

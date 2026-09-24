@@ -1923,6 +1923,65 @@ def test_settings_save_only_pins_changed_fields(tmp_path, monkeypatch):
     assert on_disk == {"LYRICS_ENABLED": False, "PREFER_HIRES": False}
 
 
+def test_settings_save_keeps_custom_timer_values(client, tmp_path, monkeypatch):
+    import html.parser
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    class Forms(html.parser.HTMLParser):
+        def __init__(self, markup):
+            super().__init__()
+            self.forms = []
+            self.current = None
+            self.select = None
+            self.feed(markup)
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form" and attrs.get("action") == "/settings/behavior":
+                self.current = {}
+                self.forms.append(self.current)
+            elif self.current is not None:
+                if tag == "input" and attrs.get("name"):
+                    if attrs.get("type") == "checkbox":
+                        if "checked" not in attrs:
+                            return
+                        self.current[attrs["name"]] = attrs.get("value", "on")
+                    else:
+                        self.current[attrs["name"]] = attrs.get("value", "")
+                elif tag == "select":
+                    self.select = attrs["name"]
+                elif tag == "option" and self.select:
+                    if "selected" in attrs or self.select not in self.current:
+                        self.current[self.select] = attrs["value"]
+
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.current = None
+            elif tag == "select":
+                self.select = None
+
+    store = tmp_path / "s.json"
+    monkeypatch.setattr(ss, "SETTINGS_FILE", store)
+    monkeypatch.setattr(ss, "_pending_apply", None)
+    monkeypatch.setattr(cfg, "NEW_RELEASE_CHECK_INTERVAL", 3600)
+    monkeypatch.setattr(cfg, "ARTIST_CATALOG_CACHE_TTL", 0)
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+
+    page = client.get("/settings")
+    assert page.status_code == 200
+    form = next(data for data in Forms(page.text).forms if "form_complete" in data)
+    del form["LYRICS_ENABLED"]
+    response = client.post("/settings/behavior", data=form, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert cfg.LYRICS_ENABLED is False
+    assert cfg.NEW_RELEASE_CHECK_INTERVAL == 3600
+    assert cfg.ARTIST_CATALOG_CACHE_TTL == 0
+    assert json.loads(store.read_text()) == {"LYRICS_ENABLED": False}
+
+
 def test_concurrent_settings_saves_merge_without_losing_either_change(tmp_path, monkeypatch):
     import json
     import threading
@@ -5957,7 +6016,7 @@ def test_resuming_web_mode_restores_saved_jobs_before_unpausing(
         assert durable_recovery_job_id is None
         restored_under.append((app_mod._CLI_MODE, app_mod._RUN_LOCK_HANDLE))
 
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(jm, "restore_jobs", restore_jobs)
     monkeypatch.setattr(app_mod, "_CLI_MODE", True)
     monkeypatch.setattr(app_mod, "_JOBS_RESTORED", False)

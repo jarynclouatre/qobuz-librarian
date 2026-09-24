@@ -82,9 +82,6 @@ TEXT_FIELDS = [
      "Folder/file naming for normal albums (beets path syntax). "
      "Empty = use beets/config.yaml.",
      "text", None, "e.g. $albumartist/$album ($year)/$track - $title"),
-    ("BEETS_PATH_SINGLETON", "beets path: singleton",
-     "Naming for singleton tracks. Empty = beets default.",
-     "text", None, "e.g. $albumartist/$album ($year)/$track - $title"),
     ("BEETS_PATH_COMP", "beets path: compilation",
      "Naming for compilations / Various Artists. Empty = beets default.",
      "text", None, "e.g. Various Artists/$album ($year)/$track - $title"),
@@ -292,8 +289,7 @@ def _validate_list(key, items):
     return list(dict.fromkeys(i.strip() for i in items if i.strip())), []
 
 
-_PATH_TEMPLATE_KEYS = ("BEETS_PATH_DEFAULT", "BEETS_PATH_SINGLETON",
-                       "BEETS_PATH_COMP")
+_PATH_TEMPLATE_KEYS = ("BEETS_PATH_DEFAULT", "BEETS_PATH_COMP")
 _FIELD_LABELS = {key: label for key, label, *_ in TEXT_FIELDS}
 _FIELD_KINDS = {key: kind for key, _, _, kind, _, _ in TEXT_FIELDS}
 
@@ -626,7 +622,7 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
                 continue
             if key == "STREAMRIP_QUALITY" and v in ("0", "1"):
                 v = "2"  # lossy tiers the FLAC pipeline discards (see _apply)
-            if v not in choices:
+            if v not in choices and v != baseline.get(key):
                 # Reject the whole submitted change. Applying valid sibling
                 # fields while silently dropping a forged/invalid enum leaves
                 # the operator with a configuration they never submitted.

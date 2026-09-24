@@ -106,7 +106,7 @@ The bundled tools' full config files live in the persistent `config` volume, see
 
 The default Compose `/config` named volume is supported for the beets database. If you replace it or set `BEETS_DB_PATH`, run the app on Linux with `/proc/self/fd` and keep the database on a local filesystem that supports hard links, xattrs, advisory `flock`, file leases, atomic `renameat2` exchange, and file and directory `fsync`. NFS, SMB/CIFS, and other network filesystems are not supported for the database; the music library itself may still live on network storage.
 
-Set folder and file naming with `BEETS_PATH_DEFAULT`, `BEETS_PATH_SINGLETON`, and `BEETS_PATH_COMP` on the **Settings** page or in `.env`. These use beets path syntax, for example `$albumartist/$album ($year)/$track - $title`. Enter that raw template on the Settings page. In `.env`, single-quote the whole assignment so Compose does not consume the beets variables:
+Set folder and file naming with `BEETS_PATH_DEFAULT` and `BEETS_PATH_COMP` on the **Settings** page or in `.env`. These use beets path syntax, for example `$albumartist/$album ($year)/$track - $title`. Enter that raw template on the Settings page. In `.env`, single-quote the whole assignment so Compose does not consume the beets variables:
 
 ```dotenv
 BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'

@@ -5052,7 +5052,6 @@ def _build_import_override_yaml(
     # back to the user's own config.yaml rather than scattering the import.
     _paths = {}
     for _name, _template in (("default", cfg.BEETS_PATH_DEFAULT),
-                             ("singleton", cfg.BEETS_PATH_SINGLETON),
                              ("comp", cfg.BEETS_PATH_COMP)):
         if not _template:
             continue

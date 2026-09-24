@@ -216,7 +216,6 @@ BEETS_PYTHON = os.environ.get("BEETS_PYTHON", "").strip()
 # Set these to control folder/file structure without hand-editing YAML,
 # e.g. BEETS_PATH_DEFAULT="$albumartist/$album ($year)/$track - $title".
 BEETS_PATH_DEFAULT   = os.environ.get("BEETS_PATH_DEFAULT", "").strip()
-BEETS_PATH_SINGLETON = os.environ.get("BEETS_PATH_SINGLETON", "").strip()
 BEETS_PATH_COMP      = os.environ.get("BEETS_PATH_COMP", "").strip()
 
 # Comma-separated list of beets plugins to choose. Empty honours whatever is

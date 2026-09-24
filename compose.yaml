@@ -94,7 +94,6 @@ services:
       # $year, $track, $title, ...). In .env, single-quote the whole template
       # so Compose passes the beets variables through literally (see .env.example).
       BEETS_PATH_DEFAULT:   "${BEETS_PATH_DEFAULT:-}"
-      BEETS_PATH_SINGLETON: "${BEETS_PATH_SINGLETON:-}"
       BEETS_PATH_COMP:      "${BEETS_PATH_COMP:-}"
       # Comma-separated list of beets plugins. Empty = honour /config/beets/
       # config.yaml. A custom list replaces its choices for managed imports;

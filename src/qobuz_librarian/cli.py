@@ -467,19 +467,32 @@ def acquire_run_lock():
     """Acquire the single-writer run lock or exit."""
     global _RUN_LEASE
     try:
-        lease = run_lock.acquire()
+        lease = run_lock.acquire("terminal")
     except run_lock.LockBusy as busy:
-        _svc = _compose_service_name()
-        die(fmt(C.RED,
-            f"\n✗  Another Qobuz Librarian run is in progress (pid {busy.pid}).\n"
+        if busy.holder == "web":
+            holder = "The Qobuz Librarian web app"
+        elif busy.holder == "terminal":
+            holder = "Another Qobuz Librarian terminal run"
+        else:
+            holder = "Another Qobuz Librarian process"
+        message = (
+            f"\n✗  {holder} (pid {busy.pid}) holds the run lock.\n"
             f"   Lock file: {cfg.LOCK_FILE}\n\n"
-            f"   The web app may be holding the lock. Either:\n"
-            f"     1. In the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT}), open Settings → Mode\n"
-            f"        and switch to terminal mode, then re-run this command.\n"
-            f"        (Or just use the web UI; every CLI mode is also a web action.)\n"
-            f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
-            f"        then re-run, then `docker compose start {_svc}`.\n\n"
-            f"   Only one writer can use /staging at a time.\n"),
+        )
+        if busy.holder == "terminal":
+            message += "   Run this again once it finishes.\n\n"
+        else:
+            _svc = _compose_service_name()
+            message += ("   Either:\n" if busy.holder == "web"
+                        else "   If it is the web app, either:\n")
+            message += (
+                f"     1. In the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT}), open Settings → Mode\n"
+                "        and switch to terminal mode, then re-run this command.\n"
+                f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
+                f"        then re-run, then `docker compose start {_svc}`.\n\n"
+            )
+        message += "   Only one writer can use /staging at a time.\n"
+        die(fmt(C.RED, message),
             EXIT_LOCK_BUSY)
     if lease is not None and lease.intact() is True:
         try:
@@ -995,6 +1008,8 @@ def parse_args():
     ) if on]
     if len(requested) > 1:
         p.error("run one mode at a time; got " + ", ".join(requested))
+    if args.settings and args.quiet:
+        p.error("--quiet would hide the choices --settings asks about; drop --quiet")
     # With no mode, the run falls through to the interactive menu, whose
     # prompts --quiet would silence, leaving a bare input cursor.
     if args.quiet and not requested:
@@ -1102,21 +1117,27 @@ def main():
         args.downsample_walk,
         args.upgrade_walk,
     )
-    if queue_started and any(queue_modes + other_modes):
-        die(fmt(
-            C.YELLOW,
-            "\n⚠  An interrupted download must be resumed before other work.\n"
-            "   Run Qobuz Librarian without a mode or search argument and "
-            "choose Resume when it offers the saved queue.\n",
-        ), EXIT_GENERAL)
-    if saved_queue and any(queue_modes):
-        die(fmt(
-            C.YELLOW,
-            "\n⚠  A saved download queue must be resumed or discarded before "
-            "another download.\n"
-            f"   It is in {cfg.QUEUE_JOURNAL_DIR}. Run Qobuz Librarian without "
-            "a mode or search argument to choose.\n",
-        ), EXIT_GENERAL)
+    def queue_refusal(uses_queue, other_work):
+        if queue_started and (uses_queue or other_work):
+            return fmt(
+                C.YELLOW,
+                "\n⚠  An interrupted download must be resumed before other work.\n"
+                "   Run Qobuz Librarian without a mode or search argument and "
+                "choose Resume when it offers the saved queue.\n",
+            )
+        if saved_queue and uses_queue:
+            return fmt(
+                C.YELLOW,
+                "\n⚠  A saved download queue must be resumed or discarded before "
+                "another download.\n"
+                f"   It is in {cfg.QUEUE_JOURNAL_DIR}. Run Qobuz Librarian without "
+                "a mode or search argument to choose.\n",
+            )
+        return None
+
+    refusal = queue_refusal(any(queue_modes), any(other_modes))
+    if refusal:
+        die(refusal, EXIT_GENERAL)
     resume_saved_queue = saved_queue and not any(queue_modes + other_modes)
 
     if args.reset_walk_seen:
@@ -1248,9 +1269,8 @@ def main():
         return remote_token(QobuzAccess.DOWNLOAD_ACTION)
 
     if resume_saved_queue:
-        # Keep this launch recovery-only.
         try:
-            offer_resume_startup_recovery(
+            recovery_choice = offer_resume_startup_recovery(
                 args,
                 download_token,
                 _STARTUP_RECOVERY_RESULT,
@@ -1267,7 +1287,12 @@ def main():
         result = _record_startup_recovery(_lockfile)
         if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
             _die_unsettled_startup_recovery(_lockfile, result)
-        if result.status is StartupRecoveryStatus.RESUME_REQUIRED:
+        saved_queue = result.status is StartupRecoveryStatus.RESUME_REQUIRED
+        queue_started = saved_queue and any(
+            item.phase is not queue_state.QueuePhase.PENDING
+            for item in result.items
+        )
+        if saved_queue:
             if queue_started:
                 log.info(fmt(
                     C.YELLOW,
@@ -1278,14 +1303,12 @@ def main():
                 log.info(fmt(C.YELLOW, wrap(
                     f"Queue kept in {cfg.QUEUE_JOURNAL_DIR}. Other downloads "
                     "wait until it is resumed or discarded.")))
-            # Kept work means the run stopped short, as when a blocked
-            # download is kept at startup.
+        if recovery_choice is None:
             raise SystemExit(EXIT_GENERAL)
-        return
 
     # Housekeeping deletes expired backups and rewrites state files, so a
     # dry run skips it.
-    if not args.dry_run:
+    if not args.dry_run and not saved_queue:
         # Sweep upgrade-backup dir of anything older than retention window.
         # Cheap (just stat + rmtree on stale dirs); silent unless something happens.
         try:
@@ -1355,12 +1378,14 @@ def main():
 
     # Crash-recovery: if a previous queueing run died with decisions still in
     # memory, we'd have left .qobuz_pending_queue.json on disk.
-    offer_resume_pending_queue(args, download_token)
+    if not resume_saved_queue:
+        offer_resume_pending_queue(args, download_token)
 
     # Same idea, but for files where every lyric provider was unavailable last
     # run.
     from qobuz_librarian.integrations.lyrics import offer_resume_lyric_retry
-    offer_resume_lyric_retry(args)
+    if not queue_started:
+        offer_resume_lyric_retry(args)
 
     # Interactive menu loop. The local tools remain reachable without a Qobuz
     # token or downloader; network-backed choices initialise that stack lazily.
@@ -1371,6 +1396,14 @@ def main():
         if mode == Mode.QUIT:
             log.info(fmt(C.GRAY, "  Bye."))
             return
+        refusal = queue_refusal(
+            mode in (Mode.ALBUM, Mode.ARTIST, Mode.WALK_QUEUE,
+                     Mode.ALBUM_WALK, Mode.ALBUM_REPAIR),
+            mode in (Mode.UPGRADE, Mode.MIGRATE, Mode.DOWNSAMPLE, Mode.LYRICS),
+        )
+        if refusal:
+            log.info(refusal)
+            continue
         if mode == Mode.ALBUM:
             # Loop inside album mode so the user can search album after album
             # without bouncing back to the top menu each time.

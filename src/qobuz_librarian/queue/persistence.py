@@ -223,7 +223,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
             choices += " / [d]iscard"
         ans = ask(f"  Resume now? {choices}: ")
         if ans is None:
-            return False
+            return None
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN,
                 f"\n  ⟳  Resuming {len(items)} saved album(s)…"))
@@ -279,23 +279,26 @@ def offer_resume_startup_recovery(args, token_source, recovery):
             except Exception as exc:
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Resume failed: {exc}. Saved queue kept for next launch."))
-            return False
+            return "resume"
         if ans in ("k", "keep"):
             log.info(fmt(C.GRAY,
                 "  Keeping the saved queue. It'll prompt again next launch."))
-            return False
+            return "keep"
         if not recovery_bearing and ans in ("d", "discard"):
             conf = ask(
                 f"  Really discard {len(items)} queued album(s)? "
                 "Type DISCARD to confirm: ",
                 colour=C.YELLOW, lower=False,
             )
+            if conf is None:
+                return None
             if conf == "DISCARD":
                 clear_queue_journal(operation_id, explicit_discard=True)
                 log.info(fmt(C.GRAY, "  Pending queue cleared."))
+                return "discard"
             else:
                 log.info(fmt(C.GRAY, "  Discard cancelled."))
-            return False
+            return "keep"
         allowed = "Y or k" if recovery_bearing else "Y, k, or d"
         log.info(fmt(C.GRAY, f"  Enter {allowed}."))
 

@@ -135,13 +135,11 @@ def run_downsample_walk_mode(args):
         keep = confirm(
             "  Keep a restorable backup of the hi-res originals? "
             "(answering No deletes them to save space)",
-            default_yes=True, auto_yes=False, on_eof=None)
+            default_yes=True, auto_yes=False, on_eof=None, quiet=True)
         if keep is None:
-            # Closed stdin never answered.
-            keep_originals = True
-            log.info(fmt(C.GRAY,
-                "  No input available; keeping originals for this run. "
-                "set the preference in Settings."))
+            log.warning(fmt(C.YELLOW,
+                "\n  No answer was given. Nothing changed."))
+            return EXIT_GENERAL
         else:
             _choice = "keep" if keep else "delete"
             saved, _warnings = settings_store.save(
@@ -162,12 +160,15 @@ def run_downsample_walk_mode(args):
                 "change this any time in Settings."))
         log.info("")
 
-    # Auto-accept gate. Skipped under --yes, which has already answered it;
-    # otherwise an unattended run stalls here and then declines every artist.
+    # Auto-accept gate. Skipped under --yes, which has already answered it.
     auto_accept_all = False
     if offered and not args.dry_run and not args.yes:
         _r = ask(
-            "\n  Auto-accept every artist and run unattended? [y/N]: ") or ""
+            "\n  Auto-accept every artist and run unattended? [y/N]: ", quiet=True)
+        if _r is None:
+            log.warning(fmt(C.YELLOW,
+                "\n  No answer was given. Nothing changed."))
+            return EXIT_GENERAL
         if _r in ("y", "yes"):
             auto_accept_all = True
             log.info(fmt(C.GREEN, "  ✓ Auto-accepting every artist. Walk away."))
@@ -218,7 +219,8 @@ def run_downsample_walk_mode(args):
             # walk would otherwise skip every artist and call that a success.
             answer = confirm(f"  Downsample {plural(n_albums, 'album')}?",
                              default_yes=False,
-                             auto_yes=args.yes or auto_accept_all, on_eof=None)
+                             auto_yes=args.yes or auto_accept_all, on_eof=None,
+                             quiet=True)
             if answer is None:
                 no_answer = True
                 break
@@ -281,15 +283,11 @@ def run_downsample_walk_mode(args):
 
     log.info("")
     if no_answer:
-        # Input can also run dry mid-walk (a piped "y\n"), so only claim
-        # nothing happened when nothing did.
-        done_part = ("Nothing was downsampled" if not n_albums_done else
-                     "The walk stopped early")
-        log.warning(block(fmt(C.YELLOW,
-            f"  ✗  {done_part}: each artist needs a confirmation and "
-            "there is no terminal left to give one. Re-run with --yes to "
-            f"accept all {plural(len(candidates_by_artist), 'artist')} "
-            "unattended.")))
+        message = ("No answer was given. Nothing changed." if not n_albums_done
+                   else "No answer was given, so the walk stopped after "
+                   f"{plural(n_albums_done, 'album')}.")
+        log.warning(fmt(C.YELLOW, f"  {message}"))
+        return EXIT_GENERAL
     elif interrupted:
         log.warning(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
     elif unchecked:

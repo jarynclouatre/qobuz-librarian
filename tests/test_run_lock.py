@@ -14,12 +14,12 @@ def test_acquire_fsyncs_pid_to_disk(tmp_path, monkeypatch):
 
     from qobuz_librarian import run_lock
 
-    fp = run_lock.acquire()
+    fp = run_lock.acquire("terminal")
     try:
         assert fp is not None
         assert fp.intact() is True
         assert fp.fileno() in fsynced_fds
-        assert lock_file.read_text().strip() == str(os.getpid())
+        assert lock_file.read_text().split() == [str(os.getpid()), "terminal"]
     finally:
         if fp is not None:
             fp.close()
@@ -32,12 +32,13 @@ def test_second_acquire_while_held_raises_lockbusy_with_holder_pid(tmp_path, mon
 
     from qobuz_librarian import run_lock
 
-    held = run_lock.acquire()
+    held = run_lock.acquire("web")
     try:
         assert held is not None
         with pytest.raises(run_lock.LockBusy) as caught:
             run_lock.acquire()
         assert caught.value.pid == str(os.getpid())
+        assert caught.value.holder == "web"
     finally:
         held.close()
 
@@ -141,7 +142,7 @@ def test_acquire_degrades_to_none_when_flock_unsupported(tmp_path, monkeypatch, 
 def test_cli_refuses_to_run_when_the_lock_is_unavailable(monkeypatch):
     from qobuz_librarian import cli, run_lock
 
-    monkeypatch.setattr(run_lock, "acquire", lambda: None)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: None)
 
     with pytest.raises(SystemExit) as stopped:
         cli.acquire_run_lock()
@@ -167,7 +168,7 @@ def test_cli_reconciles_library_publication_under_its_run_lock(monkeypatch):
 
     lease = Lease()
     events = []
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(
         cli,
         "_recover_startup_queue",
@@ -213,7 +214,7 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
         tmp_path / "music" / "Artist Two" / "Album Two",
     )
     lease = Lease()
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(
         cli,
         "_recover_startup_queue",
@@ -292,7 +293,7 @@ def test_cli_carries_on_when_a_refused_settlement_cleared_the_recovery(
             "remains blocked.",
         )
 
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
         startup_recovery,
@@ -358,7 +359,7 @@ def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
 
     prompts = []
 
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
         startup_recovery,
@@ -446,7 +447,7 @@ def test_clearing_a_leftover_is_not_reported_as_a_failure(
             "remains blocked.",
         )
 
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
         startup_recovery,
@@ -526,7 +527,7 @@ def test_a_settled_leftover_does_not_report_the_stale_verdict(
             BlockedItemSettlementStatus.RETRYABLE, "",
         )
 
-    monkeypatch.setattr(run_lock, "acquire", lambda: lease)
+    monkeypatch.setattr(run_lock, "acquire", lambda _holder: lease)
     monkeypatch.setattr(cli, "_recover_startup_queue", _recover)
     monkeypatch.setattr(
         startup_recovery,

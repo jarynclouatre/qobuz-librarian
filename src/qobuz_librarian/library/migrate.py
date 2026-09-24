@@ -74,6 +74,7 @@ COLLISION = "collision"
 COPIED = "copied"
 SKIPPED = "skipped"
 FAILED = "failed"
+INTERRUPTED = "interrupted"
 
 
 @dataclass
@@ -146,9 +147,10 @@ class ExecResult:
     # (cover art and sidecars are copied, not moved), as relative paths.
     left_in_source: list = field(default_factory=list)
     cancelled: bool = False
+    interrupted: bool = False
     # One (source, dest_rel, status, reason) per attempted file - the record of
     # what actually happened, surfaced to the user and written to the results
-    # manifest. status is COPIED | SKIPPED | FAILED.
+    # manifest. status is COPIED | SKIPPED | FAILED | INTERRUPTED.
     outcomes: list = field(default_factory=list)
     # Companion work has its own count and must not distort the track summary,
     # but every attempt still belongs in the durable results evidence.
@@ -2472,12 +2474,12 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
             remembered = _remember(entry)
         except KeyboardInterrupt as exc:
             result.cancelled = True
+            result.interrupted = True
             cleanup_primary = exc
-            result.failed += 1
             result.outcomes.append((
                 entry.source,
                 entry.dest_rel,
-                FAILED,
+                INTERRUPTED,
                 "migration was interrupted",
             ))
             outcome_recorded = True
@@ -2592,11 +2594,13 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
             except _PublishedCopyFailure as exc:
                 published = exc.published
                 discard_publication = True
+                interrupted = isinstance(exc.cause, KeyboardInterrupt)
+                result.interrupted |= interrupted
                 result.companion_outcomes.append((
                     source_path,
                     destination_path,
-                    FAILED,
-                    str(exc.cause),
+                    INTERRUPTED if interrupted else FAILED,
+                    "migration was interrupted" if interrupted else str(exc.cause),
                 ))
                 if exc.interrupted:
                     result.cancelled = True
@@ -2614,11 +2618,12 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
             except KeyboardInterrupt as exc:
                 discard_publication = published is not None
                 result.cancelled = True
+                result.interrupted = True
                 cleanup_primary = exc
                 result.companion_outcomes.append((
                     source_path,
                     destination_path,
-                    FAILED,
+                    INTERRUPTED,
                     "migration was interrupted",
                 ))
             except (OSError, shutil.Error) as exc:
@@ -4965,6 +4970,7 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             result = ExecResult()
         result.cancelled = True
         if isinstance(exc, KeyboardInterrupt):
+            result.interrupted = True
             _record_cleanup_failure(
                 result, "writer-protection teardown", exc)
             return result
@@ -5147,9 +5153,15 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             except _PublishedCopyFailure as exc:
                 published = exc.published
                 discard_publication = True
-                result.failed += 1
-                result.outcomes.append(
-                    (src, entry.dest_rel, FAILED, str(exc.cause)))
+                interrupted = isinstance(exc.cause, KeyboardInterrupt)
+                result.interrupted |= interrupted
+                if not interrupted:
+                    result.failed += 1
+                result.outcomes.append((
+                    src, entry.dest_rel,
+                    INTERRUPTED if interrupted else FAILED,
+                    "migration was interrupted" if interrupted else str(exc.cause),
+                ))
                 if exc.interrupted:
                     result.cancelled = True
                     stop_after_item = True
@@ -5166,11 +5178,11 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             except KeyboardInterrupt as exc:
                 discard_publication = (
                     published is not None and not source_retired)
-                result.failed += 1
+                result.interrupted = True
                 result.outcomes.append((
                     src,
                     entry.dest_rel,
-                    FAILED,
+                    INTERRUPTED,
                     "migration was interrupted",
                 ))
                 result.cancelled = True
@@ -5330,6 +5342,7 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
         return result
     except KeyboardInterrupt:
         result.cancelled = True
+        result.interrupted = True
         if in_place and folder_chains:
             try:
                 result.left_in_source = finished_folders_left()

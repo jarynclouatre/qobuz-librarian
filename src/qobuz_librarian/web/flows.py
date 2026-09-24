@@ -5232,7 +5232,13 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                     execution_abort.reraise()
         finally:
             job_mgr.set_staging_holder(None)
-    for failed_src, reason in result.failures[:50]:
+    interrupted = [
+        (source, reason)
+        for source, _destination, status, reason in result.outcomes
+        if status == migrate_engine.INTERRUPTED
+    ]
+    failed = result.failed + len(interrupted)
+    for failed_src, reason in (result.failures + interrupted)[:50]:
         job.push_line(f"failed: {failed_src} - {reason}")
     companion_outcomes = getattr(result, "companion_outcomes", ())
     companion_skipped = sum(
@@ -5240,11 +5246,11 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         for _source, _destination, status, _reason in companion_outcomes
     )
     companion_failed = sum(
-        status == migrate_engine.FAILED
+        status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}
         for _source, _destination, status, _reason in companion_outcomes
     )
     for source, _destination, status, reason in companion_outcomes:
-        if status == migrate_engine.FAILED:
+        if status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}:
             job.push_line(f"sidecar failed: {source} - {reason}")
     recoveries = tuple(getattr(result, "recoveries", ()))
     for recovery in recoveries:
@@ -5254,7 +5260,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
 
     verb = "moved" if in_place else "copied"
     has_problem = bool(
-        result.failed or companion_failed or recoveries or results_error
+        failed or companion_failed or recoveries or results_error
     )
     if has_problem:
         lead = (
@@ -5280,12 +5286,12 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         parts.append(f"{plural(companion_failed, 'cover/sidecar file')} failed")
     if result.lingered:
         parts.append(f"{result.lingered} moved but the original couldn't be removed")
-    if result.failed:
-        parts.append(f"{result.failed} failed; see the log")
+    if failed:
+        parts.append(f"{failed} failed; see the log")
         # Set job.error too (not just the prose summary) so a migration with
         # failed copies ends red, like every other execute path, instead of a
         # green DONE that buries "N failed" mid-sentence.
-        job.error = f"{plural(result.failed, 'file')} couldn't be migrated; see the log."
+        job.error = f"{plural(failed, 'file')} couldn't be migrated; see the log."
     if pruned:
         parts.append(f"cleared {plural(pruned, 'empty source folder')}")
     left = getattr(result, "left_in_source", ())

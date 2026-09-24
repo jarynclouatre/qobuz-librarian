@@ -2560,6 +2560,10 @@ def run_album_repair_mode(args, token, *, loop=False):
     args.no_upgrade = True  # repair = surgical; never silently upgrade the rest
 
     try:
+        if not getattr(args, "dry_run", False):
+            log.info(fmt(C.YELLOW,
+                "  The truncated tracks are removed once their replacements "
+                "verify. This cannot be undone."))
         while True:
             clear_scan_caches()
             try:

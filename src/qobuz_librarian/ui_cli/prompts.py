@@ -243,12 +243,12 @@ def _flush_stdin():
         pass
 
 
-def confirm(msg, default_yes=True, auto_yes=False, on_eof=False):
+def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, quiet=False):
     if auto_yes:
         return True
     suffix = " [Y/n]: " if default_yes else " [y/N]: "
     while True:
-        r = ask(msg + suffix)
+        r = ask(msg + suffix, quiet=quiet)
         if r is None:
             # A closed input is not consent, and not an answer either.
             return on_eof

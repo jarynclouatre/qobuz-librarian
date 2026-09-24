@@ -12,7 +12,7 @@ from qobuz_librarian.library import migrate as engine
 from qobuz_librarian.library.scanner import HAVE_MUTAGEN
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, format_size, section, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL
+from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, EXIT_INTERRUPT
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import confirm
 
@@ -269,7 +269,10 @@ def run_migrate_mode(args):
     has_problem = bool(result.failed or companion_failed or recoveries)
 
     log.info("")
-    if has_problem:
+    if result.interrupted:
+        log.info(fmt(C.YELLOW, "  Interrupted."))
+        log.info(fmt(C.YELLOW, f"  ⚠  Stopped early; {dest} holds a partial copy."))
+    elif has_problem:
         outcome = (
             "Migration stopped with problems."
             if result.cancelled else "Migration needs attention."
@@ -323,7 +326,7 @@ def run_migrate_mode(args):
         if result.failed > 50:
             log.info(fmt(C.RED,
                 f"       … and {result.failed - 50} more; see {results_manifest}"))
-    if result.cancelled:
+    if result.cancelled and not result.interrupted:
         log.info(fmt(C.YELLOW,
             "  ⚠  Stopped early; the destination holds a partial copy."))
     for recovery in recoveries:
@@ -339,6 +342,8 @@ def run_migrate_mode(args):
     # A run that lost files, stopped early, or left a recovery behind is not a
     # success, however much of it landed. A script chaining off this must see
     # the difference.
+    if result.interrupted:
+        return EXIT_INTERRUPT
     if result.failed or companion_failed or result.cancelled or recoveries:
         return EXIT_GENERAL
     return 0

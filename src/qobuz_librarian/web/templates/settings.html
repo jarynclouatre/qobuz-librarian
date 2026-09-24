@@ -10,7 +10,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>{% if queued %}Saved. Takes effect after the current job finishes.{% else %}Settings saved.{% endif %}</span>
+  <span>{% if queued %}Saved. Takes effect once no job is running.{% else %}Settings saved.{% endif %}</span>
 </div>
 {% endif %}
 
@@ -391,7 +391,7 @@
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
-        <p>These settings apply to new jobs. Saved values override Compose defaults.</p>
+        <p>These settings apply to new jobs. A value changed here overrides its Compose default.</p>
       </div>
     </div>
 {% if not rerendered %}{{ behaviour_notices() }}{% endif %}
@@ -446,6 +446,9 @@
               <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select text-base sm:max-w-sm sm:text-xs">
                 {% if key in unset_enum_keys or not behavior[key] %}
                 <option value="" {% if not behavior[key] %}selected{% endif %}>Not chosen yet</option>
+                {% endif %}
+                {% if behavior[key] and behavior[key] not in choices %}
+                <option value="{{ behavior[key] }}" selected>{{ behavior[key] }} s</option>
                 {% endif %}
                 {% for c in choices %}
                 <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
