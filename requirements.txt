@@ -44,7 +44,7 @@ pyyaml==6.0.3
     # via uvicorn
 requests==2.34.2
     # via qobuz-librarian (pyproject.toml)
-starlette==1.6.0
+starlette==1.7.0
     # via fastapi
 tomlkit==0.15.1
     # via qobuz-librarian (pyproject.toml)

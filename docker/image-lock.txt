@@ -67,11 +67,11 @@ requests-ratelimiter==0.10.0
 requests==2.34.2
 rich==13.9.4
 simple-term-menu==1.6.6
-soupsieve==2.9.2
+soupsieve==2.10
 standard-aifc==3.13.0
 standard-chunk==3.13.0
 standard-sunau==3.13.0
-starlette==1.6.0
+starlette==1.7.0
 syncedlyrics==1.0.1
 tomlkit==0.15.1
 typing-inspection==0.4.4
