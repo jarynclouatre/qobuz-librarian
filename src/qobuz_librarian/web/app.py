@@ -9513,6 +9513,7 @@ _COUNT_ONLY_SUMMARY = re.compile(
     r" and Gap Fill \([0-9][0-9,]*\)(?:, from your last library scan)?"
     r"|[0-9][0-9,]* upgrade candidates? ready to review"
     r"|[0-9][0-9,]* upgradeable albums? Qobuz can serve at higher quality"
+    r"|[0-9][0-9,]* albums? can be upgraded"
     r"|[0-9][0-9,]* albums? can be downsampled"
     r"|[0-9][0-9,]* albums? stored above CD rate"
     r"|[0-9][0-9,]* new releases? found across the library)\."

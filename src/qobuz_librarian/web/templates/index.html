@@ -302,7 +302,7 @@
           <div class="ql-active-main">
             <div class="ql-row-status">
               <span class="ql-status-chip">{{ labels.job_activity(j) }}</span>
-              <span id="dash-reconnect-{{ j.id }}" class="ql-status-chip is-warning hidden">Reconnecting</span>
+              <span id="dash-reconnect-{{ j.id }}" class="ql-status-chip ql-status-chip--wrap is-warning hidden">Reconnecting</span>
             </div>
             <a href="/jobs/{{ j.id }}" class="ql-row-title ql-row-link">
               {% if j.artist %}{{ j.artist }} · {% endif %}{{ j.display_title }}

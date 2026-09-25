@@ -1416,7 +1416,7 @@ def test_album_search_marks_a_part_finished_album_as_partial(client, monkeypatch
     assert r.status_code == 200
     assert "ql-owned-label" not in r.text
     assert "1 of 2" in r.text
-    assert r.text.count(">24/96</span>") == 2
+    assert r.text.count(">24/96</span>") == 3
     assert 'name="album_id" value="album1"' in r.text   # still downloadable
 
 
@@ -1517,9 +1517,9 @@ def test_album_search_keeps_quality_for_grouped_partial_editions(
 
     assert response.status_code == 200
     assert "data-version-toggle" in response.text
-    assert response.text.count("1 of 2") == 4
-    assert response.text.count(">16/44.1</span>") == 2
-    assert response.text.count("24/96") == 2
+    assert response.text.count("1 of 2") == 6
+    assert response.text.count(">16/44.1</span>") == 3
+    assert response.text.count("24/96") == 3
     for album_id in ("cd", "hires"):
         assert response.text.count(
             f'name="album_id" value="{album_id}"'

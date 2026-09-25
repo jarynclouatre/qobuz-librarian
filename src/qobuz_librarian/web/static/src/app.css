@@ -425,7 +425,7 @@ h1, h2, h3 {
   padding: 0.5rem 0.625rem 0.125rem;
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
-  font-size: 0.65rem;
+  font-size: 0.75rem;
 }
 .ql-sidebar-meta a {
   color: var(--ql-text-3);
@@ -529,13 +529,13 @@ h1, h2, h3 {
   left: calc(50% + 0.55rem);
   display: inline-grid;
   place-items: center;
-  min-width: 0.95rem;
-  height: 0.95rem;
+  min-width: 1.05rem;
+  height: 1.05rem;
   border-radius: 999px;
   background: var(--ql-gold);
-  color: var(--ql-gold-ink);
+  color: var(--ql-action-ink);
   font-family: var(--ql-font-mono);
-  font-size: 0.58rem;
+  font-size: 0.65rem;
   font-weight: 700;
   line-height: 1;
   text-align: center;
@@ -1098,6 +1098,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   min-width: 0;
   width: 100%;
   flex: 1 1 auto;
+  align-self: stretch;
   min-height: 0;
   padding: 0;
   border: 0;
@@ -1627,7 +1628,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   .ql-result-row--artist .ql-result-action-form .ql-btn {
     width: auto;
     min-width: 5.8rem;
-    min-height: 2rem;
     border-color: color-mix(in oklab, var(--ql-gold) 44%, transparent);
     background: transparent;
     color: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-text));
@@ -1661,6 +1661,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   line-height: 1.25;
 }
 .ql-vchip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--ql-line-soft);
@@ -2329,7 +2330,8 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
-.ql-sub-mobile {
+.ql-sub-mobile,
+.ql-vchip-narrow {
   display: none;
 }
 .ql-table-subtitle,
@@ -2779,14 +2781,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     position: static;
     grid-column: 1;
     grid-row: 1;
-    align-self: start;
+    align-self: center;
     justify-content: flex-start;
-    padding-top: 0.16rem;
   }
   .ql-table-title-cell,
   .ql-table-muted,
-  .ql-table-mono,
-  .ql-table-row > span:nth-last-child(2) {
+  .ql-table-mono {
     grid-column: 2;
   }
   .ql-table-title-cell {
@@ -2796,8 +2796,8 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     padding-right: 0;
   }
   .ql-cover {
-    width: 3.85rem;
-    height: 3.85rem;
+    width: 3.5rem;
+    height: 3.5rem;
   }
   .ql-table-title {
     display: -webkit-box;
@@ -2838,17 +2838,63 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   .ql-table-row--album > .ql-table-mono {
     display: none;
   }
+  /* The quality column: a phone row carries it on its meta line. */
   .ql-table-row > span:nth-last-child(2) {
-    position: static;
-    grid-row: 2;
-    justify-self: start;
-    margin: 0 0 0 4.53rem;
+    display: none;
   }
   .ql-table-action {
     position: static;
     grid-column: 3;
-    grid-row: 1 / span 2;
+    grid-row: 1;
+    align-self: center;
     justify-content: flex-end;
+  }
+  /* Title, artist, then one line of year, quality and the Tracks and
+     Versions chips. The chips' own box and the edition line join it. */
+  .ql-table-copy {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem 0.4rem;
+  }
+  .ql-table-copy > .ql-table-title,
+  .ql-table-copy > .ql-table-mobile-artist,
+  .ql-table-copy > .ql-subtitle,
+  .ql-table-copy .ql-table-release-meta {
+    flex-basis: 100%;
+    margin: 0;
+  }
+  .ql-table-copy > .ql-table-sub {
+    display: contents;
+  }
+  .ql-table-copy .ql-table-release-meta:not(:has(.ql-sub-version)) {
+    display: none;
+  }
+  .ql-table-copy .ql-row-chips {
+    order: 1;
+    justify-content: flex-start;
+    margin: 0;
+  }
+  .ql-sub-meta {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem 0.4rem;
+    margin: 0;
+    color: var(--ql-text-2);
+    font-size: 0.8125rem;
+    line-height: 1.2;
+  }
+  .ql-mobile-year {
+    color: var(--ql-text-2);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .ql-vchip-wide {
+    display: none;
+  }
+  .ql-vchip-narrow {
+    display: inline;
   }
   .ql-table-action .ql-btn,
   .ql-grid-footer .ql-btn {
@@ -2882,12 +2928,15 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
     padding-left: 0.7rem;
   }
   .ql-vchip {
-    padding: 0.32rem 0.55rem;
-    font-size: 0.71875rem;
+    padding: 0.32rem 0.5rem;
+    font-size: 0.6875rem;
     border-radius: 999px;
     color: color-mix(in oklab, var(--ql-gold) 75%, var(--ql-text-2));
     border-color: color-mix(in oklab, var(--ql-gold) 30%, transparent);
     background-color: color-mix(in oklab, var(--ql-gold) 6%, transparent);
+  }
+  [data-theme="winter"] .ql-vchip {
+    color: color-mix(in oklab, var(--ql-gold-strong) 80%, var(--ql-text));
   }
   .ql-table-row.ql-subrow {
     grid-template-columns: 1rem minmax(0, 1fr) auto;
@@ -2915,9 +2964,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   }
   .ql-subtitle {
     white-space: normal;
-  }
-  .ql-subrow > span:nth-last-child(2) {
-    margin-left: 3.28rem;
   }
   .ql-sub-artist {
     display: none;
@@ -3503,7 +3549,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-row-meta {
   margin: 0.2rem 0 0;
-  color: color-mix(in oklab, var(--color-base-content) 56%, transparent);
+  color: var(--ql-text-2);
   font-size: 0.8125rem;
   line-height: 1.35;
   overflow-wrap: anywhere;
@@ -3566,7 +3612,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-status-chip.is-error {
   border-color: color-mix(in oklab, var(--color-error) 34%, transparent);
-  color: var(--color-error);
+  color: color-mix(in oklab, var(--color-error) 84%, var(--color-base-content));
 }
 .ql-status-chip.hidden,
 .ql-result-label.hidden,
@@ -3582,16 +3628,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   color: color-mix(in oklab, var(--ql-gold-strong) 82%, var(--ql-text));
   border-color: color-mix(in oklab, var(--ql-gold) 38%, transparent);
   background-color: color-mix(in oklab, var(--ql-gold) 10%, transparent);
-}
-[data-theme="winter"] .ql-status-chip.is-success {
-  color: #047857;
-  border-color: rgb(4 120 87 / 0.36);
-  background-color: rgb(4 120 87 / 0.08);
-}
-[data-theme="winter"] .ql-status-chip.is-error {
-  color: #dc2626;
-  border-color: rgb(220 38 38 / 0.34);
-  background-color: rgb(220 38 38 / 0.07);
 }
 .ql-job-status {
   max-width: 100%;
@@ -3731,34 +3767,6 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   margin-bottom: 0;
   padding-inline: 1rem;
 }
-.ql-review-tabs button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-height: 2.35rem;
-  padding: 0.55rem 0.9rem 0.5rem;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--ql-text-2);
-  font-size: 0.875rem;
-  font-weight: 500;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color 140ms ease;
-}
-.ql-review-tabs button:hover {
-  color: var(--ql-text);
-}
-.ql-review-tabs button.is-active {
-  border-bottom-color: var(--ql-gold);
-  color: var(--ql-text);
-}
-.ql-review-tabs button:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: -2px;
-}
 /* The count chip inside a tab strip: the review tabs, and Queue / History.
    One definition, all of it here. */
 .ql-tab-count {
@@ -3772,28 +3780,16 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   font-size: 0.65625rem;
   font-weight: 600;
   line-height: 1;
-  color: var(--ql-text-3);
+  color: var(--ql-text-2);
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
 }
-.ql-review-tabs button.is-active .ql-tab-count {
+.ql-page-tabs .is-active .ql-tab-count {
   color: var(--ql-gold);
   background-color: color-mix(in oklab, var(--ql-gold) 12%, transparent);
 }
 /* Gold on its own tint collapses to 2.5:1 against a cream page. */
-[data-theme="winter"] .ql-review-tabs button.is-active .ql-tab-count {
+[data-theme="winter"] .ql-page-tabs .is-active .ql-tab-count {
   color: var(--ql-text);
-}
-.ql-review-tabs-static button {
-  cursor: default;
-  color: var(--ql-text-2);
-}
-.ql-review-tabs-static button:hover,
-.ql-review-tabs-static button.is-active,
-.ql-review-tabs-static button.is-active:hover {
-  color: var(--ql-text);
-}
-.ql-review-tabs-static button:not(.is-active):hover {
-  color: var(--ql-text-2);
 }
 .ql-review-filter-row {
   margin-bottom: 0.75rem;
@@ -3867,6 +3863,18 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 @media (max-width: 639.98px) {
   .ql-review-summary-row {
     margin-inline: 0;
+  }
+  /* A phone cannot fit every tool on one line, so it breaks where the
+     meaning does: selection tools first, then the Dismissed link and
+     Discard, which act on the review rather than the rows. */
+  .ql-review-summary-actions::after {
+    content: "";
+    order: 1;
+    flex-basis: 100%;
+  }
+  .ql-review-summary-actions > .ql-review-dismissed-link,
+  .ql-review-summary-actions > button[formaction] {
+    order: 2;
   }
 }
 .ql-empty-line {
@@ -4001,6 +4009,7 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   gap: 0.75rem;
 }
 .ql-header-refresh {
+  position: relative;
   display: inline-flex;
   width: 2.25rem;
   height: 2.25rem;
@@ -4029,6 +4038,24 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 .ql-refresh-note {
   color: var(--ql-text-3);
   font-size: 0.8rem;
+}
+/* On a phone the Library title keeps its row with the refresh icon, and a
+   note about the refresh takes the line below. */
+@media (max-width: 639.98px) {
+  .ql-page-header--split {
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+  }
+  .ql-page-header--split > h1 {
+    margin-right: auto;
+  }
+  .ql-page-header--split > #library-refresh {
+    display: contents;
+  }
+  .ql-page-header--split .ql-refresh-note {
+    order: 1;
+    flex-basis: 100%;
+  }
 }
 .ql-page-header p {
   max-width: 42rem;
@@ -4414,56 +4441,46 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
   overflow-x: auto;
   border-bottom: 1px solid var(--ql-line);
 }
-.ql-page-tabs a {
+.ql-page-tabs a,
+.ql-page-tabs button {
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
   min-height: 2.35rem;
   padding: 0.55rem 0.9rem 0.5rem;
+  border: 0;
   border-bottom: 2px solid transparent;
+  background: transparent;
   color: var(--ql-text-2);
-  font-size: 0.9rem;
-  font-weight: 680;
+  font-size: 0.875rem;
+  font-weight: 600;
   line-height: 1;
   text-decoration: none;
   white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms ease;
 }
-.ql-page-tabs a:hover {
+.ql-page-tabs a:hover,
+.ql-page-tabs button:hover,
+.ql-page-tabs .is-active {
   color: var(--ql-text);
 }
-.ql-page-tabs a.is-active {
+.ql-page-tabs .is-active {
   border-bottom-color: var(--ql-gold);
+}
+.ql-page-tabs a:focus-visible,
+.ql-page-tabs button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
+  outline-offset: -2px;
+}
+/* The idle Library page shows the two result tabs as labels only. */
+.ql-review-tabs-static button,
+.ql-review-tabs-static button:not(.is-active):hover {
+  cursor: default;
+  color: var(--ql-text-2);
+}
+.ql-review-tabs-static button.is-active {
   color: var(--ql-text);
-}
-.ql-quality-tabs {
-  display: grid;
-  width: min(100%, 24rem);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  overflow: hidden;
-  border: 1px solid color-mix(in oklab, var(--ql-text) 10%, transparent);
-  border-radius: var(--ql-radius-sm);
-  background-color: color-mix(in oklab, var(--ql-surface) 76%, transparent);
-}
-.ql-quality-tabs a {
-  justify-content: center;
-  min-height: 2.45rem;
-  border-bottom: 0;
-  box-shadow: inset 0 -2px 0 transparent;
-  text-align: center;
-}
-.ql-quality-tabs a + a {
-  border-left: 1px solid color-mix(in oklab, var(--ql-text) 8%, transparent);
-}
-.ql-quality-tabs a.is-active {
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 13%, transparent),
-      color-mix(in oklab, var(--ql-text) 2.5%, transparent));
-  box-shadow: inset 0 -2px 0 var(--ql-gold);
-}
-[data-theme="night"] .ql-quality-tabs {
-  border-color: color-mix(in oklab, var(--ql-text) 9%, transparent);
-  background-color: color-mix(in oklab, var(--ql-text) 3%, transparent);
 }
 .ql-tool-panel {
   border: 1px solid var(--ql-line);
@@ -5323,6 +5340,12 @@ details.ql-mobile-drawer[open] > .ql-mobile-menu {
 }
 .ql-required {
   color: var(--ql-danger);
+}
+.ql-field-optional {
+  margin-left: 0.35rem;
+  color: var(--ql-text-3);
+  font-size: 0.75rem;
+  font-weight: 500;
 }
 /* The browser's file control cannot be styled, so it is hidden behind a label
    wearing the normal button styles and the chosen name is written beside it.
@@ -6914,5 +6937,116 @@ details[data-artist].htmx-swapping {
        the Download button full-width): the one-row height left the last
        result permanently behind it. */
     padding-bottom: 6rem;
+  }
+}
+
+/* Phone tap targets: 44px wherever a control is pressed with a thumb. Where
+   the drawn control should stay small (an outlined icon, an inline chip) an
+   invisible layer carries the extra area instead. */
+@media (max-width: 1023.98px) {
+  .ql-tabbar .ql-tab {
+    min-height: 2.75rem;
+    justify-content: center;
+  }
+  .ql-sheet-foot .ql-sidebar-action {
+    min-height: 2.75rem;
+  }
+  .ql-mobile-brand {
+    padding-block: 0.3125rem;
+    margin-block: -0.3125rem;
+  }
+  .ql-sheet-head .ql-icon-button {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+  .ql-mobilebar .ql-icon-button {
+    position: relative;
+  }
+  .ql-mobilebar .ql-icon-button::after {
+    content: "";
+    position: absolute;
+    inset: -0.25rem;
+  }
+  .ql-sheet-foot .ql-sidebar-meta a {
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+    border-bottom: 0;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in oklab, var(--ql-gold) 24%, transparent);
+    text-underline-offset: 0.2rem;
+  }
+}
+@media (max-width: 639.98px) {
+  .ql-page-tabs a,
+  .ql-page-tabs button,
+  .ql-search-filter,
+  .ql-search-select-all,
+  .ql-search-back,
+  .ql-disclosure-summary {
+    min-height: 2.75rem;
+  }
+  .ql-segmented span {
+    padding-block: 0.8rem 0.87rem;
+  }
+  .ql-work-status a {
+    display: inline-flex;
+    align-items: center;
+    padding-block: 0.75rem;
+    margin-block: -0.75rem;
+  }
+  .ql-search-view-toggle {
+    overflow: visible;
+  }
+  .ql-search-view-toggle button {
+    position: relative;
+    width: 2.75rem;
+  }
+  .ql-search-view-toggle button:first-child {
+    border-radius: calc(0.5rem - 1px) 0 0 calc(0.5rem - 1px);
+  }
+  .ql-search-view-toggle button:last-child {
+    border-radius: 0 calc(0.5rem - 1px) calc(0.5rem - 1px) 0;
+  }
+  .ql-search-view-toggle button::after {
+    content: "";
+    position: absolute;
+    inset: -0.4375rem 0;
+  }
+  .ql-search-select-all,
+  .ql-search-filter {
+    white-space: nowrap;
+  }
+  .ql-group-dismiss::after,
+  .ql-header-refresh::after,
+  .ql-vchip::before,
+  .ql-auth-details-summary::before {
+    content: "";
+    position: absolute;
+  }
+  .ql-auth-details-summary {
+    position: relative;
+  }
+  .ql-auth-details-summary::before {
+    inset: -0.75rem -0.25rem;
+  }
+  .ql-group-dismiss::after {
+    inset: -0.4375rem;
+  }
+  .ql-header-refresh::after {
+    inset: -0.3125rem;
+  }
+  /* The chips sit on a row's last line, so their extra area goes mostly
+     into the padding below rather than over the artist link above. */
+  .ql-vchip::before {
+    inset: -0.3125rem -0.125rem -1rem;
+  }
+}
+@media (max-width: 359.98px) {
+  .ql-search-tools {
+    gap: 0.6rem;
+  }
+  .ql-search-view-toggle button {
+    width: 2.25rem;
   }
 }

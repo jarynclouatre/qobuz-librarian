@@ -168,14 +168,20 @@
 /* One marker for "this cannot be undone", set from what the action does to
    the user's files, never from how loud the button should look. It dresses
    the button and, through qlConfirm, the button in the confirmation, so the
-   two can never disagree about whether the thing is reversible. */
-.ql-btn[data-irreversible] {
+   two can never disagree about whether the thing is reversible. A disabled
+   button keeps its own disabled look: there is nothing to warn about yet. */
+.ql-btn[data-irreversible]:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
   border-color: color-mix(in oklab, var(--ql-danger) 44%, transparent);
   background-color: color-mix(in oklab, var(--ql-danger) 12%, transparent);
   color: color-mix(in oklab, var(--ql-danger) 86%, var(--ql-text));
 }
 
-.ql-btn-ghost[data-irreversible] {
+.ql-btn[data-irreversible]:not(.ql-btn-primary):not(.ql-btn-ghost):hover:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
+  border-color: color-mix(in oklab, var(--ql-danger) 62%, transparent);
+  background-color: color-mix(in oklab, var(--ql-danger) 18%, transparent);
+}
+
+.ql-btn-ghost[data-irreversible]:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
   border-color: transparent;
   background: transparent;
   color: color-mix(in oklab, var(--ql-danger) 72%, var(--ql-text));
