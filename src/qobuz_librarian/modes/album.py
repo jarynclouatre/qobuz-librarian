@@ -420,11 +420,10 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
             if not loop:
                 exit_code = _one_shot_exit_code(result)
                 if exit_code:
-                    log.warning(fmt(
-                        C.YELLOW,
-                        "  ⚠  Album run needs attention; review the result "
-                        "above and retry if needed.",
-                    ))
+                    clause = "review the result above and retry if needed"
+                    log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+                else:
+                    log.info(fmt(C.GREEN, "  ✓  Done."))
                 return exit_code
     except KeyboardInterrupt:
         interrupted = True

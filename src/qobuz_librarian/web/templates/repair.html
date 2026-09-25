@@ -49,7 +49,7 @@
 {% if repair_resume %}
 <div class="ql-tool-note ql-tool-note-info">
   <p class="ql-tool-note-title">Scan can resume</p>
-  <p>A repair scan did not finish{% if repair_resume.found %} with {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found so far{% endif %}.</p>
+  <p>A repair scan did not finish{% if repair_resume.found %}; it had found {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }}{% endif %}.</p>
 </div>
 {% endif %}
 

@@ -84,7 +84,7 @@ docker compose run --rm qobuz-librarian cli --help
 | Only in the terminal | Only in the web app |
 |---|---|
 | The Library walk and Album gaps walk, which ask as they go | The Library scan and the reviews it builds |
-| Offering singles and compilations (`--include-singles`, `--include-comps`) | New releases checks and Discover |
+| The `--include-singles` and `--include-comps` switches | New releases checks and Discover |
 | Downloading without importing (`--no-import`) | Dismissing and bringing back albums |
 | | Putting downsampled originals back, and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |

@@ -445,8 +445,6 @@ def run_upgrade_walk_mode(args, token):
             log.info("")
     except KeyboardInterrupt:
         interrupted = True
-        log.info("")
-        log.info(fmt(C.GRAY, "  Interrupted. Stopping upgrade walk."))
     finally:
         args.consolidate = saved_consolidate
 
@@ -457,22 +455,9 @@ def run_upgrade_walk_mode(args, token):
     n_gone = n_stale_candidates + n_gone_albums
 
     log.info("")
-    if interrupted:
-        log.warning(fmt(C.YELLOW, "  ⚠  Upgrade walk stopped early."))
-    elif no_answer:
-        if not n_attempted:
-            log.warning(fmt(C.YELLOW, "  No answer was given. Nothing changed."))
-            return EXIT_GENERAL
-        log.warning(fmt(C.YELLOW,
-            "  No answer was given, so the walk stopped after "
-            f"{plural(n_attempted, 'album')}."))
-    elif n_failed_attempts:
-        log.warning(fmt(C.RED, "  ✗  Upgrade walk finished with errors."))
-    elif n_upgraded_albums or not n_gone:
-        log.info(fmt(C.GREEN, "  ✓  Upgrade walk complete."))
-    else:
-        log.info(fmt(C.YELLOW, "  ⚠  Upgrade walk finished; nothing was "
-                               "upgraded."))
+    if no_answer and not n_attempted and not interrupted:
+        log.warning(fmt(C.YELLOW, "  No answer was given. Nothing changed."))
+        return EXIT_GENERAL
     log.info(fmt(C.GRAY,
         f"     Reviewed {plural(n_reviewed, 'artist')}; upgraded tracks in "
         f"{plural(n_upgraded_albums, 'album')}."))
@@ -513,6 +498,23 @@ def run_upgrade_walk_mode(args, token):
                     f"       · {truncate(_t, 50)}: {'; '.join(_rs)}"))
         log.info(fmt(C.GRAY,
             "     Re-run without --auto-safe to review these interactively."))
+    clause = None
+    if no_answer:
+        clause = "no answer was given, so the walk stopped early"
+    elif unsafe_artists:
+        clause = f"{plural(len(unsafe_artists), 'artist')} skipped for manual review"
+    elif n_gone and not n_upgraded_albums:
+        clause = f"{plural(n_gone, 'candidate')} no longer in the library"
+    if interrupted:
+        log.info(fmt(C.GRAY, "  Interrupted."))
+    elif n_failed_attempts:
+        log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_failed_attempts, 'error')}."))
+    elif clause:
+        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+    elif not n_upgraded_albums:
+        log.info(fmt(C.GRAY, "  Nothing to do."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     if interrupted:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if no_answer or n_failed_attempts else 0

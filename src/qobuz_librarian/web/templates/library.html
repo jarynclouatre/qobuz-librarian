@@ -133,6 +133,13 @@
   </div>
   {% endif %}
 
+  {# The review tabs stay in place at zero once the review is worked
+     through, so the page keeps its shape. #}
+  <nav class="ql-page-tabs ql-review-tabs ql-review-tabs-static" aria-label="Result type">
+    <button type="button" class="is-active" disabled>Missing Albums <span class="ql-tab-count">0</span></button>
+    <button type="button" disabled>Gap Fill <span class="ql-tab-count">0</span></button>
+  </nav>
+
   <section class="ql-scan-hero">
     <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
       <circle cx="48" cy="48" r="29" stroke="currentColor" stroke-opacity="0.5" stroke-width="2"/>

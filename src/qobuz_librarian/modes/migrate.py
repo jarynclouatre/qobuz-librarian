@@ -12,7 +12,7 @@ from qobuz_librarian.library import migrate as engine
 from qobuz_librarian.library.scanner import HAVE_MUTAGEN
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, block, fmt, format_size, section, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, EXIT_INTERRUPT
+from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, EXIT_INTERRUPT, plural
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import confirm
 
@@ -268,31 +268,24 @@ def run_migrate_mode(args):
     has_problem = bool(result.failed or companion_failed or recoveries)
 
     log.info("")
-    if result.interrupted:
-        log.info(fmt(C.YELLOW, "  Interrupted."))
-        log.info(fmt(C.YELLOW, f"  ⚠  Stopped early; {dest} holds a partial copy."))
-    elif has_problem:
-        outcome = (
-            "Migration stopped with problems."
-            if result.cancelled else "Migration needs attention."
-        )
-        log.warning(fmt(C.RED, f"  ✗  {outcome}"))
-    elif result.cancelled:
-        log.warning(fmt(C.YELLOW,
-            "  ⚠  Migration stopped early; the destination is incomplete."))
-    else:
-        if result.copied or not resume_entries:
-            log.info(fmt(C.GREEN,
-                f"  ✓  {result.copied} file(s) "
-                f"{'moved' if in_place else 'copied'}."))
-        if resume_entries:
-            log.info(fmt(C.GREEN,
-                f"  ✓  {len(resume_entries)} file(s) already in place were "
-                "verified."))
     if has_problem or result.cancelled:
         log.info(fmt(C.GRAY,
             f"     {result.copied} file(s) "
             f"{'moved' if in_place else 'copied'} before the run ended."))
+    else:
+        if result.copied or not resume_entries:
+            log.info(fmt(C.GRAY,
+                f"     {result.copied} file(s) "
+                f"{'moved' if in_place else 'copied'}."))
+        if resume_entries:
+            log.info(fmt(C.GRAY,
+                f"     {len(resume_entries)} file(s) already in place were "
+                "verified."))
+    if result.interrupted:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  Stopped early; the library is partly moved into {dest}."
+            if in_place else
+            f"     ⚠  Stopped early; {dest} holds a partial copy."))
     if result.skipped:
         log.info(fmt(C.YELLOW,
             f"  ⚠  {result.skipped} skipped (destination already existed)."))
@@ -332,6 +325,8 @@ def run_migrate_mode(args):
                 f"       … and {result.failed - 50} more; see {results_manifest}"))
     if result.cancelled and not result.interrupted:
         log.info(fmt(C.YELLOW,
+            "  ⚠  Stopped early; the library is partly moved."
+            if in_place else
             "  ⚠  Stopped early; the destination holds a partial copy."))
     for recovery in recoveries:
         log.info(fmt(C.RED,
@@ -343,6 +338,16 @@ def run_migrate_mode(args):
         f"  Plan:        {manifest}\n"
         f"  Results:     {results_manifest}\n"
         "  Spot-check it before pointing the tool at it as your main library."))
+    n_errors = result.failed + companion_failed
+    if result.interrupted or result.cancelled:
+        log.info(fmt(C.GRAY, "  Interrupted."))
+    elif n_errors:
+        log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_errors, 'error')}."))
+    elif recoveries:
+        clause = f"{plural(len(recoveries), 'recovery', 'recoveries')} retained (see above)"
+        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     # A run that lost files, stopped early, or left a recovery behind is not a
     # success, however much of it landed. A script chaining off this must see
     # the difference.

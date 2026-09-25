@@ -12160,7 +12160,7 @@ def _diagnostics():
                        "detail": paused["reason"]})
     else:
         checks.append({"label": "Writes on", "ok": True,
-                       "detail": "Downloads and scans can run"})
+                       "detail": "Not paused"})
 
     music_state, recorded_albums = collection_snapshot.music_root_write_state()
     if music_state == "ready":

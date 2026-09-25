@@ -832,11 +832,10 @@ def _gap_fill_exit_code(counts):
         for bucket in _ATTENTION_BUCKETS
     )
     if needs_attention:
-        log.warning(fmt(
-            C.YELLOW,
-            "  ⚠  Artist run needs attention; review the summary above "
-            "and retry any unfinished albums.",
-        ))
+        clause = "retry the unfinished albums above"
+        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     return EXIT_GENERAL if needs_attention else 0
 
 
@@ -869,12 +868,10 @@ def run_artist_mode(artist_name, args, token):
                     artist_name, {}, args, token, fresh=True
                 )
                 if needs_attention:
-                    log.warning(fmt(
-                        C.YELLOW,
-                        "  ⚠  Artist run needs attention; review the "
-                        "details above and retry.",
-                    ))
+                    clause = "review the details above and retry"
+                    log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
                     return EXIT_GENERAL
+                log.info(fmt(C.GREEN, "  ✓  Done."))
             return 0
         vlog(f"  Library: {artist_dir}")
 
@@ -891,7 +888,6 @@ def run_artist_mode(artist_name, args, token):
         section("Step 1: Gap-fill summary")
         print()
         counts = _report_gap_fill_summary(gap_fill_results)
-        exit_code = _gap_fill_exit_code(counts)
 
         if no_match:
             print()
@@ -920,7 +916,7 @@ def run_artist_mode(artist_name, args, token):
 
         if args.no_catalog:
             log.info(fmt(C.GRAY, "\n  --no-catalog: skipping step 2."))
-            return exit_code
+            return _gap_fill_exit_code(counts)
         print()
 
         n_added, step_two_attention = run_artist_missing_albums(
@@ -932,13 +928,10 @@ def run_artist_mode(artist_name, args, token):
         if n_added:
             log.info(fmt(C.GREEN, f"\n  ✓  Added {n_added} new album(s) for {artist_name}.\n"))
         if step_two_attention:
-            log.warning(fmt(
-                C.YELLOW,
-                "  ⚠  Artist run needs attention; review Step 2 above "
-                "and retry any unfinished albums.",
-            ))
+            clause = "retry the unfinished albums above"
+            log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
             return EXIT_GENERAL
-        return exit_code
+        return _gap_fill_exit_code(counts)
     finally:
         # Restore --consolidate so the menu loop sees the original CLI value.
         args.consolidate = saved_consolidate

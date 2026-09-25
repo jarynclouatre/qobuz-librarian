@@ -80,8 +80,7 @@ def run_library_lyrics_mode(args):
         )
     except KeyboardInterrupt:
         print()
-        log.warning(fmt(C.YELLOW,
-            "  Interrupted. What was done is saved; re-run to continue."))
+        log.info(fmt(C.GRAY, "  Interrupted."))
         return EXIT_INTERRUPT
     finally:
         signal.signal(signal.SIGINT, previous_handler)
@@ -106,29 +105,22 @@ def _report_summary(res, *, dry_run):
     skipped = summary["already_checked"]
     print()
     if summary["stopped"] and res.get("stop_stage") == "index":
-        log.warning(fmt(C.YELLOW,
-            "  ⚠  Lyrics pass stopped while checking existing tags."))
         log.info(fmt(C.GRAY,
             f"     Scanned {processed} of {plural(summary['candidate_total'], 'track')}. "
             "No provider work started."))
+        log.info(fmt(C.GRAY, "  Interrupted."))
         return True
     if not processed and not summary["stopped"] and not unreadable:
-        log.info(fmt(C.GREEN, "  ✓  Lyrics pass complete."))
         log.info(fmt(C.GRAY,
             f"     Nothing needed checking; all {plural(total, 'track')} "
             "have lyrics or were checked before (--lyrics-rescan redoes "
             "them)."))
+        log.info(fmt(C.GRAY, "  Nothing to do."))
         return False
 
     wrote_synced = res.get("wrote-synced", 0) + res.get("dry:wrote-synced", 0)
     wrote_plain  = res.get("wrote-plain", 0) + res.get("dry:wrote-plain", 0)
 
-    if summary["stopped"]:
-        log.warning(fmt(C.YELLOW, "  ⚠  Lyrics pass stopped early."))
-    elif summary["failures"]:
-        log.warning(fmt(C.RED, "  ✗  Lyrics pass finished with errors."))
-    else:
-        log.info(fmt(C.GREEN, "  ✓  Lyrics pass complete."))
     verb = "Would write" if dry_run else "Wrote"
     skipped_part = (f" · {skipped} skipped (already checked)" if skipped else "")
     unfinished_part = (
@@ -139,12 +131,12 @@ def _report_summary(res, *, dry_run):
         f"{processed} of {plural(summary['candidate_total'], 'track')} checked"
         if summary["stopped"] else f"{plural(processed, 'track')} checked"
     )
-    log.info(fmt(C.GRAY,
+    log.info(block(fmt(C.GRAY,
         f"     {checked_part} · {verb.lower()} "
         f"{wrote_synced} synced + {wrote_plain} plain · "
         f"{summary['already']} already had lyrics · "
         f"{summary['not_found']} no lyrics found"
-        f"{skipped_part}{unfinished_part}."))
+        f"{skipped_part}{unfinished_part}.")))
     if summary["missing_tags"]:
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['missing_tags'], 'track')} skipped because "
@@ -177,4 +169,10 @@ def _report_summary(res, *, dry_run):
         log.warning(fmt(C.YELLOW,
             f"     {plural(summary['other_errors'], 'track')} returned an "
             "unexpected result; see the log above."))
+    if summary["stopped"]:
+        log.info(fmt(C.GRAY, "  Interrupted."))
+    elif summary["failures"]:
+        log.warning(fmt(C.RED, f"  ✗  Finished with {plural(summary['failures'], 'error')}."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     return bool(summary["stopped"] or summary["failures"])

@@ -275,34 +275,16 @@ def run_downsample_walk_mode(args):
                 )
             log.info("")
             if interrupted:
-                log.info(fmt(C.GRAY, "  Interrupted."))
                 break
     except KeyboardInterrupt:
         log.info("")
-        log.info(fmt(C.GRAY, "  Interrupted."))
         interrupted = True
 
     log.info("")
-    if no_answer:
-        if not n_attempted:
-            log.warning(fmt(C.YELLOW,
-                "  No answer was given. No music files were changed."))
-            return EXIT_GENERAL
+    if no_answer and not n_attempted:
         log.warning(fmt(C.YELLOW,
-            "  No answer was given, so the walk stopped after "
-            f"{plural(n_attempted, 'album')}."))
-    elif interrupted:
-        log.warning(fmt(C.YELLOW, "  ⚠  Downsample walk stopped early."))
-    elif unchecked:
-        log.warning(block(fmt(C.YELLOW,
-            f"  ✗  Downsample walk incomplete: {plural(unchecked, 'artist')} "
-            "couldn't be checked. Re-run to retry.")))
-    elif total_errors:
-        log.warning(fmt(C.RED,
-            "  ✗  Downsample walk finished with errors. Re-run to retry the "
-            "files left unchanged."))
-    elif not total_flush_warns:
-        log.info(fmt(C.GREEN, "  ✓  Downsample walk complete."))
+            "  No answer was given. No music files were changed."))
+        return EXIT_GENERAL
     if args.dry_run:
         log.info(fmt(C.GRAY,
             f"     Checked {plural(n_scanned, 'artist')}; found "
@@ -314,11 +296,11 @@ def run_downsample_walk_mode(args):
             f"{plural(n_albums_done, 'album')}, "
             f"{format_size(total_saved)} smaller."))
         if keep_originals and n_albums_done:
-            log.info(fmt(C.GRAY,
+            log.info(block(fmt(C.GRAY,
                 "     The hi-res originals are kept for "
                 f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}, so "
                 "nothing is freed until they expire. Until then they can be "
-                "put back from Settings."))
+                "put back from Settings.")))
     if total_errors:
         log.info(fmt(C.YELLOW,
             f"     {plural(total_errors, 'file')} could not be downsampled "
@@ -331,16 +313,28 @@ def run_downsample_walk_mode(args):
             f"{'it' if total_damaged == 1 else 'them'}."))
     if total_flush_warns:
         log.warning(block(fmt(C.YELLOW,
-            f"  ⚠  Downsample walk needs attention: "
-            f"{plural(total_flush_warns, 'file')} resampled but couldn't be "
+            f"     ⚠  {plural(total_flush_warns, 'file')} resampled but couldn't be "
             "flushed to disk. The swap may not survive a power loss; check "
             "the drive.")))
-    if state_refresh_warnings:
-        log.warning(fmt(
-            C.YELLOW,
-            "  Files were changed, but the saved Upgrade view needs a "
-            "Library refresh.",
-        ))
+    clause = None
+    if unchecked:
+        clause = f"{plural(unchecked, 'artist')} could not be checked"
+    elif no_answer:
+        clause = "no answer was given, so the walk stopped early"
+    elif total_flush_warns:
+        clause = f"{plural(total_flush_warns, 'file')} could not be flushed to disk"
+    elif state_refresh_warnings:
+        clause = "the saved Upgrade results need a Library refresh"
+    if interrupted:
+        log.info(fmt(C.GRAY, "  Interrupted."))
+    elif total_errors:
+        log.warning(fmt(C.RED, f"  ✗  Finished with {plural(total_errors, 'error')}."))
+    elif clause:
+        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+    elif not offered:
+        log.info(fmt(C.GRAY, "  Nothing to do."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     if interrupted:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if (no_answer or unchecked

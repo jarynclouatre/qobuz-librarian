@@ -448,7 +448,6 @@ def run_album_walk_mode(args, token):
                 # for completed artists, so without this the in-progress artist's
                 # approvals wouldn't actually reach disk despite the message.
                 _save_queue(shared_queue)
-                log.info(fmt(C.GRAY, "\n  Walk interrupted."))
                 if shared_queue:
                     log.info(_kept_queue_note(shared_queue))
                 interrupted = True
@@ -480,20 +479,10 @@ def run_album_walk_mode(args, token):
     print()
     needs_attention = (interrupted or walk_stopped or partial_completion
                        or retry_needed or bool(discovery_errors))
-    if needs_attention:
-        outcome = ("stopped early" if interrupted or walk_stopped
-                   else "needs attention")
-        log.warning(fmt(C.YELLOW,
-            f"  ⚠ Album walk {outcome}. "
-            f"Artists scanned: {n_artists_scanned} · "
-            f"Already complete: {n_albums_complete} · "
-            f"Filled: {n_albums_filled}"))
-    else:
-        log.info(fmt(C.GREEN,
-            f"  ✓ Album walk complete. "
-            f"Artists scanned: {n_artists_scanned} · "
-            f"Already complete: {n_albums_complete} · "
-            f"Filled: {n_albums_filled}"))
+    log.info(fmt(C.GRAY,
+        f"     Artists scanned: {n_artists_scanned} · "
+        f"Already complete: {n_albums_complete} · "
+        f"Filled: {n_albums_filled}"))
     leftovers = []
     if n_albums_skipped:
         leftovers.append(f"skipped by you: {n_albums_skipped}")
@@ -512,6 +501,17 @@ def run_album_walk_mode(args, token):
             log.info(fmt(C.GRAY, f"    {note}"))
     if n_artists_scanned and not needs_attention and not args.dry_run:
         _write_collection_snapshot()
+    clause = None
+    if discovery_errors:
+        clause = f"{plural(len(discovery_errors), 'artist')} could not be read"
+    elif partial_completion or retry_needed:
+        clause = "some albums need a retry"
+    if interrupted or walk_stopped:
+        log.info(fmt(C.GRAY, "  Interrupted."))
+    elif clause:
+        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     if interrupted:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if needs_attention else 0
@@ -764,22 +764,25 @@ def run_walk_queued_mode(args, token):
                 ctrl_c = True
                 interrupted = True
                 _save_queue(shared_queue)
-                log.info(fmt(C.GRAY, "\n  Interrupted."))
                 log.info(_kept_queue_note(shared_queue))
 
     print()
     needs_attention = (interrupted or partial_completion or retry_needed
                        or bool(discovery_errors))
-    if needs_attention:
-        outcome = "stopped early" if interrupted else "needs attention"
-        log.warning(fmt(C.YELLOW,
-            f"  ⚠ Walk {outcome}. Scanned {n_scanned}, "
-            f"skipped {n_skipped}."))
-    else:
-        log.info(fmt(C.GREEN,
-            f"  ✓ Walk done. Scanned {n_scanned}, skipped {n_skipped}."))
+    log.info(fmt(C.GRAY, f"     Scanned {n_scanned}, skipped {n_skipped}."))
     if n_scanned and not needs_attention and not args.dry_run:
         _write_collection_snapshot()
+    clause = None
+    if discovery_errors:
+        clause = f"{plural(len(discovery_errors), 'artist')} could not be read"
+    elif partial_completion or retry_needed:
+        clause = "some albums need a retry"
+    if interrupted:
+        log.info(fmt(C.GRAY, "  Interrupted."))
+    elif clause:
+        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+    else:
+        log.info(fmt(C.GREEN, "  ✓  Done."))
     if ctrl_c:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if needs_attention else 0

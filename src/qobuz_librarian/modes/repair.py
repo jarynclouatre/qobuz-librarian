@@ -64,7 +64,7 @@ from qobuz_librarian.queue.executor import (
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, EXIT_INTERRUPT, die
+from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, EXIT_INTERRUPT, die, plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import NO_ANSWER
 
@@ -2627,8 +2627,6 @@ def run_album_repair_mode(args, token, *, loop=False):
                 except KeyboardInterrupt:
                     interrupted = True
                     print()
-                    log.info(fmt(C.YELLOW,
-                        "  Interrupted, stopping library repair sweep."))
                 else:
                     if sys.stdout.isatty():
                         print(f"\r{' ' * 90}\r", end="", flush=True)
@@ -2654,6 +2652,21 @@ def run_album_repair_mode(args, token, *, loop=False):
                 (log.warning if needs_attention else log.info)(
                     fmt(C.YELLOW if needs_attention else C.GRAY, _summary)
                 )
+                clause = None
+                if tally["recovery"]:
+                    clause = f"{plural(tally['recovery'], 'album')} kept a recovery backup"
+                elif tally["attention"]:
+                    clause = f"{plural(tally['attention'], 'album')} did not finish cleanly"
+                elif unreadable:
+                    clause = f"{plural(len(unreadable), 'artist')} could not be read"
+                if interrupted:
+                    log.info(fmt(C.GRAY, "  Interrupted."))
+                elif tally["failed"]:
+                    log.warning(fmt(C.RED, f"  ✗  Finished with {plural(tally['failed'], 'error')}."))
+                elif clause:
+                    log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+                else:
+                    log.info(fmt(C.GREEN, "  ✓  Done."))
                 if not loop:
                     if interrupted:
                         return EXIT_INTERRUPT
@@ -2673,11 +2686,10 @@ def run_album_repair_mode(args, token, *, loop=False):
             if not loop:
                 needs_attention = status in {"attention", "failed", "recovery"}
                 if needs_attention:
-                    log.warning(fmt(
-                        C.YELLOW,
-                        "  ⚠  Repair needs attention; review the result "
-                        "above before retrying.",
-                    ))
+                    clause = "review the result above before retrying"
+                    log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+                else:
+                    log.info(fmt(C.GREEN, "  ✓  Done."))
                 return EXIT_GENERAL if needs_attention else 0
     finally:
         args.no_upgrade = saved_no_upgrade

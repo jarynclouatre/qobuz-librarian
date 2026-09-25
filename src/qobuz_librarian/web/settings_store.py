@@ -27,8 +27,9 @@ _pending_lock = threading.Lock()
 # (key, label, help) - display order on the Settings page.
 BEHAVIOR_FIELDS = [
     ("PREFER_HIRES", "Prefer hi-res editions",
-     "Pick the highest-resolution edition Qobuz has; the download quality "
-     "setting still decides the quality requested."),
+     "Among editions with the standard track list, pick the highest "
+     "resolution; the download quality setting still decides the quality "
+     "requested."),
     ("MIGRATE_MULTI_ARTIST", "Migrate multi-artist folders",
      "After import, file albums credited to multiple artists under the primary "
      "album artist instead of a combined artist folder."),
@@ -53,8 +54,7 @@ LYRICS_PROVIDER_CHOICES = [
 # (key, label, help, kind, choices, placeholder).
 TEXT_FIELDS = [
     ("STREAMRIP_QUALITY", "Download quality",
-     "Quality to request; when Qobuz serves less than expected, the album is "
-     "downloaded again at the highest tier.",
+     "Maximum quality to request from Qobuz.",
      "enum", ["4", "3", "2"], ""),
     ("LYRICS_FORMAT", "Lyrics format",
      "How lyrics are written when fetched.",
@@ -65,25 +65,27 @@ TEXT_FIELDS = [
      "enum", ["sidecar", "embed", "both"], ""),
     ("LYRICS_PROVIDERS", "Lyrics providers",
      "Providers to try in order, from Lrclib, NetEase, Megalobiz, Musixmatch "
-     "and Genius; empty tries Lrclib, NetEase and Musixmatch.",
+     "and Genius; empty uses the .env value, or Lrclib, NetEase and "
+     "Musixmatch.",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
     ("LASTFM_API_KEY", "Last.fm API key",
      "Turns on the Discover tab.",
      "text", None, "32-character key"),
     ("COLLECTION_BACKUP_DIR", "Backup folder",
-     "A path inside the container: keep /collection_backups and set the host "
-     "folder with QL_COLLECTION_BACKUPS in .env.",
+     "In Docker, a path inside the container: keep /collection_backups and "
+     "set the host folder with QL_COLLECTION_BACKUPS in .env.",
      "text", None, "e.g. /collection_backups"),
     ("BEETS_PATH_DEFAULT", "beets path: default",
-     "Folder and file naming for albums, in Beets path syntax; empty uses "
-     "beets/config.yaml.",
+     "Folder and file naming for albums, in Beets path syntax; empty uses the "
+     ".env value or beets/config.yaml.",
      "text", None, "e.g. $albumartist/$album ($year)/$track - $title"),
     ("BEETS_PATH_COMP", "beets path: compilation",
-     "Folder and file naming for compilations; empty uses the Beets default.",
+     "Folder and file naming for compilations; empty uses the .env value or "
+     "the Beets default.",
      "text", None, "e.g. Various Artists/$album ($year)/$track - $title"),
     ("BEETS_PLUGINS", "beets plugins",
      "Beets plugins to enable in place of the config.yaml list; empty uses "
-     "that list, and unknown names are dropped.",
+     "the .env value or that list, and unknown names are dropped.",
      "list", None, "fetchart,lastgenre,replaygain"),
     ("ARTIST_CATALOG_CACHE_TTL", "Album-list freshness",
      "How long Library scans, Upgrade, Discover and artist pages reuse a "

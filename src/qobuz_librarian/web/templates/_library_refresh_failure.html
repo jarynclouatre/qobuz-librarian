@@ -5,6 +5,6 @@
   {% endif %}
   {% set latest_attempt = library_generation.latest_attempt %}
   {% if latest_attempt.status in ('failed', 'cancelled', 'incomplete') %}
-  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}.{% if latest_attempt.message %} {{ latest_attempt.message }}{% endif %}{% if not baseline_complete %} No full Library scan has finished yet.{% endif %}</span></div>
+  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}.{% if latest_attempt.message %} {{ latest_attempt.message }}{% endif %}</span></div>
   {% endif %}
 </div>
