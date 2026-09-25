@@ -257,7 +257,7 @@ def _decode_candidates(value, status) -> tuple[list[dict], bool]:
 _UNREADABLE_LOG_LINE = "[Saved activity log could not be read.]"
 
 
-def _decode_log_lines(value) -> tuple[list[str], bool]:
+def decode_log_lines(value) -> tuple[list[str], bool]:
     try:
         lines = json.loads(value or "[]")
     except (TypeError, ValueError):
@@ -1589,10 +1589,7 @@ def delete(job_id: str) -> None:
 
 
 def load_one(job_id: str) -> Optional[dict]:
-    """Return one persisted job by id (the same shape ``load_all`` yields
-    per row), or None if it isn't on disk. Used by the read-only "this
-    job was archived" page so a registry eviction doesn't make a job's
-    history disappear from view."""
+    """Return one persisted job with decoded logs, or None if absent."""
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -1617,7 +1614,7 @@ def load_one(job_id: str) -> Optional[dict]:
         return None
     candidates, candidates_unreadable = _decode_candidates(row[7], row[5])
     single, single_unreadable = _decode_single(row[15])
-    log_lines, log_lines_unreadable = _decode_log_lines(row[18])
+    log_lines, log_lines_unreadable = decode_log_lines(row[18])
     quality_shortfall, _ = _decode_object(row[19])
     return {
         "id": row[0], "title": row[1], "artist": row[2], "album_id": row[3],
@@ -1989,8 +1986,10 @@ def clear_history(*, retain_job_id: str | None = None) -> bool:
 
 
 def load_all() -> list[dict]:
-    """Return every persisted job as a plain dict; caller rehydrates into
-    a Job. Returns [] when the db can't be opened."""
+    """Return persisted jobs with logs left encoded until needed.
+
+    Returns [] when the db can't be opened.
+    """
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -2019,7 +2018,6 @@ def load_all() -> list[dict]:
             execute_args, execute_args_unreadable = _decode_execute_args(r[12])
             candidates, candidates_unreadable = _decode_candidates(r[7], r[5])
             single, single_unreadable = _decode_single(r[15])
-            log_lines, log_lines_unreadable = _decode_log_lines(r[18])
             quality_shortfall, _ = _decode_object(r[19])
             out.append({
                 "id": r[0], "title": r[1], "artist": r[2], "album_id": r[3],
@@ -2036,8 +2034,7 @@ def load_all() -> list[dict]:
                 "single_unreadable": single_unreadable,
                 "attention": r[16] or "",
                 "recoveries": recoveries,
-                "log_lines": log_lines,
-                "log_lines_unreadable": log_lines_unreadable,
+                "log_lines_json": r[18],
                 "quality_shortfall": quality_shortfall,
                 "edition": r[20] or "",
             })

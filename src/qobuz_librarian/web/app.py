@@ -1,6 +1,5 @@
 """FastAPI web application for Qobuz Librarian."""
 import asyncio
-import concurrent.futures
 import copy
 import ctypes
 import errno
@@ -2711,8 +2710,7 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    """Serve the app icon at the well-known path so the browser's automatic
-    /favicon.ico probe (allowlisted past auth in web/auth.py) doesn't 404."""
+    """Serve the app icon for the browser's automatic /favicon.ico probe."""
     return FileResponse(static_dir / "icon-192.png", media_type="image/png")
 
 
@@ -2766,8 +2764,7 @@ async def healthz():
 
 @app.head("/healthz")
 async def healthz_head():
-    """Uptime monitors HEAD before GET, so return a body-less 200 so they
-    don't mark the service down on a 405."""
+    """A body-less 200 for uptime monitors that send HEAD."""
     return Response(status_code=200)
 
 
@@ -3437,8 +3434,7 @@ def _staging_album_count() -> int:
 
 @app.head("/")
 async def dashboard_head():
-    """Uptime monitors / curl -I hit HEAD before GET; serve a body-less 200
-    so they don't get a 405 and mark the service down."""
+    """A body-less 200 for uptime monitors and curl -I."""
     return Response(status_code=200)
 
 
@@ -3661,8 +3657,7 @@ _ANY_TARGET = object()
 
 
 def _scan_target(job) -> str:
-    """The slice of the library a scan covers: a single artist (the per-artist routes
-    set ``job.artist``) or "" for a whole-library sweep."""
+    """The artist a scan covers, or "" for the whole library."""
     return (getattr(job, "artist", "") or "").strip().casefold()
 
 
@@ -8733,8 +8728,7 @@ _DISCOVER_TABS = (
 
 
 def _discover_available(creds_ok: bool | None = None) -> bool:
-    """The tab exists only with a Last.fm key, because without one there is
-    nothing to suggest from."""
+    """Whether Discover has a Last.fm key to suggest from."""
     return lastfm.is_configured()
 
 
@@ -13270,11 +13264,6 @@ async def set_mode(request: Request, target: str = Form("")):
 # page has that the stream is gone.
 _SSE_HEARTBEAT_TICKS = cfg.SSE_HEARTBEAT_TICKS
 
-# Dedicated thread pool for SSE waits so a long-running scan with many
-# tabs open doesn't starve /search and /download on the default executor.
-_SSE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=cfg.SSE_MAX_WORKERS, thread_name_prefix="sse")
-
 
 def _stream_session_active(request: Request) -> bool:
     if web_auth.auth_disabled():
@@ -14035,7 +14024,6 @@ async def job_stream(request: Request, job_id: str):
             yield f"event: done\ndata: {job.status.value}\n\n"
             return
         sub = job.subscribe()
-        loop = asyncio.get_running_loop()
         empty_ticks = 0
         try:
             while not _STOP_SIGNALLED.is_set():
@@ -14043,8 +14031,7 @@ async def job_stream(request: Request, job_id: str):
                     yield "event: auth\ndata: signed_out\n\n"
                     break
                 try:
-                    line = await loop.run_in_executor(
-                        _SSE_EXECUTOR, lambda: sub.get(timeout=0.5))
+                    line = sub.get_nowait()
                     if not _stream_session_active(request):
                         yield "event: auth\ndata: signed_out\n\n"
                         break
@@ -14065,6 +14052,7 @@ async def job_stream(request: Request, job_id: str):
                             or job.status == job_mgr.JobStatus.AWAITING_REVIEW):
                         yield f"event: done\ndata: {job.status.value}\n\n"
                         break
+                    await asyncio.sleep(0.5)
                     empty_ticks += 1
                     if empty_ticks >= _SSE_HEARTBEAT_TICKS:
                         empty_ticks = 0
@@ -14105,7 +14093,6 @@ async def job_review_stream(request: Request, job_id: str):
             yield "event: closed\ndata: inactive\n\n"
             return
         sub = job.subscribe()
-        loop = asyncio.get_running_loop()
         empty_ticks = 0
         try:
             while not _STOP_SIGNALLED.is_set():
@@ -14113,8 +14100,7 @@ async def job_review_stream(request: Request, job_id: str):
                     yield "event: auth\ndata: signed_out\n\n"
                     break
                 try:
-                    line = await loop.run_in_executor(
-                        _SSE_EXECUTOR, lambda: sub.get(timeout=0.5))
+                    line = sub.get_nowait()
                     if not _stream_session_active(request):
                         yield "event: auth\ndata: signed_out\n\n"
                         break
@@ -14130,6 +14116,7 @@ async def job_review_stream(request: Request, job_id: str):
                     if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
                         yield f"event: closed\ndata: {job.status.value}\n\n"
                         break
+                    await asyncio.sleep(0.5)
                     empty_ticks += 1
                     if empty_ticks >= _SSE_HEARTBEAT_TICKS:
                         empty_ticks = 0
@@ -14398,9 +14385,7 @@ def _last_scan_age() -> str | None:
 
 
 def _tool_last_run_age(execute_kind: str) -> str | None:
-    """Age of the last clean run of a tool scan, or None if it's never
-    finished, so a tool page can show "Last scan 3 days ago" instead of
-    looking identical to a first visit."""
+    """Age of a tool scan's last clean run, or None if it never finished."""
     ts = job_persistence.last_finished_at(execute_kind)
     return _format_age(ts) if ts is not None else None
 

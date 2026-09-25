@@ -162,9 +162,7 @@ def acknowledge_current_job_durable_completion(
 
 
 def _adopt_current_job(job):
-    """ThreadPoolExecutor initializer: tag each pool worker with the job that
-    spawned the pool so log records emitted from pool threads are attributed to
-    the right job (not dropped by JobLogHandler's thread filter)."""
+    """Pool initializer that attributes a worker's log lines to its job."""
     _TLS.current_job = job
 
 
@@ -526,9 +524,7 @@ class Job:
         self._fan_out(PROGRESS_PREFIX + json.dumps(payload))
 
     def notify_review_changed(self, origin: str = ""):
-        """Tell every open review tab that selection/candidates changed, so a
-        second tab (or phone) reflects a tick/untick/hide without a manual
-        reload."""
+        """Tell every open review tab that the selection changed."""
         self._fan_out(REVIEW_CHANGED + origin)
 
     def set_importing(self, active: bool) -> None:
@@ -2061,6 +2057,15 @@ def restore_jobs(
     requeued = []
     pending_reviews = []
     terminal_payloads = []
+    pending_logs = {
+        row["id"]: row["log_lines_json"]
+        for row in rows if "log_lines_json" in row
+    }
+
+    def _restore_log_lines(job):
+        if job.id in pending_logs:
+            job.log_lines, _ = job_persistence.decode_log_lines(
+                pending_logs.pop(job.id))
 
     unreadable_review_error = (
         "This saved review couldn't be restored because its choices could "
@@ -2068,6 +2073,7 @@ def restore_jobs(
     )
 
     def _persist_restored_transition(job, previous_status):
+        _restore_log_lines(job)
         if job.status == JobStatus.FAILED and not job.attention:
             job.attention = "failed"
         saved = job_persistence.persist(job)
@@ -2127,6 +2133,8 @@ def restore_jobs(
             finished_at=row.get("finished_at"),
         )
         job._durability_required = True
+        if status not in TERMINAL:
+            _restore_log_lines(job)
         pending_review = (
             status == JobStatus.PENDING
             and job.execute_kind in ("library", "upgrade", "downsample", "repair")
@@ -2340,6 +2348,9 @@ def restore_jobs(
             registry._jobs[job.id] = job
             registry._order.append(job.id)
         registry._prune_locked()
+        for job in restored:
+            if job.id in registry._jobs:
+                _restore_log_lines(job)
     for job in pending_reviews:
         if not _restore_untouched_review(job, status=JobStatus.PENDING):
             with job._lock:

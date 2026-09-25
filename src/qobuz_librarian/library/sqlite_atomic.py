@@ -26,6 +26,7 @@ import threading
 import time
 import weakref
 
+from qobuz_librarian.dirfd import digest_fd as _descriptor_digest
 from qobuz_librarian.file_exclusion import _LeaseSignalTarget
 
 _RENAME_EXCHANGE = 2
@@ -138,17 +139,6 @@ def _encoded_xattrs(descriptor):
         for name, value in sorted(values.items(), key=lambda item: os.fsencode(
             item[0]))
     ]
-
-
-def _descriptor_digest(descriptor):
-    digest = hashlib.sha256()
-    offset = 0
-    while True:
-        block = os.pread(descriptor, 1024 * 1024, offset)
-        if not block:
-            return digest.hexdigest()
-        digest.update(block)
-        offset += len(block)
 
 
 def _stable_descriptor_fields(value):

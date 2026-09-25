@@ -72,6 +72,9 @@ def _isolate_data_dir():
 
     # Re-derive every path that was built off DATA_DIR at import time.
     cfg.FETCH_LOG_FILE       = tmp_root / ".qobuz_librarian_log.json"
+    cfg.LAST_SCAN_FILE       = tmp_root / ".qobuz_last_scan"
+    cfg.APP_LOG_FILE         = tmp_root / "qobuz-librarian.log"
+    cfg.ARTIST_RESOLVE_CACHE_FILE = tmp_root / ".artist_resolve_cache.json"
     cfg.WALK_SEEN_FILE       = tmp_root / ".qobuz_walk_seen.txt"
     cfg.ALBUM_WALK_SEEN_FILE = tmp_root / ".qobuz_album_walk_seen.txt"
     cfg.PENDING_QUEUE_FILE   = tmp_root / ".qobuz_pending_queue.json"
@@ -129,11 +132,14 @@ def _isolate_data_dir():
     from qobuz_librarian.web import job_persistence
     job_persistence._disabled = True
 
-    # settings_store builds its path off DATA_DIR when it is imported, which
-    # happens at collection time, before this fixture runs. Re-derive it here
-    # so the suite never reads the dev machine's real saved Settings.
+    # settings_store and the web session store build their paths off DATA_DIR
+    # when they are imported, which happens at collection time, before this
+    # fixture runs. Re-derive them here so the suite never reads or writes the
+    # dev machine's real saved Settings or sessions.
+    from qobuz_librarian.web import auth as web_auth
     from qobuz_librarian.web import settings_store
     settings_store.SETTINGS_FILE = tmp_root / ".qobuz_settings.json"
+    web_auth._SESSIONS_FILE = tmp_root / ".qobuz_web_sessions.json"
 
     # Set the matching env vars too, so a test that importlib.reload(cfg) (to
     # exercise env parsing) recomputes these into the temp dir / off, rather than

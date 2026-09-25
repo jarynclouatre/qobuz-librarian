@@ -582,10 +582,9 @@ WEB_TEST_AUTH_TIMEOUT = 8.0
 # historical replay while keeping live lines and the terminal event.
 # POST_JOB_HOOK_TIMEOUT bounds the subprocess that fires the optional
 # post-job hook. Slow webhooks (Apprise, ntfy with retries) may need
-# more. SSE_MAX_WORKERS sets the thread pool for SSE streams (each
-# active subscriber holds one). SSE_HEARTBEAT_TICKS sets how many
-# 0.5s queue-empty ticks pass before a `: ping` keepalive. Reverse
-# proxies with short idle timeouts still receive a keepalive within 15 seconds.
+# more. SSE_HEARTBEAT_TICKS sets how many 0.5s queue-empty ticks pass
+# before a ping keepalive. Reverse proxies with short idle timeouts
+# still receive a keepalive within 15 seconds.
 JOB_LOG_CAP          = 5000
 JOB_LOG_REPLAY_TAIL  = 500
 # Ceiling on candidates a single review job holds in memory (and persists/
@@ -597,7 +596,6 @@ JOB_LOG_REPLAY_TAIL  = 500
 # runaway guard, not a routine limit.
 JOB_CANDIDATE_CAP    = 100000
 POST_JOB_HOOK_TIMEOUT = _env_num_min("POST_JOB_HOOK_TIMEOUT", 10, 1)
-SSE_MAX_WORKERS      = 16
 SSE_HEARTBEAT_TICKS  = 30
 
 # ── Fuzzy-match thresholds ────────────────────────────────────────────────────

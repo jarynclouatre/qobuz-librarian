@@ -58,10 +58,7 @@ def _normalize_track_fields(track):
 
 
 def _expect_dict(data, endpoint):
-    """qobuz_get returns r.json() untyped, so a malformed/error 200 body (a
-    JSON list/str/number - e.g. a CDN/proxy error page served with 200) would
-    crash on the `.get` below and escape callers that only catch
-    QobuzError."""
+    """Raise QobuzError for a response body that is not a JSON object."""
     if not isinstance(data, dict):
         raise QobuzError(f"{endpoint} returned a non-dict response")
     return data

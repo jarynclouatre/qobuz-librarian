@@ -32,6 +32,7 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import get_album, search_albums
+from qobuz_librarian.dirfd import named_entry_matches as _migration_named_entry_matches
 from qobuz_librarian.dirfd import named_entry_missing as _migration_name_missing
 from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
 from qobuz_librarian.integrations import rip
@@ -1273,19 +1274,6 @@ def _preflight_migration_database_anchor(anchor, anchors_match=None):
         )
     except sqlite3.Error as exc:
         raise OSError(f"beets database preflight failed: {exc}") from exc
-
-
-def _migration_named_entry_matches(parent_fd, name, entry_fd):
-    try:
-        held = os.fstat(entry_fd)
-        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except (OSError, TypeError, ValueError):
-        return False
-    return (
-        stat.S_IFMT(held.st_mode) == stat.S_IFMT(named.st_mode)
-        and (int(held.st_dev), int(held.st_ino))
-        == (int(named.st_dev), int(named.st_ino))
-    )
 
 
 def _migration_named_directory_matches(parent_fd, name, directory_fd):

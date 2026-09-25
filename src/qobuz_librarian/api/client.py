@@ -131,8 +131,7 @@ def _retry_after(resp) -> float | None:
 
 
 def _retry_sleep(seconds: float):
-    """Indirection so tests can monkeypatch backoff to a no-op without
-    affecting every other `time.sleep` in the codebase."""
+    """Backoff sleep, kept separate so tests can skip it."""
     time.sleep(seconds)
 
 

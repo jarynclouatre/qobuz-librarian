@@ -4800,9 +4800,7 @@ def _database_write_locked(anchor):
 
 
 def _beets_lock_wait():
-    """Seconds an import waits on a database another program has locked:
-    long enough for a brief reader or writer, and inside the idle limit that
-    would otherwise stop Beets first."""
+    """Seconds an import waits on a Beets database another program locked."""
     idle = float(cfg.BEETS_TIMEOUT or 0)
     return 60.0 if not idle or idle >= 120 else idle / 2
 

@@ -16,7 +16,6 @@ Quality settings:
   - FLAC compression level 5 (default, lossless, fast encode).
 """
 import copy
-import hashlib
 import os
 import secrets
 import shutil
@@ -26,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.dirfd import digest_fd as _sha256_fd
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.lyric_fetch import (
     _exchange_existing,
@@ -646,17 +646,6 @@ def _reopen_encode_temp_readonly(parent_fd: int, name: str, descriptor: int):
         os.close(readonly_fd)
         raise OSError("resampled output changed while it was being opened")
     return readonly_fd, expected
-
-
-def _sha256_fd(descriptor: int) -> str:
-    digest = hashlib.sha256()
-    offset = 0
-    while True:
-        chunk = os.pread(descriptor, 1024 * 1024, offset)
-        if not chunk:
-            return digest.hexdigest()
-        digest.update(chunk)
-        offset += len(chunk)
 
 
 def _receipt_matches_source(binding, receipt, exclusion) -> bool:
