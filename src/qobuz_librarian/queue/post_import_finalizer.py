@@ -8,6 +8,7 @@ import secrets
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import run_lock
 from qobuz_librarian.completion import (
     CompletionOriginKind,
     RecoveryOwner,
@@ -39,10 +40,12 @@ class PostImportFinalizationUnavailable(OSError):
 
 
 def _require_authority(authority: RunLockLease) -> None:
-    if type(authority) is not RunLockLease or authority.intact() is not True:
-        raise PostImportFinalizationUnavailable(
+    run_lock.require_authority(
+        authority,
+        PostImportFinalizationUnavailable(
             errno.EBUSY, "the shared run lock was lost during queue finalisation"
-        )
+        ),
+    )
 
 
 def _retirement(journal, item_id):

@@ -45,6 +45,10 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from qobuz_librarian import config, file_exclusion
+from qobuz_librarian.dirfd import digest_fd as _digest_fd
+from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
+from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
+from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
 from qobuz_librarian.library.tags import (
     VA_NORMALIZED,
     beets_sanitize,
@@ -440,7 +444,6 @@ def _album_year(metas) -> int:
 
 # ── Sealed filesystem evidence ──────────────────────────────────────────────
 
-_RENAME_NOREPLACE = 1
 _AT_EMPTY_PATH = 0x1000
 _AT_SYMLINK_NOFOLLOW = 0x100
 _STATX_TYPE = 0x0001
@@ -709,49 +712,6 @@ def _descriptor_path(descriptor) -> Path:
     return Path(value)
 
 
-def _named_entry_matches(parent_fd, name, descriptor) -> bool:
-    try:
-        return _same_entry(
-            os.fstat(descriptor),
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False),
-        )
-    except (OSError, TypeError, ValueError):
-        return False
-
-
-def _named_entry_missing(parent_fd, name) -> bool:
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    return False
-
-
-def _rename_noreplace_at(source_fd, source_name, destination_fd,
-                         destination_name) -> None:
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    ctypes.set_errno(0)
-    if renameat2(
-            int(source_fd), os.fsencode(source_name),
-            int(destination_fd), os.fsencode(destination_name),
-            _RENAME_NOREPLACE):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), os.fspath(destination_name))
-
-
 class _MigrationEntryPreserved(OSError):
     """Report an exact private entry that could not be restored safely."""
 
@@ -854,17 +814,6 @@ def _fsync_directories(*descriptors) -> None:
             continue
         seen.add(descriptor)
         os.fsync(descriptor)
-
-
-def _digest_fd(descriptor, _chunk=1 << 20) -> str:
-    digest = hashlib.sha256()
-    offset = 0
-    while True:
-        data = os.pread(descriptor, _chunk, offset)
-        if not data:
-            return digest.hexdigest()
-        digest.update(data)
-        offset += len(data)
 
 
 def _xattr_snapshot(descriptor) -> list:

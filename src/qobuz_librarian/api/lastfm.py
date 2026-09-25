@@ -287,32 +287,6 @@ def get_tag_top_albums(tag: str, *, page: int = 1,
     return _albums(body, "albums")
 
 
-def get_tag_top_artists(tag: str, *, page: int = 1,
-                        limit: int = 50) -> list[dict]:
-    """Artists tagged `tag`, most-tagged first."""
-    if not str(tag or "").strip():
-        return []
-    body = lastfm_get("tag.getTopArtists",
-                      {"tag": tag, "page": page, "limit": limit})
-    out = []
-    for row in _rows(body, "topartists", "artist"):
-        artist = _name(row)
-        if artist:
-            out.append({"name": artist})
-    return out
-
-
-def get_artist_top_albums(name: str, *, page: int = 1,
-                          limit: int = 50) -> list[dict]:
-    """The artist's most-played albums, which is how Discover picks which of a
-    suggested artist's albums to show first."""
-    if not str(name or "").strip():
-        return []
-    body = lastfm_get("artist.getTopAlbums",
-                      {"artist": name, "page": page, "limit": limit})
-    return _albums(body, "topalbums")
-
-
 def probe_key(api_key_override: str | None = None) -> bool:
     """One cheap call that separates a bad key from Last.fm being down, so the
     Settings page can say which it is. A supplied key is checked directly even

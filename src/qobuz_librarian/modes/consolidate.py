@@ -1,5 +1,4 @@
 """Album consolidation - find and remove duplicate sibling folders."""
-import hashlib
 import math
 import os
 import re
@@ -9,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from qobuz_librarian import config
+from qobuz_librarian.dirfd import digest_fd as _digest_fd
+from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import beets as beets_integration
 from qobuz_librarian.library import backup as backup_mod
@@ -40,17 +41,6 @@ from qobuz_librarian.ui_cli.prompts import (
 _YEAR_RE = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
 _MAX_ALBUM_ENTRIES = 4096
 _MAX_ALBUM_DEPTH = 16
-
-
-def _digest_fd(descriptor):
-    digest = hashlib.sha256()
-    offset = 0
-    while True:
-        chunk = os.pread(descriptor, 1024 * 1024, offset)
-        if not chunk:
-            return digest.hexdigest()
-        digest.update(chunk)
-        offset += len(chunk)
 
 
 def _file_receipt(descriptor):
@@ -89,16 +79,6 @@ def _named_file_matches(parent_fd, name, descriptor):
         and (int(held.st_dev), int(held.st_ino))
         == (int(named.st_dev), int(named.st_ino))
     )
-
-
-def _named_entry_missing(parent_fd, name):
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
 
 
 def _metadata_from_held_file(descriptor, path):

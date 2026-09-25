@@ -286,6 +286,11 @@ class RunLockLease:
             raise error
 
 
+def require_authority(authority: RunLockLease, error) -> None:
+    if type(authority) is not RunLockLease or authority.intact() is not True:
+        raise error
+
+
 _CURRENT_LEASE_REGISTRATION: Optional[
     tuple[int, weakref.ReferenceType[RunLockLease]]
 ] = None

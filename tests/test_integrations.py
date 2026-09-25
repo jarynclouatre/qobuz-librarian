@@ -423,17 +423,6 @@ def test_lyric_fetch_refuses_paths_outside_or_linked_out_of_its_owned_root(tmp_p
 # ── beets: _beets_direct behaviour ─────────────────────────────────────────
 
 
-def test_beets_runtime_check_rejects_an_unrelated_executable(monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import beets
-
-    unrelated = shutil.which("true")
-    assert unrelated is not None
-    monkeypatch.setattr(cfg, "BEETS_PYTHON", unrelated)
-
-    assert beets.beets_runtime_path() is None
-
-
 def test_beets_output_is_read_past_the_select_descriptor_limit():
     import resource
 

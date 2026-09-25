@@ -878,7 +878,7 @@ def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,
                            execute_calls=None, relocation_error=None,
                            retire=None):
     import qobuz_librarian.modes.repair as repair_mod
-    from qobuz_librarian.library.backup import capture_gap_fill_source_receipt
+    from qobuz_librarian import repair_log
 
     if retire is not None:
         monkeypatch.setattr(repair_mod, "retire_verified_repair_backup",
@@ -924,11 +924,12 @@ def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,
     monkeypatch.setattr(repair_mod, "_refills_present_in", lambda d, w, b: present)
     monkeypatch.setattr(repair_mod, "_refills_intact", lambda d, w, t, b: intact)
 
+    with repair_log._HeldRepairSource(album_dir, track) as source:
+        source_receipt = source.source_receipt
     vt = [{"path": str(track), "title": "Track 01", "isrc": "USRC11111111",
            "qobuz_track": {"id": 1, "title": "Track 01", "album": {"id": "ALB1"}},
            "file_length": 5.0,
-           "source_receipt": capture_gap_fill_source_receipt(
-               track, album_dir)}]
+           "source_receipt": source_receipt}]
     args = Namespace(force=False, yes=True, prefer_hires=False, consolidate=False, no_upgrade=False)
     return repair_mod.repair_album_dir(
         album_dir,
@@ -994,10 +995,8 @@ def test_repair_originals_restored_when_downloads_fail_and_skipped_when_backup_f
 
     # Backup itself fails → original must NOT be queued for replacement.
     import qobuz_librarian.modes.repair as repair_mod
-    from qobuz_librarian.library.backup import (
-        BackupResult,
-        capture_gap_fill_source_receipt,
-    )
+    from qobuz_librarian import repair_log
+    from qobuz_librarian.library import backup
     album_dir = tmp_path / "nb" / "Artist" / "Album (2020)"
     album_dir.mkdir(parents=True)
     track = album_dir / "01 - Track.flac"
@@ -1015,11 +1014,12 @@ def test_repair_originals_restored_when_downloads_fail_and_skipped_when_backup_f
     monkeypatch.setattr(repair_mod, "_execute_download_queue",
                         lambda *a: (_ for _ in ()).throw(
                             AssertionError("must not run when backup fails")))
+    with repair_log._HeldRepairSource(album_dir, track) as source:
+        source_receipt = source.source_receipt
     vt = [{"path": str(track), "title": "Track 01",
            "qobuz_track": {"id": 1, "title": "Track 01", "album": {"id": "ALB1"}},
            "file_length": 5.0,
-           "source_receipt": capture_gap_fill_source_receipt(
-               track, album_dir)}]
+           "source_receipt": source_receipt}]
     args = Namespace(force=False, yes=True, prefer_hires=False, consolidate=False, no_upgrade=False)
     res = repair_mod.repair_album_dir(album_dir, vt, "Artist", args, "tok")
     assert track.exists() and res["n_fail"] == len(vt)
@@ -1029,7 +1029,7 @@ def test_repair_originals_restored_when_downloads_fail_and_skipped_when_backup_f
     def partial_backup(_paths, directory, **_kwargs):
         partial_dir.mkdir(parents=True)
         track.replace(partial_dir / track.name)
-        return BackupResult(
+        return backup.BackupResult(
             partial_dir,
             complete=False,
             receipt={"kind": "gap-fill", "origin": str(directory)},
@@ -1240,10 +1240,8 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
     # same-path same-or-larger bytes, which the refill satisfies, so without
     # the pin the only copy of those tags is reaped on schedule.
     import qobuz_librarian.modes.repair as repair_mod
-    from qobuz_librarian.library.backup import (
-        _UNVERIFIED_UPGRADE_SENTINEL,
-        capture_gap_fill_source_receipt,
-    )
+    from qobuz_librarian import repair_log
+    from qobuz_librarian.library import backup
 
     album_dir = tmp_path / "Artist" / "Album (2020)"
     album_dir.mkdir(parents=True)
@@ -1273,17 +1271,18 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(repair_mod, "_refills_present_in", lambda d, w, b: True)
     monkeypatch.setattr(repair_mod, "_refills_intact", lambda d, w, t, b: True)
 
+    with repair_log._HeldRepairSource(album_dir, track) as source:
+        source_receipt = source.source_receipt
     vt = [{"path": str(track), "title": "Track 01", "isrc": "USRC11111111",
            "qobuz_track": {"id": 1, "title": "Track 01", "album": {"id": "ALB1"}},
            "file_length": 5.0,
-           "source_receipt": capture_gap_fill_source_receipt(
-               track, album_dir)}]
+           "source_receipt": source_receipt}]
     args = Namespace(force=False, yes=True, prefer_hires=False,
                      consolidate=False, no_upgrade=False)
     repair_mod.repair_album_dir(album_dir, vt, "Artist", args, "tok")
 
     backups = tmp_path / "backups"
-    pins = list(backups.rglob(_UNVERIFIED_UPGRADE_SENTINEL))
+    pins = list(backups.rglob(backup._UNVERIFIED_UPGRADE_SENTINEL))
     assert pins, "the kept backup must carry a never-reap pin"
     kept = list(backups.rglob("01 - Track.flac"))
     assert kept and kept[0].read_bytes() == b"\x00" * 200

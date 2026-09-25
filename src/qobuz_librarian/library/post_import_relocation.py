@@ -9,7 +9,6 @@ old rows remain, or finishes source cleanup after the new rows are durable.
 
 from __future__ import annotations
 
-import ctypes
 import errno
 import fcntl
 import hashlib
@@ -27,7 +26,11 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import run_lock
 from qobuz_librarian.completion import normalise_album_id
+from qobuz_librarian.dirfd import digest_fd as _digest_fd
+from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
+from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library.catalog import (
@@ -60,7 +63,6 @@ _MAX_JOURNAL_BYTES = 1024 * 1024
 _MAX_TREE_ENTRIES = 10_000
 _MAX_TREE_DEPTH = 16
 _COPY_BLOCK_SIZE = 1024 * 1024
-_RENAME_NOREPLACE = 1
 _HEX_64 = frozenset("0123456789abcdef")
 _THREAD_LOCK = threading.RLock()
 
@@ -109,11 +111,13 @@ def _checkpoint(_name: str) -> None:
 
 
 def _require_authority(authority: RunLockLease) -> None:
-    if type(authority) is not RunLockLease or authority.intact() is not True:
-        raise PostImportRelocationUnavailable(
+    run_lock.require_authority(
+        authority,
+        PostImportRelocationUnavailable(
             errno.EBUSY,
             "the shared run lock was lost before the folder move",
-        )
+        ),
+    )
 
 
 def _namespace_path() -> Path:
@@ -200,18 +204,6 @@ def _open_entry_handle(value, *, dir_fd=None) -> int:
 
 def _entry_identity(value) -> tuple[int, int]:
     return int(value.st_dev), int(value.st_ino)
-
-
-def _named_entry_matches(parent_fd, name, descriptor) -> bool:
-    try:
-        held = os.fstat(descriptor)
-        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError:
-        return False
-    return (
-        stat.S_IFMT(held.st_mode) == stat.S_IFMT(named.st_mode)
-        and _entry_identity(held) == _entry_identity(named)
-    )
 
 
 def _named_matches(parent_fd, name, descriptor, *, directory=False) -> bool:
@@ -390,17 +382,6 @@ def _stat_record(value) -> dict:
         "changed_ns": int(value.st_ctime_ns),
         "mode": int(stat.S_IMODE(value.st_mode)),
     }
-
-
-def _digest_fd(descriptor) -> str:
-    digest = hashlib.sha256()
-    offset = 0
-    while True:
-        block = os.pread(descriptor, _COPY_BLOCK_SIZE, offset)
-        if not block:
-            return digest.hexdigest()
-        digest.update(block)
-        offset += len(block)
 
 
 def _file_record(descriptor) -> dict:
@@ -955,31 +936,6 @@ def _unlink_journal(namespace_fd, operation_id) -> None:
         os.fsync(namespace_fd)
     finally:
         os.close(descriptor)
-
-
-def _rename_noreplace(source_fd, source, destination_fd, destination) -> None:
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except (AttributeError, OSError) as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    ctypes.set_errno(0)
-    if renameat2(
-        int(source_fd),
-        os.fsencode(source),
-        int(destination_fd),
-        os.fsencode(destination),
-        _RENAME_NOREPLACE,
-    ) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), os.fspath(destination))
 
 
 def _audio_relative(relative) -> bool:

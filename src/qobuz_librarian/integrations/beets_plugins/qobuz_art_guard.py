@@ -10,6 +10,7 @@ import threading
 from beets import plugins
 from beets.plugins import BeetsPlugin
 
+from qobuz_librarian import dirfd
 from qobuz_librarian.integrations.beets import (
     _merge_chain_is_named,
     _merge_name_matches,
@@ -95,12 +96,7 @@ def _same_directory(first_fd, second_fd):
         second = os.fstat(second_fd)
     except OSError:
         return False
-    return (
-        stat.S_ISDIR(first.st_mode)
-        and stat.S_ISDIR(second.st_mode)
-        and (int(first.st_dev), int(first.st_ino))
-        == (int(second.st_dev), int(second.st_ino))
-    )
+    return dirfd.same_directory(first, second)
 
 
 def _parent_still_held(state):

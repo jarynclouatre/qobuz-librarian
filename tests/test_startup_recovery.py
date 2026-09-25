@@ -359,7 +359,8 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
 
     if expected_state == "visible":
         backup_module._only_copy_cache = None
-        assert (quarantine, album) in backup_module.find_only_copy_backups()
+        assert any((path, origin) == (quarantine, album) and not result.removable
+                   for path, origin, result in backup_module.list_retained_backups())
         return
 
     if change_replacement:

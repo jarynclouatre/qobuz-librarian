@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import run_lock
 from qobuz_librarian.completion import (
     CompletionOriginKind,
     RecoveryOwner,
@@ -197,8 +198,7 @@ def _combined_post_import_relocation_handoff_matches(operation_id, handoff):
 
 
 def _require_authority(authority: RunLockLease) -> None:
-    if type(authority) is not RunLockLease or authority.intact() is not True:
-        raise _AuthorityLost
+    run_lock.require_authority(authority, _AuthorityLost)
 
 
 def _sorted_journals(loads):

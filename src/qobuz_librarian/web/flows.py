@@ -1136,24 +1136,6 @@ def owned_missing_candidate_ids(job, token, candidate_ids=None):
     return owned
 
 
-def drop_owned_missing_candidates(job, token):
-    """Remove selected missing albums already proven complete on disk."""
-    owned = owned_missing_candidate_ids(job, token)
-    if not owned:
-        return 0
-    def _drop():
-        before = len(job.candidates)
-        job.candidates = [c for c in job.candidates if c["cid"] not in owned]
-        return before - len(job.candidates)
-
-    saved, dropped = job_persistence.persist_review_mutation(job, _drop)
-    if not saved:
-        job.notify_review_changed("save_failed")
-        return 0
-    job.notify_review_changed()
-    return dropped
-
-
 def _record_last_scan():
     try:
         cfg.LAST_SCAN_FILE.write_text(str(time.time()), encoding="utf-8")
@@ -2842,111 +2824,6 @@ def execute_albums(job, chosen, token):
 
 
 # ── Upgrade flow ──────────────────────────────────────────────────────────────
-
-def scan_upgrades(job, token):
-    """Scan the library for albums Qobuz can serve at higher quality."""
-    if not cfg.UPGRADE_SCAN_ENABLED:
-        review_badges.set_ready("upgrade", False)
-        job.summary = "Upgrade scanning is turned off."
-        log.info(job.summary)
-        return
-    clear_scan_caches()
-    unreadable_artists = {}
-
-    def artist_read_failed(artist_dir, error):
-        if normalize(artist_dir.name) not in VA_NORMALIZED:
-            unreadable_artists[artist_dir.name] = str(error)
-
-    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
-               if normalize(d.name) not in VA_NORMALIZED]
-    if not artists and not unreadable_artists:
-        _set_empty_library_summary(job)
-        return
-    args = build_args()
-    capped = quality_decision.load_capped()
-    # Upgrades the user dismissed ("I'm happy with my copy"), independent of
-    # the auto-`capped` memory and of the missing-album hides.
-    hidden = hidden_mod.load()
-    log.info(f"Scanning {plural(len(artists), 'artist')} for quality upgrades")
-    total = 0
-    workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
-    def _on_artist(ad, specs, error, done, n):
-        nonlocal total
-        name = ad.name
-        if isinstance(error, (AuthLost, QobuzUnavailable)):
-            raise error
-        if error is not None:
-            log.info(f"    skipped {name}: {error}")
-            job.push_progress("Scanning for upgrades", done, n, name,
-                              found=total, unit="artist")
-            return
-        added = 0
-        current_hidden = hidden_mod.load()
-        for spec in specs:
-            if hidden_mod.is_hidden(
-                    hidden_mod.SCOPE_UPGRADE,
-                    spec.get("artist") or name,
-                    spec.get("title"),
-                    current_hidden,
-                    year=(spec.get("payload") or {}).get("year")):
-                continue
-            # Unticked by default, like the gap scan, one click shouldn't
-            # re-rip hundreds of albums nobody reviewed.
-            job.add_candidate(
-                kind="upgrade",
-                title=spec.get("title") or "?",
-                artist=spec.get("artist") or name,
-                detail=spec.get("detail") or "",
-                payload=spec.get("payload") or {},
-                selected=False,
-            )
-            total += 1
-            added += 1
-        hit = {"artist": name, "albums": added} if added else None
-        job.push_progress("Scanning for upgrades", done, n, name,
-                          found=total, hit=hit, unit="artist")
-        if added:
-            log.info(f"  {name} - {plural(added, 'album')} to upgrade")
-
-    refresh = upgrade_state.refresh_for_artists(
-        artists,
-        token=token,
-        args=args,
-        capped=capped,
-        hidden=hidden,
-        cancel_check=lambda: bool(job.cancel_requested),
-        on_artist=_on_artist,
-        discovery_errors=unreadable_artists,
-        workers=workers,
-        pool_kwargs=job_mgr.pool_initializer_kwargs(),
-    )
-    unchecked = len(refresh.errors)
-    if unchecked:
-        _record_unchecked_artists(job, unchecked)
-    if not job.cancel_requested and refresh.complete:
-        _sync_surface_badge("upgrade")
-    if job.cancel_requested:
-        log.info("Cancelled. Stopping scan.")
-    if not job.cancel_requested and refresh.complete:
-        _flag_new_since_last_scan(job, "upgrade")
-    if job.cancel_requested:
-        job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
-                       if total else "Stopped before anything turned up.")
-    elif unchecked:
-        job.summary = (
-            f"{plural(total, 'upgradeable album')} found. "
-            f"{plural(unchecked, 'artist')} couldn't be checked; refresh to retry."
-        )
-        if not total:
-            _mark_job_failed(job)
-    else:
-        job.summary = (f"{plural(total, 'upgradeable album')} Qobuz can serve "
-                       "at higher quality." + _cap_note(job) if total else
-                       "Every album is already at the best quality Qobuz offers.")
-    if unreadable_artists:
-        job.summary += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
-    log.info(job.summary)
-
 
 def execute_upgrades(job, chosen, token):
     """Re-rip the present tracks of each chosen album at higher quality."""

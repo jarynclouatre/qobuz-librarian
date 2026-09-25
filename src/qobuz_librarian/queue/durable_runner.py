@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from qobuz_librarian import run_lock
 from qobuz_librarian.completion import (
     CompletionOrigin,
     RecoveryOwner,
@@ -106,8 +107,8 @@ class DurableAlbumUnavailable(RuntimeError):
 
 
 def _require_authority(authority: RunLockLease) -> None:
-    if type(authority) is not RunLockLease or not authority.intact():
-        raise DurableAlbumUnavailable("run-lock authority is unavailable")
+    run_lock.require_authority(
+        authority, DurableAlbumUnavailable("run-lock authority is unavailable"))
 
 
 def _require_current_plan(item, args, plan: DurableNewAlbumPlan) -> None:

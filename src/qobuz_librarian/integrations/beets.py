@@ -4654,14 +4654,6 @@ def _resolve_beets_runtime():
     return _checked_beets_runtime(_beets_python_from_launcher())
 
 
-def beets_runtime_path():
-    """Return the verified Python launcher configured for Beets, if any."""
-    runtime = _resolve_beets_runtime()
-    if runtime is None or _configured_beets_plugins(runtime) is None:
-        return None
-    return runtime.python
-
-
 def beets_runtime_problem():
     """Say what stops a Beets import from running here, or None."""
     runtime = _resolve_beets_runtime()

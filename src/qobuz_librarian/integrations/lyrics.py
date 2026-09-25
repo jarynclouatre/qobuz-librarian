@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.dirfd import same_directory as _same_directory
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import lyric_fetch, rip
 from qobuz_librarian.ui_cli.ask import ask
@@ -268,15 +269,6 @@ def _open_nofollow_directory(path, *, dir_fd=None):
     flags = os.O_RDONLY | directory | nofollow
     flags |= getattr(os, "O_CLOEXEC", 0)
     return os.open(os.fspath(path), flags, dir_fd=dir_fd)
-
-
-def _same_directory(left, right):
-    return (
-        stat.S_ISDIR(left.st_mode)
-        and stat.S_ISDIR(right.st_mode)
-        and int(left.st_dev) == int(right.st_dev)
-        and int(left.st_ino) == int(right.st_ino)
-    )
 
 
 def _open_library_chain(path):

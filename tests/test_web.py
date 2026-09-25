@@ -4042,68 +4042,6 @@ def test_library_approve_skips_candidates_already_on_disk(client, monkeypatch):
             _remove_job(split)
 
 
-def test_drop_owned_requires_every_expected_track(
-        tmp_path, monkeypatch):
-    """Empty and partial folders stay actionable; an exact complete one drops."""
-    from qobuz_librarian.web import flows, job_persistence
-
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
-
-    shell = tmp_path / "Runnin' Wild (2019)"
-    shell.mkdir()
-    partial = tmp_path / "Partial Album (2010)"
-    partial.mkdir()
-    complete = tmp_path / "Complete Album (2010)"
-    complete.mkdir()
-
-    qobuz_tracks = [
-        {"title": "Alpha", "media_number": 1, "isrc": "AA001"},
-        {"title": "Beta", "media_number": 1, "isrc": "AA002"},
-    ]
-    alpha = {"title": "Alpha", "discnumber": 1, "isrc": "AA001"}
-    beta = {"title": "Beta", "discnumber": 1, "isrc": "AA002"}
-    monkeypatch.setattr(
-        flows, "get_album",
-        lambda album_id, _token: {
-            "id": album_id,
-            "title": album_id,
-            "artist": {"name": "Airbourne"},
-            "tracks": {"items": qobuz_tracks},
-        })
-
-    monkeypatch.setattr(
-        "qobuz_librarian.library.catalog.find_album_dir_filesystem",
-        lambda alb: shell if alb.get("id") == "empty1"
-        else partial if alb.get("id") == "partial1"
-        else complete if alb.get("id") == "complete1" else None)
-    monkeypatch.setattr(
-        "qobuz_librarian.library.catalog.find_existing_tracks",
-        lambda _album, album_dir=None: (
-            [] if album_dir == shell
-            else [alpha] if album_dir == partial
-            else [alpha, beta],
-            album_dir,
-        ))
-
-    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
-    job.execute_kind = "library"
-    job.add_candidate(kind="album", title="Runnin' Wild", artist="Airbourne",
-                      payload={"album_id": "empty1"}, selected=True)
-    job.add_candidate(kind="album", title="Partial Album", artist="Airbourne",
-                      payload={"album_id": "partial1"}, selected=True)
-    job.add_candidate(kind="album", title="Complete Album", artist="Airbourne",
-                      payload={"album_id": "complete1"}, selected=True)
-    try:
-        dropped = flows.drop_owned_missing_candidates(job, "tok")
-        titles = [c["title"] for c in job.candidates]
-        assert "Runnin' Wild" in titles
-        assert "Partial Album" in titles
-        assert "Complete Album" not in titles
-        assert dropped == 1
-    finally:
-        _remove_job(job)
-
-
 def test_select_all_scoped_to_the_active_filter(client):
     """With a filter showing 3 rows, Select all must not silently flip
     the other thousand, and Deselect must scope the same way so a filtered
@@ -6189,8 +6127,10 @@ def test_a_signed_in_browser_is_never_locked_out(monkeypatch, tmp_path):
                            follow_redirects=False)
         assert signed_in.status_code == 303
 
-        for _ in range(6):
-            web_auth.record_login_failure("testclient", "admin")
+        for _ in range(web_auth._LOGIN_MAX):
+            assert web_auth.begin_login_attempt("testclient", "admin")
+            web_auth.finish_login_attempt("testclient", "admin", success=False)
+        assert not web_auth.begin_login_attempt("testclient", "admin")
 
         c.get("/login")
         tok = c.cookies.get("ql_csrf")
@@ -7408,7 +7348,8 @@ def test_repair_approve_parks_the_unticked_remnant(client, monkeypatch):
 
 def test_partial_download_gap_fill_carries_its_receipts(monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import backup, catalog
+    from qobuz_librarian import repair_log
+    from qobuz_librarian.library import catalog
     from qobuz_librarian.modes import process as process_mod
     from qobuz_librarian.web import flows, job_persistence
 
@@ -7440,7 +7381,8 @@ def test_partial_download_gap_fill_carries_its_receipts(monkeypatch, tmp_path):
 
         call, = calls
         assert call["expected_album_receipt"] == candidate["payload"]["_premise"]["receipt"]
-        sealed = backup.capture_gap_fill_source_receipt(track, album_dir)
+        with repair_log._HeldRepairSource(album_dir, track) as source:
+            sealed = source.source_receipt
         assert call["expected_gap_fill_receipts"] == {sealed["relative"]: sealed["file"]}
         assert track.read_bytes() == b"imported track"
     finally:
@@ -7690,8 +7632,8 @@ def test_blank_login_does_not_spend_a_strike(client, monkeypatch):
         "username": "dink", "password_hash": "x", "session_secret": "s"})
     monkeypatch.setattr(web_auth, "credentials_configured", lambda: True)
     calls = []
-    monkeypatch.setattr(web_auth, "record_login_failure",
-                        lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(web_auth, "begin_login_attempt",
+                        lambda *a, **k: calls.append("reserved") or True)
     monkeypatch.setattr(web_auth, "verify_login",
                         lambda *a, **k: calls.append("verified") or False)
 

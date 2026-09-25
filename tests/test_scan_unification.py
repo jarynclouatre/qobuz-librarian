@@ -174,39 +174,6 @@ def test_scan_library_reuses_checkpoint_from_interrupted_publication(monkeypatch
     assert captured["attempt_id"] == 11
 
 
-def test_upgrade_scan_uses_shared_refresh_state(tmp_path, monkeypatch):
-    from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import flows
-
-    artist_dir = tmp_path / "Artist"
-    artist_dir.mkdir()
-    calls = []
-    spec = {
-        "title": "Album",
-        "artist": "Artist",
-        "detail": "16-bit/44.1kHz -> 24-bit/96kHz",
-        "payload": {"album_id": "up1", "year": "2024", "cover": ""},
-    }
-
-    def fake_refresh(artists, **kwargs):
-        artist_list = list(artists)
-        calls.append([a.name for a in artist_list])
-        kwargs["on_artist"](artist_list[0], [spec], None, 1, 1)
-        return upgrade_state.RefreshResult([spec], ["Artist"], {}, True)
-
-    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [artist_dir])
-    monkeypatch.setattr(flows.upgrade_state, "refresh_for_artists", fake_refresh)
-    job = jm.Job(title="upgrade")
-
-    flows.scan_upgrades(job, "tok")
-
-    assert calls == [["Artist"]]
-    assert len(job.candidates) == 1
-    assert job.candidates[0]["kind"] == "upgrade"
-
-
-
-
 def test_execute_downsamples_refreshes_affected_artist_state(tmp_path, monkeypatch):
     from qobuz_librarian.web import flows
 

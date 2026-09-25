@@ -1,7 +1,6 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
 import copy
 import json
-import math
 import threading
 import time
 
@@ -58,14 +57,7 @@ def _empty_kind():
 
 
 def quality_signature() -> str:
-    """Every setting the saved candidates were computed under. When it differs
-    from the current settings, a refresh must re-derive candidates even for
-    unchanged folders, the cheap skip would otherwise carry forward promises
-    made under a dead policy. Not just the quality pair: single-track-gap
-    suppression, the catalogue limit, the missing-album track minimum, and
-    live-album exclusion all change WHICH candidates a scan yields, so leaving
-    any of them out keeps stale gap/missing lists after Settings says the
-    policy changed."""
+    """Every setting the saved candidates were computed under."""
     return (f"{getattr(cfg, 'STREAMRIP_QUALITY', '')}"
             f"|{bool(getattr(cfg, 'PREFER_HIRES', False))}"
             f"|{bool(getattr(cfg, 'SUPPRESS_SINGLE_TRACK_GAPS', False))}"
@@ -75,28 +67,6 @@ def quality_signature() -> str:
             f"|rules{CANDIDATE_RULES}")
 
 
-def _nonnegative_int(value):
-    if value in (None, ""):
-        return 0, True
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return 0, False
-    return (parsed, True) if parsed >= 0 else (0, False)
-
-
-def _optional_time(value):
-    if value in (None, ""):
-        return None, True
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None, False
-    if not math.isfinite(parsed) or parsed < 0:
-        return None, False
-    return parsed, True
-
-
 def _normalise(data):
     # A version the build doesn't know is a deliberate schema signal, not
     # corruption: leave the file alone and rebuild from a fresh scan.
@@ -104,9 +74,9 @@ def _normalise(data):
         return _empty_state()
     base = _empty_state()
     kinds = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}
-    updated_at, _ = _optional_time(data.get("updated_at"))
-    retired_at, _ = _optional_time(data.get("review_retired_at"))
-    retired_generation, _ = _nonnegative_int(
+    updated_at, _ = state_file.optional_time(data.get("updated_at"))
+    retired_at, _ = state_file.optional_time(data.get("review_retired_at"))
+    retired_generation, _ = state_file.nonnegative_int(
         data.get("review_retired_generation")
     )
     base.update({
@@ -129,9 +99,9 @@ def _kind_from(data, kind, *, keep_artists=True):
     base = _empty_kind()
     bucket = (data.get("kinds") or {}).get(kind)
     if isinstance(bucket, dict):
-        updated_at, updated_ok = _optional_time(bucket.get("updated_at"))
-        generation, generation_ok = _nonnegative_int(bucket.get("generation"))
-        revision, revision_ok = _nonnegative_int(bucket.get("revision"))
+        updated_at, updated_ok = state_file.optional_time(bucket.get("updated_at"))
+        generation, generation_ok = state_file.nonnegative_int(bucket.get("generation"))
+        revision, revision_ok = state_file.nonnegative_int(bucket.get("revision"))
         raw_artists = bucket.get("artists")
         artists_ok = raw_artists is None or isinstance(raw_artists, dict)
         artists = {}

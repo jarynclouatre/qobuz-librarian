@@ -14,6 +14,7 @@ empty store.
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import stat
@@ -24,6 +25,28 @@ from pathlib import Path
 from qobuz_librarian import config as cfg
 
 log = logging.getLogger("qobuz_librarian")
+
+
+def nonnegative_int(value):
+    if value in (None, ""):
+        return 0, True
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0, False
+    return (parsed, True) if parsed >= 0 else (0, False)
+
+
+def optional_time(value):
+    if value in (None, ""):
+        return None, True
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    if not math.isfinite(parsed) or parsed < 0:
+        return None, False
+    return parsed, True
 
 
 @contextmanager
@@ -92,11 +115,7 @@ def _identity(st):
 
 
 def file_identity(path):
-    """The store's (device, inode, size, mtime), or None when it is absent.
-
-    Every writer here replaces the whole file, so an unchanged identity means
-    unchanged contents.
-    """
+    """The store's (device, inode, size, mtime), or None when it is absent."""
     try:
         return _identity(os.stat(path))
     except FileNotFoundError:

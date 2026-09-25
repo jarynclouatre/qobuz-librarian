@@ -1,53 +1,30 @@
-"""Shared downsample scan state.
-
-The downsample pass is local-only, so both the standalone Downsample scan and
-the baseline Library scan can refresh the same candidate state without mixing
-downsample items into the Library review list.
-"""
-import math
+"""Shared downsample scan state."""
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.library import candidate_premise, downsample, generation_state
+from qobuz_librarian.library import (
+    artist_scan_store,
+    candidate_premise,
+    downsample,
+    generation_state,
+)
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.downsample import DownsampleCandidate
-from qobuz_librarian.ui_cli import logging as cli_logging
 
 STATE_VERSION = 1
 _STATE_LOCK = threading.Lock()
 
 
 @dataclass
-class RefreshResult:
+class RefreshResult(artist_scan_store.RefreshResult):
     candidates: list[DownsampleCandidate]
-    artists_scanned: list[str]
-    errors: dict[str, str]
-    complete: bool
-    fingerprints: dict[str, str] = field(default_factory=dict)
-    refresh_started_at: float = 0.0
     refresh_started_revision: int = 0
-
-
-def _empty_state():
-    return {
-        "version": STATE_VERSION,
-        "updated_at": None,
-        "generation": 0,
-        "revision": 0,
-        "complete": False,
-        "artists_scanned": [],
-        "errors": {},
-        "fingerprints": {},
-        "artist_updated_at": {},
-        "artist_revision": {},
-        "candidates": [],
-    }
 
 
 def _candidate_to_dict(c: DownsampleCandidate):
@@ -81,156 +58,25 @@ def _candidate_from_dict(data):
     )
 
 
-def _nonnegative_int(value):
-    if value in (None, ""):
-        return 0, True
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return 0, False
-    return (parsed, True) if parsed >= 0 else (0, False)
-
-
-def _optional_time(value):
-    if value in (None, ""):
-        return None, True
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None, False
-    if not math.isfinite(parsed) or parsed < 0:
-        return None, False
-    return parsed, True
+_store = artist_scan_store.ArtistScanStore(
+    path=lambda: cfg.DOWNSAMPLE_STATE_FILE,
+    lock=_STATE_LOCK,
+    version=STATE_VERSION,
+    what="the saved downsample scan",
+    lost="the Downsample results from your last Library refresh",
+    surface="downsample",
+    write_failure="downsample state write failed ({e}); saved downsample view may be stale",
+    candidate_to_dict=_candidate_to_dict,
+    candidate_from_dict=_candidate_from_dict,
+)
 
 
 def load():
-    data = state_file.load_json_object(
-        cfg.DOWNSAMPLE_STATE_FILE, "the saved downsample scan",
-        "the Downsample results from your last Library refresh")
-    # A version the build doesn't know is a deliberate schema signal, not
-    # corruption: leave the file alone and rebuild from a fresh scan.
-    if data is None or data.get("version") != STATE_VERSION:
-        return _empty_state()
-    base = _empty_state()
-    updated_at, updated_ok = _optional_time(data.get("updated_at"))
-    generation, generation_ok = _nonnegative_int(data.get("generation"))
-    revision, revision_ok = _nonnegative_int(data.get("revision"))
-    raw_artists = data.get("artists_scanned")
-    artists_ok = raw_artists is None or isinstance(raw_artists, list)
-    artists_scanned = (
-        [str(name) for name in raw_artists if isinstance(name, str)]
-        if isinstance(raw_artists, list) else []
-    )
-    if isinstance(raw_artists, list) and len(artists_scanned) != len(raw_artists):
-        artists_ok = False
-    raw_candidates = data.get("candidates")
-    candidates_ok = raw_candidates is None or isinstance(raw_candidates, list)
-    candidates = [
-        candidate for candidate in (raw_candidates or [])
-        if isinstance(candidate, dict)
-        and (
-            candidate.get("payload") is None
-            or isinstance(candidate.get("payload"), dict)
-        )
-    ] if candidates_ok else []
-    if isinstance(raw_candidates, list) and len(candidates) != len(raw_candidates):
-        candidates_ok = False
-    base.update({
-        "updated_at": updated_at,
-        "generation": generation,
-        "revision": revision,
-        "complete": bool(data.get("complete")) and all((
-            updated_ok, generation_ok, revision_ok, artists_ok, candidates_ok,
-        )),
-        "artists_scanned": artists_scanned,
-        "errors": data.get("errors") if isinstance(data.get("errors"), dict) else {},
-        "fingerprints": (data.get("fingerprints")
-                         if isinstance(data.get("fingerprints"), dict) else {}),
-        "artist_updated_at": (data.get("artist_updated_at")
-                              if isinstance(data.get("artist_updated_at"), dict)
-                              else {}),
-        "artist_revision": (data.get("artist_revision")
-                            if isinstance(data.get("artist_revision"), dict)
-                            else {}),
-        "candidates": candidates,
-    })
-    return base
+    return _store.load()
 
 
 def _write_state(data):
-    try:
-        state_file.write_json(cfg.DOWNSAMPLE_STATE_FILE, data)
-        return True
-    except OSError as e:
-        # The Downsample view reads this snapshot; a failed write means it
-        # shows stale candidates until the next scan.
-        cli_logging.vlog(f"downsample state write failed ({e}); saved downsample view may be stale")
-        return False
-
-
-def _state_from_result(result: RefreshResult, *, generation: int, revision: int):
-    now = time.time()
-    return {
-        "version": STATE_VERSION,
-        "updated_at": now,
-        "generation": int(generation),
-        "revision": int(revision),
-        "complete": bool(result.complete),
-        "artists_scanned": list(result.artists_scanned),
-        "errors": dict(result.errors),
-        "fingerprints": dict(result.fingerprints),
-        "artist_updated_at": {name: now for name in result.artists_scanned},
-        "artist_revision": {
-            name: int(revision) for name in result.artists_scanned
-        },
-        "candidates": [_candidate_to_dict(c) for c in result.candidates],
-    }
-
-
-def _preserve_concurrent_artist_updates(
-    data,
-    refresh_started_at,
-    refresh_started_revision,
-):
-    if not refresh_started_at and not refresh_started_revision:
-        return data
-    current = load()
-    current_artist_updated_at = current.get("artist_updated_at") or {}
-    current_artist_revision = current.get("artist_revision") or {}
-    current_fingerprints = current.get("fingerprints") or {}
-    if refresh_started_revision:
-        preserved_artists = {
-            name for name, artist_revision in current_artist_revision.items()
-            if int(artist_revision or 0) > int(refresh_started_revision)
-        }
-    else:
-        preserved_artists = {
-            name for name, updated_at in current_artist_updated_at.items()
-            if float(updated_at or 0) > float(refresh_started_at)
-        }
-    if not preserved_artists:
-        return data
-    data["candidates"] = [
-        c for c in data.get("candidates") or []
-        if c.get("artist") not in preserved_artists
-    ] + [
-        c for c in current.get("candidates") or []
-        if c.get("artist") in preserved_artists
-    ]
-    data["artists_scanned"] = list(dict.fromkeys(
-        list(data.get("artists_scanned") or [])
-        + [name for name in current.get("artists_scanned") or []
-           if name in preserved_artists]
-    ))
-    data_artist_updated_at = dict(data.get("artist_updated_at") or {})
-    data_artist_revision = dict(data.get("artist_revision") or {})
-    for name in preserved_artists:
-        data["fingerprints"][name] = current_fingerprints.get(name, "")
-        data_artist_updated_at[name] = current_artist_updated_at.get(name, 0)
-        data_artist_revision[name] = current_artist_revision.get(name, 0)
-    data["artist_updated_at"] = data_artist_updated_at
-    data["artist_revision"] = data_artist_revision
-    return data
+    return _store.write_state(data)
 
 
 def save(
@@ -242,42 +88,16 @@ def save(
     generation=None,
     revision=None,
 ):
-    with _STATE_LOCK, state_file.store_lock(cfg.DOWNSAMPLE_STATE_FILE):
-        target_generation = (
-            generation_state.current_generation()
-            if generation is None
-            else int(generation)
-        )
-        target_revision = (
-            generation_state.reserve_revision()
-            if revision is None
-            else int(revision)
-        )
-        if target_revision is None:
-            return False
-        data = _state_from_result(
-            result,
-            generation=target_generation,
-            revision=target_revision,
-        )
-        if preserve_concurrent:
-            data = _preserve_concurrent_artist_updates(
-                data,
-                refresh_started_at
-                if refresh_started_at is not None
-                else result.refresh_started_at,
-                refresh_started_revision
-                if refresh_started_revision is not None
-                else result.refresh_started_revision,
-            )
-        if not _write_state(data):
-            return False
-        return generation_state.mark_output_current(
-            "downsample",
-            generation=target_generation,
-            revision=target_revision,
-            complete=result.complete,
-        )
+    return _store.save(
+        result,
+        load=load,
+        write_state=_write_state,
+        preserve_concurrent=preserve_concurrent,
+        refresh_started_at=refresh_started_at,
+        refresh_started_revision=refresh_started_revision,
+        generation=generation,
+        revision=revision,
+    )
 
 
 def visible_of(candidates, hidden=None):
@@ -336,31 +156,10 @@ def update_artist(
                 [], [name], {name: "saved state revision could not be written"},
                 False, {name: fingerprint},
             )
-        kept = [c for c in state["candidates"] if c.get("artist") != name]
-        kept.extend(_candidate_to_dict(c) for c in filtered)
-        artists_scanned = list(dict.fromkeys(
-            list(state.get("artists_scanned") or []) + [name]))
-        errors = dict(state.get("errors") or {})
-        errors.pop(name, None)
-        fingerprints = dict(state.get("fingerprints") or {})
-        fingerprints[name] = fingerprint
-        artist_updated_at = dict(state.get("artist_updated_at") or {})
-        artist_updated_at[name] = now
-        artist_revision = dict(state.get("artist_revision") or {})
-        artist_revision[name] = state_revision
-        saved = _write_state({
-            "version": STATE_VERSION,
-            "updated_at": now,
-            "generation": target_generation,
-            "revision": state_revision,
-            "complete": bool(state.get("complete", True)),
-            "artists_scanned": artists_scanned,
-            "errors": errors,
-            "fingerprints": fingerprints,
-            "artist_updated_at": artist_updated_at,
-            "artist_revision": artist_revision,
-            "candidates": kept,
-        })
+        saved = _write_state(_store.state_with_artist(
+            state, name, fingerprint, filtered,
+            now=now, generation=target_generation, revision=state_revision,
+        ))
         authority_saved = saved and generation_state.mark_output_current(
             "downsample",
             generation=target_generation,
@@ -469,11 +268,7 @@ def refresh_for_artists(
             fingerprint = artist_fingerprint(artist_dir)
             fingerprints[artist_dir.name] = fingerprint
             if can_reuse and (previous.get("fingerprints") or {}).get(artist_dir.name) == fingerprint:
-                found = [
-                    _candidate_from_dict(c)
-                    for c in previous.get("candidates", [])
-                    if c.get("artist") == artist_dir.name
-                ]
+                found = _store.candidates_for_artist(previous, artist_dir.name)
                 candidates.extend(found)
                 filtered = visible_of(found, hidden)
                 artists_scanned.append(artist_dir.name)
@@ -495,12 +290,4 @@ def refresh_for_artists(
     result = RefreshResult(
         candidates, artists_scanned, errors, complete, fingerprints,
         refresh_started_at, refresh_started_revision)
-    # A cancelled refresh only contains the artists reached before the cancel.
-    if persist and result.complete:
-        save(
-            result,
-            preserve_concurrent=True,
-            refresh_started_at=refresh_started_at,
-            refresh_started_revision=refresh_started_revision,
-        )
-    return result
+    return artist_scan_store.finish_refresh(result, persist=persist, save=save)

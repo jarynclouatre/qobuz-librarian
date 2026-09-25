@@ -1,5 +1,4 @@
 """Upgrade and gap-fill backup/restore functions."""
-import ctypes
 import errno
 import hashlib
 import io
@@ -18,6 +17,11 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.dirfd import digest_fd as _file_digest_fd
+from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
+from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
+from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
+from qobuz_librarian.dirfd import same_directory as _same_directory
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.interrupts import run_sigint_deferred
@@ -158,9 +162,6 @@ def _same_filesystem(a: Path, b: Path) -> bool:
         return False
 
 
-_RENAME_NOREPLACE = 1
-
-
 def _open_backup_directory(path, *, dir_fd=None):
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
@@ -168,15 +169,6 @@ def _open_backup_directory(path, *, dir_fd=None):
         raise OSError("safe no-follow directory access is unavailable")
     flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
     return os.open(os.fspath(path), flags, dir_fd=dir_fd)
-
-
-def _same_directory(left, right) -> bool:
-    return (
-        stat.S_ISDIR(left.st_mode)
-        and stat.S_ISDIR(right.st_mode)
-        and (int(left.st_dev), int(left.st_ino))
-        == (int(right.st_dev), int(right.st_ino))
-    )
 
 
 def _entry_identity(value):
@@ -191,16 +183,6 @@ def _same_entry(left, right) -> bool:
     return _entry_identity(left) == _entry_identity(right)
 
 
-def _named_entry_matches(parent_fd, name, entry_fd) -> bool:
-    try:
-        return _same_entry(
-            os.fstat(entry_fd),
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False),
-        )
-    except (OSError, TypeError, ValueError):
-        return False
-
-
 def _named_directory_matches(parent_fd, name, directory_fd) -> bool:
     try:
         held = os.fstat(directory_fd)
@@ -208,16 +190,6 @@ def _named_directory_matches(parent_fd, name, directory_fd) -> bool:
             held, os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
     except (OSError, TypeError, ValueError):
         return False
-
-
-def _named_entry_missing(parent_fd, name) -> bool:
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    return False
 
 
 def _open_entry_at(parent_fd, name):
@@ -238,31 +210,6 @@ def _open_entry_at(parent_fd, name):
     except BaseException:
         os.close(descriptor)
         raise
-
-
-def _rename_noreplace_at(source_fd, source_name, destination_fd,
-                         destination_name) -> None:
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    ctypes.set_errno(0)
-    if renameat2(
-            int(source_fd),
-            os.fsencode(source_name),
-            int(destination_fd),
-            os.fsencode(destination_name),
-            _RENAME_NOREPLACE):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), os.fspath(destination_name))
 
 
 def _rename_exact_noreplace_at(source_fd, source_name, destination_fd,
@@ -968,17 +915,6 @@ def _open_regular_file_at(parent_fd, name):
         raise
 
 
-def _file_digest_fd(descriptor) -> str:
-    digest = hashlib.sha256()
-    offset = 0
-    while True:
-        chunk = os.pread(descriptor, 1024 * 1024, offset)
-        if not chunk:
-            return digest.hexdigest()
-        digest.update(chunk)
-        offset += len(chunk)
-
-
 def _xattrs_fd(descriptor):
     """Return every supported extended attribute on one held inode."""
     try:
@@ -1175,50 +1111,6 @@ def _normalise_gap_fill_expected_receipts(receipts):
             raise OSError("gap-fill expected receipt path is duplicated")
         normalised[relative] = dict(raw_receipt)
     return normalised
-
-
-def capture_gap_fill_source_receipt(file_path, album_dir):
-    """Seal one verified source to an album-relative path and exact inode."""
-    opened = _open_backup_source(Path(album_dir))
-    if opened is None:
-        return None
-    public, music_root, album_parts, album_fds = opened
-    source_parents = []
-    source_fd = None
-    try:
-        rooted = _rooted_path_parts(public, Path(file_path))
-        if rooted is None:
-            return None
-        _source_path, _album_root, file_parts = rooted
-        if file_parts[-1] in _SIDECARS:
-            return None
-        source_parents = _open_relative_directories(
-            album_fds[-1], file_parts[:-1], create=False)
-        source_parent_fd = (
-            source_parents[-1] if source_parents else album_fds[-1])
-        source_fd = _open_regular_file_at(source_parent_fd, file_parts[-1])
-        receipt = _gap_fill_file_receipt(source_fd)
-        if (
-            receipt != _gap_fill_file_receipt(source_fd)
-            or not _named_entry_matches(
-                source_parent_fd, file_parts[-1], source_fd)
-            or not _backup_source_is_public(
-                music_root, album_parts, album_fds)
-            or not _relative_directories_are_named(
-                album_fds[-1], file_parts[:-1], source_parents)
-        ):
-            return None
-        return {
-            "relative": "/".join(file_parts),
-            "file": receipt,
-        }
-    except (OSError, TypeError, ValueError):
-        return None
-    finally:
-        if source_fd is not None:
-            os.close(source_fd)
-        _close_descriptors(source_parents)
-        _close_descriptors(album_fds)
 
 
 def _restore_exact_entry_move(source_parent_fd, source_name,
@@ -2558,43 +2450,6 @@ def _fsync(path: Path) -> bool:
         return True
     except OSError:
         return False
-
-
-def _fsync_tree(root: Path) -> bool:
-    """fsync every file and directory under ``root`` (and root itself) so a
-    verified copytree is durable before the source it mirrors is removed.
-    Returns False when any flush genuinely failed (see _fsync) - the copy may
-    exist only in the page cache, so a caller about to delete the source must
-    keep it instead."""
-    entries = _list_tree(root)
-    if entries is None:
-        return False
-    ok = True
-    try:
-        for f in entries:
-            if not f.is_symlink():
-                ok = _fsync(f) and ok
-    except OSError:
-        ok = False
-    return _fsync(root) and ok
-
-
-def replacement_tree_durable(root: Path) -> bool:
-    """Flush a completed replacement tree and the directory that names it.
-
-    Call this after the final mutation and before deleting an original or
-    backup. A logical scan can prove the files are present, but only this gate
-    proves their bytes and directory entries are no longer just cached writes.
-    """
-    if root is None:
-        return False
-    try:
-        root = Path(root)
-        if root.is_symlink() or not root.is_dir():
-            return False
-    except OSError:
-        return False
-    return _fsync_tree(root) and _fsync(root.parent)
 
 
 def _tree_digest(d: Path):
@@ -6239,12 +6094,6 @@ _ONLY_COPY_TTL_SEC = 10.0
 _BACKUP_LISTING_READ_BYTES = 8 * 1024 * 1024
 _only_copy_cache: tuple[float, tuple, list] | None = None
 _only_copy_lock = threading.Lock()
-
-
-def find_only_copy_backups():
-    """Retained backups not verified removable, as (path, origin)."""
-    return [(path, origin) for path, origin, result in list_retained_backups()
-            if not result.removable]
 
 
 def awaiting_retention(path: Path) -> bool:

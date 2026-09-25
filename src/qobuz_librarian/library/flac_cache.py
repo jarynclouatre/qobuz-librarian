@@ -18,15 +18,17 @@ import time
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.cache_db import CacheDB
 from qobuz_librarian.ui_cli.logging import vlog
 
-_init_lock = threading.Lock()
-_initialized = False
-# Bumped when a corrupt db is discarded; _conn() reopens a thread's connection
-# when its generation lags, so a sibling libscan worker stops writing into the
-# deleted inode after another thread rebuilt the db.
-_generation = 0
-_local = threading.local()
+_db = CacheDB(
+    "flac_cache.db", "flac cache", (
+        "CREATE TABLE IF NOT EXISTS files "
+        "(path TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, "
+        "payload TEXT NOT NULL)",
+    ),
+    enabled=lambda: cfg.FLAC_CACHE_ENABLED,
+)
 
 # Buffered-write state.
 _PENDING_LOCK = threading.Lock()
@@ -38,132 +40,9 @@ _PENDING_LIMIT = 500
 _writes = 0
 
 
-def _db_path():
-    return Path(str(cfg.DATA_DIR)) / "flac_cache.db"
-
-
-def _is_corrupt_error(e: sqlite3.Error) -> bool:
-    msg = str(e).lower()
-    return any(s in msg for s in
-               ("malformed", "not a database", "file is encrypted"))
-
-
-def _discard_corrupt_db() -> bool:
-    """Delete a malformed cache db (+ WAL sidecars). The cache is derived data -
-    losing it just makes the next scan re-parse, which beats a permanently dead
-    cache that re-parses every file forever. Returns True if anything cleared."""
-    db = _db_path()
-    cleared = False
-    for p in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
-        try:
-            p.unlink()
-            cleared = True
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            vlog(f"couldn't clear corrupt flac cache {p.name}: {e}")
-            return False
-    if cleared:
-        vlog("flac cache was corrupt - rebuilt from scratch")
-    return cleared
-
-
-def _handle_db_error(e: sqlite3.Error) -> None:
-    """Drop this thread's connection and, on a corrupt-db error, discard the
-    malformed file so the next _ensure() rebuilds - the same recovery
-    album_cache has. SQLite data-page corruption can pass connect + CREATE TABLE
-    and only surface on a row read, which would otherwise leave the cache
-    permanently dead (every scan re-parsing every file)."""
-    global _initialized, _generation
-    conn = getattr(_local, "conn", None)
-    if conn is not None:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-        _local.conn = None
-    if not _is_corrupt_error(e):
-        return
-    with _init_lock:
-        if _initialized and _discard_corrupt_db():
-            _initialized = False
-            _generation += 1
-            import logging
-            logging.getLogger("qobuz_librarian").info(
-                "flac cache was corrupt - discarded; it rebuilds on next scan")
-
-
-def _ensure() -> bool:
-    global _initialized
-    if not cfg.FLAC_CACHE_ENABLED:
-        return False
-    if _initialized:
-        return True
-    with _init_lock:
-        if _initialized:
-            return True
-        try:
-            _db_path().parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            vlog(f"flac cache dir unavailable ({e}); proceeding without it")
-            return False
-        for attempt in (1, 2):
-            try:
-                conn = sqlite3.connect(str(_db_path()), timeout=5)
-                try:
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute(
-                        "CREATE TABLE IF NOT EXISTS files "
-                        "(path TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, "
-                        "payload TEXT NOT NULL)")
-                    conn.commit()
-                finally:
-                    conn.close()
-                _initialized = True
-                return True
-            except sqlite3.Error as e:
-                # A corrupt db is the one error we can fix: drop it and retry
-                # once. Anything else (locked, full, unwritable) isn't ours.
-                if attempt == 1 and _is_corrupt_error(e) and _discard_corrupt_db():
-                    continue
-                vlog(f"flac cache init failed ({e}); proceeding without it")
-                return False
-        return False
-
-
-def _conn():
-    """Connection scoped to the calling thread.
-
-    A scan reads tens of thousands of files; opening a fresh connection per
-    lookup costs ~20x the lookup it's meant to make cheap, so each thread
-    keeps one (SQLite connections can't be shared across threads). synchronous
-    is dropped to NORMAL - this is a self-invalidating cache, so a row lost to
-    a crash is just re-parsed next scan, and the per-write fsync it avoids is
-    otherwise the bulk of a cold scan's caching cost.
-    """
-    conn = getattr(_local, "conn", None)
-    if conn is not None and getattr(_local, "generation", None) != _generation:
-        # Another thread discarded a corrupt db; drop this stale handle so we
-        # don't keep writing into the deleted inode.
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-        conn = None
-        _local.conn = None
-    if conn is None:
-        conn = sqlite3.connect(str(_db_path()), timeout=5)
-        conn.execute("PRAGMA synchronous=NORMAL")
-        _local.conn = conn
-        _local.generation = _generation
-    return conn
-
-
 def signature(path):
     """``(mtime_ns, size)`` for ``path``, or None if it can't be stat'd - the
-    key that detects a file changing out from under a stored entry. Capture it
-    BEFORE reading a file you intend to ``put()``, so an edit landing between the
-    read and the store doesn't pair the file's new mtime with the old tags."""
+    key that detects a file changing out from under a stored entry."""
     try:
         st = path.stat()
         return st.st_mtime_ns, st.st_size
@@ -178,7 +57,7 @@ def get(path) -> dict | None:
     passes hasn't been flushed yet, but the second pass shouldn't have to
     re-parse the file just because the row is still in RAM.
     """
-    if not _ensure():
+    if not _db.ensure():
         return None
     sig = signature(path)
     if sig is None:
@@ -197,12 +76,12 @@ def get(path) -> dict | None:
             return payload if isinstance(payload, dict) else None
         return None
     try:
-        row = _conn().execute(
+        row = _db.conn().execute(
             "SELECT mtime_ns, size, payload FROM files WHERE path = ?",
             (p,)).fetchone()
     except sqlite3.Error as e:
         vlog(f"flac cache read failed: {e}")
-        _handle_db_error(e)
+        _db.handle_db_error(e)
         return None
     if not row or row[0] != mtime_ns or row[1] != size:
         return None
@@ -214,18 +93,8 @@ def get(path) -> dict | None:
 
 
 def put(path, payload, sig=None) -> None:
-    """Store parsed tags for ``path``. Pass ``sig`` from ``signature(path)``
-    captured before the file was read; otherwise a file edited during the parse
-    is recorded with its new mtime but the pre-edit tags and served stale until
-    it changes again. Falls back to statting now when the caller omits it.
-
-    Writes are buffered and flushed in batches (see ``flush_pending``) so a
-    cold library scan doesn't commit once per file. ``get()`` reads the
-    buffer before falling back to disk, so a `put()` immediately followed by
-    `get()` on the same path is still a hit - the put→get visibility scans
-    depend on is preserved across the buffering boundary.
-    """
-    if not isinstance(payload, dict) or not _ensure():
+    """Store parsed tags for ``path``."""
+    if not isinstance(payload, dict) or not _db.ensure():
         return
     if sig is None:
         sig = signature(path)
@@ -252,7 +121,7 @@ def flush_pending() -> None:
     the next scan re-parses them (no data loss, just rework). Idempotent;
     a no-op when the buffer is empty.
     """
-    if not _ensure():
+    if not _db.ensure():
         return
     with _PENDING_LOCK:
         if not _PENDING_ROWS:
@@ -260,14 +129,14 @@ def flush_pending() -> None:
         snapshot = dict(_PENDING_ROWS)
         rows = [(p, m, s, d) for p, (m, s, d) in snapshot.items()]
     try:
-        conn = _conn()
+        conn = _db.conn()
         conn.executemany(
             "INSERT OR REPLACE INTO files (path, mtime_ns, size, payload) "
             "VALUES (?, ?, ?, ?)", rows)
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"flac cache batch write failed: {e}")
-        _handle_db_error(e)
+        _db.handle_db_error(e)
         return  # keep the buffered rows so the next flush retries them
     global _writes
     _writes += 1
@@ -294,7 +163,7 @@ def prune_missing(force: bool = False) -> int:
     repeatedly shouldn't re-walk the whole table each time - and skipped when
     MUSIC_ROOT is absent so an unmounted library volume can't wipe the cache.
     """
-    if not _ensure() or not cfg.MUSIC_ROOT.exists():
+    if not _db.ensure() or not cfg.MUSIC_ROOT.exists():
         return 0
     stamp = Path(str(cfg.DATA_DIR)) / ".flac_cache_prune"
     if not force and stamp.exists():
@@ -308,7 +177,7 @@ def prune_missing(force: bool = False) -> int:
     # flushed yet.
     flush_pending()
     try:
-        conn = _conn()
+        conn = _db.conn()
         gone = [(p,) for (p,) in conn.execute("SELECT path FROM files")
                 if not os.path.exists(p)]
         if gone:
@@ -318,7 +187,7 @@ def prune_missing(force: bool = False) -> int:
             _writes += 1
     except sqlite3.Error as e:
         vlog(f"flac cache prune failed: {e}")
-        _handle_db_error(e)
+        _db.handle_db_error(e)
         return 0
     try:
         stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -329,21 +198,15 @@ def prune_missing(force: bool = False) -> int:
 
 
 def store_stamp():
-    """A value that changes whenever the stored rows may have.
-
-    A caller memoizing a view of these rows compares this to know its numbers
-    are still the stored ones. This process's own write count is not enough on
-    its own: a terminal run writes the same file from another process, and
-    SQLite's data_version is what moves when it does.
-    """
+    """A value that changes whenever the stored rows may have."""
     version = 0
-    if _ensure():
+    if _db.ensure():
         try:
-            row = _conn().execute("PRAGMA data_version").fetchone()
+            row = _db.conn().execute("PRAGMA data_version").fetchone()
             version = row[0] if row else 0
         except sqlite3.Error as e:
             vlog(f"flac cache stamp read failed: {e}")
-            _handle_db_error(e)
+            _db.handle_db_error(e)
     return (_writes, version)
 
 
@@ -355,7 +218,7 @@ def census():
     walk and no file I/O; rows from before the cache carried sizes count
     toward their tier but not the byte totals. Returns None when the cache is
     off or holds nothing."""
-    if not _ensure():
+    if not _db.ensure():
         return None
     flush_pending()
     tiers = {"cd": [0, 0], "hires96": [0, 0], "hires192": [0, 0],
@@ -364,10 +227,10 @@ def census():
     reclaim = 0
     music_root = str(cfg.MUSIC_ROOT).rstrip("/") + "/"
     try:
-        rows = _conn().execute("SELECT path, payload FROM files").fetchall()
+        rows = _db.conn().execute("SELECT path, payload FROM files").fetchall()
     except sqlite3.Error as e:
         vlog(f"flac cache census read failed: {e}")
-        _handle_db_error(e)
+        _db.handle_db_error(e)
         return None
     def nonnegative_int(value):
         try:
@@ -424,14 +287,8 @@ def census():
 
 
 def _reset_for_tests() -> None:
-    global _initialized, _generation, _writes
+    global _writes
     _writes = 0
-    conn = getattr(_local, "conn", None)
-    if conn is not None:
-        conn.close()
-        _local.conn = None
-    _local.generation = None
-    _initialized = False
-    _generation = 0
+    _db.reset_for_tests()
     with _PENDING_LOCK:
         _PENDING_ROWS.clear()

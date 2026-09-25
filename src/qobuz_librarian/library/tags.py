@@ -225,23 +225,6 @@ def strip_edition_suffix(title):
     return s or title
 
 
-def strip_trailing_parens(title):
-    """A title with every trailing parenthesized group removed - both edition
-    AND performance-variant tags. Distinct from strip_edition_suffix (which
-    keeps performance variants): this only answers "is there a non-empty core
-    once the parenthesised decorations are gone", which catalog matching uses to
-    tell a non-Latin title apart from its ASCII-folded edition tag."""
-    s = (title or "").strip()
-    while True:
-        m = _TRAILING_PAREN_CAPTURE_RE.search(s)
-        if not m:
-            return s
-        head = s[: m.start()].strip()
-        if not head:
-            return s
-        s = head
-
-
 def canonical_track_title(value):
     """Exact title key that keeps non-Latin title text distinguishable."""
     if not isinstance(value, str):

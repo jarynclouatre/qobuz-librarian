@@ -856,12 +856,6 @@ def _persist_preserving_single_locked(job, *, admission=False) -> bool:
             return False
 
 
-def persist_preserving_single(job) -> bool:
-    """Save job state without changing an indeterminate durable Undo record."""
-    with job._lock:
-        return _persist_preserving_single_locked(job)
-
-
 def admit(job) -> bool:
     """Durably save a job before it may enter or start on a worker lane.
 

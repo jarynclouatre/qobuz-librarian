@@ -224,7 +224,8 @@ def test_age_sweep_keeps_any_backup_it_cannot_prove_redundant(tmp_path, monkeypa
     removed = bk.cleanup_old_upgrade_backups(retention_days=1, force=True)
     assert bp.exists() and (bp / "01.flac").exists()
     assert removed == 0
-    assert any(e == bp for e, _origin in bk.find_only_copy_backups())
+    assert any(path == bp and not result.removable
+               for path, _origin, result in bk.list_retained_backups())
 
 
 def test_unverified_upgrade_backup_is_pinned_from_age_sweep(tmp_path, monkeypatch):
@@ -619,7 +620,7 @@ def test_diagnostics_lists_backup_with_different_companion(tmp_path, monkeypatch
     rendered = _render_backup_diagnostics([(path, album, result)])
     assert 'data-backup-status="retained"' in rendered
     assert result.file in rendered
-    assert (backup, origin) in bk.find_only_copy_backups()
+    assert not result.removable
     assert bk._backup_safe_to_reap(backup) is False
     assert bk._dispose_retention_candidate(candidate) is False
     assert bk.discard_redundant_backup(backup) is False

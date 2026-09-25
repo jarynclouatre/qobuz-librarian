@@ -19,7 +19,6 @@ Behaviour you should not change without understanding the consequence:
 - predicted_album_paths uses a list, not a set, to preserve deterministic
   candidate order across runs (set hash iteration is non-deterministic).
 """
-import ctypes
 import errno
 import math
 import os
@@ -33,6 +32,8 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import get_album, search_albums
+from qobuz_librarian.dirfd import named_entry_missing as _migration_name_missing
+from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
     _list_artist_subdirs_cached,
@@ -705,24 +706,6 @@ def folder_holds_all_tracks(folder, qobuz_tracks, destructive=False):
     return not still_missing
 
 
-def pair_existing_tracks(a_tracks, b_tracks):
-    """One-to-one pair two ON-DISK track lists with the scan's matcher.
-
-    Returns (pairs, unpaired_a): ``pairs`` as (a_track, b_track) tuples,
-    ``unpaired_a`` the a-side tracks that claimed nothing. This keeps discovery
-    semantics and must not authorize destructive cleanup; backup-disposal
-    callers use the strict matching path above."""
-    disc_scoped = (_disc_count(a_tracks, "discnumber") > 1
-                   and _disc_count(b_tracks, "discnumber") > 1)
-    indices = _pair_indices(_existing_keys(a_tracks, disc_scoped),
-                            _existing_keys(b_tracks, disc_scoped))
-    pairs = [(a_tracks[ai], b_tracks[si])
-             for ai, si in enumerate(indices) if si is not None]
-    unpaired = [a_tracks[ai]
-                for ai, si in enumerate(indices) if si is None]
-    return pairs, unpaired
-
-
 def find_extras_in_existing(qobuz_tracks, existing_tracks):
     """Return on-disk tracks that match no Qobuz track.
 
@@ -1056,24 +1039,6 @@ def filter_compilation_albums(catalog_pairs, artist_name):
 
 # ── Post-import filesystem helpers ────────────────────────────────────────────
 
-def maybe_remove_empty_dir(d: Path):
-    """Remove dir only if it has no remaining files (cover art etc preserved)."""
-    try:
-        children = list(iter_tree_no_symlinks(d))
-        if any(p.is_file() for p in children):
-            return False
-        # Remove empty subdirs deepest-first
-        subdirs = sorted((p for p in children if p.is_dir()),
-                         key=lambda p: -len(p.parts))
-        for sd in subdirs:
-            try: sd.rmdir()
-            except OSError: pass
-        d.rmdir()
-        return True
-    except OSError:
-        return False
-
-
 def _count_audio_files_in(d):
     """Count audio files recursively in a directory. 0 if missing."""
     if d is None or not d.exists():
@@ -1088,9 +1053,6 @@ def _count_audio_files_in(d):
     return n
 
 
-_RENAME_NOREPLACE = 1
-
-
 def _open_migration_directory(path, *, dir_fd=None):
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
@@ -1098,55 +1060,6 @@ def _open_migration_directory(path, *, dir_fd=None):
         raise OSError("safe directory access is unavailable")
     flags = os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
     return os.open(path, flags, dir_fd=dir_fd)
-
-
-def _renameat2_at(source_fd, source_name, destination_fd, destination_name,
-                  flags):
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    ctypes.set_errno(0)
-    result = renameat2(
-        int(source_fd),
-        os.fsencode(source_name),
-        int(destination_fd),
-        os.fsencode(destination_name),
-        int(flags),
-    )
-    if result != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), os.fspath(destination_name))
-
-
-def _rename_noreplace_at(source_fd, source_name, destination_fd,
-                         destination_name):
-    _renameat2_at(
-        source_fd,
-        source_name,
-        destination_fd,
-        destination_name,
-        _RENAME_NOREPLACE,
-    )
-
-
-
-def _migration_name_missing(parent_fd, name):
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    return False
 
 
 class _MigrationEntryPreserved(OSError):

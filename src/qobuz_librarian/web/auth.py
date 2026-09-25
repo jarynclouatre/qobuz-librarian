@@ -905,12 +905,6 @@ def _record_login_failure(key: str, uname: str, now: float) -> None:
         del _user_failures[uname]
 
 
-def record_login_failure(ip: str, username: str = "") -> None:
-    now = time.monotonic()
-    with _login_lock:
-        _record_login_failure(_address_key(ip), _norm_user(username), now)
-
-
 def clear_login_failures(ip: str, username: str = "") -> None:
     """Forget an IP's (and the account's) failures after a successful login so an
     earlier typo run doesn't leave the next session one slip from a lockout."""
