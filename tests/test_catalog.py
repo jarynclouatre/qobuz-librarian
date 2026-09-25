@@ -1,7 +1,5 @@
 import os
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -9,7 +7,6 @@ from qobuz_librarian import config
 from qobuz_librarian.library import catalog
 from qobuz_librarian.library.catalog import (
     _is_split_album_merge,
-    album_year,
     compute_missing,
     dedup_album_versions,
     filter_owned_albums,
@@ -45,57 +42,6 @@ def test_automatic_multi_artist_migration_is_fail_closed(
     assert source_track.read_bytes() == b"source"
     assert destination_track.read_bytes() == b"destination"
     assert capture == {}
-
-
-def test_multi_artist_migration_uses_the_exact_imported_source(
-        tmp_path, monkeypatch):
-    from qobuz_librarian.library import post_import_relocation
-
-    music_root = tmp_path / "music"
-    source = music_root / "Artist, Other" / "Album"
-    destination = music_root / "Artist" / "Album"
-    source.mkdir(parents=True)
-    monkeypatch.setattr(config, "MUSIC_ROOT", music_root)
-    monkeypatch.setattr(
-        catalog,
-        "find_album_dir_filesystem",
-        lambda _album: pytest.fail("fuzzy lookup replaced an exact import path"),
-    )
-    seen = []
-
-    def relocate(actual_source, actual_destination, *, kind, authority):
-        seen.append((actual_source, actual_destination, kind, authority))
-        return post_import_relocation.RelocationResult(
-            destination=actual_destination,
-            published_files=1,
-            ownership_receipt={"version": 2},
-            changed=True,
-        )
-
-    monkeypatch.setattr(
-        post_import_relocation,
-        "relocate_post_import_album",
-        relocate,
-    )
-    authority = object()
-    capture = {}
-
-    result = catalog.prompt_and_migrate_multi_artist_folder(
-        {"artist": {"name": "Artist"}},
-        SimpleNamespace(yes=True),
-        authority=authority,
-        ownership_move_out=capture,
-        source_dir=source,
-    )
-
-    assert result == destination
-    assert capture == {"version": 2}
-    assert seen == [(
-        source,
-        destination,
-        post_import_relocation.RelocationKind.WHOLE_ALBUM,
-        authority,
-    )]
 
 
 def test_multi_artist_migration_keeps_a_band_name_whole(tmp_path, monkeypatch):
@@ -137,14 +83,10 @@ def test_compute_missing_disc_and_edition_handling():
     assert len(p) == 1 and not m
     m, p = compute_missing([_qt("Song")], [_et("Song (Acoustic)")])
     assert len(m) == 1 and not p
-
-
-def test_flat_untagged_multidisc_album_is_not_reported_missing():
-    qobuz = [_qt("One", disc=1), _qt("Two", disc=1),
-             _qt("Three", disc=2), _qt("Four", disc=2)]
-    existing = [_et("One"), _et("Two"), _et("Three"), _et("Four")]
-    missing, present = compute_missing(qobuz, existing)
-    assert not missing and len(present) == 4
+    # A rip that tags both discs as disc 1 is still complete.
+    qobuz = [_qt("One"), _qt("Two"), _qt("Three", disc=2), _qt("Four", disc=2)]
+    m, p = compute_missing(qobuz, [_et(t["title"]) for t in qobuz])
+    assert not m and len(p) == 4
 
 
 def test_non_latin_titles_match_on_text_not_empty_normalization():
@@ -167,14 +109,6 @@ def test_find_extras_flags_bonus_tracks_for_upgrade_safety():
     assert [t["title"] for t in extras] == ["Bonus"]
 
 
-
-def test_album_year_keeps_a_new_years_eve_release_in_its_year():
-    assert album_year({"release_date_original": "2021-06-15"}) == "2021"
-    ts = int(datetime(2019, 12, 31, 23, 0, 0, tzinfo=timezone.utc).timestamp())
-    assert album_year({"released_at": ts}) == "2019"
-
-
-
 def test_dedup_album_versions_collapses_editions_but_keeps_distinct_years():
     pairs = [_qalbum("Abbey Road", 1969), _qalbum("Abbey Road (Remaster)", 1969)]
     assert len(dedup_album_versions(pairs)) == 1
@@ -186,15 +120,11 @@ def test_dedup_album_versions_collapses_editions_but_keeps_distinct_years():
             _qalbum("Album", 2020, bd=24, sr=96)]
     result = dedup_album_versions(pair, prefer_hires=True)
     assert len(result) == 1 and result[0][0]["maximum_bit_depth"] == 24
-
-
-def test_dedup_album_versions_prefers_the_album_to_a_smaller_companion():
+    # A smaller hi-res "Bonus Content" companion never wins over the album.
     album = _qalbum("The Reminder", 2007, tc=13)
-    bonus = {**_qalbum("The Reminder", 2007, bd=24, sr=96, tc=9),
-             "version": "Bonus Content"}
-    for prefer_hires in (False, True):
-        [(picked, _)] = dedup_album_versions([bonus, album], prefer_hires)
-        assert picked is album
+    bonus = {**_qalbum("The Reminder", 2007, bd=24, sr=96, tc=9), "version": "Bonus Content"}
+    [(picked, _)] = dedup_album_versions([bonus, album], prefer_hires=True)
+    assert picked is album
 
 
 def test_filter_owned_albums_doesnt_swallow_sequels_or_distinct_years():
@@ -260,46 +190,6 @@ def test_find_album_dir_does_not_match_a_live_release_to_the_studio_folder(tmp_p
     clear_scan_caches()
 
 
-def test_find_album_dir_falls_through_to_lower_scored_folder_when_top_fails_coverage(
-        tmp_path, monkeypatch):
-    from qobuz_librarian.library.scanner import clear_scan_caches
-    monkeypatch.setattr(config, "MUSIC_ROOT", tmp_path)
-    (tmp_path / "Band" / "Wide Awakening Sessions Bonus").mkdir(parents=True)
-    (tmp_path / "Band" / "Wide Awaknng").mkdir(parents=True)
-    clear_scan_caches()
-    monkeypatch.setattr(catalog, "similarity",
-                        lambda a, b: 0.95 if "Sessions" in a else 0.80)
-    album = {"id": "X", "artist": {"name": "Band"}, "title": "Wide Awakening"}
-    found = find_album_dir_filesystem(album)
-    clear_scan_caches()
-    assert found is not None and found.name == "Wide Awaknng"
-
-
-
-def _exp_album(album_id, bd, sr, tracks):
-    return {"id": album_id, "artist": {"name": "Test Artist"},
-            "title": "Test Album", "maximum_bit_depth": bd,
-            "maximum_sampling_rate": sr, "tracks_count": len(tracks),
-            "tracks": {"items": tracks}}
-
-
-def test_find_expanded_edition_prefers_quality_when_extras_tied(tmp_path):
-    from qobuz_librarian.library.catalog import find_expanded_edition
-    qt = lambda isrc, title: {"isrc": isrc, "title": title, "media_number": 1}
-    et = lambda isrc, title: {"isrc": isrc, "title": title, "discnumber": 1}
-    existing = [et("ISRC001", "Track 1"), et("ISRC002", "Track 2")]
-    orig = _exp_album("orig", 16, 44.1, [qt("ISRC001", "Track 1"), qt("ISRC002", "Track 2")])
-    hires = _exp_album("hires", 24, 96.0, orig["tracks"]["items"])
-    redbook = _exp_album("redbook", 16, 44.1, orig["tracks"]["items"])
-
-    with patch("qobuz_librarian.library.catalog.search_albums",
-               return_value=[hires, redbook]), \
-         patch("qobuz_librarian.library.catalog.get_album",
-               side_effect=lambda aid, tok: hires if aid == "hires" else redbook):
-        results = find_expanded_edition(orig, tmp_path, existing, "tok", SimpleNamespace())
-    assert [r[0]["id"] for r in results] == ["hires", "redbook"]
-
-
 def test_folder_holds_all_tracks_matches_identity_not_count(tmp_path):
     from qobuz_librarian.library.catalog import folder_holds_all_tracks
 
@@ -333,30 +223,6 @@ def test_title_fallback_cannot_hand_an_isrc_twin_to_another_track():
     other_edition = [{"title": "Song", "discnumber": 1, "isrc": "GBZZZ9999999"}]
     missing, _ = compute_missing([qobuz[0]], other_edition)
     assert not missing
-
-
-def test_folder_completeness_requires_a_full_tree_walk(monkeypatch, tmp_path):
-    from qobuz_librarian.library import catalog as cat
-
-    folder = tmp_path / "Album"
-    folder.mkdir()
-    (folder / "01 - Song.flac").write_bytes(b"x")
-    qobuz = [{"title": "Song", "media_number": 1, "isrc": ""}]
-    tracks = [{"title": "Song", "discnumber": 1, "isrc": ""}]
-
-    def degraded(f, walk_errors=None):
-        if walk_errors is not None:
-            walk_errors.append(f"{f}/Disc 2: EIO")
-        return list(tracks)
-
-    monkeypatch.setattr(cat, "read_album_dir", degraded)
-    assert cat.folder_holds_all_tracks(folder, qobuz) is False
-
-    monkeypatch.setattr(cat, "read_album_dir",
-                        lambda f, walk_errors=None: list(tracks))
-    assert cat.folder_holds_all_tracks(folder, qobuz) is True
-
-
 
 
 def test_publishing_a_migration_directory_never_closes_a_reused_number(

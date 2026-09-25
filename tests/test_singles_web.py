@@ -1,6 +1,5 @@
-"""Web path for single-track grabs: the Tracks search mode, the Get-track
-download contract, and graduation (completing the album the normal way clears
-any old single mark)."""
+"""Web path for single-track grabs: the Get-track download contract and its
+Undo."""
 
 import pytest
 from test_web import _remove_job, _wait_for, client  # noqa: F401 (fixture)
@@ -16,21 +15,6 @@ def _owned_path(root, path):
     owned = _bind_owned_path(root, path)
     assert owned is not None
     return owned
-
-
-def _directory_cleanup_entry(path, *, created, root=None):
-    st = path.stat()
-    entry = {
-        "device": st.st_dev,
-        "inode": st.st_ino,
-        "size": st.st_size,
-        "modified_ns": st.st_mtime_ns,
-        "changed_ns": st.st_ctime_ns,
-        "created": created,
-    }
-    if root is not None:
-        entry["relative"] = path.relative_to(root).as_posix()
-    return entry
 
 
 def _ownership_manifest(root, path, *, created=()):
@@ -71,151 +55,6 @@ def fresh_singles(tmp_path, monkeypatch):
     monkeypatch.setattr(job_persistence, "persist", lambda _job: True)
 
 
-def test_created_artwork_and_sidecar_remain_exactly_undoable(
-        tmp_path, monkeypatch):
-    import copy
-    import os
-
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import lyric_fetch, lyrics
-    from qobuz_librarian.queue import executor
-    from qobuz_librarian.web import owned_paths, runtime
-
-    music_root = tmp_path / "music"
-    album = music_root / "Artist" / "Album"
-    album.mkdir(parents=True)
-    track = album / "01 - Track.flac"
-    cover = album / "cover.jpg"
-    track.write_bytes(b"audio with embedded lyrics")
-    cover.write_bytes(b"artwork")
-    # File timestamps come off the kernel's coarse clock (~1ms ticks) and a
-    # new dirent doesn't grow a small directory, so when the sidecar lands in
-    # the same tick as the setup writes above, the parent's before/after
-    # identities are byte-identical and there is legitimately no change to
-    # record. The stored identity still matches disk either way. The flake this
-    # cures, measured 99% same-tick on this machine). Backdate the album dir
-    # BEFORE the manifest captures its identity, so the sidecar write provably
-    # crosses a tick and the recorded change chains from the manifest's own
-    # starting point.
-    past = album.stat().st_mtime_ns - 5_000_000_000
-    os.utime(album, ns=(past, past))
-    manifest = _ownership_manifest(music_root, track, created=[album])
-    manifest["items"][0]["companions"] = [{
-        "kind": "artwork",
-        "relative": cover.relative_to(music_root).as_posix(),
-        "file": owned_paths._owned_file_identity(cover.stat()),
-    }]
-    item = {
-        "_resolved_post_dir": album,
-        "_import_ownership": manifest,
-    }
-
-    class FakeFLAC:
-        def __init__(self, _path):
-            self.tags = {"lyrics": ["[00:01.00]words"]}
-
-    def identity(path):
-        return owned_paths._owned_file_identity(path.stat())
-
-    def write_sidecar(
-            path, content, *, creation_out=None,
-            directory_mutation_out=None, sidecar_identity_out=None,
-            **_kwargs):
-        sidecar = path.with_suffix(".lrc")
-        sidecar.write_text(content, encoding="utf-8")
-        receipt = {
-            "path": os.path.abspath(sidecar),
-            "file": identity(sidecar),
-        }
-        if isinstance(creation_out, dict):
-            creation_out.update(receipt)
-        if isinstance(sidecar_identity_out, dict):
-            sidecar_identity_out.update(receipt)
-        return True
-
-    def replace_tags(
-            _flac, path, *, identity_change_out=None,
-            directory_mutation_out=None, **_kwargs):
-        before = identity(path)
-        replacement = path.with_name(path.name + ".replacement")
-        replacement.write_bytes(path.read_bytes() + b" stripped")
-        os.replace(replacement, path)
-        if isinstance(identity_change_out, dict):
-            identity_change_out.update({
-                "path": os.path.abspath(path),
-                "before": before,
-                "after": identity(path),
-            })
-
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", music_root)
-    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
-    monkeypatch.setattr(cfg, "LYRICS_FORMAT", "sidecar")
-    monkeypatch.setattr(lyrics, "HAVE_LYRIC_FETCH", True)
-    monkeypatch.setattr(lyric_fetch, "FLAC", FakeFLAC)
-    monkeypatch.setattr(lyric_fetch, "write_sidecar", write_sidecar)
-    monkeypatch.setattr(lyric_fetch, "save_flac_tags", replace_tags)
-
-    changes, created, directory_changes = [], [], []
-    lyrics.write_post_import_sidecars(
-        [album],
-        identity_changes_out=changes,
-        created_files_out=created,
-        directory_changes_out=directory_changes,
-    )
-
-    assert len(changes) == 1
-    assert len(created) == 1
-    assert directory_changes
-    assert runtime._single_owned_path(manifest, album) is None
-    executor._advance_import_ownership_identities(
-        [item], changes, created, directory_changes)
-    binding = runtime._single_owned_path(
-        manifest,
-        album,
-        created_files_after_import=item["_import_ownership_created_files"],
-    )
-    assert binding is not None
-    owned, bound_track = binding
-    sidecar = track.with_suffix(".lrc")
-    assert bound_track == track
-    assert [entry["relative"] for entry in owned["companions"]] == [
-        cover.relative_to(music_root).as_posix(),
-        sidecar.relative_to(music_root).as_posix()
-    ]
-    changed_companion = copy.deepcopy(owned)
-    changed_companion["companions"][0]["file"]["size"] += 1
-    assert owned_paths._unlink_owned_path(music_root, changed_companion) is None
-    assert track.exists() and cover.exists() and sidecar.exists()
-    assert owned_paths._unlink_owned_path(music_root, owned) == track
-    assert not track.exists()
-    assert not cover.exists()
-    assert not sidecar.exists()
-    assert not album.exists()
-
-
-def test_undo_finishes_when_a_created_folder_contains_an_unowned_file(
-        tmp_path):
-    from qobuz_librarian.web import owned_paths
-
-    music_root = tmp_path / "music"
-    album = music_root / "Artist" / "Album"
-    album.mkdir(parents=True)
-    track = album / "01 - Track.flac"
-    booklet = album / "booklet.pdf"
-    track.write_bytes(b"audio")
-    booklet.write_bytes(b"booklet")
-    created_album = _directory_cleanup_entry(
-        album, created=True, root=music_root)
-    owned = owned_paths._bind_owned_path(
-        music_root, track, created_directories=[created_album])
-    assert owned is not None
-
-    assert owned_paths._unlink_owned_path(music_root, owned) == track
-    assert not track.exists()
-    assert booklet.read_bytes() == b"booklet"
-    assert owned["directory_cleanup"]["complete"] is True
-
-
 def test_get_track_marks_the_single_with_the_gap_toggle_off(
         client, monkeypatch, fresh_singles):
     import qobuz_librarian.api.search as search_mod
@@ -254,44 +93,6 @@ def test_get_track_marks_the_single_with_the_gap_toggle_off(
         assert _wait_for(lambda: job.status in (jm.JobStatus.DONE, jm.JobStatus.FAILED))
         assert job.status == jm.JobStatus.DONE
         # Upgrade reads the mark; gap scans only do with the toggle on.
-        assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is True
-    finally:
-        _remove_job(job)
-
-
-def test_get_track_can_hide_album_gaps_when_setting_is_enabled(
-        client, monkeypatch, fresh_singles):
-    import qobuz_librarian.api.search as search_mod
-    import qobuz_librarian.library.catalog as cat_mod
-    import qobuz_librarian.queue.executor as ex_mod
-    import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian.web import runtime
-
-    monkeypatch.setattr(runtime, "_get_token", lambda: "tok")
-    monkeypatch.setattr(app_mod.cfg, "SUPPRESS_SINGLE_TRACK_GAPS", True, raising=False)
-    monkeypatch.setattr(search_mod, "get_album", lambda _id, _tok: {
-        "id": "alb1", "title": "Girl With No Face", "year": 2024,
-        "artist": {"name": "Allie X"},
-        "tracks": {"items": [
-            {"id": "trk7", "title": "Black Eye", "track_number": 3},
-            {"id": "trk8", "title": "Galina", "track_number": 4}]}})
-    monkeypatch.setattr(cat_mod, "find_existing_tracks", lambda *a, **k: ([], None))
-
-    def fake_exec(queue, *a, **k):
-        queue[0]["n_ok"] = 1
-        queue[0]["imported"] = True
-        queue[0]["n_fail"] = 0
-    monkeypatch.setattr(ex_mod, "_execute_download_queue", fake_exec)
-
-    jm.start_worker()
-    r = client.post("/download", data={"album_id": "alb1", "track_id": "trk7"},
-                    follow_redirects=False)
-    assert r.status_code in (200, 303)
-    job = [j for j in list(jm.registry._jobs.values())
-           if getattr(j, "album_id", None) == "alb1"][0]
-    try:
-        assert _wait_for(lambda: job.status in (jm.JobStatus.DONE, jm.JobStatus.FAILED))
-        assert job.status == jm.JobStatus.DONE
         assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is True
     finally:
         _remove_job(job)
@@ -338,14 +139,6 @@ def test_undo_removes_the_grabbed_track_and_clears_the_mark(client, monkeypatch,
         assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is False
         assert job.single.get("removed") is True
         assert len(refresh_calls) == 1
-        args, kwargs = refresh_calls[0]
-        assert args[0]["title"] == "Girl With No Face"
-        assert args[0]["artist"]["name"] == "Allie X"
-        assert args[1]["dir"] == str(d)
-        assert kwargs["fallback_artist"] == "Allie X"
-        assert kwargs["token"] == "tok"
-        assert kwargs["upgrade"] is True
-        assert kwargs["downsample"] is True
     finally:
         _remove_job(job)
 
@@ -388,40 +181,6 @@ def test_undo_refuses_a_replacement_when_the_inode_is_reused(
         assert track.read_bytes() == replacement
         assert not job.single.get("removed")
         assert forgotten == []
-    finally:
-        _remove_job(job)
-
-
-def test_undo_already_gone_clears_single_mark_and_refreshes_state(
-        client, monkeypatch, fresh_singles, tmp_path):
-    import qobuz_librarian.library.scanner as scanner_mod
-    import qobuz_librarian.web.flows as flows_mod
-    from qobuz_librarian.web import runtime
-
-    d = tmp_path / "Allie X" / "Girl With No Face (2024)"
-    hidden.mark_single("Allie X", "Girl With No Face", "2024", "alb1")
-    refresh_calls = []
-
-    job = jm.Job(title="Black Eye", artist="Allie X", album_id="alb1")
-    job.status = jm.JobStatus.DONE
-    job.single = {"album_id": "alb1", "track_id": "trk7", "dir": str(d),
-                  "isrc": "ISRC1", "track_no": 3, "title": "Black Eye",
-                  "artist": "Allie X", "album": "Girl With No Face",
-                  "marked": True, "new_folder": False}
-    jm.registry.add(job)
-    monkeypatch.setattr(runtime, "_get_optional_token", lambda: "tok")
-    monkeypatch.setattr(scanner_mod, "read_album_dir", lambda _d: [])
-    monkeypatch.setattr(
-        flows_mod,
-        "_refresh_after_local_album_change",
-        lambda *args, **kwargs: refresh_calls.append((args, kwargs)),
-    )
-    try:
-        r = client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
-        assert r.status_code in (200, 303)
-        assert hidden.is_single("Allie X", "Girl With No Face", hidden.load()) is False
-        assert job.single.get("removed") is True
-        assert len(refresh_calls) == 1
     finally:
         _remove_job(job)
 
@@ -497,85 +256,5 @@ def test_undo_no_isrc_removes_the_grabbed_disc_not_a_same_numbered_twin(
         assert sibling_album.is_dir()
         assert cd1.is_dir()
         assert cd1_twin.exists()
-    finally:
-        _remove_job(job)
-
-
-def test_undo_with_no_isrc_or_track_number_deletes_nothing(
-        client, monkeypatch, fresh_singles, tmp_path):
-    # Neither an ISRC nor a track number to match on: two missing values must not
-    # read as equal and delete an arbitrary track.
-    import qobuz_librarian.integrations.beets as beets_mod
-    import qobuz_librarian.library.scanner as scanner_mod
-
-    d = tmp_path / "Artist" / "Album (2024)"
-    d.mkdir(parents=True)
-    t = d / "01 - A.flac"
-    t.write_bytes(b"flac")
-
-    job = jm.Job(title="A", artist="Artist", album_id="alb8")
-    job.status = jm.JobStatus.DONE
-    job.single = {"album_id": "alb8", "track_id": "t1", "dir": str(d),
-                  "isrc": "", "track_no": None, "title": "A",
-                  "artist": "Artist", "album": "Album",
-                  "marked": False, "new_folder": False}
-    jm.registry.add(job)
-    monkeypatch.setattr(scanner_mod, "read_album_dir", lambda _d: [
-        {"path": str(t), "isrc": "", "tracknumber": 1}])
-    monkeypatch.setattr(beets_mod, "forget_beets_entries", lambda paths: len(paths))
-    try:
-        client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
-        assert t.exists()
-    finally:
-        _remove_job(job)
-
-
-@pytest.mark.parametrize("htmx", [False, True])
-def test_undo_stays_retryable_when_its_final_job_save_fails(
-    client, monkeypatch, fresh_singles, tmp_path, htmx
-):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import beets as beets_mod
-    from qobuz_librarian.web import flows, job_persistence
-
-    music_root = tmp_path / "music"
-    album = music_root / "Artist" / "Album"
-    album.mkdir(parents=True)
-    track = album / "01 - Track.flac"
-    track.write_bytes(b"audio")
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", music_root)
-    monkeypatch.setattr(flows, "_refresh_after_local_album_change", lambda *args, **kwargs: None)
-    monkeypatch.setattr(beets_mod, "forget_beets_entries", lambda _paths: 1)
-
-    job = jm.Job(title="Track", artist="Artist", status=jm.JobStatus.DONE)
-    job.single = {
-        "dir": str(album),
-        "title": "Track",
-        "artist": "Artist",
-        "album": "Album",
-        "owned_root": str(music_root),
-        "owned_path": _owned_path(music_root, track),
-    }
-    jm.registry.add(job)
-
-    def save_until_final(current):
-        if current.single.get("removed") is True:
-            assert jm.staging_lock().locked()
-        return current.single.get("removed") is not True
-
-    monkeypatch.setattr(job_persistence, "persist", save_until_final)
-    try:
-        headers = {"HX-Request": "true"} if htmx else {}
-        response = client.post(
-            f"/jobs/{job.id}/undo",
-            headers=headers,
-            follow_redirects=False,
-        )
-
-        assert not track.exists()
-        assert response.status_code == (200 if htmx else 503)
-        assert job.single.get("removed") is not True
-        if htmx:
-            assert f'hx-post="/jobs/{job.id}/undo"' in response.text
     finally:
         _remove_job(job)

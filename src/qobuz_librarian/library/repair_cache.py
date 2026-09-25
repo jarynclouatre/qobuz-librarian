@@ -140,6 +140,3 @@ def prune_expired(force: bool = False) -> int:
         pass
     return removed
 
-
-def _reset_for_tests() -> None:
-    _db.reset_for_tests()

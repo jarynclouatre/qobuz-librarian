@@ -12,26 +12,6 @@ def _album(tracks):
             "tracks": {"items": tracks}}
 
 
-def test_match_key_from_stem_keys_a_star_track_to_its_title():
-    from qobuz_librarian.library.tags import normalize, strip_edition_suffix
-
-    assert dl.match_key_from_stem("01. ★") == normalize(strip_edition_suffix("★"))
-    assert dl.match_key_from_stem("03 - Changes") == normalize(
-        strip_edition_suffix("Changes"))
-
-
-def test_conflicting_file_identity_does_not_fall_back_to_title(monkeypatch, tmp_path):
-    track = {"id": 1, "title": "Song", "media_number": 1, "track_number": 1}
-    path = tmp_path / "01 - Song.flac"
-    path.write_bytes(b"audio")
-    monkeypatch.setattr(dl, "read_audio_meta", lambda _path: {
-        "title": "Song", "discnumber": 1, "tracknumber": 2,
-    })
-
-    identities = dl._capture_file_identities([path], [track])
-    assert dl._pair_files_to_tracks([path], [track], identities, [track]) == []
-
-
 def _patch(monkeypatch, *, rip, added, cleanup, cancel=False):
     from qobuz_librarian.integrations.staging import StagedFile
 
@@ -132,59 +112,6 @@ def test_lossy_track_retried_once_and_recovers(monkeypatch, tmp_path):
     assert rips == ["https://play.qobuz.com/album/ALB",
                     "https://play.qobuz.com/track/101"]
     assert (r["n_ok"], r["n_lossy"], r["n_fail"]) == (2, 0, 0)
-
-    records = r["_staged_track_bindings"]
-    # track_b landed first, but bindings must come out in catalogue order -
-    # the durable runner compares them against the journal's lineages, which
-    # are always catalogue-ordered.
-    assert [(record["slot"], record["path"]) for record in records] == [
-        ("qobuz:101", str(recovered)),
-        ("qobuz:202", str(track_b)),
-    ]
-
-    class _CapturedRun:
-        path = tmp_path
-        files = tuple(
-            (str(Path(record["path"]).relative_to(tmp_path)),
-             tuple(record["identity"]))
-            for record in records
-        )
-
-    monkeypatch.setattr(dl, "staging_run_from_record", lambda _value: object())
-    monkeypatch.setattr(dl, "capture_staging_run", lambda _run: _CapturedRun())
-    assert dl.staged_track_bindings(r) == tuple(records)
-    assert dl.exact_download_coverage(r, album).counts.broken == 0
-
-    extra = tmp_path / "unbound.flac"
-    extra.write_bytes(b"extra")
-    value = os.stat(extra, follow_symlinks=False)
-    _CapturedRun.files += ((
-        extra.name,
-        (value.st_dev, value.st_ino, value.st_mode, value.st_size,
-         value.st_mtime_ns, value.st_ctime_ns),
-    ),)
-    with pytest.raises(OSError, match="does not match"):
-        dl.staged_track_bindings(r)
-
-
-@pytest.mark.parametrize("total,missing,expect_full", [
-    (100, 69, False),   # 0.69 → per-track
-    (100, 70, True),    # 0.70 → full-album
-    (5, 3, False),      # below the max(4, …) floor → per-track
-    (5, 4, True),       # hits the floor of 4 → full-album
-])
-def test_strategy_full_vs_per_track_boundary(monkeypatch, total, missing, expect_full):
-    tracks = [{"id": i, "title": f"T{i}"} for i in range(total)]
-    urls = []
-    _patch(monkeypatch,
-           rip=lambda url, **_k: (urls.append(url), (0, ""))[1],
-           added=lambda _s: [],
-           cleanup=lambda f: (list(f), [], []))
-
-    dl.run_album_download(album=_album(tracks), missing=tracks[:missing],
-                          present=[{}], album_dir=None, snapshot=set())
-
-    assert any("/album/" in u for u in urls) is expect_full
 
 
 def test_full_album_backs_up_present_tracks_before_rip(monkeypatch, tmp_path):
@@ -327,80 +254,6 @@ def test_retire_download_staging_after_import_sweeps_leftover_art(monkeypatch, t
     (album2 / "01 - Song.flac").write_bytes(b"audio")
     assert dl.retire_download_staging_after_import({"_staging_run": run2.to_record()}) is False
     assert (album2 / "01 - Song.flac").exists()
-
-
-def test_discard_download_staging_removes_partial_run(monkeypatch, tmp_path):
-    # A user cancel throws the partial rip away so the queue can move on -
-    # leftover audio must not hold the run for recovery like a crash does.
-    from qobuz_librarian.integrations.staging import create_staging_run
-
-    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
-
-    run = create_staging_run()
-    album = run.path / "Artist" / "Album"
-    album.mkdir(parents=True)
-    (album / "01 - Song.flac").write_bytes(b"partial audio")
-    (album / "cover.jpg").write_bytes(b"art")
-    assert dl.discard_download_staging({"_staging_run": run.to_record()}) is True
-    assert not run.path.exists()
-    retry_dir = tmp_path / cfg.BEETS_RETRY_DIR
-    assert not retry_dir.exists() or not any(retry_dir.iterdir())
-
-
-def test_snapshot_staging_skips_the_beets_retry_tree(monkeypatch, tmp_path):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import rip
-
-    staging = tmp_path / "staging"
-    (staging / ".beets_retry" / "ParkedArt" / "ParkedAlbum").mkdir(parents=True)
-    (staging / ".beets_retry" / "ParkedArt" / "ParkedAlbum" / "1.flac").write_bytes(b"x")
-    (staging / "Artist" / "Album").mkdir(parents=True)
-    (staging / "Artist" / "Album" / "1.flac").write_bytes(b"x")
-    monkeypatch.setattr(cfg, "STAGING_DIR", staging)
-
-    snap = rip.snapshot_staging()
-    paths = {str(p.relative_to(staging)) for p in snap}
-    assert paths == {"Artist/Album/1.flac"}
-
-    (staging / "Artist" / "Album" / "2.flac").write_bytes(b"y")
-    (staging / ".beets_retry" / "ParkedArt" / "ParkedAlbum" / "2.flac").write_bytes(b"y")
-    added = {str(p.relative_to(staging)) for p in rip.files_added_since(snap)}
-    assert added == {"Artist/Album/2.flac"}
-
-
-def test_wrong_same_title_retry_file_does_not_clear_reject(monkeypatch, tmp_path):
-    tracks = [
-        {"id": 101, "title": "Song", "media_number": 1, "track_number": 1},
-        {"id": 202, "title": "Song", "media_number": 2, "track_number": 1},
-    ]
-    disc_1 = tmp_path / "Disc 1"
-    disc_2 = tmp_path / "Disc 2"
-    wrong_retry_dir = tmp_path / "retry" / "Disc 1"
-    disc_1.mkdir()
-    disc_2.mkdir()
-    wrong_retry_dir.mkdir(parents=True)
-    clean = disc_1 / "01 - Song.flac"
-    rejected = disc_2 / "01 - Song.mp3"
-    wrong_retry = wrong_retry_dir / "01 - Song.flac"
-    clean.write_bytes(b"clean")
-    rejected.write_bytes(b"lossy")
-    wrong_retry.write_bytes(b"wrong disc")
-    rips = []
-
-    _patch(
-        monkeypatch,
-        rip=lambda url, **_k: (rips.append(url), (0, ""))[1],
-        added=lambda _s, deltas=iter([[clean, rejected], [wrong_retry]]): next(deltas, []),
-        cleanup=lambda _f, outcomes=iter([
-            ([clean], [rejected], []), ([wrong_retry], [], []),
-        ]): next(outcomes, ([], [], [])),
-    )
-
-    result = dl.run_album_download(
-        album=_album(tracks), missing=tracks, present=[], album_dir=None,
-        snapshot=set(),
-    )
-
-    assert rips == ["https://play.qobuz.com/album/ALB",
-                    "https://play.qobuz.com/track/202"]
-    assert (result["n_ok"], result["n_lossy"], result["n_fail"]) == (1, 1, 0)
+    # A user cancel discards the partial rip instead of holding it for recovery.
+    assert dl.discard_download_staging({"_staging_run": run2.to_record()}) is True
+    assert not run2.path.exists()

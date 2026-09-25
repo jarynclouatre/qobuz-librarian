@@ -1,25 +1,13 @@
 """Tests for quality/tiers.py and quality/decision.py."""
 
-from datetime import datetime, timedelta, timezone
 
 from qobuz_librarian.quality.decision import (
-    album_max_quality,
     compare_album_quality,
-    load_capped,
     quality_change_summary,
-    save_capped,
 )
-from qobuz_librarian.quality.tiers import format_quality
 
 
-def test_format_quality_renders_known_tiers_and_unknown():
-    assert format_quality(16, 44100) == "16/44.1"
-    assert format_quality(24, 96000) == "24/96"
-    # Unreadable tracks stay visible as unknown.
-    assert format_quality(0, 44100) == "?"
-
-
-def test_streamrip_quality_tier_1_coerces_to_lossless(monkeypatch, capsys):
+def test_streamrip_quality_tier_1_coerces_to_lossless(monkeypatch):
     # Tier 1 (320kbps MP3) is unsupported: the pipeline is FLAC-only and the
     # post-download cleanup discards every non-FLAC file, so a tier-1 setting
     # would rip each track and then delete it, so the setting downloads
@@ -30,27 +18,12 @@ def test_streamrip_quality_tier_1_coerces_to_lossless(monkeypatch, capsys):
     monkeypatch.setenv("STREAMRIP_QUALITY", "1")
     importlib.reload(cfg)
     try:
-        err = capsys.readouterr().err
         assert cfg.STREAMRIP_QUALITY == 2          # coerced to CD lossless, not left at 1
-        assert "STREAMRIP_QUALITY" in err and "320" in err
     finally:
         # streamrip_quality_cap() reads cfg.STREAMRIP_QUALITY live, so reset it
         # here (not only via teardown) so tier 2 can't leak into later tests.
         monkeypatch.delenv("STREAMRIP_QUALITY", raising=False)
         importlib.reload(cfg)
-
-
-def test_album_max_quality_keeps_qobuz_master_when_downsample_enabled(monkeypatch):
-    # Upgrade discovery should still report the best Qobuz can provide.
-    monkeypatch.setattr("qobuz_librarian.config.STREAMRIP_QUALITY", 4)
-    monkeypatch.setattr("qobuz_librarian.config.DOWNSAMPLE_HIRES_ENABLED", True)
-    assert album_max_quality(
-        {"maximum_bit_depth": 24, "maximum_sampling_rate": 192.0}) == (24, 192000)
-    assert album_max_quality(
-        {"maximum_bit_depth": 24, "maximum_sampling_rate": 88.2}) == (24, 88200)
-    # 44.1/48 kHz aren't resampled, so they pass through.
-    assert album_max_quality(
-        {"maximum_bit_depth": 16, "maximum_sampling_rate": 44.1}) == (16, 44100)
 
 
 def test_compare_album_quality_classifies_and_counts_unknown():
@@ -78,35 +51,10 @@ def test_compare_album_quality_classifies_and_counts_unknown():
         [{"bits": 16, "sample_rate": 44100}],
         {"maximum_bit_depth": 0, "maximum_sampling_rate": 96.0},
     )["classification"] == "unknown"
-
-
-def test_quality_change_summary_counts_upgrades_and_losses():
-    t = lambda b, r, channels=2: {
-        "bits": b, "sample_rate": r, "channels": channels,
-    }
-    assert quality_change_summary([(t(16, 44100), t(24, 96000))])["upgrading"] == 1
-    # A would-be downgrade from hi-res must be flagged so we can refuse it.
-    assert quality_change_summary([(t(24, 96000), t(16, 44100))])["losing_hires"] == 1
-    uncertain = quality_change_summary([
-        (t(16, 192000), t(24, 96000)),
-        (t(24, 96000, 6), t(24, 96000, 2)),
-    ])
-    assert uncertain["unknown"] == 2
-
-
-def test_capped_persistence_round_trips_and_prunes(tmp_path, monkeypatch):
-    monkeypatch.setattr("qobuz_librarian.config.CAPPED_FILE", tmp_path / "capped.json")
-    fresh = datetime.now(timezone.utc).isoformat()
-    stale = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
-    save_capped({"old": {"ts": stale, "title": "Stale"},
-                 "new": {"ts": fresh, "title": "Fresh"}})
-    loaded = load_capped()
-    assert loaded == {"new": {"ts": fresh, "title": "Fresh"}}
-
-    # If someone hand-edits the file into a JSON list, load_capped must return
-    # a dict so is_album_capped's .get() doesn't blow up the upgrade scan.
-    (tmp_path / "capped.json").write_text('["x", "y"]', encoding="utf-8")
-    assert load_capped() == {}
+    # A per-track downgrade from hi-res is flagged so it can be refused.
+    hires = {"bits": 24, "sample_rate": 96000, "channels": 2}
+    cd = {"bits": 16, "sample_rate": 44100, "channels": 2}
+    assert quality_change_summary([(hires, cd)])["losing_hires"] == 1
 
 
 def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatch):

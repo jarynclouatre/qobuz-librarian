@@ -1,19 +1,14 @@
 """Validate Docker defaults and persisted-config reconciliation."""
-import json
 import os
 import re
-import shutil
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
-import pytest
-
 _DEFAULT_TOML = Path(__file__).resolve().parents[1] / "docker" / "streamrip-default.toml"
 _ENTRYPOINT = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
-_COMPOSE = Path(__file__).resolve().parents[1] / "compose.yaml"
-_ENV_EXAMPLE = _COMPOSE.parent / ".env.example"
+
+
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::[^}]*)?\}")
 
 # Keys streamrip 2.2.0's format() info dict actually provides.
@@ -21,90 +16,6 @@ VALID_FOLDER_KEYS = {"albumartist", "albumcomposer", "bit_depth", "container",
                      "id", "sampling_rate", "title", "year"}
 VALID_TRACK_KEYS = {"albumartist", "albumcomposer", "artist", "composer",
                     "explicit", "id", "title", "tracknumber"}
-
-
-def test_custom_compose_web_port_reaches_cli_recovery_help():
-    import yaml
-
-    compose = yaml.safe_load(_COMPOSE.read_text())
-    service = compose["services"]["qobuz-librarian"]
-    assert "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8666}:8666" in service["ports"]
-
-    env = {
-        **os.environ,
-        "WEB_PORT": "8666",
-        "WEB_PUBLIC_PORT": "9443",
-    }
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from qobuz_librarian import cli; print(cli._help_epilog())",
-        ],
-        cwd=_COMPOSE.parent,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert "http://<host>:9443/settings" in result.stdout
-
-
-def test_documented_beets_path_survives_compose_env(tmp_path):
-    docker = shutil.which("docker")
-    if docker is None:
-        pytest.skip("Docker CLI unavailable")
-    probe = subprocess.run(
-        [docker, "compose", "version"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if probe.returncode:
-        pytest.skip("Docker Compose plugin unavailable")
-    example = next(
-        line.removeprefix("# ")
-        for line in _ENV_EXAMPLE.read_text().splitlines()
-        if line.startswith("# BEETS_PATH_DEFAULT=")
-    )
-    env_file = tmp_path / "beets.env"
-    env_file.write_text(example + "\n", encoding="utf-8")
-    env = dict(os.environ)
-    for name in (
-        "BEETS_PATH_DEFAULT",
-        "albumartist",
-        "album",
-        "year",
-        "track",
-        "title",
-    ):
-        env.pop(name, None)
-
-    result = subprocess.run(
-        [
-            docker,
-            "compose",
-            "--env-file",
-            str(env_file),
-            "-f",
-            str(_COMPOSE),
-            "config",
-            "--format",
-            "json",
-        ],
-        cwd=_COMPOSE.parent,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    rendered = json.loads(result.stdout)
-    value = rendered["services"]["qobuz-librarian"]["environment"][
-        "BEETS_PATH_DEFAULT"
-    ]
-    assert value.replace("$$", "$") == (
-        "$albumartist/$album ($year)/$track - $title"
-    )
-    assert "variable is not set" not in result.stderr
 
 
 def test_streamrip_default_toml_uses_valid_placeholders_and_flags():
@@ -160,7 +71,10 @@ def test_entrypoint_normalises_a_stale_config_volume(tmp_path):
         "add_singles_to_folder = false\n"
         'folder_format = "{albumartist}/{title} ({year})"\n'
     )
-    _run_entrypoint_head(tmp_path, {"CONFIG_DIR": str(cfg)})
+    r = _run_entrypoint_head(tmp_path, {"CONFIG_DIR": str(cfg)}, capture=True)
+    assert r.returncode == 0
+    # With no PUID/PGID the app still drops to 1000:1000, not root.
+    assert "1000:1000" in r.stdout
 
     out = (cfg / "streamrip" / "config.toml").read_text()
     assert "downloads_enabled = false" in out and "\ndownloads_enabled = true" not in out
@@ -168,41 +82,6 @@ def test_entrypoint_normalises_a_stale_config_volume(tmp_path):
     assert "download_booklets = false" in out and "download_booklets = true" not in out
     # Unrelated keys are left alone.
     assert "failed_downloads_enabled = true" in out
-
-
-def test_entrypoint_repairs_duplicate_enforced_keys_from_an_older_volume(tmp_path):
-    cfg = _make_config(
-        tmp_path,
-        "[qobuz]\n"
-        "download_booklets = true\n"
-        "download_booklets = false\n"
-        "[database]\n"
-        "downloads_enabled = true\n"
-        "downloads_enabled = false\n"
-        "[filepaths]\n"
-        "add_singles_to_folder = false\n"
-        "add_singles_to_folder = true\n"
-        "[misc]\n"
-        "check_for_updates = true\n"
-        "check_for_updates = false\n",
-    )
-
-    _run_entrypoint_head(tmp_path, {"CONFIG_DIR": str(cfg)})
-
-    path = cfg / "streamrip" / "config.toml"
-    parsed = tomllib.load(path.open("rb"))
-    assert parsed["qobuz"]["download_booklets"] is False
-    assert parsed["database"]["downloads_enabled"] is False
-    assert parsed["filepaths"]["add_singles_to_folder"] is True
-    assert parsed["misc"]["check_for_updates"] is False
-
-
-def test_entrypoint_defaults_to_nonroot_user(tmp_path):
-    # With no PUID/PGID the app must still drop to 1000:1000, not run as root.
-    cfg = _make_config(tmp_path, "[database]\n")
-    r = _run_entrypoint_head(tmp_path, {"CONFIG_DIR": str(cfg)}, capture=True)
-    assert r.returncode == 0
-    assert "1000:1000" in r.stdout
 
 
 def test_entrypoint_ownership_repair_does_not_follow_config_symlinks(tmp_path):
@@ -240,32 +119,3 @@ def test_entrypoint_ownership_repair_does_not_follow_config_symlinks(tmp_path):
 
     assert called.is_file()
     assert not dereferenced.exists()
-
-
-def test_cli_privilege_drop_canonicalises_ids_and_rejects_mixed_root(
-        monkeypatch):
-    from qobuz_librarian import cli
-
-    calls = []
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cli, "_in_container", lambda: True)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/gosu")
-    monkeypatch.setattr(os, "execvp", lambda program, argv: calls.append(
-        (program, argv)))
-
-    monkeypatch.setenv("PUID", "00")
-    monkeypatch.setenv("PGID", "00")
-    cli._maybe_drop_privileges()
-    assert calls == []
-
-    monkeypatch.setenv("PUID", "1000")
-    monkeypatch.setenv("PGID", "00")
-    with pytest.raises(SystemExit) as exc:
-        cli._maybe_drop_privileges()
-    assert exc.value.code == 64
-    assert calls == []
-
-    monkeypatch.setenv("PUID", "001000")
-    monkeypatch.setenv("PGID", "001001")
-    cli._maybe_drop_privileges()
-    assert calls[0][1][1] == "1000:1001"

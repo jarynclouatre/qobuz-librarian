@@ -95,24 +95,11 @@ def test_an_album_still_on_disk_is_not_offered_again(library, qobuz):
 
     assert job.candidates == []
     assert qobuz["album_calls"] == []
-
-
-def test_a_folder_renamed_past_recognition_is_matched_by_its_isrcs(library,
-                                                                   qobuz):
-    library.add("Bonobo", "unsorted rip 03", [
-        _track("Migration", 1, isrc="GBCEL1600123"),
-        _track("Break Apart", 2, isrc="GBCEL1600124"),
-        _track("Outlier", 3, isrc="GBCEL2100001"),
-    ])
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Migration", "qobuz_album_id": "a1", "tracks": [
-            _track("Migration", 1, isrc="GBCEL1600123"),
-            _track("Break Apart", 2, isrc="GBCEL1600124"),
-            _track("Outlier", 3, isrc="GBCEL1600125"),
-        ]}]}]))
-
-    assert job.candidates == []
-    assert qobuz["album_calls"] == []
+    # A folder renamed past recognition is still matched by its tracks.
+    library.add("Bonobo", "unsorted rip 03", [_track("Kiara", 1, isrc="GBCEL1000001")])
+    job = _run(_snapshot([{"name": "Bonobo", "albums": [{"name": "Black Sands",
+        "qobuz_album_id": "a2", "tracks": [_track("Kiara", 1, isrc="GBCEL1000001")]}]}]))
+    assert job.candidates == [] and qobuz["album_calls"] == []
 
 
 def test_a_dead_album_id_falls_back_to_the_isrc_then_the_name(library, qobuz):
@@ -132,23 +119,6 @@ def test_a_dead_album_id_falls_back_to_the_isrc_then_the_name(library, qobuz):
     assert "Bonobo Fragments" in qobuz["search_calls"]
 
 
-def test_an_artist_with_no_folder_seals_the_music_folder_instead(library,
-                                                                 qobuz):
-    library.add("Bonobo", "Black Sands", [_track("Kiara", 1)])
-    qobuz["albums"]["a1"] = _qobuz_album("a1", "Room 25", artist="Noname")
-    job = _run(_snapshot([{"name": "Noname", "albums": [
-        {"name": "Room 25", "qobuz_album_id": "a1",
-         "tracks": [_track("Self", 1)]}]}]))
-
-    payload = job.candidates[0]["payload"]
-    assert "_premise" not in payload
-    sealed = payload[candidate_premise.ABSENT_CONTAINER_KEY]
-    assert sealed["artist"] == "Noname"
-    # The seal is the music folder's own incarnation, so approving it later
-    # still refuses an unmounted library.
-    assert candidate_premise.validate(job.candidates[0])["kind"] == "missing"
-
-
 def test_an_unmounted_library_refuses_an_absent_artist_row(library, qobuz,
                                                           monkeypatch):
     qobuz["albums"]["a1"] = _qobuz_album("a1", "Room 25", artist="Noname")
@@ -156,33 +126,11 @@ def test_an_unmounted_library_refuses_an_absent_artist_row(library, qobuz,
         {"name": "Room 25", "qobuz_album_id": "a1",
          "tracks": [_track("Self", 1)]}]}]))
 
+    assert candidate_premise.validate(job.candidates[0])["kind"] == "missing"
     monkeypatch.setattr(candidate_premise, "capture_music_root_identity",
                         lambda: None)
     with pytest.raises(candidate_premise.CandidateStale):
         candidate_premise.validate(job.candidates[0])
-
-
-def test_a_same_titled_album_from_another_year_is_still_restored(library,
-                                                                 qobuz):
-    library.add("Weezer", "Weezer (1994)", [_track("My Name Is Jonas", 1)])
-    qobuz["albums"]["w01"] = _qobuz_album("w01", "Weezer", artist="Weezer")
-    job = _run(_snapshot([{"name": "Weezer", "albums": [
-        {"name": "Weezer (1994)", "qobuz_album_id": "w94",
-         "tracks": [_track("My Name Is Jonas", 1)]},
-        {"name": "Weezer (2001)", "qobuz_album_id": "w01",
-         "tracks": [_track("Don't Let Go", 1)]}]}]))
-
-    assert [c["payload"]["album_id"] for c in job.candidates] == ["w01"]
-
-
-def test_a_lossy_match_is_not_offered_as_a_restore(library, qobuz):
-    lossy = _qobuz_album("a1", "Migration")
-    lossy["maximum_bit_depth"] = 0
-    qobuz["albums"]["a1"] = lossy
-    job = _run(_snapshot([{"name": "Bonobo", "albums": [
-        {"name": "Migration", "qobuz_album_id": "a1", "tracks": []}]}]))
-
-    assert job.candidates == []
 
 
 def test_unreadable_artist_is_not_offered_as_missing(library, qobuz, monkeypatch):

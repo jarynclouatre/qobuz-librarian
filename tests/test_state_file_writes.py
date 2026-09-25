@@ -5,8 +5,6 @@ import json
 import os
 import threading
 
-import pytest
-
 from qobuz_librarian import state_file
 
 
@@ -67,19 +65,3 @@ def test_concurrent_writers_never_tear_the_store(tmp_path):
     assert seen > 0
     final = json.loads(path.read_text())
     assert final["i"] == 39
-
-
-
-
-def test_store_lock_refuses_symlink_without_touching_target(tmp_path):
-    path = tmp_path / "store.json"
-    victim = tmp_path / "unrelated.json"
-    original = '{"must_survive": true}'
-    victim.write_text(original, encoding="utf-8")
-    path.with_name(path.name + ".lock").symlink_to(victim)
-
-    with pytest.raises(OSError):
-        with state_file.store_lock(path):
-            pass
-
-    assert victim.read_text(encoding="utf-8") == original

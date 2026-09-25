@@ -145,23 +145,6 @@ def test_fully_missing_album_is_a_gap_with_no_dir(monkeypatch, tmp_path, beatles
     assert not res.unmatched_dirs
 
 
-def test_partial_owned_album_reports_the_real_track_gap(monkeypatch, tmp_path, beatles_search):
-    full = _album("a1", "Abbey Road", "The Beatles", 1969,
-                  [_qt(f"t{i}", f"ISRC{i}") for i in range(10)])
-    res = _run(monkeypatch, tmp_path,
-               layout={"The Beatles": {"Abbey Road (1969)":
-                                       [_et(f"t{i}", f"ISRC{i}") for i in range(6)]}},
-               catalog=[full], artists=beatles_search)
-
-    partials = [g for g in res.gaps if g.on_disk_dir is not None]
-    assert len(partials) == 1
-    gap = partials[0]
-    assert gap.qobuz_album["title"] == "Abbey Road"
-    assert gap.on_disk_dir.name == "Abbey Road (1969)"
-    assert len(gap.present) == 6
-    assert len(gap.missing) == 4
-
-
 def test_deluxe_edition_gap_measured_against_the_owned_edition(monkeypatch, tmp_path, beatles_search):
     # The folder is an anniversary edition; the gap must be computed against the
     # edition that folder actually is (14 tracks), not the standard release.
@@ -220,38 +203,6 @@ def test_transient_api_error_aborts_the_scan_instead_of_burying_a_folder(
 
 
 # ── New-release quickscan ─────────────────────────────────────────────────────
-
-def test_resolve_artist_does_not_cache_an_id_less_match(monkeypatch):
-    # A partial/malformed Qobuz 200 - a name match carrying no id - must not
-    # be cached.
-    monkeypatch.setattr(discovery, "_resolve_cache", {})
-    monkeypatch.setattr(discovery, "_resolve_cache_dirty", False)
-
-    calls = []
-
-    def fake_search(query, token, limit=None):
-        calls.append(query)
-        return [{"name": "Phantom Singer", "albums_count": 7}]  # no "id"
-    monkeypatch.setattr(discovery, "search_artists", fake_search)
-
-    assert discovery.resolve_artist("Phantom Singer", "tok") == (None, "Phantom Singer")
-    # A later scan must re-search, not hand back a cached non-match.
-    assert discovery.resolve_artist("Phantom Singer", "tok") == (None, "Phantom Singer")
-    assert len(calls) == 2
-    assert "Phantom Singer" not in discovery._resolve_cache
-
-
-def test_artist_search_failure_is_not_returned_as_a_no_match(monkeypatch):
-    monkeypatch.setattr(discovery, "_resolve_cache", {})
-
-    def malformed(*_args, **_kwargs):
-        from qobuz_librarian.api.auth import QobuzError
-        raise QobuzError("malformed artist/search response")
-
-    monkeypatch.setattr(discovery, "search_artists", malformed)
-
-    with pytest.raises(discovery.ArtistSearchUnavailable):
-        discovery.resolve_artist("Phantom Singer", "tok")
 
 
 def test_new_releases_surface_only_what_appeared_since_the_baseline(

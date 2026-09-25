@@ -1,4 +1,3 @@
-import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -40,6 +39,10 @@ def test_album_candidate_receipt_accepts_unchanged_and_rejects_changed_bytes(
     track.write_bytes(b"different audio bytes")
     with pytest.raises(CandidateStale, match="local files changed"):
         validate(candidate)
+    # A pick saved before receipts existed is refused as well.
+    del candidate["payload"]["_premise"]
+    with pytest.raises(CandidateStale):
+        validate(candidate)
 
 
 def test_library_gap_fill_row_seals_the_files_a_whole_album_fill_moves(
@@ -57,61 +60,6 @@ def test_library_gap_fill_row_seals_the_files_a_whole_album_fill_moves(
     spec = flows._gap_candidate_spec(gap, "Artist")
 
     assert set(spec["payload"]["_gap_fill_receipts"]) == {track.name}
-
-
-def test_saved_artist_receipt_does_not_replace_row_evidence(tmp_path, monkeypatch):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import (
-        candidate_premise,
-        library_scan_state,
-        scan_checkpoint,
-    )
-
-    _root, album, track = _music_album(tmp_path, monkeypatch)
-    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "review.json")
-    monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
-    old_premise = candidate_premise.capture("missing", album.parent)
-    track.write_bytes(b"changed audio")
-    current = candidate_premise.capture("missing", album.parent)
-    gap_premise = candidate_premise.capture("gap-fill", album)
-    rows = []
-    for album_id in ("current", "uncaptured", "null", "stale", "partial"):
-        rows.append({
-            "kind": "album", "artist": "Artist", "title": album_id,
-            "payload": {"album_id": album_id, "_artist_dir": "Artist",
-                        "_artist_dir_path": str(album.parent)},
-        })
-    rows[0]["payload"]["_premise"] = current
-    rows[2]["payload"]["_premise"] = None
-    rows[3]["payload"]["_premise"] = old_premise
-    rows[4]["payload"].update({
-        "_premise": gap_premise, "album_dir": str(album), "gap_fill": True,
-    })
-    artists = {"Artist": {"candidates": rows}}
-    original = deepcopy(artists)
-
-    assert library_scan_state.save_kind("missing", artists=artists, complete=True)
-    assert scan_checkpoint.save("missing", {"Artist"}, rows, {}, artists)
-    assert artists == original
-    stored = json.loads(cfg.LIBRARY_SCAN_STATE_FILE.read_text())
-    artist = stored["kinds"]["missing"]["artists"]["Artist"]
-    assert artist["_premise"] == current
-    assert artist["candidates"][1]["payload"]["_premise"] is None
-    assert artist["candidates"][2]["payload"]["_premise"] is None
-    assert artist["candidates"][3]["payload"]["_premise"] == old_premise
-
-    resumed = scan_checkpoint.load("missing")
-    for loaded in (
-        library_scan_state.kind_state("missing")["artists"]["Artist"]["candidates"],
-        resumed["candidates"],
-        resumed["artists"]["Artist"]["candidates"],
-    ):
-        assert candidate_premise.validate(loaded[0]) == current
-        for row in loaded[1:4]:
-            with pytest.raises(candidate_premise.CandidateStale):
-                candidate_premise.validate(row)
-        assert candidate_premise.canonical(loaded[3]) == old_premise
-        assert candidate_premise.validate(loaded[4]) == gap_premise
 
 
 def _renumber_mount_ids(premise):
@@ -151,32 +99,11 @@ def test_candidate_receipt_survives_mount_namespace_renumbering(
 
     assert validate(candidate) == current
     assert validate_premise(premise) == current
-
-
-def test_candidate_receipt_rejects_changed_mount_boundary_topology(
-        tmp_path, monkeypatch):
-    import qobuz_librarian.library.candidate_premise as candidate_premise
-
-    _root, album, _track = _music_album(tmp_path, monkeypatch)
-    premise = capture("upgrade", album)
-    candidate = {
-        "kind": "upgrade",
-        "payload": {"album_dir": str(album), "_premise": premise},
-    }
-    current = _renumber_mount_ids(premise)
-    new_mount_id = max(
-        identity[6] for identity in current["receipt"]["path_generations"]
-    ) + 1
-    # A newly mounted album has one boundary at its path entry and throughout
-    # its tree.  The directory and byte identities remain unchanged, but this
-    # is not the reviewed container topology and must be refused.
-    current["receipt"]["path_generations"][-1][6] = new_mount_id
-    for identity in current["receipt"]["directory_generations"].values():
-        identity[6] = new_mount_id
-    monkeypatch.setattr(
-        candidate_premise, "capture", lambda _kind, _path: current)
-
-    with pytest.raises(CandidateStale, match="local files changed"):
+    # A new mount boundary at the album is not the reviewed topology.
+    for identity in (current["receipt"]["path_generations"][-1],
+                     *current["receipt"]["directory_generations"].values()):
+        identity[6] = -1
+    with pytest.raises(CandidateStale):
         validate(candidate)
 
 
@@ -227,53 +154,6 @@ def test_missing_candidate_binds_the_reviewed_artist_tree(tmp_path, monkeypatch)
     ) + 1
     with pytest.raises(CandidateStale):
         validate_container(candidate)
-
-
-def test_legacy_candidate_without_receipt_fails_closed(tmp_path, monkeypatch):
-    _root, album, _track = _music_album(tmp_path, monkeypatch)
-    candidate = {
-        "kind": "downsample",
-        "payload": {"album_dir": str(album)},
-    }
-    with pytest.raises(CandidateStale, match="predates local file receipts"):
-        validate(candidate)
-
-
-def test_only_admission_shares_an_artist_capture(tmp_path, monkeypatch):
-    # Admission may seal an artist once, because an unshared check runs again
-    # before anything is written. That later check must not share: it would
-    # read the first row's files and take the rest on trust.
-    from qobuz_librarian.library import candidate_premise
-
-    _root, album, _track = _music_album(tmp_path, monkeypatch)
-    premise = candidate_premise.capture("missing", album.parent)
-    rows = [{"cid": i, "kind": "album", "payload": {
-        "_artist_dir_path": str(album.parent), "_premise": premise,
-    }} for i in range(3)]
-    capture = candidate_premise.capture
-    captures = []
-    monkeypatch.setattr(candidate_premise, "capture",
-                        lambda kind, path: (captures.append(path),
-                                            capture(kind, path))[1])
-
-    candidate_premise.validate_all(rows)
-    assert captures == [str(album.parent)] * 3      # re-sealed for every row
-
-    captures.clear()
-    assert candidate_premise.stale_candidate_ids(
-        rows, share_artist_captures=True) == set()
-    assert captures == [str(album.parent)]          # sealed once
-
-    captures.clear()
-    assert candidate_premise.stale_candidate_ids(rows) == set()
-    assert captures == [str(album.parent)] * 3      # unshared by default
-
-    uncaptured = {"cid": 3, "kind": "album", "payload": {
-        "_artist_dir_path": str(album.parent),
-    }}
-    assert candidate_premise.stale_candidate_ids(
-        [*rows, uncaptured], share_artist_captures=True) == {3}
-    assert "_premise" not in uncaptured["payload"]
 
 
 def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeypatch):

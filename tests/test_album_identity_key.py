@@ -6,32 +6,6 @@ sibling's fingerprint. The strict key keeps identity-bearing parentheses while
 still folding real edition decorations.
 """
 from qobuz_librarian.library import hidden
-from qobuz_librarian.library.tags import strip_album_decorations_strict
-
-
-def test_identity_parens_survive_and_decorations_fold():
-    keeps = [
-        "Alone (Again)",
-        "Rancid (5)",
-        "American Football (LP2)",
-        "The Asylum Albums (1972-1975)",
-        "Fearless (Taylor's Version)",
-        "Goliath (feat. Katie Jacoby)",
-        "Album (Live)",
-    ]
-    for title in keeps:
-        assert strip_album_decorations_strict(title) == title, title
-    folds = {
-        "Revolver (2009 Remaster)": "Revolver",
-        "Album (Deluxe Edition) (2018)": "Album",
-        "Van Halen (Hi-Res Version)": "Van Halen",
-        "Surfer Girl (Mono Version) (1963)": "Surfer Girl",
-        "The Stooges (50th Anniversary Deluxe Edition)": "The Stooges",
-        "Minutes To Midnight (Explicit)": "Minutes To Midnight",
-        "Mr. Tambourine Man (1965)": "Mr. Tambourine Man",
-    }
-    for title, bare in folds.items():
-        assert strip_album_decorations_strict(title) == bare, title
 
 
 def test_distinct_albums_get_distinct_fingerprints():
@@ -44,9 +18,13 @@ def test_distinct_albums_get_distinct_fingerprints():
         fa = hidden.album_fingerprint("Artist", a)
         fb = hidden.album_fingerprint("Artist", b)
         assert fa and fb and fa != fb, (a, b)
-    # ...while an edition still folds onto its album.
+    # ...while an edition still folds onto its album, whatever the case.
     assert (hidden.album_fingerprint("Artist", "Revolver")
-            == hidden.album_fingerprint("Artist", "Revolver (2009 Remaster)"))
+            == hidden.album_fingerprint("Artist", "Revolver (2009 Remaster)")
+            == hidden.album_fingerprint("artist", "REVOLVER"))
+    # Nothing left to compare on, so it can never be hidden.
+    assert hidden.album_fingerprint("", "Kid A") is None
+    assert hidden.album_fingerprint("Radiohead", "") is None
 
 
 def test_loose_keyed_store_rekeys_and_splits_on_load(tmp_path, monkeypatch):

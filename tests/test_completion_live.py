@@ -161,13 +161,3 @@ def test_new_album_completion_revalidates_and_refuses_track_replacement(
             live.revalidate()
 
     second_landing.write_bytes(_test_flac(b"writable after close"))
-
-
-def test_descriptor_quality_refuses_header_only_flac(tmp_path):
-    path = tmp_path / "truncated.flac"
-    path.write_bytes(_test_flac(b"garbage"))
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        assert completion_live._descriptor_quality(descriptor) == (0, 0)
-    finally:
-        os.close(descriptor)

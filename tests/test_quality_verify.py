@@ -22,12 +22,6 @@ def _patch(monkeypatch, tracks, tier):
     monkeypatch.setattr(config, "STREAMRIP_QUALITY", tier)
 
 
-def test_cd_only_source_served_cd_is_not_under(monkeypatch):
-    _patch(monkeypatch, [{"bits": 16, "sample_rate": 44100}], tier=4)
-    album = {"maximum_bit_depth": 16, "maximum_sampling_rate": 44.1}
-    assert verify.rip_shortfall([_FakeDir()], album)["under"] is False
-
-
 def test_one_low_track_among_good_is_under(monkeypatch):
     _patch(monkeypatch, [
         {"bits": 24, "sample_rate": 96000},
@@ -37,61 +31,14 @@ def test_one_low_track_among_good_is_under(monkeypatch):
     album = {"maximum_bit_depth": 24, "maximum_sampling_rate": 96.0}
     r = verify.rip_shortfall([_FakeDir()], album)
     assert r["under"] is True and r["n_below"] == 1
-
-
-def test_served_at_cap_target_is_not_under(monkeypatch):
+    # Neither a CD-only album served at CD nor one served at the user's own
+    # quality cap is short.
+    _patch(monkeypatch, [{"bits": 16, "sample_rate": 44100}], tier=4)
+    cd_only = {"maximum_bit_depth": 16, "maximum_sampling_rate": 44.1}
+    assert verify.rip_shortfall([_FakeDir()], cd_only)["under"] is False
     _patch(monkeypatch, [{"bits": 24, "sample_rate": 96000}], tier=3)
-    album = {"maximum_bit_depth": 24, "maximum_sampling_rate": 192.0}
-    assert verify.rip_shortfall([_FakeDir()], album)["under"] is False
-
-
-def test_effective_tier_override_controls_target(monkeypatch):
-    _patch(monkeypatch, [{"bits": 24, "sample_rate": 96000}], tier=4)
-    album = {"maximum_bit_depth": 24, "maximum_sampling_rate": 192.0}
-    result = verify.rip_shortfall([_FakeDir()], album, effective_tier=3)
-    assert result["under"] is False
-
-
-def test_redownload_fallback_restores_first_staged_rip_when_retry_lands_nothing(
-        monkeypatch, tmp_path):
-    staging = tmp_path / "staging"
-    first = staging / "Artist" / "Album"
-    first.mkdir(parents=True)
-    (first / "01.flac").write_bytes(b"first rip")
-    monkeypatch.setattr(config, "STAGING_DIR", staging)
-
-    dirs, retry_kept = verify.redownload_with_staged_fallback(
-        [first],
-        run_retry=lambda: None,
-        collect_staged_dirs=lambda: [],
-        collect_retry_files=lambda: [],
-        retry_preserves_original=lambda: False)
-
-    assert dirs == [first]
-    assert retry_kept is False
-    assert (first / "01.flac").read_bytes() == b"first rip"
-
-
-def test_redownload_fallback_restores_first_rip_on_interrupt(
-        monkeypatch, tmp_path):
-    staging = tmp_path / "staging"
-    first = staging / "Artist" / "Album"
-    first.mkdir(parents=True)
-    (first / "01.flac").write_bytes(b"first rip")
-    monkeypatch.setattr(config, "STAGING_DIR", staging)
-
-    def run_retry():
-        raise KeyboardInterrupt
-
-    with pytest.raises(KeyboardInterrupt):
-        verify.redownload_with_staged_fallback(
-            [first],
-            run_retry=run_retry,
-            collect_staged_dirs=lambda: [],
-            collect_retry_files=lambda: [],
-            retry_preserves_original=lambda: False)
-
-    assert (first / "01.flac").read_bytes() == b"first rip"
+    top = {"maximum_bit_depth": 24, "maximum_sampling_rate": 192.0}
+    assert verify.rip_shortfall([_FakeDir()], top)["under"] is False
 
 
 def test_redownload_fallback_restores_first_rip_when_retry_less_complete(

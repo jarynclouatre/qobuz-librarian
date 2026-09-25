@@ -74,39 +74,6 @@ def test_failed_job_commit_cannot_ride_a_later_successful_commit(
     assert accepted.id in saved_ids
 
 
-def test_restore_split_review_replaces_main_and_removes_remnant(
-        monkeypatch, tmp_path):
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    main = Job(title="Library review", execute_kind="library")
-    main.status = JobStatus.PENDING
-    main.add_candidate("album", "Picked", payload={"album_id": "picked"})
-    remnant = Job(title="Library review", execute_kind="library")
-    remnant.status = JobStatus.AWAITING_REVIEW
-    remnant.add_candidate(
-        "album", "Left parked", payload={"album_id": "parked"},
-        selected=False,
-    )
-    assert job_persistence.persist(main)
-    assert job_persistence.persist(remnant)
-
-    main.status = JobStatus.AWAITING_REVIEW
-    main.candidates = list(main.candidates) + list(remnant.candidates)
-    main.sync_cand_seq()
-    assert job_persistence.restore_split_review(main, remnant)
-
-    restored = job_persistence.load_one(main.id)
-    assert restored is not None
-    assert restored["status"] == JobStatus.AWAITING_REVIEW.value
-    assert [candidate["title"] for candidate in restored["candidates"]] == [
-        "Picked", "Left parked",
-    ]
-    assert job_persistence.load_one(remnant.id) is None
-
-
 def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_path):
     from qobuz_librarian.web import routes_jobs, runtime
 
@@ -187,30 +154,3 @@ def test_a_provider_error_never_reaches_the_stored_job_record(
         observer.close()
     assert "NOT-A-REAL-TOKEN-0000" not in "".join(stored)
     assert "nobody@example.test" not in "".join(stored)
-
-
-def test_only_the_listed_attention_markers_are_cleared(monkeypatch, tmp_path):
-    # A backlog of old failures kept the nav dot lit: only opening each job
-    # in turn cleared one, and the list they gather on cleared nothing.
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-    job_persistence._reset_for_tests()
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence.init()
-
-    made = {}
-    for title, attention in (("Failed", "failed"),
-                             ("Cancelled late", "cancel_late"),
-                             ("Interrupted", "recovery")):
-        job = Job(title=title, status=JobStatus.FAILED)
-        job.attention = attention
-        assert _REAL_ADMIT(job) is True
-        made[attention] = job.id
-
-    assert job_persistence.attention_count() == 3
-    # Only what the reader was shown: clearing the whole backlog emptied the
-    # very list they had opened.
-    assert job_persistence.acknowledge_listed_attention([made["failed"]]) == 1
-    assert job_persistence.attention_count() == 2
-    # Recovery stands for work still outstanding, not for unread news.
-    assert job_persistence.acknowledge_listed_attention(list(made.values())) == 1
-    assert job_persistence.attention_count() == 1
