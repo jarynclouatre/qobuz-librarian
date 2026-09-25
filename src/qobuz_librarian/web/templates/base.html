@@ -180,11 +180,10 @@
       </form>
       {% endif %}
 
-      {% if cli_mode %}
+      {% if cli_mode and page != 'settings' %}
       <div class="ql-cli-banner">
-        Terminal (CLI) mode is on. Downloads and scans here are paused while the
-        terminal has control.
-        <a href="/settings">Resume web app</a>
+        Terminal mode is on, so downloads and scans here are paused.
+        <a href="/settings#mode">Resume web app</a>
       </div>
       {% endif %}
 

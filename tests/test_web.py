@@ -4642,8 +4642,8 @@ def test_library_download_parks_unselected_and_keeps_only_picks():
 def test_library_review_rebuilds_from_saved_state_when_no_live_job(monkeypatch):
     """F1: with the baseline complete but no live library job (swept cancel,
     discarded scan job, corrupt restart row), the Missing Albums / Gap Fill
-    review must rebuild from saved scan state, never 'Baseline ready' + no
-    tabs. Retiring the review (discard / worked-through) blocks the rebuild."""
+    review must rebuild from saved scan state, never a finished status with
+    no tabs. Retiring the review (discard / worked-through) blocks the rebuild."""
     from qobuz_librarian.library import library_scan_state
     from qobuz_librarian.web import app as webapp
 

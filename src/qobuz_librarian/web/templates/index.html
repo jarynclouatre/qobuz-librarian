@@ -143,7 +143,7 @@
               d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
       </svg>
       <span class="min-w-0 flex-1 text-sm">
-        <strong>{{ new_release_review.count }} new release{{ 's' if new_release_review.count != 1 }}</strong> found across your library, waiting for review.
+        <strong>{{ new_release_review.count }} new release{{ 's' if new_release_review.count != 1 }}</strong> waiting for review.
       </span>
       <a href="/jobs/{{ new_release_review.id }}" class="ql-btn ql-btn-primary ql-btn-sm ml-auto shrink-0">Review</a>
     </div>
@@ -318,12 +318,12 @@
           {% if j.id == cancel_protected_job_id %}
           <div class="ql-row-action">
             <span class="ql-status-chip is-warning"
-                  title="This interrupted-download recovery stays active until its saved step settles.">Recovery protected</span>
+                  title="This job resumes an interrupted download and cannot be cancelled.">Recovery protected</span>
           </div>
           {% elif j.importing %}
           <div class="ql-row-action">
             <span class="ql-status-chip"
-                  title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
+                  title="Import has started and cannot be stopped.">Finishing</span>
           </div>
           {% else %}
           <form action="/jobs/{{ j.id }}/cancel" method="post" class="ql-row-action ql-active-action">
@@ -337,28 +337,21 @@
         </div>
         {% endfor %}
         {% if queued_jobs %}
-        {% set _wait = namespace(behind=false, paused=none) %}
+        {% set _wait = namespace(paused=none) %}
         {% for qj in queued_jobs %}
         {% set qw = (queue_waits or {}).get(qj.id) %}
-        {% if qw %}{% set _wait.behind = true %}{% endif %}
         {% if qw and qw.paused_for and not _wait.paused %}{% set _wait.paused = qw.paused_for %}{% endif %}
         {% endfor %}
+        {% set _first_wait = (queue_waits or {}).get(queued_jobs[0].id) %}
         <div class="ql-active-row">
           <div class="ql-active-main">
             <p class="ql-row-title">{{ queued_jobs | length }} job{{ 's' if queued_jobs|length != 1 }} queued</p>
-            <p class="ql-row-meta">
-              {%- if _wait.paused -%}
-              Waiting until {% if _wait.paused.album %}“{{ _wait.paused.album }}”{% else %}the interrupted download{% endif %} is retried or given up.
-              {%- elif queued_jobs | length > 1 -%}
-              Each starts automatically when the jobs ahead of it finish.
-              {%- elif _wait.behind -%}
-              Starts automatically after the current job finishes.
-              {%- else -%}
-              Starts automatically.
-              {%- endif -%}
-            </p>
+            {% if _wait.paused %}
+            <p class="ql-row-meta">Waiting until {% if _wait.paused.album %}“{{ _wait.paused.album }}”{% else %}the interrupted download{% endif %} is retried or given up.</p>
+            {% elif queued_jobs | length == 1 %}
+            <p class="ql-row-meta">{% if _first_wait %}Behind {{ _first_wait.position }} job{{ 's' if _first_wait.position != 1 }}.{% else %}Next.{% endif %}</p>
+            {% endif %}
           </div>
-          <a href="/queue" class="ql-btn ql-btn-secondary ql-btn-sm shrink-0">View queue</a>
         </div>
         {% endif %}
       </div>

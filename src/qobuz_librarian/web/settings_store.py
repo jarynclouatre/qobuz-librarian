@@ -27,20 +27,18 @@ _pending_lock = threading.Lock()
 # (key, label, help) - display order on the Settings page.
 BEHAVIOR_FIELDS = [
     ("PREFER_HIRES", "Prefer hi-res editions",
-     "When several editions are available, choose the highest quality allowed "
-     "by your download quality setting. Turn this off to favour the original "
-     "edition."),
+     "Pick the highest-resolution edition Qobuz has; the download quality "
+     "setting still decides the quality requested."),
     ("MIGRATE_MULTI_ARTIST", "Migrate multi-artist folders",
      "After import, file albums credited to multiple artists under the primary "
      "album artist instead of a combined artist folder."),
     ("DOWNSAMPLE_HIRES_ENABLED", "Downsample new hi-res downloads",
-     "Before import, reduce newly downloaded hi-res FLACs to 44.1 or 48 kHz. "
-     "The hi-res version is not kept. The Downsample page has its own keep "
-     "setting."),
+     "Before import, reduce new hi-res downloads to 44.1 or 48 kHz; the "
+     "hi-res files are not kept."),
     ("SUPPRESS_SINGLE_TRACK_GAPS", "Treat track downloads as singles",
-     "Library scans and new-release checks treat a single-track download as "
-     "a single: the rest of its album is not offered, and an artist you own "
-     "only singles from is skipped."),
+     "Library scans and checks for new releases treat a single-track "
+     "download as a single: the rest of its album is not offered, and an "
+     "artist you own only singles from is skipped."),
     ("LYRICS_ENABLED", "Fetch lyrics",
      "Fetch lyrics during import, using synced lyrics when providers have them."),
 ]
@@ -55,9 +53,8 @@ LYRICS_PROVIDER_CHOICES = [
 # (key, label, help, kind, choices, placeholder).
 TEXT_FIELDS = [
     ("STREAMRIP_QUALITY", "Download quality",
-     "Maximum quality to request. If Qobuz serves less than expected, "
-     "Qobuz Librarian retries at the highest tier and keeps the saved file "
-     "aligned with this setting.",
+     "Quality to request; when Qobuz serves less than expected, the album is "
+     "downloaded again at the highest tier.",
      "enum", ["4", "3", "2"], ""),
     ("LYRICS_FORMAT", "Lyrics format",
      "How lyrics are written when fetched.",
@@ -67,38 +64,35 @@ TEXT_FIELDS = [
      "the track tags with no leftover file (embed), or both.",
      "enum", ["sidecar", "embed", "both"], ""),
     ("LYRICS_PROVIDERS", "Lyrics providers",
-     "Comma-separated list of providers to try in order. Available: Lrclib, "
-     "NetEase, Megalobiz, Musixmatch, Genius. Unknown names are ignored. "
-     "Empty tries Lrclib, NetEase and Musixmatch, in that order.",
+     "Providers to try in order, from Lrclib, NetEase, Megalobiz, Musixmatch "
+     "and Genius; empty tries Lrclib, NetEase and Musixmatch.",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
     ("LASTFM_API_KEY", "Last.fm API key",
-     "Empty hides the Discover tab.",
+     "Turns on the Discover tab.",
      "text", None, "32-character key"),
     ("COLLECTION_BACKUP_DIR", "Backup folder",
-     "In Docker this is a container path, not a folder on your host. Keep "
-     "/collection_backups here and set QL_COLLECTION_BACKUPS in .env to "
-     "choose the host folder; another path needs a matching mount.",
+     "A path inside the container: keep /collection_backups and set the host "
+     "folder with QL_COLLECTION_BACKUPS in .env.",
      "text", None, "e.g. /collection_backups"),
     ("BEETS_PATH_DEFAULT", "beets path: default",
-     "Folder/file naming for normal albums (beets path syntax). "
-     "Empty = use beets/config.yaml.",
+     "Folder and file naming for albums, in Beets path syntax; empty uses "
+     "beets/config.yaml.",
      "text", None, "e.g. $albumartist/$album ($year)/$track - $title"),
     ("BEETS_PATH_COMP", "beets path: compilation",
-     "Naming for compilations / Various Artists. Empty = beets default.",
+     "Folder and file naming for compilations; empty uses the Beets default.",
      "text", None, "e.g. Various Artists/$album ($year)/$track - $title"),
     ("BEETS_PLUGINS", "beets plugins",
-     "beets plugins to enable (replaces the config.yaml list). "
-     "Empty = use that file. Unknown names are dropped and flagged. "
-     "e.g. lastgenre, replaygain, scrub, edit.",
+     "Beets plugins to enable in place of the config.yaml list; empty uses "
+     "that list, and unknown names are dropped.",
      "list", None, "fetchart,lastgenre,replaygain"),
     ("ARTIST_CATALOG_CACHE_TTL", "Album-list freshness",
-     "How long gap scans reuse a fetched discography before refetching. "
-     "(New-release checks always fetch fresh.)",
+     "How long Library scans, Upgrade, Discover and artist pages reuse a "
+     "fetched discography.",
      "enum", ["86400", "259200", "604800", "2592000"], ""),
     ("NEW_RELEASE_CHECK_INTERVAL", "Auto-check for new releases",
-     "How often to check Qobuz for new releases while the app is running. "
-     "Results go to the Search page for review; nothing downloads. "
-     "Off = manual only.",
+     "How often to check Qobuz for new releases. Runs after the first full "
+     "Library scan, when nothing else is running; results appear as a New "
+     "releases review.",
      "enum", ["0", "21600", "43200", "86400", "604800"], ""),
     ("DOWNSAMPLE_KEEP_ORIGINALS", "Keep originals when downsampling",
      "Whether the Downsample page parks a restorable copy of each hi-res "
@@ -193,20 +187,24 @@ ENUM_OPTION_LABELS = {
 }
 
 
-def inert_behaviour_notes(values) -> dict:
+def inert_behaviour_notes(values, have_downsample=True) -> dict:
     """What a saved combination has switched off, keyed by the setting it hits.
 
     Download quality is the cap streamrip is invoked with, so at 16-bit /
     44.1 kHz nothing can arrive above CD rate. That leaves the downsample
     toggle on screen with nothing to act on, and hi-res edition picking still
     deciding the edition but no longer the quality. Neither is refused, so the
-    page has to say which one still does something.
+    page has to say which one still does something. Without ffmpeg and flac
+    the downsample toggle never runs at any quality.
     """
     notes = {}
+    if not have_downsample:
+        notes["DOWNSAMPLE_HIRES_ENABLED"] = (
+            "ffmpeg or flac is missing, so this never runs.")
     if str(values.get("STREAMRIP_QUALITY", "")) != "2":
         return notes
     quality = ENUM_OPTION_LABELS["STREAMRIP_QUALITY"]["2"]
-    if values.get("DOWNSAMPLE_HIRES_ENABLED"):
+    if values.get("DOWNSAMPLE_HIRES_ENABLED") and have_downsample:
         notes["DOWNSAMPLE_HIRES_ENABLED"] = (
             f"Your download quality is {quality}, so nothing arrives above CD "
             "rate and this never runs.")

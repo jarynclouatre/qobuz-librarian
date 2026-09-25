@@ -2238,7 +2238,8 @@
     var waitNote = document.getElementById("queue-wait-note");
     function clearQueuedState() {
       if (waitNote) { waitNote.classList.add("hidden"); waitNote = null; }
-      if (activity && (activity.textContent === "Queued" || activity.textContent === "Waiting to start")) {
+      if (activity && activity.hasAttribute("data-queued")) {
+        activity.removeAttribute("data-queued");
         activity.textContent = jc && jc.dataset.jobType === "download" && !jc.dataset.jobKind ? "Downloading"
           : (jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning");
       }
@@ -2433,6 +2434,8 @@
     var summaryRow = document.getElementById("review-summary-row");
     var summaryCount = document.querySelector("#review-candidates [data-summary-count]");
     var emptyBox = document.getElementById("review-empty");
+    var footerDiscard = document.getElementById("review-footer-discard");
+    var footerBack = document.getElementById("review-footer-back");
     var filterRow = document.getElementById("review-filter-row");
     var filterInput = document.getElementById("review-filter");
     var dsTotal = document.querySelector("[data-downsample-total]");
@@ -2586,6 +2589,9 @@
       }
       if (summaryRow) summaryRow.classList.toggle("hidden", c.total === 0);
       if (emptyBox) emptyBox.classList.toggle("hidden", c.total > 0);
+      if (submit) submit.classList.toggle("hidden", c.total === 0);
+      if (footerDiscard) footerDiscard.classList.toggle("hidden", c.total > 0);
+      if (footerBack) footerBack.classList.toggle("hidden", c.total === 0);
       var tabsNav = cont.querySelector("[data-review-tabs]");
       if (tabsNav) tabsNav.classList.toggle("hidden", c.total === 0);
       if (filterRow && !curQuery()) filterRow.classList.toggle("hidden", c.artists < 4);

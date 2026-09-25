@@ -573,7 +573,7 @@ def _settle_blocked_recovery(action, *, job=None):
         raise ValueError("a blocked-item settlement action is required")
     with _STARTUP_RECOVERY_LOCK:
         if not _run_lock_intact():
-            return False, "The single-writer safety lock is unavailable."
+            return False, "The run lock is unavailable."
         try:
             recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
         except Exception:
@@ -594,7 +594,7 @@ def _settle_blocked_recovery(action, *, job=None):
                            "Queue or History.")
         binding = _startup_recovery_binding()
         if binding is None:
-            return False, "The blocked recovery identity could not be verified."
+            return False, "The blocked recovery record could not be verified."
         recovery_item = binding[0]
         imported = startup_recovery.import_was_filed(
             recovery_item.operation_id, binding[2])
@@ -927,15 +927,15 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                "directories exist. Downloads can't run until fixed.")
     elif _LOCK_UNENFORCEABLE and isinstance(run_lock.unavailable_reason,
                                             PermissionError):
-        reason = "The safety lock file can't be opened."
+        reason = "The run lock file can't be opened."
         msg = (f"Qobuz Librarian can't open {cfg.LOCK_FILE}: permission "
                "denied. Downloads and scans are paused. Set its owner to the "
                "user Qobuz Librarian runs as (PUID and PGID in Docker), then "
                "restart.")
     elif _LOCK_UNENFORCEABLE:
-        reason = "The data folder can't hold the safety lock."
-        msg = ("The data folder can't hold the single-writer safety lock "
-               "(read-only, or a mount without file locking). Downloads and "
+        reason = "The data folder can't hold the run lock."
+        msg = ("The data folder can't hold the run lock (read-only, or a "
+               "mount without file locking). Downloads and "
                "scans are paused. Move the data folder to a writable "
                "filesystem that supports file locking, then restart.")
     elif not _data_dir_available():
@@ -945,8 +945,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
         reason = "Qobuz Librarian can't write to its data folder."
         action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
         msg = ("Qobuz Librarian can't write to its data folder, so downloads "
-               "and scans are paused and nothing new can be saved. Your music "
-               "and your saved review are untouched. Check that the folder "
+               "and scans are paused and nothing new can be saved. Check that "
+               "the folder "
                "still exists and that Qobuz Librarian can write to it; the "
                "app picks it up again on its own.")
     elif _STARTUP_RECOVERY_REFRESHING:
@@ -956,16 +956,15 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     elif _STARTUP_RECOVERY_UNKNOWN:
         reason = "Interrupted work could not be checked safely."
         msg = (
-            "Qobuz Librarian acquired the safety lock but could not read its "
-            "saved recovery state. The lock was released, downloads and scans "
-            "remain paused, and the app will retry automatically. Check the "
+            "Qobuz Librarian took the run lock but could not read its saved "
+            "recovery state. The lock was released, downloads and scans stay "
+            "paused, and the app tries again on its own. Check the "
             "data-folder permissions if this notice remains."
         )
     elif not _run_lock_intact():
-        reason = "The safety lock that keeps one writer at a time was lost."
-        msg = ("The single-writer safety lock was lost. Downloads and scans "
-               "are paused so another process cannot write to the library "
-               "at the same time. Restart Qobuz Librarian before continuing.")
+        reason = "The run lock was lost."
+        msg = ("The run lock was lost, so downloads and scans are paused. "
+               "Restart Qobuz Librarian.")
     elif not job_mgr.job_persistence.ready_for_admission():
         jobs_db = job_mgr.job_persistence.database_path()
         if job_mgr.job_persistence.database_damaged():
@@ -1990,7 +1989,7 @@ def _review_job_from_library_state():
     """Rebuild the parked Library review from the saved baseline scan when no
     live job holds the /library surface, so a review lost to a swept cancel,
     a discarded scan job, or a corrupt persisted row on restart comes back
-    instead of stranding the user on 'Baseline ready' with no tabs. Mirrors
+    instead of stranding the user on the finished status with no tabs. Mirrors
     the Upgrade/Downsample saved-state reconstruction; the live job stays
     primary (callers only reach here when _library_current_job() is None).
     """
@@ -3535,7 +3534,7 @@ def _start_new_release_check(credentials):
         existing = _active_new_release_check()
         if existing is not None:
             return existing
-        job = job_mgr.Job(title="New-release check")
+        job = job_mgr.Job(title="New releases")
         job.execute_kind = "new_releases"
 
         def _scan(j):
@@ -7413,7 +7412,8 @@ def _persist_single_download_undo(
                 if preserve_existing:
                     job._preserve_persisted_single = True
             raise RuntimeError(
-                "The downloaded track's Undo record could not be saved durably."
+                "The downloaded track's Undo could not be saved to the data "
+                "folder."
             )
         if ownership_valid and persisted is True:
             with job._lock:
@@ -7481,7 +7481,7 @@ def _persist_single_download_undo(
         _refresh_post_import_relocation_recovery(authority)
         restore_source(clear_preservation=True)
         raise PostImportRelocationAttention(
-            "The relocated track's Undo handoff could not be sealed."
+            "The relocated track's Undo could not be saved."
         ) from exc
 
     handoff = {"consumer": consumer, "hash": handoff_hash}
@@ -7529,7 +7529,8 @@ def _persist_single_download_undo(
             queue_item.pop("_post_import_relocation_handoff_unknown", None)
             restore_source(clear_preservation=True)
         raise PostImportRelocationAttention(
-            "The relocated track's Undo record could not be saved durably."
+            "The relocated track's Undo could not be saved to the data "
+            "folder."
         ) from persistence_error
 
     accept_destination(single_snapshot)
@@ -7764,7 +7765,8 @@ def _make_single_track_run(album, track, token):
                         ):
                             _refresh_post_import_relocation_recovery(authority)
                             raise RuntimeError(
-                                "The relocated track's recovery identity was lost."
+                                "The relocated track's recovery record was "
+                                "lost."
                             )
                         else:
                             landed_dir = original_landed_dir
@@ -8267,7 +8269,7 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
                            if notice_bits else
                            "Nothing is selected on that tab yet.")
     elif request.query_params.get("approved"):
-        notice_bits.append("Download started. It's running in the queue.")
+        notice_bits.append("Download queued.")
     # Bring all back redirects here with what happened, a store-write failure
     # included. Without this the page dropped the message and a restore that
     # never ran looked exactly like one that worked.
@@ -9359,7 +9361,7 @@ def _job_nav_destination(job) -> tuple[str, str, str]:
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-async def job_page(request: Request, job_id: str, approved: bool = False,
+async def job_page(request: Request, job_id: str,
                    stale: bool = False, noselection: bool = False, page: int = 1,
                    error: str = "", q: str = "", tab: str = "",
                    waiting: bool = False):
@@ -9369,7 +9371,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
         if job is None:
             return RedirectResponse(
                 url="/queue?error=" + _notice_key(
-                    "That job is no longer in the record."),
+                    "That job is no longer in History."),
                 status_code=303)
     if job.execute_kind == "library" and job.status not in job_mgr.TERMINAL:
         # /library is the single Library review surface (launcher, live scan,
@@ -9420,7 +9422,7 @@ async def job_page(request: Request, job_id: str, approved: bool = False,
             "reason": str(output.get("reason") or ""),
         }
     ctx = {"job": job, "page": nav_page, "shown_attention": shown_attention,
-           "approved": approved, "stale": stale, "noselection": noselection,
+           "stale": stale, "noselection": noselection,
            "waiting": waiting,
            "error": _notice_text(error),
            "new_release_state": new_release_state,
@@ -9659,7 +9661,7 @@ async def job_approve(request: Request, job_id: str):
     if not job:
         return RedirectResponse(
             url="/queue?error=" + _notice_key(
-                "That job is no longer in the record."),
+                "That job is no longer in History."),
             status_code=303)
     # A parked review can outlive its feature: credentials can be pulled after
     # an upgrade review parks, and the downsample engine can vanish across a
@@ -10771,7 +10773,7 @@ async def job_give_up(request: Request, job_id: str):
     if not job:
         return RedirectResponse(
             url="/queue?error=" + _notice_key(
-                "That job is no longer in the record."),
+                "That job is no longer in History."),
             status_code=303)
     form = await request.form()
     if not _recovery_submission_matches(
@@ -10905,7 +10907,7 @@ async def job_retry(request: Request, job_id: str):
 
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
-        return _land(error="That job is no longer in the record.")
+        return _land(error="That job is no longer in History.")
     if (job.status != job_mgr.JobStatus.FAILED or not job.album_id
             or (job.execute_args or {}).get("retry_disabled") == "terminal"):
         return _land(error="Nothing to retry for that job.")
@@ -10984,8 +10986,8 @@ async def job_retry(request: Request, job_id: str):
             return busy
         return _durable_recovery_response(
             request,
-            "The single-writer safety lock could not be verified. No download "
-            "was started. Restart Qobuz Librarian.",
+            "The run lock could not be verified. No download was started. "
+            "Restart Qobuz Librarian.",
         )
     try:
         recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
@@ -11174,9 +11176,8 @@ async def job_retry(request: Request, job_id: str):
                     return busy
                 return _durable_recovery_response(
                     request,
-                    "The single-writer safety lock was lost while Retry was "
-                    "preparing. No download was started. Restart Qobuz "
-                    "Librarian.",
+                    "The run lock was lost while Retry was preparing. No "
+                    "download was started. Restart Qobuz Librarian.",
                 )
             try:
                 recovery_now = _record_startup_recovery(_RUN_LOCK_HANDLE)
@@ -11445,7 +11446,7 @@ async def job_undo(request: Request, job_id: str):
             if job:
                 return _tr(request, "_job_body.html", {"job": job})
             return HTMLResponse("", headers={"HX-Redirect": "/queue"})
-        msg = ("That job is no longer in the record." if not job
+        msg = ("That job is no longer in History." if not job
                else "Nothing to undo for that job.")
         return RedirectResponse(
             url="/queue?error=" + _notice_key(msg), status_code=303)
@@ -11728,15 +11729,9 @@ async def job_cancel(
         protected = job_mgr.cancel_is_protected(job)
         importing = job.importing
         if protected:
-            message = (
-                "This interrupted-download recovery cannot be canceled until "
-                "its saved step settles."
-            )
+            message = "An interrupted-download recovery cannot be cancelled."
         elif importing:
-            message = (
-                "Import has started, so this can't be stopped now. It will "
-                "finish in a moment."
-            )
+            message = "Import has started and cannot be stopped."
         elif job.status in job_mgr.TERMINAL:
             message = "That job had already finished."
         else:
@@ -11755,7 +11750,7 @@ async def job_cancel(
         # Both land on /library with no other sign the discard happened; a
         # review that was there a second ago is just gone otherwise.
         if was_review and job.execute_kind in ("library", "new_releases"):
-            label = ("New-release review" if job.execute_kind == "new_releases"
+            label = ("New releases review" if job.execute_kind == "new_releases"
                      else "Library review")
             dest += "?notice=" + _notice_key(f"{label} discarded.")
     else:
@@ -11944,10 +11939,7 @@ async def queue_cancel_pending():
     if protected or finishing or unsaved:
         parts = ["Queue cleared where safe."]
         if protected:
-            parts.append(
-                "The interrupted-download recovery stays in place until its "
-                "saved step settles."
-            )
+            parts.append("The interrupted-download recovery was not cancelled.")
         if finishing:
             noun = "job is" if finishing == 1 else "jobs are"
             parts.append(
@@ -12164,11 +12156,11 @@ def _diagnostics():
     if paused is not None:
         # The banner at the top of this same page already carries the whole
         # sentence; the row names the cause so the panel reads as a checklist.
-        checks.append({"label": "Active write pause", "ok": False,
+        checks.append({"label": "Writes paused", "ok": False,
                        "detail": paused["reason"]})
     else:
-        checks.append({"label": "Active write pause", "ok": True,
-                       "detail": "No active write pause"})
+        checks.append({"label": "Writes on", "ok": True,
+                       "detail": "Downloads and scans can run"})
 
     music_state, recorded_albums = collection_snapshot.music_root_write_state()
     if music_state == "ready":
@@ -12207,7 +12199,7 @@ def _diagnostics():
                        "detail": f"Not readable and writable by the container "
                        f"user: {shown}. Set their owner to PUID/PGID"})
     # A whole-directory count and size, the same shape as the Staging area
-    # row above. The rows further down (Stranded upgrade backups, Backups
+    # row above. The rows further down (Unfinished upgrade backups, Backups
     # needing review) each cover one problem subset; this is the total the
     # folder is actually holding.
     _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
@@ -12228,18 +12220,18 @@ def _diagnostics():
         checks.append({"label": "Beets database", "ok": False,
                        "detail": f"{parent_display} does not exist"})
 
-    missing_tool_fix = ("Pull the image again (docker compose pull)"
+    missing_tool_fix = ("Pull the image again (docker compose pull)."
                         if cfg.in_container()
-                        else "Install it on the PATH the app runs with")
+                        else "See Quick start in the README.")
     for binary in ("rip", "ffmpeg", "flac"):
         found = shutil.which(binary)
         checks.append({"label": f"{binary} binary",
                        "ok": bool(found),
-                       "detail": found or f"{binary} not on PATH. "
+                       "detail": found or f"{binary} was not found. "
                        f"{missing_tool_fix}"})
     beets_python, beets_detail = _beets_runtime_diagnostic()
     checks.append({
-        "label": "Beets 2.14.1 runtime",
+        "label": "Beets",
         "ok": beets_python is not None,
         "detail": beets_detail,
     })
@@ -12258,16 +12250,16 @@ def _diagnostics():
                 "couldn't inspect stranded upgrade backups: %s", exc)
     if stranded_error:
         checks.append({
-            "label": "Stranded upgrade backups",
+            "label": "Unfinished upgrade backups",
             "ok": False,
             "detail": "Could not inspect this folder; its status is unknown.",
         })
     elif stranded:
-        checks.append({"label": "Stranded upgrade backups", "ok": False,
+        checks.append({"label": "Unfinished upgrade backups", "ok": False,
                        "detail": f"{len(stranded)} found in "
                                  f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed"})
     else:
-        checks.append({"label": "Stranded upgrade backups", "ok": True,
+        checks.append({"label": "Unfinished upgrade backups", "ok": True,
                        "detail": "none"})
     backup_dir = collection_snapshot.snapshot_dir()
     if cfg.collection_backup_dir_in_music(backup_dir):
@@ -12499,7 +12491,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
             for host, resolved in [_resolve_host_path(cp)]
         ],
         "behavior_fields": settings_store.BEHAVIOR_FIELDS,
-        "inert_notes": settings_store.inert_behaviour_notes(values),
+        "inert_notes": settings_store.inert_behaviour_notes(
+            values, have_downsample=downsample_engine.HAVE_DOWNSAMPLE),
         "text_fields": settings_store.TEXT_FIELDS,
         "behavior_generation": settings_store.form_generation(
             "behaviour", values),
@@ -12796,6 +12789,7 @@ async def save_behavior(request: Request):
     quality_before = (
         str(effective_before.get("STREAMRIP_QUALITY", "")),
         bool(effective_before.get("PREFER_HIRES", False)),
+        bool(effective_before.get("SUPPRESS_SINGLE_TRACK_GAPS", False)),
     )
     try:
         ok, warnings = settings_store.save_from_form(
@@ -12820,17 +12814,22 @@ async def save_behavior(request: Request):
         return _settings_response(request, error="invalidsettings",
                                   warnings=warnings, diagnostics=diags,
                                   rerendered=True)
-    # A quality-policy change leaves a parked/saved Upgrade review promising
-    # targets the settings no longer produce.
+    # A quality or singles change leaves a saved Upgrade review promising
+    # targets the settings no longer produce, and a saved Library scan whose
+    # lists were built under the old policy (library_scan_state signature).
     quality_note = False
     effective_after = settings_store.current()
     if quality_before != (
         str(effective_after.get("STREAMRIP_QUALITY", "")),
         bool(effective_after.get("PREFER_HIRES", False)),
+        bool(effective_after.get("SUPPRESS_SINGLE_TRACK_GAPS", False)),
     ):
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, upgrade_state.load)
-        quality_note = bool((state or {}).get("candidates"))
+        quality_note = (
+            bool((state or {}).get("candidates"))
+            or await loop.run_in_executor(
+                None, generation_state.baseline_complete))
     # Durable publication is the settings store's admission point; failure
     # leaves both the live config and any deferred overlay unchanged.
     if not ok:
@@ -13248,8 +13247,8 @@ async def set_mode(request: Request, target: str = Form("")):
         # exact single-writer authority.
         return RedirectResponse(
             url="/settings?error=" + _notice_key(
-                "The safety lock is required. Fix the data-folder filesystem "
-                "or permissions, then restart Qobuz Librarian."),
+                "The run lock is required. Fix the data-folder filesystem or "
+                "permissions, then restart Qobuz Librarian."),
             status_code=303,
         )
     if want == "web":
@@ -13285,7 +13284,7 @@ async def set_mode(request: Request, target: str = Form("")):
                     return RedirectResponse(
                         url="/settings?error=" + _notice_key(
                             "Saved recovery state could not be checked. Web "
-                            "mode stayed paused and its safety lock was "
+                            "mode stayed paused and its run lock was "
                             "released; check the data-folder permissions, "
                             "then try again."
                         ),

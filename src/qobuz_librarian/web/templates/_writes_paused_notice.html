@@ -10,7 +10,7 @@
     <input type="hidden" name="recovery_item_id" value="{{ writes_paused_notice.settle.item_id }}">
     <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
             data-confirm="Give up on this download? {% if writes_paused_notice.settle.partial %}The tracks Beets moved stay in your library. The rest are kept in Settings > Diagnostics, along with any backup of the album's earlier tracks, which Restore there puts back.{% elif writes_paused_notice.settle.imported %}What Beets filed stays in your library; any staged files are discarded.{% else %}The staged files are discarded.{% endif %}"
-            data-confirm-action="Give up" data-irreversible>Give up on it</button>
+            data-confirm-action="Give up" data-irreversible>Give up on this album</button>
   </form>
   <a href="/settings#mode" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>
   {% elif writes_paused_notice.give_up %}
@@ -22,7 +22,7 @@
       <input type="hidden" name="recovery_item_id" value="{{ give_up.item_id }}">
       <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
               data-confirm="Discard this interrupted download? {% if give_up.partial %}The tracks Beets moved stay in your library. The rest are kept in Settings > Diagnostics, along with any backup of the album's earlier tracks, which Restore there puts back.{% elif give_up.imported %}What Beets already filed stays in your library.{% else %}Nothing is added to your library.{% endif %}"
-              data-confirm-action="Give up" data-irreversible>Give up on it</button>
+              data-confirm-action="Give up" data-irreversible>Give up on this album</button>
     </form>
     <a href="{{ writes_paused_notice.action.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ writes_paused_notice.action.label }}</a>
   </div>

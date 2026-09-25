@@ -272,7 +272,7 @@ def _refresh_after_local_album_change(
             generation_state.mark_output_status(
                 "new_releases",
                 "stale",
-                reason="An in-app album change could not update New Releases.",
+                reason="An in-app album change could not update New releases.",
             )
     if not album_id:
         for surface, reason in (
@@ -284,7 +284,7 @@ def _refresh_after_local_album_change(
             (
                 "new_releases",
                 "An album changed in the app, and it could not be matched "
-                "to anything in these saved New Releases results.",
+                "to anything in these saved New releases results.",
             ),
         ):
             if generation_state.output_is_current(surface, state=authority):
@@ -855,7 +855,7 @@ def _park_library_failures(failed_cands, execute_kind="library",
     if not failed_cands:
         return None
     if execute_kind == "new_releases":
-        job = job_mgr.Job(title="New-release check",
+        job = job_mgr.Job(title="New releases",
                           execute_kind="new_releases",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
     elif execute_kind == "upgrade":
@@ -2134,8 +2134,8 @@ def _scan_library_impl(
             "this scan did not finish cleanly."
         )
     if baseline_save_failed:
-        job.summary += (" The New Releases baseline couldn't be saved; "
-                        "the next complete scan will try again.")
+        job.summary += (" New releases could not be updated; the next "
+                        "complete scan tries again.")
     if snapshot_refused:
         job.summary += " " + snapshot_refused
     if scan_state_save_failed:
@@ -2147,7 +2147,7 @@ def _scan_library_impl(
     # what puts the warning on Library at all.
     unsaved = list(stale_tabs)
     if baseline_save_failed:
-        unsaved.append("New Releases")
+        unsaved.append("New releases")
     if (unsaved and attempt_id is not None and publication is not None
             and not scan_state_save_failed and not job.cancel_requested):
         named = (" and ".join(unsaved) if len(unsaved) < 3
@@ -2202,10 +2202,10 @@ def _append_to_parked_new_release_review(job):
         job_persistence.persist_review_mutation(
             parked, lambda: setattr(parked, "summary", restated))
         job.summary += (
-            " Added to the new-release review already waiting, "
+            " Added to the New releases review already waiting, "
             f"now {plural(waiting, 'new release')}.")
     else:
-        job.summary += " They were already in the review waiting for you."
+        job.summary += " They were already in the review."
     parked.notify_review_changed()
     job.status = job_mgr.JobStatus.DONE
     return True
@@ -2351,42 +2351,42 @@ def scan_new_releases(job, token):
 
     if rebaseline and seen:
         if saved is False:
-            job.summary = ("The fresh catalogue baseline couldn't be saved. "
-                           "Check again to retry it.")
+            job.summary = ("What Qobuz has now couldn't be saved. Check "
+                           "again to retry it.")
             if failed_count:
                 job.summary += (f" {plural(failed_count, 'artist')} also "
                                 "couldn't be checked.")
         elif failed_count:
-            job.summary = ("Catalogue rebaseline incomplete. "
-                           f"{plural(failed_count, 'artist')} couldn't be "
+            job.summary = (f"{plural(failed_count, 'artist')} couldn't be "
                            "checked; check again to retry them.")
         else:
-            job.summary = ("Catalogue limit changed. Recorded a fresh baseline. "
-                           "Future checks will flag new releases.")
+            job.summary = ("The catalogue limit changed, so this check "
+                           "recorded what Qobuz has now. Later checks list "
+                           "what is new.")
     elif total:
-        job.summary = f"{plural(total, 'new release')} found across the library."
+        job.summary = f"{plural(total, 'new release')} found."
         if failed_count:
             job.summary += (f" {plural(failed_count, 'artist')} couldn't be "
                             "checked; check again for a complete result.")
         if saved is False:
-            job.summary += (" The updated baseline couldn't be saved, so these "
+            job.summary += (" This check couldn't be saved, so these "
                             "releases may appear again.")
     elif failed_count:
         job.summary = ("No new releases from the artists that could be checked. "
                        f"{plural(failed_count, 'artist')} couldn't be checked; "
                        "check again for a complete result.")
         if saved is False:
-            job.summary += " The partial baseline update couldn't be saved."
+            job.summary += " This check couldn't be saved."
     elif not seen:
         if saved is False:
-            job.summary = ("The current Qobuz catalogue was checked, but the "
-                           "starting baseline couldn't be saved. Check again.")
+            job.summary = ("The current Qobuz catalogue was checked but "
+                           "couldn't be saved. Check again.")
         else:
-            job.summary = ("First check complete. Recorded the current Qobuz "
-                           "catalogue baseline. Future checks will flag new releases.")
+            job.summary = ("First check complete. Later checks list albums "
+                           "added to Qobuz after it.")
     elif saved is False:
-        job.summary = ("No new releases found, but the updated baseline couldn't "
-                       "be saved. Check again.")
+        job.summary = ("No new releases found, but this check couldn't be "
+                       "saved. Check again.")
     else:
         job.summary = "No new releases since your last check."
     if skipped_note:
@@ -2696,7 +2696,7 @@ def execute_albums(job, chosen, token):
         job.summary = "Stopped early. " + ", ".join(parts) + "."
         retry_count = failed + interrupted + not_started
         destination = ("Library" if is_library_run else
-                       "New Releases" if is_nr_run else "Restore review")
+                       "New releases" if is_nr_run else "Restore review")
         if retry_count and (is_library_run or is_nr_run or is_restore_run):
             if retry_save_failed:
                 job.summary += (
@@ -2759,7 +2759,7 @@ def execute_albums(job, chosen, token):
         job.attention = "partial" if retryable_tracks else "lossy"
         messages = []
         if retryable_tracks:
-            destination = "New Releases" if is_nr_run else "Library Gap Fill"
+            destination = "New releases" if is_nr_run else "Library Gap Fill"
             if retry_save_failed:
                 messages.append(
                     f"{plural(retryable_tracks, 'track')} could not be saved "
@@ -2806,7 +2806,7 @@ def execute_albums(job, chosen, token):
         _remember_review_save(_return_qobuz_review_picks(
             failed_cands, "collection_restore", job.execute_args))
     if failed:
-        destination = ("New Releases" if is_nr_run else
+        destination = ("New releases" if is_nr_run else
                        "Restore review" if is_restore_run else "Library")
         if retry_save_failed:
             outcome = f"They could not be saved back to {destination}."

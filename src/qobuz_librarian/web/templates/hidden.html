@@ -131,7 +131,7 @@
 {% else %}
 {# A filter with no matches must say so: the generic empty text would claim
    there is nothing dismissed while the filter is what's hiding it. #}
-<p class="ql-review-page-empty">Nothing matches &ldquo;{{ hidden_q }}&rdquo;. <a href="?" class="ql-inline-link">Clear the filter</a>.</p>
+<p class="ql-review-page-empty">Nothing matches &ldquo;{{ hidden_q }}&rdquo;.</p>
 {% endif %}
 
 {% else %}
@@ -143,8 +143,7 @@
       <path d="M9.5 17.5h5"/>
     </svg>
   </span>
-  <p class="ql-empty-title">{% if is_downsample %}No hi-res albums kept.{% else %}Nothing dismissed.{% endif %}</p>
-  <p class="ql-empty-text">{% if is_downsample %}Albums kept hi-res appear here.{% elif is_upgrade %}Albums dismissed from the Upgrade review appear here.{% else %}Albums dismissed from the Library review appear here.{% endif %}</p>
+  <p class="ql-empty-title">{% if is_downsample %}No kept hi-res albums.{% else %}Nothing dismissed.{% endif %}</p>
   <a href="{{ back_url }}" class="ql-btn ql-btn-primary w-full sm:w-auto mt-4">Go to {{ back_label }}</a>
 </div>
 {% endif %}

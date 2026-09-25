@@ -260,7 +260,7 @@ _MISSING = object()
 # a page open on the run must not still be headed with the scan's name.
 RUN_TITLES = {
     "library": "Library download",
-    "new_releases": "New-release download",
+    "new_releases": "New releases download",
     "upgrade": "Upgrade run",
     "downsample": "Downsample run",
     "repair": "Repair",
@@ -1986,7 +1986,7 @@ def approve(
                 raise
             if not _restore_untouched_review(j, parked):
                 raise RuntimeError(
-                    "The untouched review could not be restored durably."
+                    "The review could not be saved back to the data folder."
                 ) from e
             message = (
                 str(e)
@@ -2256,6 +2256,12 @@ def restore_jobs(
                              "finished.")
             elif job.execute_kind == "library":
                 job.error = restart + "Start the scan again from the Library page."
+            elif (job.execute_kind == "new_releases"
+                    and job.title == RUN_TITLES["new_releases"]):
+                job.error = ("Interrupted by a restart before its downloads "
+                             "finished.")
+            elif job.execute_kind == "downsample":
+                job.error = restart + "Start it again from Downsample."
             else:
                 job.error = restart + "Run it again to retry."
             if job.recoveries:
@@ -2291,6 +2297,8 @@ def restore_jobs(
                 else:
                     job.summary = (restart + "Start the repair scan again and "
                                    "it continues from where it left off.")
+            elif job.execute_kind == "downsample":
+                job.summary = restart + "Start it again from Downsample."
             else:
                 job.summary = restart + "Run the scan again to retry."
             job.finished_at = job_persistence.previous_write_at() or job.created_at

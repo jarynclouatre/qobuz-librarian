@@ -26,7 +26,7 @@
   {% endfor %}
 </div>
 
-{% if not review_groups %}
+{% if not review_groups and (review_query or review_counts.total) %}
 <p class="ql-review-page-empty">
   {% if review_query %}No artists or albums match your filter.{% elif review_tab == 'gaps' %}No albums to fill.{% elif review_tab == 'missing' %}No missing albums to review.{% else %}Nothing on this page.{% endif %}
 </p>

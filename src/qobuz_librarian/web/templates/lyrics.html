@@ -20,10 +20,10 @@
 
   <div class="ql-work-status">
     <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Queued{% elif lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif have_lyrics %}Ready{% else %}Unavailable{% endif %}
+      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Queued{% elif lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif not have_lyrics %}Not installed{% elif last_run %}Ready{% else %}Not scanned yet{% endif %}
     </span>
     <span>
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif last_run %}Last lyrics scan {{ last_run }}.{% else %}No lyrics scan has finished yet.{% endif %}
+      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif not have_lyrics %}{% elif last_run %}Last lyrics scan {{ last_run }}.{% else %}No scan has finished yet.{% endif %}
     </span>
     {% if have_lyrics and not lyrics_running %}
     <span>

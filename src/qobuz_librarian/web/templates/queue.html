@@ -53,12 +53,10 @@
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if qw and qw.paused_for -%}
       Waiting until {% if qw.paused_for.album %}“{{ qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.
-      {%- elif qw and qw.position > 1 -%}
-      Waiting behind {{ qw.position }} jobs. Starts automatically.
       {%- elif qw -%}
-      Starts automatically after the current job finishes.
+      Behind {{ qw.position }} job{{ 's' if qw.position != 1 }}.
       {%- else -%}
-      Starts automatically.
+      Next.
       {%- endif -%}
     </p>
     {% endif %}
@@ -73,7 +71,7 @@
   {% if job.id == cancel_protected_job_id %}
   <div class="ql-activity-actions">
     <span class="ql-status-chip is-warning"
-          title="This interrupted-download recovery stays active until its saved step settles.">Recovery protected</span>
+          title="This job resumes an interrupted download and cannot be cancelled.">Recovery protected</span>
   </div>
   {% elif job.importing %}
   {# Beets runs to its own end, so a Cancel here would be a dead control. Say
@@ -81,7 +79,7 @@
      hover text a phone can't show. #}
   <div class="ql-activity-actions">
     <span class="ql-status-chip"
-          title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
+          title="Import has started and cannot be stopped.">Finishing</span>
   </div>
   {% elif job.cancel_requested %}
   <div class="ql-activity-actions">
@@ -93,7 +91,7 @@
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="return_to" value="/queue">
     {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
-    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% else %} ql-btn-ghost{% endif %}"
+    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% endif %}"
             title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}{{ labels.cancel_confirm(job) }}{% endif %}"
@@ -157,7 +155,7 @@
   <form action="/queue/cancel-pending" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}{% if queue_has_cancel_protected %} The interrupted-download recovery stays active until its saved step settles.{% endif %} Completed work and parked reviews are untouched."
+            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}{% if queue_has_cancel_protected %} The interrupted-download recovery is not cancelled.{% endif %} Completed work and parked reviews are untouched."
             data-confirm-action="Clear queue" data-irreversible>Clear the queue</button>
   </form>
 </div>
@@ -170,7 +168,6 @@
     </svg>
   </div>
   <p class="font-medium text-base-content/70">{% if writes_paused %}Nothing is running.{% else %}Queue is empty.{% endif %}</p>
-  <p class="text-sm mt-1 text-base-content/50">{% if writes_paused %}Downloads and scans are paused, so nothing can start yet.{% else %}Downloads and scans appear here while they run.{% endif %} Finished work and parked reviews live in History.</p>
   <div class="ql-empty-actions">
     {# Nothing can start, so a Search button here only leads back to a greyed
        download; the notice above carries the one thing that lifts the pause. #}

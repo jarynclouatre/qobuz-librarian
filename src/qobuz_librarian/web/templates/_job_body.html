@@ -89,9 +89,7 @@
   {% if s == 'awaiting_review' %}
     {% if _review_qobuz_blocked and not embedded_surface|default(false) %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
-      <span>This saved review remains available, but its selected action waits
-        for Qobuz. <a href="/settings" class="ql-inline-link">Connect Qobuz</a>
-        to continue.</span>
+      <span><a href="/settings" class="ql-inline-link">Connect Qobuz</a> to act on this review.</span>
     </div>
     {% endif %}
     {# The scan's own summary carries its caveats, an artist it couldn't check,
@@ -136,7 +134,7 @@
       {% include "_writes_paused_reason.html" %}
       <div class="ql-review-footer">
         <div class="ql-review-footer-actions">
-          <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary"
+          <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary{% if not review_counts.total %} hidden{% endif %}"
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or writes_paused or _review_qobuz_blocked %} disabled{% endif %}{% if writes_paused %} title="{{ writes_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
@@ -152,9 +150,14 @@
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-irreversible
             {%- else %} data-confirm-action="Download"
             {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
+          {# A spent review has nothing to download, so the way out takes the
+             bar's place. #}
+          {{ labels.discard_review(job, _review_thing, labels.discard_confirm(job) | trim,
+                                   'ql-btn ql-btn-secondary ql-review-footer-secondary' ~ (' hidden' if review_counts.total else ''),
+                                   'review-footer-discard') }}
           {% if not embedded_surface|default(false) %}
           <div class="ql-review-footer-secondary-group">
-            <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ job_return_label }}</a>
+            <a href="{{ job_return_href }}" id="review-footer-back" class="ql-btn ql-btn-secondary ql-btn-sm{% if not review_counts.total %} hidden{% endif %}">{{ job_return_label }}</a>
           </div>
           {% endif %}
         </div>
@@ -173,7 +176,8 @@
     {% set _cancel_protected = job.id == cancel_protected_job_id %}
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
-        <span id="job-activity" aria-live="polite">{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% else %}Waiting to start{% endif %}</span>
+        {% set _qw = queue_wait if queue_wait is defined else none %}
+        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused_for %}{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
         {% if s in ('scanning', 'running') %}<span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>{% endif %}
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
@@ -198,26 +202,22 @@
          what is happening, the way the Queue rows do, instead of greying a
          button whose reason only lives in hover text a phone cannot show. #}
       <span class="ql-status-chip ql-job-import-chip{% if not job.importing %} hidden{% endif %}" data-import-chip
-            title="Import has started, so this can't be stopped now. It will finish in a moment.">Finishing</span>
+            title="Import has started and cannot be stopped.">Finishing</span>
       {% endif %}
     </div>
 
     {% if _cancel_protected %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
-      <span>This interrupted-download recovery stays active until its saved step settles.</span>
+      <span>This job resumes an interrupted download and cannot be cancelled.</span>
     </div>
     {% endif %}
 
-    {% if s == 'pending' and queue_wait is defined and queue_wait %}
+    {% if s == 'pending' and _qw and _qw.paused_for %}
     <div class="ql-job-wait-note" id="queue-wait-note">
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-job-wait-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
       </svg>
-      {% if queue_wait.paused_for %}
-      <span>Waiting until {% if queue_wait.paused_for.album %}“{{ queue_wait.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if queue_wait.paused_for.job_id %} <a href="/jobs/{{ queue_wait.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}</span>
-      {% else %}
-      <span>Waiting for “{{ queue_wait.ahead_title }}” to finish{% if queue_wait.position > 1 %} ({{ queue_wait.position }} ahead of yours){% endif %}. Starts automatically.</span>
-      {% endif %}
+      <span>Waiting until {% if _qw.paused_for.album %}“{{ _qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if _qw.paused_for.job_id %} <a href="/jobs/{{ _qw.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}</span>
     </div>
     {% endif %}
 
@@ -235,10 +235,6 @@
         <p id="prog-item" class="ql-progress-item">{{ job.progress_item }}</p>
       </div>
     </div>
-
-    {% if s == 'scanning' and job.execute_kind == 'library' %}
-    <p class="ql-form-note">The scan keeps going if you leave this page.</p>
-    {% endif %}
 
     {% if s == 'scanning' and job.execute_kind in ('library', 'upgrade', 'downsample', 'new_releases', 'collection_restore') %}
     <p id="scan-found" class="ql-scan-found" aria-live="polite"></p>
@@ -267,7 +263,7 @@
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
       <div class="ql-notice-copy">
         <strong>Cancelled too late</strong>
-        <div>The import had already started when you asked to stop, and it runs to the end once it begins. The album is in your library.</div>
+        <div>It finished before the stop could take effect.</div>
       </div>
     </div>
     {% endif %}
@@ -372,7 +368,7 @@
             data-confirm="Remove the downloaded track and undo the single?"
             data-confirm-action="Remove track">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-sm" data-irreversible{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
         {% include "_writes_paused_reason.html" %}
       </form>
       {% endif %}

@@ -4,7 +4,7 @@
 
 {% macro review_title(job) -%}
   {%- if job.execute_kind == 'new_releases' -%}
-    New-release check
+    New releases
   {%- elif job.execute_kind == 'upgrade' -%}
     Albums to upgrade
   {%- elif job.execute_kind == 'downsample' -%}
@@ -124,12 +124,25 @@
   {%- elif job.execute_kind == 'downsample' -%}
     downsample review
   {%- elif job.execute_kind == 'new_releases' -%}
-    new-release review
+    New releases review
   {%- elif job.execute_kind == 'collection_restore' -%}
     restore review
   {%- else -%}
     library review
   {%- endif -%}
+{%- endmacro %}
+
+{# Discard lives in the quiet toolbar row rather than the floating bar: that
+   bar is the one tapped for every download, and a destructive action a
+   thumb-slip away from it does not belong there. It moves into the bar only
+   once nothing is left to download. Marked only where discarding loses
+   something no rescan can rebuild. #}
+{% macro discard_review(job, thing, confirm, cls='', id='') -%}
+<button type="submit" formaction="/jobs/{{ job.id }}/cancel" formnovalidate
+        {%- if id %} id="{{ id }}"{% endif %}
+        class="{{ cls or 'ql-review-tool' ~ (' ql-review-tool-danger' if job.execute_kind == 'new_releases' else '') }}"
+        data-confirm="{{ confirm }}"
+        data-confirm-action="Discard"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ thing }}</button>
 {%- endmacro %}
 
 {% macro discard_confirm(job) -%}
@@ -138,7 +151,7 @@
   {%- elif job.execute_kind == 'library' -%}
     Discard this library review? Your ticks are cleared, but you can bring the whole review back from the Library page.
   {%- elif job.execute_kind == 'new_releases' -%}
-    Discard this new-release review? These releases are recorded as seen. A later check won't list them again.
+    Discard this New releases review? A later check does not list these releases again.
   {%- elif job.execute_kind == 'collection_restore' -%}
     Discard this restore review? Upload the backup file again to build it back.
   {%- else -%}
@@ -194,7 +207,7 @@
   {%- if (job.status.value == 'scanning' or (job.status.value == 'pending' and job.kind == 'scan' and job.phase != 'execute')) and job.execute_kind in ('library', 'repair') -%}
     Stop this scan? Its progress through the artists it has checked is discarded, and the next scan starts from the beginning.
   {%- else -%}
-    Cancel this job? It will stop after the current safe step.
+    Cancel this job? It stops at the next step.
   {%- endif -%}
 {%- endmacro %}
 

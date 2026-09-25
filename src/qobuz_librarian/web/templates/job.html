@@ -8,7 +8,7 @@
 
 {% if new_release_state.stale %}
 <div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
-  <span><strong>Refresh needed.</strong> {{ new_release_state.reason or "These saved New Releases results need a Library refresh." }} Your saved review remains available below. <a href="/library" class="ql-inline-link">Open Library &rarr;</a></span>
+  <span><strong>Refresh needed.</strong>{% if new_release_state.reason %} {{ new_release_state.reason }}{% endif %} <a href="/library" class="ql-inline-link">Open Library &rarr;</a></span>
 </div>
 {% endif %}
 
@@ -25,25 +25,16 @@
 </div>
 {% endif %}
 
-{% if noselection %}
+{% if noselection and job.status.value == 'awaiting_review' %}
 <div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
   {% set _review_thing = labels.discard_review_label(job) %}
   <span>Nothing was selected. Choose at least one item, or use Discard {{ _review_thing }} to remove this review.</span>
 </div>
 {% endif %}
 
-{% if waiting %}
+{% if waiting and job.execute_kind == 'new_releases' %}
 <div class="ql-notice ql-notice-info ql-job-banner" data-flash>
-  <span>This new-release check was already running.</span>
-</div>
-{% endif %}
-
-{# Only true while the job really is waiting its turn. A job that has already
-   started says so itself, in the status chip and the progress line, and the
-   green "queued" banner beside them was a second, wrong answer. #}
-{% if approved and job.status.value == 'pending' %}
-<div class="ql-notice ql-notice-success ql-job-banner" data-flash>
-  <span>Queued. It'll start shortly.</span>
+  <span>A New releases check was already running.</span>
 </div>
 {% endif %}
 

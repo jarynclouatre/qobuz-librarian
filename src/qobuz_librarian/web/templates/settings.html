@@ -19,7 +19,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>Quality setting changed. Run a Library refresh after it takes effect. Until then, the saved Upgrade review cannot be approved.</span>
+  <span>Saved Library and Upgrade results were built with the previous settings. Run a Library refresh once the change takes effect.</span>
 </div>
 {% endif %}
 
@@ -187,7 +187,7 @@
 {% elif error == "credsmode" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <span>The Qobuz account was not changed because the web app does not hold
-  the safety lock. Finish the other Qobuz Librarian run or resume the web app,
+  the run lock. Finish the other Qobuz Librarian run or resume the web app,
   then try again.</span>
 </div>
 {% elif error and error not in ("invalidsettings", "persist", "settingschanged") %}
@@ -211,12 +211,6 @@
   </summary>
   <div class="ql-settings-section-body">
     <div class="ql-settings-section-head">
-      <div class="ql-settings-section-copy">
-        <p>
-          Token used for Search, Library, Discover, New Releases, Upgrade,
-          Repair, and downloads.
-        </p>
-      </div>
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
          Qobuz to have accepted it. A saved-but-unproven token says so. #}
       {% if auth_token_set and token_verified is not sameas false %}
@@ -229,8 +223,7 @@
     </div>
     {% if auth_token_set and not downloader_ready %}
     <div class="ql-notice ql-notice-warning">
-      <span>Your token can use Search and catalogue scans. Downloads also need
-      your Qobuz email or user ID; add it below.</span>
+      <span>Downloads also need your Qobuz email or user ID.</span>
     </div>
     {% endif %}
     {% if not auth_token_set %}
@@ -282,8 +275,7 @@
                {% if env_user_id_set %}disabled aria-disabled="true"{% endif %}
                class="ql-input max-w-lg">
         <p class="ql-field-help">
-          {% if env_user_id_set %}Set by environment; remove <code>QOBUZ_USER_ID</code> from <code>.env</code> or <code>compose.yaml</code> to manage it here.{% else %}Needed by the downloader; a token by itself still supports Search,
-          Library, Discover, New Releases, Upgrade, and Repair scans.{% endif %}
+          {% if env_user_id_set %}Set by environment; remove <code>QOBUZ_USER_ID</code> from <code>.env</code> or <code>compose.yaml</code> to manage it here.{% else %}Needed for downloads.{% endif %}
         </p>
       </div>
       <div class="ql-field">
@@ -301,9 +293,6 @@
                  class="ql-input pr-12 font-mono text-base sm:text-sm">
           {{ secret_toggle("auth_token", "token") }}
         </div>
-        <p class="ql-field-help">
-          {% if creds_from_env %}Managed by environment; remove it there before replacing it here.{% elif auth_token_set %}Paste a new token here to replace it.{% else %}Use your Qobuz auth token, not your password.{% endif %}
-        </p>
       </div>
 
       <div class="ql-settings-actions">
@@ -323,14 +312,6 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
-    <div class="ql-settings-section-head">
-      <div class="ql-settings-section-copy">
-        <p>
-          Use terminal mode before running CLI commands. Web scans and
-          downloads pause while terminal mode is active.
-        </p>
-      </div>
-    </div>
     <details class="ql-settings-details">
       <summary class="ql-disclosure-summary">
         CLI command
@@ -344,8 +325,8 @@
     {% if lock_unenforceable %}
     <div class="ql-mode-row">
       <div class="min-w-0">
-        <p class="ql-mode-state">Safety lock unavailable. Downloads paused.</p>
-        <p class="ql-mode-help">The data folder must support the safety lock so interrupted work can be recovered without two runs changing the library at once. Check its permissions and filesystem locking support, then restart Qobuz Librarian.</p>
+        <p class="ql-mode-state">Run lock unavailable. Downloads paused.</p>
+        <p class="ql-mode-help">Check the data folder's permissions and filesystem locking support, then restart Qobuz Librarian.</p>
       </div>
     </div>
     {% endif %}
@@ -389,11 +370,6 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
-    <div class="ql-settings-section-head">
-      <div class="ql-settings-section-copy">
-        <p>These settings apply to new jobs. A value changed here overrides its Compose default.</p>
-      </div>
-    </div>
 {% if not rerendered %}{{ behaviour_notices() }}{% endif %}
     <form action="/settings/behavior" method="post">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -477,14 +453,6 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
-    <div class="ql-settings-section-head">
-      <div class="ql-settings-section-copy">
-        <p>
-          Paths currently in use. Host paths are shown when Docker exposes them;
-          otherwise this shows the container path.
-        </p>
-      </div>
-    </div>
     <dl class="ql-path-list">
       {% for p in library_paths %}
       <div class="ql-path-row">
@@ -540,7 +508,7 @@
         <input type="hidden" name="mode" value="missing_albums">
         <input type="hidden" name="return_to" value="/settings">
         <button type="submit" name="force_full" value="1" class="ql-btn ql-btn-sm ql-btn-secondary"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-                data-confirm="Re-scan every artist folder from scratch? This ignores the unchanged-folder cache, so it takes as long as a first scan. Use it after large manual changes to your files. This opens the Library page."
+                data-confirm="Re-scan every artist folder from scratch? This takes as long as a first scan and opens the Library page."
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>
@@ -553,18 +521,6 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
-    <div class="ql-settings-section-head">
-      <div class="ql-settings-section-copy">
-        <p>
-          Suggests artists from the ones already in your library, and offers
-          what Qobuz has by them. The tab appears once a key is set; free keys
-          come from
-          <a href="https://www.last.fm/api/account/create" target="_blank"
-             rel="noopener" class="ql-link">last.fm</a>.
-        </p>
-      </div>
-    </div>
-
     {% if lastfm_check == 'ok' %}
     <div class="ql-notice ql-notice-success mb-6">
       <span>Last.fm accepted the key.</span>
@@ -596,7 +552,7 @@
                  class="ql-input pr-12 font-mono text-base sm:text-sm">
           {{ secret_toggle("f-" ~ key, "key") }}
         </div>
-        <p class="ql-field-help">{% if behavior[key] %}Paste a new key here to replace it.{% else %}{{ help }}{% endif %}</p>
+        <p class="ql-field-help">{{ help }} <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener" class="ql-link">Free keys come from last.fm.</a></p>
       </div>
       {% endfor %}
       <div class="ql-settings-actions">
@@ -794,7 +750,7 @@
       <div class="ql-settings-section-copy">
         <p>
           Signed in as <strong>{{ web_login_username }}</strong>. Changing the
-          password signs out every browser, including this one.
+          password signs every browser out.
         </p>
       </div>
     </div>

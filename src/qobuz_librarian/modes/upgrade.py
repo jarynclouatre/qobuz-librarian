@@ -82,7 +82,7 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
             generation_state.mark_output_status(
                 "new_releases",
                 "stale",
-                reason="A CLI replacement could not update New Releases.",
+                reason="A CLI replacement could not update New releases.",
             )
     artist_dir = _artist_dir_from_upgrade_result(album, result)
     if artist_dir is None:

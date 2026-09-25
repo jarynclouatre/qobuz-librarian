@@ -522,7 +522,7 @@ def acquire_run_lock():
             die(fmt(
                 C.RED,
                 "\n✗  The saved recovery state could not be checked safely.\n"
-                "   The safety lock was released and no library work was "
+                "   The run lock was released and no library work was "
                 "started. Check the data-folder permissions, then try "
                 "again.\n",
             ), EXIT_GENERAL)
@@ -545,11 +545,10 @@ def acquire_run_lock():
         lease.close()
     die(fmt(
         C.RED,
-        "\n✗  The single-writer safety lock could not be established.\n"
+        "\n✗  The run lock could not be taken.\n"
         f"   Lock file: {cfg.LOCK_FILE}\n\n"
-        "   Refusing to modify staging or the library without exclusive "
-        "write authority. Check the data-volume permissions and filesystem "
-        "locking support, then try again.\n",
+        "   Nothing was changed. Check the data-volume permissions and "
+        "filesystem locking support, then try again.\n",
     ), EXIT_GENERAL)
 
 

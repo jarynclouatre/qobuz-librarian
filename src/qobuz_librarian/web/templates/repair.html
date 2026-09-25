@@ -14,7 +14,7 @@
 
 {% if not qobuz_ready %}
 <section class="ql-work-card">
-  {% with connect_embedded=True, connect_note="Saved Repair progress, review choices, recovery, and history remain available below." %}
+  {% with connect_embedded=True %}
     {% include "_connect_cta.html" %}
   {% endwith %}
 </section>
@@ -31,17 +31,17 @@
 {% elif repair_job.status.value == 'failed' %}
 <div class="ql-work-status" role="alert">
   <span class="ql-status-chip is-error">Repair failed</span>
-  <span>{% if repair_job.candidates %}Review the saved album details below, then start a new scan when you are ready.{% else %}No repair choices were saved from that run. Review its log, then start a new scan when you are ready.{% endif %}</span>
+  {% if not repair_job.candidates %}<span>No repair choices were saved from that run.</span>{% endif %}
 </div>
 {% endif %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
 {% endif %}
 <div class="ql-work-status">
   <span class="ql-status-chip {% if repair_resume %}is-warning{% else %}is-neutral{% endif %}">
-    {% if repair_resume %}Resume available{% else %}Ready to scan{% endif %}
+    {% if repair_resume %}Resume available{% elif last_run %}Ready to scan{% else %}Not scanned yet{% endif %}
   </span>
   <span>
-    {% if last_run %}Last repair scan {{ last_run }}.{% else %}No repair scan has finished yet.{% endif %}
+    {% if last_run %}Last repair scan {{ last_run }}.{% else %}No scan has finished yet.{% endif %}
   </span>
   <a href="/repair/history">View history</a>
 </div>
@@ -49,19 +49,19 @@
 {% if repair_resume %}
 <div class="ql-tool-note ql-tool-note-info">
   <p class="ql-tool-note-title">Scan can resume</p>
-  <p>A repair scan did not finish{% if repair_resume.found %} with {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found so far{% endif %}. Starting it again reuses saved artists only when their exact files are unchanged, and checks changed or older saved work again.</p>
+  <p>A repair scan did not finish{% if repair_resume.found %} with {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found so far{% endif %}.</p>
 </div>
 {% endif %}
 
 <section class="ql-work-card ql-work-card-primary">
   <div class="ql-work-card-copy">
     <p class="ql-work-card-title">{% if repair_resume %}Resume repair scan{% else %}Scan for damaged files{% endif %}</p>
-    <p class="ql-work-card-text">Repair reads every file end to end for damage. Nothing is replaced until you review and approve a verified repair.</p>
+    <p class="ql-work-card-text">Scans FLAC files for damage. Damaged tracks are listed for review.</p>
   </div>
   <form action="/repair" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused or not qobuz_ready %} disabled title="{{ writes_paused_reason if writes_paused else 'Connect Qobuz before starting a Repair scan.' }}" aria-disabled="true"{% endif %}
-            {% if repair_resume %}data-confirm="Continue the repair scan from where it left off?" data-confirm-action="Resume scan"{% else %}data-confirm="Start a full repair scan? This can take a while on a large library." data-confirm-action="Start scan"{% endif %}>{% if repair_resume %}Resume scan{% else %}Start repair scan{% endif %}</button>
+    <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused or not qobuz_ready %} disabled title="{{ writes_paused_reason if writes_paused else 'Connect Qobuz first.' }}" aria-disabled="true"{% endif %}
+            {% if repair_resume %}data-confirm="Continue the repair scan from where it left off?" data-confirm-action="Resume scan"{% else %}data-confirm="Scan the whole library for damaged files?" data-confirm-action="Scan"{% endif %}>{% if repair_resume %}Resume scan{% else %}Scan{% endif %}</button>
   </form>
 </section>
 {% else %}

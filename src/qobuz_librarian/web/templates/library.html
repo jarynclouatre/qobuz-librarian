@@ -24,18 +24,18 @@
      page title, so name it, but only when _library_refresh.html is really
      offering it: a lost Qobuz connection leaves it disabled with its own notice
      above. #}
-  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong> {{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }} Your saved review remains available below.{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title to bring it up to date.{% endif %}</span></div>
+  <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong>{% if library_generation.outputs.library.reason %} {{ library_generation.outputs.library.reason }}{% endif %}{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title.{% endif %}</span></div>
   {% endif %}
 
   {% if not qobuz_ready %}
   <section class="ql-work-card">
-    {% with connect_embedded=True, connect_note="Your saved Library state remains available below. Downloading and refreshes wait for the connection." %}
+    {% with connect_embedded=True %}
       {% include "_connect_cta.html" %}
     {% endwith %}
   </section>
   {% endif %}
 
-  {# Until a baseline exists this is the page's purpose, so it is drawn
+  {# Until a first scan exists this is the page's purpose, so it is drawn
      above whatever else owns the surface rather than instead of it. #}
   {% if library_scan_state.ready and not library_baseline_exists
         and not library_refresh_scanning
@@ -47,7 +47,7 @@
       <circle cx="70" cy="66" r="14" stroke="currentColor" stroke-width="2"/>
       <path d="M80.5 76.5 88 84" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
-    <p class="ql-scan-hero-title">One scan builds your library's baseline.</p>
+    <p class="ql-scan-hero-title">Scan your library</p>
     <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
     <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked, continues from there{% endif %}</p>
     <form action="/library" method="post" data-busy-submit>
@@ -116,8 +116,8 @@
   {% elif library_baseline_exists %}
 
   <div class="ql-scan-status">
-    <span class="ql-status-chip {% if baseline_complete %}is-success{% else %}is-warning{% endif %}">{% if baseline_complete %}Baseline ready{% else %}Refresh needed{% endif %}</span>
-    <span class="ql-scan-status-meta">{% if not baseline_complete %}{{ library_generation.outputs.library.reason or "These saved results need a Library refresh." }}{% elif last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full baseline has finished{% endif %}</span>
+    <span class="ql-status-chip {% if baseline_complete %}is-success{% else %}is-warning{% endif %}">{% if baseline_complete %}Scanned{% else %}Refresh needed{% endif %}</span>
+    <span class="ql-scan-status-meta">{% if not baseline_complete %}{{ library_generation.outputs.library.reason }}{% elif last_full_scan %}Last full scan {{ last_full_scan }}{% else %}A full scan has finished{% endif %}</span>
   </div>
 
   {% if library_resume %}
@@ -133,13 +133,6 @@
   </div>
   {% endif %}
 
-  {# Tabs are the Library IA - they stay visible with zero counts once the
-     review is worked through, so the page is never a bare "Baseline ready". #}
-  <nav class="ql-page-tabs ql-review-tabs ql-review-tabs-static" aria-label="Result type">
-    <button type="button" class="is-active" disabled>Missing Albums <span class="ql-tab-count">0</span></button>
-    <button type="button" disabled>Gap Fill <span class="ql-tab-count">0</span></button>
-  </nav>
-
   <section class="ql-scan-hero">
     <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
       <circle cx="48" cy="48" r="29" stroke="currentColor" stroke-opacity="0.5" stroke-width="2"/>
@@ -149,7 +142,6 @@
     <p class="ql-scan-hero-title">Review discarded</p>
     {% else %}
     <p class="ql-scan-hero-title">Review complete</p>
-    <p class="ql-scan-hero-text">Everything from your last scan has been reviewed.</p>
     {% endif %}
     {% if hidden_count or library_review_retired_reason == 'discarded' %}
     <div class="flex flex-wrap items-center justify-center gap-3 mt-4">

@@ -20,7 +20,7 @@
 <div class="ql-notice ql-notice-success" data-flash data-flash-kind="success">
   <span>
     <strong>{% if started_job.artist %}{{ started_job.artist }} · {% endif %}{{ started_job.display_title }}</strong>
-    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}already finished.{% else %}added to the queue.{% endif %}
+    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}had already finished.{% else %}added to the queue.{% endif %}
     <a href="/jobs/{{ started_job.id }}" class="ql-inline-link">Open it →</a>
   </span>
 </div>
@@ -28,7 +28,7 @@
 
 {% include "_writes_paused_notice.html" %}
 
-{% if attention_only %}
+{% if attention_only and (bulk_jobs or jobs) %}
 <div class="ql-notice ql-notice-warning">
   <span>Showing unresolved History items. Recovery and Catalogue cleanup stay until resolved. <a href="/queue/history">Show all history</a>.</span>
 </div>
@@ -70,7 +70,7 @@
       {% elif job.attention == 'unchecked' %}
         <span class="ql-status-chip is-warning" title="Some artists or tracks could not be read; open it for details.">Scan incomplete</span>
       {% elif job.attention == 'cancel_late' %}
-        <span class="ql-status-chip is-warning" title="The import had already started, so the stop could not take effect.">Cancelled too late</span>
+        <span class="ql-status-chip is-warning" title="It finished before the stop could take effect.">Cancelled too late</span>
       {% elif job.attention == 'catalog' %}
         <span class="ql-status-chip is-warning" title="The deleted track still has a stale Beets catalogue entry.">Catalogue cleanup</span>
       {% elif job.attention == 'quality' %}
@@ -88,11 +88,8 @@
           <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
           <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
           {% endif %}
-          <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action"{% if retry_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
+          <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if retry_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
         </form>
-        {% endif %}
-        {% if not job.recovery_unreadable %}
-        <a href="/jobs/{{ job.id }}" class="ql-row-open">Open →</a>
         {% endif %}
       </div>
     </div>
@@ -123,10 +120,12 @@
         {{ labels.kind_tile(job, 'ql-job-tile--done') }}
         <div class="ql-activity-main">
           <p class="ql-row-title">
-            <a href="{{ '/settings#diagnostics' if job.recovery_unreadable else '/jobs/' ~ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
+            {# Its saved row cannot be loaded as a job, so the title is not a
+               link; the line below is the one way on. #}
+            {% if job.recovery_unreadable %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>{% endif %}
           </p>
           {% if job.recovery_unreadable %}
-          <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Repair backups were left untouched; inspect them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+          <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Inspect the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% elif job.recoveries and job.execute_kind != 'migration' %}
           <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
           {% endif %}
@@ -207,7 +206,7 @@
     </svg>
   </div>
   <p class="font-medium text-base-content/70">{% if history_unavailable %}History is unavailable or incomplete{% elif attention_only %}Nothing needs attention{% else %}No finished jobs yet{% endif %}.</p>
-  <p class="text-sm mt-1 text-base-content/50">{% if history_unavailable %}Saved activity could not be read reliably. Nothing was deleted; check the data folder and restart Qobuz Librarian.{% elif attention_only %}Unresolved warnings, recoveries, and catalogue cleanup appear here.{% else %}Completed downloads, scans, and reviews appear here.{% endif %}</p>
+  {% if history_unavailable %}<p class="text-sm mt-1 text-base-content/50">Saved activity could not be read reliably. Nothing was deleted; check the data folder and restart Qobuz Librarian.</p>{% endif %}
   <div class="ql-empty-actions">
     <a href="{% if attention_only %}/queue/history{% else %}/queue{% endif %}" class="ql-btn ql-btn-secondary w-full sm:w-auto">{% if attention_only %}Show all history{% else %}Back to Queue{% endif %}</a>
   </div>
