@@ -1779,7 +1779,7 @@ def history_page(limit: int, offset: int,
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
                 "execute_kind, execute_args, created_at, finished_at, "
-                "attention, recoveries, edition, single "
+                "attention, recoveries, edition, single, quality_shortfall "
                 "FROM jobs "
                 f"WHERE {_HISTORY_SQL} {clause}"
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC "
@@ -1805,6 +1805,7 @@ def history_page(limit: int, offset: int,
             "finished_at": _decode_timestamp(row[10]),
             "attention": row[11] or "", "recoveries": recoveries,
             "edition": row[13] or "",
+            "quality_shortfall": _decode_object(row[15])[0],
             "recovery_unreadable": recovery_unreadable,
             "single_unreadable": single_unreadable,
         })

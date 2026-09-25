@@ -7,7 +7,12 @@ from fastapi.responses import RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import QobuzAccess
-from qobuz_librarian.library import collection_snapshot, generation_state, scanner
+from qobuz_librarian.library import (
+    collection_snapshot,
+    generation_state,
+    scan_checkpoint,
+    scanner,
+)
 from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import flows, review_badges, runtime
@@ -107,6 +112,20 @@ def _scan_submission_failure_response(request, destination):
 def _active_library_scan():
     """A library scan that's already pending/crawling, or None."""
     return _active_scan("library")
+
+
+def _library_resume_offer(generation):
+    """The interrupted Library scan's checkpoint to offer a resume from, or
+    None. Offered while no Library scan is pending or crawling, when no
+    generation has finished or the latest attempt is running, failed or
+    incomplete."""
+    if _active_library_scan() is not None:
+        return None
+    latest = (generation.get("latest_attempt") or {}).get("status")
+    if (int(generation.get("generation") or 0)
+            and latest not in {"running", "failed", "incomplete"}):
+        return None
+    return scan_checkpoint.pending()
 
 
 def _music_root_problem():

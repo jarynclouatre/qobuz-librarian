@@ -209,29 +209,13 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
                                and not new_releases.auto_scan_attempted()),
             # First-run setup banner: shown until a full library scan has
             # seeded the new-release baseline.
-            "baseline_complete": generation_state.baseline_complete(),
+            "baseline_complete": generation_state.baseline_complete(
+                library_generation),
             "setup_scanning": scans._active_library_scan() is not None,
             "library_scan_state": scan_state,
             # An interrupted gap-scan, surfaced on the dashboard the way
             # /library already does, gated on no scan running.
-            "library_resume": (
-                lambda cp, generation: (
-                    cp
-                    if (
-                        cp is not None
-                        and scans._active_library_scan() is None
-                        and (
-                            not int(generation.get("generation") or 0)
-                            or str(
-                                (generation.get("latest_attempt") or {}).get(
-                                    "status"
-                                )
-                            ) in {"running", "failed", "incomplete"}
-                        )
-                    )
-                    else None
-                )
-            )(scan_checkpoint.pending(), library_generation),
+            "library_resume": scans._library_resume_offer(library_generation),
             # A fresh install has no credentials; the page says so up front.
             # Filesystem-only.
             "creds_ok": runtime._creds_ok(),

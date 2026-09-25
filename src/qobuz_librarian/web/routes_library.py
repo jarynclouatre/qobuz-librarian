@@ -12,7 +12,6 @@ from qobuz_librarian.library import (
     generation_state,
     library_scan_state,
     new_releases,
-    scan_checkpoint,
 )
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
@@ -200,21 +199,13 @@ def _library_current_job():
     return cur
 
 
-def _library_page_context(page, tab, q):
-    """Everything /library reads from the data and music volumes."""
-    badge_generation = review_badges.ready_generation("library")
-    # Albums a terminal run downloaded are still listed by the review this
-    # process holds in memory until they are applied. Do it before anything
-    # reads the review, so the counts and the tabs agree with the library.
-    flows.apply_pending_review_removals()
+def _library_header_context():
+    """What the Library header and the failure notice under it read, for the
+    page and for the header's poll alike."""
     library_generation = scans._truthful_library_generation()
-    ctx = {
-        "creds_ok": runtime._creds_ok(),
-        "qobuz_ready": runtime._qobuz_ready(), "page": "library",
+    return {
+        "qobuz_ready": runtime._qobuz_ready(),
         "library_scan_state": scans._library_scan_state(),
-        # Freshness line: when a full gap scan last completed, and whether one
-        # ever has (the new-release baseline is only seeded by a clean finish).
-        "last_full_scan": _last_scan_age(),
         "baseline_complete": generation_state.baseline_complete(
             library_generation
         ),
@@ -223,10 +214,6 @@ def _library_page_context(page, tab, q):
         ),
         "new_release_baseline_complete": new_releases.is_baseline_complete(),
         "library_generation": library_generation,
-        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_MISSING),
-        # Why a finished review retired ("discarded" / "worked_through" / ""),
-        # so the finished-state card reads right.
-        "library_review_retired_reason": "",
         "JobStatus": job_mgr.JobStatus,
         # Drives the header's quiet refresh: hidden while a crawl is already
         # under way (the "Refreshing…" note takes its place over a parked
@@ -239,6 +226,27 @@ def _library_page_context(page, tab, q):
             "library", statuses=(job_mgr.JobStatus.PENDING,
                                  job_mgr.JobStatus.SCANNING)) is not None,
         "library_refresh_failure": _library_refresh_failure(),
+    }
+
+
+def _library_page_context(page, tab, q):
+    """Everything /library reads from the data and music volumes."""
+    badge_generation = review_badges.ready_generation("library")
+    # Albums a terminal run downloaded are still listed by the review this
+    # process holds in memory until they are applied. Do it before anything
+    # reads the review, so the counts and the tabs agree with the library.
+    flows.apply_pending_review_removals()
+    ctx = {
+        **_library_header_context(),
+        "creds_ok": runtime._creds_ok(),
+        "page": "library",
+        # Freshness line: when a full gap scan last completed, and whether one
+        # ever has (the new-release baseline is only seeded by a clean finish).
+        "last_full_scan": _last_scan_age(),
+        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_MISSING),
+        # Why a finished review retired ("discarded" / "worked_through" / ""),
+        # so the finished-state card reads right.
+        "library_review_retired_reason": "",
         "unreadable_artists": unreadable_artists_mod.load(),
         "auto_library_scan": cfg.AUTO_LIBRARY_SCAN,
     }
@@ -255,20 +263,8 @@ def _library_page_context(page, tab, q):
     ctx["census"] = None
     # Resume hint: an interrupted scan's checkpoint, while no scan runs. A
     # parked review can sit above it, so it is not tied to an idle surface.
-    latest_status = str(
-        (ctx["library_generation"].get("latest_attempt") or {}).get(
-            "status"
-        )
-        or "never"
-    )
-    ctx["library_resume"] = (
-        scan_checkpoint.pending()
-        if not ctx["library_refresh_scanning"] and (
-            not int(ctx["library_generation"].get("generation") or 0)
-            or latest_status in {"running", "failed", "incomplete"}
-        )
-        else None
-    )
+    ctx["library_resume"] = scans._library_resume_offer(
+        ctx["library_generation"])
     if ljob is not None:
         ctx["queue_wait"] = runtime._queue_wait(ljob)
         # A full load has to be able to land on either tab: the address is the
@@ -328,40 +324,15 @@ async def library_refresh_note(request: Request):
     never polls."""
     loop = asyncio.get_running_loop()
     def _context():
-        library_generation = generation_state.load()
         return {
-            "qobuz_ready": runtime._qobuz_ready(),
-            "baseline_complete": generation_state.baseline_complete(
-                library_generation
-            ),
-            "library_baseline_exists": (
-                generation_state.library_snapshot_available(
-                    library_generation
-                )
-            ),
-            "new_release_baseline_complete": (
-                new_releases.is_baseline_complete()
-            ),
-            "library_generation": library_generation,
-            "library_scan_state": scans._library_scan_state(),
+            **_library_header_context(),
             "library_job": _library_current_job(),
-            "JobStatus": job_mgr.JobStatus,
-            "library_refresh_running": scans._active_scan(
-                "library",
-                statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
-                          job_mgr.JobStatus.RUNNING),
-            ) is not None,
-            "library_header_note": _library_header_note(),
-            "library_refresh_scanning": scans._active_scan(
-                "library", statuses=(job_mgr.JobStatus.PENDING,
-                                     job_mgr.JobStatus.SCANNING)) is not None,
             # Only the poll says this, so it lands once, when the work it was
             # watching ends. A page load has the review itself to read.
             "library_refresh_outcome": _library_refresh_outcome(),
             # A failure is not a passing note, so the poll delivers it out of
             # band into the page body and the page renders it on every load
             # until a refresh actually gets somewhere.
-            "library_refresh_failure": _library_refresh_failure(),
             "refresh_failure_oob": True,
         }
 

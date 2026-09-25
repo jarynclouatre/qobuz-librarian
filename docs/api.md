@@ -6,8 +6,8 @@ A read-only JSON API for job state: dashboards, monitoring, or scripts.
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/jobs` | All jobs, most recent first. Optional `?status=` (`pending`, `running`, `scanning`, `awaiting_review`, `done`, `failed`, `canceled`; an unrecognised value returns `400`) and `?limit=N` (max 500, default 50). Returns `{"jobs": [...], "count": N}`. Each job has `id`, `status`, `title`, `edition`, `display_title`, `artist`, `album_id`, `error`, `created_at` and `finished_at`; recent jobs also carry `summary` and `quality_shortfall`, and older ones read back from History do not. |
-| `GET /api/jobs/{id}/status` | One job as JSON: the recent-job fields above plus a `log_lines` array (last 50 lines). 404 if not found. |
+| `GET /api/jobs` | All jobs, most recent first. Optional `?status=` (`pending`, `running`, `scanning`, `awaiting_review`, `done`, `failed`, `canceled`; an unrecognised value returns `400`) and `?limit=N` (max 500, default 50). Returns `{"jobs": [...], "count": N}`. Each job has `id`, `status`, `title`, `edition`, `display_title`, `artist`, `album_id`, `summary`, `error`, `quality_shortfall`, `created_at` and `finished_at`. |
+| `GET /api/jobs/{id}/status` | One job as JSON: the fields above plus a `log_lines` array (last 50 lines). 404 if not found. |
 | `GET /api/jobs/{id}/stream` | SSE stream for a recent job (404 otherwise). It opens with a `retry:` hint; each log line is a `message` event, `progress` events carry the progress state, and a `done` event carries the final status. A quiet stream sends `event: ping` keepalives, and `event: auth` with `signed_out` ends it when the session does. |
 | `GET /api/queue/count` | A lightweight `{"count": N, "running": true/false, "signature": "...", "rows": "...", "attention": N}` for an "is anything active?" badge, without pulling the whole job list. The opaque `signature` changes when the active work changes, `rows` only when a job's status does, and `attention` counts finished jobs that still need attention. |
 

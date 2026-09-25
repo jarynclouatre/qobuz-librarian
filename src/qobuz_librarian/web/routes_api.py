@@ -1,5 +1,6 @@
 """JSON and live-progress endpoints under /api."""
 import asyncio
+import contextlib
 import hashlib
 import logging
 import queue
@@ -56,6 +57,45 @@ def _stream_session_active(request: Request) -> bool:
     return bool(token) and web_auth.verify_session(token)
 
 
+async def _job_events(request, job, event_for, idle_end):
+    """The loop both job streams share. Each line fanned out to ``job`` goes
+    through ``event_for``, which returns the event to send ("" for none) and
+    whether it ends the stream. With nothing queued, ``idle_end`` returns the
+    closing event once the job has moved on, or ""; until then a quiet stream
+    sends a ping every _SSE_HEARTBEAT_TICKS ticks. A signed-out session
+    closes the stream with an auth event."""
+    sub = job.subscribe()
+    quiet_ticks = 0
+    try:
+        while not runtime._STOP_SIGNALLED.is_set():
+            if not _stream_session_active(request):
+                yield "event: auth\ndata: signed_out\n\n"
+                break
+            try:
+                line = sub.get_nowait()
+            except queue.Empty:
+                closing = idle_end()
+                if closing:
+                    yield closing
+                    break
+                await asyncio.sleep(0.5)
+                quiet_ticks += 1
+                if quiet_ticks >= _SSE_HEARTBEAT_TICKS:
+                    quiet_ticks = 0
+                    yield "event: ping\ndata: 1\n\n"
+                continue
+            event, last = event_for(line)
+            if event:
+                quiet_ticks = 0
+                yield event
+            if last:
+                break
+    except Exception:
+        _log.exception("SSE stream error for job %s", job.id)
+    finally:
+        job.unsubscribe(sub)
+
+
 @router.get("/api/diagnostics", response_class=HTMLResponse)
 async def api_diagnostics(request: Request):
     """Htmx partial that returns just the diagnostics list items for the Recheck button."""
@@ -95,46 +135,28 @@ async def job_stream(request: Request, job_id: str):
                 return
             yield f"event: done\ndata: {job.status.value}\n\n"
             return
-        sub = job.subscribe()
-        empty_ticks = 0
-        try:
-            while not runtime._STOP_SIGNALLED.is_set():
-                if not _stream_session_active(request):
-                    yield "event: auth\ndata: signed_out\n\n"
-                    break
-                try:
-                    line = sub.get_nowait()
-                    if not _stream_session_active(request):
-                        yield "event: auth\ndata: signed_out\n\n"
-                        break
-                    empty_ticks = 0
-                    if line == job_mgr.STREAM_END:
-                        yield f"event: done\ndata: {job.status.value}\n\n"
-                        break
-                    if line.startswith(job_mgr.PROGRESS_PREFIX):
-                        yield ("event: progress\ndata: "
-                               + line[len(job_mgr.PROGRESS_PREFIX):] + "\n\n")
-                        continue
-                    if line.startswith(job_mgr.REVIEW_CHANGED):
-                        continue  # review-sync nudge, handled by the review stream
-                    escaped = line.replace("\n", " ").replace("\r", "")
-                    yield f"data: {escaped}\n\n"
-                except queue.Empty:
-                    if (job.status in job_mgr.TERMINAL
-                            or job.status == job_mgr.JobStatus.AWAITING_REVIEW):
-                        yield f"event: done\ndata: {job.status.value}\n\n"
-                        break
-                    await asyncio.sleep(0.5)
-                    empty_ticks += 1
-                    if empty_ticks >= _SSE_HEARTBEAT_TICKS:
-                        empty_ticks = 0
-                        yield "event: ping\ndata: 1\n\n"
-                except Exception:
-                    _log.exception(
-                        "SSE stream error for job %s", job.id)
-                    break
-        finally:
-            job.unsubscribe(sub)
+
+        def _event_for(line):
+            if line == job_mgr.STREAM_END:
+                return f"event: done\ndata: {job.status.value}\n\n", True
+            if line.startswith(job_mgr.PROGRESS_PREFIX):
+                return ("event: progress\ndata: "
+                        + line[len(job_mgr.PROGRESS_PREFIX):] + "\n\n"), False
+            if line.startswith(job_mgr.REVIEW_CHANGED):
+                return "", False  # review-sync nudge, handled by the review stream
+            escaped = line.replace("\n", " ").replace("\r", "")
+            return f"data: {escaped}\n\n", False
+
+        def _idle_end():
+            if (job.status in job_mgr.TERMINAL
+                    or job.status == job_mgr.JobStatus.AWAITING_REVIEW):
+                return f"event: done\ndata: {job.status.value}\n\n"
+            return ""
+
+        async with contextlib.aclosing(
+                _job_events(request, job, _event_for, _idle_end)) as events:
+            async for event in events:
+                yield event
 
     return StreamingResponse(_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -162,61 +184,58 @@ async def job_review_stream(request: Request, job_id: str):
         if job is None or job.status != job_mgr.JobStatus.AWAITING_REVIEW:
             yield "event: closed\ndata: inactive\n\n"
             return
-        sub = job.subscribe()
-        empty_ticks = 0
-        try:
-            while not runtime._STOP_SIGNALLED.is_set():
-                if not _stream_session_active(request):
-                    yield "event: auth\ndata: signed_out\n\n"
-                    break
-                try:
-                    line = sub.get_nowait()
-                    if not _stream_session_active(request):
-                        yield "event: auth\ndata: signed_out\n\n"
-                        break
-                    if line.startswith(job_mgr.REVIEW_CHANGED):
-                        # The data names the originating tab (or "changed" for a
-                        # server-side sync) so that tab can skip reloading a DOM
-                        # its own action already brought up to date.
-                        origin = line[len(job_mgr.REVIEW_CHANGED):]
-                        yield f"event: review\ndata: {origin or 'changed'}\n\n"
-                    # All other fanned-out lines (log/progress/end) are ignored
-                    # here; this channel only carries review-sync nudges.
-                except queue.Empty:
-                    if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
-                        yield f"event: closed\ndata: {job.status.value}\n\n"
-                        break
-                    await asyncio.sleep(0.5)
-                    empty_ticks += 1
-                    if empty_ticks >= _SSE_HEARTBEAT_TICKS:
-                        empty_ticks = 0
-                        yield "event: ping\ndata: 1\n\n"
-                except Exception:
-                    _log.exception(
-                        "review event stream failed for job %s", job.id)
-                    break
-        finally:
-            job.unsubscribe(sub)
+
+        def _event_for(line):
+            if line.startswith(job_mgr.REVIEW_CHANGED):
+                # The data names the originating tab (or "changed" for a
+                # server-side sync) so that tab can skip reloading a DOM its
+                # own action already brought up to date.
+                origin = line[len(job_mgr.REVIEW_CHANGED):]
+                return f"event: review\ndata: {origin or 'changed'}\n\n", False
+            # Log, progress and end lines belong to the progress stream.
+            return "", False
+
+        def _idle_end():
+            if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
+                return f"event: closed\ndata: {job.status.value}\n\n"
+            return ""
+
+        async with contextlib.aclosing(
+                _job_events(request, job, _event_for, _idle_end)) as events:
+            async for event in events:
+                yield event
 
     return StreamingResponse(_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _job_to_dict(job, *, log_tail: int = 50):
-    out = {
-        "id": job.id,
-        "status": job.status.value,
-        "title": job.title,
-        "edition": job.edition,
-        "display_title": job.display_title,
-        "artist": job.artist,
-        "album_id": job.album_id,
-        "summary": job.summary,
-        "error": job.error,
-        "quality_shortfall": job.quality_shortfall,
-        "created_at": job.created_at,
-        "finished_at": job.finished_at,
+def _job_row(*, job_id, status, title, edition, artist, album_id, summary,
+             error, quality_shortfall, created_at, finished_at):
+    """A job as the API returns it, with the same keys whether it is live or
+    read back from History."""
+    return {
+        "id": job_id,
+        "status": status,
+        "title": title,
+        "edition": edition,
+        "display_title": job_mgr.release_title(title, edition),
+        "artist": artist,
+        "album_id": album_id,
+        "summary": summary,
+        "error": error,
+        "quality_shortfall": quality_shortfall,
+        "created_at": created_at,
+        "finished_at": finished_at,
     }
+
+
+def _job_to_dict(job, *, log_tail: int = 50):
+    out = _job_row(
+        job_id=job.id, status=job.status.value, title=job.title,
+        edition=job.edition, artist=job.artist, album_id=job.album_id,
+        summary=job.summary, error=job.error,
+        quality_shortfall=job.quality_shortfall,
+        created_at=job.created_at, finished_at=job.finished_at)
     if log_tail:
         out["log_lines"] = job.log_lines[-log_tail:]
     return out
@@ -324,20 +343,13 @@ async def jobs_list(status: str = "", limit: int = 50):
         for row in job_persistence.history_page(cap, 0, status=wanted):
             if row["id"] in seen:
                 continue
-            matching.append({
-                "id": row["id"],
-                "status": row["status"],
-                "title": row["title"],
-                "edition": row["edition"],
-                "display_title": job_mgr.release_title(
-                    row["title"], row["edition"]
-                ),
-                "artist": row["artist"],
-                "album_id": row["album_id"] or None,
-                "error": row["error"],
-                "created_at": row["created_at"],
-                "finished_at": row["finished_at"],
-            })
+            matching.append(_job_row(
+                job_id=row["id"], status=row["status"], title=row["title"],
+                edition=row["edition"], artist=row["artist"],
+                album_id=row["album_id"], summary=row["summary"],
+                error=row["error"],
+                quality_shortfall=row["quality_shortfall"],
+                created_at=row["created_at"], finished_at=row["finished_at"]))
             seen.add(row["id"])
             if len(matching) >= cap:
                 break
