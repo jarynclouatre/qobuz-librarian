@@ -108,7 +108,7 @@ def test_restore_split_review_replaces_main_and_removes_remnant(
 
 
 def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_path):
-    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import routes_jobs, runtime
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     job_persistence._reset_for_tests()
@@ -132,7 +132,7 @@ def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_pa
     assert job.status == jm.JobStatus.AWAITING_REVIEW
     assert job.set_selected(job.candidates[0]["cid"], True)
     assert jm.approve(
-        job, split_review=lambda review: webapp._build_unapproved_review(review, ""),
+        job, split_review=lambda review: routes_jobs._build_unapproved_review(review, ""),
     ) is True
     assert job.status == jm.JobStatus.PENDING
     assert jm.request_cancel(job) is True
@@ -143,7 +143,7 @@ def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_pa
     assert [(c["payload"]["album_id"], c["selected"])
             for c in job.candidates] == expected
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-    jm.restore_jobs({"library": webapp._resume_album_download})
+    jm.restore_jobs({"library": runtime._resume_album_download})
     reviews = jm.registry.awaiting_review()
     assert len(reviews) == 1
     assert [(c["payload"]["album_id"], c["selected"])

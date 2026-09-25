@@ -281,8 +281,7 @@ def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeyp
     from types import SimpleNamespace
 
     from qobuz_librarian.library import candidate_premise
-    from qobuz_librarian.web import app as webapp
-    from qobuz_librarian.web import jobs
+    from qobuz_librarian.web import jobs, routes_jobs, runtime
 
     _root, album, track = _music_album(tmp_path, monkeypatch)
     premise = candidate_premise.capture("missing", album.parent)
@@ -312,17 +311,17 @@ def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeyp
     async def run_in_executor(_executor, fn):
         return fn()
 
-    monkeypatch.setattr(webapp.asyncio, "get_running_loop", lambda: SimpleNamespace(
+    monkeypatch.setattr(routes_jobs.asyncio, "get_running_loop", lambda: SimpleNamespace(
         run_in_executor=run_in_executor))
     monkeypatch.setattr(candidate_premise, "capture", record)
-    monkeypatch.setattr(webapp, "_authorize_qobuz_for_web", authorize)
-    monkeypatch.setattr(webapp, "_lock_busy_response", lambda _r: None)
-    monkeypatch.setattr(webapp, "_web_writes_paused", lambda: False)
+    monkeypatch.setattr(runtime, "_authorize_qobuz_for_web", authorize)
+    monkeypatch.setattr(runtime, "_lock_busy_response", lambda _r: None)
+    monkeypatch.setattr(runtime, "_web_writes_paused", lambda: False)
     monkeypatch.setattr(jobs.registry, "get", lambda _id: job)
-    monkeypatch.setattr(webapp.flows, "owned_missing_candidate_ids", lambda *_a, **_k: set())
+    monkeypatch.setattr(runtime.flows, "owned_missing_candidate_ids", lambda *_a, **_k: set())
     admitted = []
     monkeypatch.setattr(jobs, "approve", lambda *_a, **_k: admitted.append(True))
-    response = asyncio.run(webapp.job_approve(SimpleNamespace(form=form), job.id))
+    response = asyncio.run(routes_jobs.job_approve(SimpleNamespace(form=form), job.id))
     assert response.status_code == 303
     assert "error=" in response.headers["location"]
     assert not admitted

@@ -4876,8 +4876,8 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         parts.append(space)
     # Show the manifest where the user can actually find it, the container
     # path means nothing from a phone. Settings does the same for every path
-    # it displays. Runtime import: app imports flows at startup.
-    from qobuz_librarian.web.app import _resolve_host_path
+    # it displays. Imported here because runtime.py imports flows at startup.
+    from qobuz_librarian.web.runtime import _resolve_host_path
     manifest_display, _ = _resolve_host_path(str(manifest))
     job.summary = ("; ".join(parts) + ". Unidentified and skipped files stay "
                    f"where they are. Full plan written to {manifest_display}.")

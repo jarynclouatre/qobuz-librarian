@@ -106,7 +106,7 @@ def _stale_page_response(request, token):
         resp = HTMLResponse("", status_code=200,
                             headers={"HX-Refresh": "true"})
     else:
-        from qobuz_librarian.web.app import render_error_page
+        from qobuz_librarian.web.runtime import render_error_page
         resp = render_error_page(request, 403, "That page went stale",
                                  _STALE_MESSAGE)
     _set_csrf_cookie(request, resp, token)
@@ -185,7 +185,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         request.state.csrf_token = token
 
         if request.method not in _SAFE_METHODS:
-            from qobuz_librarian.web.app import render_error_page
+            from qobuz_librarian.web.runtime import render_error_page
             if cross_origin(request):
                 return render_error_page(
                     request, 403, "Request refused",

@@ -11,7 +11,7 @@ from qobuz_librarian.web import jobs as jm
 
 def _owned_path(root, path):
     """Filesystem identity record written after a single-track import."""
-    from qobuz_librarian.web.app import _bind_owned_path
+    from qobuz_librarian.web.owned_paths import _bind_owned_path
 
     owned = _bind_owned_path(root, path)
     assert owned is not None
@@ -79,7 +79,7 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations import lyric_fetch, lyrics
     from qobuz_librarian.queue import executor
-    from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import owned_paths, runtime
 
     music_root = tmp_path / "music"
     album = music_root / "Artist" / "Album"
@@ -103,7 +103,7 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
     manifest["items"][0]["companions"] = [{
         "kind": "artwork",
         "relative": cover.relative_to(music_root).as_posix(),
-        "file": app_mod._owned_file_identity(cover.stat()),
+        "file": owned_paths._owned_file_identity(cover.stat()),
     }]
     item = {
         "_resolved_post_dir": album,
@@ -115,7 +115,7 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
             self.tags = {"lyrics": ["[00:01.00]words"]}
 
     def identity(path):
-        return app_mod._owned_file_identity(path.stat())
+        return owned_paths._owned_file_identity(path.stat())
 
     def write_sidecar(
             path, content, *, creation_out=None,
@@ -166,10 +166,10 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
     assert len(changes) == 1
     assert len(created) == 1
     assert directory_changes
-    assert app_mod._single_owned_path(manifest, album) is None
+    assert runtime._single_owned_path(manifest, album) is None
     executor._advance_import_ownership_identities(
         [item], changes, created, directory_changes)
-    binding = app_mod._single_owned_path(
+    binding = runtime._single_owned_path(
         manifest,
         album,
         created_files_after_import=item["_import_ownership_created_files"],
@@ -184,9 +184,9 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
     ]
     changed_companion = copy.deepcopy(owned)
     changed_companion["companions"][0]["file"]["size"] += 1
-    assert app_mod._unlink_owned_path(music_root, changed_companion) is None
+    assert owned_paths._unlink_owned_path(music_root, changed_companion) is None
     assert track.exists() and cover.exists() and sidecar.exists()
-    assert app_mod._unlink_owned_path(music_root, owned) == track
+    assert owned_paths._unlink_owned_path(music_root, owned) == track
     assert not track.exists()
     assert not cover.exists()
     assert not sidecar.exists()
@@ -195,7 +195,7 @@ def test_created_artwork_and_sidecar_remain_exactly_undoable(
 
 def test_undo_finishes_when_a_created_folder_contains_an_unowned_file(
         tmp_path):
-    from qobuz_librarian.web import app as app_mod
+    from qobuz_librarian.web import owned_paths
 
     music_root = tmp_path / "music"
     album = music_root / "Artist" / "Album"
@@ -206,11 +206,11 @@ def test_undo_finishes_when_a_created_folder_contains_an_unowned_file(
     booklet.write_bytes(b"booklet")
     created_album = _directory_cleanup_entry(
         album, created=True, root=music_root)
-    owned = app_mod._bind_owned_path(
+    owned = owned_paths._bind_owned_path(
         music_root, track, created_directories=[created_album])
     assert owned is not None
 
-    assert app_mod._unlink_owned_path(music_root, owned) == track
+    assert owned_paths._unlink_owned_path(music_root, owned) == track
     assert not track.exists()
     assert booklet.read_bytes() == b"booklet"
     assert owned["directory_cleanup"]["complete"] is True
@@ -222,8 +222,9 @@ def test_get_track_marks_the_single_with_the_gap_toggle_off(
     import qobuz_librarian.library.catalog as cat_mod
     import qobuz_librarian.queue.executor as ex_mod
     import qobuz_librarian.web.app as app_mod
+    from qobuz_librarian.web import runtime
 
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(runtime, "_get_token", lambda: "tok")
     monkeypatch.setattr(search_mod, "get_album", lambda _id, _tok: {
         "id": "alb1", "title": "Girl With No Face", "year": 2024,
         "artist": {"name": "Allie X"},
@@ -264,8 +265,9 @@ def test_get_track_can_hide_album_gaps_when_setting_is_enabled(
     import qobuz_librarian.library.catalog as cat_mod
     import qobuz_librarian.queue.executor as ex_mod
     import qobuz_librarian.web.app as app_mod
+    from qobuz_librarian.web import runtime
 
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(runtime, "_get_token", lambda: "tok")
     monkeypatch.setattr(app_mod.cfg, "SUPPRESS_SINGLE_TRACK_GAPS", True, raising=False)
     monkeypatch.setattr(search_mod, "get_album", lambda _id, _tok: {
         "id": "alb1", "title": "Girl With No Face", "year": 2024,
@@ -298,8 +300,8 @@ def test_get_track_can_hide_album_gaps_when_setting_is_enabled(
 def test_undo_removes_the_grabbed_track_and_clears_the_mark(client, monkeypatch, fresh_singles, tmp_path):
     import qobuz_librarian.integrations.beets as beets_mod
     import qobuz_librarian.library.scanner as scanner_mod
-    import qobuz_librarian.web.app as app_mod
     import qobuz_librarian.web.flows as flows_mod
+    from qobuz_librarian.web import runtime
 
     d = tmp_path / "Allie X" / "Girl With No Face (2024)"
     d.mkdir(parents=True)
@@ -318,7 +320,7 @@ def test_undo_removes_the_grabbed_track_and_clears_the_mark(client, monkeypatch,
                   "marked": True, "new_folder": True,
                   "owned_path": _owned_path(d, f)}
     jm.registry.add(job)
-    monkeypatch.setattr(app_mod, "_get_optional_token", lambda: "tok")
+    monkeypatch.setattr(runtime, "_get_optional_token", lambda: "tok")
     monkeypatch.setattr(
         flows_mod,
         "_refresh_after_local_album_change",
@@ -393,8 +395,8 @@ def test_undo_refuses_a_replacement_when_the_inode_is_reused(
 def test_undo_already_gone_clears_single_mark_and_refreshes_state(
         client, monkeypatch, fresh_singles, tmp_path):
     import qobuz_librarian.library.scanner as scanner_mod
-    import qobuz_librarian.web.app as app_mod
     import qobuz_librarian.web.flows as flows_mod
+    from qobuz_librarian.web import runtime
 
     d = tmp_path / "Allie X" / "Girl With No Face (2024)"
     hidden.mark_single("Allie X", "Girl With No Face", "2024", "alb1")
@@ -407,7 +409,7 @@ def test_undo_already_gone_clears_single_mark_and_refreshes_state(
                   "artist": "Allie X", "album": "Girl With No Face",
                   "marked": True, "new_folder": False}
     jm.registry.add(job)
-    monkeypatch.setattr(app_mod, "_get_optional_token", lambda: "tok")
+    monkeypatch.setattr(runtime, "_get_optional_token", lambda: "tok")
     monkeypatch.setattr(scanner_mod, "read_album_dir", lambda _d: [])
     monkeypatch.setattr(
         flows_mod,
@@ -431,6 +433,7 @@ def test_undo_no_isrc_removes_the_grabbed_disc_not_a_same_numbered_twin(
     import qobuz_librarian.library.catalog as cat_mod
     import qobuz_librarian.queue.executor as ex_mod
     import qobuz_librarian.web.app as app_mod
+    from qobuz_librarian.web import runtime
 
     music_root = tmp_path / "music"
     d = music_root / "By Genre" / "Classical" / "Artist" / "Box Set (2020)"
@@ -441,7 +444,7 @@ def test_undo_no_isrc_removes_the_grabbed_disc_not_a_same_numbered_twin(
     cd2_grabbed = cd2 / "03 - Disc Two Three.flac"
     cd1_twin.write_bytes(b"cd1")
 
-    monkeypatch.setattr(app_mod, "_get_token", lambda: "tok")
+    monkeypatch.setattr(runtime, "_get_token", lambda: "tok")
     monkeypatch.setattr(app_mod.cfg, "MUSIC_ROOT", music_root)
     monkeypatch.setattr(search_mod, "get_album", lambda _id, _tok: {
         "id": "albx", "title": "Box Set", "year": 2020,
@@ -533,7 +536,6 @@ def test_undo_stays_retryable_when_its_final_job_save_fails(
 ):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.integrations import beets as beets_mod
-    from qobuz_librarian.web import app as app_mod
     from qobuz_librarian.web import flows, job_persistence
 
     music_root = tmp_path / "music"

@@ -449,7 +449,7 @@ def test_upgrade_zero_is_current_only_for_its_generation_and_policy(
         monkeypatch, tmp_path):
     from qobuz_librarian.library import generation_state
     from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import app as webapp
+    from qobuz_librarian.web import saved_reviews
 
     generation = _publish_library_generation(monkeypatch, tmp_path)
     result = RefreshResult(
@@ -462,24 +462,24 @@ def test_upgrade_zero_is_current_only_for_its_generation_and_policy(
     )
     assert upgrade_state.save(result, generation=generation)
 
-    current = webapp._upgrade_state_summary()
+    current = saved_reviews._upgrade_state_summary()
     assert current["complete"] is True
     assert current["count"] == 0
     assert current["stale"] is False
 
     monkeypatch.setattr(
-        webapp,
+        saved_reviews,
         "_effective_upgrade_quality_signature",
         lambda: "changed-policy",
     )
-    policy_stale = webapp._upgrade_state_summary()
+    policy_stale = saved_reviews._upgrade_state_summary()
     assert policy_stale["complete"] is True
     assert policy_stale["count"] == 0
     assert policy_stale["stale"] is True
 
     attempt = generation_state.begin_attempt()
     generation_state.commit_catalog_generation(attempt)
-    older_generation = webapp._upgrade_state_summary()
+    older_generation = saved_reviews._upgrade_state_summary()
     assert older_generation["complete"] is False
     assert older_generation["stale"] is True
 
