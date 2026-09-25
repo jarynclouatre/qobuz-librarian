@@ -17,9 +17,9 @@ from typing import Callable
 
 from qobuz_librarian import config, redaction
 from qobuz_librarian.ui_cli.colors import C, fmt
+from qobuz_librarian.ui_cli.logging import log
 
 
-# ── Exceptions ────────────────────────────────────────────────────────────────
 class AuthOutcome(StrEnum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -106,14 +106,7 @@ _RAW_API_BODY_RE = re.compile(r"^((?:HTTP \d+|bad JSON) from [^:]+):\s+.+$", re.
 
 
 def friendly_qobuz_error(e):
-    """Strip the raw API response body from a QobuzError's message.
-
-    `qobuz_get` raises ``QobuzError("HTTP NNN from endpoint: <body>")`` and
-    ``QobuzError("bad JSON from endpoint: <decode error>")``; the trailing
-    detail is fine for logs but leaks a response body or a raw
-    JSONDecodeError into the user-facing UI. This helper keeps the
-    status/endpoint prefix and drops everything after the colon.
-    """
+    """Strip the raw API response body from a QobuzError's message."""
     msg = str(e)
     m = _RAW_API_BODY_RE.match(msg)
     if m:
@@ -137,7 +130,6 @@ class QobuzEntitlementError(Exception):
     """Qobuz accepted the token but refused the requested account action."""
 
 
-# ── Token loading ─────────────────────────────────────────────────────────────
 class CredentialToken(str):
     """A token string carrying the non-secret generation that loaded it."""
 
@@ -300,12 +292,7 @@ def load_qobuz_credentials() -> QobuzCredentials:
 
 
 def load_qobuz_token():
-    """Return (user_id, token). Raises NoCredsError when no token is saved.
-
-    Priority order:
-      1. QOBUZ_USER_AUTH_TOKEN / QOBUZ_USER_ID env vars.
-      2. streamrip config.toml at STREAMRIP_CONFIG.
-    """
+    """Return (user_id, token)."""
     credentials = load_qobuz_credentials()
     return credentials.user_id, credentials.token
 
@@ -453,7 +440,6 @@ def enforce_streamrip_disc_folders() -> None:
     file keeps its permissions, and a symlinked config stays a symlink."""
     if not streamrip_disc_folders_off():
         return
-    import logging
     import os
     import stat
 
@@ -465,7 +451,7 @@ def enforce_streamrip_disc_folders() -> None:
     except Exception:
         return
     if _save_streamrip_config(doc, mode=mode):
-        logging.getLogger("qobuz_librarian").info(fmt(
+        log.info(fmt(
             C.GRAY,
             f"  Turned on disc_subdirectories in {config.STREAMRIP_CONFIG}."))
 
@@ -511,8 +497,7 @@ def sync_streamrip_creds_from_env():
     ) else ""
     user_id = env_user_id or matching_user_id
     if not user_id:
-        import logging
-        logging.getLogger("qobuz_librarian").warning(fmt(
+        log.warning(fmt(
             C.YELLOW,
             "  ⚠  QOBUZ_USER_AUTH_TOKEN is set but QOBUZ_USER_ID is not - "
             "downloads need both. Set QOBUZ_USER_ID (or save credentials on "
@@ -522,7 +507,6 @@ def sync_streamrip_creds_from_env():
     return write_streamrip_creds(user_id, token)
 
 
-# ── Streamrip config sanity check ─────────────────────────────────────────────
 def verify_streamrip_downloads_folder():
     """Warn loudly if streamrip's downloads.folder doesn't match STAGING_DIR."""
     if not config.STREAMRIP_CONFIG.exists():
@@ -537,8 +521,6 @@ def verify_streamrip_downloads_folder():
         return
     try:
         if Path(sr_dl).expanduser().resolve() != config.STAGING_DIR.resolve():
-            import logging
-            log = logging.getLogger("qobuz_librarian")
             log.info(fmt(C.YELLOW, f"  ⚠  streamrip downloads.folder = {sr_dl}"))
             log.info(fmt(C.YELLOW, f"     Qobuz Librarian expects:        {config.STAGING_DIR}"))
             log.info(fmt(C.YELLOW,
@@ -547,7 +529,6 @@ def verify_streamrip_downloads_folder():
         pass
 
 
-# ── Auth-lost detection (rip subprocess output) ───────────────────────────────
 def detect_auth_lost(rip_output):
     """Heuristic check on rip's combined stdout/stderr for auth failures.
 

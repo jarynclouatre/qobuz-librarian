@@ -61,7 +61,6 @@ except Exception as _e:  # missing deps shouldn't crash the ingest pipeline
     AVAILABLE = False
     IMPORT_ERROR = _e
 
-# ── Defaults & tunables ──────────────────────────────────────────────────────
 DEFAULT_PROVIDERS  = ["Lrclib", "NetEase", "Musixmatch"]
 DEFAULT_STATE_FILE = Path(__file__).resolve().parent / ".lyric_fetch_state.json"
 
@@ -154,7 +153,6 @@ _state_lock = threading.Lock()
 _breaker_lock = threading.Lock()
 
 
-# ── Thread-safe provider error capture ───────────────────────────────────────
 # syncedlyrics logs provider errors via Python's logging module. We capture
 # warnings/errors per-thread so the circuit-breaker regex can see them, then
 # silence the StreamHandlers syncedlyrics installs on each provider logger so
@@ -170,7 +168,7 @@ class _ChatterCapture(logging.Handler):
         try:
             buf.append(self.format(record))
         except Exception:
-            pass
+            self.handleError(record)
 
     @classmethod
     def begin(cls) -> None:
@@ -218,7 +216,6 @@ if AVAILABLE:
         _lg.setLevel(logging.WARNING)
 
 
-# ── State ────────────────────────────────────────────────────────────────────
 @dataclass
 class TrackState:
     mtime: float = 0.0
@@ -307,10 +304,7 @@ def load_state(path: Path = DEFAULT_STATE_FILE) -> dict[str, TrackState]:
 @contextmanager
 def _state_file_lock(path: Path):
     """Hold an exclusive cross-process lock for the state file while reading +
-    writing it. The state file is shared by a CLI import hook and the web
-    worker (separate processes), so a threading.Lock can't serialise them; an
-    flock on a sidecar lock file does. Best-effort - if the lock file can't be
-    opened we proceed unlocked rather than block a lyric save."""
+    writing it."""
     with state_file.store_lock(path):
         yield
 
@@ -331,12 +325,8 @@ def save_state(state: dict[str, TrackState], path: Path = DEFAULT_STATE_FILE) ->
 
 
 def update_state(mutator, path: Path = DEFAULT_STATE_FILE) -> None:
-    """Atomically read-modify-write the state file under the cross-process lock.
-
-    `mutator(state)` receives the freshly-loaded dict and mutates it in place.
-    Loading and saving inside one lock hold is what makes a prune safe against a
-    concurrent checkpoint: a plain load→modify→save (outside the lock) can write
-    back a snapshot that drops entries another process added in between."""
+    """Atomically read-modify-write the state file under the cross-process
+    lock."""
     with _state_file_lock(path):
         state = load_state(path)
         mutator(state)
@@ -378,19 +368,13 @@ class _StateWriter(dict[str, TrackState]):
 
 
 def prune_missing(state: dict[str, TrackState]) -> int:
-    """Drop entries whose file no longer exists, mutating `state` in place.
-
-    Keys are absolute paths, so a moved, renamed, or deleted track otherwise
-    leaves an orphan that's reloaded and re-serialised on every walk - the JSON
-    grows without bound and is parsed in full each run. Returns the count
-    dropped. Mirrors flac_cache.prune_missing."""
+    """Drop entries whose file no longer exists, mutating `state` in place."""
     gone = [k for k in state if not os.path.exists(k)]
     for k in gone:
         del state[k]
     return len(gone)
 
 
-# ── Lyrics classification & tag I/O ──────────────────────────────────────────
 def classify(text: Optional[str]) -> str:
     if not text or not text.strip():
         return "none"
@@ -890,13 +874,11 @@ def _unlink_held_name(
         )
         try:
             _rename_noreplace(parent_fd, name, quarantine_fd, "held")
-        except BaseException:
+        finally:
             # Python may deliver a signal after renameat2 completed but before
             # its wrapper returned. Derive the namespace outcome from the held
             # inode instead of trusting control flow.
             moved = _capture_quarantined_node()
-            raise
-        moved = _capture_quarantined_node()
         moved_identity = _regular_identity(os.fstat(held_fd))
         if (
             moved_identity is None
@@ -1659,7 +1641,6 @@ def build_query(f) -> Optional[str]:
     return f"{_clean_title(title)} {artist}"
 
 
-# ── Duration sanity check for synced LRCs ────────────────────────────────────
 def lrc_max_seconds(text: str) -> Optional[float]:
     matches = LRC_TS_RE.findall(text)
     if not matches:
@@ -1689,7 +1670,6 @@ def lrc_duration_sane(lyrics: str, track_seconds: float) -> tuple[bool, str]:
     return True, ""
 
 
-# ── Provider query (with circuit breaker) ────────────────────────────────────
 def _bounded_provider_search(query: str, prov: str, **kwargs):
     """Run one third-party provider lookup behind an application deadline.
 
@@ -1821,7 +1801,6 @@ def search_lyrics(
     return None, None, "", tried, hard
 
 
-# ── Per-file processing & state-aware filter ─────────────────────────────────
 def _normalise_lyrics_format(value: str) -> str:
     value = (value or "embed").strip().lower()
     return value if value in ("embed", "sidecar", "both") else "embed"
@@ -2228,7 +2207,6 @@ def _process_bound_file(
     return action
 
 
-# ── High-level entry point ───────────────────────────────────────────────────
 def fetch_for_paths(
     paths: Iterable[Path],
     providers: Optional[list[str]] = None,
@@ -2371,7 +2349,6 @@ def fetch_for_paths(
     return counts
 
 
-# ── Scan-only indexer ────────────────────────────────────────────────────────
 def index_existing(
     items: Iterable,
     *,

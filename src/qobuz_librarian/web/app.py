@@ -129,6 +129,8 @@ from qobuz_librarian.web.csrf import (
     body_limit,
 )
 
+_log = logging.getLogger("qobuz_librarian")
+
 # Held for the lifetime of the web process. Module-level so Python won't
 # garbage-collect it (which would silently release the flock).
 _RUN_LOCK_HANDLE = None
@@ -147,7 +149,6 @@ _LOCK_UNENFORCEABLE = False
 _STARTUP_RECOVERY_RESULT = None
 # True while an authoritative refresh is running or after it raised.
 _STARTUP_RECOVERY_UNKNOWN = False
-# True only while that refresh is running.
 _STARTUP_RECOVERY_REFRESHING = False
 _STARTUP_RECOVERY_LOCK = threading.RLock()
 # Set before lifespan shutdown starts so no new mutating request can register
@@ -161,7 +162,6 @@ _STOP_SIGNALLED = threading.Event()
 # authority.
 _JOBS_RESTORED = False
 _JOBS_RESTORE_LOCK = threading.Lock()
-# Tri-state result of the startup token probe.
 _TOKEN_VALID: bool | None = None
 _TOKEN_GENERATION: str | None = None
 _AUTH_LOSS_NOTIFIED_GENERATIONS: set[str] = set()
@@ -577,6 +577,8 @@ def _settle_blocked_recovery(action, *, job=None):
         try:
             recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
         except Exception:
+            _log.exception(
+                "couldn't check blocked recovery for job %s", getattr(job, "id", "?"))
             return False, "The saved recovery state could not be checked safely."
         # A job running again owns its saved queue entry.
         unstarted = (
@@ -613,7 +615,7 @@ def _settle_blocked_recovery(action, *, job=None):
                     action=action,
                 )
         except Exception:
-            logging.getLogger("qobuz_librarian").exception(
+            _log.exception(
                 "settling the blocked recovery for job %s raised",
                 getattr(job, "id", "?"),
             )
@@ -628,6 +630,8 @@ def _settle_blocked_recovery(action, *, job=None):
         try:
             refreshed = _record_startup_recovery(_RUN_LOCK_HANDLE)
         except Exception:
+            _log.exception(
+                "couldn't verify settled recovery for job %s", getattr(job, "id", "?"))
             return False, "The settled recovery could not be verified safely."
         if action is BlockedItemSettlementAction.RETRY:
             if imported and _recovery_status_value(refreshed) == "attention_required":
@@ -703,7 +707,7 @@ def _staging_entry_allowed(job) -> bool:
     try:
         _record_startup_recovery(_RUN_LOCK_HANDLE)
     except Exception as exc:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "couldn't verify durable recovery at the staging boundary: %s",
             exc,
         )
@@ -753,7 +757,6 @@ def _settled_completion_response(request, job):
     Re-read the recovery and the completion record it just moved, or the reply
     describes a state this request has already left behind.
     """
-    _log = logging.getLogger("qobuz_librarian")
     if not _run_lock_intact():
         _log.info("Retry %s: no completed-download lane; run lock not held.",
                   job.id)
@@ -995,7 +998,7 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
             # which this message points at; the user gets what happened to
             # their music and what to do.
             if log_details:
-                logging.getLogger("qobuz_librarian").warning(
+                _log.warning(
                     "post-import relocation recovery: %s (paths: %s)",
                     relocation.reason or "reason not reported",
                     paths or "none reported")
@@ -1325,7 +1328,7 @@ def _close_web_run_lock(lease) -> None:
     try:
         lease.close()
     except OSError:
-        logging.getLogger("qobuz_librarian").exception(
+        _log.exception(
             "couldn't release a rejected Web run-lock lease"
         )
 
@@ -1346,7 +1349,7 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
                 "interrupted Library publication state could not be saved"
             )
         if publication_recovery:
-            logging.getLogger("qobuz_librarian").warning(
+            _log.warning(
                 "Recovered a Library crawl interrupted before its saved view "
                 "was published."
             )
@@ -2101,7 +2104,7 @@ def _restore_jobs_once() -> None:
                 requeue=_requeued_download_run,
             )
         except Exception as exc:
-            logging.getLogger("qobuz_librarian").warning(
+            _log.warning(
                 "couldn't restore prior jobs: %s. Starting fresh.",
                 exc,
             )
@@ -2204,7 +2207,6 @@ async def _lifespan(_app: FastAPI):
     _STARTUP_RECOVERY_RESULT = None
     _STARTUP_RECOVERY_UNKNOWN = False
     job_mgr.set_durable_recovery_job_id(None)
-    _log = logging.getLogger("qobuz_librarian")
     _scrub_stored_credentials(_log)
     cli_logging.attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL)
     if web_auth.auth_disabled():
@@ -2690,12 +2692,7 @@ _LOG_POINTER_RE = re.compile(r"\s*[;.]?\s*(see the log|see job log)\.?\s*$",
 
 
 def _strip_log_pointer(message, log_lines):
-    """Drop a trailing "see the log" from a message when there is no log.
-
-    Log lines live in memory, so anything that outlived a restart has none, and
-    the pointer was printed directly above "No log output was retained for this
-    job."
-    """
+    """Drop a trailing "see the log" from a message when there is no log."""
     if log_lines:
         return message
     return _LOG_POINTER_RE.sub("", message or "").strip() or message
@@ -2705,7 +2702,6 @@ templates.env.globals["fmt_clock"] = _fmt_clock
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
-# Whether to show a Log out control. True only when auth is on and set up.
 templates.env.globals["auth_active"] = web_auth.auth_active
 
 static_dir = _here / "static"
@@ -2716,10 +2712,7 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Serve the app icon at the well-known path so the browser's automatic
-    /favicon.ico probe (allowlisted past auth in web/auth.py) doesn't 404. The
-    HTML pages also carry a <link rel="icon">; this covers the bare probe.
-    The 192px icon, not the 512px one: a favicon renders at 16-32px and the
-    full-size PNG is dead weight on every cold load."""
+    /favicon.ico probe (allowlisted past auth in web/auth.py) doesn't 404."""
     return FileResponse(static_dir / "icon-192.png", media_type="image/png")
 
 
@@ -2905,7 +2898,7 @@ async def login_submit(request: Request, username: str = Form(""),
     try:
         web_auth.set_session_cookie(resp, request)
     except web_auth.SessionPersistenceError:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "Couldn't persist a new web session; login refused.")
         return templates.TemplateResponse(
             request=request, name="login.html",
@@ -2972,7 +2965,7 @@ async def setup_submit(request: Request, username: str = Form(""),
     # First-run setup is unauthenticated by necessity (no creds exist yet), so
     # whoever reaches the open port first claims admin.
     _ip = (request.client.host if request.client else "") or "unknown"
-    logging.getLogger("qobuz_librarian").warning(
+    _log.warning(
         "First-run /setup creating admin account from %s (username=%r).",
         _ip, user)
     # The KDF is deliberately slow, so it runs off the event loop; on the loop
@@ -3001,7 +2994,7 @@ async def setup_submit(request: Request, username: str = Form(""),
     try:
         web_auth.set_session_cookie(resp, request)
     except web_auth.SessionPersistenceError:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "Couldn't persist the first web session; setup login was saved.")
         return templates.TemplateResponse(
             request=request, name="login.html",
@@ -3231,7 +3224,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     """An uncaught route error renders the styled page for browser paths instead
     of FastAPI's bare JSON 500. API routes keep JSON. The detail is logged, never
     shown, since it can carry internals."""
-    logging.getLogger("qobuz_librarian").exception(
+    _log.exception(
         "Unhandled error on %s", request.scope.get("path", "?"))
     file_error = _file_error(exc)
     if file_error is not None and not request.scope["path"].startswith("/api/"):
@@ -3422,6 +3415,8 @@ def _same_edition_is_complete(album: dict) -> bool:
         return bool(existing and _album_tracks_complete(album)) and not catalog.compute_missing(
             wanted, existing)[0]
     except Exception:
+        _log.exception(
+            "edition ownership check failed for album %s", album.get("id"))
         return False
 
 
@@ -3666,23 +3661,15 @@ _ANY_TARGET = object()
 
 
 def _scan_target(job) -> str:
-    """The slice of the library a scan covers: a single artist (the per-artist
-    routes set ``job.artist``) or "" for a whole-library sweep. Dedup compares on
-    this so re-scanning one artist folds onto / supersedes only that artist's own
-    in-flight scan or parked review, never a different artist's, and never the
-    whole-library pass. Case/whitespace-folded so "Bonobo" re-scans "bonobo"."""
+    """The slice of the library a scan covers: a single artist (the per-artist routes
+    set ``job.artist``) or "" for a whole-library sweep."""
     return (getattr(job, "artist", "") or "").strip().casefold()
 
 
 def _active_scan(*kinds, statuses=("pending", "scanning"), target=_ANY_TARGET):
     """A job of one of the given execute_kinds in one of ``statuses``, or None,
     folding a double-submitted pass onto the one already in flight instead of
-    stacking duplicate work. Defaults to the scan phase: a scan keeps its
-    execute_kind through the post-review download (which runs as ``running``),
-    so matching only pending/scanning lets a deliberate re-scan still queue
-    behind a batch that's downloading. Run-to-completion jobs with no review
-    (lyrics) pass their own running phase instead. ``target`` restricts the match
-    to one artist's scan (or the whole-library pass); the default matches any."""
+    stacking duplicate work."""
     for j in job_mgr.registry.pending_and_running():
         if getattr(j, "execute_kind", "") in kinds and j.status.value in statuses:
             if target is _ANY_TARGET or _scan_target(j) == target:
@@ -3710,7 +3697,7 @@ def _queue_wait(job):
         if j.id == job.id or j.kind != job.kind:
             continue
         if j.status in (job_mgr.JobStatus.SCANNING, job_mgr.JobStatus.RUNNING):
-            holder = j  # the job actually occupying this lane's worker right now
+            holder = j
         elif (j.status == job_mgr.JobStatus.PENDING
               and (j.created_at or 0) < (job.created_at or 0)):
             ahead += 1
@@ -3810,15 +3797,7 @@ def _last_finished_library_job():
 
 
 def _library_refresh_outcome():
-    """What the library work that just ended actually did, or "".
-
-    The parked review's own summary counts what is in it, which the tabs
-    already say, so Library suppresses it. That left a finished refresh with
-    no outcome anywhere on this page: the note simply disappeared, which
-    reads exactly like a press that did nothing. Only recent work is
-    reported, and only where the note itself was watching. A failure is not
-    reported here; it is not a passing note, so it has its own notice.
-    """
+    """What the library work that just ended actually did, or ""."""
     latest = _last_finished_library_job()
     if latest is None or latest.status is job_mgr.JobStatus.FAILED:
         return ""
@@ -3878,12 +3857,7 @@ def _library_current_job():
 
 
 async def _submit_scan_deduped_async(job, scan_fn, execute_fn, *kinds, **kw):
-    """Run _submit_scan_deduped off the event loop.
-
-    It takes _auto_check_lock, which dashboard executor threads can hold across
-    small (possibly NAS-backed) reads, so the loop must not block on it; the
-    same reason POST /library offloads its submit. Every async scan route goes
-    through this instead of calling _submit_scan_deduped directly on the loop."""
+    """Run _submit_scan_deduped off the event loop."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, lambda: _submit_scan_deduped(job, scan_fn, execute_fn, *kinds, **kw))
@@ -4226,7 +4200,7 @@ def _start_due_jobs_in_background():
         due = (_library_scan_resume_due() or _unreadable_recheck_pending()
                or _new_release_check_due())
     except OSError as e:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "automatic start from the dashboard skipped: %s", e)
         return
     if not due:
@@ -4239,7 +4213,7 @@ def _start_due_jobs_in_background():
             _maybe_resume_library_scan()
             _maybe_auto_check_new_releases()
         except Exception as e:
-            logging.getLogger("qobuz_librarian").warning(
+            _log.warning(
                 "automatic start from the dashboard failed: %s", e)
         finally:
             _auto_start_busy.release()
@@ -4280,7 +4254,7 @@ def _maybe_resume_library_scan():
     with _auto_check_lock:
         if any(j.status != job_mgr.JobStatus.AWAITING_REVIEW
                for j in job_mgr.registry.pending_and_running()):
-            return  # something already working
+            return
         if readable_again:
             _start_library_scan(credentials)
             return
@@ -4487,7 +4461,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         try:
             token = _get_token()
 
-            # Resolve pasted Qobuz URLs before trying a text search.
             try:
                 _split = urllib.parse.urlsplit(query)
                 netloc = _split.netloc.lower()
@@ -4516,7 +4489,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except QobuzError:
                     error = "Couldn't fetch that album."
                 except Exception:
-                    logging.getLogger("qobuz_librarian").exception(
+                    _log.exception(
                         "album fetch failed for %r", query)
                     error = "Couldn't fetch that album."
             elif parsed and parsed[0] == "album" and kind == "track":
@@ -4714,7 +4687,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                             for res in group["results"]:
                                 res["owned"] = str(res["track_id"]) in present_ids
                         except Exception:
-                            pass
+                            _log.exception(
+                                "track ownership annotation failed for album %s", album_id)
 
                 try:
                     _own_timeout = 20
@@ -4722,14 +4696,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                         loop.run_in_executor(None, _annotate_owned_tracks),
                         timeout=_own_timeout)
                 except asyncio.TimeoutError:
-                    logging.getLogger("qobuz_librarian").warning(
+                    _log.warning(
                         "track ownership annotation timed out (%ss) for %r; "
                         "results shown without Owned marks",
                         _own_timeout,
                         query,
                     )
                 except Exception:
-                    logging.getLogger("qobuz_librarian").exception(
+                    _log.exception(
                         "track ownership annotation failed for %r", query)
             _album_raws = []
             for a in (raw if kind == "album" or selected_artist else []):
@@ -4809,7 +4783,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                                 res["owned"] = True
                             res["ownership_unknown"] = False
                         except Exception:
-                            pass
+                            _log.exception(
+                                "ownership annotation failed for album %s", alb.get("id"))
                     return annotations
                 try:
                     # Exact ownership may need the selected edition's track
@@ -4822,11 +4797,11 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     for res, annotation in zip(results, annotations):
                         res.update(annotation)
                 except asyncio.TimeoutError:
-                    logging.getLogger("qobuz_librarian").warning(
+                    _log.warning(
                         "ownership annotation timed out (%ss) for %r; results "
                         "shown without Owned marks", _own_timeout, query)
                 except Exception:
-                    logging.getLogger("qobuz_librarian").exception(
+                    _log.exception(
                         "ownership annotation failed for %r", query)
 
             # Collapse the flat result list into one row per album: a
@@ -4925,7 +4900,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         except QobuzError:
             error = "Search failed. Try again."
         except Exception:
-            logging.getLogger("qobuz_librarian").exception(
+            _log.exception(
                 "search failed for %r", query)
             error = "Search failed. Try again."
     creds_ok = bool(_read_creds().get("auth_token"))
@@ -4993,7 +4968,7 @@ def _album_tracklist(album_id, token):
     except Exception:
         # A library that can't be read still leaves a usable tracklist; the
         # marks are the only thing lost.
-        logging.getLogger("qobuz_librarian").exception(
+        _log.exception(
             "tracklist ownership check failed for album %r", album_id)
     return [{"n": t.get("track_number") or i,
              "disc": t.get("media_number") or 1,
@@ -5030,7 +5005,7 @@ async def search_album_tracks(request: Request, album_id: str = ""):
     except QobuzError:
         error = "Qobuz could not list these tracks. Try again."
     except Exception:
-        logging.getLogger("qobuz_librarian").exception(
+        _log.exception(
             "tracklist failed for album %r", album_id)
         error = "Qobuz could not list these tracks. Try again."
     return _tr(request, "_search_tracklist.html", {
@@ -5347,7 +5322,7 @@ def _make_download_run(
                         if _run_lock_intact():
                             _record_startup_recovery(_RUN_LOCK_HANDLE)
                     except BaseException as refresh_exc:
-                        logging.getLogger("qobuz_librarian").warning(
+                        _log.warning(
                             "couldn't refresh durable Web recovery after an "
                             "executor failure: %s",
                             refresh_exc,
@@ -5364,7 +5339,7 @@ def _make_download_run(
                         refresh_failed = True
                 except Exception as exc:
                     refresh_failed = True
-                    logging.getLogger("qobuz_librarian").warning(
+                    _log.warning(
                         "couldn't refresh durable Web recovery after the "
                         "executor returned: %s",
                         exc,
@@ -5516,7 +5491,6 @@ def _make_download_run(
             # either kind leaves the row offering the download it still needs.
             j.landed_complete = not retryable and not lossy_only
             if retryable:
-                # Partial landing: the album is on disk with gaps.
                 flows._fold_partial_gap_fill(
                     album, (album.get("artist") or {}).get("name") or "",
                     retryable)
@@ -5813,6 +5787,7 @@ def _record_owned_progress(progress):
     try:
         return progress() is not False
     except Exception:
+        _log.exception("couldn't save Undo progress")
         return False
 
 
@@ -7385,6 +7360,7 @@ def _refresh_post_import_relocation_recovery(authority) -> bool:
     try:
         recovered = _record_startup_recovery(authority)
     except Exception:
+        _log.exception("couldn't refresh recovery after track relocation")
         return False
     return _recovery_status_value(recovered) == "clear"
 
@@ -7508,6 +7484,7 @@ def _persist_single_download_undo(
                 )
             )
         except BaseException:
+            _log.exception("couldn't verify track Undo before recovery")
             proof_before = None
         recovered_clear = _refresh_post_import_relocation_recovery(authority)
         try:
@@ -7518,6 +7495,7 @@ def _persist_single_download_undo(
                 )
             )
         except BaseException:
+            _log.exception("couldn't verify track Undo after recovery")
             proof_after = None
         if proof_before is True or proof_after is True:
             accept_destination(single_snapshot)
@@ -7936,12 +7914,16 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 try:
                     album_dir = catalog.find_album_dir_filesystem(album)
                 except Exception:
+                    _log.exception(
+                        "track ownership folder lookup failed for album %s", album_id)
                     return False
                 if album_dir is None:
                     return False
                 try:
                     existing_tracks, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
                 except Exception:
+                    _log.exception(
+                        "track ownership read failed for album %s", album_id)
                     return False
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
                 if not (existing_tracks and qobuz_tracks):
@@ -7962,6 +7944,8 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 try:
                     album_dir = catalog.find_album_dir_filesystem(album)
                 except Exception:
+                    _log.exception(
+                        "album ownership folder lookup failed for album %s", album_id)
                     return False
                 if album_dir is None:
                     return False
@@ -7970,9 +7954,10 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     # the cached-subdir scan + fuzzy fallback for the same album.
                     existing_tracks, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
                 except Exception:
+                    _log.exception(
+                        "album ownership read failed for album %s", album_id)
                     existing_tracks = []
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-                # Only count it complete when nothing's missing.
                 return bool(existing_tracks and _album_tracks_complete(album)) and not (
                     catalog.compute_missing(qobuz_tracks, existing_tracks)[0])
 
@@ -8057,7 +8042,6 @@ async def queue_download(request: Request, album_id: str = Form(""),
                         "duplicate",
                     )
                 return RedirectResponse(url=f"/jobs/{dup.id}", status_code=303)
-            # Re-check the run-lock right before submitting.
             busy = _lock_busy_response(request)
             if busy is not None:
                 return busy
@@ -8083,6 +8067,8 @@ async def queue_download(request: Request, album_id: str = Form(""),
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(url="/settings?error=creds", status_code=303)
     except Exception as e:
+        _log.warning("couldn't queue download for album %s", album_id,
+                     exc_info=True)
         user_msg = _download_error_message(
             e,
             "Couldn't queue download. Try again.",
@@ -8452,15 +8438,12 @@ async def library_scan(
     )
     if job is None:
         return _scan_submission_failure_response(request, error_home)
-    # Land back on /library, where the scan is watched and reviewed right here.
     return RedirectResponse(url="/library", status_code=303)
 
 
 @app.post("/library/skip-setup")
 async def skip_baseline_setup(request: Request):
-    """Dismiss the first-run baseline-scan offer on the dashboard. The scan stays
-    available any time from the Library page; this just stops the dashboard from
-    offering it on every load."""
+    """Dismiss the first-run baseline-scan offer on the dashboard."""
     new_releases.note_auto_scan_attempted()
     return RedirectResponse(url="/", status_code=303)
 
@@ -8741,7 +8724,6 @@ async def library_bring_back_all(request: Request):
         url="/library?notice=" + _notice_key(msg), status_code=303)
 
 
-# ── Discover ──────────────────────────────────────────────────────────────────
 _DISCOVER_TABS = (
     ("similar", "/discover", "Similar"),
     ("genres", "/discover/genres", "Genres"),
@@ -10254,7 +10236,6 @@ def _hide_scope(execute_kind):
     return hidden_mod.SCOPE_MISSING
 
 
-# Artist groups per review page.
 REVIEW_PAGE_ARTISTS = 40
 # Whole-group candidate budget per page; see _paginate_groups.
 REVIEW_PAGE_CANDIDATES = 1500
@@ -10288,7 +10269,6 @@ def _review_artist_groups(job, query="", tab=""):
         if q and not flows.candidate_matches_query(c, q):
             continue
         groups.setdefault(artist, []).append(c)
-    # Sort groups by music-library order, tracks by their stable seq.
     ordered = []
     for artist in sorted(groups, key=_artist_sort_key):
         items = sorted(groups[artist], key=lambda c: c.get("seq", 0))
@@ -10323,24 +10303,15 @@ def _paginate_groups(groups, page):
 
 
 def _review_origin(request) -> str:
-    """The requesting tab's self-assigned id, for review-changed fan-outs.
-
-    app.js mints one per page load and sends it on every review mutation, so
-    the SSE nudge can name where a change came from and the originating tab can
-    skip reloading itself (its DOM is already current, and reloading would swallow
-    the user's next tick mid-swap). Clamped to a token-safe alphabet so a forged
-    header can't smuggle SSE framing into the stream."""
+    """The requesting tab's self-assigned id, for review-changed fan-outs."""
     raw = request.headers.get("X-QL-Origin", "")
     return "".join(c for c in raw if c.isalnum())[:32]
 
 
 def _get_reviewable_job(job_id):
-    """A job from the live registry, or rehydrated from disk if it has been
-    evicted, so a restored awaiting-review job's selection and pager work, and
-    an evicted (terminal) job's review page still renders and pages. Ticks only
-    persist for a job still in the registry; persist_soon no-ops on a rehydrated
-    copy, but an evicted job is terminal and its review is read-only, so there's
-    nothing to save. Returns None if it's nowhere."""
+    """A job from the live registry, or rehydrated from disk if it has been evicted,
+    so a restored awaiting-review job's selection and pager work, and an evicted
+    (terminal) job's review page still renders and pages."""
     job = job_mgr.registry.get(job_id)
     if job is None:
         job = job_mgr.load_historical_job(job_id)
@@ -10676,7 +10647,6 @@ async def job_dismiss_rest(request: Request, job_id: str):
     # An active filter narrows the dismissal to the rows it shows, same
     # what-you-see-is-what-you-act-on rule as select-all.
     q = (form.get("q") or "").strip().lower()
-    # Snapshot the artists that still have an unticked album.
     with job._lock:
         artists, seen = [], set()
         for c in job.candidates:
@@ -10792,7 +10762,7 @@ async def job_give_up(request: Request, job_id: str):
         job,
         BlockedItemSettlementAction.DISCARD,
     )
-    logging.getLogger("qobuz_librarian").info(
+    _log.info(
         "Give up %s: discarding the blocked download %s.", job.id,
         "succeeded" if settled
         else f"was refused: {(reason or 'no reason given').rstrip('.')}")
@@ -10845,7 +10815,7 @@ async def discard_interrupted_terminal_download(request: Request):
             status_code=303)
     settled, reason = _settle_blocked_recovery(
         BlockedItemSettlementAction.DISCARD)
-    logging.getLogger("qobuz_librarian").info(
+    _log.info(
         "Give up on the interrupted terminal download: %s.",
         "succeeded" if settled
         else f"refused: {(reason or 'no reason given').rstrip('.')}")
@@ -10992,6 +10962,8 @@ async def job_retry(request: Request, job_id: str):
     try:
         recovery = _record_startup_recovery(_RUN_LOCK_HANDLE)
     except Exception:
+        _log.exception(
+            "couldn't check recovery before retrying job %s", job.id)
         return _durable_recovery_response(
             request,
             "The saved recovery state could not be checked safely. No "
@@ -11072,7 +11044,7 @@ async def job_retry(request: Request, job_id: str):
                 job,
                 BlockedItemSettlementAction.RETRY,
             )
-        logging.getLogger("qobuz_librarian").info(
+        _log.info(
             "Retry %s: settling the blocked download %s.", job.id,
             "succeeded" if settled
             else f"was refused: {(reason or 'no reason given').rstrip('.')}")
@@ -11182,6 +11154,8 @@ async def job_retry(request: Request, job_id: str):
             try:
                 recovery_now = _record_startup_recovery(_RUN_LOCK_HANDLE)
             except Exception:
+                _log.exception(
+                    "couldn't recheck recovery while retrying job %s", job.id)
                 return _durable_recovery_response(
                     request,
                     "The saved recovery state changed while Retry was "
@@ -11394,6 +11368,7 @@ async def job_retry(request: Request, job_id: str):
         message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
     except Exception as exc:
+        _log.warning("couldn't prepare retry for job %s", job.id, exc_info=True)
         message = _download_error_message(
             exc,
             "Couldn't prepare this retry. Try again.",
@@ -11468,7 +11443,7 @@ async def job_undo(request: Request, job_id: str):
                 downsample=True,
             )
         except Exception as exc:
-            logging.getLogger("qobuz_librarian").info(
+            _log.info(
                 "quality state refresh after undo skipped: %s", exc)
 
     undo_outcome = {}
@@ -12001,12 +11976,7 @@ _STAGING_LEFTOVER_KINDS = {
 
 
 def _album_name_from_path(path):
-    """An album folder read back as a name: artist, then album.
-
-    A row offering to change files has to say which album it would change, and
-    for music already on disk the folder path is the only name the app holds.
-    The library is filed artist over album, so those two folders are the name.
-    """
+    """An album folder read back as a name: artist, then album."""
     parts = [part for part in Path(str(path)).parts if part not in ("/", "")]
     if len(parts) >= 2:
         return f"{parts[-2]} · {parts[-1]}"
@@ -12246,7 +12216,7 @@ def _diagnostics():
                     stranded.append(entry)
         except OSError as exc:
             stranded_error = True
-            logging.getLogger("qobuz_librarian").warning(
+            _log.warning(
                 "couldn't inspect stranded upgrade backups: %s", exc)
     if stranded_error:
         checks.append({
@@ -12280,7 +12250,7 @@ def _diagnostics():
             if not backup_mod.awaiting_retention(item[0])
         ]
     except Exception as exc:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "couldn't inspect kept recovery backups: %s", exc)
         checks.append({
             "label": "Backups needing review",
@@ -12322,7 +12292,7 @@ def _diagnostics():
     try:
         inventory["undo"] = backup_mod.list_undo_copies()
     except Exception as exc:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "couldn't inspect retained hi-res originals: %s", exc)
         checks.append({
             "label": "Hi-res originals kept",
@@ -12342,7 +12312,7 @@ def _diagnostics():
     try:
         inventory["leftovers"] = _staging_leftovers()
     except Exception as exc:
-        logging.getLogger("qobuz_librarian").warning(
+        _log.warning(
             "couldn't inspect files kept in staging: %s", exc)
         checks.append({
             "label": "Files kept in staging",
@@ -12400,9 +12370,7 @@ def _resolve_host_path(container_path: str) -> tuple[str, bool]:
 
 
 def _web_login_env_managed() -> bool:
-    """Whether Compose is still carrying a web password. It no longer overrides
-    a password set here on every restart, but changing it there is still the
-    way back in when this one is forgotten, so the page has to say so."""
+    """Whether Compose is still carrying a web password."""
     return bool(os.environ.get("WEB_AUTH_PASSWORD", "").strip()
                 or os.environ.get("WEB_AUTH_PASSWORD_FILE", "").strip())
 
@@ -12553,12 +12521,7 @@ async def settings_page(request: Request, saved: bool = False,
 
 
 def _qobuz_token_is_env_owned() -> bool:
-    """Whether environment configuration owns the Qobuz token slot.
-
-    The *_FILE declaration counts even when its secret mount is temporarily
-    unreadable. Treating that state as form-owned permits a shadow credential
-    that silently loses authority when the mount recovers or the app restarts.
-    """
+    """Whether environment configuration owns the Qobuz token slot."""
     return bool(
         cfg.QOBUZ_USER_AUTH_TOKEN
         or os.environ.get("QOBUZ_USER_AUTH_TOKEN", "").strip()
@@ -12652,7 +12615,6 @@ async def save_settings(
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    # Check the token with Qobuz *before* writing it.
     verdict = AuthOutcome.TEMPORARY
     if new_token:
         probe = credentials_from_values(
@@ -12764,7 +12726,6 @@ async def save_behavior(request: Request):
         return form.get(key, "").strip().lower() not in (
             "0", "false", "off", "no", ""
         )
-    # The real Settings form ships a hidden form_complete=1 marker.
     is_complete = "form_complete" in form
     if is_complete and anchor == "behaviour":
         values = {k: (_posted_bool(k) if k in form else False)
@@ -13225,7 +13186,7 @@ async def set_mode(request: Request, target: str = Form("")):
                     for j in job_mgr.registry.pending_and_running()
                 )
                 if jobs_active or job_mgr.active_library_operations():
-                    _CLI_MODE = False  # no transfer happened; stay in web mode
+                    _CLI_MODE = False
                     return False
                 if _RUN_LOCK_HANDLE is not None:
                     try:
@@ -13277,7 +13238,7 @@ async def set_mode(request: Request, target: str = Form("")):
                         _LOCK_BUSY_PID = None
                         _LOCK_UNENFORCEABLE = False
                         _CLI_MODE = prior_cli_mode
-                    logging.getLogger("qobuz_librarian").exception(
+                    _log.exception(
                         "couldn't resume Web mode because durable recovery "
                         "could not be read"
                     )
@@ -13556,15 +13517,7 @@ async def api_diagnostics(request: Request):
 
 
 def _diagnostics_result_notice(kind: str, body: str) -> str:
-    """A Restore/Remove result on the diagnostics list.
-
-    Errors and warnings stay inline at the top of the list: they do not
-    auto-fade, so they are found by scrolling up even when missed. A success
-    or info notice does auto-fade, and the list can run long enough that one
-    written at its top is gone before anyone scrolls back to see it. Land
-    those in the page's fixed toast host instead, the same one downloads
-    already use.
-    """
+    """A Restore/Remove result on the diagnostics list."""
     if kind in ("success", "info"):
         return (f'<div id="download-toast" hx-swap-oob="beforeend">'
                 f'{_ql_notice_html(kind, body)}</div>')
@@ -13718,13 +13671,12 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 try:
                     quality_decision.clear_local_album_cap(origin)
                 except OSError:
-                    logging.getLogger("qobuz_librarian").exception(
+                    _log.exception(
                         "couldn't clear the downsample cap for %s", origin)
                 try:
                     flows._refresh_downsample_artist_state(Path(origin).parent)
                 except Exception:
-                    logging.getLogger("qobuz_librarian").exception(
-                        "downsample state refresh failed after undo")
+                    _log.exception("downsample state refresh failed after undo")
                 try:
                     if generation_state.output_is_current("upgrade"):
                         generation_state.mark_output_status(
@@ -13736,8 +13688,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                             ),
                         )
                 except Exception:
-                    logging.getLogger("qobuz_librarian").exception(
-                        "upgrade state invalidation failed after undo")
+                    _log.exception("upgrade state invalidation failed after undo")
             if n and not carried.exists():
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _diagnostics_result_notice(
@@ -14121,7 +14072,7 @@ async def job_stream(request: Request, job_id: str):
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logging.getLogger("qobuz_librarian").exception(
+                    _log.exception(
                         "SSE stream error for job %s", job.id)
                     break
         finally:
@@ -14186,6 +14137,8 @@ async def job_review_stream(request: Request, job_id: str):
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    _log.exception(
+                        "review event stream failed for job %s", job.id)
                     break
         finally:
             job.unsubscribe(sub)
@@ -14474,12 +14427,7 @@ def _credentials_snapshot():
 
 
 def _write_creds(user_id, auth_token) -> bool:
-    """Write credentials into the streamrip config. Returns False if the
-    config volume isn't writable (NAS perms) so the Settings page can show
-    a clear message rather than 500ing.
-
-    Delegates to qobuz_librarian.api.auth.write_streamrip_creds so the web
-    Settings path and the env-var sync share one credential writer."""
+    """Write credentials into the streamrip config."""
     return api_auth.write_streamrip_creds(user_id, auth_token)
 
 

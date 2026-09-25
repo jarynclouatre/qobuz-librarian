@@ -1120,10 +1120,8 @@ def _copy_file(
             raise OSError("relocation source grew while it was copied")
         os.fchmod(descriptor, expected["mode"])
         os.fsync(descriptor)
-    except BaseException:
+    finally:
         os.close(descriptor)
-        raise
-    os.close(descriptor)
     os.utime(
         destination_name,
         ns=(expected["modified_ns"], expected["modified_ns"]),

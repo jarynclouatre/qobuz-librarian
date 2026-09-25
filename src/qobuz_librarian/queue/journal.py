@@ -1532,6 +1532,7 @@ def _open_namespace_lock() -> int:
     )
     descriptor = -1
     locked = False
+    established = False
     try:
         try:
             descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1562,18 +1563,21 @@ def _open_namespace_lock() -> int:
         # This confirms both a newly linked lock and every ancestor that may
         # have survived an earlier mkdir/parent-fsync failure.
         _confirm_namespace_durable(directory)
+        established = True
         return descriptor
-    except BaseException as exc:
-        if locked:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            except OSError:
-                pass
-        if descriptor >= 0:
-            os.close(descriptor)
+    except Exception as exc:
         if isinstance(exc, QueueJournalError):
             raise
         raise QueueJournalError(f"queue journal lock could not be established: {exc}") from exc
+    finally:
+        if not established:
+            if locked:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 @contextmanager

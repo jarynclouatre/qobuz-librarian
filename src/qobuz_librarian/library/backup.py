@@ -87,14 +87,7 @@ class BackupDisposalReconciliation:
 
 @dataclass(frozen=True)
 class IncompleteUpgradeRestoreOutcome:
-    """Truthful result of reconciling an interrupted whole-album backup.
-
-    ``restored`` counts files published by this call, ``already_present``
-    counts writer-held files that already matched the carried original, and
-    ``unresolved`` counts originals that were not proved safe.  A false
-    ``backup_disposed`` means the recovery copy remains authoritative even
-    when every file is now present (for example, a final fsync was uncertain).
-    """
+    """Truthful result of reconciling an interrupted whole-album backup."""
 
     restored: int
     already_present: int
@@ -5961,17 +5954,7 @@ def backup_keep_markers_present(bp) -> bool:
 
 
 def _backup_safe_to_reap(bp: Path) -> bool:
-    """True ONLY when the backup is provably redundant.
-
-    The age sweep deletes on this, so the burden of proof is on "safe to
-    delete", never on "must keep": an unreadable backup, a missing origin, a
-    keep marker or any file not proven back means KEPT. Redundancy is proved
-    by content, not by counting files: a count match is fooled when restored
-    or gap-filled files inflate the origin while one of the backup's own
-    tracks is still missing or short there, which is the case that strands
-    the only good copy. Classification here is unbudgeted; disposal proves it
-    again on the files it holds.
-    """
+    """True ONLY when the backup is provably redundant."""
     if backup_keep_markers_present(bp):
         return False
     origin = _read_backup_origin(bp)
@@ -6057,16 +6040,7 @@ def release_backup_owner(backup: BackupResult, *, expected_owner) -> bool:
 def pin_unverified_upgrade_backup(backup: BackupResult,
                                   note: str | None = None, *,
                                   expected_owner=None) -> bool:
-    """Mark a backup the redundancy proof cannot protect: never reap it.
-
-    Retention accepts a replacement that passes its audio checks, so a
-    same-path replacement can satisfy it while the original tags or artwork
-    survive only in the backup. For those this marker is the only protection,
-    which is why a failed or unflushed write returns False and the caller
-    must warn that the backup is unprotected. Swallowing it would leave a
-    sole copy one age sweep from deletion with no sign anything was wrong.
-    ``note`` names the reason when the default upgrade wording does not fit.
-    """
+    """Mark a backup the redundancy proof cannot protect: never reap it."""
     if not _backup_owner_authorized(backup, expected_owner):
         return False
     return _write_receipt_marker(

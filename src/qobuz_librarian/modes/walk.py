@@ -65,8 +65,6 @@ def _kept_queue_note(queue):
         indent="  ", hanging="  "))
 
 
-# ── Artist walk seen file ─────────────────────────────────────────────────────
-
 def load_walk_seen():
     """Load set of normalized artist names already decided in walk mode."""
     if not cfg.WALK_SEEN_FILE.exists():
@@ -151,16 +149,8 @@ def record_walk_seen(artist_name, seen=None):
         log.info(fmt(C.YELLOW, f"  ⚠  Couldn't write {cfg.WALK_SEEN_FILE.name}: {e}."))
 
 
-# ── Album-fill-walk seen file ─────────────────────────────────────────────
-
 def _album_seen_key(artist_name, album_name):
-    """Normalized 'artist::album' key for the album-walk seen file.
-
-    Uses the same normalize() that artist-level matching uses, so 'AC/DC' /
-    'AC_DC' / 'ac dc' all map to one key. The :: separator is illegal in
-    normalized output (normalize strips punctuation), so it can't collide
-    with a real artist or album name.
-    """
+    """Normalized 'artist::album' key for the album-walk seen file."""
     return f"{normalize(artist_name)}::{normalize(album_name)}"
 
 
@@ -222,8 +212,6 @@ def record_album_walk_seen(artist_name, album_name, seen=None):
         log.info(fmt(C.YELLOW,
             f"  ⚠  Couldn't write {cfg.ALBUM_WALK_SEEN_FILE.name}: {e}."))
 
-
-# ── Album fill walk ───────────────────────────────────────────────────
 
 # Outcomes that settle an album for the album-fill walk: it's done, or the
 # user said no, or Qobuz couldn't place the folder (recorded so it stops
@@ -516,8 +504,6 @@ def run_album_walk_mode(args, token):
         return EXIT_INTERRUPT
     return EXIT_GENERAL if needs_attention else 0
 
-
-# ── Library walk ──────────────────────────────────────────────────────
 
 def run_walk_queued_mode(args, token):
     """Walk artists, accumulate decisions across artists, flush on demand."""

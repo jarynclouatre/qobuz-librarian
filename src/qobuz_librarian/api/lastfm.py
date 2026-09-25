@@ -289,9 +289,7 @@ def get_tag_top_albums(tag: str, *, page: int = 1,
 
 def probe_key(api_key_override: str | None = None) -> bool:
     """One cheap call that separates a bad key from Last.fm being down, so the
-    Settings page can say which it is. A supplied key is checked directly even
-    when applying it is deferred until an active job ends. Returns True, or
-    raises."""
+    Settings page can say which it is."""
     lastfm_get("chart.getTopArtists", {"limit": 1},
                api_key_override=api_key_override)
     return True

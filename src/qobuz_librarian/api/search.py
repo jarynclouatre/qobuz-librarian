@@ -57,12 +57,11 @@ def _normalize_track_fields(track):
     return track
 
 
-# ── Album / artist / track search ─────────────────────────────────────────────
 def _expect_dict(data, endpoint):
-    """qobuz_get returns r.json() untyped, so a malformed/error 200 body
-    (a JSON list/str/number - e.g. a CDN/proxy error page served with 200) would
-    crash on the `.get` below and escape callers that only catch QobuzError.
-    Turn it into the QobuzError they already handle, matching get_album."""
+    """qobuz_get returns r.json() untyped, so a malformed/error 200 body (a
+    JSON list/str/number - e.g. a CDN/proxy error page served with 200) would
+    crash on the `.get` below and escape callers that only catch
+    QobuzError."""
     if not isinstance(data, dict):
         raise QobuzError(f"{endpoint} returned a non-dict response")
     return data
@@ -70,19 +69,14 @@ def _expect_dict(data, endpoint):
 
 def _envelope(data, key):
     """The ``data[key]`` sub-object as a dict, or {} when it's missing or a
-    non-dict. The top-level body is dict-checked by _expect_dict, but a
-    malformed response can still put a list/str where the albums/artists/tracks
-    envelope is expected, which would crash the ``.get('items')`` that follows."""
+    non-dict."""
     obj = data.get(key)
     return obj if isinstance(obj, dict) else {}
 
 
 def _items(data, key):
     """The ``data[key]['items']`` list with only its dict members, or [] when
-    that items array is missing or the wrong type. A malformed/error 200 body
-    can put a bare string or a list of primitives where an items array belongs;
-    returning [] keeps the per-item normalisation that follows from crashing on
-    a non-dict, so callers that only catch QobuzError aren't bypassed."""
+    that items array is missing or the wrong type."""
     items = _envelope(data, key).get("items")
     if not isinstance(items, list):
         return []
@@ -183,11 +177,7 @@ _MAX_TRACK_PAGES = 100
 
 
 def _listed_track_total(album):
-    """How many tracks the endpoint says this album's list holds.
-
-    tracks.total counts the list being paged. tracks_count is album metadata
-    and can disagree with it, so it does not decide whether a page is missing.
-    """
+    """How many tracks the endpoint says this album's list holds."""
     try:
         return int((album.get("tracks") or {}).get("total") or 0)
     except (TypeError, ValueError):
@@ -265,14 +255,7 @@ def get_track(track_id, token):
 
 
 def search_tracks(query, token, limit=10):
-    """Generic Qobuz track search. Returns list of track dicts.
-
-    Each track dict carries the standard fields (id, title, duration, isrc,
-    track_number, media_number, version) plus an embedded `album` dict
-    with id/title/artist/etc. Used by find_qobuz_track_by_isrc to resolve
-    on-disk files to exact-recording replacements without album-level
-    edition guessing.
-    """
+    """Generic Qobuz track search."""
     data = _expect_dict(
         qobuz_get("track/search", {"query": query, "limit": limit}, token),
         "track/search")
@@ -282,7 +265,6 @@ def search_tracks(query, token, limit=10):
     return items
 
 
-# ── ISRC lookup - STRICT equality (replacing the wrong recording is silent data loss) ────
 def find_qobuz_track_by_isrc(isrc, token):
     """Look up a Qobuz track by exact ISRC. Returns the track dict or None. Qobuz
     indexes ISRCs in track/search, but a text query for an ISRC string can
@@ -305,7 +287,6 @@ def find_qobuz_track_by_isrc(isrc, token):
     return None
 
 
-# ── Artist discography (paginated) ────────────────────────────────────────────
 def get_artist_albums(artist_id, token, limit=None, fresh=False):
     """Return (items, qobuz_total) for an artist's full discography.
     Items are search-shaped (no tracks); call get_album() for those.
@@ -395,7 +376,6 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     return items, qobuz_total
 
 
-# ── Saved favourites ──────────────────────────────────────────────────────────
 def get_user_favorites(token, limit=None):
     """The albums this account has starred on Qobuz, newest first.
 

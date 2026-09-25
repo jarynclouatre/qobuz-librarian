@@ -486,20 +486,14 @@ def add_restore_candidate(job, album, artist_name, *, artist_key=None,
 
 
 def candidate_matches_query(c, q):
-    """The review filter's predicate, artist or album title contains ``q``.
-
-    Shared by the fragment render and bulk endpoints so the visible filter and
-    affected rows remain identical. Both the query and candidate are folded.
-    """
+    """The review filter's predicate, artist or album title contains ``q``."""
     hay = (c.get("artist") or "") + " " + (c.get("title") or "")
     return (q or "").lower() in hay.lower()
 
 
 def is_gap_candidate(c):
     """Whether a saved review candidate is a Gap Fill entry (missing tracks in
-    an owned album) rather than a fully missing album. New scans stamp the
-    payload; candidates carried forward from older checkpoints only say so in
-    their detail line, so fall back to that."""
+    an owned album) rather than a fully missing album."""
     if (c.get("payload") or {}).get("gap_fill"):
         return True
     return "gap-fill:" in (c.get("detail") or "")
@@ -507,10 +501,7 @@ def is_gap_candidate(c):
 
 def library_review_summary(candidates):
     """The parked library review's one-line summary, without the trailing
-    period. Every writer of that summary (the scan when it parks, the
-    restart rebuild) goes through here, so the History card cannot call Gap
-    Fill candidates "missing albums" or disagree with the tabs it describes.
-    Splits with the same predicate the tabs use."""
+    period."""
     gaps = sum(1 for c in candidates if is_gap_candidate(c))
     missing = len(candidates) - gaps
     return (f"{len(candidates):,} to review across Missing Albums "
@@ -718,7 +709,8 @@ def _refresh_restored_missing_spec(spec, token):
             return spec
         existing, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
         missing, _ = catalog.compute_missing(tracks, existing)
-    except Exception:
+    except Exception as exc:
+        log.info(f"  couldn't refresh restored album {album_id}: {exc}")
         return spec
     if not missing:
         return None
@@ -1131,7 +1123,8 @@ def owned_missing_candidate_ids(job, token, candidate_ids=None):
             missing, _ = catalog.compute_missing(tracks, existing)
             if existing and not missing:
                 owned.add(cid)
-        except Exception:
+        except Exception as exc:
+            log.info(f"  couldn't check owned album {album_id}: {exc}")
             continue
     return owned
 
@@ -1341,9 +1334,6 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
         ]
         hidden_mod.restore_rows(scope, raced_specs)
     return len(to_hide) - len(ticked_meanwhile)
-
-
-# ── Scans ─────────────────────────────────────────────────────────────────────
 
 
 def _scan_library_artist(artist_dir, token, partial_only, hidden):
@@ -2389,8 +2379,6 @@ def scan_new_releases(job, token):
     # activity log below it would otherwise repeat the exact same sentence.
 
 
-# ── Execute ───────────────────────────────────────────────────────────────────
-
 def _note_staging_wait(job, phase, current, total):
     """If a long staging-lock holder (a library-wide Lyrics scan) owns the mutex
     right now, show that this job is waiting behind it. Without this the album
@@ -2823,8 +2811,6 @@ def execute_albums(job, chosen, token):
         job.attention = job.attention or "review"
 
 
-# ── Upgrade flow ──────────────────────────────────────────────────────────────
-
 def execute_upgrades(job, chosen, token):
     """Re-rip the present tracks of each chosen album at higher quality."""
     effective = settings_store.current()
@@ -3125,15 +3111,8 @@ def execute_upgrades(job, chosen, token):
         _mark_job_failed(job)
 
 
-# ── Downsample flow ─────────────────────────────────────────────────────────────
-
 def _note_scan_wrap_up(job, done, total):
-    """Say what a scan is doing once its walk is over.
-
-    Saving the results and building the review take a moment more, and leaving
-    the card on a full bar and "32 / 32 artists" made that read as a stall on
-    finished work.
-    """
+    """Say what a scan is doing once its walk is over."""
     if done >= total and not job.cancel_requested:
         job.push_progress("Saving results")
 
@@ -3551,7 +3530,6 @@ def _kept_originals_note(resampled_files):
             "nothing is freed until they expire. Until then you can put them "
             "back from Settings.")
 
-# ── Repair flow ───────────────────────────────────────────────────────────────
 
 def _repair_damage_detail(truncated):
     """Say what the scan measured instead of asserting truncation.
@@ -3707,16 +3685,7 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
 
 
 def _repair_item(artist, albums, flagged):
-    """One consistent live-status line for the whole-library repair sweep.
-
-    Every progress push during the sweep, the per-album heartbeat, the
-    per-artist completion tick, and the failure tick, renders through this so
-    the job page's detail line updates *in place* (the artist and the counts
-    climbing) instead of structurally flip-flopping between an artist-name form
-    and a bare-tally form, which reads as flicker. ``artist`` is whichever one a
-    worker is currently grinding on (carried in ``beat['current']``); it is
-    empty only in the opening instant before the first heartbeat fires, where a
-    neutral label stands in."""
+    """One consistent live-status line for the whole-library repair sweep."""
     if not artist and not albums:
         return "Starting…"
     who = artist or "your library"
@@ -4767,9 +4736,6 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     if not counts["failures"]:
         _close_completed_job(job)
     log.info(job.summary)
-
-
-# ── Library migration ──────────────────────────────────────────────────────────
 
 
 def scan_migration(job, src, dest, *, use_acoustid, in_place=False):

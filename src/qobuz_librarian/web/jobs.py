@@ -53,6 +53,8 @@ from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
 from qobuz_librarian.web import job_persistence, review_badges
 
+log = logging.getLogger("qobuz_librarian")
+
 # Thread-local pointer to the job currently being run on this worker.
 _TLS = threading.local()
 _durable_recovery_state_lock = threading.Lock()
@@ -168,9 +170,7 @@ def _adopt_current_job(job):
 
 def pool_initializer_kwargs() -> dict:
     """kwargs for a ThreadPoolExecutor created INSIDE a job's worker thread, so
-    its workers inherit this job via _TLS.current_job. Must be called on the
-    worker thread (where current_job is set). Outside a job (CLI) it captures
-    None, which is harmless (no JobLogHandler is attached there)."""
+    its workers inherit this job via _TLS.current_job."""
     return {"initializer": _adopt_current_job,
             "initargs": (getattr(_TLS, "current_job", None),)}
 
@@ -408,7 +408,6 @@ class Job:
         if highest >= self._cand_seq - 1:
             self._cand_seq = highest + 1
 
-    # ── logging / streaming ──────────────────────────────────────────────────
     def _fan_out(self, line: str):
         with self._lock:
             for q in self._subscribers:
@@ -467,12 +466,7 @@ class Job:
         self._fan_out(line)
 
     def persisted_log_lines_locked(self) -> list:
-        """The tail of the log to keep on disk, marked if anything was cut.
-
-        The caller holds ``self._lock``: persist() takes it around the whole
-        snapshot and push_line mutates log_lines under the same one, so
-        re-entering it here would deadlock the writer against itself.
-        """
+        """The tail of the log to keep on disk, marked if anything was cut."""
         if len(self.log_lines) <= self.LOG_PERSIST_CAP:
             return list(self.log_lines)
         kept = list(self.log_lines[-self.LOG_PERSIST_CAP:])
@@ -534,13 +528,7 @@ class Job:
     def notify_review_changed(self, origin: str = ""):
         """Tell every open review tab that selection/candidates changed, so a
         second tab (or phone) reflects a tick/untick/hide without a manual
-        reload. Fanned out as a distinct event the SSE layer maps to
-        `event: review`, carrying the originating tab's id (when the change came
-        from a tab at all) so that tab can skip the reload; its DOM is already
-        current from the action's own response, and reloading it anyway would
-        replace the page mid-interaction and eat the next tick of someone
-        working quickly down a list. Other tabs still re-fetch the
-        authoritative counts themselves."""
+        reload."""
         self._fan_out(REVIEW_CHANGED + origin)
 
     def set_importing(self, active: bool) -> None:
@@ -613,7 +601,6 @@ class Job:
             except ValueError:
                 pass
 
-    # ── candidates ───────────────────────────────────────────────────────────
     CANDIDATE_CAP = cfg.JOB_CANDIDATE_CAP
 
     def add_candidate(self, kind, title, artist="", detail="", payload=None,
@@ -677,7 +664,6 @@ class Job:
     def selected_candidates(self) -> list:
         return [c for c in self.candidates if c.get("selected")]
 
-    # ── selection (server-backed; the review UI reads ticks here, not the form) ──
     def set_selected(self, cid: str, on: bool) -> Optional[bool]:
         """Flip one candidate's selected flag while the review is still live.
 
@@ -789,8 +775,7 @@ class JobRegistry:
 
     def executing(self) -> list[Job]:
         """Jobs actively reading cfg/touching files RIGHT NOW (not merely queued
-        or parked). Used to decide whether it's safe to apply a deferred config
-        change without mutating an in-flight job underneath the other lane."""
+        or parked)."""
         return [j for j in self.all()
                 if j.status in (JobStatus.RUNNING, JobStatus.SCANNING)]
 
@@ -846,8 +831,6 @@ class JobRegistry:
             self._order = keep
 
 
-# ── Logging capture ───────────────────────────────────────────────────────────
-
 class JobLogHandler(logging.Handler):
     """Routes records from the shared qobuz_librarian logger to a Job."""
 
@@ -866,10 +849,8 @@ class JobLogHandler(logging.Handler):
         try:
             self.job.push_line(self._ANSI.sub("", self.format(record)))
         except Exception:
-            pass
+            self.handleError(record)
 
-
-# ── Global singletons ─────────────────────────────────────────────────────────
 
 registry = JobRegistry()
 
@@ -1049,13 +1030,7 @@ _staging_lock = _StagingMutex()
 
 
 def staging_lock():
-    """Return the staging-mutex object so callers can ``with staging_lock():``.
-
-    Held while a single album is being downloaded and imported. Release
-    between albums (or between a download and an import phase) lets the
-    other worker lane interleave its own album-level work instead of
-    waiting for an entire batch.
-    """
+    """Return the staging-mutex object so callers can ``with staging_lock():``."""
     return _staging_lock
 
 
@@ -1181,8 +1156,7 @@ def _run_task(job: Job, fn):
     """Run one phase of a job with log capture and status bookkeeping."""
     handler = JobLogHandler(job)
     handler.setFormatter(logging.Formatter("%(message)s"))
-    app_logger = logging.getLogger("qobuz_librarian")
-    app_logger.addHandler(handler)
+    log.addHandler(handler)
     _TLS.current_job = job
     try:
         fn(job)
@@ -1211,7 +1185,7 @@ def _run_task(job: Job, fn):
         job.push_line(f"[ERROR] {cleaned}")
     finally:
         _TLS.current_job = None
-        app_logger.removeHandler(handler)
+        log.removeHandler(handler)
         # Persist before the hook starts so durability never waits on a webhook.
         _finish_task_phase(job)
 
@@ -1225,7 +1199,6 @@ def _run_post_job_hook(payload: dict) -> None:
     import signal
     import subprocess
 
-    hook_logger = logging.getLogger("qobuz_librarian")
     cmd = os.environ.get("POST_JOB_HOOK", "").strip()
     if not cmd:
         return
@@ -1240,7 +1213,7 @@ def _run_post_job_hook(payload: dict) -> None:
             start_new_session=True,
         )
     except OSError as e:
-        hook_logger.warning("post-job hook could not start: %s", e)
+        log.warning("post-job hook could not start: %s", e)
         return
     try:
         proc.communicate(json.dumps(payload).encode("utf-8"),
@@ -1252,10 +1225,10 @@ def _run_post_job_hook(payload: dict) -> None:
         except (OSError, ProcessLookupError):
             proc.kill()
         proc.communicate()
-        hook_logger.warning("post-job hook timed out")
+        log.warning("post-job hook timed out")
     else:
         if proc.returncode:
-            hook_logger.warning(
+            log.warning(
                 "post-job hook exited with status %s", proc.returncode)
 
 
@@ -1301,8 +1274,7 @@ def _post_job_hook_worker():
         try:
             _fire_post_job_hook(payload)
         except Exception:
-            logging.getLogger("qobuz_librarian").exception(
-                "post-job hook worker failed")
+            log.exception("post-job hook worker failed")
         finally:
             _post_job_hook_queue.task_done()
 
@@ -1319,7 +1291,7 @@ def _ensure_post_job_hook_workers() -> bool:
             try:
                 thread.start()
             except RuntimeError as exc:
-                logging.getLogger("qobuz_librarian").warning(
+                log.warning(
                     "post-job hook thread could not start: %s", exc)
                 break
             _post_job_hook_threads.add(thread)
@@ -1334,7 +1306,7 @@ def _start_post_job_hook(payload):
     try:
         _post_job_hook_queue.put_nowait(payload)
     except queue.Full:
-        logging.getLogger("qobuz_librarian").warning(
+        log.warning(
             "post-job hook queue is full; notification for %s was skipped",
             payload.get("id") or "a finished job",
         )
@@ -1346,7 +1318,7 @@ def _wait_for_post_job_hooks():
     while _post_job_hook_queue.unfinished_tasks:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            logging.getLogger("qobuz_librarian").warning(
+            log.warning(
                 "%s post-job hook notification(s) still pending at shutdown",
                 _post_job_hook_queue.unfinished_tasks,
             )
@@ -1390,7 +1362,7 @@ def _worker_loop(work_queue: "queue.Queue"):
                     if not settings_store._any_active_job():
                         settings_store.drain_pending()
             except Exception:
-                pass
+                log.exception("couldn't apply deferred settings while idle")
             continue
         if _restart_stop.is_set():
             # Stopping: leave it queued. Its saved row still says pending, so
@@ -1411,7 +1383,7 @@ def _worker_loop(work_queue: "queue.Queue"):
                     if not registry.executing():
                         settings_store.drain_pending()
                 except Exception:
-                    pass
+                    log.exception("couldn't apply deferred settings before job %s", job.id)
                 with job._lock:
                     if job.cancel_requested or job.status != JobStatus.PENDING:
                         # A queued cancel and this worker claim use the same
@@ -1445,11 +1417,11 @@ def _worker_loop(work_queue: "queue.Queue"):
                     import traceback as _tb
                     summary = _tb.format_exception_only(type(e), e)[-1].strip()
                     job.error = f"Worker crash: {summary}. Restart the job."
-                logging.getLogger("qobuz_librarian").exception(
+                log.exception(
                     "worker: job %s crashed hard", job.id)
                 _finish_task_phase(job)
             except Exception:
-                pass
+                log.exception("couldn't finalize crashed job %s", job.id)
         finally:
             try:
                 work_queue.task_done()
@@ -1572,7 +1544,7 @@ def _release_held_downloads() -> None:
         if check is None or not check():
             return
     except Exception as exc:
-        logging.getLogger("qobuz_librarian").warning(
+        log.warning(
             "couldn't check whether held downloads may start: %s", exc)
         return
     with _held_downloads_lock:
@@ -2342,6 +2314,7 @@ def restore_jobs(
                     if not callable(execute_fn):
                         raise TypeError("restored executor is not callable")
                 except Exception:
+                    log.exception("couldn't restore executor for job %s", job.id)
                     job.status = JobStatus.FAILED
                     job.error = (
                         "The saved details needed to resume this review "
@@ -2386,7 +2359,7 @@ def restore_jobs(
     for payload in terminal_payloads:
         _start_post_job_hook(payload)
     if interrupted or review or requeued:
-        logging.getLogger("qobuz_librarian").info(
+        log.info(
             "Restored %s / %s / %s / %s from the previous run.",
             plural(historical, "historical job"),
             plural(review, "review job"),

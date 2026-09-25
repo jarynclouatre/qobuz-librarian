@@ -194,11 +194,7 @@ def _files_albums_apart(template):
 
 
 def path_templates_give_albums_own_folders(plugin_config):
-    """True unless a path template files several albums in one folder.
-
-    The durable download lane proves an import by the exact contents of the
-    album's folder, which a shared folder never matches.
-    """
+    """True unless a path template files several albums in one folder."""
     return all(
         _files_albums_apart(template)
         for template in _effective_path_templates(plugin_config).values()
@@ -216,13 +212,7 @@ _REQUIRED_SEALS = (getattr(fcntl, "F_SEAL_SEAL", 0x1)
 
 
 def _yaml_sq(value):
-    """Emit *value* as a safe YAML single-quoted scalar.
-
-    Single-quoted style is the simplest YAML scalar with no backslash
-    escaping. The only metacharacter is the single quote itself, doubled
-    to escape. Newlines aren't valid in these values; collapse to spaces
-    so a stray one can't fold into a second YAML line.
-    """
+    """Emit *value* as a safe YAML single-quoted scalar."""
     s = str(value).replace("\r", " ").replace("\n", " ")
     return "'" + s.replace("'", "''") + "'"
 
@@ -764,8 +754,6 @@ def _require_delete_journal_mode(connection):
         raise sqlite3.DatabaseError("safe path updates require SQLite delete-journal mode")
 
 
-
-
 def _preflight_beets_database_anchor(anchor, anchors_match=None):
     """Reject an unsafe DB before the first associated filesystem mutation."""
     if anchor is None:
@@ -810,8 +798,6 @@ def _merge_relative_directory_matches(root_fd, parts, expected_fd):
                 pass
 
 
-
-
 def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destination_name, held_fd):
     """Restore one exact moved entry without overwriting either name."""
 
@@ -849,8 +835,6 @@ def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destinat
                 "the interrupted rollback preserved the exact entry at its last proved name"
             )
         raise
-
-
 
 
 def _hold_merge_directory(records, parent_fd, name, directory_fd, parent_parts):
@@ -894,8 +878,6 @@ def _close_held_merge_directories(records):
             except OSError:
                 pass
     records.clear()
-
-
 
 
 def _under_retry_dir(p):
@@ -3777,7 +3759,7 @@ class _ManagedEvidenceLifetime:
 def _finalize_managed_evidence_lifetime(lifetime):
     try:
         _run_managed_sigint_deferred(lifetime.close)
-    except BaseException:
+    except Exception:
         pass
 
 
@@ -5340,7 +5322,7 @@ class _ManagedBeetsRunLifetime:
 def _finalize_managed_beets_run_lifetime(lifetime):
     try:
         _run_managed_sigint_deferred(lifetime.close)
-    except BaseException:
+    except Exception:
         pass
 
 
@@ -7689,9 +7671,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
         )
         clear_scan_caches()
         return True
-    except BaseException as exc:
-        if not isinstance(exc, Exception):
-            raise
+    except Exception as exc:
         outcome = (
             "the committed catalogue change may already be visible"
             if transaction is not None and transaction.published
@@ -7937,9 +7917,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
         )
         clear_scan_caches()
         return True
-    except BaseException as exc:
-        if not isinstance(exc, Exception):
-            raise
+    except Exception as exc:
         outcome = (
             "the committed catalogue change may already be visible"
             if transaction is not None and transaction.published
@@ -8271,9 +8249,7 @@ def _consolidate_duplicate_albums(protected_paths=None):
             lambda: _beets_database_anchor_matches(database_anchor),
             lambda current: current.execute("PRAGMA quick_check").fetchone() == ("ok",),
         )
-    except BaseException as exc:
-        if not isinstance(exc, Exception):
-            raise
+    except Exception as exc:
         outcome = (
             "the committed replacement may already be visible"
             if transaction is not None and transaction.published

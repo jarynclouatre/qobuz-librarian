@@ -1329,10 +1329,8 @@ def remove_file(receipt):
                 destination_chain[-1],
                 "entry",
             )
-        except BaseException:
+        finally:
             moved = layout() == "private"
-            raise
-        moved = layout() == "private"
         if not moved or not exclusion.intact():
             raise OSError("staging file changed during cleanup move")
 

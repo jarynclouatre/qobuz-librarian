@@ -235,10 +235,7 @@ _UPGRADE_VERIFY_DURATION_RATIO = 0.97
 
 def _folder_tracks_checked(folder):
     """(tracks, degraded) for an album folder, read through read_album_dir so
-    lengths/quality come from the same reader the rest of the app uses.
-    degraded=True means part of the tree couldn't be read, so the list may be
-    INCOMPLETE. Counts and quality drawn from it must not authorize deleting
-    anything (a transient read error would read as a smaller album)."""
+    lengths/quality come from the same reader the rest of the app uses."""
     errs = []
     tracks = read_album_dir(folder, walk_errors=errs)
     return tracks, bool(errs)
@@ -798,7 +795,6 @@ def process_album(album, args, *, allow_force=True, label=None,
         log.info(fmt(C.RED, f"  ✗  {label_prefix}Album has no tracks in API response. Skipping."))
         return {"result": "no_tracks"}
 
-    # ── Detect what's already there ──────────────────────────────────────────
     # --force cleanup is deferred until AFTER the download confirm
     # below: deleting here would mean a 'no' at the download prompt
     # leaves the user with their folder already wiped.
@@ -817,7 +813,6 @@ def process_album(album, args, *, allow_force=True, label=None,
         vlog(f"hybrid detection: {len(existing)} existing track(s) total")
         missing, present = compute_missing(qobuz_tracks, existing)
 
-    # ── Quality-aware auto-upgrade decision ──────────────────────────────────
     # Runs BEFORE the "already complete" early-exit, because an album that is
     # "complete" track-wise might still be lower quality than Qobuz and
     # warrant an upgrade-replace.
@@ -1204,7 +1199,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             ))
             return {"result": "stale_candidate"}
 
-    # ── Pre-flight: staging dir state (BEFORE backup so sys.exit can't strand it)
     staging_preflight(args)
 
     if (
@@ -1228,7 +1222,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             })
             return {"result": "replacement_aborted_catalogue_failed"}
 
-    # ── Auto-upgrade: back up the existing folder before redownload ──────────
     # Same-filesystem move, so this is fast (rename, not copy). The backup
     # is restored if anything fails before beets import succeeds.
     if auto_upgrade_active and album_dir and album_dir.exists():
@@ -1274,7 +1267,6 @@ def process_album(album, args, *, allow_force=True, label=None,
         log.info(fmt(C.GRAY,
             "  ⤷  Backed up existing folder (auto-restore on failure)"))
 
-    # ── --force: NOW move the existing album dir aside (deferred from above) ──
     if use_force:
         force_outcome = force_cleanup_preflight(
             album,
@@ -1297,7 +1289,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             # by the same finally block that handles the auto-upgrade backup.
             upgrade_backup_path = force_outcome
 
-    # ── Download phase ───────────────────────────────────────────────────────
     # Pre-init so the backup-resolution finally block has sane defaults if a
     # rip raises AuthLost / OSError before the result is read back.
     n_ok = n_fail = n_lossy = 0
@@ -1480,7 +1471,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                     log.info(fmt(C.GRAY,
                         "  Quality check: staged rip meets the selected source cap."))
 
-        # ── Pre-import: downsample + lyrics on STAGING ──────────────────────────
         # Downsampling and lyric_fetch run on staging BEFORE beets imports.
         if n_ok > 0 and not args.no_import:
             if not staged_dirs_for_import:
@@ -1494,7 +1484,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             post_import_signatures = track_signatures_for_album_dirs(
                 staged_dirs_for_import)
 
-        # ── Beets import ─────────────────────────────────────────────────────────
         imported = False
         if args.no_import:
             log.info(fmt(C.YELLOW, f"\n  --no-import: skipping beets. Files remain in {cfg.STAGING_DIR}/"))
@@ -1543,7 +1532,6 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     finally:
         # Always resolve upgrade backup, including on exception.
-        # ── Auto-upgrade backup resolution ───────────────────────────────────────
         upgrade_restored = False
         if upgrade_backup_path is not None:
             # Require zero failures AND zero lossy-deletes.
@@ -1708,7 +1696,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                         f"{album_dir!s} out of the library, then move the "
                         "backup's files, not its dot-files, into it."))
 
-        # ── Gap-fill backup resolution ───────────────────────────────────────
         # run_album_download records this the moment it stashes present tracks,
         # so it's reachable here even when the rip raised before returning.
         gap_fill_backup_path = download_result.get("gap_fill_backup_path")
@@ -1848,7 +1835,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                 recovery_unverified=recovery_unverified,
             )
 
-    # ── Consolidation ────────────────────────────────────────────────────────
     n_consolidated = 0
     consolidation_interrupted = False
     # treat_as_new keeps this download as its own edition; consolidation folds
@@ -1865,7 +1851,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.YELLOW,
                 "\n  --consolidate requested but beets import didn't succeed; skipping."))
 
-    # ── Post-import cleanup: folder layout and duplicate cover art ──────────
     if imported:
         strict_success = n_fail == 0 and n_lossy == 0
         post_dir_exact = False
@@ -1971,7 +1956,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                 vlog(f"lyric retry: import unsuccessful; queued {len(resolved)} "
                      f"staging path(s) for next-launch retry")
 
-    # ── Summary ──────────────────────────────────────────────────────────────
     n_retryable, n_truly_lossy = incomplete_track_counts(download_result)
     downsample_attention = bool(
         downsample_outcome["downsample_errors"]

@@ -76,6 +76,8 @@ from qobuz_librarian.run_lock import RunLockLease
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import job_persistence
 
+log = logging.getLogger("qobuz_librarian")
+
 _STAGING_RUN_KIND = "download-staging-run"
 _STAGING_GROUP_KIND = "staging-group"
 _STAGING_KINDS = frozenset({_STAGING_RUN_KIND, _STAGING_GROUP_KIND})
@@ -410,7 +412,7 @@ def _retain_unclaimed_staging_runs(authority, names) -> bool:
         if group is None:
             settled = False
             continue
-        logging.getLogger("qobuz_librarian").warning(
+        log.warning(
             "An unclaimed download folder %s was left in staging; it was "
             "moved to %s for review.",
             name,
@@ -1854,7 +1856,7 @@ def recover_startup_state(
         _require_authority(authority)
         if relocation.status is not RelocationRecoveryStatus.CLEAR:
             paths = "; ".join(os.fspath(path) for path in relocation.paths)
-            logging.getLogger("qobuz_librarian").error(
+            log.error(
                 "%s: %s. Paths needing attention: %s.",
                 POST_IMPORT_RELOCATION_LOG_ENTRY,
                 relocation.reason or "reason not reported",
@@ -1870,7 +1872,7 @@ def recover_startup_state(
             blocked = [loaded for loaded in loads
                        if loaded.status is queue_state.QueueLoadStatus.BLOCKED]
             if blocked:
-                logging.getLogger("qobuz_librarian").error(
+                log.error(
                     "%s: %s.",
                     UNREADABLE_QUEUE_LOG_ENTRY,
                     "; ".join(

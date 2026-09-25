@@ -1108,11 +1108,7 @@ def _run_pre_import_hooks_for_dirs(
 
 
 def _pre_import_staging_hooks(args, album_dirs=None):
-    """Compatibility wrapper for the single-album pre-import hooks.
-
-    New downloads pass their validated per-run album roots. The whole-staging
-    default remains only for older direct callers.
-    """
+    """Compatibility wrapper for the single-album pre-import hooks."""
     return _run_pre_import_hooks_for_dirs(
         album_dirs or [cfg.STAGING_DIR], args)
 
@@ -1281,13 +1277,7 @@ _RETRYABLE_STOP_RESULTS = {
 
 
 def _queue_item_needs_retry(item):
-    """Whether an item should stay queued for a later run.
-
-    Kept: items stopped before they could finish (cancel / interrupt / auth
-    loss / disk full / an upgrade whose backup couldn't be taken), imports that
-    were not transactionally accepted, and downloads that landed nothing.
-    Dropped: only completed download-phase items without one of those explicit
-    retry markers."""
+    """Whether an item should stay queued for a later run."""
     if item.get("result") in _RETRYABLE_STOP_RESULTS:
         return True
     return item.get("n_ok", 0) == 0
@@ -3398,7 +3388,6 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         else:
             log.info(fmt(C.RED, f"    ✗ download failed · {summary_elapsed}s"))
 
-        # ── Per-album pre-import + beets import ──────────────────────────
         item_imported = False
         if summary_n_ok > 0 and not args.no_import:
             try:
@@ -3432,30 +3421,28 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                             retry_preserves_original=lambda: (
                                 retry_preserves_track_coverage(
                                     item, retry_item)))
-                    except Exception:
+                        if retry_kept:
+                            retire_empty_download_staging(item)
+                            for key in ("n_ok", "n_fail", "n_lossy",
+                                        "failed_tracks", "lossy_tracks",
+                                        "broken_tracks", "elapsed",
+                                        "gap_fill_backup_path", "_staging_run",
+                                        "_staging_run_retained",
+                                        "_expected_track_keys",
+                                        "_clean_track_keys",
+                                        "_exact_track_coverage",
+                                        "_unmatched_audio",
+                                        "_clean_staged_files",
+                                        "_all_staged_audio",
+                                        "_staged_track_bindings"):
+                                if key in retry_item:
+                                    item[key] = retry_item[key]
+                                else:
+                                    item.pop(key, None)
+                        else:
+                            retire_empty_download_staging(retry_item)
+                    finally:
                         item["quality"] = saved_q
-                        raise
-                    if retry_kept:
-                        retire_empty_download_staging(item)
-                        for key in ("n_ok", "n_fail", "n_lossy",
-                                    "failed_tracks", "lossy_tracks",
-                                    "broken_tracks", "elapsed",
-                                    "gap_fill_backup_path", "_staging_run",
-                                    "_staging_run_retained",
-                                    "_expected_track_keys",
-                                    "_clean_track_keys",
-                                    "_exact_track_coverage",
-                                    "_unmatched_audio",
-                                    "_clean_staged_files",
-                                    "_all_staged_audio",
-                                    "_staged_track_bindings"):
-                            if key in retry_item:
-                                item[key] = retry_item[key]
-                            else:
-                                item.pop(key, None)
-                    else:
-                        retire_empty_download_staging(retry_item)
-                    item["quality"] = saved_q
                     return fresh_dirs
 
                 try:
@@ -3678,9 +3665,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 "skipping unrelated staging work.",
             ))
 
-    # ── Post-batch: consolidate duplicate albums once if anything landed.
-    # The fold is a library-wide pass, so running it per-album would waste
-    # work; once at end is enough.
+    # Consolidate duplicate albums once if anything landed. The fold is a
+    # library-wide pass, so running it per-album would waste work.
     ownership_scope_resolved = any(
         item.get("_resolved_post_dir_from_import_ownership") is True
         for item in items
@@ -3708,7 +3694,6 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             "one-track ownership scope"
         )
 
-    # ── Post-batch lyric-retry resolution.
     print()
     _post_dirs = [it.get("_resolved_post_dir") for it in items
                   if it.get("_resolved_post_dir") is not None]

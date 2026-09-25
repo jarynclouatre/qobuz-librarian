@@ -259,8 +259,6 @@ def _migration_abort_in_chain(failure: BaseException | None):
     return None
 
 
-# ── Tag extraction ──────────────────────────────────────────────────────────
-
 def _first(tags: Mapping, *keys) -> str:
     """First non-empty value across the given keys, case-insensitively.
 
@@ -364,13 +362,9 @@ def extract_metadata(path: Path, *, descriptor=None) -> Optional[dict]:
     return normalize_tags(tags, path.stem, path.suffix, path.parent.name)
 
 
-# ── Placement ────────────────────────────────────────────────────────────────
-
 def is_placeable(meta: Optional[dict]) -> bool:
-    """A file can be placed from metadata once it has an album artist and album.
-
-    The title falls back to the source filename, so it isn't required; without an
-    artist or album there's no folder to build, so the file is left alone."""
+    """A file can be placed from metadata once it has an album artist and
+    album."""
     if not meta:
         return False
     return bool(meta.get("albumartist") and meta.get("album"))
@@ -441,8 +435,6 @@ def _album_year(metas) -> int:
         return 0
     return max(counts, key=lambda year: (counts[year], year))
 
-
-# ── Sealed filesystem evidence ──────────────────────────────────────────────
 
 _AT_EMPTY_PATH = 0x1000
 _AT_SYMLINK_NOFOLLOW = 0x100
@@ -1934,8 +1926,6 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
     )
 
 
-# ── AcoustID second stage (opt-in, container-only) ───────────────────────────
-
 def choose_acoustid_match(candidates, min_score: float = ACOUSTID_MIN_SCORE):
     """Pick a single confident match from AcoustID candidates, or None.
 
@@ -2060,8 +2050,6 @@ def fingerprint_identify(path: Path, min_score: float = ACOUSTID_MIN_SCORE,
     return identify_from_lookup(resp, min_score, path.stem, (ext or path.suffix).lower())
 
 
-# ── Path validation ───────────────────────────────────────────────────────────
-
 def _is_within(child: Path, parent: Path) -> bool:
     try:
         child.resolve().relative_to(parent.resolve())
@@ -2176,8 +2164,6 @@ def space_estimate(plan: MigrationPlan, *, in_place: bool = False,
         need += comp_bytes * len(dst_folders)
     return need, free
 
-
-# ── Source collection ─────────────────────────────────────────────────────────
 
 # Non-audio files worth carrying with an album: cover art, embedded booklets,
 # rip logs, cue sheets, synced lyrics, and playlists. Only audio gets a plan
@@ -2741,8 +2727,6 @@ def _collect_items(source_root: Path, *, use_acoustid: bool = False,
     finally:
         root_binding.close()
 
-
-# ── Execution ─────────────────────────────────────────────────────────────────
 
 def _is_resume_collision(entry: PlanEntry) -> bool:
     return (isinstance(entry, PlanEntry)

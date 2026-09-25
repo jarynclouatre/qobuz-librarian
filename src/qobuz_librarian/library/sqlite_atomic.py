@@ -487,7 +487,7 @@ def _release_sqlite_database_exclusion_state(state):
 def _finalize_sqlite_database_exclusion_state(state):
     try:
         _release_sqlite_database_exclusion_state(state)
-    except BaseException:
+    except Exception:
         pass
 
 
@@ -828,7 +828,7 @@ def _release_file_lease_state(state):
 def _finalize_file_lease_state(state):
     try:
         _release_file_lease_state(state)
-    except BaseException:
+    except Exception:
         pass
 
 

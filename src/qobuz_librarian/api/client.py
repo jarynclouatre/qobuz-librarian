@@ -32,7 +32,6 @@ from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 
 
-# ── Session ───────────────────────────────────────────────────────────────────
 def ua_string() -> str:
     """The app's User-Agent, shared by every outbound API session."""
     try:
@@ -137,7 +136,6 @@ def _retry_sleep(seconds: float):
     time.sleep(seconds)
 
 
-# ── Core request ──────────────────────────────────────────────────────────────
 def _net_reason(exc):
     """Short, human reason for a requests failure (not the urllib3 dump)."""
     if isinstance(exc, requests.Timeout):

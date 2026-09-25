@@ -56,7 +56,6 @@ from qobuz_librarian.ui_cli.logging import attach_file_handler, log, set_quiet, 
 _STARTUP_RECOVERY_RESULT = None
 _RUN_LEASE = None
 
-# ── URL parsers ───────────────────────────────────────────────────────────────
 
 _QOBUZ_PLAY_RE        = re.compile(r"(?:play|open)\.qobuz\.com/(album|track)/([A-Za-z0-9]+)")
 _QOBUZ_STORE_ALBUM_RE = re.compile(r"qobuz\.com/[a-zA-Z-]+/album/[^/]+/([A-Za-z0-9]+)/?(?:[?#]|$)")
@@ -75,8 +74,6 @@ def parse_qobuz_url(url: str) -> tuple[str, str] | None:
         return "track", m.group(1)
     return None
 
-
-# ── Single-instance lock ──────────────────────────────────────────────────────
 
 def _recover_startup_queue(authority):
     """Inspect durable queue state without starting download/import work."""
@@ -298,7 +295,8 @@ def _offer_blocked_cli_settlement(authority, result):
             action=action,
         )
         fresh = _record_startup_recovery(authority)
-    except Exception:
+    except Exception as exc:
+        vlog(f"couldn't settle the blocked download: {exc}")
         return result, False, None
     matches = (
         _cli_retry_settlement_matches
@@ -449,13 +447,7 @@ def _die_unsettled_startup_recovery(
 
 
 def _compose_service_name() -> str:
-    """Best-effort docker compose service name for diagnostic hints.
-
-    Docker sets HOSTNAME to the container's name when `container_name:` is
-    set in compose, else to the 12-char container ID. Fall back to the
-    generic name when we see an ID, so user-facing strings don't print a
-    misleading hex blob.
-    """
+    """Best-effort docker compose service name for diagnostic hints."""
     import os
     h = os.environ.get("HOSTNAME", "").strip()
     if not h or (len(h) == 12 and all(c in "0123456789abcdef" for c in h)):
@@ -551,8 +543,6 @@ def acquire_run_lock():
         "filesystem locking support, then try again.\n",
     ), EXIT_GENERAL)
 
-
-# ── Pre-flight checks ─────────────────────────────────────────────────────────
 
 def _in_container() -> bool:
     return cfg.in_container()
@@ -662,15 +652,9 @@ def require_music_root():
     die(fmt(C.RED, problem + fix), EXIT_CONFIG)
 
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
-
 class _ExitOneArgParser(argparse.ArgumentParser):
     """ArgumentParser that exits 1 (EXIT_GENERAL) on parse errors instead
-    of argparse's default 2. Our documented exit-code contract reserves 2
-    for EXIT_AUTH; without this override, a `--flag --conflict` typo
-    surfaces with the same code as "token expired" and cron retry rules
-    can't tell them apart.
-    """
+    of argparse's default 2."""
 
     def exit(self, status=0, message=None):
         if status == 2:
@@ -1053,8 +1037,6 @@ def parse_args():
     return args
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     raise_open_file_limit()
     # Apply the web Settings page's persisted overrides before parse_args
@@ -1352,7 +1334,6 @@ def main():
             repair_cache.prune_expired()
         except Exception as e:
             vlog(f"repair-cache prune error: {e}")
-    # ── Decide the entry mode ─────────────────────────────────────────────────
     # Single-shot flag paths first (each skips the menu loop), then positional
     # args / URL → album mode, then the interactive menu. The single-shot paths
     # still respect AuthLost / KeyboardInterrupt cleanly; all caught at the

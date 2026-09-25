@@ -238,13 +238,7 @@ def _retag_refills_in_staging(staged_dirs, source_by_isrc):
 
 
 def _make_retag_callback(retag_sources, retag_failed):
-    """The pre-import retag hook the executor calls on the staged refills.
-
-    An exception inside the carry surfaces in the executor's catch-and-log,
-    but the carry state is then unknown, so every source is recorded as
-    failed BEFORE the attempt and only the confirmed non-failures are cleared
-    after. Without that, the backup resolution would read the empty set as
-    "all tags carried" and delete the only copy of the originals' metadata."""
+    """The pre-import retag hook the executor calls on the staged refills."""
     def _retag_callback(staged_dirs):
         retag_failed.update(retag_sources)
         done = _retag_refills_in_staging(staged_dirs, retag_sources)
@@ -1491,16 +1485,7 @@ def _relocate_refilled_into_album_dir(
 
 def _refills_present_in(album_dir, wanted_counts, baseline_counts):
     """True once each wanted ISRC has its refills back ON TOP of the files
-    that already carried it.
-
-    ``wanted_counts`` is a Counter of ISRC → how many truncated originals with
-    that ISRC went to backup; ``baseline_counts`` is the ISRC census of what
-    remained on disk after that move (None = the baseline couldn't be read,
-    so the result is unverifiable and never True). A plain set membership test would pass when
-    only ONE of two same-ISRC originals came back, and a bare count would let
-    a healthy pre-existing file sharing the ISRC vouch for a refill that never
-    returned, either way the backup holding the second file gets deleted. So
-    require baseline + wanted of each ISRC, counted."""
+    that already carried it."""
     if not wanted_counts:
         return True
     if baseline_counts is None:
@@ -1686,8 +1671,9 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         if recovery_checkpoint is not None:
             try:
                 recovery_checkpoint(recovery)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.info(fmt(C.RED,
+                    f"  ✗  Couldn't save the Repair recovery record ({exc})."))
 
     def recovery_result():
         return retained_recovery.backup if retained_recovery is not None else None
@@ -1713,7 +1699,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "backup": None,
             }
 
-        # ── Resolve the refill plan before touching any files ────────────
         # Everything Qobuz-side happens up front, while the truncated
         # originals are still in place. If the parent-album lookup hits a
         # transient outage the repair aborts cleanly with nothing moved,
@@ -1804,7 +1789,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         if expected_generation:
             token = api_client.authorize_bound_download(token)
 
-        # ── Back up the truncated originals (plan in hand) ───────────────
         broken_paths = [b["path"] for b in verified_truncated]
         backup_path = backup_gap_fill_files(
             broken_paths,
@@ -2052,7 +2036,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "backup": recovery_result(),
             }
 
-        # ── Put the refill back where it belongs ─────────────────────────
         # beets files by tags, so a track whose canonical Qobuz album differs
         # from album_dir (EPs, compilations, bonus tracks) lands in a stray
         # folder. Move it home before judging success.
@@ -2168,7 +2151,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         else:
             repaired = False
 
-        # ── Backup resolution ────────────────────────────────────────────
         if backup_path and backup_path.exists():
             if repaired and retag_failed:
                 # The audio is verifiably fixed, but the originals' tags/art
@@ -2293,7 +2275,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "restoration was incomplete.",
                     )
 
-        # ── Replaced-tracks log (only on a genuine, in-place repair) ──────
         # A verified refill is a repair whether or not the originals' backup
         # could also be retired; a kept backup rides along in "backup".
         if repaired:

@@ -31,19 +31,15 @@ _CANCEL_CHECK = None
 
 
 def set_cancel_check(fn):
-    """Register a no-arg callable that returns True to cancel the active rip.
-
-    Called by qobuz_librarian.web.jobs at import time.
-    """
+    """Register a no-arg callable that returns True to cancel the active rip."""
     global _CANCEL_CHECK
     _CANCEL_CHECK = fn
 
 
 def is_cancel_requested():
-    """True when the active web job has been cancelled. Always False on the
-    CLI path (no hook installed; Ctrl-C raises KeyboardInterrupt instead).
-    Lets post-rip code skip the beets import after a cancel."""
+    """True when the active web job has been cancelled."""
     return bool(_CANCEL_CHECK and _CANCEL_CHECK())
+
 
 try:
     from mutagen.flac import FLAC as MutagenFLAC
@@ -54,8 +50,6 @@ except Exception:
 
 _FLAC_TRUNCATION_FLOOR = 150_000
 
-
-# ── FLAC signature ────────────────────────────────────────────────────────────
 
 def _flac_signature(path: Path):
     """Tag-tuple identifier for a FLAC, stable across beets's move. Lyric_fetch's
@@ -94,8 +88,6 @@ def _flac_signature(path: Path):
         _g("title", "TITLE").lower(),
     )
 
-
-# ── FLAC validation ───────────────────────────────────────────────────────────
 
 def flac_audio_ok(path, *, descriptor=None):
     """Verify a FLAC's audio with ``flac -t`` (decode + per-frame CRC check).
@@ -206,8 +198,6 @@ def is_flac(path: Path) -> bool:
     return True
 
 
-# ── Process helpers ───────────────────────────────────────────────────────────
-
 def _kill_process_group(proc):
     """Best-effort: kill rip's whole process group, fall back to .kill().
 
@@ -231,14 +221,7 @@ def _kill_process_group(proc):
 
 
 def _terminate(proc, reader):
-    """Kill the rip process group, reap the child, and drain the reader.
-
-    Reaping matters: in the container uvicorn runs as PID 1 with no init to
-    harvest orphans, so a killed rip left unwaited stays a zombie for the
-    life of the web process, one per cancel or timeout. Once the child is
-    reaped its stdout is closed, so joining the reader afterwards can't race
-    the ``lines`` buffer the caller is about to read.
-    """
+    """Kill the rip process group, reap the child, and drain the reader."""
     _kill_process_group(proc)
     try:
         proc.wait(timeout=5)
@@ -246,8 +229,6 @@ def _terminate(proc, reader):
         pass
     reader.join(timeout=5)
 
-
-# ── streamrip wrapper ─────────────────────────────────────────────────────────
 
 def rip_url(url, timeout=None, live_output=False, quality=None,
             staging_dir=None):
@@ -415,8 +396,6 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
     reader.join(timeout=5)
     return proc.returncode, "".join(lines)
 
-
-# ── Staging snapshot / cleanup ────────────────────────────────────────────────
 
 def _iter_staging_files():
     """Yield every staging file, skipping the retry-park tree entirely.
