@@ -4,7 +4,6 @@ import asyncio
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from qobuz_librarian import config as cfg
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.web import hidden_pages, runtime, saved_reviews
 
@@ -13,14 +12,11 @@ router = APIRouter()
 
 @router.get("/upgrade", response_class=HTMLResponse)
 async def upgrade_page(request: Request):
-    creds_ok = runtime._creds_ok()
-    # Without credentials the page still renders, showing the connect card,
-    # bouncing to Search reads as a broken button.
-    if not getattr(cfg, "UPGRADE_SCAN_ENABLED", True):
+    if not runtime._upgrade_available():
         return saved_reviews._upgrade_unavailable_response()
     state = saved_reviews._upgrade_state_summary()
     return runtime._tr(request, "upgrade.html", {
-        "creds_ok": creds_ok, "qobuz_ready": runtime._qobuz_ready(), "page": "upgrade",
+        "creds_ok": runtime._creds_ok(), "qobuz_ready": runtime._qobuz_ready(), "page": "upgrade",
         "upgrade_state": state,
         "last_run": runtime._tool_last_run_age("library"),
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_UPGRADE)})

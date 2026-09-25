@@ -738,7 +738,7 @@ def refold_restored_missing(artists, fingerprints):
     or None when no library review is parked (they return on the next scan)."""
     parked = None
     for job in job_mgr.registry.awaiting_review():
-        if getattr(job, "execute_kind", "") != "library":
+        if job.execute_kind != "library":
             continue
         if parked is None or (job.created_at or 0) > (parked.created_at or 0):
             parked = job
@@ -809,7 +809,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
     many rejoined, or None when there's no review to fold into."""
     parked = None
     for j in job_mgr.registry.awaiting_review():
-        if getattr(j, "execute_kind", "") != execute_kind:
+        if j.execute_kind != execute_kind:
             continue
         if parked is None or (j.created_at or 0) > (parked.created_at or 0):
             parked = j
@@ -821,7 +821,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
     # the review it points at. A scan's own summary is left alone: it carries
     # caveats a bare count would throw away.
     ours = (parked.summary or "") == split_review_summary(
-        getattr(parked, "execute_kind", ""), parked.candidates)
+        parked.execute_kind, parked.candidates)
     folded = fold_new_candidates(parked, specs)
     if folded is False:
         return False
@@ -829,7 +829,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
         return None
     if ours:
         parked.summary = split_review_summary(
-            getattr(parked, "execute_kind", ""), parked.candidates)
+            parked.execute_kind, parked.candidates)
     parked.notify_review_changed()
     return folded[0]
 
@@ -2134,7 +2134,7 @@ def _parked_new_release_review(exclude=None):
     ``exclude`` skips the check currently running, which is not parked yet."""
     parked = None
     for j in job_mgr.registry.awaiting_review():
-        if getattr(j, "execute_kind", "") != "new_releases":
+        if j.execute_kind != "new_releases":
             continue
         if exclude is not None and j.id == exclude.id:
             continue

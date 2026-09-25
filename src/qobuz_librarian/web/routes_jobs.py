@@ -19,7 +19,6 @@ from fastapi.responses import (
 
 from qobuz_librarian import completion
 from qobuz_librarian import config as cfg
-from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import CredentialChanged, NoCredsError, QobuzAccess
 from qobuz_librarian.integrations import beets as beets_mod
@@ -1536,22 +1535,12 @@ async def job_retry(request: Request, job_id: str):
     if duplicate:
         return _land(started=duplicate.id)
     try:
+        loop = asyncio.get_running_loop()
         token = credentials.token
         album = None
         if not durable_resume:
-            loop = asyncio.get_running_loop()
-            album = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: api_client.call_within(
-                        cfg.WEB_FETCH_TIMEOUT,
-                        qobuz_search.get_album,
-                        album_id,
-                        token,
-                    ),
-                ),
-                timeout=cfg.WEB_FETCH_TIMEOUT,
-            )
+            album = await runtime._qobuz_call(
+                qobuz_search.get_album, album_id, token)
         same_edition_complete = bool(
             album is not None
             and retry_as_new
@@ -1709,7 +1698,7 @@ async def job_retry(request: Request, job_id: str):
             # A failed single-track download carries job.album_id (so Retry shows up),
             # but _make_download_run would download the whole album. Rebuild it as
             # the same one-track run instead.
-            single = getattr(job, "single", None)
+            single = job.single
             track = None
             as_new = False
             if durable_resume and single and single.get("track_id"):
@@ -1833,7 +1822,7 @@ async def job_undo(request: Request, job_id: str):
         )
     )
     info = (
-        dict(getattr(job, "single", None) or {})
+        dict(job.single or {})
         if job and not undo_uncertain
         else {}
     )

@@ -19,14 +19,7 @@ async def lyrics_page(request: Request):
         "sidecar": ".lrc sidecar files",
         "both": "Embedded tags and .lrc files",
     }.get(lyrics_format, lyrics_format)
-    latest_lyrics = None
-    for job in job_mgr.registry.finished():
-        if (job.execute_kind == "lyrics"
-                and (latest_lyrics is None
-                     or (job.finished_at or job.created_at or 0)
-                     >= (latest_lyrics.finished_at
-                         or latest_lyrics.created_at or 0))):
-            latest_lyrics = job
+    latest_lyrics = scans._last_finished("lyrics")
     lyrics_failed = (
         latest_lyrics
         if latest_lyrics is not None

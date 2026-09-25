@@ -33,6 +33,19 @@ def _active_scan(*kinds, statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.
     return None
 
 
+def _last_finished(kind, statuses=job_mgr.TERMINAL):
+    """The most recently stopped job of one execute_kind, or None."""
+    latest = None
+    for j in job_mgr.registry.all():
+        if j.execute_kind != kind or j.status not in statuses:
+            continue
+        if (latest is None
+                or (j.finished_at or j.created_at or 0)
+                >= (latest.finished_at or latest.created_at or 0)):
+            latest = j
+    return latest
+
+
 async def _submit_scan_deduped_async(job, scan_fn, execute_fn, *kinds, **kw):
     """Run _submit_scan_deduped off the event loop."""
     loop = asyncio.get_running_loop()
@@ -64,7 +77,7 @@ def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds,
         # this they pile up forever.
         stale_reviews = [
             old for old in job_mgr.registry.awaiting_review()
-            if (getattr(old, "execute_kind", "") in kinds
+            if (old.execute_kind in kinds
                 and _scan_target(old) == target)
         ]
         submitted = job_mgr.submit_scan(job, scan_fn, execute_fn)
@@ -96,23 +109,31 @@ def _active_library_scan():
     return _active_scan("library")
 
 
+def _music_root_problem():
+    """Why the music folder cannot be read as a folder, or ""."""
+    root = Path(cfg.MUSIC_ROOT)
+    hint = runtime._music_root_hint()
+    try:
+        if not root.exists():
+            return f"{root} does not exist. {hint}"
+        if not root.is_dir():
+            return f"{root} is not a folder. {hint}"
+    except OSError:
+        return f"{root} could not be read. {hint}"
+    return ""
+
+
 def _library_scan_state():
     """Whether a whole-library scan has something valid to scan."""
     root = Path(cfg.MUSIC_ROOT)
     hint = runtime._music_root_hint()
-    if not root.exists():
+    problem = _music_root_problem()
+    if problem:
         return {
             "ready": False,
             "empty": False,
             "count": 0,
-            "message": f"{root} does not exist. {hint}",
-        }
-    if not root.is_dir():
-        return {
-            "ready": False,
-            "empty": False,
-            "count": 0,
-            "message": f"{root} is not a folder. {hint}",
+            "message": problem,
         }
     unreadable = []
     artists = scanner.list_library_artists(
@@ -265,7 +286,7 @@ def _fold_into_parked_library_review(job):
             f"Updated {updated} changed item{'s' if updated != 1 else ''} "
             "in the open Library review."
         )
-    unchecked = getattr(job, "_unchecked_artists", 0)
+    unchecked = job.unchecked_artists
     if not bits:
         if unchecked:
             bits.append("No new finds from the artists that could be checked.")

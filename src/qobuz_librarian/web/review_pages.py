@@ -131,25 +131,24 @@ def _review_artist_groups(job, query="", tab=""):
     return ordered
 
 
-def _paginate_groups(groups, page):
+def _paginate_groups(groups, page, rows=lambda group: len(group[1])):
     """Slice artist groups into one page. Returns (page_groups, page, n_pages).
     ``page`` is clamped into range so a stale/empty page lands somewhere valid.
 
     Pages pack whole artist groups (so select-artist stays sane) up to
-    REVIEW_PAGE_ARTISTS groups AND ~REVIEW_PAGE_CANDIDATES rows, counting
-    artists alone let a page of prolific artists carry thousands of collapsed
-    rows into the DOM (a 40-artist page measured 758KB HTML). A single group
-    larger than the budget still gets its own page, whole."""
+    REVIEW_PAGE_ARTISTS groups AND ~REVIEW_PAGE_CANDIDATES rows, as ``rows``
+    counts them for one group. A single group larger than the budget still
+    gets its own page, whole."""
     pages = []
     cur, cur_rows = [], 0
     for g in groups:
-        rows = len(g[1])
+        n = rows(g)
         if cur and (len(cur) >= REVIEW_PAGE_ARTISTS
-                    or cur_rows + rows > REVIEW_PAGE_CANDIDATES):
+                    or cur_rows + n > REVIEW_PAGE_CANDIDATES):
             pages.append(cur)
             cur, cur_rows = [], 0
         cur.append(g)
-        cur_rows += rows
+        cur_rows += n
     if cur:
         pages.append(cur)
     n_pages = max(1, len(pages))

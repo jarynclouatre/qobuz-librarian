@@ -1,5 +1,6 @@
 """Routes for collection snapshots, backups and staging leftovers."""
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -163,13 +164,9 @@ async def collection_restore_upload(request: Request,
     def _restore_target_state():
         root = Path(cfg.MUSIC_ROOT)
         hint = runtime._music_root_hint()
-        try:
-            if not root.exists():
-                return f"{root} does not exist. {hint}", None, None
-            if not root.is_dir():
-                return f"{root} is not a folder. {hint}", None, None
-        except OSError:
-            return f"{root} could not be read. {hint}", None, None
+        problem = scans._music_root_problem()
+        if problem:
+            return problem, None, None
         scanner.clear_scan_caches()
         try:
             unreadable = []
@@ -178,8 +175,10 @@ async def collection_restore_upload(request: Request,
             emptied = not artists and not unreadable
         except OSError:
             return f"{root} could not be read. {hint}", None, None
-        if not root.is_dir():
-            return f"{root} does not exist. {hint}", None, None
+        # The listing reads a folder that has gone as an empty one.
+        problem = scans._music_root_problem()
+        if problem:
+            return problem, None, None
         root_identity = candidate_premise.capture_music_root_identity()
         if root_identity is None:
             return (f"{root} could not be verified as the restore target. "
@@ -318,27 +317,64 @@ def _restore_refused_notice(request: Request, target: Path, origin) -> str:
     return _stuck_backup_notice(request, target, headline)
 
 
-def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
+@contextlib.contextmanager
+def _library_held(request: Request, operation: str, verb: str):
+    """Hold the library for one diagnostics action. Yields None while it is
+    held, or the refusal to answer with when library writes are paused or a
+    job is working in the library."""
+    state, operation_token, lock = runtime._begin_direct_library_operation(
+        operation)
+    if state == "paused":
+        yield (_diagnostics_result_notice(
+                   "warning", f"Library writes were paused before {verb} "
+                   "could start. Resume the web app, then try again.")
+               + runtime._diagnostics_fragment(request))
+        return
+    if state == "busy":
+        yield (_diagnostics_result_notice(
+                   "warning", "A job is working in the library right now. "
+                   "Try again once it finishes.")
+               + runtime._diagnostics_fragment(request))
+        return
+    try:
+        yield None
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(operation_token)
+
+
+def _backup_target(backup):
+    """The retained backup a diagnostics button names, or None when it is gone
+    or the name is anything but a plain folder name. The form posts a bare
+    directory name; anything path-shaped (separators, dot-dirs) is someone
+    probing, not a backup this page listed."""
     name = (backup or "").strip()
-    base = Path(str(cfg.UPGRADE_BACKUP_DIR))
-    target = base / name
+    target = Path(str(cfg.UPGRADE_BACKUP_DIR)) / name
     if (not name or name != Path(name).name or name.startswith(".")
             or not target.is_dir()):
+        return None
+    return target
+
+
+async def _run_diagnostics_action(request: Request, action, arg):
+    """Run a diagnostics-list button's work off the event loop and answer with
+    its notice and the list redrawn."""
+    busy = runtime._lock_busy_response(request)
+    if busy is not None:
+        return busy
+    loop = asyncio.get_running_loop()
+    return HTMLResponse(await loop.run_in_executor(None, action, request, arg))
+
+
+def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
+    target = _backup_target(backup)
+    if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
                 + runtime._diagnostics_fragment(request))
-    state, operation_token, lock = runtime._begin_direct_library_operation(
-        "Backup removal")
-    if state == "paused":
-        return (_diagnostics_result_notice(
-                    "warning", "Library writes were paused before Delete "
-                    "could start. Resume the web app, then try again.")
-                + runtime._diagnostics_fragment(request))
-    if state == "busy":
-        return (_diagnostics_result_notice("warning", "A job is working in the library "
-                                "right now. Try again once it finishes.")
-                + runtime._diagnostics_fragment(request))
-    try:
+    with _library_held(request, "Backup removal", "Delete") as refusal:
+        if refusal:
+            return refusal
         location, _is_host = runtime._resolve_host_path(str(target))
         if backup_mod.discard_backup_unchecked(target):
             note = _diagnostics_result_notice(
@@ -347,35 +383,18 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
-    finally:
-        lock.release()
-        job_mgr.end_library_operation(operation_token)
     return note + runtime._diagnostics_fragment(request)
 
 
 def _restore_backup_sync(request: Request, backup: str) -> str:
-    name = (backup or "").strip()
-    base = Path(str(cfg.UPGRADE_BACKUP_DIR))
-    target = base / name
-    # The form posts a bare directory name; anything path-shaped (separators,
-    # dot-dirs) is someone probing, not a backup this page listed.
-    if (not name or name != Path(name).name or name.startswith(".")
-            or not target.is_dir()):
+    target = _backup_target(backup)
+    if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
                 + runtime._diagnostics_fragment(request))
-    state, operation_token, lock = runtime._begin_direct_library_operation(
-        "Backup restore")
-    if state == "paused":
-        return (_diagnostics_result_notice(
-                    "warning", "Library writes were paused before Restore "
-                    "could start. Resume the web app, then try again.")
-                + runtime._diagnostics_fragment(request))
-    if state == "busy":
-        return (_diagnostics_result_notice("warning", "A job is working in the library "
-                                "right now. Try again once it finishes.")
-                + runtime._diagnostics_fragment(request))
-    try:
+    with _library_held(request, "Backup restore", "Restore") as refusal:
+        if refusal:
+            return refusal
         carried = backup_mod.load_backup_result(target)
         receipt = carried.receipt if carried is not None else None
         try:
@@ -462,44 +481,24 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "This backup has an unsupported recovery record, so "
                 "it was left untouched.")
-    finally:
-        lock.release()
-        job_mgr.end_library_operation(operation_token)
     return note + runtime._diagnostics_fragment(request)
 
 
 @router.post("/backups/restore", response_class=HTMLResponse)
 async def restore_backup(request: Request, backup: str = Form("")):
     """Move an orphaned backup's files home. The button on the diagnostics list."""
-    busy = runtime._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(
-        None, _restore_backup_sync, request, backup))
+    return await _run_diagnostics_action(request, _restore_backup_sync, backup)
 
 
 def _discard_backup_sync(request: Request, backup: str) -> str:
-    name = (backup or "").strip()
-    base = Path(str(cfg.UPGRADE_BACKUP_DIR))
-    target = base / name
-    if (not name or name != Path(name).name or name.startswith(".")
-            or not target.is_dir()):
+    target = _backup_target(backup)
+    if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
                 + runtime._diagnostics_fragment(request))
-    state, operation_token, lock = runtime._begin_direct_library_operation(
-        "Backup removal")
-    if state == "paused":
-        return (_diagnostics_result_notice(
-                    "warning", "Library writes were paused before Remove "
-                    "could start. Resume the web app, then try again.")
-                + runtime._diagnostics_fragment(request))
-    if state == "busy":
-        return (_diagnostics_result_notice("warning", "A job is working in the library "
-                                "right now. Try again once it finishes.")
-                + runtime._diagnostics_fragment(request))
-    try:
+    with _library_held(request, "Backup removal", "Remove") as refusal:
+        if refusal:
+            return refusal
         carried = backup_mod.load_backup_result(target)
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
@@ -528,34 +527,19 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "error", "Couldn't verify every file is back byte-for-byte, "
                 "so the backup was left untouched. Restore is the safe way "
                 "to bring its files home.")
-    finally:
-        lock.release()
-        job_mgr.end_library_operation(operation_token)
     return note + runtime._diagnostics_fragment(request)
 
 
 def _release_undo_copy_sync(request: Request, backup: str) -> str:
-    name = (backup or "").strip()
-    base = Path(str(cfg.UPGRADE_BACKUP_DIR))
-    target = base / name
-    if (not name or name != Path(name).name or name.startswith(".")
-            or not target.is_dir()):
+    target = _backup_target(backup)
+    if target is None:
         return (_diagnostics_result_notice("error", "Those originals aren't there "
                                 "anymore. They may already be restored or "
                                 "cleared.")
                 + runtime._diagnostics_fragment(request))
-    state, operation_token, lock = runtime._begin_direct_library_operation(
-        "Backup removal")
-    if state == "paused":
-        return (_diagnostics_result_notice(
-                    "warning", "Library writes were paused before Delete "
-                    "could start. Resume the web app, then try again.")
-                + runtime._diagnostics_fragment(request))
-    if state == "busy":
-        return (_diagnostics_result_notice("warning", "A job is working in the library "
-                                "right now. Try again once it finishes.")
-                + runtime._diagnostics_fragment(request))
-    try:
+    with _library_held(request, "Backup removal", "Delete") as refusal:
+        if refusal:
+            return refusal
         carried = backup_mod.load_backup_result(target)
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
@@ -585,9 +569,6 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                 "error", "Couldn't confirm the album still holds every one of "
                 "these files, so the originals were left where they are. "
                 "Restore them instead if the album is incomplete.")
-    finally:
-        lock.release()
-        job_mgr.end_library_operation(operation_token)
     return note + runtime._diagnostics_fragment(request)
 
 
@@ -610,18 +591,9 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
     if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
                 + runtime._diagnostics_fragment(request))
-    state, operation_token, lock = runtime._begin_direct_library_operation(
-        "Staging cleanup")
-    if state == "paused":
-        return (_diagnostics_result_notice(
-                    "warning", "Library writes were paused before Remove "
-                    "could start. Resume the web app, then try again.")
-                + runtime._diagnostics_fragment(request))
-    if state == "busy":
-        return (_diagnostics_result_notice("warning", "A job is working in the library "
-                                "right now. Try again once it finishes.")
-                + runtime._diagnostics_fragment(request))
-    try:
+    with _library_held(request, "Staging cleanup", "Remove") as refusal:
+        if refusal:
+            return refusal
         location, _is_host = runtime._resolve_host_path(str(target))
         stuck = _diagnostics_result_notice(
             "error", "The app couldn't remove them, so they were left where "
@@ -640,9 +612,6 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
             removed = staging_mod.discard_group(target)
             note = (_diagnostics_result_notice("success", "Removed the kept files.")
                     if removed else stuck)
-    finally:
-        lock.release()
-        job_mgr.end_library_operation(operation_token)
     return note + runtime._diagnostics_fragment(request)
 
 
@@ -655,18 +624,9 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
     if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
                 + runtime._diagnostics_fragment(request))
-    state, operation_token, lock = runtime._begin_direct_library_operation(
-        "Staging cleanup")
-    if state == "paused":
-        return (_diagnostics_result_notice(
-                    "warning", "Library writes were paused before this could "
-                    "start. Resume the web app, then try again.")
-                + runtime._diagnostics_fragment(request))
-    if state == "busy":
-        return (_diagnostics_result_notice("warning", "A job is working in the library "
-                                "right now. Try again once it finishes.")
-                + runtime._diagnostics_fragment(request))
-    try:
+    with _library_held(request, "Staging cleanup", "this") as refusal:
+        if refusal:
+            return refusal
         location, _is_host = runtime._resolve_host_path(str(target))
         if staging_mod.discard_group_unchecked(target):
             note = _diagnostics_result_notice(
@@ -675,9 +635,6 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
-    finally:
-        lock.release()
-        job_mgr.end_library_operation(operation_token)
     return note + runtime._diagnostics_fragment(request)
 
 
@@ -685,54 +642,29 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
 async def discard_staging_group_unchecked(request: Request,
                                           group: str = Form("")):
     """Delete a held group no automatic route will touch, offered by the row."""
-    busy = runtime._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(
-        None, _discard_staging_group_unchecked_sync, request, group))
+    return await _run_diagnostics_action(request, _discard_staging_group_unchecked_sync, group)
 
 
 @router.post("/staging/discard", response_class=HTMLResponse)
 async def discard_staging_group(request: Request, group: str = Form("")):
     """Delete one group of files the app is holding in staging. The Remove
     button on the diagnostics list."""
-    busy = runtime._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(
-        None, _discard_staging_group_sync, request, group))
+    return await _run_diagnostics_action(request, _discard_staging_group_sync, group)
 
 
 @router.post("/backups/discard", response_class=HTMLResponse)
 async def discard_backup(request: Request, backup: str = Form("")):
     """Delete a kept backup once its files are verified home. The Remove button on the diagnostics list."""
-    busy = runtime._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(
-        None, _discard_backup_sync, request, backup))
+    return await _run_diagnostics_action(request, _discard_backup_sync, backup)
 
 
 @router.post("/backups/release-originals", response_class=HTMLResponse)
 async def release_backup_originals(request: Request, backup: str = Form("")):
     """Delete a downsample's kept originals before their days run out."""
-    busy = runtime._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(
-        None, _release_undo_copy_sync, request, backup))
+    return await _run_diagnostics_action(request, _release_undo_copy_sync, backup)
 
 
 @router.post("/backups/discard-unchecked", response_class=HTMLResponse)
 async def discard_backup_unchecked(request: Request, backup: str = Form("")):
     """Delete a backup no automatic route will touch, offered by the refusal."""
-    busy = runtime._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(
-        None, _discard_unchecked_backup_sync, request, backup))
+    return await _run_diagnostics_action(request, _discard_unchecked_backup_sync, backup)

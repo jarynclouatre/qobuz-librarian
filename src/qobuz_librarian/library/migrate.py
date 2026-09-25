@@ -1589,7 +1589,7 @@ def _destination_state(root_receipt, dest_root, dest_rel):
 
 def _probe_destination_name_semantics(dest_root: Path) -> dict:
     """Measure case and Unicode-normalization aliasing on the target FS."""
-    anchor = _existing_ancestor(dest_root)
+    anchor = existing_ancestor(dest_root)
     if anchor is None:
         raise OSError("destination name semantics could not be measured")
     receipt = _capture_root_receipt(anchor)
@@ -2086,13 +2086,13 @@ def validate_paths(src: Path, dest: Path, *,
         return f"Source/destination safety could not be proved: {exc}"
     # The copy/move writes into the destination tree (created if absent), so a
     # read-only dest must fail here, not partway through with a raw OSError.
-    dest_anchor = dest if dest.exists() else _existing_ancestor(dest)
+    dest_anchor = dest if dest.exists() else existing_ancestor(dest)
     if dest_anchor is None or not os.access(str(dest_anchor), os.W_OK):
         return f"Destination isn't writable: {dest_anchor or dest}"
     return None
 
 
-def _existing_ancestor(path: Path) -> Optional[Path]:
+def existing_ancestor(path: Path) -> Optional[Path]:
     """The nearest path that exists at or above ``path`` (where a copy lands)."""
     p = Path(path)
     while True:
@@ -2113,7 +2113,7 @@ def space_estimate(plan: MigrationPlan, *, in_place: bool = False,
     placements and verified resumes.
     ``free_bytes`` is the space available where the new library is built, or
     None when it can't be read (no existing ancestor, or a stat error)."""
-    anchor = _existing_ancestor(plan.dest_root)
+    anchor = existing_ancestor(plan.dest_root)
     free = None
     if anchor is not None:
         try:

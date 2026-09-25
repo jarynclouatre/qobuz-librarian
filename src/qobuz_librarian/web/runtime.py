@@ -849,6 +849,15 @@ def _download_error_message(exc, fallback: str) -> str:
     return fallback
 
 
+async def _qobuz_call(fn, *args, **kwargs):
+    """Run one Qobuz API call off the event loop, held to WEB_FETCH_TIMEOUT."""
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, lambda: api_client.call_within(
+            cfg.WEB_FETCH_TIMEOUT, fn, *args, **kwargs)),
+        timeout=cfg.WEB_FETCH_TIMEOUT)
+
+
 def _authorize_qobuz_live(access: QobuzAccess, *, expected_generation=""):
     """Run the bounded uncached check used before a Web action is admitted."""
     return api_client.call_within(
@@ -2353,7 +2362,7 @@ def _find_job_touching_album(album_id: str, skip_single_track: bool = False):
     for j in job_mgr.registry.pending_and_running():
         if j.status == job_mgr.JobStatus.AWAITING_REVIEW:
             continue
-        if skip_single_track and (getattr(j, "single", None) or {}).get("track_id"):
+        if skip_single_track and (j.single or {}).get("track_id"):
             continue
         if j.album_id == album_id:
             return j
@@ -2394,7 +2403,7 @@ def _duplicate_download_job(album_id: str, track_id: str = "",
         return None
     if track_id:
         for j in job_mgr.registry.pending_and_running():
-            s = getattr(j, "single", None) or {}
+            s = j.single or {}
             if s.get("album_id") == album_id and s.get("track_id") == str(track_id):
                 return j
         return None
@@ -2409,7 +2418,7 @@ def _active_search_downloads() -> tuple[
     for job in job_mgr.registry.pending_and_running():
         if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
             continue
-        single = getattr(job, "single", None) or {}
+        single = job.single or {}
         track_id = str(single.get("track_id") or "")
         album_id = str(single.get("album_id") or job.album_id or "")
         if album_id and track_id:

@@ -364,14 +364,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             loop = asyncio.get_running_loop()
             if kind == "album" and (album_id or (parsed and parsed[0] == "album")):
                 try:
-                    raw = [await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None, lambda: api_client.call_within(
-                                cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album,
-                                album_id or parsed[1], token)
-                        ),
-                        timeout=cfg.WEB_FETCH_TIMEOUT,
-                    )]
+                    raw = [await runtime._qobuz_call(
+                        qobuz_search.get_album, album_id or parsed[1], token)]
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."
                 except (AuthLost, QobuzUnavailable):
@@ -391,10 +385,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 # Tracks mode: resolve the pasted track URL to that one track;
                 # the track-results loop below renders it for a one-track download.
                 try:
-                    _t = await asyncio.wait_for(
-                        loop.run_in_executor(None, lambda: api_client.call_within(
-                            cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_track, parsed[1], token)),
-                        timeout=cfg.WEB_FETCH_TIMEOUT)
+                    _t = await runtime._qobuz_call(
+                        qobuz_search.get_track, parsed[1], token)
                     raw = [_t] if _t else []
                     if not raw:
                         error = "Couldn't fetch that track. Check the URL."
@@ -419,19 +411,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                              "Search for an artist by name instead.")
             elif kind == "artist" and artist_id:
                 try:
-                    raw, artist_total = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: api_client.call_within(
-                                cfg.WEB_FETCH_TIMEOUT,
-                                qobuz_search.get_artist_albums,
-                                artist_id,
-                                token,
-                                limit=cfg.ARTIST_CATALOG_LIMIT,
-                            ),
-                        ),
-                        timeout=cfg.WEB_FETCH_TIMEOUT,
-                    )
+                    raw, artist_total = await runtime._qobuz_call(
+                        qobuz_search.get_artist_albums, artist_id, token,
+                        limit=cfg.ARTIST_CATALOG_LIMIT)
                     selected_artist = {
                         "id": artist_id,
                         "name": artist_name or query,
@@ -442,19 +424,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     error = "Timed out reaching the Qobuz API."
             elif kind == "artist":
                 try:
-                    artist_raw = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: api_client.call_within(
-                                cfg.WEB_FETCH_TIMEOUT,
-                                qobuz_search.search_artists,
-                                query,
-                                token,
-                                limit=cfg.ARTIST_LOOKUP_LIMIT,
-                            ),
-                        ),
-                        timeout=cfg.WEB_FETCH_TIMEOUT,
-                    )
+                    artist_raw = await runtime._qobuz_call(
+                        qobuz_search.search_artists, query, token,
+                        limit=cfg.ARTIST_LOOKUP_LIMIT)
                     for a in artist_raw:
                         if not a.get("id"):
                             continue
@@ -478,14 +450,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             else:
                 _search_fn = qobuz_search.search_tracks if kind == "track" else qobuz_search.search_albums
                 try:
-                    raw = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: api_client.call_within(cfg.WEB_FETCH_TIMEOUT, _search_fn,
-                                                query, token, limit=cfg.SEARCH_LIMIT),
-                        ),
-                        timeout=cfg.WEB_FETCH_TIMEOUT,
-                    )
+                    raw = await runtime._qobuz_call(
+                        _search_fn, query, token, limit=cfg.SEARCH_LIMIT)
                 except asyncio.TimeoutError:
                     error = "Timed out reaching the Qobuz API."
 
@@ -945,12 +911,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
             QobuzAccess.DOWNLOAD_ACTION
         )
         token = credentials.token
-        album = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: api_client.call_within(cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)),
-            timeout=cfg.WEB_FETCH_TIMEOUT,
-        )
+        album = await runtime._qobuz_call(qobuz_search.get_album, album_id, token)
         if download_as_new_edition and await loop.run_in_executor(
             None, lambda: runtime._same_edition_is_complete(album)
         ):

@@ -29,7 +29,7 @@ def _finished_search_downloads() -> tuple[set[str], set[tuple[str, str]]]:
     for job in job_mgr.registry.all():
         if not job.landed_complete or job.status not in job_mgr.TERMINAL:
             continue
-        single = getattr(job, "single", None) or {}
+        single = job.single or {}
         track_id = str(single.get("track_id") or "")
         album_id = str(single.get("album_id") or job.album_id or "")
         if not album_id:

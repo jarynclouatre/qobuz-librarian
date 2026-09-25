@@ -148,17 +148,9 @@ def _library_header_note():
 
 
 def _last_finished_library_job():
-    """The most recent library scan that has stopped, or None."""
-    latest = None
-    for j in job_mgr.registry.all():
-        if j.execute_kind != "library":
-            continue
-        if j.status not in (job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED):
-            continue
-        if (latest is None
-                or (j.finished_at or 0) > (latest.finished_at or 0)):
-            latest = j
-    return latest
+    """The most recent library scan that finished or failed, or None."""
+    return scans._last_finished(
+        "library", (job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED))
 
 
 def _library_refresh_outcome():

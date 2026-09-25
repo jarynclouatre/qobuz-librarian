@@ -44,31 +44,17 @@ def _hidden_view(request, scope, *, page, restore_action, back_url,
     groups = _hidden_matching(hidden_mod.hidden_by_artist(scope), q)
     # Review rows, not fingerprints. One fingerprint can hold several editions
     # of an album, and every page that counts dismissals elsewhere (the review
-    # link, the Library, Upgrade and Downsample cards) counts rows. Counting
-    # keys here made the same set read as two different sizes one click apart.
+    # link, the Library, Upgrade and Downsample cards) counts rows.
     # Counted after the filter, because the button below acts on what is shown.
     total_rows = sum(g["rows"] for g in groups)
 
-    # Whole artists per page, same budgets as the review pages; this page
-    # once shipped its entire set as one 639 KB document.
-    pages = []
-    cur, cur_rows = [], 0
-    for g in groups:
-        if cur and (len(cur) >= review_pages.REVIEW_PAGE_ARTISTS
-                    or cur_rows + g["rows"] > review_pages.REVIEW_PAGE_CANDIDATES):
-            pages.append(cur)
-            cur, cur_rows = [], 0
-        cur.append(g)
-        cur_rows += g["rows"]
-    if cur:
-        pages.append(cur)
-    n_pages = max(1, len(pages))
     try:
         pg = int(request.query_params.get("p") or 1)
     except ValueError:
         pg = 1
-    pg = max(1, min(pg, n_pages))
-    page_groups = pages[pg - 1] if pages else []
+    # Whole artists per page, same budgets as the review pages.
+    page_groups, pg, n_pages = review_pages._paginate_groups(
+        groups, pg, rows=lambda g: g["rows"])
     for g in page_groups:
         for a in g["albums"]:
             a["when"], a["when_exact"] = runtime._when_label(_hidden_ts_epoch(a.get("ts")))

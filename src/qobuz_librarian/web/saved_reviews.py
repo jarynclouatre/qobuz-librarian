@@ -136,13 +136,13 @@ def _saved_review_row(surface, spec):
     }
 
 
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=True,
+                      separators=(",", ":"))
+
+
 def _saved_review_key(surface, spec):
-    return json.dumps(
-        _saved_review_row(surface, spec),
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-    )
+    return _canonical_json(_saved_review_row(surface, spec))
 
 
 def _saved_review_claim_key(surface, spec):
@@ -159,22 +159,20 @@ def _saved_review_claim_key(surface, spec):
         album_dir = payload.get("album_dir")
         if isinstance(album_dir, str) and album_dir:
             return surface, "album_dir", album_dir
-    return surface, "row", _saved_review_key(surface, row)
+    return surface, "row", _canonical_json(row)
 
 
 def _saved_review_signature(surface, state):
     rows = []
     for spec in state.get("candidates") or []:
         rows.append(_saved_review_row(surface, spec))
-    rows.sort(key=lambda row: json.dumps(
-        row, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
+    rows.sort(key=_canonical_json)
     signature_data = {"rows": rows}
     if surface == "upgrade":
         signature_data["quality_signature"] = str(
             state.get("quality_signature") or ""
         )
-    raw = json.dumps(signature_data, sort_keys=True, ensure_ascii=True,
-                     separators=(",", ":"))
+    raw = _canonical_json(signature_data)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

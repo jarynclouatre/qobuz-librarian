@@ -24,7 +24,7 @@ def _migrate_checks(src, dest):
         if not p.exists():
             # The migration creates the destination tree, so a not-yet-created
             # dest is fine as long as a writable ancestor exists to land it in.
-            anc = migrate_engine._existing_ancestor(p) if is_dest else None
+            anc = migrate_engine.existing_ancestor(p) if is_dest else None
             if is_dest and anc and os.access(str(anc), os.W_OK):
                 checks.append({"label": label, "ok": True,
                                "detail": f"{p} (will be created under {anc})"})

@@ -94,6 +94,10 @@ _HISTORY_PER_PAGE = 25
 _HISTORY_BULK_CAP = 20
 
 
+def _page_count(n, per_page):
+    return max(1, (n + per_page - 1) // per_page)
+
+
 @router.get("/queue/history", response_class=HTMLResponse)
 async def queue_history(
     request: Request,
@@ -131,8 +135,7 @@ async def queue_history(
         recoveries = _stamp(recoveries)
         bulk_rest = job_persistence.history_count(
             bulk=True, exclude_recoveries=True, attention_only=attention)
-        bulk_pages = max(
-            1, (bulk_rest + _HISTORY_BULK_CAP - 1) // _HISTORY_BULK_CAP)
+        bulk_pages = _page_count(bulk_rest, _HISTORY_BULK_CAP)
         bulk_page = min(max(1, bulk_page), bulk_pages)
         # A retained recovery is asking for a decision, so it stays pinned to
         # the first page rather than repeating under every one.
@@ -150,7 +153,7 @@ async def queue_history(
         # layer is capped, so a headline built from it under-reported the
         # history by however much it had dropped.
         bulk_total = len(recoveries) + bulk_rest
-        pages = max(1, (total + _HISTORY_PER_PAGE - 1) // _HISTORY_PER_PAGE)
+        pages = _page_count(total, _HISTORY_PER_PAGE)
         page = min(max(1, page), pages)
         rows = _stamp(job_persistence.history_page(
             _HISTORY_PER_PAGE,
