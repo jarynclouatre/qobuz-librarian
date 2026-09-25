@@ -7,8 +7,8 @@
   --ql-surface: #1a140c;
   --ql-surface-2: #221a0f;
   --ql-surface-hover: #2a2114;
-  --ql-line: rgba(228, 169, 78, 0.16);
-  --ql-line-soft: rgba(228, 169, 78, 0.09);
+  --ql-line: rgb(243 234 215 / 0.12);
+  --ql-line-soft: rgb(243 234 215 / 0.075);
   --ql-text: #f3ead7;
   --ql-text-2: #b9a888;
   --ql-text-3: #8d7c63;
@@ -26,18 +26,18 @@
 
   /* Sidebar, cards, the phone tab bar and the confirm dialog. */
   --ql-rail-top: var(--ql-bg-2);
-  --ql-rail-bottom: #120d07;
-  --ql-card-top: #1d160d;
-  --ql-card-bottom: #191309;
-  --ql-card-line: rgb(228 169 78 / 0.13);
-  --ql-card-shadow: 0 24px 50px -30px rgb(0 0 0 / 0.95), inset 0 1px 0 rgb(255 255 255 / 0.035);
+  --ql-rail-bottom: var(--ql-bg-2);
+  --ql-card-top: var(--ql-surface);
+  --ql-card-bottom: var(--ql-surface);
+  --ql-card-line: var(--ql-line);
+  --ql-card-shadow: none;
   --ql-bar: color-mix(in oklab, var(--ql-bg) 97%, #000);
   --ql-dialog: color-mix(in oklab, var(--ql-bg) 96%, #fff);
-  /* The brass of the main button, the active tab and progress bars. */
-  --ql-brass: linear-gradient(180deg, #f4c473 0%, var(--ql-gold) 45%, #c98a28 100%);
-  --ql-brass-hover: linear-gradient(180deg, #f8cd85 0%, #ecb45c 45%, var(--ql-gold-strong) 100%);
-  --ql-brass-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), inset 0 -1px 0 rgb(0 0 0 / 0.18), 0 6px 20px -8px color-mix(in oklab, var(--ql-gold) 55%, transparent);
-  --ql-brass-bar: linear-gradient(90deg, #c98a28, #f0bc66);
+  /* The main button and progress bars: flat gold. */
+  --ql-brass: var(--ql-gold);
+  --ql-brass-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
+  --ql-brass-shadow: none;
+  --ql-brass-bar: var(--ql-gold);
 
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
@@ -58,8 +58,8 @@
   --ql-surface: #fbf7ee;
   --ql-surface-2: #f1e7d3;
   --ql-surface-hover: #e9dcc4;
-  --ql-line: rgba(146, 94, 20, 0.24);
-  --ql-line-soft: rgba(146, 94, 20, 0.13);
+  --ql-line: rgb(43 32 19 / 0.16);
+  --ql-line-soft: rgb(43 32 19 / 0.09);
   --ql-text: #2b2013;
   --ql-text-2: #6d5a41;
   --ql-text-3: #766446;
@@ -75,18 +75,18 @@
   --ql-shadow: 0 14px 30px -20px rgb(84 56 15 / 0.4);
   --ql-shadow-soft: 0 8px 18px -14px rgb(84 56 15 / 0.28);
 
-  --ql-rail-top: color-mix(in oklab, var(--ql-surface-2) 62%, var(--ql-bg));
-  --ql-rail-bottom: color-mix(in oklab, var(--ql-surface) 96%, var(--ql-bg));
-  --ql-card-top: color-mix(in oklab, var(--ql-surface) 92%, var(--ql-bg));
+  --ql-rail-top: var(--ql-bg-2);
+  --ql-rail-bottom: var(--ql-bg-2);
+  --ql-card-top: var(--ql-surface);
   --ql-card-bottom: var(--ql-surface);
   --ql-card-line: var(--ql-line);
-  --ql-card-shadow: var(--ql-shadow-soft);
+  --ql-card-shadow: none;
   --ql-bar: #efe6d4;
   --ql-dialog: #faf4e8;
-  --ql-brass: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
-  --ql-brass-hover: linear-gradient(180deg, #dda748 0%, #c78a24 55%, #b2761a 100%);
-  --ql-brass-shadow: inset 0 1px 0 rgb(255 255 255 / 0.3), inset 0 -1px 0 rgb(0 0 0 / 0.16), 0 6px 18px -8px rgb(168 107 18 / 0.5);
-  --ql-brass-bar: linear-gradient(90deg, #a86b12, #d59a3a);
+  --ql-brass: var(--ql-gold);
+  --ql-brass-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
+  --ql-brass-shadow: none;
+  --ql-brass-bar: var(--ql-gold);
 
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
@@ -151,15 +151,12 @@
 }
 
 .ql-btn-primary {
-  border-color: rgba(0, 0, 0, 0.3);
-  background: var(--ql-brass);
-  box-shadow: var(--ql-brass-shadow);
+  border-color: transparent;
+  background: var(--ql-gold);
   color: var(--ql-action-ink);
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .ql-btn-primary:hover:not(:disabled):not(.is-disabled) {
-  border-color: rgba(0, 0, 0, 0.3);
   background: var(--ql-brass-hover);
 }
 
@@ -170,15 +167,13 @@
 .ql-btn-primary.is-disabled {
   border-color: color-mix(in oklab, var(--ql-text) 14%, transparent);
   background: color-mix(in oklab, var(--ql-surface-2) 60%, transparent);
-  box-shadow: none;
   color: var(--ql-text-3);
-  text-shadow: none;
   opacity: 1;
 }
 
 .ql-btn-secondary {
-  border-color: color-mix(in oklab, var(--ql-text) 18%, transparent);
-  background-color: color-mix(in oklab, var(--ql-surface-2) 54%, transparent);
+  border-color: color-mix(in oklab, var(--ql-text) 20%, transparent);
+  background-color: transparent;
   color: var(--ql-text);
 }
 
@@ -229,24 +224,13 @@
    one obvious button to press; it just stops wearing the colour of a safe
    one. Disabled stays with the primary's own disabled treatment. */
 .ql-btn-primary[data-irreversible]:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
-  border-color: rgba(0, 0, 0, 0.32);
-  background: linear-gradient(180deg,
-    color-mix(in oklab, var(--ql-danger) 90%, #000) 0%,
-    color-mix(in oklab, var(--ql-danger) 82%, #000) 55%,
-    color-mix(in oklab, var(--ql-danger) 74%, #000) 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
-    0 6px 20px -8px color-mix(in oklab, var(--ql-danger) 55%, transparent);
+  border-color: transparent;
+  background: color-mix(in oklab, var(--ql-danger) 80%, #000);
   color: #fdf3ef;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.24);
 }
 
 .ql-btn-primary[data-irreversible]:hover:not(:disabled):not([aria-disabled="true"]):not(.is-disabled) {
-  background: linear-gradient(180deg,
-    color-mix(in oklab, var(--ql-danger) 96%, #000) 0%,
-    color-mix(in oklab, var(--ql-danger) 88%, #000) 55%,
-    color-mix(in oklab, var(--ql-danger) 80%, #000) 100%);
+  background: color-mix(in oklab, var(--ql-danger) 88%, #000);
 }
 
 .ql-btn-sm {
@@ -282,7 +266,7 @@
 
 .ql-input:focus {
   border-color: color-mix(in oklab, var(--ql-gold) 72%, var(--ql-line));
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ql-gold) 18%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--ql-gold) 72%, var(--ql-line));
 }
 
 .ql-select {
@@ -306,18 +290,19 @@
   border: 1px solid color-mix(in oklab, var(--ql-text) 28%, transparent);
   border-radius: 0.1875rem;
   background-color: color-mix(in oklab, var(--ql-bg) 72%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, #000 16%, transparent);
   cursor: pointer;
 }
 
 .ql-checkbox:hover {
-  border-color: color-mix(in oklab, var(--ql-gold) 54%, var(--ql-line));
+  border-color: color-mix(in oklab, var(--ql-text) 50%, transparent);
 }
 
+/* Ticked boxes are cream on night and ink on winter, not gold: a page of
+   picks would otherwise be a column of gold squares. */
 .ql-checkbox:checked {
-  border-color: var(--ql-gold);
-  background-color: var(--ql-gold);
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.5 8.2 6.6 11 12.8 4.7' fill='none' stroke='%23241803' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  border-color: var(--ql-text);
+  background-color: var(--ql-text);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.5 8.2 6.6 11 12.8 4.7' fill='none' stroke='%23140e07' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-position: center;
   background-repeat: no-repeat;
   background-size: 0.82rem 0.82rem;
@@ -326,12 +311,20 @@
 /* Part-selected groups. appearance:none suppresses the browser's own mixed
    mark, so without this a half-ticked artist is drawn as an empty box. */
 .ql-checkbox:indeterminate {
-  border-color: var(--ql-gold);
-  background-color: var(--ql-gold);
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M4 8h8' fill='none' stroke='%23241803' stroke-width='2.1' stroke-linecap='round'/%3E%3C/svg%3E");
+  border-color: var(--ql-text);
+  background-color: var(--ql-text);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M4 8h8' fill='none' stroke='%23140e07' stroke-width='2.1' stroke-linecap='round'/%3E%3C/svg%3E");
   background-position: center;
   background-repeat: no-repeat;
   background-size: 0.82rem 0.82rem;
+}
+
+[data-theme="winter"] .ql-checkbox:checked {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.5 8.2 6.6 11 12.8 4.7' fill='none' stroke='%23fbf7ee' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+[data-theme="winter"] .ql-checkbox:indeterminate {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M4 8h8' fill='none' stroke='%23fbf7ee' stroke-width='2.1' stroke-linecap='round'/%3E%3C/svg%3E");
 }
 
 .ql-checkbox:focus-visible {
@@ -354,10 +347,10 @@
 }
 
 .ql-toggle:checked {
-  border-color: color-mix(in oklab, var(--ql-gold) 72%, var(--ql-line));
+  border-color: var(--ql-text);
   background:
-    radial-gradient(circle at calc(100% - 0.62rem) 50%, var(--ql-gold-ink) 0 0.34rem, transparent 0.36rem),
-    var(--ql-gold);
+    radial-gradient(circle at calc(100% - 0.62rem) 50%, var(--ql-bg) 0 0.34rem, transparent 0.36rem),
+    var(--ql-text);
 }
 
 .ql-toggle:focus-visible {

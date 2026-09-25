@@ -659,7 +659,7 @@
     if (download) {
       var owned = document.createElement("span");
       owned.className = "ql-owned-label";
-      owned.textContent = "Owned";
+      owned.textContent = "In library";
       download.replaceWith(owned);
     }
   }

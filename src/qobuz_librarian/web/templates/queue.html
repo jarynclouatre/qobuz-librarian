@@ -129,7 +129,7 @@
       <h2 id="queue-active-heading">Running now</h2>
       <span class="ql-count">{{ active_jobs | length }}</span>
     </header>
-    <div class="ql-activity-list ql-panelize">
+    <div class="ql-activity-list">
       {% for job in active_jobs %}{{ queue_job_row(job) }}{% endfor %}
     </div>
   </section>
@@ -141,7 +141,7 @@
       <h2 id="queue-waiting-heading">Waiting</h2>
       <span class="ql-count">{{ waiting_jobs | length }}</span>
     </header>
-    <div class="ql-activity-list ql-panelize">
+    <div class="ql-activity-list">
       {% for job in waiting_jobs %}{{ queue_job_row(job) }}{% endfor %}
     </div>
   </section>

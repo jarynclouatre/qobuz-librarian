@@ -114,7 +114,7 @@
     <p class="ql-mono-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
   </header>
   <div class="ql-history-cards">
-    <div class="ql-activity-list ql-panelize">
+    <div class="ql-activity-list">
       {% for job in bulk_jobs %}
       <article class="ql-activity-row ql-history-row ql-history-row--bulk{% if job.status == 'failed' %} is-error{% endif %}">
         {{ labels.kind_tile(job, 'ql-job-tile--done') }}
@@ -161,7 +161,7 @@
     <h2 id="history-downloads-heading">Downloads</h2>
     <p class="ql-mono-meta">{{ total }}{% if attention_only and total > jobs|length %} · showing {{ jobs|length }}; open again for the rest{% elif pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
   </header>
-  <div class="ql-activity-list ql-panelize">
+  <div class="ql-activity-list">
     {% for job in jobs %}
     <article class="ql-activity-row ql-history-row ql-history-row--compact{% if job.status == 'failed' %} is-error{% endif %}">
       {{ labels.kind_tile(job, 'ql-job-tile--done') }}

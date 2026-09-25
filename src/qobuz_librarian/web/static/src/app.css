@@ -118,21 +118,7 @@ h1, h2, h3 {
 /* App shell. */
 .ql-app-body {
   color: var(--color-base-content);
-  background:
-    radial-gradient(75rem 35rem at 36% -10%,
-      color-mix(in oklab, var(--ql-gold) 10%, transparent) 0%,
-      transparent 68%),
-    radial-gradient(56rem 44rem at 108% 112%,
-      color-mix(in oklab, var(--ql-gold) 4.5%, transparent) 0%,
-      transparent 62%),
-    linear-gradient(180deg, var(--ql-bg) 0%, var(--ql-bg) 60%, color-mix(in oklab, var(--ql-bg) 82%, #000) 100%);
-}
-[data-theme="winter"] .ql-app-body {
-  background:
-    radial-gradient(86rem 32rem at 30rem -18rem,
-      color-mix(in oklab, var(--ql-gold) 14%, transparent) 0%,
-      transparent 58%),
-    linear-gradient(180deg, var(--ql-bg-2) 0%, var(--ql-bg) 18rem, color-mix(in oklab, var(--ql-bg) 92%, #fff) 100%);
+  background-color: var(--ql-bg);
 }
 .ql-noscript {
   border-bottom: 1px solid color-mix(in oklab, var(--ql-danger) 34%, transparent);
@@ -157,36 +143,15 @@ h1, h2, h3 {
   display: flex;
   flex-direction: column;
 }
-@media (min-width: 1024px) {
-  .ql-app-content {
-    background:
-      linear-gradient(90deg, color-mix(in oklab, var(--ql-text) 2.5%, transparent) 0, transparent 9rem);
-  }
-}
 .ql-sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
   flex-direction: column;
   justify-content: space-between;
-  border-right: 1px solid var(--ql-line);
-  background: linear-gradient(180deg, var(--ql-rail-top) 0%, var(--ql-rail-bottom) 100%);
+  border-right: 1px solid var(--ql-line-soft);
+  background-color: var(--ql-rail-top);
   padding: 1.25rem 0.875rem;
-  box-shadow: inset -1px 0 0 color-mix(in oklab, #000 22%, transparent);
-}
-[data-theme="night"] .ql-sidebar {
-  border-right-color: var(--ql-line-soft);
-}
-[data-theme="night"] .ql-sidebar::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 11rem;
-  background: radial-gradient(14rem 9.5rem at 34% 1.75rem,
-    color-mix(in oklab, var(--ql-gold) 10%, transparent) 0%, transparent 72%);
-  pointer-events: none;
 }
 .ql-sidebar-top,
 .ql-sidebar-bottom {
@@ -221,12 +186,7 @@ h1, h2, h3 {
   right: 0.5rem;
   bottom: 0;
   height: 1px;
-  background: linear-gradient(90deg,
-    color-mix(in oklab, var(--ql-gold) 28%, transparent),
-    color-mix(in oklab, var(--ql-gold) 2%, transparent));
-}
-[data-theme="night"] .ql-brand-mark {
-  filter: drop-shadow(0 0 10px color-mix(in oklab, var(--ql-gold) 35%, transparent));
+  background-color: var(--ql-line-soft);
 }
 .ql-sidebar-brand span,
 .ql-mobile-brand span {
@@ -287,7 +247,6 @@ h1, h2, h3 {
   height: 0.4375rem;
   border-radius: 50%;
   background: var(--ql-warning);
-  box-shadow: 0 0 0.5rem color-mix(in oklab, var(--ql-warning) 65%, transparent);
 }
 .ql-nav-link,
 .ql-sidebar-action {
@@ -307,30 +266,13 @@ h1, h2, h3 {
 }
 .ql-nav-link:hover,
 .ql-sidebar-action:hover {
-  background-color: color-mix(in oklab, var(--ql-gold) 7%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
   color: var(--ql-text);
 }
 .ql-nav-link.is-active {
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 16%, transparent) 0%,
-      color-mix(in oklab, var(--ql-gold) 6%, transparent) 100%);
-  color: var(--ql-gold);
+  background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
+  color: var(--ql-text);
   font-weight: 600;
-  box-shadow:
-    inset 0 0 0 1px color-mix(in oklab, var(--ql-gold) 26%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 0 20px -6px color-mix(in oklab, var(--ql-gold) 40%, transparent);
-  text-shadow: 0 0 14px color-mix(in oklab, var(--ql-gold) 45%, transparent);
-}
-[data-theme="winter"] .ql-nav-link.is-active {
-  background: var(--ql-brass);
-  color: var(--ql-action-ink);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.28),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
-    0 4px 14px -6px rgba(168, 107, 18, 0.5);
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 .ql-nav-link svg,
 .ql-sidebar-action svg,
@@ -364,7 +306,6 @@ h1, h2, h3 {
   align-self: center;
   border-radius: 50%;
   background-color: var(--ql-gold);
-  box-shadow: 0 0 0.5rem color-mix(in oklab, var(--ql-gold) 65%, transparent);
 }
 .ql-sidebar-alert {
   display: flex;
@@ -395,7 +336,7 @@ h1, h2, h3 {
 .ql-sidebar-meta a {
   color: var(--ql-text-3);
   text-decoration: none;
-  border-bottom: 1px solid color-mix(in oklab, var(--ql-gold) 24%, transparent);
+  border-bottom: 1px solid var(--ql-line);
   padding-bottom: 1px;
 }
 .ql-sidebar-meta a:hover {
@@ -442,13 +383,7 @@ h1, h2, h3 {
   height: 1.35rem;
 }
 .ql-tabbar .ql-tab.is-active {
-  color: var(--ql-gold);
-}
-[data-theme="night"] .ql-tabbar .ql-tab.is-active {
-  text-shadow: 0 0 14px color-mix(in oklab, var(--ql-gold) 45%, transparent);
-}
-[data-theme="winter"] .ql-tabbar .ql-tab.is-active {
-  color: var(--ql-gold-strong);
+  color: var(--ql-text);
 }
 .ql-tab-slot {
   position: relative;
@@ -481,7 +416,6 @@ h1, h2, h3 {
   height: 6px;
   border-radius: 50%;
   background: var(--ql-gold);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--ql-gold) 60%, transparent);
 }
 /* The tab bar's own count. It has its own name because it is a filled pill on
    a dark bar, while .ql-count is a tinted chip beside a label; sharing
@@ -496,8 +430,8 @@ h1, h2, h3 {
   min-width: 1.05rem;
   height: 1.05rem;
   border-radius: 999px;
-  background: var(--ql-gold);
-  color: var(--ql-action-ink);
+  background: var(--ql-text);
+  color: var(--ql-bg);
   font-family: var(--ql-font-mono);
   font-size: 0.65rem;
   font-weight: 700;
@@ -532,12 +466,9 @@ h1, h2, h3 {
   overscroll-behavior: contain;
   border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-xl);
-  background: linear-gradient(180deg, var(--ql-card-top) 0%, var(--ql-card-bottom) 100%);
-  box-shadow: 0 24px 50px -24px rgba(0, 0, 0, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.035);
-  padding: 0.625rem 0.75rem 0.75rem;
-}
-[data-theme="winter"] .ql-sheet {
+  background-color: var(--ql-surface);
   box-shadow: var(--ql-shadow);
+  padding: 0.625rem 0.75rem 0.75rem;
 }
 .ql-sheet-head {
   display: flex;
@@ -578,28 +509,21 @@ h1, h2, h3 {
   z-index: 30;
   display: flex;
   justify-content: space-between;
-  min-height: 3.25rem;
+  min-height: 2.75rem;
   align-items: center;
   gap: 0.625rem;
-  border-bottom: 1px solid var(--ql-line);
-  background:
-    linear-gradient(180deg, color-mix(in oklab, var(--ql-surface-2) 62%, var(--ql-bg)) 0%,
-    color-mix(in oklab, var(--ql-surface) 82%, var(--ql-bg)) 100%);
-  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--ql-line-soft);
+  background-color: var(--ql-bg);
+  padding: 0 0.5rem 0 1rem;
   /* Paired with viewport-fit=cover in the head: the page extends into the
      display cutout, so the bar holds itself clear of the status bar. Must
-     stay after the padding shorthand or the shorthand resets it. On a device
-     without a cutout this resolves to the same 0.55rem. */
-  padding-top: calc(0.55rem + env(safe-area-inset-top));
-  box-shadow: 0 1px 0 color-mix(in oklab, var(--ql-gold) 9%, transparent);
+     stay after the padding shorthand or the shorthand resets it. */
+  padding-top: env(safe-area-inset-top);
 }
 @media (min-width: 1024px) {
   .ql-mobilebar {
     display: none;
   }
-}
-[data-theme="night"] .ql-mobilebar {
-  border-bottom-color: var(--ql-line-soft);
 }
 .ql-mobile-actions {
   display: flex;
@@ -610,6 +534,11 @@ h1, h2, h3 {
 }
 .ql-mobilebar > .ql-mobile-brand {
   justify-content: flex-start;
+  font-size: 1rem;
+}
+.ql-mobilebar .ql-brand-mark {
+  width: 1.625rem;
+  height: 1.625rem;
 }
 .ql-icon-button {
   display: inline-grid;
@@ -623,7 +552,7 @@ h1, h2, h3 {
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .ql-icon-button:hover {
-  background-color: color-mix(in oklab, var(--ql-gold) 9%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 7%, transparent);
 }
 .ql-icon-button.is-error {
   color: var(--color-error);
@@ -668,7 +597,7 @@ details.ql-mobile-drawer[open]::before {
   width: 100%;
   margin-inline: auto;
   flex: 1;
-  padding: 0.9rem 0.7rem 1.75rem;
+  padding: 0.875rem 1rem 1.75rem;
 }
 .ql-main:focus {
   outline: none;
@@ -750,7 +679,7 @@ details.ql-mobile-drawer[open]::before {
 }
 @media (min-width: 768px) {
   .ql-dashboard-title h1 {
-    font-size: 2.35rem;
+    font-size: 2.4rem;
   }
 }
 .ql-dashboard-title p {
@@ -762,6 +691,9 @@ details.ql-mobile-drawer[open]::before {
   display: grid;
   gap: var(--ql-space-3);
 }
+.ql-dashboard-notices:not(:has(*)) {
+  display: none;
+}
 .ql-search-workspace {
   display: grid;
   max-width: 70rem;
@@ -770,14 +702,8 @@ details.ql-mobile-drawer[open]::before {
 .ql-panel {
   border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-lg);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 32%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-surface) 94%, var(--ql-bg)) 100%);
+  background-color: var(--ql-surface);
   padding: var(--ql-pad-card);
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, var(--ql-text) 5%, transparent),
-    var(--ql-shadow-soft);
 }
 .ql-search-panel:not([data-qobuz-setup-card]) {
   border: 0;
@@ -790,12 +716,6 @@ details.ql-mobile-drawer[open]::before {
   max-width: 54rem;
   overflow: hidden;
   padding: 0;
-}
-[data-theme="night"] .ql-panel {
-  border-color: var(--ql-line);
-  background:
-    linear-gradient(180deg, color-mix(in oklab, var(--ql-surface) 92%, #000) 0%,
-    var(--ql-surface) 100%);
 }
 [data-theme="night"] .ql-search-panel:not([data-qobuz-setup-card]) {
   background: transparent;
@@ -913,7 +833,7 @@ details.ql-mobile-drawer[open]::before {
   min-width: auto;
   border-radius: 0;
   padding: 0.25rem 0 0.32rem;
-  color: color-mix(in oklab, var(--color-base-content) 50%, transparent);
+  color: var(--ql-text-3);
   font-family: var(--ql-font-ui);
   font-size: 0.875rem;
   font-weight: 720;
@@ -925,7 +845,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-segmented label:has(input:checked) span {
   color: var(--ql-text);
-  border-bottom-color: var(--ql-gold);
+  border-bottom-color: var(--ql-text);
 }
 .ql-segmented label:has(input:focus-visible) span {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
@@ -952,22 +872,15 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.625rem;
   height: 3.125rem;
   padding: 0 1.05rem;
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 20%, transparent);
+  border: 1px solid color-mix(in oklab, var(--ql-text) 16%, transparent);
   border-radius: 0.6875rem;
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 55%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-bg) 42%, var(--ql-surface)) 100%);
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, var(--ql-text) 4%, transparent),
-    0 0.5rem 1.375rem -1rem oklch(0% 0 0 / 0.9);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  background-color: color-mix(in oklab, var(--ql-text) 4%, var(--ql-bg));
+  transition: border-color 150ms ease;
 }
 .ql-search-field:focus-within {
-  border-color: color-mix(in oklab, var(--ql-gold) 55%, transparent);
+  border-color: color-mix(in oklab, var(--ql-text) 32%, transparent);
   outline: 2px solid var(--ql-gold-strong);
   outline-offset: 2px;
-  box-shadow: 0 0 2.5rem -1rem color-mix(in oklab, var(--ql-gold) 24%, transparent);
 }
 .ql-search-field-icon {
   width: 1.05rem;
@@ -1006,24 +919,18 @@ details.ql-mobile-drawer[open]::before {
   gap: var(--ql-space-2);
   height: 3.125rem;
   padding: 0 var(--ql-space-6);
-  border: 1px solid oklch(0% 0 0 / 0.3);
+  border: 0;
   border-radius: 0.6875rem;
-  background: var(--ql-brass);
+  background: var(--ql-gold);
   color: var(--ql-action-ink);
   font-size: 0.875rem;
   font-weight: 640;
   line-height: 1;
-  text-shadow: 0 1px 0 oklch(100% 0 0 / 0.18);
-  box-shadow: var(--ql-brass-shadow);
   cursor: pointer;
-  transition: filter 150ms ease, box-shadow 150ms ease;
+  transition: background-color 150ms ease;
 }
 .ql-search-submit:hover {
-  filter: brightness(1.06);
-}
-.ql-search-submit:active {
-  filter: brightness(0.95);
-  box-shadow: inset 0 1px 0 oklch(0% 0 0 / 0.18);
+  background: var(--ql-brass-hover);
 }
 .ql-search-submit:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 70%, transparent);
@@ -1033,6 +940,67 @@ details.ql-mobile-drawer[open]::before {
   width: 0.875rem;
   height: 0.875rem;
   border-width: 1.75px;
+}
+.ql-search-submit-icon {
+  display: none;
+}
+/* On a phone the keyboard's own Search key submits, so the button folds into
+   the end of the field as an icon instead of a second full-width bar. */
+@media (max-width: 639.98px) {
+  /* The query is already in the field right above, so the phone keeps the
+     heading for screen readers only and runs the count and the note as one
+     short paragraph. */
+  .ql-search-query-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ql-search-context-main:has(.ql-search-query-title) {
+    display: block;
+  }
+  .ql-search-context-main:has(.ql-search-query-title) > .ql-search-context-meta {
+    display: inline;
+  }
+  .ql-search-context-main:has(.ql-search-query-title) > p.ql-search-context-meta::before {
+    content: " · ";
+  }
+  .ql-search-row {
+    position: relative;
+  }
+  .ql-search-field {
+    height: 3rem;
+    padding-right: 3rem;
+  }
+  .ql-search-field-icon {
+    display: none;
+  }
+  .ql-search-submit {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 3rem;
+    height: 3rem;
+    padding: 0;
+    border-radius: 0 0.6875rem 0.6875rem 0;
+    background: transparent;
+    color: var(--ql-text-2);
+  }
+  .ql-search-submit:hover {
+    background: transparent;
+    color: var(--ql-text);
+  }
+  .ql-search-submit-icon {
+    display: block;
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .ql-search-submit:has(.htmx-request) .ql-search-submit-icon,
+  .ql-search-submit-label {
+    display: none;
+  }
 }
 .ql-spinner {
   width: 1rem;
@@ -1109,8 +1077,7 @@ details.ql-mobile-drawer[open]::before {
   width: 5.75rem;
   height: 5.75rem;
   margin-bottom: 0.65rem;
-  color: color-mix(in oklab, var(--ql-gold) 72%, var(--ql-text-3));
-  filter: drop-shadow(0 0 1.4rem color-mix(in oklab, var(--ql-gold) 22%, transparent));
+  color: var(--ql-text-3);
 }
 .ql-search-idle p {
   margin: 0;
@@ -1184,21 +1151,24 @@ details.ql-mobile-drawer[open]::before {
     width: 100%;
   }
 }
-.ql-results-panel,
-.ql-activity-list,
 .ql-progress-panel,
 .ql-connect-cta,
 .ql-auth-panel {
   border: 1px solid var(--ql-line-soft);
   border-radius: var(--ql-radius);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 18%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-surface) 92%, var(--ql-bg)) 100%);
-  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ql-text) 4%, transparent);
+  background-color: var(--ql-surface);
+}
+/* Result and activity lists are rows on the page itself: a hairline above
+   the first and below the last, one between each, no box around them. */
+.ql-results-panel,
+.ql-activity-list {
+  border-top: 1px solid var(--ql-line-soft);
+  border-bottom: 1px solid var(--ql-line-soft);
 }
 [data-theme="night"] .ql-results-panel,
-[data-theme="night"] .ql-activity-list,
+[data-theme="night"] .ql-activity-list {
+  border-color: var(--ql-line);
+}
 [data-theme="night"] .ql-progress-panel,
 [data-theme="night"] .ql-connect-cta,
 [data-theme="night"] .ql-auth-panel {
@@ -1233,7 +1203,7 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   flex-direction: column;
   gap: 0.875rem;
-  padding: 0.875rem 1rem;
+  padding: 0.875rem 0;
   transition: background-color 150ms ease;
 }
 @media (min-width: 640px) {
@@ -1246,7 +1216,7 @@ details.ql-mobile-drawer[open]::before {
   }
 }
 .ql-result-row:hover {
-  background-color: color-mix(in oklab, var(--ql-gold) 5%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 3%, transparent);
 }
 .ql-result-main {
   display: flex;
@@ -1321,33 +1291,10 @@ details.ql-mobile-drawer[open]::before {
 }
 @media (max-width: 519.98px) {
   .ql-search-results .ql-results-panel {
-    border: 0;
-    background-color: transparent;
     overflow: visible;
   }
-  .ql-result-list {
-    display: grid;
-    gap: var(--ql-space-2);
-  }
-  .ql-result-list > * + *,
   .ql-version-panel {
     border-top: 0;
-  }
-  .ql-result-list > .ql-result-row {
-    border: 1px solid var(--ql-line-soft);
-    border-radius: var(--ql-radius);
-    background:
-      linear-gradient(180deg,
-        color-mix(in oklab, var(--ql-surface-2) 18%, var(--ql-surface)) 0%,
-        color-mix(in oklab, var(--ql-surface) 91%, var(--ql-bg)) 100%);
-    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ql-text) 4%, transparent);
-  }
-  [data-theme="night"] .ql-result-list > .ql-result-row {
-    border-color: var(--ql-line);
-    background-color: color-mix(in oklab, var(--ql-surface) 88%, #000);
-  }
-  .ql-result-row {
-    padding: 0.875rem;
   }
   .ql-result-main {
     align-items: flex-start;
@@ -1364,43 +1311,19 @@ details.ql-mobile-drawer[open]::before {
     line-height: 1.34;
   }
   .ql-result-inline-quality {
-    display: inline-grid;
-    height: 1.125rem;
-    min-width: 1.55rem;
-    place-items: center;
-    border: 0;
-    border-radius: 0.25rem;
-    margin-left: 0.35rem;
-    padding: 0 0.32rem;
-    font-size: 0.6875rem;
-    font-weight: 700;
-    line-height: 1;
+    display: inline;
+    margin-left: 0.4rem;
+    font-family: var(--ql-font-mono);
+    font-size: 0.75rem;
+    font-weight: 500;
     white-space: nowrap;
-    vertical-align: -0.08rem;
-    box-shadow: inset 0 0 0 1px var(--ql-quality-edge, currentColor);
-  }
-  .ql-search-results .ql-artist-results {
-    border: 1px solid color-mix(in oklab, var(--ql-line-soft) 80%, transparent);
-    border-radius: var(--ql-radius);
-    background-color: color-mix(in oklab, var(--ql-surface) 82%, var(--ql-bg));
-    overflow: hidden;
-  }
-  .ql-artist-results .ql-result-list {
-    gap: 0;
   }
   .ql-artist-results .ql-result-list > .ql-result-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.7rem;
-    border: 0;
-    border-bottom: 1px solid color-mix(in oklab, var(--ql-line-soft) 76%, transparent);
-    border-radius: 0;
-    background-color: transparent;
-    padding: 0.78rem;
-  }
-  .ql-artist-results .ql-result-list > .ql-result-row:last-child {
-    border-bottom: 0;
+    padding-block: 0.78rem;
   }
   .ql-result-row--artist .ql-result-main {
     align-items: center;
@@ -1432,47 +1355,63 @@ details.ql-mobile-drawer[open]::before {
   .ql-result-row--artist .ql-result-action-form .ql-btn {
     width: auto;
     min-width: 5.8rem;
-    border-color: color-mix(in oklab, var(--ql-gold) 44%, transparent);
-    background: transparent;
-    color: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-text));
     padding-inline: 0.68rem;
   }
 }
+/* The Tracks and Versions disclosures: quiet text with the review's chevron,
+   pointing right while closed and down while open. In a table row the Tracks
+   column already carries the count, so there it is the chevron alone. */
 .ql-vchip {
   position: relative;
   display: inline-flex;
+  min-height: 1.75rem;
   align-items: center;
-  border: 1px solid var(--ql-line-soft);
-  border-radius: 0.25rem;
-  padding: 0.16rem 0.32rem;
+  border: 0;
+  border-radius: var(--ql-radius-sm);
+  padding: 0 0.375rem;
   background: transparent;
-  color: var(--ql-text-3);
-  font-family: var(--ql-font-mono);
-  font-size: 0.65625rem;
-  font-weight: 480;
+  color: var(--ql-text-2);
+  font-family: var(--ql-font-ui);
+  font-size: 0.8125rem;
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: color 150ms ease, border-color 150ms ease, background-color 150ms ease;
+  transition: color 150ms ease, background-color 150ms ease;
 }
 .ql-vchip::after {
-  content: "▾";
-  margin-left: 0.3rem;
-  font-size: 1.25em;
-  line-height: 1;
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: none;
+  margin-left: 0.45rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
   transition: transform 150ms ease;
 }
 .ql-vchip[aria-expanded="true"]::after {
-  transform: rotate(180deg);
+  transform: translateY(-0.1rem) rotate(45deg);
 }
 .ql-vchip:hover {
-  color: var(--ql-text-2);
-  border-color: var(--ql-line);
+  color: var(--ql-text);
+  background-color: color-mix(in oklab, var(--ql-text) 6%, transparent);
 }
 .ql-vchip[aria-expanded="true"] {
-  color: var(--ql-gold);
-  border-color: color-mix(in oklab, var(--ql-gold) 40%, transparent);
-  background-color: color-mix(in oklab, var(--ql-gold) 8%, transparent);
+  color: var(--ql-text);
+}
+.ql-table-row .ql-vchip-wide {
+  display: none;
+}
+@media (min-width: 760px) {
+  .ql-table-row .ql-vchip:has(.ql-vchip-wide) {
+    width: 1.75rem;
+    justify-content: center;
+    padding: 0;
+  }
+  .ql-table-row .ql-vchip:has(.ql-vchip-wide)::after {
+    margin-left: 0;
+  }
 }
 .ql-vchip:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
@@ -1498,9 +1437,8 @@ details.ql-mobile-drawer[open]::before {
 .ql-tracklist {
   display: grid;
   gap: 0.05rem;
-  border-top: 1px solid color-mix(in oklab, var(--ql-gold) 8%, transparent);
+  border-top: 1px solid var(--ql-line-soft);
   padding: 0.5rem 0.9rem 0.65rem;
-  background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
 }
 .ql-table-body > .ql-tracklist-panel .ql-tracklist {
   padding-left: 4.53rem;
@@ -1555,20 +1493,13 @@ details.ql-mobile-drawer[open]::before {
 .ql-track-disc:first-child {
   margin-top: 0;
 }
-[data-theme="winter"] .ql-tracklist {
-  --ql-subrow-bg: oklch(0% 0 0 / 0.045);
-}
 .ql-tracklist-panel + .ql-grid-version-row {
   border-top: 1px solid color-mix(in oklab, var(--ql-line-soft) 72%, transparent);
 }
 .ql-table-row.ql-subrow {
-  background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
-  border-top: 1px solid color-mix(in oklab, var(--ql-gold) 5%, transparent);
+  border-top-color: var(--ql-line-soft);
   min-height: 3rem;
   padding-block: 0.45rem;
-}
-[data-theme="winter"] .ql-table-row.ql-subrow {
-  --ql-subrow-bg: oklch(0% 0 0 / 0.045);
 }
 .ql-subcell {
   position: relative;
@@ -1585,7 +1516,7 @@ details.ql-mobile-drawer[open]::before {
   top: -1.2rem;
   bottom: -1.2rem;
   width: 1px;
-  background: color-mix(in oklab, var(--ql-gold) 22%, transparent);
+  background: var(--ql-line);
 }
 .ql-subrow-last .ql-subcell::before {
   bottom: 50%;
@@ -1597,7 +1528,7 @@ details.ql-mobile-drawer[open]::before {
   top: 50%;
   width: 0.875rem;
   height: 1px;
-  background: color-mix(in oklab, var(--ql-gold) 22%, transparent);
+  background: var(--ql-line);
 }
 .ql-subcell > div {
   min-width: 0;
@@ -1625,28 +1556,29 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text);
   font-weight: 560;
 }
+/* Quality, "In library" and a part-finished album are facts about a row,
+   not things to press, so they are plain coloured text rather than chips. */
 .ql-owned-label,
 .ql-partial-label,
 .ql-quality-badge {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: var(--ql-space-1);
-  border: 1px solid var(--ql-quality-edge, currentColor);
-  border-radius: 0.3125rem;
-  padding: 0.3rem 0.5rem;
-  color: var(--ql-quality-ink, currentColor);
-  font-family: var(--ql-font-mono);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  line-height: 1;
+  line-height: 1.2;
   white-space: nowrap;
+}
+.ql-quality-badge {
+  font-family: var(--ql-font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.ql-owned-label,
+.ql-partial-label {
+  font-size: 0.8125rem;
+  font-weight: 550;
 }
 .ql-owned-label {
   color: var(--ql-owned);
-  border-color: color-mix(in oklab, var(--ql-owned) 30%, transparent);
-  background-color: color-mix(in oklab, var(--ql-owned) 7%, transparent);
 }
 .ql-owned-label svg {
   width: 0.875rem;
@@ -1657,8 +1589,6 @@ details.ql-mobile-drawer[open]::before {
    its download button. Reads as a caution, not a completion. */
 .ql-partial-label {
   color: var(--ql-warning);
-  border-color: color-mix(in oklab, var(--ql-warning) 32%, transparent);
-  background-color: color-mix(in oklab, var(--ql-warning) 8%, transparent);
 }
 .ql-search-quality-status {
   display: inline-flex;
@@ -1785,12 +1715,12 @@ details.ql-mobile-drawer[open]::before {
   transition: transform 150ms ease, background-color 150ms ease;
 }
 .ql-search-filter[aria-pressed="true"] .ql-toggle-switch {
-  border-color: color-mix(in oklab, var(--ql-gold) 46%, transparent);
-  background-color: color-mix(in oklab, var(--ql-gold) 26%, transparent);
+  border-color: var(--ql-text);
+  background-color: var(--ql-text);
 }
 .ql-search-filter[aria-pressed="true"] .ql-toggle-switch i {
   transform: translateX(0.9375rem);
-  background-color: var(--ql-gold);
+  background-color: var(--ql-bg);
 }
 .ql-search-filter:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
@@ -1822,8 +1752,8 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text-2);
 }
 .ql-search-view-toggle button.is-active {
-  color: var(--ql-gold);
-  background-color: color-mix(in oklab, var(--ql-gold) 10%, transparent);
+  color: var(--ql-text);
+  background-color: color-mix(in oklab, var(--ql-text) 9%, transparent);
 }
 .ql-view-icon {
   width: 0.9375rem;
@@ -1850,17 +1780,11 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   align-items: center;
   gap: 0.875rem;
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 30%, transparent);
+  border: 1px solid var(--ql-line);
   border-radius: 0.8125rem;
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 11%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-gold) 6%, var(--ql-surface)) 100%);
+  background-color: var(--ql-surface);
   padding: 0.625rem 0.75rem 0.625rem 1.1875rem;
-  box-shadow:
-    0 0.875rem 1.875rem -1.125rem oklch(0% 0 0 / 0.9),
-    inset 0 1px 0 oklch(100% 0 0 / 0.045),
-    0 0 1.625rem -0.875rem color-mix(in oklab, var(--ql-gold) 50%, transparent);
+  box-shadow: var(--ql-shadow-soft);
 }
 .ql-bulk-count {
   color: var(--ql-text);
@@ -1909,11 +1833,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-table-head {
   min-height: 2.625rem;
   border-bottom: 1px solid var(--ql-line);
-  padding: 0 var(--ql-space-4);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 7%, transparent),
-      color-mix(in oklab, var(--ql-gold) 3%, transparent));
+  padding: 0 var(--ql-space-1);
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
   font-size: 0.65625rem;
@@ -1929,8 +1849,8 @@ details.ql-mobile-drawer[open]::before {
 .ql-table-row {
   min-height: 4rem;
   border-top: 1px solid var(--ql-line-soft);
-  padding: 0.56rem 1rem;
-  transition: background-color 150ms ease, box-shadow 150ms ease;
+  padding: 0.56rem var(--ql-space-1);
+  transition: background-color 150ms ease;
 }
 .ql-table-body > .ql-table-row:first-child {
   border-top: 0;
@@ -1939,21 +1859,10 @@ details.ql-mobile-drawer[open]::before {
   border-top-color: var(--ql-line);
 }
 .ql-table-row:hover {
-  background-color: color-mix(in oklab, var(--ql-gold) 5%, transparent);
-}
-.ql-table-row.ql-subrow:hover {
-  background:
-    linear-gradient(
-      color-mix(in oklab, var(--ql-gold) 4%, transparent),
-      color-mix(in oklab, var(--ql-gold) 4%, transparent)),
-    var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
+  background-color: color-mix(in oklab, var(--ql-text) 3%, transparent);
 }
 .ql-table-row:has(.ql-checkbox:checked) {
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 8.5%, transparent),
-      color-mix(in oklab, var(--ql-gold) 5%, transparent));
-  box-shadow: inset 0.1875rem 0 0 var(--ql-gold);
+  background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
 }
 .ql-table-row.is-owned .ql-cover,
 .ql-table-row.is-owned .ql-table-title,
@@ -2129,6 +2038,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-result-link-form {
   display: inline;
 }
+/* Artist and album names act as links but read as names until pointed at. */
 .ql-result-link {
   border: 0;
   background: none;
@@ -2136,13 +2046,15 @@ details.ql-mobile-drawer[open]::before {
   color: inherit;
   font: inherit;
   text-align: inherit;
-  text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, currentColor 55%, transparent);
+  text-decoration: none;
   text-underline-offset: 0.15em;
   cursor: pointer;
 }
-.ql-result-link:hover {
+.ql-result-link:hover,
+.ql-result-link:focus-visible {
   color: var(--ql-text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 55%, transparent);
 }
 .ql-result-link:focus-visible {
   outline: 2px solid var(--ql-gold);
@@ -2191,31 +2103,25 @@ details.ql-mobile-drawer[open]::before {
   height: 2.75rem;
   min-height: 2.75rem;
   border-radius: var(--ql-radius);
-  border-color: color-mix(in oklab, var(--ql-gold) 16%, transparent);
   color: var(--ql-text-2);
-  background-color: color-mix(in oklab, var(--ql-gold) 4%, transparent);
 }
 .ql-download-icon-button:hover {
-  border-color: color-mix(in oklab, var(--ql-gold) 50%, transparent);
-  color: var(--ql-gold);
-  background-color: color-mix(in oklab, var(--ql-gold) 10%, transparent);
+  color: var(--ql-text);
+  background-color: color-mix(in oklab, var(--ql-text) 7%, transparent);
 }
 .ql-download-icon-button.is-queued {
-  border-color: color-mix(in oklab, var(--ql-owned) 36%, transparent);
   color: var(--ql-owned);
-  background-color: color-mix(in oklab, var(--ql-owned) 10%, transparent);
+  background-color: transparent;
   cursor: default;
 }
 .ql-download-icon-button.is-scanning {
-  border-color: color-mix(in oklab, var(--ql-info) 36%, transparent);
   color: var(--ql-info);
-  background-color: color-mix(in oklab, var(--ql-info) 10%, transparent);
+  background-color: transparent;
   cursor: default;
 }
 .ql-download-icon-button:disabled:not(.is-queued):not(.is-scanning) {
-  border-color: color-mix(in oklab, var(--ql-text-3) 28%, transparent);
   color: var(--ql-text-3);
-  background-color: color-mix(in oklab, var(--ql-text-3) 7%, transparent);
+  background-color: transparent;
 }
 [data-search-item][data-queued="1"] [data-search-select-wrap],
 [data-search-item][data-scanning="1"] [data-search-select-wrap] {
@@ -2223,8 +2129,8 @@ details.ql-mobile-drawer[open]::before {
   pointer-events: none;
 }
 .ql-download-icon {
-  width: 0.9375rem;
-  height: 0.9375rem;
+  width: 1.125rem;
+  height: 1.125rem;
   fill: none !important;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -2235,15 +2141,10 @@ details.ql-mobile-drawer[open]::before {
   display: grid;
   gap: var(--ql-space-3);
   max-width: 28rem;
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 24%, var(--ql-line));
+  border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius);
-  background:
-    linear-gradient(135deg,
-      color-mix(in oklab, var(--ql-gold) 8%, transparent),
-      transparent 38%),
-    color-mix(in oklab, var(--ql-surface) 92%, var(--ql-bg));
+  background-color: var(--ql-surface);
   padding: 0.875rem;
-  box-shadow: var(--ql-shadow-soft);
 }
 .ql-download-choice-copy {
   display: grid;
@@ -2288,21 +2189,15 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.7rem;
   border: 1px solid var(--ql-line-soft);
   border-radius: var(--ql-radius);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 18%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-surface) 88%, transparent) 100%);
+  background-color: var(--ql-surface);
   padding: 0.7rem;
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, var(--ql-text) 4%, transparent),
-    var(--ql-shadow-soft);
 }
 .ql-grid-tile:hover {
-  border-color: color-mix(in oklab, var(--ql-gold) 28%, var(--ql-line-soft));
+  border-color: var(--ql-line);
 }
 .ql-grid-tile:has(.ql-checkbox:checked) {
-  border-color: color-mix(in oklab, var(--ql-gold) 62%, var(--ql-line-soft));
-  background-color: color-mix(in oklab, var(--ql-gold) 8%, var(--ql-surface));
+  border-color: color-mix(in oklab, var(--ql-text) 40%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 5%, var(--ql-surface));
 }
 /* The drawn chip stays 1.5rem (its ::before, inset to match); the target
    grows to 44px. Top/left are pulled in by the same amount the box grew so
@@ -2397,7 +2292,7 @@ details.ql-mobile-drawer[open]::before {
   border-top: 1px solid color-mix(in oklab, var(--ql-line-soft) 72%, transparent);
 }
 .ql-grid-version-row:has(.ql-checkbox:checked) {
-  background-color: color-mix(in oklab, var(--ql-gold) 8%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
 }
 /* Same 44px hit-area trick as .ql-table-check. */
 .ql-grid-version-check {
@@ -2472,13 +2367,10 @@ details.ql-mobile-drawer[open]::before {
     gap: var(--ql-space-2);
   }
   .ql-dashboard-title h1 {
-    font-size: 1.25rem;
-  }
-  .ql-search-panel:not([data-qobuz-setup-card]) {
-    padding: var(--ql-space-2);
+    font-size: 1.75rem;
   }
   .ql-search-form {
-    gap: 0.55rem;
+    gap: 0.375rem;
   }
   .ql-segmented {
     width: 100%;
@@ -2496,16 +2388,8 @@ details.ql-mobile-drawer[open]::before {
     padding-inline: var(--ql-space-1);
     text-align: center;
   }
-  .ql-search-row {
-    flex-direction: column;
-    gap: var(--ql-space-2);
-  }
-  .ql-search-submit {
-    width: 100%;
-    height: 2.875rem;
-  }
   .ql-search-context {
-    gap: 0.55rem 0.9rem;
+    gap: 0.375rem 0.9rem;
   }
   .ql-search-context-title {
     font-size: 1.25rem;
@@ -2529,14 +2413,10 @@ details.ql-mobile-drawer[open]::before {
     display: none;
   }
   .ql-search-view-panel {
-    border: 0;
-    border-radius: 0;
-    background-color: transparent;
     overflow: visible;
   }
   .ql-table-body {
     display: grid;
-    gap: 0.55rem;
   }
   .ql-search-table .ql-table-head,
   .ql-search-table .ql-table-row {
@@ -2545,27 +2425,10 @@ details.ql-mobile-drawer[open]::before {
   .ql-table-row {
     position: relative;
     align-items: start;
-    column-gap: 0.62rem;
+    column-gap: 0.75rem;
     row-gap: 0.4rem;
     min-height: 0;
-    border: 1px solid color-mix(in oklab, var(--ql-line-soft) 82%, transparent);
-    border-radius: var(--ql-radius);
-    background:
-      linear-gradient(180deg,
-        color-mix(in oklab, var(--ql-surface-2) 22%, var(--ql-surface)) 0%,
-        color-mix(in oklab, var(--ql-surface) 86%, var(--ql-bg)) 100%);
-    padding: 0.78rem;
-    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ql-text) 4%, transparent);
-  }
-  .ql-table-row:last-child {
-    border-bottom: 1px solid color-mix(in oklab, var(--ql-line-soft) 82%, transparent);
-  }
-  .ql-table-row:hover {
-    background-color: color-mix(in oklab, var(--ql-gold) 4%, transparent);
-  }
-  .ql-table-row:has(.ql-checkbox:checked) {
-    background-color: color-mix(in oklab, var(--ql-gold) 6%, var(--ql-surface));
-    box-shadow: none;
+    padding: 0.75rem 0;
   }
   .ql-table-check {
     position: static;
@@ -2665,6 +2528,10 @@ details.ql-mobile-drawer[open]::before {
     justify-content: flex-start;
     margin: 0;
   }
+  .ql-table-copy .ql-row-chips::before {
+    content: "·";
+    color: var(--ql-text-3);
+  }
   /* A track's album line keeps its two-line cap and gives way to the
      quality chip, which drops below it rather than being cut off. */
   .ql-table-copy > .ql-table-subtitle {
@@ -2709,38 +2576,31 @@ details.ql-mobile-drawer[open]::before {
   .ql-grid-footer {
     align-items: flex-start;
   }
+  /* Versions and track lists open as an indented list under their album,
+     marked by a hairline down the left rather than a panel. */
   .ql-version-panel:not(.hidden) {
     display: grid;
-    gap: 0.55rem;
-    margin-left: 0.9rem;
+    margin-left: 1.75rem;
+    border-left: 1px solid var(--ql-line);
   }
   .ql-tracklist {
-    margin-left: var(--ql-space-2);
+    margin: 0 0 0.75rem 1.75rem;
     border: 0;
-    border-left: 2px solid color-mix(in oklab, var(--ql-gold) 28%, transparent);
-    border-radius: var(--ql-radius);
-    padding: 0.6rem 0.7rem;
+    border-left: 1px solid var(--ql-line);
+    padding: 0.25rem 0 0.25rem 0.75rem;
   }
   .ql-table-body > .ql-tracklist-panel .ql-tracklist {
-    padding-left: 0.7rem;
+    padding-left: 0.75rem;
   }
   .ql-vchip {
-    padding: 0.32rem 0.5rem;
-    font-size: 0.6875rem;
-    border-radius: 999px;
-    color: color-mix(in oklab, var(--ql-gold) 75%, var(--ql-text-2));
-    border-color: color-mix(in oklab, var(--ql-gold) 30%, transparent);
-    background-color: color-mix(in oklab, var(--ql-gold) 6%, transparent);
-  }
-  [data-theme="winter"] .ql-vchip {
-    color: color-mix(in oklab, var(--ql-gold-strong) 80%, var(--ql-text));
+    margin-left: -0.375rem;
   }
   .ql-table-row.ql-subrow {
     grid-template-columns: 1rem minmax(0, 1fr) auto;
-    padding: 0.7rem;
-    margin-left: var(--ql-space-2);
-    border-left: 2px solid color-mix(in oklab, var(--ql-gold) 28%, transparent);
-    background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.28));
+    padding: 0.7rem 0 0.7rem 0.75rem;
+  }
+  .ql-table-row.ql-subrow:first-child {
+    border-top: 0;
   }
   .ql-subrow > .ql-table-mono {
     display: none;
@@ -2822,52 +2682,34 @@ details.ql-mobile-drawer[open]::before {
 .ql-activity-list {
   display: grid;
 }
-.ql-panelize {
-  overflow: hidden;
-  border: 1px solid var(--ql-card-line);
-  border-radius: var(--ql-radius-xl);
-  background: linear-gradient(180deg, var(--ql-card-top) 0%, var(--ql-card-bottom) 100%);
-  box-shadow: var(--ql-card-shadow);
-}
 .ql-activity-row {
   display: grid;
   min-width: 0;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.85rem 1rem;
-  padding: 0.95rem 1.1rem;
+  padding: 0.85rem var(--ql-space-1);
 }
 .ql-job-tile {
   display: flex;
-  width: 44px;
-  height: 44px;
+  width: 1.75rem;
+  height: 1.75rem;
   flex: none;
   align-items: center;
   justify-content: center;
-  border-radius: var(--ql-radius);
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 18%, transparent);
-  background: color-mix(in oklab, var(--ql-gold) 8%, transparent);
   align-self: center;
 }
 .ql-job-tile svg {
   width: 20px;
   height: 20px;
   fill: none;
-  stroke: var(--ql-gold);
+  stroke: var(--ql-text-2);
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ql-job-tile--done {
-  border-color: color-mix(in oklab, var(--ql-text) 10%, transparent);
-  background: color-mix(in oklab, var(--ql-text) 5%, transparent);
-}
 .ql-job-tile--done svg {
-  stroke: var(--ql-text-2);
-}
-.ql-history-row--compact .ql-job-tile {
-  width: 34px;
-  height: 34px;
+  stroke: var(--ql-text-3);
 }
 .ql-history-row--compact .ql-job-tile svg {
   width: 16px;
@@ -2884,28 +2726,14 @@ details.ql-mobile-drawer[open]::before {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: var(--ql-brass-bar);
-  box-shadow: 0 0 10px color-mix(in oklab, var(--ql-gold) 50%, transparent);
+  background: var(--ql-gold);
   transition: width 400ms ease;
-}
-[data-theme="winter"] .ql-progress i {
-  box-shadow: none;
 }
 .ql-activity-row + .ql-activity-row {
   border-top: 1px solid var(--ql-line-soft);
 }
 [data-theme="night"] .ql-activity-row + .ql-activity-row {
   border-top-color: var(--ql-line);
-}
-.ql-activity-row.is-running {
-  background-color: color-mix(in oklab, var(--ql-gold) 4%, transparent);
-}
-.ql-activity-row.is-error {
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-warning) 9%, transparent) 0%,
-      color-mix(in oklab, var(--ql-warning) 4%, transparent) 100%);
-  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--ql-warning) 70%, transparent);
 }
 .ql-activity-main {
   min-width: 0;
@@ -2933,9 +2761,6 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.76rem;
   line-height: 1.2;
   white-space: nowrap;
-}
-.ql-history-cards {
-  border-radius: var(--ql-radius-xl);
 }
 .ql-history-row--compact {
   padding-block: 0.6rem;
@@ -3142,25 +2967,13 @@ details.ql-mobile-drawer[open]::before {
   display: grid;
   min-height: 100vh;
   place-items: center;
-  background:
-    radial-gradient(56rem 28rem at 50% -12rem,
-      color-mix(in oklab, var(--ql-gold) 12%, transparent) 0%,
-      transparent 56%),
-    linear-gradient(180deg, var(--ql-bg-2) 0%, var(--ql-bg) 18rem);
+  background-color: var(--ql-bg);
   color: var(--ql-text);
   padding: var(--ql-space-4);
 }
 .ql-auth-panel {
   width: min(100%, 26rem);
-  border-color: color-mix(in oklab, var(--ql-gold) 18%, var(--ql-line));
-  background:
-    linear-gradient(135deg,
-      color-mix(in oklab, var(--ql-gold) 6%, transparent) 0%,
-      transparent 42%),
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface) 94%, var(--ql-bg)) 0%,
-      var(--ql-surface) 100%);
-  box-shadow: var(--ql-shadow-soft);
+  border-color: var(--ql-line);
 }
 .ql-auth-panel-login {
   width: min(100%, 24rem);
@@ -3185,9 +2998,6 @@ details.ql-mobile-drawer[open]::before {
   flex: none;
   object-fit: contain;
   object-position: top;
-}
-[data-theme="night"] .ql-auth-logo {
-  filter: drop-shadow(0 0 10px color-mix(in oklab, var(--ql-gold) 35%, transparent));
 }
 .ql-auth-title {
   min-width: 0;
@@ -3252,8 +3062,10 @@ details.ql-mobile-drawer[open]::before {
   text-decoration: none;
 }
 .ql-row-link:hover {
-  color: var(--ql-gold);
-  text-decoration: none;
+  color: var(--ql-text);
+  text-decoration: underline;
+  text-decoration-color: var(--ql-line);
+  text-underline-offset: 0.18em;
 }
 .ql-row-meta {
   margin: 0.2rem 0 0;
@@ -3273,13 +3085,16 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.375rem;
   margin-bottom: 0.35rem;
 }
+/* A status is a word in its own colour on a faint wash of it: no outline, so
+   it never reads as a button beside the row's real controls. */
 .ql-status-chip {
   display: inline-flex;
   width: fit-content;
   align-items: center;
-  border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border: 0;
   border-radius: var(--ql-radius-sm);
   padding: 0.2rem 0.45rem;
+  background-color: color-mix(in oklab, currentColor 8%, transparent);
   color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
   font-size: 0.75rem;
   font-weight: 650;
@@ -3296,43 +3111,28 @@ details.ql-mobile-drawer[open]::before {
   overflow-wrap: anywhere;
 }
 .ql-status-chip.is-warning {
-  border-color: color-mix(in oklab, var(--color-warning) 32%, transparent);
   color: var(--color-warning);
 }
 .ql-status-chip.is-success {
-  border-color: color-mix(in oklab, var(--color-success) 34%, transparent);
   color: var(--color-success);
 }
 .ql-status-chip.is-info {
-  border-color: color-mix(in oklab, var(--color-info) 34%, transparent);
   color: var(--color-info);
-  background-color: color-mix(in oklab, var(--color-info) 8%, transparent);
 }
 .ql-status-chip.is-neutral {
-  border-color: color-mix(in oklab, var(--color-base-content) 16%, transparent);
-  color: color-mix(in oklab, var(--color-base-content) 58%, transparent);
+  color: var(--ql-text-2);
 }
 .ql-status-chip.is-active {
-  border-color: color-mix(in oklab, var(--color-primary) 38%, transparent);
-  color: color-mix(in oklab, var(--color-primary) 72%, var(--color-base-content));
-  background-color: color-mix(in oklab, var(--color-primary) 9%, transparent);
+  color: var(--ql-text);
 }
 .ql-status-chip.is-error {
-  border-color: color-mix(in oklab, var(--color-error) 34%, transparent);
   color: color-mix(in oklab, var(--color-error) 84%, var(--color-base-content));
 }
 .ql-status-chip.hidden {
   display: none !important;
 }
 [data-theme="winter"] .ql-status-chip.is-warning {
-  border-color: color-mix(in oklab, var(--ql-warning) 42%, transparent);
   color: color-mix(in oklab, var(--ql-warning) 82%, var(--ql-text));
-  background-color: color-mix(in oklab, var(--ql-warning) 11%, transparent);
-}
-[data-theme="winter"] .ql-status-chip.is-active {
-  color: color-mix(in oklab, var(--ql-gold-strong) 82%, var(--ql-text));
-  border-color: color-mix(in oklab, var(--ql-gold) 38%, transparent);
-  background-color: color-mix(in oklab, var(--ql-gold) 10%, transparent);
 }
 .ql-badge {
   display: inline-flex;
@@ -3479,12 +3279,8 @@ details.ql-mobile-drawer[open]::before {
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
 }
 .ql-page-tabs .is-active .ql-count {
-  color: var(--ql-gold);
-  background-color: color-mix(in oklab, var(--ql-gold) 12%, transparent);
-}
-/* Gold on its own tint collapses to 2.5:1 against a cream page. */
-[data-theme="winter"] .ql-page-tabs .is-active .ql-count {
   color: var(--ql-text);
+  background-color: color-mix(in oklab, var(--ql-text) 12%, transparent);
 }
 .ql-review-filter-row {
   margin-bottom: var(--ql-space-3);
@@ -3518,7 +3314,6 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-review-groups {
   display: grid;
-  gap: var(--ql-space-2);
 }
 .ql-review-loadmore {
   display: flex;
@@ -3555,6 +3350,10 @@ details.ql-mobile-drawer[open]::before {
 @media (max-width: 639.98px) {
   .ql-review-summary-row {
     margin-inline: 0;
+    padding-inline: 0.75rem;
+  }
+  .ql-review-tabs {
+    padding-inline: 0.75rem;
   }
   /* A phone cannot fit every tool on one line, so it breaks where the
      meaning does: selection tools first, then the Dismissed link and
@@ -3791,6 +3590,9 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   gap: var(--ql-space-4);
 }
+.ql-job-shell > * {
+  min-width: 0;
+}
 .ql-job-header {
   margin-bottom: 0;
 }
@@ -3836,14 +3638,13 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.68rem;
 }
 .ql-repair-phase-number.is-done {
-  border-color: color-mix(in oklab, var(--ql-gold) 44%, transparent);
-  background-color: color-mix(in oklab, var(--ql-gold) 16%, transparent);
-  color: color-mix(in oklab, var(--ql-gold) 86%, var(--ql-text));
+  border-color: var(--ql-line);
+  color: var(--ql-text-2);
 }
 .ql-repair-phase-number.is-current {
-  border-color: color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  background-color: color-mix(in oklab, var(--ql-gold) 13%, transparent);
-  color: color-mix(in oklab, var(--ql-gold) 90%, var(--ql-text));
+  border-color: var(--ql-text);
+  background-color: var(--ql-text);
+  color: var(--ql-bg);
 }
 .ql-repair-phase-number.is-error {
   border-color: color-mix(in oklab, var(--ql-danger) 60%, transparent);
@@ -3865,7 +3666,7 @@ details.ql-mobile-drawer[open]::before {
   border-top: 1px solid var(--ql-line-soft);
 }
 .ql-repair-phase-line.is-done {
-  border-color: color-mix(in oklab, var(--ql-gold) 34%, transparent);
+  border-color: var(--ql-text-3);
 }
 .ql-hidden-summary {
   display: flex;
@@ -3883,7 +3684,7 @@ details.ql-mobile-drawer[open]::before {
   border-bottom: 1px solid var(--ql-line);
 }
 .ql-hidden-summary:hover .ql-hidden-artist {
-  color: var(--ql-gold);
+  color: var(--ql-text);
 }
 .ql-hidden-summary-copy {
   display: grid;
@@ -4044,7 +3845,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-system-code {
   width: fit-content;
-  border-bottom: 2px solid var(--ql-gold);
+  border-bottom: 2px solid var(--ql-line);
   color: color-mix(in oklab, var(--ql-text) 42%, transparent);
   font-family: var(--ql-font-mono);
   font-size: clamp(2.5rem, 12vw, 5.5rem);
@@ -4104,7 +3905,7 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text);
 }
 .ql-page-tabs .is-active {
-  border-bottom-color: var(--ql-gold);
+  border-bottom-color: var(--ql-text);
   color: var(--ql-text);
 }
 .ql-page-tabs a:focus-visible,
@@ -4124,13 +3925,11 @@ details.ql-mobile-drawer[open]::before {
 .ql-tool-panel {
   border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-lg);
-  background-color: color-mix(in oklab, var(--ql-surface) 88%, var(--ql-bg));
-  box-shadow: var(--ql-shadow-soft);
+  background-color: var(--ql-surface);
 }
 .ql-tool-page .ql-tool-panel {
   border: 0;
   background: transparent;
-  box-shadow: none;
 }
 .ql-tool-panel-body {
   display: grid;
@@ -4144,11 +3943,6 @@ details.ql-mobile-drawer[open]::before {
   .ql-tool-panel-body {
     gap: 1.125rem;
   }
-}
-[data-theme="night"] .ql-tool-panel {
-  border-color: var(--ql-line);
-  background-color: color-mix(in oklab, var(--ql-surface) 82%, var(--ql-bg));
-  box-shadow: var(--ql-shadow);
 }
 @media (min-width: 640px) {
   .ql-tool-panel form .ql-btn-primary {
@@ -4226,60 +4020,37 @@ details.ql-mobile-drawer[open]::before {
   line-height: 1.35;
 }
 .ql-work-status a {
-  color: color-mix(in oklab, var(--ql-gold) 82%, var(--ql-text));
-  text-decoration: none;
+  color: var(--ql-text);
+  text-decoration: underline;
+  text-decoration-color: var(--ql-line);
+  text-underline-offset: 0.18em;
 }
 .ql-work-status a:hover {
-  color: var(--ql-gold);
+  text-decoration-color: currentColor;
 }
 .ql-work-status--bar {
-  border: 1px solid color-mix(in oklab, var(--ql-text) 9%, transparent);
+  border: 1px solid var(--ql-line-soft);
   border-radius: var(--ql-radius-sm);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 22%, var(--ql-surface)),
-      color-mix(in oklab, var(--ql-text) 2%, transparent));
   padding: 0.7rem 0.8rem;
-}
-[data-theme="night"] .ql-work-status--bar {
-  border-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-text) 4%, transparent),
-      color-mix(in oklab, var(--ql-text) 2%, transparent));
 }
 .ql-work-card {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: var(--ql-space-4);
-  border: 1px solid color-mix(in oklab, var(--ql-text) 10%, transparent);
+  border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 24%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-surface) 82%, var(--ql-bg)) 100%);
+  background-color: var(--ql-surface);
   padding: var(--ql-pad-card);
-  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ql-text) 4%, transparent);
 }
 .ql-work-card > .ql-notice {
   border: 0;
   background: transparent;
   padding: 0;
 }
-.ql-work-card-primary {
-  border-color: color-mix(in oklab, var(--ql-gold) 26%, var(--ql-line));
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 11%, var(--ql-surface-2)) 0%,
-      color-mix(in oklab, var(--ql-surface) 84%, var(--ql-bg)) 100%);
-}
 .ql-work-card-warning {
   border-color: color-mix(in oklab, var(--ql-warning) 30%, var(--ql-line));
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-warning) 8%, transparent) 0%,
-      color-mix(in oklab, var(--ql-surface) 78%, transparent) 100%);
+  background-color: color-mix(in oklab, var(--ql-warning) 5%, var(--ql-surface));
 }
 .ql-empty-work {
   border-style: dashed;
@@ -4296,7 +4067,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-work-card-kicker {
   margin: 0 0 var(--ql-space-1);
-  color: color-mix(in oklab, var(--ql-gold) 78%, var(--ql-text));
+  color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
   font-size: 0.68rem;
   font-weight: 720;
@@ -4426,15 +4197,9 @@ details.ql-mobile-drawer[open]::before {
   display: grid;
   justify-items: center;
   gap: 0.35rem;
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 13%, transparent);
+  border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-xl);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 30%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-surface) 92%, var(--ql-bg)) 100%);
-  box-shadow:
-    0 1.5rem 3.125rem -1.875rem oklch(0% 0 0 / 0.95),
-    inset 0 1px 0 oklch(100% 0 0 / 0.035);
+  background-color: var(--ql-surface);
   padding: 3rem 1.5rem 2.75rem;
   text-align: center;
 }
@@ -4442,8 +4207,7 @@ details.ql-mobile-drawer[open]::before {
   width: 5.25rem;
   height: 5.25rem;
   margin-bottom: 0.65rem;
-  color: color-mix(in oklab, var(--ql-gold) 72%, var(--ql-text-3));
-  filter: drop-shadow(0 0 1.4rem color-mix(in oklab, var(--ql-gold) 22%, transparent));
+  color: var(--ql-text-3);
 }
 .ql-scan-hero-title {
   margin: 0;
@@ -4497,13 +4261,10 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-census {
   margin-top: var(--ql-space-4);
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 13%, transparent);
+  border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-xl);
   padding: var(--ql-pad-card);
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-surface-2) 30%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-surface) 92%, var(--ql-bg)) 100%);
+  background-color: var(--ql-surface);
 }
 /* Collapsed one-liner above a parked review. */
 .ql-census-fold {
@@ -4704,16 +4465,7 @@ details.ql-mobile-drawer[open]::before {
   overflow: hidden;
   border: 1px solid var(--ql-card-line);
   border-radius: var(--ql-radius-xl);
-  background: linear-gradient(180deg, var(--ql-card-top) 0%, var(--ql-card-bottom) 100%);
-  box-shadow: var(--ql-card-shadow);
-}
-.ql-settings-section-primary {
-  border-color: color-mix(in oklab, var(--ql-gold) 24%, var(--ql-line));
-  background:
-    linear-gradient(135deg,
-      color-mix(in oklab, var(--ql-gold) 7%, transparent) 0%,
-      transparent 38%),
-    linear-gradient(180deg, var(--ql-card-top) 0%, var(--ql-card-bottom) 100%);
+  background-color: var(--ql-surface);
 }
 .ql-settings-section-body {
   display: grid;
@@ -4767,9 +4519,6 @@ details.ql-mobile-drawer[open]::before {
   font-weight: 600;
   line-height: 1.25;
 }
-.ql-settings-summary:hover h2 {
-  color: var(--ql-gold);
-}
 .ql-settings-section[open] > .ql-settings-summary {
   border-bottom: 1px solid var(--ql-line);
 }
@@ -4787,12 +4536,10 @@ details.ql-mobile-drawer[open]::before {
   flex: none;
   border-radius: 50%;
   background: var(--ql-owned);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--ql-owned) 60%, transparent);
 }
 /* A token Qobuz has rejected is not a connection; the dot says so. */
 .ql-conn-line--stale .ql-conn-dot {
   background: var(--ql-danger);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--ql-danger) 60%, transparent);
 }
 .ql-conn-line .ql-conn-who {
   color: var(--ql-text-3);
@@ -4818,7 +4565,7 @@ details.ql-mobile-drawer[open]::before {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: var(--ql-brass-bar);
+  background: var(--ql-text-3);
 }
 .ql-settings-section-copy p {
   max-width: 68ch;
@@ -5315,11 +5062,11 @@ details[open] > .ql-disclosure-summary::after {
   align-items: center;
   gap: var(--ql-space-3);
   list-style: none;
-  padding: 0.75rem 0.35rem;
+  padding: 0.75rem 0.25rem;
   transition: background-color 140ms ease;
 }
 .ql-review-group--triage > .ql-review-summary {
-  padding-right: 3.1rem;  /* room for the dismiss icon-button overlay */
+  padding-right: 3rem;  /* room for the dismiss icon-button overlay */
 }
 .ql-review-artist-check {
   flex: none;
@@ -5345,24 +5092,23 @@ details[open] > .ql-disclosure-summary::after {
 }
 .ql-group-dismiss {
   position: absolute;
-  top: 0.55rem;
-  right: 0.7rem;
+  top: 0.25rem;
+  right: 0;
   display: inline-flex;
-  width: 1.9375rem;
-  height: 1.9375rem;
+  width: 2.75rem;
+  height: 2.75rem;
   align-items: center;
   justify-content: center;
-  border: 1px solid color-mix(in oklab, var(--ql-text) 14%, transparent);
+  border: 0;
   border-radius: var(--ql-radius);
   background: transparent;
   color: var(--ql-text-3);
   cursor: pointer;
-  transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+  transition: color 140ms ease, background-color 140ms ease;
 }
 .ql-group-dismiss:hover {
-  border-color: color-mix(in oklab, var(--ql-text) 26%, transparent);
   color: var(--ql-text);
-  background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 6%, transparent);
 }
 .ql-group-dismiss:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
@@ -5372,8 +5118,8 @@ details[open] > .ql-disclosure-summary::after {
   display: none !important;
 }
 .ql-group-dismiss-icon {
-  width: 0.9375rem;
-  height: 0.9375rem;
+  width: 1.125rem;
+  height: 1.125rem;
 }
 .ql-review-summary::-webkit-details-marker {
   display: none;
@@ -5570,17 +5316,11 @@ details[open] > summary .ql-review-chevron {
   display: flex;
   flex-direction: column;
   gap: var(--ql-space-2);
-  border: 1px solid color-mix(in oklab, var(--ql-gold) 30%, transparent);
+  border: 1px solid var(--ql-line);
   border-radius: 0.8125rem;
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 11%, var(--ql-surface)) 0%,
-      color-mix(in oklab, var(--ql-gold) 6%, var(--ql-surface)) 100%);
+  background-color: var(--ql-surface);
   padding: 0.625rem 0.75rem;
-  box-shadow:
-    0 0.875rem 1.875rem -1.125rem oklch(0% 0 0 / 0.9),
-    inset 0 1px 0 oklch(100% 0 0 / 0.045),
-    0 0 1.625rem -0.875rem color-mix(in oklab, var(--ql-gold) 50%, transparent);
+  box-shadow: var(--ql-shadow-soft);
 }
 .ql-review-footer-primary,
 .ql-review-footer-secondary {
@@ -5705,11 +5445,7 @@ details[open] > summary .ql-review-chevron {
   background-color: color-mix(in oklab, var(--ql-text) 3%, transparent);
 }
 .ql-review-candidate:has(.ql-checkbox:checked) {
-  background:
-    linear-gradient(180deg,
-      color-mix(in oklab, var(--ql-gold) 8.5%, transparent),
-      color-mix(in oklab, var(--ql-gold) 5%, transparent));
-  box-shadow: inset 3px 0 0 var(--ql-gold);
+  background-color: color-mix(in oklab, var(--ql-text) 4%, transparent);
 }
 .ql-review-items {
   display: grid;
@@ -5724,18 +5460,12 @@ details[open] > summary .ql-review-chevron {
   border-radius: 0.4375rem;
   object-fit: cover;
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
-  box-shadow:
-    0 0 0 1px oklch(100% 0 0 / 0.11),
-    0 0.3125rem 0.75rem -0.25rem oklch(0% 0 0 / 0.8);
 }
 .ql-review-cover--empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  background:
-    linear-gradient(135deg,
-      color-mix(in oklab, var(--ql-gold) 16%, transparent),
-      color-mix(in oklab, var(--ql-text) 7%, transparent));
+  background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
 }
 .ql-review-cover-mark {
   width: 55%;
@@ -5897,7 +5627,7 @@ details[open] > summary .ql-review-chevron {
   align-items: center;
   justify-content: flex-start;
   border-right: 1px solid var(--ql-line);
-  color: var(--ql-gold);
+  color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
   font-size: 0.8125rem;
   font-weight: 700;
@@ -6001,7 +5731,7 @@ details[open] > summary .ql-review-chevron {
 :where(.ql-input, .ql-select):focus-within {
   border-color: var(--color-primary);
   outline: 0;
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 34%, transparent);
+  box-shadow: 0 0 0 1px var(--color-primary);
 }
 
 /* Monospace numeric readouts for counts, sizes, tiers, and progress phases. */
@@ -6026,7 +5756,6 @@ details[open] > summary .ql-review-chevron {
   color: var(--ql-text);
   font-size: 0.875rem;
   line-height: 1.4;
-  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ql-seam) 10%, transparent);
 }
 .ql-notice:not(:has(> svg))::before {
   content: "";
@@ -6068,15 +5797,16 @@ details[open] > summary .ql-review-chevron {
 .ql-inline-link,
 .ql-link,
 .ql-notice a:not(.ql-btn) {
-  color: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-text));
-  font-weight: 700;
+  color: var(--ql-text);
+  font-weight: 600;
   text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 40%, transparent);
   text-underline-offset: 0.18em;
 }
 .ql-inline-link:hover,
 .ql-link:hover,
 .ql-notice a:not(.ql-btn):hover {
-  color: var(--ql-text);
+  text-decoration-color: currentColor;
 }
 .ql-inline-link.ql-review-dismissed-link {
   display: inline-flex;
@@ -6126,32 +5856,19 @@ details[open] > summary .ql-review-chevron {
 }
 [data-theme="winter"] .log-console:empty::before { color: var(--ql-text-3); }
 
-/* Quality chips: Hi-Res is the only gold one; CD stays neutral so the gold
-   budget holds. Lossy keeps a muted warning tint. */
+/* Quality: Hi-Res is the only gold one; CD stays neutral so the gold budget
+   holds. Lossy keeps a muted warning colour. */
 .quality-hires {
-  --ql-quality-edge: color-mix(in oklab, var(--ql-gold) 36%, transparent);
   color: var(--ql-gold);
-  background: linear-gradient(180deg,
-    color-mix(in oklab, var(--ql-gold) 13%, transparent),
-    color-mix(in oklab, var(--ql-gold) 5%, transparent));
-  border-color: color-mix(in oklab, var(--ql-gold) 36%, transparent);
-  text-shadow: 0 0 0.625rem color-mix(in oklab, var(--ql-gold) 35%, transparent);
 }
 .quality-cd {
-  --ql-quality-edge: color-mix(in oklab, var(--ql-text) 14%, transparent);
-  color: var(--ql-text-2);
-  background: transparent;
-  border-color: color-mix(in oklab, var(--ql-text) 14%, transparent);
+  color: var(--ql-text-3);
 }
 .quality-lossy {
-  --ql-quality-edge: color-mix(in oklab, var(--ql-danger) 40%, transparent);
   color: color-mix(in oklab, var(--ql-danger) 82%, var(--ql-text));
-  background: color-mix(in oklab, var(--ql-danger) 8%, transparent);
-  border-color: color-mix(in oklab, var(--ql-danger) 40%, transparent);
 }
 [data-theme="winter"] .quality-hires {
   color: var(--ql-gold-strong);
-  text-shadow: none;
 }
 
 /* htmx spinners must not reserve layout while idle. They only occupy space during
@@ -6168,7 +5885,6 @@ details[open] > summary .ql-review-chevron {
   border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-lg);
   background: var(--ql-surface);
-  box-shadow: var(--ql-shadow-soft);
   padding: 0.35rem 1.1rem;
 }
 .ql-search-skeleton.htmx-request + .ql-search-results { display: none; }
@@ -6252,9 +5968,8 @@ details[data-artist].htmx-swapping {
   white-space: nowrap;
 }
 .ql-discover-expand {
-  border-top: 1px solid color-mix(in oklab, var(--ql-gold) 12%, transparent);
+  border-top: 1px solid var(--ql-line-soft);
   padding: var(--ql-space-3) var(--ql-space-4) var(--ql-space-2);
-  background-color: var(--ql-subrow-bg, oklch(0% 0 0 / 0.22));
 }
 [data-theme="winter"] .ql-discover-expand {
   --ql-subrow-bg: oklch(0% 0 0 / 0.045);
@@ -6289,9 +6004,9 @@ details[data-artist].htmx-swapping {
   border-color: var(--ql-line);
 }
 .ql-dchip.is-active {
-  border-color: color-mix(in oklab, var(--ql-gold) 40%, transparent);
-  background-color: color-mix(in oklab, var(--ql-gold) 8%, transparent);
-  color: var(--ql-gold);
+  border-color: color-mix(in oklab, var(--ql-text) 40%, transparent);
+  background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
+  color: var(--ql-text);
 }
 .ql-dchip:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
@@ -6425,8 +6140,7 @@ details[data-artist].htmx-swapping {
     min-height: 2.75rem;
   }
   .ql-mobile-brand {
-    padding-block: 0.3125rem;
-    margin-block: -0.3125rem;
+    min-height: 2.75rem;
   }
   .ql-sheet-head .ql-icon-button {
     width: 2.75rem;
@@ -6446,7 +6160,7 @@ details[data-artist].htmx-swapping {
     align-items: center;
     border-bottom: 0;
     text-decoration: underline;
-    text-decoration-color: color-mix(in oklab, var(--ql-gold) 24%, transparent);
+    text-decoration-color: var(--ql-line);
     text-underline-offset: 0.2rem;
   }
 }
@@ -6486,7 +6200,6 @@ details[data-artist].htmx-swapping {
     position: absolute;
     inset: -0.4375rem 0;
   }
-  .ql-group-dismiss::after,
   .ql-header-refresh::after,
   .ql-table-row .ql-vchip::before,
   .ql-result-row .ql-vchip::before,
@@ -6499,9 +6212,6 @@ details[data-artist].htmx-swapping {
   }
   .ql-auth-details-summary::before {
     inset: -0.75rem -0.25rem;
-  }
-  .ql-group-dismiss::after {
-    inset: -0.4375rem;
   }
   .ql-header-refresh::after {
     inset: -0.3125rem;
@@ -6524,5 +6234,9 @@ details[data-artist].htmx-swapping {
   }
   .ql-search-view-toggle button {
     width: 2.25rem;
+  }
+  .ql-page-tabs a,
+  .ql-page-tabs button {
+    padding-inline: 0.55rem;
   }
 }
