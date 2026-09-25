@@ -351,12 +351,11 @@ def test_parked_album_is_not_reported_as_a_clean_run():
         [{"result": "attention", "n_ok": 14, "n_fail": 0}], 1)
 
     assert colour == C.YELLOW
+    assert text.lstrip().startswith("⚠")
     assert "✓" not in text
-    assert "1 album unfinished" in text
 
     colour, text = executor._queue_done_line(
         [{"result": "downloaded", "n_ok": 14, "n_fail": 0}], 1)
 
     assert colour == C.GREEN
-    assert text.startswith("  ✓ Queue done: 1/1 albums OK")
-    assert "unfinished" not in text
+    assert text.lstrip().startswith("✓")

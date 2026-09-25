@@ -236,6 +236,9 @@ JOB_FINAL_SAVE_ERROR = (
     "The work finished, but the app couldn't save the final job result. "
     "Check the data volume before retrying or clearing this job."
 )
+LIBRARY_SCAN_AUTO_RESUMES = (
+    "It resumes from where it left off the next time the Search page opens."
+)
 
 # Distinguishes an intact review whose last eligible tick disappeared from a
 # stale/non-review job and from a durable admission failure.
@@ -2267,8 +2270,7 @@ def restore_jobs(
                                    "Library page.")
                 elif (cfg.AUTO_LIBRARY_SCAN
                         and not generation_state.baseline_complete()):
-                    job.summary = (restart + "It resumes from where it left "
-                                   "off the next time the Search page opens.")
+                    job.summary = restart + LIBRARY_SCAN_AUTO_RESUMES
                 else:
                     job.summary = (restart + "Resume it from the notice on "
                                    "the Search page.")

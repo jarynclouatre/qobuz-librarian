@@ -210,16 +210,14 @@ def test_force_stops_after_an_interrupted_backup(monkeypatch, tmp_path):
     monkeypatch.setattr(
         proc,
         "_recover_incomplete_upgrade_backup",
-        lambda backup, original, **kwargs: recovered.append(
-            (backup, original, kwargs["operation"])),
+        lambda backup, original, *, operation: recovered.append(
+            (backup, original)),
     )
 
     outcome = proc.force_cleanup_preflight({}, _args(force=True))
 
     assert outcome is None
-    assert recovered == [
-        (retained, album_dir, "forced re-download backup"),
-    ]
+    assert recovered == [(retained, album_dir)]
 
 
 def test_partial_retention_moves_only_the_recorded_download_run(

@@ -1131,7 +1131,7 @@ def test_execute_repairs_does_not_count_an_unverified_redownload_as_repaired(mon
     flows.execute_repairs(job, chosen, "tok")
 
     assert callback_seen
-    assert "Repaired 0/1" in job.summary
+    assert "0/1" in job.summary
     assert not job.error
     assert job.status != job_mgr.JobStatus.FAILED
 

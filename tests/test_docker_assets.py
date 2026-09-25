@@ -202,7 +202,7 @@ def test_entrypoint_defaults_to_nonroot_user(tmp_path):
     cfg = _make_config(tmp_path, "[database]\n")
     r = _run_entrypoint_head(tmp_path, {"CONFIG_DIR": str(cfg)}, capture=True)
     assert r.returncode == 0
-    assert "Running as 1000:1000" in r.stdout
+    assert "1000:1000" in r.stdout
 
 
 def test_entrypoint_ownership_repair_does_not_follow_config_symlinks(tmp_path):

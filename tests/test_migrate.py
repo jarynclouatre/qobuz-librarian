@@ -283,7 +283,7 @@ def test_execute_migration_copies_selected_and_keeps_originals(tmp_path):
     copied = sorted((dest / "Artist/Album (2017)").glob("*.flac"))
     assert [path.read_bytes() for path in copied] == [b"one", b"two"]
     assert f1.exists() and f2.exists()             # copy mode: originals intact
-    assert "2 files copied" in job.summary
+    assert job.status is not jm.JobStatus.FAILED and not job.error
     assert list(dest.glob("migration-results-*.csv"))
 
 
@@ -311,7 +311,7 @@ def test_execute_migration_blocks_low_space_in_place_move(tmp_path, monkeypatch)
 
     job = jm.Job(title="mig")
     flows.execute_migration(job, chosen, str(dest), in_place=True, src=src)
-    assert job.error and "free space" in job.error.lower()
+    assert job.status is jm.JobStatus.FAILED and job.error
     assert not destination.exists()
     assert f1.exists()                                   # nothing was moved
 

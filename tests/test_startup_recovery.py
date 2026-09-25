@@ -80,7 +80,7 @@ def test_post_import_relocation_recovery_precedes_queue_recovery(
         record.getMessage()
         for record in caplog.records
         if record.getMessage().startswith(
-            "Post-import folder-move recovery needs attention"
+            startup_recovery.POST_IMPORT_RELOCATION_LOG_ENTRY
         )
     )
     assert "exact relocation evidence changed" in recovery_log

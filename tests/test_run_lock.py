@@ -195,6 +195,7 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
         RelocationRecoveryResult,
         RelocationRecoveryStatus,
     )
+    from qobuz_librarian.queue import startup_recovery
     from qobuz_librarian.queue.startup_recovery import (
         StartupRecoveryResult,
         StartupRecoveryStatus,
@@ -241,7 +242,8 @@ def test_cli_folder_move_recovery_pause_names_cause_and_exact_paths(
     assert lease.closed is True
     assert "exact relocation evidence changed" in flat
     assert all(str(path) in message for path in affected_paths)
-    assert "interrupted download" not in flat
+    assert startup_recovery.POST_IMPORT_RELOCATION_LOG_ENTRY in flat
+    assert startup_recovery.BLOCKED_DOWNLOAD_LOG_ENTRY not in flat
 
 
 
@@ -318,6 +320,7 @@ def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
     download and scan, and a restart does not clear it, so the terminal has to
     offer the decision itself.
     """
+    import re
     from types import SimpleNamespace
 
     from qobuz_librarian import cli, run_lock
@@ -383,10 +386,9 @@ def test_a_staged_leftover_is_offered_a_decision_in_the_terminal(
     assert lease.closed is False
     asked = " ".join(" ".join(prompts).split())
     # Nothing can be re-run and the saved entry is not what is holding things
-    # up, so naming a retry or a discard would offer the same thing twice.
-    assert "discard" not in asked.lower()
-    assert "retry" not in asked.lower()
-    assert "Cleared the leftover" in caplog.text
+    # up, so a retry or a discard key would offer the same thing twice.
+    assert set(re.findall(r"(\w+)=", asked)) == {"c", "Enter"}
+    assert "✓" in caplog.text
 
 
 def test_clearing_a_leftover_is_not_reported_as_a_failure(
@@ -466,8 +468,8 @@ def test_clearing_a_leftover_is_not_reported_as_a_failure(
 
     said = " ".join((capsys.readouterr().err + " " + caplog.text).split())
     assert stopped.value.code == 1
-    assert "Cleared the leftover" in said
-    assert "could not be verified safely" not in said
+    assert "✓" in said
+    assert "✗" not in said
 
 
 def test_a_settled_leftover_does_not_report_the_stale_verdict(
@@ -544,5 +546,5 @@ def test_a_settled_leftover_does_not_report_the_stale_verdict(
     with caplog.at_level("INFO", logger="qobuz_librarian"):
         assert cli.acquire_run_lock() is lease
     assert lease.closed is False
-    assert "Cleared the leftover" in caplog.text
-    assert "could not be verified safely" not in caplog.text
+    assert "✓" in caplog.text
+    assert not any(record.levelname == "ERROR" for record in caplog.records)

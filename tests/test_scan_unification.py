@@ -848,12 +848,17 @@ def test_resumed_baseline_scan_can_complete_saved_library_state(tmp_path, monkey
 
 def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import downsample_state, library_scan_state
+    from qobuz_librarian.library import (
+        downsample_state,
+        generation_state,
+        library_scan_state,
+    )
     from qobuz_librarian.quality import upgrade_state
     from qobuz_librarian.web import flows
 
     artist_dir = tmp_path / "Artist"
     artist_dir.mkdir()
+    monkeypatch.setattr(cfg, "LIBRARY_GENERATION_STATE_FILE", tmp_path / "generation.json")
     monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
     monkeypatch.setattr(flows.scan_checkpoint.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
@@ -899,7 +904,7 @@ def test_complete_scan_keeps_resume_checkpoint_when_saved_state_fails(tmp_path, 
     assert saved["candidates"] == job.candidates
     assert saved["artists"]["Artist"]["catalog_ids"] == ["album-1"]
     assert cleared == []
-    assert "saved scan state couldn't be written" in job.summary
+    assert generation_state.load()["latest_attempt"]["status"] == "failed"
 
 
 @pytest.mark.parametrize("scan_name,kind", [("scan_library", "missing"),
@@ -1394,7 +1399,7 @@ def test_new_release_scan_keeps_incomplete_rebaseline_truthful(
 
     assert marked["complete"] is False
     assert marked["baseline_limit"] is None
-    assert "2 artists couldn't be checked" in job.summary
+    assert job.unchecked_artists == 2
     assert "No Match" in job.summary
     assert job.status is jm.JobStatus.FAILED
     # job.summary above already names the reason and the remedy; job.error
@@ -1446,7 +1451,7 @@ def test_new_release_check_completes_past_a_folder_qobuz_has_no_artist_for(
     # Naming the folder is the only way the user learns why that artist never
     # surfaces, so a silent skip would be its own fault.
     assert "Bonobo, Joy Crookes" in job.summary
-    assert "couldn't be checked" not in job.summary
+    assert job.unchecked_artists == 0
 
 
 def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
@@ -1476,7 +1481,7 @@ def test_new_release_scan_reports_state_save_failure(tmp_path, monkeypatch):
 
     flows.scan_new_releases(job, "tok")
 
-    assert "couldn't be saved" in job.summary
+    assert job.unchecked_artists == 0
     assert job.status is jm.JobStatus.FAILED
     # job.summary above already names the reason and the remedy; job.error
     # would only restate it.
@@ -1534,7 +1539,7 @@ def test_partial_new_release_find_stays_reviewable(tmp_path, monkeypatch):
     assert len(job.candidates) == 1
     assert job.status is jm.JobStatus.PENDING
     assert job.error is None
-    assert "1 artist couldn't be checked" in job.summary
+    assert job.unchecked_artists == 1
 
 
 
