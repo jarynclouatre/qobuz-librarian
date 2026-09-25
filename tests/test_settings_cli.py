@@ -24,14 +24,11 @@ def test_changed_answers_save_only_the_diff(monkeypatch):
     )
     # Quality: pick "4". Downsample policy and every toggle: keep current
     # (Enter). PREFER_HIRES is the only toggle actually flipped.
-    monkeypatch.setattr(settings_cli, "ask", lambda *_a, **_kw: "1")
-    # confirm() is called once for the downsample policy, then once per
-    # behaviour toggle in BEHAVIOR_FIELDS order. Only PREFER_HIRES flips.
-    answers = iter([True, True, False, False, False, False])
-    monkeypatch.setattr(
-        settings_cli, "confirm",
-        lambda *_a, **_kw: next(answers),
-    )
+    # ask() takes the quality, then one answer per behaviour toggle in
+    # BEHAVIOR_FIELDS order; confirm() takes the downsample policy.
+    answers = iter(["1", "y", "", "", "", ""])
+    monkeypatch.setattr(settings_cli, "ask", lambda *_a, **_kw: next(answers))
+    monkeypatch.setattr(settings_cli, "confirm", lambda *_a, **_kw: True)
 
     result = settings_cli.run_settings_mode(SimpleNamespace(dry_run=False))
 

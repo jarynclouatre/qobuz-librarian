@@ -651,7 +651,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     n_partial = len(partials)
 
     if not ordered:
-        log.info(fmt(C.GREEN, "\n  ✓  No new albums to suggest. You're caught up!\n"))
+        log.info(fmt(C.GREEN, "\n  ✓  No new albums to suggest.\n"))
         return 0, False
 
     print()

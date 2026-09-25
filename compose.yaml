@@ -131,8 +131,8 @@ services:
       # up, comma-separated. IP addresses, localhost, single-label names and
       # .local/.lan/.home.arpa/.internal names always work.
       WEB_ALLOWED_HOSTS: "${WEB_ALLOWED_HOSTS:-}"
-      # Refuse downloads/scans at startup if /music or /staging aren't writable
-      # by the container user (typical on a NAS with the wrong PUID/PGID).
+      # Pause downloads and scans while /music or /staging isn't writable by
+      # the container user (typical on a NAS with the wrong PUID/PGID).
       # Set QL_CHECK_VOLUMES=0 in .env for a read-only (:ro) /music share.
       QL_CHECK_VOLUMES: ${QL_CHECK_VOLUMES:-1}
       # Terminal-first mode: set QL_CLI_ONLY=1 in .env to start in terminal
@@ -153,7 +153,7 @@ services:
       # ── Download quality ──────────────────────────────────────────────────
       # streamrip quality: 2=CD/16-bit lossless, 3=24-bit ≤96kHz,
       # 4=24-bit ≤192kHz. Default 4 = the highest quality Qobuz has per release.
-      # Set "2" for CD lossless if you'd rather have smaller files.
+      # Set "2" for CD lossless and smaller files.
       STREAMRIP_QUALITY: "${STREAMRIP_QUALITY:-4}"
 
       # ── Lyrics ────────────────────────────────────────────────────────────
@@ -170,34 +170,35 @@ services:
       PREFER_HIRES: "${PREFER_HIRES:-true}"
       # After import, merge sibling/duplicate album folders. CLI-only and
       # prompts per folder; off by default (it moves folders). Set "true"
-      # if you want it offered on CLI runs.
+      # to have CLI runs offer it.
       CONSOLIDATE: "${CONSOLIDATE:-false}"
       # Move "Primary, Other/<album>" into "Primary/<album>" after import.
       MIGRATE_MULTI_ARTIST: "${MIGRATE_MULTI_ARTIST:-false}"
-      # Library scans and new-release checks treat a single-track download as
-      # a single: the rest of its album is not offered, and an artist you own
-      # only singles from is skipped.
+      # Library scans and checks for new releases treat a single-track
+      # download as a single: the rest of its album is not offered, and an
+      # artist you own only singles from is skipped.
       SUPPRESS_SINGLE_TRACK_GAPS: "${SUPPRESS_SINGLE_TRACK_GAPS:-false}"
       # Cover art placement: sidecar (image beside tracks) | embed | both.
       ARTWORK: "${ARTWORK:-sidecar}"
       # ── New releases ──────────────────────────────────────────────────────
-      # First launch offers a baseline library scan. It lists missing albums and
-      # establishes the new-release baseline (resuming if interrupted). "false"
-      # skips the offer; a manual library scan still seeds the baseline.
+      # First launch offers a Library scan, which lists missing albums and gives
+      # New releases its starting point (resuming if interrupted). "false"
+      # skips the offer; a Library scan started by hand does the same.
       AUTO_LIBRARY_SCAN: "${AUTO_LIBRARY_SCAN:-true}"
-      # Auto-check for new releases by your library's artists this often
-      # (seconds), surfaced on the dashboard once the baseline's set. 0 = off.
-      # Also tunable on the Settings page.
+      # Check for new releases by your library's artists this often (seconds),
+      # after the first full Library scan; results appear as a New releases
+      # review. 0 = off. Also on the Settings page.
       NEW_RELEASE_CHECK_INTERVAL: "${NEW_RELEASE_CHECK_INTERVAL:-86400}"
       # Only flag albums released within this many days as "new" (0 = any catalogue
       # newcomer counts, including older releases Qobuz recently added). Default 365.
       NEW_RELEASE_MAX_AGE_DAYS: "${NEW_RELEASE_MAX_AGE_DAYS:-365}"
-      # How long (seconds) a gap scan reuses a fetched discography before
-      # re-fetching. The new-release check always fetches fresh regardless.
+      # How long (seconds) Library scans, Upgrade, Discover and artist pages
+      # reuse a fetched discography. The new-release check always fetches fresh.
       ARTIST_CATALOG_CACHE_TTL: "${ARTIST_CATALOG_CACHE_TTL:-604800}"
 
-      # ── Optional features (off by default) ────────────────────────────────
-      # Hide the Upgrade page and skip quality-upgrade scanning entirely.
+      # ── Optional features ─────────────────────────────────────────────────
+      # Show Upgrade and include quality upgrades in Library scans. "false"
+      # hides Upgrade and skips that pass.
       UPGRADE_SCAN_ENABLED: "${UPGRADE_SCAN_ENABLED:-true}"
       # Let an ordinary CLI download or gap-fill run also upgrade an album Qobuz
       # can now serve better. The CLI asks before replacing the whole folder.
@@ -209,7 +210,7 @@ services:
       # deliberate one-off singles alone).
       UPGRADE_SINGLES_ENABLED: "${UPGRADE_SINGLES_ENABLED:-false}"
       # Downsample hi-res FLACs to 44.1/48 kHz before import to save space.
-      # Leave false to keep whatever Qobuz delivers (CD quality is fine).
+      # Leave false to keep whatever Qobuz delivers.
       DOWNSAMPLE_HIRES_ENABLED: "${DOWNSAMPLE_HIRES_ENABLED:-false}"
       # What the on-demand Downsample does with each hi-res original: keep a
       # restorable copy (Settings, for UPGRADE_BACKUP_RETENTION_DAYS) or delete

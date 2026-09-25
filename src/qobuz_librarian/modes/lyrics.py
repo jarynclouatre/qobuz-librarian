@@ -14,7 +14,7 @@ from qobuz_librarian.library.lyrics import (
     summarize_lyrics_result,
 )
 from qobuz_librarian.library.scanner import clear_scan_caches
-from qobuz_librarian.ui_cli.colors import C, banner, fmt
+from qobuz_librarian.ui_cli.colors import C, banner, block, fmt
 from qobuz_librarian.ui_cli.errors import (
     EXIT_CONFIG,
     EXIT_GENERAL,
@@ -37,12 +37,12 @@ def run_library_lyrics_mode(args):
         # cron run still surfaces the missing dep instead of looking like a
         # silent success; die() with EXIT_CONFIG so the cron's exit-code
         # check notices too.
-        log.warning(fmt(C.YELLOW,
+        log.warning(block(fmt(C.YELLOW,
             "  ⚠  Lyric fetching isn't available; the syncedlyrics provider "
-            "library isn't installed."))
-        log.warning(fmt(C.GRAY,
+            "library isn't installed.")))
+        log.warning(block(fmt(C.GRAY,
             "     The bundled Docker image includes it; bare installs need "
-            "the [lyrics] extra (`pip install 'syncedlyrics>=1.0'` also works)."))
+            "the [lyrics] extra (`pip install 'syncedlyrics>=1.0'` also works).")))
         die("syncedlyrics not installed", EXIT_CONFIG)
 
     providers = ", ".join(cfg.LYRICS_PROVIDERS) or "Lrclib, NetEase, Musixmatch"

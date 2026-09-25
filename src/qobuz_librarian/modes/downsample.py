@@ -82,19 +82,19 @@ def run_downsample_walk_mode(args):
 
     keep_originals = cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
     if cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep":
-        log.info(fmt(C.YELLOW,
+        log.info(block(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. A "
             "restorable copy of each original is kept for "
             f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}; a rewrite "
-            "can be undone from the Settings page until then."))
+            "can be undone from the Settings page until then.")))
     elif cfg.DOWNSAMPLE_KEEP_ORIGINALS == "delete":
-        log.info(fmt(C.YELLOW,
+        log.info(block(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. The "
-            "originals are not kept and there is no undo."))
+            "originals are not kept and there is no undo.")))
     else:
-        log.info(fmt(C.YELLOW,
+        log.info(block(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. You'll "
-            "choose first whether to keep the hi-res originals."))
+            "choose first whether to keep the hi-res originals.")))
     if args.dry_run:
         log.info(fmt(C.GRAY, "  --dry-run: listing candidates only, nothing is changed."))
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
@@ -155,8 +155,7 @@ def run_downsample_walk_mode(args):
             # answer for the current run.
             keep_originals = keep
             log.info(fmt(C.GRAY,
-                f"  Saved. Originals will be {'kept' if keep else 'deleted'}; "
-                "change this any time in Settings."))
+                f"  Saved. Originals will be {'kept' if keep else 'deleted'}."))
         log.info("")
 
     # Auto-accept gate. Skipped under --yes, which has already answered it.
@@ -171,7 +170,7 @@ def run_downsample_walk_mode(args):
             return EXIT_GENERAL
         if answer:
             auto_accept_all = True
-            log.info(fmt(C.GREEN, "  ✓ Auto-accepting every artist. Walk away."))
+            log.info(fmt(C.GREEN, "  ✓ Auto-accepting every artist."))
     log.info("")
 
     n_scanned = len(refresh.artists_scanned) - unchecked

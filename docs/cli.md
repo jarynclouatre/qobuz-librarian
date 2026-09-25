@@ -2,11 +2,11 @@
 
 [← README](../README.md)
 
-The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and download lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands with `qobuz-librarian` in place of everything up to and including `cli`. Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
+The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and run lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands with `qobuz-librarian` in place of everything up to and including `cli`. Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
 
-## The download lock
+## The run lock
 
-The web app and CLI share one download lock, so only one runs at a time. Free it before a CLI run: switch to terminal mode from **Settings → Mode**, then click **Resume web app** after the CLI run, or stop the web container with `docker compose stop qobuz-librarian` and start it again afterward.
+The web app and CLI share one run lock, so only one runs at a time. Free it before a CLI run: switch to terminal mode from **Settings → Mode**, then click **Resume web app** after the CLI run, or stop the web container with `docker compose stop qobuz-librarian` and start it again afterward.
 
 Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing and Settings).
 
@@ -46,7 +46,7 @@ docker compose run --rm -it qobuz-librarian cli --settings
 
 ## Direct downloads
 
-Both confirm each album before anything downloads (download, queue, or skip), so keep `-it`. With no terminal attached, an unanswered prompt skips the album.
+Both confirm each album before anything downloads (download, queue, or skip), so keep `-it`. With no terminal attached, an album download stops at its confirmation without downloading anything, and the run exits with status 1.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)
@@ -79,4 +79,12 @@ docker compose run --rm qobuz-librarian cli --reset-walk-seen
 docker compose run --rm qobuz-librarian cli --help
 ```
 
-The CLI honours the same `.env` and `compose.yaml` settings as the web UI.
+## What only one side does
+
+| Only in the terminal | Only in the web app |
+|---|---|
+| The Library walk and Album gaps walk, which ask as they go | The Library scan and the reviews it builds |
+| Offering singles and compilations (`--include-singles`, `--include-comps`) | New releases checks and Discover |
+| Downloading without importing (`--no-import`) | Dismissing and bringing back albums |
+| | Putting downsampled originals back, and restoring from a collection backup |
+| | The Settings fields `--settings` leaves out |

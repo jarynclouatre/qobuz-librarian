@@ -1119,8 +1119,8 @@ def process_album(album, args, *, allow_force=True, label=None,
         if source_premise is None:
             log.info(fmt(
                 C.YELLOW,
-                "  ⚠  The local album could not be sealed exactly. Refresh "
-                "or rerun the command; nothing was changed.",
+                "  ⚠  The local album could not be checked. Refresh or "
+                "rerun the command; nothing was changed.",
             ))
             return {"result": "stale_candidate"}
         expected_album_receipt = source_premise["receipt"]

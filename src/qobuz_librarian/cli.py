@@ -682,6 +682,12 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
     def __init__(self, prog):
         super().__init__(prog, width=text_width())
 
+    def _split_lines(self, text, width):
+        # Flag names in the help text stay whole rather than breaking at
+        # their hyphens.
+        text = self._whitespace_matcher.sub(" ", text).strip()
+        return textwrap.wrap(text, width, break_on_hyphens=False)
+
     def _format_action_invocation(self, action):
         if isinstance(action, argparse.BooleanOptionalAction):
             option = action.option_strings[0]
@@ -792,6 +798,15 @@ def _help_epilog():
         break_long_words=False,
         break_on_hyphens=False,
     ))
+    lines.extend(("", *textwrap.wrap(
+        "Only in the web app: the Library scan and its reviews, New releases "
+        "checks, Discover, dismissing and bringing back albums, putting "
+        "downsampled originals back, restoring from a collection backup, and "
+        "the Settings fields --settings leaves out.",
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )))
     lines.extend(("", "Exit codes:"))
     for code, description in (
         ("0", "success"),
@@ -866,8 +881,8 @@ def parse_args():
                         "behaviour toggles from the terminal (same store "
                         "the web Settings page saves to)")
     modes.add_argument("--reset-walk-seen", action="store_true",
-                   help="delete the library-walk dedup files and exit "
-                        "(so the next walk revisits every artist/album)")
+                   help="forget which artists and albums the walks have "
+                        "already checked, and exit")
 
     offers.add_argument("--no-catalog",   action="store_true",
                    help="skip missing album suggestions in Artist mode and "
@@ -1080,11 +1095,11 @@ def main():
         present = [str(f) for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE)
                    if f.exists()]
         if present:
-            log.info(fmt(C.GRAY, "  --dry-run: would clear walk-seen state:"))
+            log.info(fmt(C.GRAY, "  --dry-run: would clear the lists of artists and albums already checked:"))
             for r in present:
                 log.info(fmt(C.GRAY, f"     {r}"))
         else:
-            log.info(fmt(C.GRAY, "  No walk-seen state to clear."))
+            log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
         return
 
     banner("Qobuz Librarian: search · artist · library · repair · upgrade")
@@ -1153,11 +1168,11 @@ def main():
                     "   Check the volume permissions / PUID-PGID; /data must be writable.\n"),
                     EXIT_GENERAL)
         if removed:
-            log.info(fmt(C.GREEN, "  ✓  Cleared walk-seen state:"))
+            log.info(fmt(C.GREEN, "  ✓  Cleared the lists of artists and albums already checked:"))
             for r in removed:
                 log.info(fmt(C.GRAY, f"     {r}"))
         else:
-            log.info(fmt(C.GRAY, "  No walk-seen state to clear."))
+            log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
         return
 
     # Local-only: reads/writes the same settings store the web Settings page
@@ -1393,7 +1408,6 @@ def main():
     while True:
         mode = interactive_session_mode()
         if mode == Mode.QUIT:
-            log.info(fmt(C.GRAY, "  Bye."))
             return
         refusal = queue_refusal(
             mode in (Mode.ALBUM, Mode.ARTIST, Mode.WALK_QUEUE,

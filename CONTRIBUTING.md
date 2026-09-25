@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking the time. This file covers filing bugs, suggesting features, and submitting PRs.
+This file covers filing bugs, suggesting features, and submitting PRs.
 
 ## Reporting bugs
 

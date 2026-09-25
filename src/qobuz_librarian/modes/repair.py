@@ -1941,12 +1941,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         )
         if post_backup_premise is None:
             pin_repair_recovery(
-                "repair backup kept, the remaining album could not be sealed"
+                "repair backup kept, the remaining album could not be checked"
             )
             checkpoint_recovery(
                 backup_path,
                 "backup",
-                "The remaining album could not be sealed before its refill.",
+                "The remaining album could not be checked before its refill.",
             )
             log.info(fmt(
                 C.RED,

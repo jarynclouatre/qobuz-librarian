@@ -6656,8 +6656,8 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
         if not source_still_sealed:
             log.info(fmt(
                 C.RED,
-                f"  ✗  {public} changed while its transaction was "
-                "sealed; leaving it untouched."))
+                f"  ✗  {public} changed while it was being checked; "
+                "leaving it untouched."))
             return None
         try:
             bp = _upgrade_backup_path_for(public)
@@ -7164,8 +7164,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             )
             log.info(fmt(
                 C.RED,
-                "  ✗  Backup copied but its exact ownership receipt could "
-                "not be sealed; "
+                "  ✗  Backup copied but could not be verified; "
                 + (
                     "the original remains in place and the copy was discarded."
                     if discarded
@@ -7831,7 +7830,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                 log.info(fmt(
                     C.RED,
                     f"  ✗  {record['parts'][-1]} could not be backed up "
-                    f"exactly; retained work will be sealed at {bp}."))
+                    f"exactly; what was copied is kept at {bp}."))
                 break
             finally:
                 if publication is not None:
@@ -8256,9 +8255,8 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
         if not result.complete:
             log.info(fmt(
                 C.YELLOW,
-                "  ⚠  The kept originals could not be sealed to an exact "
-                f"ownership receipt. They remain at {bp}, but no source "
-                "will be rewritten."))
+                "  ⚠  The kept originals could not be verified. They remain "
+                f"at {bp}, and no original will be rewritten."))
             return _result(result, set(), {})
         if not _held_copies_match_receipt(result):
             log.info(fmt(

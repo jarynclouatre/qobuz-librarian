@@ -144,7 +144,7 @@ def _seal_queue_item_siblings(item):
             log.info(fmt(
                 C.YELLOW,
                 f"  ⚠  Keeping sibling {Path(sibling).name}; it couldn't "
-                "be sealed safely before the download.",
+                "be checked before the download.",
             ))
     item["_sibling_cleanup_receipts"] = tuple(receipts)
 
@@ -1358,7 +1358,7 @@ def _reunite_split_album(
     if operation_capture is not None:
         if relocation.operation_id is None:
             raise PostImportRelocationAttention(
-                "the split-folder relocation lost its recovery identity"
+                "the split-folder relocation lost its recovery record"
             )
         operation_capture["operation_id"] = relocation.operation_id
     item["_resolved_post_dir"] = post_dir
@@ -1596,7 +1596,7 @@ def _resolve_queue_item(
                     if receipt is None:
                         log.info(fmt(
                             C.YELLOW,
-                            f"  ⚠  Kept sibling {name}; it wasn't sealed "
+                            f"  ⚠  Kept sibling {name}; it wasn't checked "
                             "before the download.",
                         ))
                         continue

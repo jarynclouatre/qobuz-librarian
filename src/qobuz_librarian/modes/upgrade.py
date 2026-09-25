@@ -282,7 +282,7 @@ def run_upgrade_walk_mode(args, token):
             if answer:
                 auto_accept_all = True
                 log.info(fmt(C.GREEN,
-                    "  ✓ Auto-accepting every artist. Walk away."))
+                    "  ✓ Auto-accepting every artist."))
         log.info("")
 
         for artist_name, candidates in by_artist.items():

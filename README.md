@@ -69,20 +69,19 @@ mkdir -p music   # skip if QL_MUSIC_DIR points at an existing folder
 docker compose up -d
 ```
 
-Then open <http://localhost:8666>. The first visit sets a web username and password; sign in, paste your Qobuz token on **Settings** (see below), and search for an artist, album, or track. After you connect, the Search page offers a one-time baseline scan to learn what is already in your library; run it or skip it.
+Then open <http://localhost:8666>. The first visit sets a web username and password; sign in, paste your Qobuz token on **Settings** (see below), and search for an artist, album, or track. After you connect, the Search page offers a first Library scan; run it or skip it.
 
 > **Point `QL_MUSIC_DIR` at a dedicated music library**, not your home folder or a drive with other files mixed in. The app moves and merges files within that tree, and Upgrade replaces files in place.
 
-On Windows, run the setup in WSL or Git Bash. `compose.yaml` pulls the prebuilt `latest` image from Docker Hub as `dinkeyes/qobuz-librarian` (that account name differs from the GitHub project, which is expected); to build it yourself, see [Development](#development). On a shared or untrusted network, lock down access before the first boot; see [Security](#security).
+On Windows, run the setup in WSL or Git Bash. `compose.yaml` pulls the prebuilt `latest` image from Docker Hub as `dinkeyes/qobuz-librarian` (that account name differs from the GitHub project); to build it yourself, see [Development](#development). On a shared or untrusted network, lock down access before the first boot; see [Security](#security).
 
 Docker is the supported way to run the **web UI**: the image bundles streamrip, beets 2.14.1, the FLAC tools, and the compiled stylesheet. Installing from the repo gives you the `qobuz-librarian` **CLI** for scripted runs against an existing streamrip/beets 2.14.1 setup: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'` (or the same spec with `pip`; the `[lyrics]` extra covers the lyrics features Docker already bundles). The Python package also includes the compiled web assets and the `qobuz-librarian-web` command, but you still provide streamrip, beets, and the audio tools outside Docker. If beets uses a separate environment and its `beet` launcher has an unusual wrapper, set `BEETS_PYTHON` to that environment's Python executable.
 
 ### Updating Docker
 
 Run these commands from the directory that holds `compose.yaml` and `.env`.
-They update the image, not the files you downloaded: compare your
-`compose.yaml` against the one in this repository after an update so a new
-setting it gained does not pass you by.
+They update the image, not the files you downloaded; compare your
+`compose.yaml` with the one in this repository after an update.
 
 ```bash
 docker compose pull
@@ -91,15 +90,15 @@ docker compose ps
 docker compose exec qobuz-librarian qobuz-librarian --version
 ```
 
-`pull` downloads the current image, then `up -d` recreates the service when that image has changed. `docker compose restart` alone keeps the existing container on its old image. Named config and data volumes, along with the music, staging, and backup bind mounts, remain in place during recreation. `docker compose ps` should settle on `healthy`, and the reported application version should match the release you expected to install. The container health check uses `/readyz` to catch an unreadable login, unavailable data directory, unavailable Queue/History database, or unsafe single-writer lock; `/healthz` remains a process-only liveness check. A deliberate read-only pause stays healthy so Settings and Diagnostics remain usable.
+`pull` downloads the current image, then `up -d` recreates the service when that image has changed. `docker compose restart` alone keeps the existing container on its old image. Named config and data volumes, along with the music, staging, and backup bind mounts, remain in place during recreation. `docker compose ps` should settle on `healthy`, and the reported application version should match the release you expected to install. The container health check uses `/readyz` to catch an unreadable login, unavailable data directory, unavailable Queue/History database, or unsafe run lock; `/healthz` remains a process-only liveness check. A deliberate read-only pause stays healthy so Settings and Diagnostics remain usable.
 
 ### Your Qobuz token
 
-Auth is by token, not your password. You need a paid Qobuz account; this only downloads what your subscription entitles you to.
+Auth is by token, not your password, and needs a paid Qobuz account.
 
-Get the token from the [Qobuz web player](https://play.qobuz.com): sign in, open dev tools (F12), and find Local Storage for `play.qobuz.com` (**Application** tab in Chrome/Edge, **Storage** in Firefox). Open the `localuser` entry and copy its `token` value; the `id` field next to it is your user id. Paste the token into **Auth token** on Settings; **Email or user ID** takes either your email or that numeric id. Credentials stay in the container and are used only for Qobuz authentication.
+Get the token from the [Qobuz web player](https://play.qobuz.com): sign in, open dev tools (F12), and find Local Storage for `play.qobuz.com` (**Application** tab in Chrome/Edge, **Storage** in Firefox). Open the `localuser` entry and copy its `token` value; the `id` field next to it is your user id. Paste the token into **Auth token** on Settings; **Email or user ID** takes either your email or that numeric id.
 
-The token is enough for Search, Library, Discover, New Releases, Upgrade, and Repair. Downloads also need the email or user ID because streamrip uses it to start a Qobuz download.
+The token is enough for Search, Library, Discover, New releases, Upgrade, and Repair. Downloads also need the email or user ID.
 
 If you already run streamrip elsewhere, copy `password_or_token` from `~/.config/streamrip/config.toml` instead.
 
@@ -115,7 +114,7 @@ If you already run streamrip elsewhere, copy `password_or_token` from `~/.config
 
 The web UI requires sign-in by default: a single shared credential, stored as a salted PBKDF2 hash, with brute-force limiting per source address and per username. An address that reaches the limit is refused for a while, the correct password included, until the wait clears; guesses from elsewhere never refuse an address that has not failed, and a browser that is already signed in is never counted. Behind a reverse proxy, set `FORWARDED_ALLOW_IPS` (see [Configuration](docs/configuration.md#deployment)) or the limit counts every visitor as one. The bundled `compose.yaml` ships hardened (`no-new-privileges`, `cap_drop: [ALL]`, memory and PID limits) and runs as `PUID:PGID` rather than root; credential files are written `0600` by the entrypoint and the app.
 
-On first boot there is no account yet, and the setup screen stays open until one is created. New and reset passwords need at least 15 characters; common and product-name passwords are refused. On a shared or untrusted network, seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env`, or set `WEB_BIND=127.0.0.1` to keep the port off the LAN, before starting the container. On a private home LAN, creating the account promptly is usually sufficient.
+On first boot there is no account yet, and the setup screen stays open until one is created. New and reset passwords need at least 15 characters; common and product-name passwords are refused. On a shared or untrusted network, seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env`, or set `WEB_BIND=127.0.0.1` to keep the port off the LAN, before starting the container.
 
 For internet exposure, put it behind an authenticating reverse proxy, a VPN, or Tailscale rather than relying on the built-in login alone. See [SECURITY.md](SECURITY.md), and [Configuration](docs/configuration.md#deployment) for the deployment knobs.
 

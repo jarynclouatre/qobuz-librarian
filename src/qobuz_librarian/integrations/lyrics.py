@@ -33,6 +33,9 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "kept-existing-plain",
     "not-found",
     "skipped-instrumental",
+    "skipped-long",
+    "skipped-tags",
+    "skipped",
 }
 _LYRIC_QUEUED_OUTCOMES = {"providers-unavailable", "unsafe-path"}
 
@@ -148,6 +151,12 @@ def _run_lyric_hook(album_dir):
     instrumental = counts.get("skipped-instrumental", 0)
     if instrumental:
         msg += f"; {instrumental} skipped as instrumental"
+    too_long = counts.get("skipped-long", 0)
+    if too_long:
+        msg += f"; {too_long} skipped (too long)"
+    no_tags = counts.get("skipped-tags", 0)
+    if no_tags:
+        msg += f"; {no_tags} skipped (missing tags)"
     if unavailable:
         msg += f"; {unavailable} provider-unavailable and need retry after import"
     if failed:
@@ -1269,7 +1278,7 @@ def offer_resume_lyric_retry(args):
             return False  # fall through to menu
         if ans in ("k", "keep"):
             log.info(
-                fmt(C.GRAY, "  Keeping the lyric retry manifest. It'll prompt again next launch.")
+                fmt(C.GRAY, "  Keeping the lyrics retry list.")
             )
             return False
         if ans in ("d", "discard"):

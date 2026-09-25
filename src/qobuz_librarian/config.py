@@ -1,8 +1,9 @@
 """Runtime configuration.
 
-Every value here is overridable via an environment variable of the same
-name; the literal in this file is just the fallback when the env is
-unset. `compose.yaml` sets the ones a container deployment needs.
+Values read through the ``_env`` helpers can be set by an environment
+variable of the same name, with the literal here as the fallback; plain
+constants such as the search limits and fuzzy-match thresholds cannot.
+`compose.yaml` sets the ones a container deployment needs.
 """
 import math
 import os

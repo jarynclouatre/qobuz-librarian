@@ -11,14 +11,14 @@ from qobuz_librarian import config
 from qobuz_librarian.library import migrate as engine
 from qobuz_librarian.library.scanner import HAVE_MUTAGEN
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, fmt, format_size, section, truncate
+from qobuz_librarian.ui_cli.colors import C, block, fmt, format_size, section, truncate
 from qobuz_librarian.ui_cli.errors import EXIT_CONFIG, EXIT_GENERAL, EXIT_INTERRUPT
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import confirm
 
 
 def _prompt_path(msg: str) -> str:
-    return ask(msg, lower=False) or ""
+    return ask(msg, lower=False, quiet=True) or ""
 
 
 def _resolve_paths(args):
@@ -30,13 +30,14 @@ def _resolve_paths(args):
     dest = (getattr(args, "migrate_dest", "") or config.MIGRATE_DEST).strip()
     if not src:
         src = _prompt_path("  Source library to organise: ")
+    if not src:
+        log.warning(fmt(C.RED, "\n  ✗  No source was given. Nothing changed."))
+        return None, None
     if not dest:
         dest = _prompt_path("  Destination for the organised copy: ")
-    if not src or not dest:
+    if not dest:
         log.warning(fmt(C.RED,
-            "  ✗  Need both a source and a destination.\n"
-            "     Set MIGRATE_SRC and MIGRATE_DEST, or pass "
-            "--migrate-src / --migrate-dest."))
+            "\n  ✗  No destination was given. Nothing changed."))
         return None, None
 
     src, dest = Path(src), Path(dest)
@@ -134,16 +135,13 @@ def run_migrate_mode(args):
     log.info(fmt(C.GRAY, f"  Source:      {src}"))
     log.info(fmt(C.GRAY, f"  Destination: {dest}"))
     if in_place:
-        log.info(fmt(C.YELLOW + C.BOLD,
+        log.info(block(fmt(C.YELLOW + C.BOLD,
             "  In-place mode: files are MOVED into place; originals are "
-            "relocated, not copied, and folders left empty are removed."))
-    else:
-        log.info(fmt(C.GREEN,
-            "  Copy mode: your originals stay exactly where they are."))
+            "relocated, not copied, and folders left empty are removed.")))
     if not use_acoustid:
-        log.info(fmt(C.GRAY,
+        log.info(block(fmt(C.GRAY,
             "  Tags only (fast). Add --acoustid to fingerprint files whose tags "
-            "can't place them."))
+            "can't place them.")))
 
     progress = _progress_printer()
     items = engine.collect_items(src, use_acoustid=use_acoustid, progress=progress)
@@ -162,7 +160,8 @@ def run_migrate_mode(args):
                    resume_entries)
 
     if getattr(args, "dry_run", False):
-        log.info(fmt(C.CYAN, "  Dry run: nothing was copied."))
+        log.info(fmt(C.CYAN,
+            f"  Dry run: nothing was {'moved' if in_place else 'copied'}."))
         return 0
     if not plan.placed and not resume_entries:
         log.info(fmt(C.GRAY, "  Nothing to place. Stopping."))
@@ -282,9 +281,14 @@ def run_migrate_mode(args):
         log.warning(fmt(C.YELLOW,
             "  ⚠  Migration stopped early; the destination is incomplete."))
     else:
-        log.info(fmt(C.GREEN,
-            f"  ✓  {result.copied} file(s) "
-            f"{'moved' if in_place else 'copied'}."))
+        if result.copied or not resume_entries:
+            log.info(fmt(C.GREEN,
+                f"  ✓  {result.copied} file(s) "
+                f"{'moved' if in_place else 'copied'}."))
+        if resume_entries:
+            log.info(fmt(C.GREEN,
+                f"  ✓  {len(resume_entries)} file(s) already in place were "
+                "verified."))
     if has_problem or result.cancelled:
         log.info(fmt(C.GRAY,
             f"     {result.copied} file(s) "

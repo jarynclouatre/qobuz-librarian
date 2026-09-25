@@ -29,7 +29,7 @@ If your library is not already organised as artist folders with album folders in
 
 It places each file by its tags (album artist, album, title, track, disc). For files whose tags are not enough to place them, an optional AcoustID fingerprint pass identifies them by sound (slower, needs network, off by default; no API key required).
 
-Library migration copies by default, so the source library stays where it is. Optional move mode relocates the originals after preview and removes source folders that become empty. The tool previews the full plan first: where each file goes, what it could not place, and how much space is needed at the destination. Nothing is copied or moved until you confirm. Files it cannot confidently place are left alone and listed.
+Library migration copies by default, so the source library stays where it is. Optional move mode relocates the originals after preview and removes source folders that become empty. The tool previews the plan first: how many files it can place, how many it could not place or would collide with an existing file, and how much space the destination needs (in the terminal, `--verbose` lists the files it could not place). Nothing is copied or moved until you confirm. Files it cannot confidently place are left alone and listed.
 
 An approved migration writes two CSVs at the destination: a `migration-manifest-*.csv` recording the full plan (including everything left behind and why) and a `migration-results-*.csv` recording what the run copied, moved, skipped, or failed on. Each file gets a unique timestamped name, so repeated runs never overwrite an earlier record; the approved plan and the finished run both report the exact filename they wrote. A `--dry-run` prints the preview without writing either file or otherwise changing the destination.
 
@@ -84,10 +84,10 @@ Stop Qobuz Librarian completely before running this or any other manual `beet` c
 
 ## The first scan on a big library
 
-A library-wide scan makes roughly one Qobuz call per artist directory (cached on re-scans, so repeated scans mostly use cached data), fanned across a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). There is no artificial delay between calls (`ARTIST_API_DELAY`, default 0); Qobuz's rate limit is handled by automatic retry and back-off, so raise it only if you get throttled. It is scan-then-review, not a daemon. After the baseline, use the Library refresh for music added outside the app. Singles and very short EPs are hidden from the missing-albums step by default; lower `MISSING_ALBUMS_MIN_TRACKS` (e.g. to 1) to surface them. (A single-artist run can also pass `--include-singles`.)
+A library-wide scan makes roughly one Qobuz call per artist directory (cached on re-scans, so repeated scans mostly use cached data), fanned across a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). There is no artificial delay between calls (`ARTIST_API_DELAY`, default 0); Qobuz's rate limit is handled by automatic retry and back-off, so raise it only if you get throttled. It is scan-then-review, not a daemon. After the first scan, use the Library refresh for music added outside the app. Singles and very short EPs are hidden from the missing-albums step by default; lower `MISSING_ALBUMS_MIN_TRACKS` (e.g. to 1) to surface them. (A single-artist run can also pass `--include-singles`.)
 
 Review choices are remembered, so a large library can be handled over several sessions. Library dismissals hide missing-album suggestions, Upgrade dismissals hide skipped upgrades, and Downsample remembers albums you keep hi-res. Restore them from each page's **Dismissed** view (Downsample calls it **Kept hi-res**). Saved choices are per album, so a new release by an already-reviewed artist still surfaces. Explicit single-artist CLI scans do not use the hidden list.
 
-## After the baseline
+## After the first scan
 
 One full scan is the setup step, not a routine. The app tracks everything it downloads on its own, so you normally never scan again. If music lands in the folders from outside the app, the small refresh icon in the Library header runs a quick pass (unchanged artist folders are skipped) and folds anything new into the review you already have open; your ticks stay put. "Force full rescan", for when you've reorganised things by hand, lives in Settings.

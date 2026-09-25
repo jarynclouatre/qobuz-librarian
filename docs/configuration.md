@@ -13,7 +13,7 @@ Use the **Settings** page for day-to-day behaviour:
 - beets folder layout
 - scan cadence
 
-These settings apply to new jobs. A field you change on the Settings page keeps that value across restarts and wins over `.env` for that field; fields you never change there keep following `.env`. Lower-level options stay in `.env` or `compose.yaml` and may need a restart, including timeouts, worker counts, cache and pacing tunables, `WEB_AUTH*`, host bind, and `LOG_LEVEL`.
+These settings apply to new jobs. A field you change on the Settings page keeps that value across restarts and wins over `.env` for that field; fields you never change there keep following `.env`. The Qobuz token is the other way round: one set in the environment wins over one saved on Settings. Lower-level options stay in `.env` or `compose.yaml` and may need a restart, including timeouts, worker counts, cache and pacing tunables, `WEB_AUTH*`, host bind, and `LOG_LEVEL`.
 
 ## Host paths
 
@@ -51,7 +51,7 @@ out of library scans and import targets.
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
 | `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path where the collection backup is written after each library scan |
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
-| `AUTO_LIBRARY_SCAN` | `true` | Offer the one-time baseline scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
+| `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
 | `NEW_RELEASE_MAX_AGE_DAYS` | `365` | Only flag albums released within this many days as new (`0` = any catalogue newcomer counts, including older releases Qobuz recently added) |
 | `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days |
@@ -62,7 +62,7 @@ out of library scans and import targets.
 | `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample hi-res FLACs as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
-| `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Library scans and new-release checks treat a single-track download as a single: the rest of its album is not offered, and an artist you own only singles from is skipped |
+| `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Library scans and checks for new releases treat a single-track download as a single: the rest of its album is not offered, and an artist you own only singles from is skipped |
 | `EXCLUDE_LIVE_ALBUMS` | `false` | Drop obvious live/tour/session/acoustic releases from the missing-albums gap list; a studio album whose real title merely contains "Live" is never dropped |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
@@ -153,10 +153,10 @@ Operations that replace or remove an existing library file also require the shar
 
 For a read-only music share, append `:ro` to the `/music` bind and set `QL_CHECK_VOLUMES=0` in `.env`; otherwise write endpoints, including scan starts, return 503 while the write check fails. The check is live, so fixing the mount or its ownership takes effect without a restart.
 
-If the bind dirs were auto-created as root on a first `up`, chown them:
+If the music folder was auto-created as root on a first `up`, chown it; the container fixes its own volumes on the next start:
 
 ```bash
-sudo chown -R 1000:1000 ./music ./staging ./upgrade_backups ./collection_backups
+sudo chown -R 1000:1000 ./music
 ```
 
 To run as root, set `PUID=0` and `PGID=0` explicitly. A non-numeric typo makes the container refuse to start rather than silently falling back to root.
@@ -173,7 +173,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 **Host names.** With `WEB_AUTH=none`, and on the first-visit setup screen, the web UI answers only to an IP address, `localhost`, a single-label name such as `nas`, a name ending in `.local`, `.lan`, `.home`, `.home.arpa`, `.internal`, `.localdomain` or `.fritz.box`, or a name listed in `WEB_ALLOWED_HOSTS` (comma-separated, without scheme or port). Any other name gets a plain 400 page naming that setting. Requests from a proxy named in `FORWARDED_ALLOW_IPS` are not checked; the proxy's own host routing decides. On every page, a form or request the browser reports as coming from another site is refused with a 403, CSRF token or not.
 
-**Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, the single-writer lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
+**Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, the run lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
 
 **Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the proxy's address. It decides three things: the failed-login throttle counts attempts per real client rather than per the shared proxy IP, a request the proxy received over HTTPS is recognised as such, which is what marks the session cookie `Secure`, and the proxy's requests skip the host-name check above. Without it, a proxy terminating TLS leaves that cookie unmarked. Point it at your proxy, not `*`. The default, `127.0.0.1`, does not cover a proxy on a Docker network, so leaving it unset there throttles every visitor as one; the log names the untrusted peer so you can verify that it really is your proxy before adding it.
 
@@ -222,7 +222,7 @@ The hook also fires once if the saved Qobuz token stops being accepted (`status`
 
 ## What the app does on its own
 
-On first run the Search page *offers* a one-time baseline scan (`AUTO_LIBRARY_SCAN`) rather than starting it for you. Once that baseline exists, periodic new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on their own, read-only, on a background timer, so they keep to the interval even when nobody has the app open. Both park a review list; nothing is downloaded or changed until you act on it.
+On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`) rather than starting it for you. Once a full scan has finished, new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on a background timer while nothing else is running, so they keep to the interval even when nobody has the app open. Both park a review list; nothing is downloaded until you act on it.
 
 - **Library gap-fill** can add missing albums or missing tracks after review. It fetches only the missing tracks, except when little of the album is present: then it downloads the whole album, sets the tracks you have aside, and removes them once the new files verify.
 - **After a download**, it re-checks the new album's track lengths against Qobuz and flags **Repair** if one is short. Read-only (a clean truncation can still decode).

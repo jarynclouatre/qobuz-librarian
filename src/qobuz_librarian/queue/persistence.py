@@ -282,7 +282,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
             return "resume"
         if ans in ("k", "keep"):
             log.info(fmt(C.GRAY,
-                "  Keeping the saved queue. It'll prompt again next launch."))
+                "  Keeping the saved queue."))
             return "keep"
         if not recovery_bearing and ans in ("d", "discard"):
             conf = ask(
@@ -384,7 +384,7 @@ def offer_resume_pending_queue(args, token_source):
                     f"  ⚠  Resume failed: {e}. Saved queue kept for next launch."))
             return False  # fall through to menu
         if ans in ("k", "keep"):
-            log.info(fmt(C.GRAY, "  Keeping the pending queue. It'll prompt again next launch."))
+            log.info(fmt(C.GRAY, "  Keeping the pending queue."))
             return False
         if ans in ("d", "discard"):
             conf = ask(

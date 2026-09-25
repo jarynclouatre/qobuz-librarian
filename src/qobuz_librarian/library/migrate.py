@@ -1872,7 +1872,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
             if source_root_receipt is not None and source_receipt is None:
                 entries.append(PlanEntry(
                     source=source, status=UNPLACEABLE, source_of_truth=sot,
-                    reason="source could not be sealed safely", meta=meta))
+                    reason="source could not be read safely", meta=meta))
                 continue
             placeable.append((source, meta, sot, source_receipt))
     finally:
@@ -1931,7 +1931,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
             entries.append(PlanEntry(
                 source=source, status=COLLISION, dest_rel=rel,
                 source_of_truth=sot,
-                reason="destination root could not be sealed safely", meta=meta,
+                reason="destination folder could not be read safely", meta=meta,
                 source_receipt=source_receipt))
             continue
         exists, destination_receipt, destination_path_receipt, reason = (
@@ -2342,7 +2342,7 @@ def _enumerate_source_descriptors(binding, *, cancel_check=None,
                 if progress:
                     progress(
                         "Reading tags" if suffix in audio_exts
-                        else "Sealing cover art and sidecars",
+                        else "Reading cover art and sidecars",
                         visited, 0, name,
                     )
                 path, metadata, receipt = _scan_file_from_descriptor(

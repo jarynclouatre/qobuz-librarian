@@ -6,7 +6,7 @@ deployment can set download quality, downsample policy and the behaviour
 toggles without ever opening the web UI.
 """
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, banner, fmt
+from qobuz_librarian.ui_cli.colors import C, banner, fmt, wrap
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import confirm
 from qobuz_librarian.web import settings_store
@@ -48,6 +48,25 @@ def _pick_downsample_policy(current_value):
     return "keep" if keep else "delete"
 
 
+def _pick_toggle(label, help_text, current_on):
+    """Yes or no for one toggle; "?" prints its help and asks again."""
+    suffix = " [Y/n/?]: " if current_on else " [y/N/?]: "
+    while True:
+        r = ask(f"    {label}{suffix}", quiet=True)
+        if r is None:
+            return None
+        if not r:
+            return current_on
+        if r in ("y", "yes"):
+            return True
+        if r in ("n", "no"):
+            return False
+        if r == "?":
+            log.info(fmt(C.GRAY, wrap(help_text, indent="      ")))
+            continue
+        print(fmt(C.YELLOW, "  Answer y, n or ?."))
+
+
 def _show_current(values):
     log.info(fmt(C.GRAY, "  Current values:"))
     quality_label = settings_store.ENUM_OPTION_LABELS["STREAMRIP_QUALITY"].get(
@@ -87,12 +106,11 @@ def run_settings_mode(args):
         changes["DOWNSAMPLE_KEEP_ORIGINALS"] = policy
 
     print()
-    log.info(fmt(C.WHITE, "  Behaviour toggles (Enter keeps the current value):"))
+    log.info(fmt(C.WHITE,
+        "  Behaviour toggles (Enter keeps the current value, ? explains one):"))
     for key, label, help_text in settings_store.BEHAVIOR_FIELDS:
         current_on = bool(values.get(key))
-        answer = confirm(f"    {label} - {help_text}",
-                         default_yes=current_on, auto_yes=False, on_eof=None,
-                         quiet=True)
+        answer = _pick_toggle(label, help_text, current_on)
         if answer is None:
             log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
             return 1
