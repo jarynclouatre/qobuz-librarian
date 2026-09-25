@@ -65,7 +65,7 @@ pyyaml==6.0.3
     # via uvicorn
 requests==2.34.2
     # via qobuz-librarian (pyproject.toml)
-ruff==0.16.8
+ruff==0.16.9
     # via qobuz-librarian (pyproject.toml)
 starlette==1.7.0
     # via fastapi
@@ -84,7 +84,7 @@ typing-inspection==0.4.4
     #   pydantic
 urllib3==2.8.0
     # via requests
-uvicorn==0.53.0
+uvicorn==0.54.0
     # via qobuz-librarian (pyproject.toml)
 uvloop==0.22.1
     # via uvicorn
