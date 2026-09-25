@@ -135,13 +135,13 @@
 {# Discard lives in the quiet toolbar row rather than the floating bar: that
    bar is the one tapped for every download, and a destructive action a
    thumb-slip away from it does not belong there. It moves into the bar only
-   once nothing is left to download. In the row it sits last, set apart and
-   in red; it is marked irreversible only where discarding loses something
-   no rescan can rebuild. #}
+   once nothing is left to download. In the row it sits last, after a rule.
+   Only where discarding loses something no rescan can rebuild is it marked
+   irreversible, which also turns it red. #}
 {% macro discard_review(job, thing, confirm, cls='', id='') -%}
 <button type="submit" formaction="/jobs/{{ job.id }}/cancel" formnovalidate
         {%- if id %} id="{{ id }}"{% endif %}
-        class="{{ cls or 'ql-review-tool ql-review-tool-danger ql-review-discard' }}"
+        class="{{ cls or 'ql-review-tool ql-review-discard' }}"
         data-confirm="{{ confirm }}"
         data-confirm-action="Discard"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ thing }}</button>
 {%- endmacro %}

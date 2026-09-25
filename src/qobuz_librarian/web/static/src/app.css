@@ -3235,43 +3235,31 @@ details.ql-mobile-drawer[open]::before {
 .ql-review-footer-secondary.hidden {
   display: none !important;
 }
-/* One toolbar row. Where a phone is narrower than the tools it scrolls
-   sideways rather than wrapping, and Discard comes last, after a rule. The
-   padding and matching margin keep the tools' focus rings inside the scroll
-   box. */
+/* Two sets of tools: the selection tools, then the Dismissed link and
+   Discard, which act on the review rather than its rows. Each set keeps
+   together; where the row cannot hold both, the second moves under the
+   first, and on a phone it always does. */
 .ql-review-summary-actions {
   display: flex;
   min-width: 0;
   flex: 0 1 auto;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--ql-space-3);
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-  margin: -0.25rem;
-  padding: 0.25rem;
 }
-.ql-review-summary-actions::-webkit-scrollbar {
-  display: none;
+.ql-review-tool-group {
+  display: flex;
+  max-width: 100%;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--ql-space-3);
 }
-/* The row's end fades out, so a tool cut by the edge reads as "more this
-   way" rather than as a clipped word. */
-@media (max-width: 639.98px) {
-  .ql-review-summary-actions {
-    padding-right: 1.5rem;
-    scroll-padding-inline: 0.25rem 1.5rem;
-    mask-image: linear-gradient(to right, #000 calc(100% - 1.5rem), transparent);
-  }
-  .ql-review-summary-actions:focus-within {
-    mask-image: none;
-  }
-}
-.ql-review-summary-actions > * {
+.ql-review-tool-group > * {
   flex: none;
   white-space: nowrap;
 }
-.ql-review-summary-actions > .ql-review-discard {
+.ql-review-tool-group > .ql-review-discard {
   position: relative;
   margin-left: var(--ql-space-2);
   padding-left: calc(var(--ql-space-3) + 1px);
@@ -3285,6 +3273,20 @@ details.ql-mobile-drawer[open]::before {
   height: 1.25rem;
   transform: translateY(-50%);
   background-color: var(--ql-line);
+}
+/* On a phone a review without a Dismissed link leaves Discard alone on its
+   row, already apart, so it drops the rule there. */
+@media (max-width: 639.98px) {
+  .ql-review-tool-group {
+    flex-basis: 100%;
+  }
+  .ql-review-tool-group > .ql-review-discard:first-child {
+    margin-left: 0;
+    padding-left: var(--ql-space-1);
+  }
+  .ql-review-discard:first-child::before {
+    content: none;
+  }
 }
 .ql-review-tool {
   display: inline-flex;
@@ -3303,10 +3305,10 @@ details.ql-mobile-drawer[open]::before {
 .ql-review-tool:hover {
   color: var(--ql-text);
 }
-.ql-review-tool-danger {
+.ql-review-tool[data-irreversible] {
   color: color-mix(in oklab, var(--ql-danger) 78%, var(--ql-text));
 }
-.ql-review-tool-danger:hover {
+.ql-review-tool[data-irreversible]:hover {
   color: color-mix(in oklab, var(--ql-danger) 92%, var(--ql-text));
 }
 .ql-review-tool:focus-visible {
