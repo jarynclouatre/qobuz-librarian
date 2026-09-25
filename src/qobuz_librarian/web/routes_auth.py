@@ -168,10 +168,10 @@ async def setup_submit(request: Request, username: str = Form(""),
             context={"error": err, "username": user}, status_code=400)
     # First-run setup is unauthenticated by necessity (no creds exist yet), so
     # whoever reaches the open port first claims admin.
-    _ip = (request.client.host if request.client else "") or "unknown"
+    ip = web_auth.client_ip(request)
     _log.warning(
         "First-run /setup creating admin account from %s (username=%r).",
-        _ip, user)
+        ip, user)
     # The KDF is deliberately slow, so it runs off the event loop; on the loop
     # it would stall every other request for the length of the hash, and a
     # second tap while it ran would land here again before the first request

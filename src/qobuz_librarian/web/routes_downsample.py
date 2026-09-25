@@ -19,18 +19,20 @@ async def downsample_page(request: Request):
     # the Refresh confirm must say so instead of quietly dropping the user's
     # ticks.
     review_parked = any(
-        getattr(j, "execute_kind", "") == "downsample"
+        j.execute_kind == "downsample"
         for j in job_mgr.registry.awaiting_review())
     return runtime._tr(request, "downsample.html", {
         "page": "downsample",
         "have_downsample": downsample_engine.HAVE_DOWNSAMPLE,
-        "creds_ok": bool(runtime._read_creds().get("auth_token")),
+        "creds_ok": runtime._creds_ok(),
         "downsample_state": state,
         "review_parked": review_parked,
         # A standalone refresh in flight, so the page shows "scan running"
         # instead of the idle launcher (which read as if nothing was happening).
         "downsample_running": scans._active_scan(
-            "downsample", statuses=("pending", "scanning", "running")),
+            "downsample",
+            statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                      job_mgr.JobStatus.RUNNING)),
         "last_run": runtime._tool_last_run_age("downsample"),
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)})
 

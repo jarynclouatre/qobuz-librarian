@@ -13,7 +13,7 @@ router = APIRouter()
 
 @router.get("/upgrade", response_class=HTMLResponse)
 async def upgrade_page(request: Request):
-    creds_ok = bool(runtime._read_creds().get("auth_token"))
+    creds_ok = runtime._creds_ok()
     # Without credentials the page still renders, showing the connect card,
     # bouncing to Search reads as a broken button.
     if not getattr(cfg, "UPGRADE_SCAN_ENABLED", True):

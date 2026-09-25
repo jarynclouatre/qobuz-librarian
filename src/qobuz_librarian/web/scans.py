@@ -18,15 +18,16 @@ _ANY_TARGET = object()
 
 def _scan_target(job) -> str:
     """The artist a scan covers, or "" for the whole library."""
-    return (getattr(job, "artist", "") or "").strip().casefold()
+    return (job.artist or "").strip().casefold()
 
 
-def _active_scan(*kinds, statuses=("pending", "scanning"), target=_ANY_TARGET):
+def _active_scan(*kinds, statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING),
+                 target=_ANY_TARGET):
     """A job of one of the given execute_kinds in one of ``statuses``, or None,
     folding a double-submitted pass onto the one already in flight instead of
     stacking duplicate work."""
     for j in job_mgr.registry.pending_and_running():
-        if getattr(j, "execute_kind", "") in kinds and j.status.value in statuses:
+        if j.execute_kind in kinds and j.status in statuses:
             if target is _ANY_TARGET or _scan_target(j) == target:
                 return j
     return None
@@ -39,7 +40,8 @@ async def _submit_scan_deduped_async(job, scan_fn, execute_fn, *kinds, **kw):
         None, lambda: _submit_scan_deduped(job, scan_fn, execute_fn, *kinds, **kw))
 
 
-def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds, statuses=("pending", "scanning")):
+def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds,
+                         statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING)):
     """Submit a scan only if one of ``kinds`` isn't already active, atomically.
 
     Checking _active_scan and submitting in one locked step closes the window
@@ -209,7 +211,7 @@ def _fold_into_parked_library_review(job):
         return
     parked = None
     for other in job_mgr.registry.awaiting_review():
-        if (getattr(other, "execute_kind", "") != "library"
+        if (other.execute_kind != "library"
                 or other.id == job.id):
             continue
         if parked is None or (other.created_at or 0) > (parked.created_at or 0):

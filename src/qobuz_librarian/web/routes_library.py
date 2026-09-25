@@ -7,14 +7,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.api.auth import (
-    AuthLost,
-    CredentialChanged,
-    NoCredsError,
-    QobuzAccess,
-    QobuzEntitlementError,
-    QobuzUnavailable,
-)
+from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.library import (
     generation_state,
     library_scan_state,
@@ -132,18 +125,19 @@ def _library_header_note():
     follows an approved review said "Refreshing…" as well.
     """
     job = scans._active_scan(
-        "library", statuses=("pending", "scanning", "running"))
+        "library", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                             job_mgr.JobStatus.RUNNING))
     if job is None:
         return None
-    if job.status.value == "pending":
+    if job.status == job_mgr.JobStatus.PENDING:
         return {"label": "Queued", "detail": "",
                 "title": "Waits for the running job to finish."}
-    if job.status.value == "running":
+    if job.status == job_mgr.JobStatus.RUNNING:
         return {"label": "Downloading…", "detail": "",
                 "title": "Downloading the albums selected in the review."}
-    total = int(getattr(job, "progress_total", 0) or 0)
-    current = int(getattr(job, "progress_current", 0) or 0)
-    unit = str(getattr(job, "progress_unit", "") or "").strip()
+    total = int(job.progress_total or 0)
+    current = int(job.progress_current or 0)
+    unit = str(job.progress_unit or "").strip()
     detail = ""
     if total:
         detail = f"{current:,} of {total:,}"
@@ -157,7 +151,7 @@ def _last_finished_library_job():
     """The most recent library scan that has stopped, or None."""
     latest = None
     for j in job_mgr.registry.all():
-        if getattr(j, "execute_kind", "") != "library":
+        if j.execute_kind != "library":
             continue
         if j.status not in (job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED):
             continue
@@ -194,7 +188,7 @@ def _library_refresh_failure():
     since = latest.finished_at or 0
     for j in job_mgr.registry.all():
         if (j is not latest
-                and getattr(j, "execute_kind", "") == "library"
+                and j.execute_kind == "library"
                 and max(j.created_at or 0, j.started_at or 0,
                         j.finished_at or 0) > since):
             return ""
@@ -214,7 +208,7 @@ def _library_current_job():
               job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING)
     cur = None
     for j in job_mgr.registry.all():
-        if (getattr(j, "execute_kind", "") != "library"
+        if (j.execute_kind != "library"
                 or j.status not in states):
             continue
         if cur is None:
@@ -236,7 +230,7 @@ def _library_page_context(page, tab, q):
     flows.apply_pending_review_removals()
     library_generation = scans._truthful_library_generation()
     ctx = {
-        "creds_ok": bool(runtime._read_creds().get("auth_token")),
+        "creds_ok": runtime._creds_ok(),
         "qobuz_ready": runtime._qobuz_ready(), "page": "library",
         "library_scan_state": scans._library_scan_state(),
         # Freshness line: when a full gap scan last completed, and whether one
@@ -259,10 +253,12 @@ def _library_page_context(page, tab, q):
         # under way (the "Refreshing…" note takes its place over a parked
         # review; a bare scan shows its own progress body).
         "library_refresh_running": scans._active_scan(
-            "library", statuses=("pending", "scanning", "running")) is not None,
+            "library", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                                 job_mgr.JobStatus.RUNNING)) is not None,
         "library_header_note": _library_header_note(),
         "library_refresh_scanning": scans._active_scan(
-            "library", statuses=("pending", "scanning")) is not None,
+            "library", statuses=(job_mgr.JobStatus.PENDING,
+                                 job_mgr.JobStatus.SCANNING)) is not None,
         "library_refresh_failure": _library_refresh_failure(),
         "unreadable_artists": unreadable_artists_mod.load(),
         "auto_library_scan": cfg.AUTO_LIBRARY_SCAN,
@@ -374,11 +370,13 @@ async def library_refresh_note(request: Request):
             "JobStatus": job_mgr.JobStatus,
             "library_refresh_running": scans._active_scan(
                 "library",
-                statuses=("pending", "scanning", "running"),
+                statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                          job_mgr.JobStatus.RUNNING),
             ) is not None,
             "library_header_note": _library_header_note(),
             "library_refresh_scanning": scans._active_scan(
-                "library", statuses=("pending", "scanning")) is not None,
+                "library", statuses=(job_mgr.JobStatus.PENDING,
+                                     job_mgr.JobStatus.SCANNING)) is not None,
             # Only the poll says this, so it lands once, when the work it was
             # watching ends. A page load has the review itself to read.
             "library_refresh_outcome": _library_refresh_outcome(),
@@ -439,15 +437,8 @@ async def library_scan(
             credentials = await runtime._authorize_qobuz_for_web(
                 QobuzAccess.CATALOGUE_ACTION
             )
-        except (
-            NoCredsError,
-            AuthLost,
-            QobuzUnavailable,
-            QobuzEntitlementError,
-            CredentialChanged,
-            asyncio.TimeoutError,
-        ) as exc:
-            msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+        except runtime._QOBUZ_ACTION_ERRORS as exc:
+            msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
             if runtime._is_htmx(request):
                 return HTMLResponse(
                     runtime._ql_notice_html("error", html.escape(msg)),
@@ -482,15 +473,8 @@ async def library_scan(
         credentials = await runtime._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION
         )
-    except (
-        NoCredsError,
-        AuthLost,
-        QobuzUnavailable,
-        QobuzEntitlementError,
-        CredentialChanged,
-        asyncio.TimeoutError,
-    ) as exc:
-        msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+    except runtime._QOBUZ_ACTION_ERRORS as exc:
+        msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         if runtime._is_htmx(request):
             return HTMLResponse(
                 runtime._ql_notice_html("error", html.escape(msg)),

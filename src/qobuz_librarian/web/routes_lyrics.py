@@ -21,7 +21,7 @@ async def lyrics_page(request: Request):
     }.get(lyrics_format, lyrics_format)
     latest_lyrics = None
     for job in job_mgr.registry.finished():
-        if (getattr(job, "execute_kind", "") == "lyrics"
+        if (job.execute_kind == "lyrics"
                 and (latest_lyrics is None
                      or (job.finished_at or job.created_at or 0)
                      >= (latest_lyrics.finished_at
@@ -36,12 +36,12 @@ async def lyrics_page(request: Request):
     return runtime._tr(request, "lyrics.html", {
         "page": "lyrics",
         "have_lyrics": lyric_fetch.AVAILABLE,
-        "creds_ok": bool(runtime._read_creds().get("auth_token")),
+        "creds_ok": runtime._creds_ok(),
         "last_run": runtime._tool_last_run_age("lyrics"),
         # A library-wide lyrics scan in flight, so the page says so instead of
         # showing the idle "Ready · Start lyrics scan" launcher while one runs.
         "lyrics_running": scans._active_scan(
-            "lyrics", statuses=("pending", "running")),
+            "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING)),
         "lyrics_failed": lyrics_failed,
         "lyrics_format": lyrics_format_label,
         "providers": providers,
@@ -65,7 +65,8 @@ async def lyrics_scan(request: Request):
     busy = runtime._lock_busy_response(request)
     if busy is not None:
         return busy
-    existing = scans._active_scan("lyrics", statuses=("pending", "running"))
+    existing = scans._active_scan(
+        "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
     if existing is not None:
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
     job = job_mgr.Job(title="Lyrics scan")

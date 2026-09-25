@@ -129,8 +129,6 @@ async def job_stream(request: Request, job_id: str):
                     if empty_ticks >= _SSE_HEARTBEAT_TICKS:
                         empty_ticks = 0
                         yield "event: ping\ndata: 1\n\n"
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     _log.exception(
                         "SSE stream error for job %s", job.id)
@@ -193,8 +191,6 @@ async def job_review_stream(request: Request, job_id: str):
                     if empty_ticks >= _SSE_HEARTBEAT_TICKS:
                         empty_ticks = 0
                         yield "event: ping\ndata: 1\n\n"
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     _log.exception(
                         "review event stream failed for job %s", job.id)
@@ -214,12 +210,12 @@ def _job_to_dict(job, *, log_tail: int = 50):
         "edition": job.edition,
         "display_title": job.display_title,
         "artist": job.artist,
-        "album_id": getattr(job, "album_id", None),
+        "album_id": job.album_id,
         "summary": job.summary,
         "error": job.error,
-        "quality_shortfall": getattr(job, "quality_shortfall", {}),
-        "created_at": getattr(job, "created_at", None),
-        "finished_at": getattr(job, "finished_at", None),
+        "quality_shortfall": job.quality_shortfall,
+        "created_at": job.created_at,
+        "finished_at": job.finished_at,
     }
     if log_tail:
         out["log_lines"] = job.log_lines[-log_tail:]
@@ -254,7 +250,10 @@ async def queue_count():
     ))
     return JSONResponse({
         "count": len(active),
-        "running": any(j.status.value in ("running", "scanning") for j in active),
+        "running": any(
+            j.status in (job_mgr.JobStatus.RUNNING, job_mgr.JobStatus.SCANNING)
+            for j in active
+        ),
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
         # Status alone: the signature above moves every time a scan adds a
         # candidate, which would redraw the Queue on every poll for hours.

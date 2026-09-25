@@ -244,7 +244,7 @@ async def queue_cancel_pending():
         if unsaved:
             noun = "job" if unsaved == 1 else "jobs"
             parts.append(
-                f"{unsaved} {noun} couldn't be canceled because the update "
+                f"{unsaved} {noun} couldn't be cancelled because the update "
                 "couldn't be saved."
             )
         message = " ".join(parts)

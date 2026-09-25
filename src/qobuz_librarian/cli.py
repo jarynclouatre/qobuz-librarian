@@ -980,7 +980,6 @@ def parse_args():
     if (args.no_catalog and not (args.artist or args.library_walk)
             and (args.query or other_run_mode)):
         p.error("--no-catalog only applies to artist mode and --library-walk")
-    # The upgrade walk covers the library; it cannot use a query.
     if args.upgrade_walk and args.query:
         p.error("--upgrade-walk covers the whole library. Drop the "
                 "query, or run a normal search without --upgrade-walk")

@@ -79,7 +79,7 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "page": "discover",
         "discover_tab": tab,
         "discover_tabs": _DISCOVER_TABS,
-        "creds_ok": bool(runtime._read_creds().get("auth_token")),
+        "creds_ok": runtime._creds_ok(),
         "qobuz_ready": runtime._qobuz_ready(),
         "feed": _discover_empty_feed(),
         "artists": [],
@@ -96,7 +96,7 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
 
     try:
         token = runtime._get_token()
-    except (SystemExit, NoCredsError):
+    except NoCredsError:
         context["creds_ok"] = False
         context["qobuz_ready"] = False
         return runtime._tr(request, "discover.html", context)
@@ -175,7 +175,7 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
     loop = asyncio.get_running_loop()
     try:
         token = runtime._get_token()
-    except (SystemExit, NoCredsError):
+    except NoCredsError:
         return runtime._tr(request, "_discover_albums.html", {
             "albums": [],
             "decades": [],

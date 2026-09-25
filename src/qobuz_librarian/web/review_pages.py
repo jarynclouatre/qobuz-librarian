@@ -71,8 +71,8 @@ _COUNT_ONLY_SUMMARY = re.compile(
 def _review_summary_line(job) -> str:
     """The scan's own summary as a review screen should show it: its caveats
     kept, its bare count dropped in favour of the live counts row."""
-    summary = str(getattr(job, "summary", "") or "").strip()
-    if getattr(job, "execute_kind", "") not in _TRIAGE_KINDS or not summary:
+    summary = str(job.summary or "").strip()
+    if job.execute_kind not in _TRIAGE_KINDS or not summary:
         return summary
     count = _COUNT_ONLY_SUMMARY.match(summary)
     return summary[count.end():].strip() if count else summary

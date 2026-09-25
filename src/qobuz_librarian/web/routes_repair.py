@@ -5,14 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import repair_log
-from qobuz_librarian.api.auth import (
-    AuthLost,
-    CredentialChanged,
-    NoCredsError,
-    QobuzAccess,
-    QobuzEntitlementError,
-    QobuzUnavailable,
-)
+from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.library import scan_checkpoint
 from qobuz_librarian.web import flows, review_badges, review_pages, runtime, scans
 from qobuz_librarian.web import jobs as job_mgr
@@ -36,7 +29,7 @@ def _repair_current_job():
               job_mgr.JobStatus.FAILED, job_mgr.JobStatus.CANCELED)
     cur = None
     for j in job_mgr.registry.all():
-        if getattr(j, "execute_kind", "") != "repair":
+        if j.execute_kind != "repair":
             continue
         if cur is None or (j.created_at or 0) >= (cur.created_at or 0):
             cur = j
@@ -47,7 +40,7 @@ def _repair_current_job():
 @router.get("/repair", response_class=HTMLResponse)
 async def repair_page(request: Request, page: int = 1):
     badge_generation = review_badges.ready_generation("repair")
-    creds_ok = bool(runtime._read_creds().get("auth_token"))
+    creds_ok = runtime._creds_ok()
     # /repair is the SINGLE authoritative repair surface.
     rjob = _repair_current_job()
     ctx = {"creds_ok": creds_ok, "qobuz_ready": runtime._qobuz_ready(),
@@ -99,15 +92,8 @@ async def repair_scan(request: Request):
         credentials = await runtime._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION
         )
-    except (
-        NoCredsError,
-        AuthLost,
-        QobuzUnavailable,
-        QobuzEntitlementError,
-        CredentialChanged,
-        asyncio.TimeoutError,
-    ) as exc:
-        msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+    except runtime._QOBUZ_ACTION_ERRORS as exc:
+        msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         return RedirectResponse(
             url="/repair?error=" + runtime._notice_key(msg), status_code=303)
     job = job_mgr.Job(title="Repair scan")

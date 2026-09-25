@@ -73,7 +73,7 @@ async def dashboard_head():
 def _new_release_review():
     """The awaiting-review new-release check for the dashboard badge, if any."""
     for j in job_mgr.registry.awaiting_review():
-        if getattr(j, "execute_kind", "") == "new_releases":
+        if j.execute_kind == "new_releases":
             return {"id": j.id, "count": len(j.candidates)}
     return None
 
@@ -188,7 +188,7 @@ def _maybe_resume_library_scan():
 async def dashboard(request: Request, q: str = "", kind: str = "artist",
                     artist_id: str = "", artist_name: str = "", album_id: str = ""):
     active_jobs = [j for j in job_mgr.registry.pending_and_running()
-                   if j.status.value in ('running', 'scanning')]
+                   if j.status in (job_mgr.JobStatus.RUNNING, job_mgr.JobStatus.SCANNING)]
 
     # These all read the (often NAS / network-mounted) data + music volumes,
     # the fetch log, the creds file, the lyric-retry file, and a staging
@@ -234,7 +234,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             )(scan_checkpoint.pending(), library_generation),
             # First-run nudge: a fresh install has no creds, so every search/scan
             # would fail cryptically, so surface it up front. Filesystem-only.
-            "creds_ok": bool(runtime._read_creds().get("auth_token")),
+            "creds_ok": runtime._creds_ok(),
             "qobuz_ready": runtime._qobuz_ready(),
             "lyric_retry_count":
                 len(lyrics_mode.load_lyric_retry()) if cfg.LYRIC_RETRY_FILE.exists() else 0,
@@ -242,8 +242,6 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # A store that couldn't be read was kept aside and the run fell back
             # to defaults, and only the container log said so, which nobody reads.
             "corrupt_stores": state_file.corrupt_store_details(),
-            # Says the pause here rather than leaving it to the 503 a press
-            # earns. It probes the volumes, so it belongs off the event loop.
         }
 
     loop = asyncio.get_running_loop()
@@ -282,7 +280,8 @@ async def lyric_retry(request: Request):
         return busy
     # A retry and a full backfill share the one lyric-state file, so they must
     # never run at once, so fold onto whichever lyrics pass is already in flight.
-    existing = scans._active_scan("lyrics", statuses=("pending", "running"))
+    existing = scans._active_scan(
+        "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
     if existing is not None:
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
     job = job_mgr.Job(title="Lyric retry")
@@ -349,8 +348,6 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     if not runtime._is_htmx(request):
         return RedirectResponse(url="/", status_code=303)
     if query or (kind == "album" and album_id):
-        # Imported before the try so the except clauses below can always name
-        # them, even if a failure happens before the request reaches the API.
         try:
             token = runtime._get_token()
 
@@ -412,16 +409,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 # instead of the old (now false) "works on albums" message.
                 error = ("That's a track URL. Switch to Track to download one "
                          "track, or paste the album URL in Album mode.")
-            elif parsed:
-                # Parsed as some other Qobuz URL kind (artist/playlist).
-                if kind == "artist":
-                    error = "Search artists by name. Paste album or track URLs only."
-                else:
-                    error = ("Only Qobuz album and track URLs are supported. "
-                             "Search for an artist by name instead.")
-            elif is_qobuz_url:
-                # URL looks like qobuz.com but isn't a recognised format (e.g.
-                # artist/interpreter or playlist page).
+            elif parsed or is_qobuz_url:
+                # Another Qobuz URL kind (artist, playlist), or a qobuz.com URL
+                # in no recognised format.
                 if kind == "artist":
                     error = "Search artists by name. Paste album or track URLs only."
                 else:
@@ -784,7 +774,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     g["have_tracks"] = rep["have_tracks"]
                     g["want_tracks"] = rep["want_tracks"]
                     g["others"] = eds[1:]
-        except (SystemExit, NoCredsError):
+        except NoCredsError:
             error = "No Qobuz credentials set. Visit Settings."
         except AuthLost:
             error = "Token is expired or invalid. Update it in Settings."
@@ -796,7 +786,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             _log.exception(
                 "search failed for %r", query)
             error = "Search failed. Try again."
-    creds_ok = bool(runtime._read_creds().get("auth_token"))
+    creds_ok = runtime._creds_ok()
     search_state = f"{kind}|{query}"
     if artist_id:
         search_state += f"|artist:{artist_id}"
@@ -887,7 +877,7 @@ async def search_album_tracks(request: Request, album_id: str = ""):
             loop.run_in_executor(
                 None, lambda: _album_tracklist(album_id, token)),
             timeout=cfg.WEB_FETCH_TIMEOUT)
-    except (SystemExit, NoCredsError):
+    except NoCredsError:
         error = "No Qobuz credentials set. Visit Settings."
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
@@ -1126,7 +1116,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         # Land on the new job's page so the user sees their download starting.
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
     except NoCredsError as exc:
-        msg = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         if runtime._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(url="/settings?error=creds", status_code=303)

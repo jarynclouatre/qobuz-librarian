@@ -1049,7 +1049,7 @@ def staging_holder() -> Optional[str]:
         return _staging_holder
 
 
-def _qobuz_action_error_message(exc, *, unchanged=False) -> str:
+def qobuz_action_error_message(exc, *, unchanged=False) -> str:
     """Short action-gate copy shared by scans and review approvals."""
     if isinstance(exc, NoCredsError):
         message = "Connect Qobuz in Settings."
@@ -1961,7 +1961,7 @@ def approve(
             message = (
                 str(e)
                 if isinstance(e, CandidateStale)
-                else _qobuz_action_error_message(e)
+                else qobuz_action_error_message(e)
                      + " Your review and picks are untouched."
             )
             j.push_line(message)
@@ -2480,7 +2480,6 @@ def request_cancel(job: Job) -> bool:
             return True
         if job.status == JobStatus.PENDING:
             return False
-        # The worker claimed it first; stop it like any running job.
     # Either it wasn't in review, or an approve() flipped it to PENDING
     # between the check and cancel_review's locked re-check.
     with job._lock:

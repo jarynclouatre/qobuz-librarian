@@ -9,15 +9,7 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.api.auth import (
-    AuthLost,
-    CredentialChanged,
-    DownloaderNotReady,
-    NoCredsError,
-    QobuzAccess,
-    QobuzEntitlementError,
-    QobuzUnavailable,
-)
+from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
@@ -48,7 +40,7 @@ async def collection_snapshot_now(request: Request, force: str = Form("")):
     if busy is not None:
         return busy
     existing = scans._active_scan("collection_snapshot",
-                            statuses=("pending", "running"))
+                            statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
     if existing is not None:
         return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
     job = job_mgr.Job(title="Collection backup")
@@ -129,7 +121,8 @@ async def collection_restore_upload(request: Request,
         return busy
     existing = scans._active_scan(
         "collection_restore",
-        statuses=("pending", "scanning", "awaiting_review", "running"))
+        statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                  job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING))
     if existing is not None:
         # In the page, say so where the form sits and link the open review;
         # a bare redirect there would swap the whole page under the reader
@@ -165,6 +158,8 @@ async def collection_restore_upload(request: Request,
     if not ok:
         return _restore_response(request, reason)
     # An empty music folder that the app's own last backup says held albums is
+    # most likely an unmounted share, so the restore is refused unless the
+    # upload marks it as an empty replacement folder.
     def _restore_target_state():
         root = Path(cfg.MUSIC_ROOT)
         hint = runtime._music_root_hint()
@@ -222,17 +217,9 @@ async def collection_restore_upload(request: Request,
     try:
         credentials = await runtime._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION)
-    except (
-        NoCredsError,
-        AuthLost,
-        QobuzUnavailable,
-        QobuzEntitlementError,
-        DownloaderNotReady,
-        CredentialChanged,
-        asyncio.TimeoutError,
-    ) as exc:
+    except runtime._QOBUZ_ACTION_ERRORS as exc:
         return _restore_response(
-            request, job_mgr._qobuz_action_error_message(exc, unchanged=True))
+            request, job_mgr.qobuz_action_error_message(exc, unchanged=True))
     job = job_mgr.Job(title="Restore from backup")
     job.execute_kind = "collection_restore"
 
@@ -253,7 +240,8 @@ async def collection_restore_upload(request: Request,
         _scan,
         runtime._resume_album_download(job, job.execute_args),
         "collection_restore",
-        statuses=("pending", "scanning", "awaiting_review", "running"),
+        statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                  job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING),
     )
     if submitted is None:
         busy = runtime._lock_busy_response(request)

@@ -158,7 +158,6 @@ def run_downsample_walk_mode(args):
                 f"  Saved. Originals will be {'kept' if keep else 'deleted'}."))
         log.info("")
 
-    # Auto-accept gate. Skipped under --yes, which has already answered it.
     auto_accept_all = False
     if offered and not args.dry_run and not args.yes:
         answer = confirm(

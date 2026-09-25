@@ -21,15 +21,7 @@ from qobuz_librarian import completion
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api import search as qobuz_search
-from qobuz_librarian.api.auth import (
-    AuthLost,
-    CredentialChanged,
-    DownloaderNotReady,
-    NoCredsError,
-    QobuzAccess,
-    QobuzEntitlementError,
-    QobuzUnavailable,
-)
+from qobuz_librarian.api.auth import CredentialChanged, NoCredsError, QobuzAccess
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.library import candidate_premise, generation_state, new_releases
@@ -244,7 +236,7 @@ async def job_approve(request: Request, job_id: str):
     if not job:
         return RedirectResponse(
             url="/queue?error=" + runtime._notice_key(
-                "That job is no longer in History."),
+                "That review is no longer open."),
             status_code=303)
     # A parked review can outlive its feature: credentials can be pulled after
     # an upgrade review parks, and the downsample engine can vanish across a
@@ -393,16 +385,8 @@ async def job_approve(request: Request, job_id: str):
             authorized_credentials = await runtime._authorize_qobuz_for_web(
                 QobuzAccess.DOWNLOAD_ACTION
             )
-        except (
-            NoCredsError,
-            AuthLost,
-            QobuzUnavailable,
-            QobuzEntitlementError,
-            DownloaderNotReady,
-            CredentialChanged,
-            asyncio.TimeoutError,
-        ) as exc:
-            message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+        except runtime._QOBUZ_ACTION_ERRORS as exc:
+            message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
             return RedirectResponse(
                 url=dest + "?error=" + runtime._notice_key(message),
                 status_code=303,
@@ -668,7 +652,7 @@ async def job_approve(request: Request, job_id: str):
             status_code=303,
         )
     if approved == "credential_changed":
-        message = job_mgr._qobuz_action_error_message(
+        message = job_mgr.qobuz_action_error_message(
             CredentialChanged(),
             unchanged=True,
         )
@@ -1392,16 +1376,8 @@ async def job_retry(request: Request, job_id: str):
         credentials = await runtime._authorize_qobuz_for_web(
             QobuzAccess.DOWNLOAD_ACTION
         )
-    except (
-        NoCredsError,
-        AuthLost,
-        QobuzUnavailable,
-        QobuzEntitlementError,
-        DownloaderNotReady,
-        CredentialChanged,
-        asyncio.TimeoutError,
-    ) as exc:
-        message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+    except runtime._QOBUZ_ACTION_ERRORS as exc:
+        message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
 
     # A Retry is also the only user-triggered lane for an interrupted durable
@@ -1491,7 +1467,7 @@ async def job_retry(request: Request, job_id: str):
 
         with runtime._CREDENTIAL_LOCK:
             if not runtime._credential_generation_is_active(credentials.generation):
-                message = job_mgr._qobuz_action_error_message(
+                message = job_mgr.qobuz_action_error_message(
                     CredentialChanged(),
                     unchanged=True,
                 )
@@ -1586,7 +1562,7 @@ async def job_retry(request: Request, job_id: str):
         # Re-check under the submit lock.
         with runtime._DOWNLOAD_SUBMIT_LOCK, runtime._CREDENTIAL_LOCK:
             if not runtime._credential_generation_is_active(credentials.generation):
-                message = job_mgr._qobuz_action_error_message(
+                message = job_mgr.qobuz_action_error_message(
                     CredentialChanged(),
                     unchanged=True,
                 )
@@ -1821,7 +1797,7 @@ async def job_retry(request: Request, job_id: str):
                             job.attention = ""
         return _land(started=new_job.id)
     except NoCredsError as exc:
-        message = job_mgr._qobuz_action_error_message(exc, unchanged=True)
+        message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
     except Exception as exc:
         _log.warning("couldn't prepare retry for job %s", job.id, exc_info=True)

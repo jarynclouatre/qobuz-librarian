@@ -875,6 +875,18 @@ async def _authorize_qobuz_for_web(access: QobuzAccess, *,
     )
 
 
+# What _authorize_qobuz_for_web raises when the action may not start.
+_QOBUZ_ACTION_ERRORS = (
+    NoCredsError,
+    AuthLost,
+    QobuzUnavailable,
+    QobuzEntitlementError,
+    DownloaderNotReady,
+    CredentialChanged,
+    asyncio.TimeoutError,
+)
+
+
 def _credential_generation_is_active(generation: str) -> bool:
     return bool(generation) and api_auth.read_qobuz_credentials().generation == generation
 
@@ -1475,7 +1487,7 @@ def _resume_downsample(job, _args):
     return execute
 
 
-def _upgrade_available(creds_ok: bool | None = None) -> bool:
+def _upgrade_available() -> bool:
     return bool(getattr(cfg, "UPGRADE_SCAN_ENABLED", True))
 
 
@@ -2195,8 +2207,8 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         _token_valid_for(credentials) is False,
     )
     context.setdefault("health_lock_busy", bool(_LOCK_BUSY_PID))
-    context.setdefault("upgrade_available", _upgrade_available(creds_ok))
-    context.setdefault("discover_available", _discover_available(creds_ok))
+    context.setdefault("upgrade_available", _upgrade_available())
+    context.setdefault("discover_available", _discover_available())
     if review_badge_ack:
         surface, generation = review_badge_ack
         if (surface in review_badges.SURFACES
@@ -2242,7 +2254,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             "downsample_originals_choice",
             (
                 _downsample_originals_choice()
-                if getattr(job, "execute_kind", "") == "downsample"
+                if job.execute_kind == "downsample"
                 else None
             ),
         )
@@ -2513,7 +2525,7 @@ def _active_new_release_check():
     that list (flows._append_to_parked_new_release_review), so asking again is
     always allowed and never costs the user the ticks already made."""
     for j in job_mgr.registry.pending_and_running():
-        if getattr(j, "execute_kind", "") != "new_releases":
+        if j.execute_kind != "new_releases":
             continue
         if j.status != job_mgr.JobStatus.AWAITING_REVIEW:
             return j
@@ -2526,14 +2538,13 @@ def _pending_new_release_review(job):
     own, so a review split off the batch the user approved was reachable only
     from the dashboard notice or History: the page they were standing on gave
     them no way back to the rest of their own results."""
-    if getattr(job, "execute_kind", "") != "new_releases":
+    if job.execute_kind != "new_releases":
         return None
-    if getattr(getattr(job, "status", None), "value", "") not in (
-            "done", "failed", "canceled"):
+    if job.status not in job_mgr.TERMINAL:
         return None
     other = None
     for j in job_mgr.registry.awaiting_review():
-        if getattr(j, "execute_kind", "") == "new_releases" and j.id != job.id:
+        if j.execute_kind == "new_releases" and j.id != job.id:
             other = j
             break
     if other is None:
@@ -4082,7 +4093,7 @@ def _census_view():
     return view
 
 
-def _discover_available(creds_ok: bool | None = None) -> bool:
+def _discover_available() -> bool:
     """Whether Discover has a Last.fm key to suggest from."""
     return lastfm.is_configured()
 
@@ -4101,13 +4112,12 @@ _JOB_NAV_SURFACES = {
 
 
 def _job_nav_destination(job) -> tuple[str, str, str]:
-    destination = _JOB_NAV_SURFACES.get(getattr(job, "execute_kind", ""))
+    destination = _JOB_NAV_SURFACES.get(job.execute_kind)
     if destination is not None:
         if destination[0] == "upgrade" and not _upgrade_available():
             return "queue", "/queue/history", "Back to History"
         return destination
-    status = getattr(getattr(job, "status", None), "value", "")
-    if status in {"done", "failed", "canceled"}:
+    if job.status in job_mgr.TERMINAL:
         return "queue", "/queue/history", "Back to History"
     return "queue", "/queue", "Back to Queue"
 
@@ -4834,7 +4844,7 @@ def _get_token():
 
 
 def _get_optional_token():
-    if not _read_creds().get("auth_token"):
+    if not _creds_ok():
         return None
     try:
         return _get_token()
@@ -4932,6 +4942,10 @@ def _read_creds():
         "_generation": credentials.generation,
         "_source": credentials.source,
     }
+
+
+def _creds_ok() -> bool:
+    return bool(_read_creds().get("auth_token"))
 
 
 def _credentials_snapshot():

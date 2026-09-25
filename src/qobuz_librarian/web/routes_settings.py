@@ -335,7 +335,7 @@ async def save_settings(
                 diagnostics=diags,
             )
         credential_work_running = any(
-            (getattr(job, "execute_kind", "") or "download")
+            (job.execute_kind or "download")
             not in {"downsample", "lyrics", "migration", "collection_snapshot"}
             and job.status != job_mgr.JobStatus.AWAITING_REVIEW
             for job in job_mgr.registry.pending_and_running()
@@ -597,7 +597,6 @@ async def set_mode(request: Request, target: str = Form("")):
     Switching to CLI is refused while a download/scan is active: releasing the
     lock under a running job would let the CLI race the worker over /staging.
     """
-    global _creds_cache
     want = (target or "").strip().lower()
     if want == "cli":
         # Flip to CLI mode first so a /download or scan POST landing during
@@ -681,9 +680,6 @@ async def set_mode(request: Request, target: str = Form("")):
                         ),
                         status_code=303,
                     )
-            # The CLI may have changed the saved token while it held the lock;
-            # drop the cached creds so the banner reflects what's on disk now.
-            _creds_cache = None
             return RedirectResponse(url="/settings?mode=web", status_code=303)
         except run_lock.LockBusy:
             # A CLI session still holds the lock, so we can't take it back yet.
