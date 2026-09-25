@@ -237,11 +237,8 @@ async def job_status(job_id: str):
 
 @router.get("/api/queue/count")
 async def queue_count():
-    """Live count of in-flight jobs (pending/scanning/running; parked reviews
-    have their own dots) so the nav Queue badge stays in sync without a page
-    reload. The badge is otherwise server-rendered once per page, which left it
-    stale (e.g. reading "1" next to an empty Queue) after a job finished while
-    you sat on another page."""
+    """Live count of in-flight jobs for the nav Queue badge; parked reviews
+    have their own dots."""
     active = [j for j in job_mgr.registry.pending_and_running()
               if j.status != job_mgr.JobStatus.AWAITING_REVIEW]
     revision = "\n".join(sorted(

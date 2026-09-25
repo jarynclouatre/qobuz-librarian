@@ -1756,7 +1756,7 @@ def history_page(limit: int, offset: int,
                  exclude_recoveries: bool = False,
                  attention_only: bool = False) -> list[dict]:
     """A page of finished jobs, newest first: the browsable record behind the
-    History view. Lighter than ``load_all`` (no candidates/args): just what a
+    History view. Lighter than ``load_all`` (no candidates or log lines): what a
     history row shows, plus the id to open the full job. The ``id`` tiebreaker
     keeps paging stable when finish times collide. ``bulk`` narrows to the
     card layer (True), the downloads table (False), or everything (None).

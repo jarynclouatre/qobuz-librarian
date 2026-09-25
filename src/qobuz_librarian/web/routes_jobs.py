@@ -184,18 +184,11 @@ async def job_review_page(request: Request, job_id: str, page: int = 1,
 
 def _build_unapproved_review(job, tab, *, admission_filter=None,
                              discard_ids=()):
-    """Before approving a Qobuz album review: move every candidate
-    that ISN'T being downloaded right now into its own parked review, so a
-    partial download consumes ONLY the ticked picks. Everything else stays in
-    the living review:
-    the unticked candidates, plus (on a tab-scoped approve) the whole tab the
-    user isn't looking at, ticks and all. A final admission filter may also
-    keep a selected candidate parked when another job claimed it just before
-    approval. ``discard_ids`` removes candidates already proven complete on
-    disk as part of the same durable transition. The caller holds ``job._lock``
-    and durably admits both jobs before publishing either transition. Returns
-    the new unpublished parked job, or None when every candidate is being
-    used."""
+    """Keep only the admitted picks (ticked, in the approved tab, passed by
+    ``admission_filter``) on ``job`` and move every other candidate but
+    ``discard_ids`` to a new parked review. The caller holds ``job._lock`` and
+    admits both jobs before publishing either. Returns the unpublished parked
+    job, or None, leaving ``job`` unchanged, when there is nothing to move."""
     tab_scoped = tab in ("missing", "gaps")
     gap_active = tab == "gaps"
     keep, split = [], []
@@ -237,8 +230,8 @@ async def job_approve(request: Request, job_id: str):
             url="/queue?error=" + runtime._notice_key(
                 "That review is no longer open."),
             status_code=303)
-    # A parked review can outlive its feature: credentials can be pulled after
-    # an upgrade review parks, and the downsample engine can vanish across a
+    # A parked review can outlive its feature: Upgrade can be switched off
+    # after its review parks, and the downsample engine can vanish across a
     # restart.
     if job.execute_kind == "upgrade" and not runtime._upgrade_available():
         return saved_reviews._upgrade_unavailable_response()
@@ -1214,14 +1207,7 @@ async def job_dismiss_rest(request: Request, job_id: str):
 
 @router.post("/jobs/{job_id}/give-up")
 async def job_give_up(request: Request, job_id: str):
-    """Abandon a blocked download so downloads and scans can run again.
-
-    Retry is the right first move, but a download can be stuck on something a
-    retry repeats exactly, and until it is settled every download and scan
-    stays paused. This throws the interrupted download away, keeps an album
-    Beets finished filing in the library, and otherwise leaves the album to
-    be started again whenever the user wants.
-    """
+    """Abandon a blocked download so downloads and scans can run again."""
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return RedirectResponse(
@@ -1260,8 +1246,7 @@ async def job_give_up(request: Request, job_id: str):
             f"Abandoned. {reason} Downloads and scans can run again."
             if imported else
             "Abandoned. The interrupted download was discarded and nothing "
-            "was added to your library. Downloads and scans can run again, "
-            "and you can start this album whenever you like."
+            "was added to your library. Downloads and scans can run again."
         )
     if not job_persistence.persist(job):
         return runtime._durable_recovery_response(
@@ -1431,9 +1416,8 @@ async def job_retry(request: Request, job_id: str):
             )
         return _land(started=job.id)
 
-    # A different album's unsettled recovery used to refuse this Retry
-    # outright, leaving the second album nowhere to go. It waits for that one
-    # to settle instead.
+    # Behind a different album's unsettled recovery, this Retry waits for that
+    # one to settle.
     queue_behind = runtime._recovery_pause_is_another_download(job)
 
     if recovery_submission:
@@ -1870,7 +1854,7 @@ async def job_undo(request: Request, job_id: str):
     undo_outcome = {}
 
     def _clear_deliberate_single_mark() -> bool:
-        """Return only after the exact suppression mark is durably absent."""
+        """Whether the exact suppression mark is gone from the saved store."""
         if not info.get("marked"):
             return True
         try:

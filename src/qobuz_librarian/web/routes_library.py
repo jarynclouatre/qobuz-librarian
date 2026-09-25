@@ -116,14 +116,7 @@ def _review_job_from_library_state():
 
 def _library_header_note():
     """What the header note beside the Library title should say, or None when
-    nothing library-side is in flight.
-
-    A parked review keeps the /library surface (see _library_current_job), so
-    work crawling behind it has nowhere to show its progress card. This note
-    carries it instead: without it a refresh that takes a quarter of an hour
-    showed the word "Refreshing…" and nothing else, and the download phase that
-    follows an approved review said "Refreshing…" as well.
-    """
+    nothing library-side is in flight."""
     job = scans._active_scan(
         "library", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
                              job_mgr.JobStatus.RUNNING))
@@ -165,13 +158,7 @@ def _library_refresh_outcome():
 
 def _library_refresh_failure():
     """Why the last library scan stopped, while that is still the last thing
-    a refresh did, or "".
-
-    Library owns its whole lifecycle, so a refresh that could not run has to
-    say so on this page. It used to arrive as the same passing note a
-    successful refresh uses, which meant it faded after six seconds, never
-    survived a reload, and existed in full only as a History row.
-    """
+    a refresh did, or ""."""
     latest = _last_finished_library_job()
     if latest is None or latest.status is not job_mgr.JobStatus.FAILED:
         return ""
@@ -309,9 +296,9 @@ def _library_page_context(page, tab, q):
 async def library_page(request: Request, page: int = 1, tab: str = "",
                        q: str = ""):
     notice_bits = []
-    _skipped = request.query_params.get("skipped", "")
-    if _skipped.isdigit() and int(_skipped):
-        n = int(_skipped)
+    skipped = request.query_params.get("skipped", "")
+    if skipped.isdigit() and int(skipped):
+        n = int(skipped)
         notice_bits.append(
             f"{n} album{'s' if n != 1 else ''} already in your library, skipped.")
     if request.query_params.get("noselection"):
@@ -321,11 +308,10 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     elif request.query_params.get("approved"):
         notice_bits.append("Download queued.")
     # Bring all back redirects here with what happened, a store-write failure
-    # included. Without this the page dropped the message and a restore that
-    # never ran looked exactly like one that worked.
-    _notice = runtime._notice_text(request.query_params.get("notice"))
-    if _notice:
-        notice_bits.append(_notice)
+    # included.
+    notice = runtime._notice_text(request.query_params.get("notice"))
+    if notice:
+        notice_bits.append(notice)
     loop = asyncio.get_running_loop()
     ctx, badge_ack = await loop.run_in_executor(
         None, lambda: _library_page_context(page, tab, q))

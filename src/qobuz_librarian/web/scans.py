@@ -221,12 +221,8 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
 
 
 def _fold_into_parked_library_review(job):
-    """A refresh that finishes while a Missing Albums / Gap Fill review is
-    parked folds its finds into that review instead of parking a second one,
-    the Library review is one living thing that updates in place, and a
-    refresh must never wipe the picks already made there. The scan job then
-    completes with a summary, so Queue/History records the refresh without
-    ever becoming a second review surface."""
+    """A refresh that finishes while a Library review is parked folds its
+    finds into it; the scan job then finishes with a summary."""
     if (job.status not in (job_mgr.JobStatus.SCANNING, job_mgr.JobStatus.RUNNING)
             or job.cancel_requested):
         return
@@ -277,14 +273,14 @@ def _fold_into_parked_library_review(job):
         job.candidates = []
     bits = []
     if added:
-        bits.append(f"Folded {added} new find{'s' if added != 1 else ''} "
-                    "into the open Library review.")
+        bits.append(f"Added {plural(added, 'new find')} to the open "
+                    "Library review.")
     if updated and not parked.candidates:
         bits.append("Nothing left to review.")
     elif updated:
         bits.append(
-            f"Updated {updated} changed item{'s' if updated != 1 else ''} "
-            "in the open Library review."
+            f"Updated {plural(updated, 'changed item')} in the open Library "
+            "review."
         )
     unchecked = job.unchecked_artists
     if not bits:
@@ -293,15 +289,14 @@ def _fold_into_parked_library_review(job):
         else:
             bits.append("No new finds. The open Library review is up to date.")
     if unchecked:
-        bits.append(f"{unchecked} artist{'s' if unchecked != 1 else ''} "
-                    "couldn't be checked; scan again to resume from where it "
-                    "left off.")
+        bits.append(f"{plural(unchecked, 'artist')} couldn't be checked; "
+                    "scan again to resume from where it left off.")
     elif (left_out := unreadable_artists_mod.load()):
         bits.append(f"{plural(len(left_out), 'artist folder')} couldn't be "
                     "read and "
                     f"{'was' if len(left_out) == 1 else 'were'} left out.")
     if job.candidate_cap_hit or parked.candidate_cap_hit:
-        bits.append("The scan hit the result cap, so some finds may not be "
+        bits.append("The scan hit the result cap, so some finds are not "
                     "listed.")
     job.summary = " ".join(bits)
     job.push_line(job.summary)

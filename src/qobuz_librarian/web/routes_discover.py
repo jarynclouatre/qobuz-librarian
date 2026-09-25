@@ -53,9 +53,8 @@ def _discover_album_views(rows, queued=None, scanning=None):
 
 
 def _discover_decades(albums):
-    """Chips for the decades actually present, newest first. Fewer than two
-    real decades and the row is not offered: a filter with one setting is a
-    control that does nothing."""
+    """An "All" chip, then a chip for each decade present, newest first. The
+    template hides the row when there are fewer than two decades."""
     years = set()
     for album in albums:
         try:

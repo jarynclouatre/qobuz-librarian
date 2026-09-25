@@ -1,0 +1,8 @@
+{{ headline }} Its folder is {{ location }}.
+<form hx-post="/backups/discard-unchecked" hx-target="#diagnostics-list" class="mt-2" data-busy-submit>
+  <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+  <input type="hidden" name="backup" value="{{ name }}">
+  <button type="submit" class="ql-btn ql-btn-sm"
+          data-confirm="Delete this backup at {{ location }} without checking it? The app cannot confirm your library already has these files, so this may be their only copy. It cannot be undone."
+          data-confirm-action="Delete anyway" data-irreversible>Delete anyway</button>
+</form>

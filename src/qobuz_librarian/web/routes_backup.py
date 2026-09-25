@@ -32,11 +32,7 @@ _log = logging.getLogger("qobuz_librarian")
 
 @router.post("/collection/snapshot")
 async def collection_snapshot_now(request: Request, force: str = Form("")):
-    """Write a collection snapshot now instead of waiting for the next scan.
-
-    Runs as a job because a library this walks can live on a slow NAS, and a
-    request that sits there for a minute looks like the app has hung.
-    """
+    """Write a collection snapshot now instead of waiting for the next scan."""
     busy = runtime._lock_busy_response(request)
     if busy is not None:
         return busy
@@ -259,32 +255,14 @@ def _diagnostics_result_notice(kind: str, body: str) -> str:
 
 
 def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
-    """A refusal that still leaves the user something they can do.
-
-    Restore and Remove each refuse for good reasons, and between them they
-    used to leave the row standing forever with an alarm beside it. Say what
-    happened, say where the files are so they can be looked at, and offer the
-    one action that is always truthful: delete them unchecked, on purpose.
-    """
+    """A refusal that names the backup's folder and offers to delete it
+    unchecked."""
     location, _is_host = runtime._resolve_host_path(str(target))
-    tok = html.escape(request.state.csrf_token)
-    name = html.escape(target.name)
     return _diagnostics_result_notice(
         "error",
-        f"{headline} Its folder is {html.escape(location)}; look there "
-        "before deciding. If you do not want it, delete it."
-        f'<form hx-post="/backups/discard-unchecked" '
-        f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
-        f'<input type="hidden" name="_csrf_token" value="{tok}">'
-        f'<input type="hidden" name="backup" value="{name}">'
-        f'<button type="submit" class="ql-btn ql-btn-sm" '
-        f'data-confirm="Delete this backup at {html.escape(location)} '
-        f'without checking it? The app cannot confirm your library already '
-        f'has these files, so this may be their only copy. It cannot be '
-        f'undone." '
-        f'data-confirm-action="Delete anyway" '
-        f'data-irreversible>Delete anyway</button>'
-        f'</form>',
+        runtime.templates.get_template("_stuck_backup_notice.html").render(
+            request=request, headline=headline, location=location,
+            name=target.name),
     )
 
 
@@ -304,7 +282,7 @@ def _restore_refused_notice(request: Request, target: Path, origin) -> str:
     if (backup_size and origin_size
             and origin_size[1] >= backup_size[1] > 0):
         headline = (
-            f"{html.escape(origin_display)} now holds "
+            f"{origin_display} now holds "
             f"{plural(origin_size[0], 'file')} "
             f"({origin_size[1] / 1024 / 1024:.1f} MB) while this backup holds "
             f"{plural(backup_size[0], 'file')} "
@@ -345,9 +323,7 @@ def _library_held(request: Request, operation: str, verb: str):
 
 def _backup_target(backup):
     """The retained backup a diagnostics button names, or None when it is gone
-    or the name is anything but a plain folder name. The form posts a bare
-    directory name; anything path-shaped (separators, dot-dirs) is someone
-    probing, not a backup this page listed."""
+    or the name is not a bare folder name the page could have listed."""
     name = (backup or "").strip()
     target = Path(str(cfg.UPGRADE_BACKUP_DIR)) / name
     if (not name or name != Path(name).name or name.startswith(".")
@@ -378,7 +354,7 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
         location, _is_host = runtime._resolve_host_path(str(target))
         if backup_mod.discard_backup_unchecked(target):
             note = _diagnostics_result_notice(
-                "success", "Deleted the backup without checking it, as asked.")
+                "success", "Deleted the backup without checking it.")
         else:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
@@ -573,9 +549,8 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
 
 
 def _staging_group_target(group):
-    """The kept group a Remove button names, or None for anything but a plain
-    folder name. The form posts a bare directory name; ".." or a path is
-    someone probing, not a group this page listed."""
+    """The kept group a Remove button names, or None when the name is not a
+    bare folder name the page could have listed."""
     name = (group or "").strip()
     if not name or name in (".", "..") or name != Path(name).name:
         return None
@@ -630,7 +605,7 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
         location, _is_host = runtime._resolve_host_path(str(target))
         if staging_mod.discard_group_unchecked(target):
             note = _diagnostics_result_notice(
-                "success", "Deleted the files without checking them, as asked.")
+                "success", "Deleted the files without checking them.")
         else:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "

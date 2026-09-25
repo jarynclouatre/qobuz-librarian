@@ -232,15 +232,15 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
                     else None
                 )
             )(scan_checkpoint.pending(), library_generation),
-            # First-run nudge: a fresh install has no creds, so every search/scan
-            # would fail cryptically, so surface it up front. Filesystem-only.
+            # A fresh install has no credentials; the page says so up front.
+            # Filesystem-only.
             "creds_ok": runtime._creds_ok(),
             "qobuz_ready": runtime._qobuz_ready(),
             "lyric_retry_count":
                 len(lyrics_mode.load_lyric_retry()) if cfg.LYRIC_RETRY_FILE.exists() else 0,
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
-            # A store that couldn't be read was kept aside and the run fell back
-            # to defaults, and only the container log said so, which nobody reads.
+            # Stores that couldn't be read, kept aside while the run fell back
+            # to defaults.
             "corrupt_stores": state_file.corrupt_store_details(),
         }
 
@@ -278,7 +278,7 @@ async def lyric_retry(request: Request):
     busy = runtime._lock_busy_response(request)
     if busy is not None:
         return busy
-    # A retry and a full backfill share the one lyric-state file, so they must
+    # A retry and a full backfill share the one lyric-state file and must
     # never run at once, so fold onto whichever lyrics pass is already in flight.
     existing = scans._active_scan(
         "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
@@ -397,8 +397,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 except QobuzError:
                     error = "Couldn't fetch that track. Check the URL."
             elif parsed and parsed[0] == "track":
-                # Album mode: a track URL -- point the user at the Track toggle
-                # instead of the old (now false) "works on albums" message.
+                # Album mode: a track URL points the user at the Track toggle.
                 error = ("That's a track URL. Switch to Track to download one "
                          "track, or paste the album URL in Album mode.")
             elif parsed or is_qobuz_url:
@@ -584,15 +583,12 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 _album_raws.append(a)
 
             # Flag results already in the library so search never offers a
-            # plain Download on an album you own; the app is gap-fill, so
-            # that would contradict its own purpose.
+            # plain Download on an album you own.
             if _album_raws:
                 def _annotate_owned():
                     # Same filesystem resolver the download and scan paths use.
-                    # "Owned" means COMPLETE, not "a folder with a file in it":
-                    # a part-finished album reading "Owned" loses both its
-                    # checkbox and its download button, which is the gap-fill
-                    # case this app exists for.
+                    # Owned means every track is present; a part-finished
+                    # album keeps its checkbox and its download button.
                     annotations = []
                     for alb in _album_raws:
                         res = {"ownership_unknown": True}
@@ -682,12 +678,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     g["owned"] = g["owned"] or res["owned"]
                     if res.get("disk_year"):
                         g["disk_year"] = res["disk_year"]
-                    # Each edition keeps its OWN title and its own ownership
-                    # verdict. Sharing the group's title made a plain pressing
-                    # render as the deluxe it was grouped under, right down to
-                    # the download confirmation naming a record you had not
-                    # picked; sharing one verdict put a count from one pressing
-                    # beside the track total of another.
+                    # Each edition keeps its own title and its own ownership
+                    # verdict, so its row and download confirmation name that
+                    # pressing and count its own tracks.
                     g["editions"].append({
                         "id": res["id"],
                         "title": res["title"],
@@ -777,9 +770,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
            "creds_ok": creds_ok, "qobuz_ready": runtime._qobuz_ready(), "page": "search"}
     if runtime._is_htmx(request):
         resp = runtime._tr(request, "_search_results.html", ctx)
-        # Put the search in the address bar. Without it a reload, or Back after
-        # a look at the Queue, landed on the empty state with the query, the
-        # album list and every tick gone. GET / rehydrates from these.
+        # Put the search in the address bar, so a reload or Back lands on the
+        # same results. GET / rehydrates from these.
         if query or (kind == "album" and album_id):
             params = {"kind": kind, "q": query}
             if artist_id:

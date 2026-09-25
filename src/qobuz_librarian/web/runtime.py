@@ -2152,11 +2152,7 @@ templates.env.globals["asset_version"] = _ASSET_VERSION
 
 def _lockout_notice(ip, username="", *, after_failure=False) -> str:
     """How long the login throttle still refuses wrong guesses, or "" when it
-    doesn't.
-
-    The GET and the POST share it: a locked-out visitor was shown a normal
-    form and only found out by filling it in and submitting again.
-    """
+    doesn't."""
     left = web_auth.login_lockout_remaining(ip, username)
     if left <= 0:
         return ""
@@ -4159,12 +4155,8 @@ def _local_album_art(album_dir):
 
 
 def _review_cover(job, candidate):
-    """Where a review row's thumbnail comes from.
-
-    Qobuz results carry a cover URL. Albums already on disk carry no URL at
-    all, and the app was showing an empty tile for music whose artwork is
-    sitting right there in the folder, so those are served from the folder.
-    """
+    """Qobuz rows use their cover URL; rows on disk use the folder's cover
+    file."""
     payload = candidate.get("payload") or {}
     cover = payload.get("cover")
     if cover:

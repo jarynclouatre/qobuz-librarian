@@ -52,10 +52,7 @@ async def repair_page(request: Request, page: int = 1):
         ctx.update(review_pages._review_context(rjob, page))
     # The launcher renders when the surface is idle AND under a run that failed
     # or was cancelled (see _repair_current_job, which keeps those on the page
-    # on purpose). Both cases read these, so both have to be given them: when
-    # only the idle branch set them, a failed run showed its own finish time
-    # above the words "No repair scan has finished yet", and an interrupted
-    # sweep was never offered its resume.
+    # on purpose). Both cases read these, so both have to be given them.
     if rjob is None or rjob.status in (job_mgr.JobStatus.FAILED,
                                        job_mgr.JobStatus.CANCELED):
         # Offer a resume only for a genuinely interrupted sweep (a stale
@@ -121,9 +118,7 @@ async def repair_scan(request: Request):
 
 @router.get("/repair/history", response_class=HTMLResponse)
 async def repair_history(request: Request):
-    """Show what Repair has refilled in place, so the user knows which albums
-    to refresh on an offline-sync client that may still serve the old broken
-    file. The log itself is append-only on disk (DATA_DIR); this is read-only."""
+    """Tracks Repair has replaced in place."""
     # Walks lines on the data volume, so offload to match the dashboard's pattern
     # and keep the event loop free if the file is sizable.
     loop = asyncio.get_running_loop()

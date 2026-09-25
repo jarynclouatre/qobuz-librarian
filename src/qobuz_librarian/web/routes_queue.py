@@ -20,14 +20,7 @@ async def queue_head():
 
 @router.post("/queue/interrupted/discard")
 async def discard_interrupted_terminal_download(request: Request):
-    """Give up on an interrupted terminal download from the web.
-
-    The download it settles was started in a terminal, so there is no job page
-    to carry the usual controls and the reader was told to go and use a
-    terminal instead. Giving up is the one decision that lifts the pause
-    without a resume, and a resume can only be run by the interface that owns
-    the saved queue, so that is what is offered here.
-    """
+    """Give up on an interrupted terminal download from the web."""
     form = await request.form()
     offer = runtime._terminal_recovery_offer()
     if offer is None or (
@@ -51,8 +44,7 @@ async def discard_interrupted_terminal_download(request: Request):
                 reason or "The interrupted download could not be discarded."),
             status_code=303)
     # No album name here: the banner it was clicked from names it, and the
-    # query the queue page reads is capped, so a long title cut the sentence
-    # off mid-word.
+    # query the queue page reads is capped.
     return RedirectResponse(
         url="/queue?notice=" + runtime._notice_key(
             f"Gave up on the interrupted download. {reason}"
@@ -150,8 +142,7 @@ async def queue_history(
         total = job_persistence.history_count(
             bulk=False, exclude_recoveries=True, attention_only=attention)
         # Count the archive, not the cards that happened to render: the card
-        # layer is capped, so a headline built from it under-reported the
-        # history by however much it had dropped.
+        # layer is capped.
         bulk_total = len(recoveries) + bulk_rest
         pages = _page_count(total, _HISTORY_PER_PAGE)
         page = min(max(1, page), pages)
@@ -170,8 +161,7 @@ async def queue_history(
      total, pages, p, rows) = await loop.run_in_executor(
         None, lambda: _load_page(p, jp))
     if attention:
-        # Only the rows this page shows: clearing the backlog before the
-        # query emptied the list the reader had just opened.
+        # Only the rows this page shows, after the query that listed them.
         shown = [row.get("id") for row in (*bulk_jobs, *rows)]
         await loop.run_in_executor(
             None, lambda: job_persistence.acknowledge_listed_attention(shown))
@@ -184,9 +174,8 @@ async def queue_history(
         "attention_only": attention,
         "history_unavailable": not job_persistence.ready_for_admission(),
         "error": runtime._notice_text(error),
-        # What a Retry from this page just did. Retry no longer opens the job
-        # card, so the page it left the user on has to say what started and
-        # offer the way in.
+        # What a Retry from this page just started; Retry stays on History,
+        # which links to the new job.
         "started_job": job_mgr.registry.get(started) if started else None,
     })
 
@@ -218,8 +207,8 @@ async def queue_clear(request: Request):
 
 @router.post("/queue/cancel-pending")
 async def queue_cancel_pending():
-    # Parked reviews are deliberately exempt: the queue page no longer shows
-    # them, and a bulk clear must never take something the user can't see.
+    # Parked reviews are exempt: the queue page does not show them, and a bulk
+    # clear must never take something the user can't see.
     protected = 0
     finishing = 0
     unsaved = 0

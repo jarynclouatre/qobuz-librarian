@@ -28,7 +28,7 @@ async def downsample_page(request: Request):
         "downsample_state": state,
         "review_parked": review_parked,
         # A standalone refresh in flight, so the page shows "scan running"
-        # instead of the idle launcher (which read as if nothing was happening).
+        # instead of the idle launcher.
         "downsample_running": scans._active_scan(
             "downsample",
             statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,

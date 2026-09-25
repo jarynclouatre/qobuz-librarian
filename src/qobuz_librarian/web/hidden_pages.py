@@ -154,24 +154,23 @@ async def _restore_hidden(request, scope, redirect):
         rejoined = await loop.run_in_executor(
             None, lambda: flows.refold_restored_missing(artists, fingerprints))
         if rejoined is False:
-            msg = ("Restored, but the open Library review couldn't be saved. "
-                   "Check the data folder, then refresh the review.")
+            msg = ("Brought back, but the open Library review couldn't be "
+                   "saved. Check the data folder, then refresh the review.")
         elif rejoined is None:
             # No live parked review to fold into.
             lifted = await loop.run_in_executor(
                 None, library_scan_state.clear_review_retired)
-            msg = ("Restored, back in the Library review." if lifted
-                   else "Restored. They return the next time the library scans.")
+            msg = ("Brought back to the Library review." if lifted
+                   else "Brought back. They return the next time the library scans.")
         elif rejoined:
-            msg = (f"Restored {rejoined}, back in the Library review."
-                   if rejoined != 1 else "Restored, back in the Library review.")
+            msg = (f"Brought back {rejoined} to the Library review."
+                   if rejoined != 1 else "Brought back to the Library review.")
         else:
-            msg = "Restored. Nothing needs adding to the Library review."
+            msg = "Brought back. Nothing needs adding to the Library review."
         return RedirectResponse(
             url=redirect + _hidden_query(q, msg, p), status_code=303)
-    # Upgrade and Downsample scopes: nothing to fold, but a restore here was
-    # silent before, giving no sign a stale click had done nothing.
-    msg = (f"Restored {restored}." if restored != 1 else "Restored."
+    # Upgrade and Downsample scopes: nothing to fold.
+    msg = (f"Brought back {restored}." if restored != 1 else "Brought back."
            ) if restored else "Nothing to bring back."
     return RedirectResponse(
         url=redirect + _hidden_query(q, msg, p), status_code=303)
