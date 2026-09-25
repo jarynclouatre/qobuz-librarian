@@ -177,7 +177,7 @@
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
         {% set _qw = queue_wait if queue_wait is defined else none %}
-        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused_for %}{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
+        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused_for %}Waiting until {% if _qw.paused_for.album %}“{{ _qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if _qw.paused_for.job_id %} <a href="/jobs/{{ _qw.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
         {% if s in ('scanning', 'running') %}<span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>{% endif %}
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
@@ -212,21 +212,12 @@
     </div>
     {% endif %}
 
-    {% if s == 'pending' and _qw and _qw.paused_for %}
-    <div class="ql-job-wait-note" id="queue-wait-note">
-      <svg xmlns="http://www.w3.org/2000/svg" class="ql-job-wait-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-      </svg>
-      <span>Waiting until {% if _qw.paused_for.album %}“{{ _qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if _qw.paused_for.job_id %} <a href="/jobs/{{ _qw.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}</span>
-    </div>
-    {% endif %}
-
     {# Render the card from the snapshot the server already holds. Waiting for
        the first live event meant a page opened part-way through a long album
        showed a running job with no album and no count. #}
     {% set _pc = job.progress_current %}
     {% set _pt = job.progress_total %}
-    <div id="progress-card" class="ql-progress-panel ql-progress-panel--job{% if not job.progress_phase and not _pt %} hidden{% endif %}">
+    <div id="progress-card"{% if not job.progress_phase and not _pt %} class="hidden"{% endif %}>
       <div>
         <div class="ql-progress-panel-head">
           <span id="prog-count" class="ql-progress-count readout">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span>

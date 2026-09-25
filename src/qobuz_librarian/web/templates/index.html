@@ -295,7 +295,7 @@
     {% if active_jobs or queued_jobs %}
       <div class="ql-active-strip-header">
         <h2>Background work</h2>
-        <a href="/queue" class="ql-btn ql-btn-secondary ql-btn-sm">Open queue</a>
+        <a href="/queue" class="ql-active-strip-link">Open queue</a>
       </div>
       <div class="ql-active-list">
         {% for j in active_jobs %}
@@ -330,7 +330,7 @@
                   title="Import has started and cannot be stopped.">Finishing</span>
           </div>
           {% else %}
-          <form action="/jobs/{{ j.id }}/cancel" method="post" class="ql-row-action ql-active-action">
+          <form action="/jobs/{{ j.id }}/cancel" method="post" class="ql-row-action">
             <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
             <button type="submit" class="ql-btn ql-btn-sm"
                     title="Cancel job" aria-label="Cancel job"

@@ -24,11 +24,11 @@
      only a manual reload put it right. Poll while there is a run to follow;
      the replacement drops these attributes once there isn't, so the polling
      stops on its own. #}
-  <div id="downsample-body"{% if downsample_running %} hx-get="/downsample"
+  <div id="downsample-body" class="ql-tool-body"{% if downsample_running %} hx-get="/downsample"
        hx-trigger="every 3s" hx-target="#downsample-body"
        hx-select="#downsample-body" hx-swap="outerHTML"{% endif %}>
 
-  <div class="ql-work-status ql-work-status--bar ql-quality-status">
+  <div class="ql-work-status ql-quality-status">
     <span class="ql-status-chip {% if downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
       {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
     </span>
@@ -53,7 +53,7 @@
       <p>{% if _ds_executing %}Your files are being rewritten in place.{% elif downsample_running.status.value == 'pending' %}Starts when the current job finishes.{% else %}Checking your files for albums that can be downsampled.{% endif %} <a href="/jobs/{{ downsample_running.id }}" class="ql-inline-link">Watch progress →</a></p>
     </div>
     {% elif downsample_state.stale %}
-    <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
+    <section class="ql-work-card ql-quality-entry-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">Refresh Downsample results</p>
         <p class="ql-work-card-text">The saved result is not current. Refresh checks only local files and does not contact Qobuz.</p>
@@ -67,7 +67,7 @@
       </div>
     </section>
     {% elif downsample_state.count %}
-    <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
+    <section class="ql-work-card ql-quality-entry-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">{{ downsample_state.count }} album{% if downsample_state.count != 1 %}s{% endif %} can be downsampled</p>
         <p class="ql-work-card-text">Files are rewritten in place at 44.1 / 48 kHz{% if ds_originals_chosen() and keeps_ds_originals() %}, and the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% elif ds_originals_chosen() %} and the hi-res originals are not kept{% else %}. You choose whether the hi-res originals are kept{% endif %}.</p>
@@ -86,7 +86,7 @@
       </div>
     </section>
     {% else %}
-    <section class="ql-work-card ql-empty-work ql-quality-entry-card">
+    <section class="ql-work-card ql-quality-entry-card">
       <div class="ql-work-card-copy">
       <p class="ql-work-card-title">{% if downsample_state.complete %}No albums to downsample{% else %}No Downsample results yet{% endif %}</p>
         <p class="ql-work-card-text">Refresh checks the files already on disk.</p>
@@ -101,7 +101,7 @@
     </section>
     {% endif %}
   {% else %}
-  <section class="ql-work-card ql-work-card-warning ql-quality-entry-card">
+  <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-kicker">Unavailable</p>
       <p class="ql-work-card-title">Downsampling is unavailable</p>

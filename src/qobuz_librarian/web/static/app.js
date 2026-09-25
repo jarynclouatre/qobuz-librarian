@@ -2235,9 +2235,7 @@
         ? "Found " + countLabel(foundAlbums, foundSingular, foundPlural) + " across " + plural(foundArtists, "artist") + " so far…"
         : "";
     }
-    var waitNote = document.getElementById("queue-wait-note");
     function clearQueuedState() {
-      if (waitNote) { waitNote.classList.add("hidden"); waitNote = null; }
       if (activity && activity.hasAttribute("data-queued")) {
         activity.removeAttribute("data-queued");
         activity.textContent = jc && jc.dataset.jobType === "download" && !jc.dataset.jobKind ? "Downloading"

@@ -111,31 +111,29 @@
 <section class="ql-activity-section" aria-labelledby="history-jobs-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-jobs-heading">Jobs</h2>
-    <p class="ql-mono-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
+    <p class="ql-section-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
   </header>
-  <div class="ql-history-cards">
-    <div class="ql-activity-list">
-      {% for job in bulk_jobs %}
-      <article class="ql-activity-row ql-history-row ql-history-row--bulk{% if job.status == 'failed' %} is-error{% endif %}">
-        {{ labels.kind_tile(job, 'ql-job-tile--done') }}
-        <div class="ql-activity-main">
-          <p class="ql-row-title">
-            {# Its saved row cannot be loaded as a job, so the title is not a
-               link; the line below is the one way on. #}
-            {% if job.recovery_unreadable %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>{% endif %}
-          </p>
-          {% if job.recovery_unreadable %}
-          <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Inspect the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-          {% elif job.recoveries and job.execute_kind != 'migration' %}
-          <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-          {% endif %}
-        </div>
-        {{ job_side(job) }}
-        {% if job.interrupted_by_restart %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
-        {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta ql-row-meta--error ql-row-reason" title="{{ reason }}">{{ reason }}</p>{% endif %}
-      </article>
-      {% endfor %}
-    </div>
+  <div class="ql-activity-list">
+    {% for job in bulk_jobs %}
+    <article class="ql-activity-row ql-history-row ql-history-row--bulk">
+      {{ labels.kind_tile(job, 'ql-job-tile--done') }}
+      <div class="ql-activity-main">
+        <p class="ql-row-title">
+          {# Its saved row cannot be loaded as a job, so the title is not a
+             link; the line below is the one way on. #}
+          {% if job.recovery_unreadable %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>{% endif %}
+        </p>
+        {% if job.recovery_unreadable %}
+        <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Inspect the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+        {% elif job.recoveries and job.execute_kind != 'migration' %}
+        <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+        {% endif %}
+      </div>
+      {{ job_side(job) }}
+      {% if job.interrupted_by_restart %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
+      {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta ql-row-meta--error ql-row-reason" title="{{ reason }}">{{ reason }}</p>{% endif %}
+    </article>
+    {% endfor %}
   </div>
   {% if bulk_pages > 1 and not attention_only %}
   <nav class="ql-activity-pagination" aria-label="Job pages">
@@ -159,11 +157,11 @@
 <section class="ql-activity-section" aria-labelledby="history-downloads-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-downloads-heading">Downloads</h2>
-    <p class="ql-mono-meta">{{ total }}{% if attention_only and total > jobs|length %} · showing {{ jobs|length }}; open again for the rest{% elif pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
+    <p class="ql-section-meta">{{ total }}{% if attention_only and total > jobs|length %} · showing {{ jobs|length }}; open again for the rest{% elif pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
   </header>
   <div class="ql-activity-list">
     {% for job in jobs %}
-    <article class="ql-activity-row ql-history-row ql-history-row--compact{% if job.status == 'failed' %} is-error{% endif %}">
+    <article class="ql-activity-row ql-history-row ql-history-row--compact">
       {{ labels.kind_tile(job, 'ql-job-tile--done') }}
       <div class="ql-activity-main">
         <p class="ql-row-title">

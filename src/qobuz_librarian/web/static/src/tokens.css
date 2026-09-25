@@ -14,7 +14,7 @@
   --ql-text-3: #8d7c63;
   --ql-gold: #e4a94e;
   --ql-gold-strong: #c98d2c;
-  --ql-gold-ink: #231604;
+  --ql-gold-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
   --ql-action-ink: #231604;
   --ql-gold-dim: #523d1b;
   --ql-owned: #a8bc7c;
@@ -24,20 +24,9 @@
   --ql-shadow: 0 24px 50px -30px rgb(0 0 0 / 0.95);
   --ql-shadow-soft: 0 8px 22px -16px rgb(0 0 0 / 0.6);
 
-  /* Sidebar, cards, the phone tab bar and the confirm dialog. */
-  --ql-rail-top: var(--ql-bg-2);
-  --ql-rail-bottom: var(--ql-bg-2);
-  --ql-card-top: var(--ql-surface);
-  --ql-card-bottom: var(--ql-surface);
-  --ql-card-line: var(--ql-line);
-  --ql-card-shadow: none;
+  /* The phone tab bar and the confirm dialog. */
   --ql-bar: color-mix(in oklab, var(--ql-bg) 97%, #000);
   --ql-dialog: color-mix(in oklab, var(--ql-bg) 96%, #fff);
-  /* The main button and progress bars: flat gold. */
-  --ql-brass: var(--ql-gold);
-  --ql-brass-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
-  --ql-brass-shadow: none;
-  --ql-brass-bar: var(--ql-gold);
 
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
@@ -65,7 +54,7 @@
   --ql-text-3: #766446;
   --ql-gold: #b97e1e;
   --ql-gold-strong: #80500a;
-  --ql-gold-ink: #fff8e9;
+  --ql-gold-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
   --ql-action-ink: #090603;
   --ql-gold-dim: #ead8b4;
   --ql-owned: #526b2e;
@@ -75,18 +64,8 @@
   --ql-shadow: 0 14px 30px -20px rgb(84 56 15 / 0.4);
   --ql-shadow-soft: 0 8px 18px -14px rgb(84 56 15 / 0.28);
 
-  --ql-rail-top: var(--ql-bg-2);
-  --ql-rail-bottom: var(--ql-bg-2);
-  --ql-card-top: var(--ql-surface);
-  --ql-card-bottom: var(--ql-surface);
-  --ql-card-line: var(--ql-line);
-  --ql-card-shadow: none;
   --ql-bar: #efe6d4;
   --ql-dialog: #faf4e8;
-  --ql-brass: var(--ql-gold);
-  --ql-brass-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
-  --ql-brass-shadow: none;
-  --ql-brass-bar: var(--ql-gold);
 
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
@@ -157,7 +136,7 @@
 }
 
 .ql-btn-primary:hover:not(:disabled):not(.is-disabled) {
-  background: var(--ql-brass-hover);
+  background: var(--ql-gold-hover);
 }
 
 /* A disabled primary drops the brass entirely. Dimmed gold still reads as

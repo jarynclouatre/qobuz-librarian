@@ -20,7 +20,7 @@
     {% endwith %}
   </section>
   {% endif %}
-  <div class="ql-work-status ql-work-status--bar ql-quality-status">
+  <div class="ql-work-status ql-quality-status">
     <span class="ql-status-chip {% if upgrade_state.stale %}is-warning{% elif upgrade_state.count %}is-info{% else %}is-neutral{% endif %}">
       {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}{% if hidden_count %}Nothing left to review{% else %}No upgrades found{% endif %}{% else %}Not scanned yet{% endif %}
     </span>
@@ -35,7 +35,7 @@
   </div>
 
   {% if upgrade_state.stale %}
-  <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
+  <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
       {# Upgrade has no scan of its own by contract, so this card describes the
          situation and hands off. Naming it after a refresh would promise an
@@ -47,7 +47,7 @@
     </div>
   </section>
   {% elif upgrade_state.count %}
-  <section class="ql-work-card ql-work-card-primary ql-quality-entry-card">
+  <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">{{ upgrade_state.count }} album{% if upgrade_state.count != 1 %}s{% endif %} to upgrade</p>
     </div>
@@ -60,7 +60,7 @@
     </div>
   </section>
   {% elif upgrade_state.complete %}
-  <section class="ql-work-card ql-empty-work ql-quality-entry-card">
+  <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">{% if hidden_count %}Nothing left to review{% else %}No upgrades found{% endif %}</p>
       <p class="ql-work-card-text">The latest Library scan checked the whole catalogue with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}</p>
@@ -70,7 +70,7 @@
     </div>
   </section>
   {% else %}
-  <section class="ql-work-card ql-empty-work ql-quality-entry-card">
+  <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">No Upgrade results yet</p>
       <p class="ql-work-card-text">A Library scan builds them.</p>

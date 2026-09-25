@@ -14,7 +14,7 @@
      watch, so it kept saying a scan was running after the scan had ended.
      Poll while there is one, and the replacement stops polling once there
      isn't. #}
-  <div id="lyrics-body"{% if lyrics_running %} hx-get="/lyrics"
+  <div id="lyrics-body" class="ql-tool-body"{% if lyrics_running %} hx-get="/lyrics"
        hx-trigger="every 3s" hx-target="#lyrics-body"
        hx-select="#lyrics-body" hx-swap="outerHTML"{% endif %}>
 
@@ -68,7 +68,7 @@
         </span>
       </label>
     </div>
-    <section class="ql-work-card ql-work-card-primary">
+    <section class="ql-work-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">Scan library for lyrics</p>
         <p class="ql-work-card-text">Missing lyrics are written automatically to {{ lyrics_format|lower }}; there is no review step.</p>
@@ -80,7 +80,7 @@
   </form>
   {% endif %}
   {% else %}
-  <section class="ql-work-card ql-work-card-warning">
+  <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">Lyrics support is not installed</p>
       <p class="ql-work-card-text">Install Qobuz Librarian with lyrics support, then restart the app.</p>

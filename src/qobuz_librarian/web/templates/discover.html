@@ -37,7 +37,7 @@
        hx-trigger="every 2s" hx-target="#discover-body"
        hx-select="#discover-body" hx-swap="outerHTML"{% endif %}>
 
-    <div class="ql-work-status ql-work-status--bar">
+    <div class="ql-work-status">
       {% if feed.phase == 'waiting' %}
       <span class="ql-status-chip is-neutral">Waiting</span>
       <span>Other Discover requests are still finishing. This one will start automatically.</span>

@@ -98,7 +98,7 @@
   {% with job = library_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
 
   {% elif not library_scan_state.ready %}
-  <section class="ql-work-card{% if not library_scan_state.empty %} ql-work-card-warning{% endif %}">
+  <section class="ql-work-card">
     <div class="ql-notice {% if library_scan_state.empty %}ql-notice-info{% else %}ql-notice-warning{% endif %} ql-tool-notice">
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-notice-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
         {% if library_scan_state.empty %}
