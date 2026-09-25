@@ -2785,6 +2785,42 @@ def test_auth_failure_before_any_import_reparks_the_review():
         _remove_job(job)
 
 
+def test_a_split_review_that_cannot_be_put_back_fails_without_hanging(
+    monkeypatch,
+):
+    """The failed save is logged while the job's lock is held, and the job's
+    own log handler takes that lock again."""
+    from qobuz_librarian.api.auth import AuthLost
+    from qobuz_librarian.web import job_persistence
+
+    monkeypatch.setattr(job_persistence, "_warned_write_failure", False)
+    broken = sqlite3.connect(":memory:", check_same_thread=False)
+
+    job = jm.Job(title="Library scan")
+    job.kind = "scan"
+    job.execute_kind = "library"
+    job.status = jm.JobStatus.AWAITING_REVIEW
+    job.add_candidate("album", "A", "X", payload={"album_id": "a1"})
+    remnant = jm.Job(title="Library scan")
+    remnant.kind = "scan"
+    remnant.execute_kind = "library"
+    remnant.status = jm.JobStatus.AWAITING_REVIEW
+
+    def _dies(j, chosen):
+        monkeypatch.setattr(job_persistence, "_get_conn", lambda: broken)
+        raise AuthLost("token rejected")
+
+    job._execute_fn = _dies
+    jm.registry.add(job)
+    try:
+        jm.start_worker()
+        assert jm.approve(job, None, split_review=lambda _job: remnant) is True
+        assert _wait_for(lambda: job.status == jm.JobStatus.FAILED)
+    finally:
+        _remove_job(job)
+        _remove_job(remnant)
+
+
 def test_auth_failure_before_import_rejoins_a_split_review(monkeypatch):
     """A pre-mutation failure restores one review, not two partial reviews."""
     from qobuz_librarian.api.auth import AuthLost

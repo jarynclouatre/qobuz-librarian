@@ -346,7 +346,9 @@ class Job:
     finished_at: Optional[float] = None
     _execute_fn: Optional[Callable] = field(default=None, repr=False)
     _subscribers: list = field(default_factory=list, repr=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Reentrant because a save that fails under it logs, and this job's own
+    # log handler takes it again to append the line.
+    _lock: object = field(default_factory=threading.RLock, repr=False)
     _review_action_lock: object = field(
         default_factory=threading.RLock,
         repr=False,
