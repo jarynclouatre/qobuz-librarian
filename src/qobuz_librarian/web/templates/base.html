@@ -109,7 +109,7 @@
               <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
                 <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
                 Queue / History
-                <span class="js-queue-badge ql-queue-badge{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
+                <span class="js-queue-badge ql-count{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
               </a>
               {# A dot, not a second number: a count here reads as more queued
                  work sitting right next to the real queue count. #}

@@ -25,12 +25,12 @@
     <button type="button" data-review-tab="missing"
             class="{% if review_tab == 'missing' %}is-active{% endif %}"
             {% if review_tab == 'missing' %}aria-current="true"{% endif %}>
-      Missing Albums <span class="ql-tab-count" data-tab-count="missing">{{ labels.format_count(review_tab_counts.missing) }}</span>
+      Missing Albums <span class="ql-count" data-tab-count="missing">{{ labels.format_count(review_tab_counts.missing) }}</span>
     </button>
     <button type="button" data-review-tab="gaps"
             class="{% if review_tab == 'gaps' %}is-active{% endif %}"
             {% if review_tab == 'gaps' %}aria-current="true"{% endif %}>
-      Gap Fill <span class="ql-tab-count" data-tab-count="gaps">{{ labels.format_count(review_tab_counts.gaps) }}</span>
+      Gap Fill <span class="ql-count" data-tab-count="gaps">{{ labels.format_count(review_tab_counts.gaps) }}</span>
     </button>
   </nav>
   {% endif %}

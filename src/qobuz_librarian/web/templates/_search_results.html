@@ -87,7 +87,7 @@
 {% macro tracks_toggle(album_id, title, panel_id, count=none) -%}
   <button type="button" class="ql-vchip" data-tracks-toggle
           aria-expanded="false" aria-controls="{{ panel_id }}"
-          aria-label="Tracks on {{ title }}"
+          aria-label="{% if count and count != '?' %}{{ count }} {{ 'track' if count == 1 else 'tracks' }} on {{ title }}{% else %}Tracks on {{ title }}{% endif %}"
           hx-get="/search/album-tracks?album_id={{ album_id | urlencode }}"
           hx-target="#{{ panel_id }}" hx-swap="innerHTML"
           hx-trigger="click">
@@ -221,13 +221,14 @@
             <div class="ql-table-title-cell" role="cell">
               {% if r.cover %}<img src="{{ r.cover }}" alt="" loading="lazy" width="48" height="48" class="ql-cover">
               {% else %}<span class="ql-cover ql-cover-placeholder" aria-hidden="true"></span>{% endif %}
-              <div>
+              <div class="ql-table-copy">
                 <p class="ql-table-title">{{ r.title }}</p>
                 <div class="ql-table-mobile-artist">{{ result_link('artist', r.artist_id, r.artist) }}</div>
                 {% if r.version %}
-                <div class="ql-table-sub"><span class="ql-sub-version">{{ r.version }}</span></div>
+                <div class="ql-table-sub"><div class="ql-table-release-meta"><span class="ql-sub-version">{{ r.version }}</span></div></div>
                 {% endif %}
-                <div class="ql-table-subtitle ql-sub-mobile">{{ result_link('album', r.album_id, r.album_title) }}{% if r.year and r.year != '?' %} · {{ r.year }}{% endif %}{% if r.track_n != '?' %} · Track {{ r.track_n }}{% if r.total != '?' %} of {{ r.total }}{% endif %}{% endif %} {% if r.owned %}<span class="ql-owned-label">Owned</span>{% else %}{{ quality_badge(r) }}{% endif %}</div>
+                <div class="ql-table-subtitle ql-sub-mobile">{{ result_link('album', r.album_id, r.album_title) }}{% if r.year and r.year != '?' %} · {{ r.year }}{% endif %}{% if r.track_n != '?' %} · Track {{ r.track_n }}{% if r.total != '?' %} of {{ r.total }}{% endif %}{% endif %}</div>
+                <span class="ql-sub-mobile ql-sub-meta">{% if r.owned %}<span class="ql-owned-label">Owned</span>{% else %}{{ quality_badge(r) }}{% endif %}</span>
               </div>
             </div>
             <div class="ql-table-artist" role="cell">{{ result_link('artist', r.artist_id, r.artist) }}</div>

@@ -186,7 +186,7 @@
       {% if s == 'pending' %}
       <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel" data-pending-cancel-form>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action"
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary"
                 data-confirm="Remove this waiting job from the queue?"
                 data-confirm-action="Remove">Remove</button>
       </form>
@@ -215,7 +215,7 @@
     {% if s == 'pending' and _qw and _qw.paused_for %}
     <div class="ql-job-wait-note" id="queue-wait-note">
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-job-wait-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
       </svg>
       <span>Waiting until {% if _qw.paused_for.album %}“{{ _qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if _qw.paused_for.job_id %} <a href="/jobs/{{ _qw.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}</span>
     </div>

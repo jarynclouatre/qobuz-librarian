@@ -76,7 +76,7 @@
   <div class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
          viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
             d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
     </svg>
     <span class="min-w-0 flex-1 text-sm">
@@ -102,9 +102,9 @@
     <div class="ql-notice {% if library_scan_state.empty %}ql-notice-info{% else %}ql-notice-warning{% endif %} ql-tool-notice">
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-notice-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
         {% if library_scan_state.empty %}
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
         {% else %}
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5 19h14a2 2 0 0 0 1.84-2.75L13.74 4a2 2 0 0 0-3.5 0L3.18 16.25A2 2 0 0 0 5 19z"/>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 9v2m0 4h.01M5 19h14a2 2 0 0 0 1.84-2.75L13.74 4a2 2 0 0 0-3.5 0L3.18 16.25A2 2 0 0 0 5 19z"/>
         {% endif %}
       </svg>
       <span class="ql-notice-copy"><strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}</span>
@@ -136,8 +136,8 @@
   {# The review tabs stay in place at zero once the review is worked
      through, so the page keeps its shape. #}
   <nav class="ql-page-tabs ql-review-tabs ql-review-tabs-static" aria-label="Result type">
-    <button type="button" class="is-active" disabled>Missing Albums <span class="ql-tab-count">0</span></button>
-    <button type="button" disabled>Gap Fill <span class="ql-tab-count">0</span></button>
+    <button type="button" class="is-active" disabled>Missing Albums <span class="ql-count">0</span></button>
+    <button type="button" disabled>Gap Fill <span class="ql-count">0</span></button>
   </nav>
 
   <section class="ql-scan-hero">

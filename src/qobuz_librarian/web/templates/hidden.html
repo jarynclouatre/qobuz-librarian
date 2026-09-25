@@ -60,6 +60,7 @@
   {% for g in groups %}
   <details class="ql-review-group ql-hidden-group"{% if groups | length == 1 %} open{% endif %}>
     <summary class="ql-hidden-summary">
+      <span class="ql-review-chevron" aria-hidden="true"></span>
       <span class="ql-hidden-summary-copy">
         <span class="ql-hidden-artist">{{ g.artist }}</span>
         {# Review rows, the unit the review and the page button count. A line
@@ -67,10 +68,6 @@
            be larger than the number of lines. #}
         <span class="ql-hidden-count">{{ labels.format_count(g.rows) }} album{% if g.rows != 1 %}s{% endif %}</span>
       </span>
-      <svg class="ql-hidden-chevron" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 12h14"/>
-        <path class="ql-hidden-plus-vertical" d="M12 5v14"/>
-      </svg>
     </summary>
     <div class="ql-hidden-group-body">
       {% if (not is_upgrade and not is_downsample) or g.albums | length > 1 %}

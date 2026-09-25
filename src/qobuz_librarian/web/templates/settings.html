@@ -8,7 +8,7 @@
 {% if saved %}
 <div class="ql-notice {% if queued %}ql-notice-info{% else %}ql-notice-success{% endif %} mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
   <span>{% if queued %}Saved. Takes effect once no job is running.{% else %}Settings saved.{% endif %}</span>
 </div>
@@ -17,7 +17,7 @@
 {% if quality_note %}
 <div class="ql-notice ql-notice-info mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
   <span>Quality or singles settings changed. Run a Library refresh once the change takes effect.</span>
 </div>
@@ -26,7 +26,7 @@
 {% if warnings and error != "invalidsettings" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
   </svg>
   <span>{% for w in warnings %}{{ w }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span>
 </div>
@@ -70,7 +70,7 @@
 {% else %}
 <div class="ql-notice ql-notice-success mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
   <span>Connected. Your Qobuz token was saved.
     <a href="/" class="ql-link font-semibold">Go to Search</a></span>
@@ -81,7 +81,7 @@
 {% if envchecked %}
 <div class="ql-notice ql-notice-success mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
   <span>Qobuz accepted your token. It comes from your environment, so there was
     nothing to save here.
@@ -100,7 +100,7 @@
 {% if corrupt_stores %}
 <div class="ql-notice ql-notice-warning mb-6 flex items-start flex-wrap gap-3">
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
   </svg>
   <span class="min-w-0">{{ corrupt_stores | length }} saved file{{ 's' if corrupt_stores | length != 1 }}
     couldn't be read and {{ 'was' if corrupt_stores | length == 1 else 'were' }} reset.
@@ -290,7 +290,7 @@
                  autocomplete="off" autocorrect="off" spellcheck="false"
                  {% if creds_from_env %}disabled aria-disabled="true"{% endif %}
                  placeholder="{% if auth_token_set %}{% else %}Paste token{% endif %}"
-                 class="ql-input pr-12 font-mono text-base sm:text-sm">
+                 class="ql-input ql-mono pr-12">
           {{ secret_toggle("auth_token", "token") }}
         </div>
       </div>
@@ -379,7 +379,7 @@
       <div class="ql-default-field ql-quality-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
         <div class="ql-default-control">
-          <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select text-base sm:max-w-sm sm:text-xs">
+          <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select sm:max-w-sm">
             {% for c in choices %}
             <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
             {% endfor %}
@@ -419,7 +419,7 @@
             <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
             <div class="ql-default-control">
               {% if kind == 'enum' %}
-              <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select text-base sm:max-w-sm sm:text-xs">
+              <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select sm:max-w-sm">
                 {% if key in unset_enum_keys or not behavior[key] %}
                 <option value="" {% if not behavior[key] %}selected{% endif %}>Not chosen yet</option>
                 {% endif %}
@@ -433,7 +433,7 @@
               {% else %}
               <input type="text" name="{{ key }}" id="f-{{ key }}" value="{{ behavior[key] }}"
                      placeholder="{{ placeholder }}"
-                     class="ql-input font-mono text-base sm:max-w-sm sm:text-xs">
+                     class="ql-input ql-mono sm:max-w-lg">
               {% endif %}
               <p class="ql-field-help">{{ help }}</p>
             </div>
@@ -442,7 +442,7 @@
         </div>
       </details>
 
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save behaviour</button>
+      <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save behaviour</button>
     </form>
   </div>
 </details>
@@ -453,6 +453,8 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
+    {% set _any_host = library_paths | selectattr('resolved') | list %}
+    {% if not _any_host %}<p class="ql-path-kind ql-path-caption">Container paths</p>{% endif %}
     <dl class="ql-path-list">
       {% for p in library_paths %}
       <div class="ql-path-row">
@@ -464,7 +466,7 @@
           <div class="ql-path-kind">Container path</div>
           <div class="ql-path-value ql-path-value-muted">{{ p.container }}</div>
           {% else %}
-          <div class="ql-path-kind">Container path</div>
+          {% if _any_host %}<div class="ql-path-kind">Container path</div>{% endif %}
           <div class="ql-path-value">{{ p.container }}</div>
           {% endif %}
         </dd>
@@ -549,14 +551,14 @@
           <input type="password" name="{{ key }}" id="f-{{ key }}"
                  value="" placeholder="{% if not behavior[key] %}{{ placeholder }}{% endif %}"
                  autocomplete="off" autocorrect="off" spellcheck="false"
-                 class="ql-input pr-12 font-mono text-base sm:text-sm">
+                 class="ql-input ql-mono pr-12">
           {{ secret_toggle("f-" ~ key, "key") }}
         </div>
         <p class="ql-field-help">{{ help }} <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener" class="ql-link">Free keys come from last.fm.</a></p>
       </div>
       {% endfor %}
       <div class="ql-settings-actions">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save key</button>
+        <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save key</button>
         {% if behavior['LASTFM_API_KEY'] %}
         <button type="submit" name="lastfm_remove" value="1"
                 class="ql-btn ql-btn-secondary w-full sm:w-auto">Remove key</button>
@@ -677,12 +679,12 @@
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
         <input type="text" name="{{ key }}" id="f-{{ key }}"
                value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
-               class="ql-input max-w-lg text-base sm:text-sm">
+               class="ql-input ql-mono max-w-lg">
         <p class="ql-field-help">Writing to <code>{{ collection_backup.folder }}</code>. {{ help }}</p>
       </div>
       {% endfor %}
       <div class="ql-settings-actions">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Save folder</button>
+        <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save folder</button>
       </div>
     </form>
   </div>
@@ -731,7 +733,7 @@
         </span>
       </label>
       <div class="ql-settings-actions">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Check this backup</button>
+        <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Check this backup</button>
         {% include "_writes_paused_reason.html" %}
       </div>
     </form>
@@ -763,7 +765,7 @@
         <div class="relative max-w-lg">
           <input type="password" name="current_password" id="current_password"
                  autocomplete="current-password" required
-                 class="ql-input pr-12 text-base sm:text-sm">
+                 class="ql-input pr-12">
           {{ secret_toggle("current_password", "password") }}
         </div>
       </div>
@@ -772,7 +774,7 @@
         <div class="relative max-w-lg">
           <input type="password" name="new_password" id="new_password"
                  autocomplete="new-password" required minlength="15"
-                 class="ql-input pr-12 text-base sm:text-sm">
+                 class="ql-input pr-12">
           {{ secret_toggle("new_password", "new password") }}
         </div>
         <p class="ql-field-help">At least 15 characters.</p>
@@ -782,7 +784,7 @@
         <div class="relative max-w-lg">
           <input type="password" name="confirm_password" id="confirm_password"
                  autocomplete="new-password" required minlength="15"
-                 class="ql-input pr-12 text-base sm:text-sm">
+                 class="ql-input pr-12">
           {{ secret_toggle("confirm_password", "confirmation") }}
         </div>
       </div>
@@ -793,7 +795,7 @@
       </p>
       {% endif %}
       <div class="ql-settings-actions">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">Change password</button>
+        <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Change password</button>
       </div>
     </form>
   </div>

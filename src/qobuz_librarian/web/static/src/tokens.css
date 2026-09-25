@@ -24,6 +24,21 @@
   --ql-shadow: 0 24px 50px -30px rgb(0 0 0 / 0.95);
   --ql-shadow-soft: 0 8px 22px -16px rgb(0 0 0 / 0.6);
 
+  /* Sidebar, cards, the phone tab bar and the confirm dialog. */
+  --ql-rail-top: var(--ql-bg-2);
+  --ql-rail-bottom: #120d07;
+  --ql-card-top: #1d160d;
+  --ql-card-bottom: #191309;
+  --ql-card-line: rgb(228 169 78 / 0.13);
+  --ql-card-shadow: 0 24px 50px -30px rgb(0 0 0 / 0.95), inset 0 1px 0 rgb(255 255 255 / 0.035);
+  --ql-bar: color-mix(in oklab, var(--ql-bg) 97%, #000);
+  --ql-dialog: color-mix(in oklab, var(--ql-bg) 96%, #fff);
+  /* The brass of the main button, the active tab and progress bars. */
+  --ql-brass: linear-gradient(180deg, #f4c473 0%, var(--ql-gold) 45%, #c98a28 100%);
+  --ql-brass-hover: linear-gradient(180deg, #f8cd85 0%, #ecb45c 45%, var(--ql-gold-strong) 100%);
+  --ql-brass-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), inset 0 -1px 0 rgb(0 0 0 / 0.18), 0 6px 20px -8px color-mix(in oklab, var(--ql-gold) 55%, transparent);
+  --ql-brass-bar: linear-gradient(90deg, #c98a28, #f0bc66);
+
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
   --color-base-300: var(--ql-line);
@@ -60,6 +75,19 @@
   --ql-shadow: 0 14px 30px -20px rgb(84 56 15 / 0.4);
   --ql-shadow-soft: 0 8px 18px -14px rgb(84 56 15 / 0.28);
 
+  --ql-rail-top: color-mix(in oklab, var(--ql-surface-2) 62%, var(--ql-bg));
+  --ql-rail-bottom: color-mix(in oklab, var(--ql-surface) 96%, var(--ql-bg));
+  --ql-card-top: color-mix(in oklab, var(--ql-surface) 92%, var(--ql-bg));
+  --ql-card-bottom: var(--ql-surface);
+  --ql-card-line: var(--ql-line);
+  --ql-card-shadow: var(--ql-shadow-soft);
+  --ql-bar: #efe6d4;
+  --ql-dialog: #faf4e8;
+  --ql-brass: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
+  --ql-brass-hover: linear-gradient(180deg, #dda748 0%, #c78a24 55%, #b2761a 100%);
+  --ql-brass-shadow: inset 0 1px 0 rgb(255 255 255 / 0.3), inset 0 -1px 0 rgb(0 0 0 / 0.16), 0 6px 18px -8px rgb(168 107 18 / 0.5);
+  --ql-brass-bar: linear-gradient(90deg, #a86b12, #d59a3a);
+
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
   --color-base-300: var(--ql-line);
@@ -76,9 +104,25 @@
   --ql-radius-sm: 0.375rem;
   --ql-radius: 0.5625rem;
   --ql-radius-lg: 0.75rem;
+  --ql-radius-xl: 1rem;
+  --ql-space-1: 0.25rem;
+  --ql-space-2: 0.5rem;
+  --ql-space-3: 0.75rem;
+  --ql-space-4: 1rem;
+  --ql-space-5: 1.25rem;
+  --ql-space-6: 1.5rem;
+  /* The inside of a card: Settings sections, empty states, work cards,
+     sign-in and the census. */
+  --ql-pad-card: var(--ql-space-4);
   --ql-font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --ql-font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
   --ql-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+@media (min-width: 640px) {
+  :root {
+    --ql-pad-card: var(--ql-space-5);
+  }
 }
 
 .ql-btn {
@@ -108,26 +152,15 @@
 
 .ql-btn-primary {
   border-color: rgba(0, 0, 0, 0.3);
-  background: linear-gradient(180deg, #f4c473 0%, var(--ql-gold) 45%, #c98a28 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -1px 0 rgba(0, 0, 0, 0.18), 0 6px 20px -8px color-mix(in oklab, var(--ql-gold) 55%, transparent);
+  background: var(--ql-brass);
+  box-shadow: var(--ql-brass-shadow);
   color: var(--ql-action-ink);
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .ql-btn-primary:hover:not(:disabled):not(.is-disabled) {
   border-color: rgba(0, 0, 0, 0.3);
-  background: linear-gradient(180deg, #f8cd85 0%, #ecb45c 45%, var(--ql-gold-strong) 100%);
-}
-
-[data-theme="winter"] .ql-btn-primary {
-  background: linear-gradient(180deg, #d59a3a 0%, #bc7f1c 55%, #a86b12 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 0 -1px 0 rgba(0, 0, 0, 0.16), 0 6px 18px -8px rgba(168, 107, 18, 0.5);
-  color: var(--ql-action-ink);
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
-}
-
-[data-theme="winter"] .ql-btn-primary:hover:not(:disabled):not(.is-disabled) {
-  background: linear-gradient(180deg, #dda748 0%, #c78a24 55%, #b2761a 100%);
+  background: var(--ql-brass-hover);
 }
 
 /* A disabled primary drops the brass entirely. Dimmed gold still reads as
@@ -302,30 +335,6 @@
 }
 
 .ql-checkbox:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
-  outline-offset: 2px;
-}
-
-.ql-radio {
-  width: 1rem;
-  height: 1rem;
-  flex: none;
-  appearance: none;
-  border: 1px solid color-mix(in oklab, var(--ql-text) 28%, transparent);
-  border-radius: 999px;
-  background-color: color-mix(in oklab, var(--ql-bg) 72%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, #000 16%, transparent);
-  cursor: pointer;
-}
-
-.ql-radio:checked {
-  border-color: var(--ql-gold);
-  background:
-    radial-gradient(circle at center, var(--ql-gold) 0 36%, transparent 39%),
-    color-mix(in oklab, var(--ql-bg) 72%, transparent);
-}
-
-.ql-radio:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
   outline-offset: 2px;
 }

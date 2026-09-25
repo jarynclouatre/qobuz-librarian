@@ -91,7 +91,7 @@
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="return_to" value="/queue">
     {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
-    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary ql-secondary-action{% endif %}"
+    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary{% endif %}"
             title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
             data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}{{ labels.cancel_confirm(job) }}{% endif %}"
@@ -127,7 +127,7 @@
   <section class="ql-activity-section" aria-labelledby="queue-active-heading">
     <header class="ql-activity-section-header">
       <h2 id="queue-active-heading">Running now</h2>
-      <span class="ql-activity-count">{{ active_jobs | length }}</span>
+      <span class="ql-count">{{ active_jobs | length }}</span>
     </header>
     <div class="ql-activity-list ql-panelize">
       {% for job in active_jobs %}{{ queue_job_row(job) }}{% endfor %}
@@ -139,7 +139,7 @@
   <section class="ql-activity-section" aria-labelledby="queue-waiting-heading">
     <header class="ql-activity-section-header">
       <h2 id="queue-waiting-heading">Waiting</h2>
-      <span class="ql-activity-count">{{ waiting_jobs | length }}</span>
+      <span class="ql-count">{{ waiting_jobs | length }}</span>
     </header>
     <div class="ql-activity-list ql-panelize">
       {% for job in waiting_jobs %}{{ queue_job_row(job) }}{% endfor %}

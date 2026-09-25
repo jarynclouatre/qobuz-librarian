@@ -75,15 +75,15 @@ TEXT_FIELDS = [
      "In Docker, a path inside the container: keep /collection_backups and "
      "set the host folder with QL_COLLECTION_BACKUPS in .env.",
      "text", None, "e.g. /collection_backups"),
-    ("BEETS_PATH_DEFAULT", "beets path: default",
+    ("BEETS_PATH_DEFAULT", "Beets path: default",
      "Folder and file naming for albums, in Beets path syntax; empty uses the "
      ".env value or beets/config.yaml.",
      "text", None, "e.g. $albumartist/$album ($year)/$track - $title"),
-    ("BEETS_PATH_COMP", "beets path: compilation",
+    ("BEETS_PATH_COMP", "Beets path: compilation",
      "Folder and file naming for compilations; empty uses the .env value or "
      "the Beets default.",
      "text", None, "e.g. Various Artists/$album ($year)/$track - $title"),
-    ("BEETS_PLUGINS", "beets plugins",
+    ("BEETS_PLUGINS", "Beets plugins",
      "Beets plugins to enable in place of the config.yaml list; empty uses "
      "the .env value or that list, and unknown names are dropped.",
      "list", None, "fetchart,lastgenre,replaygain"),
