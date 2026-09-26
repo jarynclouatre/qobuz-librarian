@@ -3528,8 +3528,11 @@ class _DestinationSafety:
         self.release_attempted = False
         self.recovery = None
         self.interrupted = False
+        self.keyboard_interrupt = None
 
     def _note_exception(self, exc) -> None:
+        if isinstance(exc, KeyboardInterrupt):
+            self.keyboard_interrupt = exc
         if (
             not isinstance(exc, OSError)
             or getattr(exc, "errno", None) == errno.EINTR
@@ -5055,6 +5058,8 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                             result.recoveries):
                         source_retired = True
                         if not destination_safety.release():
+                            if destination_safety.keyboard_interrupt is not None:
+                                raise destination_safety.keyboard_interrupt
                             stop_after_item = destination_safety.interrupted
                             recovery = destination_safety.recovery or {}
                             location = recovery.get("location")
@@ -5069,6 +5074,8 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                                 + location_note
                             )
                         stop_after_item = destination_safety.interrupted
+                        if destination_safety.keyboard_interrupt is not None:
+                            result.interrupted = True
                         retired_receipts.append(entry.source_receipt)
                         result.copied += 1
                         result.outcomes.append(

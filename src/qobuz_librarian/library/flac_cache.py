@@ -121,13 +121,13 @@ def flush_pending() -> None:
     the next scan re-parses them (no data loss, just rework). Idempotent;
     a no-op when the buffer is empty.
     """
-    if not _db.ensure():
-        return
     with _PENDING_LOCK:
         if not _PENDING_ROWS:
             return
         snapshot = dict(_PENDING_ROWS)
         rows = [(p, m, s, d) for p, (m, s, d) in snapshot.items()]
+    if not _db.ensure():
+        return
     try:
         conn = _db.conn()
         conn.executemany(

@@ -838,15 +838,25 @@ class JobLogHandler(logging.Handler):
     _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
     def __init__(self, job: Job):
-        super().__init__()
         self.job = job
+        super().__init__()
 
-    def emit(self, record: logging.LogRecord):
+    def createLock(self):
+        # The job's own lock, so a thread that logs while holding it never
+        # waits on a second lock held by another thread writing to this job.
+        self.lock = self.job._lock
+
+    def filter(self, record: logging.LogRecord):
         # Both worker lanes (download + scan) attach a handler to the SAME
         # process-global "qobuz_librarian" logger, and Python dispatches every
-        # record to EVERY handler regardless of the emitting thread.
+        # record to EVERY handler regardless of the emitting thread. The
+        # filter runs before the lock is taken, so other threads' records
+        # never touch this job's lock.
         if getattr(_TLS, "current_job", None) is not self.job:
-            return
+            return False
+        return super().filter(record)
+
+    def emit(self, record: logging.LogRecord):
         try:
             self.job.push_line(self._ANSI.sub("", self.format(record)))
         except Exception:
