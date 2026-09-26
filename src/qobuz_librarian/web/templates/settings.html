@@ -51,6 +51,48 @@
 {% endif %}
 {% endmacro %}
 
+{% macro setting_toggle(key, label, help) %}
+<label class="ql-setting-row">
+  <div class="ql-setting-main">
+    <span class="ql-setting-title">{{ label }}</span>
+    <div id="help-{{ key }}" class="ql-setting-help">{{ help }}</div>
+    {% if (inert_notes|default({})).get(key) %}
+    <div id="note-{{ key }}" class="ql-setting-help"><strong>{{ inert_notes[key] }}</strong></div>
+    {% endif %}
+  </div>
+  <input type="checkbox" name="{{ key }}" id="cb-{{ key }}"
+         class="ql-toggle shrink-0"
+         aria-describedby="help-{{ key }}{% if (inert_notes|default({})).get(key) %} note-{{ key }}{% endif %}"
+         {% if behavior[key] %}checked{% endif %}>
+</label>
+{% endmacro %}
+
+{% macro setting_field(key, label, help, kind, choices, placeholder) %}
+<div class="ql-default-field">
+  <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
+  <div class="ql-default-control">
+    {% if kind == 'enum' %}
+    <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select sm:max-w-sm">
+      {% if key in unset_enum_keys or not behavior[key] %}
+      <option value="" {% if not behavior[key] %}selected{% endif %}>Not chosen yet</option>
+      {% endif %}
+      {% if behavior[key] and behavior[key] not in choices %}
+      <option value="{{ behavior[key] }}" selected>{{ behavior[key] }} s</option>
+      {% endif %}
+      {% for c in choices %}
+      <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
+      {% endfor %}
+    </select>
+    {% else %}
+    <input type="text" name="{{ key }}" id="f-{{ key }}" value="{{ behavior[key] }}"
+           placeholder="{{ placeholder }}"
+           class="ql-input ql-mono sm:max-w-lg">
+    {% endif %}
+    <p class="ql-field-help">{{ help }}</p>
+  </div>
+</div>
+{% endmacro %}
+
 
 {% if rerendered %}{{ behaviour_notices() }}{% endif %}
 <div class="ql-settings-page">
@@ -303,67 +345,6 @@
   </div>
 </details>
 
-{# Shown before credentials are saved too: the terminal's lock-busy message
-   sends a fresh install here to switch modes, so the control it names has to
-   be on the page. #}
-<details class="ql-settings-section">
-  <summary class="ql-settings-summary">
-    <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
-    <details class="ql-settings-details">
-      <summary class="ql-disclosure-summary">
-        CLI command
-      </summary>
-      <div class="ql-code-block">
-        <code id="cli-command">docker compose exec qobuz-librarian qobuz-librarian</code>
-        <button type="button" class="ql-btn ql-btn-sm ql-btn-secondary ql-copy-button"
-                data-copy-target="#cli-command">Copy</button>
-      </div>
-    </details>
-    {% if lock_unenforceable %}
-    <div class="ql-mode-row">
-      <div class="min-w-0">
-        <p class="ql-mode-state">Run lock unavailable. Downloads paused.</p>
-        <p class="ql-mode-help">Check the data folder's permissions and filesystem locking support, then restart Qobuz Librarian.</p>
-      </div>
-    </div>
-    {% endif %}
-    {% if cli_mode %}
-    <div class="ql-mode-row">
-      <div class="min-w-0">
-        <p class="ql-mode-state">Terminal mode active</p>
-        <p class="ql-mode-help">Web scans and downloads are paused.</p>
-      </div>
-      <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">
-        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <input type="hidden" name="target" value="web">
-        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm w-full sm:w-auto">Resume web app</button>
-      </form>
-    </div>
-    {% if cli_only_env %}
-    <p class="ql-settings-footnote">
-      <code>QL_CLI_ONLY</code> is set, so Qobuz Librarian returns to terminal
-      mode after every restart. Remove it to default to the web app.
-    </p>
-    {% endif %}
-    {% elif not lock_unenforceable %}
-    <div class="ql-mode-row">
-      <div class="min-w-0">
-        <p class="ql-mode-state">Web app active</p>
-        <p class="ql-mode-help">Scans and downloads can run from the web UI.</p>
-      </div>
-      <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">
-        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <input type="hidden" name="target" value="cli">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-secondary-action w-full sm:w-auto">Switch to terminal mode</button>
-      </form>
-    </div>
-    {% endif %}
-  </div>
-</details>
-
 <details class="ql-settings-section">
   <summary class="ql-settings-summary">
     <h2 id="behaviour" tabindex="-1" class="ql-anchor-target">Behaviour</h2>
@@ -388,56 +369,33 @@
         </div>
       </div>
       {% endfor %}
+      {% set everyday_fields = ('LYRICS_FORMAT', 'ARTWORK', 'NEW_RELEASE_CHECK_INTERVAL', 'DOWNSAMPLE_KEEP_ORIGINALS') %}
       <div class="ql-setting-list">
-        {% for key, label, help in behavior_fields %}
-        <label class="ql-setting-row">
-          <div class="ql-setting-main">
-            <span class="ql-setting-title">{{ label }}</span>
-            <div id="help-{{ key }}" class="ql-setting-help">{{ help }}</div>
-            {% if (inert_notes|default({})).get(key) %}
-            <div id="note-{{ key }}" class="ql-setting-help"><strong>{{ inert_notes[key] }}</strong></div>
-            {% endif %}
-          </div>
-          <input type="checkbox" name="{{ key }}" id="cb-{{ key }}"
-                 class="ql-toggle shrink-0"
-                 aria-describedby="help-{{ key }}{% if (inert_notes|default({})).get(key) %} note-{{ key }}{% endif %}"
-                 {% if behavior[key] %}checked{% endif %}>
-        </label>
+        {% for key, label, help in behavior_fields if key != 'MIGRATE_MULTI_ARTIST' %}
+        {{ setting_toggle(key, label, help) }}
+        {% endfor %}
+      </div>
+      <div class="ql-defaults-grid">
+        {% for key, label, help, kind, choices, placeholder in text_fields if key in everyday_fields %}
+        {{ setting_field(key, label, help, kind, choices, placeholder) }}
         {% endfor %}
       </div>
 
-      <details class="ql-settings-details ql-settings-defaults"{% if defaults_open %} open{% endif %}>
+      <details class="ql-settings-details ql-settings-advanced"{% if defaults_open %} open{% endif %}>
         <summary class="ql-disclosure-summary">
           <span class="ql-settings-summary-row">
-            <span>Download and import defaults</span>
-            <span>Lyrics, artwork, beets</span>
+            <span>Advanced</span>
+            <span>Beets, lyrics providers, album lists, folders</span>
           </span>
         </summary>
         <div class="ql-defaults-grid">
-          {% for key, label, help, kind, choices, placeholder in text_fields if key not in ('STREAMRIP_QUALITY', 'COLLECTION_BACKUP_DIR', 'LASTFM_API_KEY') %}
-          <div class="ql-default-field">
-            <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
-            <div class="ql-default-control">
-              {% if kind == 'enum' %}
-              <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select sm:max-w-sm">
-                {% if key in unset_enum_keys or not behavior[key] %}
-                <option value="" {% if not behavior[key] %}selected{% endif %}>Not chosen yet</option>
-                {% endif %}
-                {% if behavior[key] and behavior[key] not in choices %}
-                <option value="{{ behavior[key] }}" selected>{{ behavior[key] }} s</option>
-                {% endif %}
-                {% for c in choices %}
-                <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
-                {% endfor %}
-              </select>
-              {% else %}
-              <input type="text" name="{{ key }}" id="f-{{ key }}" value="{{ behavior[key] }}"
-                     placeholder="{{ placeholder }}"
-                     class="ql-input ql-mono sm:max-w-lg">
-              {% endif %}
-              <p class="ql-field-help">{{ help }}</p>
-            </div>
-          </div>
+          {% for key, label, help, kind, choices, placeholder in text_fields if key not in ('STREAMRIP_QUALITY', 'COLLECTION_BACKUP_DIR', 'LASTFM_API_KEY') + everyday_fields %}
+          {{ setting_field(key, label, help, kind, choices, placeholder) }}
+          {% endfor %}
+        </div>
+        <div class="ql-setting-list">
+          {% for key, label, help in behavior_fields if key == 'MIGRATE_MULTI_ARTIST' %}
+          {{ setting_toggle(key, label, help) }}
           {% endfor %}
         </div>
       </details>
@@ -825,6 +783,67 @@
       {{ diagnostics_html | safe }}
     </div>
     <p id="diagnostics-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+  </div>
+</details>
+
+{# Shown before credentials are saved too: the terminal's lock-busy message
+   sends a fresh install here to switch modes, so the control it names has to
+   be on the page. #}
+<details class="ql-settings-section">
+  <summary class="ql-settings-summary">
+    <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
+  <div class="ql-settings-section-body">
+    <details class="ql-settings-details">
+      <summary class="ql-disclosure-summary">
+        CLI command
+      </summary>
+      <div class="ql-code-block">
+        <code id="cli-command">docker compose exec qobuz-librarian qobuz-librarian</code>
+        <button type="button" class="ql-btn ql-btn-sm ql-btn-secondary ql-copy-button"
+                data-copy-target="#cli-command">Copy</button>
+      </div>
+    </details>
+    {% if lock_unenforceable %}
+    <div class="ql-mode-row">
+      <div class="min-w-0">
+        <p class="ql-mode-state">Run lock unavailable. Downloads paused.</p>
+        <p class="ql-mode-help">Check the data folder's permissions and filesystem locking support, then restart Qobuz Librarian.</p>
+      </div>
+    </div>
+    {% endif %}
+    {% if cli_mode %}
+    <div class="ql-mode-row">
+      <div class="min-w-0">
+        <p class="ql-mode-state">Terminal mode active</p>
+        <p class="ql-mode-help">Web scans and downloads are paused.</p>
+      </div>
+      <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="target" value="web">
+        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm w-full sm:w-auto">Resume web app</button>
+      </form>
+    </div>
+    {% if cli_only_env %}
+    <p class="ql-settings-footnote">
+      <code>QL_CLI_ONLY</code> is set, so Qobuz Librarian returns to terminal
+      mode after every restart. Remove it to default to the web app.
+    </p>
+    {% endif %}
+    {% elif not lock_unenforceable %}
+    <div class="ql-mode-row">
+      <div class="min-w-0">
+        <p class="ql-mode-state">Web app active</p>
+        <p class="ql-mode-help">Scans and downloads can run from the web UI.</p>
+      </div>
+      <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="target" value="cli">
+        <button type="submit" class="ql-btn ql-btn-secondary ql-secondary-action w-full sm:w-auto">Switch to terminal mode</button>
+      </form>
+    </div>
+    {% endif %}
   </div>
 </details>
 </div>

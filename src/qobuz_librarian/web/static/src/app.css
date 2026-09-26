@@ -4673,12 +4673,15 @@ details.ql-mobile-drawer[open]::before {
 .ql-settings-details-copy {
   margin-top: 0.55rem;
 }
-/* The defaults drawer sits between the toggle rows and the save button,
-   ruled off from the rows and clear of the button. */
-.ql-settings-defaults {
-  margin-bottom: 1.15rem;
+/* The Advanced drawer sits between the everyday fields and the save button,
+   ruled off from the fields and clear of the button. */
+.ql-settings-advanced {
+  margin-block: 1.15rem;
   border-top: 1px solid color-mix(in oklab, var(--ql-text) 9%, transparent);
   padding-top: 0.95rem;
+}
+.ql-settings-advanced .ql-setting-list {
+  margin-top: var(--ql-space-4);
 }
 .ql-settings-notice-title {
   margin: 0;
@@ -4775,8 +4778,7 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   gap: 0.45rem;
 }
-/* Download quality standing on its own above the toggle list, not folded
-   into the collapsed defaults disclosure with beets path templates. */
+/* Download quality standing on its own above the toggle list. */
 .ql-quality-field {
   margin-bottom: 1.1rem;
   padding-bottom: 1.1rem;
