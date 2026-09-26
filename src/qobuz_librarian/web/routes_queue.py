@@ -6,7 +6,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from qobuz_librarian.queue.startup_recovery import BlockedItemSettlementAction
-from qobuz_librarian.web import job_persistence, runtime
+from qobuz_librarian.web import (
+    job_labels,
+    job_persistence,
+    queue_recovery,
+    refusals,
+    rendering,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -22,17 +28,17 @@ async def queue_head():
 async def discard_interrupted_terminal_download(request: Request):
     """Give up on an interrupted terminal download from the web."""
     form = await request.form()
-    offer = runtime._terminal_recovery_offer()
+    offer = queue_recovery._terminal_recovery_offer()
     if offer is None or (
         str(form.get("recovery_operation_id") or "") != offer["operation_id"]
         or str(form.get("recovery_item_id") or "") != offer["item_id"]
     ):
         return RedirectResponse(
-            url="/queue?error=" + runtime._notice_key(
+            url="/queue?error=" + rendering._notice_key(
                 "That interrupted download is no longer the one holding things "
                 "up. Nothing was changed. Reload the page."),
             status_code=303)
-    settled, reason = runtime._settle_blocked_recovery(
+    settled, reason = queue_recovery._settle_blocked_recovery(
         BlockedItemSettlementAction.DISCARD)
     _log.info(
         "Give up on the interrupted terminal download: %s.",
@@ -40,13 +46,13 @@ async def discard_interrupted_terminal_download(request: Request):
         else f"refused: {(reason or 'no reason given').rstrip('.')}")
     if not settled:
         return RedirectResponse(
-            url="/queue?error=" + runtime._notice_key(
+            url="/queue?error=" + rendering._notice_key(
                 reason or "The interrupted download could not be discarded."),
             status_code=303)
     # No album name here: the banner it was clicked from names it, and the
     # query the queue page reads is capped.
     return RedirectResponse(
-        url="/queue?notice=" + runtime._notice_key(
+        url="/queue?notice=" + rendering._notice_key(
             f"Gave up on the interrupted download. {reason}"
             if offer["imported"] or offer["partial"] else
             "Gave up on the interrupted download. Nothing reached your "
@@ -63,18 +69,18 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
     in-memory set."""
     pending = job_mgr.registry.pending_and_running()
     protected_id = job_mgr.durable_recovery_job_id()
-    return runtime._tr(request, "queue.html", {
+    return rendering._tr(request, "queue.html", {
         "pending": pending,
-        "queue_rows_signature": runtime._queue_rows_signature(pending),
+        "queue_rows_signature": job_labels._queue_rows_signature(pending),
         # Per-pending-job "waiting behind X" explainer, the same one the single
         # job page shows, so the Queue list says why a job hasn't started
         # instead of a bare "Queued". None for anything already running.
-        "queue_waits": {j.id: runtime._queue_wait(j) for j in pending},
+        "queue_waits": {j.id: job_labels._queue_wait(j) for j in pending},
         "queue_has_cancel_protected": any(
             j.id == protected_id for j in pending
         ),
-        "error": runtime._notice_text(error),
-        "notice": runtime._notice_text(notice),
+        "error": rendering._notice_text(error),
+        "notice": rendering._notice_text(notice),
         "page": "queue",
         "active_tab": "queue",
     })
@@ -114,13 +120,13 @@ async def queue_history(
     def _stamp(rows):
         for r in rows:
             ts = r.get("finished_at") or r.get("created_at")
-            r["when"], r["when_exact"] = runtime._when_label(ts)
+            r["when"], r["when_exact"] = job_labels._when_label(ts)
         return rows
 
     def _load_page(page, bulk_page):
         # Two layers: meaningful jobs as cards, plain downloads as the table
         # underneath. Both walk the archive a page at a time.
-        recoveries = runtime._retire_gone_recoveries(
+        recoveries = rendering._retire_gone_recoveries(
             job_persistence.recovery_history(attention_only=True)
             if attention else job_persistence.recovery_history()
         )
@@ -165,7 +171,7 @@ async def queue_history(
         shown = [row.get("id") for row in (*bulk_jobs, *rows)]
         await loop.run_in_executor(
             None, lambda: job_persistence.acknowledge_listed_attention(shown))
-    return runtime._tr(request, "history.html", {
+    return rendering._tr(request, "history.html", {
         "page": "queue", "active_tab": "history",
         "bulk_jobs": bulk_jobs, "jobs": rows,
         "bulk_total": bulk_total, "bulk_shown": len(bulk_jobs),
@@ -173,7 +179,7 @@ async def queue_history(
         "cur_page": p, "pages": pages, "total": total,
         "attention_only": attention,
         "history_unavailable": not job_persistence.ready_for_admission(),
-        "error": runtime._notice_text(error),
+        "error": rendering._notice_text(error),
         # What a Retry from this page just started; Retry stays on History,
         # which links to the new job.
         "started_job": job_mgr.registry.get(started) if started else None,
@@ -184,9 +190,9 @@ async def queue_history(
 async def queue_clear(request: Request):
     """Clear the History: drop finished/canceled/failed jobs from the registry
     and the full on-disk archive. In-flight jobs are untouched."""
-    with runtime._STARTUP_RECOVERY_LOCK:
-        if runtime._startup_recovery_status_value() != "clear":
-            return runtime._durable_recovery_response(
+    with queue_recovery._STARTUP_RECOVERY_LOCK:
+        if queue_recovery._startup_recovery_status_value() != "clear":
+            return refusals._durable_recovery_response(
                 request,
                 "History cannot be cleared while an interrupted download still "
                 "has saved recovery state. Retry or settle that download first.",
@@ -198,7 +204,7 @@ async def queue_clear(request: Request):
                 "was removed; check the data volume and try again."
             )
             return RedirectResponse(
-                url="/queue/history?error=" + runtime._notice_key(message),
+                url="/queue/history?error=" + rendering._notice_key(message),
                 status_code=303,
             )
         job_mgr.registry.clear_finished()
@@ -241,6 +247,6 @@ async def queue_cancel_pending():
             )
         message = " ".join(parts)
         return RedirectResponse(
-            url="/queue?notice=" + runtime._notice_key(message), status_code=303
+            url="/queue?notice=" + rendering._notice_key(message), status_code=303
         )
     return RedirectResponse(url="/queue", status_code=303)

@@ -15,7 +15,17 @@ from qobuz_librarian.library import (
 )
 from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.ui_cli.errors import plural
-from qobuz_librarian.web import flows, review_badges, runtime
+from qobuz_librarian.web import (
+    flows,
+    job_runs,
+    qobuz_access,
+    refusals,
+    rendering,
+    review_badges,
+    runtime,
+    storage,
+    write_gate,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 _ANY_TARGET = object()
@@ -69,7 +79,7 @@ def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds,
     or None when web writes were paused between the route's opening gate and
     here (a set_mode CLI handoff landing mid-request; see job_approve)."""
     with runtime._auto_check_lock:
-        if runtime._web_writes_paused():
+        if write_gate._web_writes_paused():
             return None
         target = _scan_target(job)
         existing = _active_scan(*kinds, statuses=statuses, target=target)
@@ -97,12 +107,12 @@ def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds,
 
 def _scan_submission_failure_response(request, destination):
     """Explain a refused durable admission unless the CLI owns the lock."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     separator = "&" if "?" in destination else "?"
     return RedirectResponse(
-        url=destination + separator + "error=" + runtime._notice_key(
+        url=destination + separator + "error=" + rendering._notice_key(
             job_mgr.JOB_ADMISSION_ERROR
         ),
         status_code=303,
@@ -131,7 +141,7 @@ def _library_resume_offer(generation):
 def _music_root_problem():
     """Why the music folder cannot be read as a folder, or ""."""
     root = Path(cfg.MUSIC_ROOT)
-    hint = runtime._music_root_hint()
+    hint = storage._music_root_hint()
     try:
         if not root.exists():
             return f"{root} does not exist. {hint}"
@@ -145,7 +155,7 @@ def _music_root_problem():
 def _library_scan_state():
     """Whether a whole-library scan has something valid to scan."""
     root = Path(cfg.MUSIC_ROOT)
-    hint = runtime._music_root_hint()
+    hint = storage._music_root_hint()
     problem = _music_root_problem()
     if problem:
         return {
@@ -173,7 +183,7 @@ def _library_scan_state():
                 "ready": False,
                 "empty": False,
                 "count": 0,
-                "message": runtime._music_write_target_message(
+                "message": storage._music_write_target_message(
                     write_state, recorded, diagnostic=True),
             }
         return {
@@ -214,7 +224,7 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
     with runtime._auto_check_lock:
         # Re-check the pause predicate under the lock (see
         # _start_new_release_check).
-        if runtime._web_writes_paused():
+        if write_gate._web_writes_paused():
             return None
         existing = _active_library_scan()
         if existing is not None:
@@ -224,7 +234,7 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
         job.execute_kind = "library"
 
         def _scan(j):
-            active = runtime._authorize_qobuz_live(
+            active = qobuz_access._authorize_qobuz_live(
                 QobuzAccess.CATALOGUE_ACTION,
                 expected_generation=credentials.generation,
             )
@@ -235,7 +245,7 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
         return job_mgr.submit_scan(
             job,
             _scan,
-            runtime._resume_album_download(job, job.execute_args),
+            job_runs._resume_album_download(job, job.execute_args),
         )
 
 

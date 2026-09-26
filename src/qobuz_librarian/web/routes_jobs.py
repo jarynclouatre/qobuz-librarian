@@ -29,14 +29,24 @@ from qobuz_librarian.queue.startup_recovery import BlockedItemSettlementAction
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
+    download_admission,
+    download_outcomes,
     flows,
+    job_labels,
     job_persistence,
+    job_runs,
     owned_paths,
+    qobuz_access,
+    queue_recovery,
+    refusals,
+    rendering,
     review_badges,
     review_pages,
     runtime,
     saved_reviews,
     settings_store,
+    track_downloads,
+    write_gate,
 )
 from qobuz_librarian.web import jobs as job_mgr
 
@@ -63,7 +73,7 @@ async def job_page(request: Request, job_id: str,
         job = job_mgr.load_historical_job(job_id)
         if job is None:
             return RedirectResponse(
-                url="/queue?error=" + runtime._notice_key(
+                url="/queue?error=" + rendering._notice_key(
                     "That job is no longer in History."),
                 status_code=303)
     if job.execute_kind == "library" and job.status not in job_mgr.TERMINAL:
@@ -80,7 +90,7 @@ async def job_page(request: Request, job_id: str,
         query = ("?" + urllib.parse.urlencode(params)) if params else ""
         return RedirectResponse(url=f"/library{query}", status_code=303)
     review_badge_ack = _review_badge_ack_for(job)
-    nav_page, _return_href, _return_label = runtime._job_nav_destination(job)
+    nav_page, _return_href, _return_label = job_labels._job_nav_destination(job)
     shown_attention = job.attention
     if job.attention and job.attention not in ("recovery", "catalog"):
         # Opening the page is the acknowledgement: the History chip and the
@@ -100,7 +110,7 @@ async def job_page(request: Request, job_id: str,
         await loop.run_in_executor(
             None,
             lambda: job_persistence.acknowledge_missing_recoveries(
-                job, runtime._recovery_missing),
+                job, rendering._recovery_missing),
         )
     new_release_state = {"stale": False, "reason": ""}
     if (
@@ -117,12 +127,12 @@ async def job_page(request: Request, job_id: str,
     ctx = {"job": job, "page": nav_page, "shown_attention": shown_attention,
            "stale": stale, "noselection": noselection,
            "waiting": waiting,
-           "error": runtime._notice_text(error),
+           "error": rendering._notice_text(error),
            "new_release_state": new_release_state,
-           "queue_wait": runtime._queue_wait(job),
+           "queue_wait": job_labels._queue_wait(job),
            "JobStatus": job_mgr.JobStatus}
     ctx.update(review_pages._review_context(job, page, q, tab))
-    return runtime._tr(
+    return rendering._tr(
         request, "job.html", ctx, review_badge_ack=review_badge_ack
     )
 
@@ -155,9 +165,9 @@ async def job_content(request: Request, job_id: str, page: int = 1,
     review_badge_ack = _review_badge_ack_for(job)
     ctx = {"job": job, "JobStatus": job_mgr.JobStatus,
            "embedded_surface": embedded,
-           "queue_wait": runtime._queue_wait(job)}
+           "queue_wait": job_labels._queue_wait(job)}
     ctx.update(review_pages._review_context(job, page))
-    return runtime._tr(
+    return rendering._tr(
         request, "_job_body.html", ctx, review_badge_ack=review_badge_ack
     )
 
@@ -176,7 +186,7 @@ async def job_review_page(request: Request, job_id: str, page: int = 1,
     review_badge_ack = _review_badge_ack_for(job)
     ctx = {"job": job, "JobStatus": job_mgr.JobStatus}
     ctx.update(review_pages._review_context(job, page, q, tab))
-    return runtime._tr(
+    return rendering._tr(
         request, "_review_page.html", ctx,
         review_badge_ack=review_badge_ack,
     )
@@ -213,7 +223,7 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
     other.candidates = split  # cids, seqs, and saved ticks ride along
     other.summary = flows.split_review_summary(other.execute_kind, split)
     other.sync_cand_seq()
-    factory = runtime._RESUME_EXECUTE.get(other.execute_kind)
+    factory = job_runs._RESUME_EXECUTE.get(other.execute_kind)
     if factory is not None:
         other._execute_fn = factory(other, other.execute_args)
     return other
@@ -221,13 +231,13 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
 
 @router.post("/jobs/{job_id}/approve")
 async def job_approve(request: Request, job_id: str):
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     job = job_mgr.registry.get(job_id)
     if not job:
         return RedirectResponse(
-            url="/queue?error=" + runtime._notice_key(
+            url="/queue?error=" + rendering._notice_key(
                 "That review is no longer open."),
             status_code=303)
     # A parked review can outlive its feature: Upgrade can be switched off
@@ -252,7 +262,7 @@ async def job_approve(request: Request, job_id: str):
             and (job.execute_args or {}).get("quality_signature")
             != saved_reviews._effective_upgrade_quality_signature()):
         return RedirectResponse(
-            url=f"/jobs/{job.id}?error=" + runtime._notice_key(
+            url=f"/jobs/{job.id}?error=" + rendering._notice_key(
                 "Download quality changed since this Upgrade review was "
                 "built. Run a Library refresh before approving it."
             ),
@@ -274,7 +284,7 @@ async def job_approve(request: Request, job_id: str):
         action = ("in-place move" if (job.execute_args or {}).get("in_place")
                   else "copy")
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(
+            url=dest + "?error=" + rendering._notice_key(
                 f"Confirm the low-space risk before approving this {action}. "
                 "Your review is untouched."
             ),
@@ -327,7 +337,7 @@ async def job_approve(request: Request, job_id: str):
                     None, lambda: _all_stale_message_for(
                         job, stale_premise_candidate_ids.counts))
                 return RedirectResponse(
-                    url=dest + "?error=" + runtime._notice_key(stale_message),
+                    url=dest + "?error=" + rendering._notice_key(stale_message),
                     status_code=303,
                 )
         # Only now that the run is going to happen: the keep-vs-delete answer is
@@ -337,7 +347,7 @@ async def job_approve(request: Request, job_id: str):
         if job.execute_kind == "downsample":
             # current() includes a saved value waiting for another lane to
             # finish. Bind that value to this approval below.
-            choice = runtime._downsample_originals_choice()
+            choice = rendering._downsample_originals_choice()
             rendered_choice = (
                 form.get("downsample_policy") or ""
             ).strip().lower()
@@ -347,7 +357,7 @@ async def job_approve(request: Request, job_id: str):
                 or rendered_choice != current_choice
             ):
                 return RedirectResponse(
-                    url=dest + "?error=" + runtime._notice_key(
+                    url=dest + "?error=" + rendering._notice_key(
                         "The keep-or-delete setting changed after this review "
                         "was shown. No music files were changed; review the "
                         "updated warning and approve again."
@@ -359,7 +369,7 @@ async def job_approve(request: Request, job_id: str):
                 if choice in ("keep", "delete"):
                     downsample_choice_to_save = choice
                 else:
-                    return runtime._tr(request, "downsample_keep_choice.html", {
+                    return rendering._tr(request, "downsample_keep_choice.html", {
                         "job": job, "page": "downsample",
                         "picked": len(selected_candidate_snapshot),
                         "picked_albums":
@@ -374,13 +384,13 @@ async def job_approve(request: Request, job_id: str):
     if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
             and job.execute_kind in _QOBUZ_REVIEW_KINDS):
         try:
-            authorized_credentials = await runtime._authorize_qobuz_for_web(
+            authorized_credentials = await qobuz_access._authorize_qobuz_for_web(
                 QobuzAccess.DOWNLOAD_ACTION
             )
-        except runtime._QOBUZ_ACTION_ERRORS as exc:
+        except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
             message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
             return RedirectResponse(
-                url=dest + "?error=" + runtime._notice_key(message),
+                url=dest + "?error=" + rendering._notice_key(message),
                 status_code=303,
             )
         if job.execute_kind in _LIBRARY_SURFACE_KINDS:
@@ -413,11 +423,11 @@ async def job_approve(request: Request, job_id: str):
         with (
             saved_reviews._SAVED_REVIEW_LOCK,
             runtime._auto_check_lock,
-            runtime._DOWNLOAD_SUBMIT_LOCK,
-            runtime._CREDENTIAL_LOCK,
+            download_admission._DOWNLOAD_SUBMIT_LOCK,
+            qobuz_access._CREDENTIAL_LOCK,
             job._review_action_lock,
         ):
-            if runtime._web_writes_paused():
+            if write_gate._web_writes_paused():
                 return "paused"
             if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
                 return False
@@ -450,7 +460,7 @@ async def job_approve(request: Request, job_id: str):
                 } <= stale_premise_candidate_ids:
                     return "all_candidates_stale"
             if (authorized_credentials is not None
-                    and not runtime._credential_generation_is_active(
+                    and not qobuz_access._credential_generation_is_active(
                         authorized_credentials.generation)):
                 return "credential_changed"
             if (job.execute_kind in ("upgrade", "downsample")
@@ -500,7 +510,7 @@ async def job_approve(request: Request, job_id: str):
                     if album_id is None:
                         admission_decisions[key] = False
                         return False
-                    admitted = runtime._duplicate_download_job(album_id) is None
+                    admitted = download_admission._duplicate_download_job(album_id) is None
                     if not admitted:
                         already_downloading.append(candidate)
                 else:
@@ -544,7 +554,7 @@ async def job_approve(request: Request, job_id: str):
                             "_credential_generation":
                                 authorized_credentials.generation,
                         }
-                        factory = runtime._RESUME_EXECUTE.get(job.execute_kind)
+                        factory = job_runs._RESUME_EXECUTE.get(job.execute_kind)
                         if factory is not None:
                             job._execute_fn = factory(job, job.execute_args)
                         qobuz_args_changed = True
@@ -559,7 +569,7 @@ async def job_approve(request: Request, job_id: str):
                             **(job.execute_args or {}),
                             "keep_originals": downsample_keep_originals,
                         }
-                        job._execute_fn = runtime._resume_downsample(
+                        job._execute_fn = job_runs._resume_downsample(
                             job, job.execute_args)
                         downsample_args_changed = True
             if downsample_choice_to_save:
@@ -577,7 +587,7 @@ async def job_approve(request: Request, job_id: str):
                     migration_low_space_required
                     and migration_low_space_accepted
                 )
-                execute_fn = runtime._resume_migration(job, execute_args)
+                execute_fn = job_runs._resume_migration(job, execute_args)
                 with job._lock:
                     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
                         previous_migration_args = job.execute_args
@@ -597,7 +607,7 @@ async def job_approve(request: Request, job_id: str):
                 if downsample_args_changed and approved is not True:
                     with job._lock:
                         job.execute_args = previous_downsample_args
-                        job._execute_fn = runtime._resume_downsample(
+                        job._execute_fn = job_runs._resume_downsample(
                             job, job.execute_args or {})
                 if qobuz_args_changed and approved is not True:
                     with job._lock:
@@ -617,19 +627,19 @@ async def job_approve(request: Request, job_id: str):
             None, lambda: _all_stale_message_for(
                 job, stale_premise_candidate_ids.counts))
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(stale_message),
+            url=dest + "?error=" + rendering._notice_key(stale_message),
             status_code=303,
         )
     if (isinstance(approved, tuple)
             and len(approved) == 2
             and approved[0] == "candidate_stale"):
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(approved[1]),
+            url=dest + "?error=" + rendering._notice_key(approved[1]),
             status_code=303,
         )
     if approved == "review_changed":
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(
+            url=dest + "?error=" + rendering._notice_key(
                 "That review changed while approval was being checked. "
                 "Nothing changed; review the current selections and try again."
             ),
@@ -637,7 +647,7 @@ async def job_approve(request: Request, job_id: str):
         )
     if approved == "downsample_policy_failed":
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(
+            url=dest + "?error=" + rendering._notice_key(
                 "Couldn't save the keep-or-delete choice. No music files "
                 "were changed; check the data folder and try again."
             ),
@@ -649,25 +659,25 @@ async def job_approve(request: Request, job_id: str):
             unchanged=True,
         )
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(message),
+            url=dest + "?error=" + rendering._notice_key(message),
             status_code=303,
         )
     if approved == "sync_failed":
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(
+            url=dest + "?error=" + rendering._notice_key(
                 "The refreshed review could not be saved. Your existing "
                 "choices are untouched; check the data folder and try again."
             ),
             status_code=303,
         )
     if approved == "paused":
-        busy = runtime._lock_busy_response(request)
+        busy = refusals._lock_busy_response(request)
         if busy is not None:
             return busy
         return RedirectResponse(url=dest, status_code=303)
     if approved is None:
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(
+            url=dest + "?error=" + rendering._notice_key(
                 job_mgr.JOB_ADMISSION_ERROR
             ) + _skip_q,
             status_code=303,
@@ -675,7 +685,7 @@ async def job_approve(request: Request, job_id: str):
     running_q = ""
     if already_downloading:
         names = _named_albums(already_downloading)
-        running_q = "&error=" + runtime._notice_key(
+        running_q = "&error=" + rendering._notice_key(
             f"{names} {'is' if len(already_downloading) == 1 else 'are'} "
             "already downloading, so "
             f"{'it was' if len(already_downloading) == 1 else 'they were'} "
@@ -694,7 +704,7 @@ async def job_approve(request: Request, job_id: str):
             c for c in selected_candidate_snapshot
             if c.get("cid") in stale_premise_candidate_ids
         ])
-        local_stale_q = "&error=" + runtime._notice_key(
+        local_stale_q = "&error=" + rendering._notice_key(
             f"Started the rest. {skipped_names} changed on disk after this "
             f"review was built, so "
             f"{'it was' if local_stale == 1 else 'they were'} skipped and "
@@ -964,7 +974,7 @@ async def job_review_group_items(request: Request, job_id: str,
         tab = ""
     groups = review_pages._review_artist_groups(job, query=q, tab=tab)
     items = next((rows for name, rows in groups if name == artist), [])
-    return runtime._tr(request, "_review_group_items.html", {
+    return rendering._tr(request, "_review_group_items.html", {
         "job": job, "items": items, "review_tab": tab,
     })
 
@@ -985,7 +995,7 @@ async def job_candidate_art(job_id: str, cid: str):
              for c in job.candidates if c.get("cid") == cid),
             None,
         )
-    art = runtime._local_album_art(album_dir) if album_dir else None
+    art = rendering._local_album_art(album_dir) if album_dir else None
     if art is None:
         return Response(status_code=404)
     try:
@@ -1080,7 +1090,7 @@ async def job_hide(request: Request, job_id: str):
         groups = review_pages._review_artist_groups(job, query=q, tab=tab)
         remaining = next((rows for name, rows in groups if name == artist), [])
         if remaining:
-            resp = runtime._tr(request, "_review_group.html",
+            resp = rendering._tr(request, "_review_group.html",
                        {"job": job, "artist": artist, "items": remaining,
                         "triage": True, "open": True, "review_tab": tab,
                         "review_query": q})
@@ -1211,23 +1221,23 @@ async def job_give_up(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return RedirectResponse(
-            url="/queue?error=" + runtime._notice_key(
+            url="/queue?error=" + rendering._notice_key(
                 "That job is no longer in History."),
             status_code=303)
     form = await request.form()
-    if not runtime._recovery_submission_matches(
+    if not queue_recovery._recovery_submission_matches(
         job,
         str(form.get("recovery_operation_id") or ""),
         str(form.get("recovery_item_id") or ""),
     ):
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "That interrupted download is no longer the one holding things "
             "up. Nothing was changed. Reload the page.",
         )
-    control = runtime._durable_recovery_control()
+    control = queue_recovery._durable_recovery_control()
     imported = bool(control and (control.get("imported") or control.get("partial")))
-    settled, reason = runtime._settle_durable_web_recovery(
+    settled, reason = queue_recovery._settle_durable_web_recovery(
         job,
         BlockedItemSettlementAction.DISCARD,
     )
@@ -1236,7 +1246,7 @@ async def job_give_up(request: Request, job_id: str):
         "succeeded" if settled
         else f"was refused: {(reason or 'no reason given').rstrip('.')}")
     if not settled:
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             reason or "The interrupted download could not be discarded.",
         )
@@ -1249,7 +1259,7 @@ async def job_give_up(request: Request, job_id: str):
             "was added to your library. Downloads and scans can run again."
         )
     if not job_persistence.persist(job):
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "The interrupted download was cleared and downloads can run "
             "again, but its outcome could not be saved to History. "
@@ -1292,7 +1302,7 @@ async def job_retry(request: Request, job_id: str):
 
     def _land(started: str = "", error: str = "") -> RedirectResponse:
         if error:
-            error = runtime._notice_key(error)
+            error = rendering._notice_key(error)
         dest = _retry_return_url(return_to, started=started, error=error)
         if dest is None:
             dest = (f"/jobs/{started}" if started
@@ -1324,7 +1334,7 @@ async def job_retry(request: Request, job_id: str):
         getattr(job, "_preserve_persisted_single", False) is True
         or getattr(job, "_single_undo_unavailable", False) is True
     ):
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "This track's saved recovery state is uncertain, so Retry is "
             "paused. No download was started. Restart Qobuz Librarian.",
@@ -1350,46 +1360,46 @@ async def job_retry(request: Request, job_id: str):
         or len(recovery_operation_id) > 128
         or len(recovery_item_id) > 128
     ):
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "That recovery Retry is incomplete or stale. No download was "
             "started. Reload this page and try again.",
         )
 
     try:
-        credentials = await runtime._authorize_qobuz_for_web(
+        credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.DOWNLOAD_ACTION
         )
-    except runtime._QOBUZ_ACTION_ERRORS as exc:
+    except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
         message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
 
     # A Retry is also the only user-triggered lane for an interrupted durable
     # Web download.
     if not runtime._run_lock_intact():
-        busy = runtime._lock_busy_response(request)
+        busy = refusals._lock_busy_response(request)
         if busy is not None:
             return busy
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "The run lock could not be verified. No download was started. "
             "Restart Qobuz Librarian.",
         )
     try:
-        recovery = runtime._record_startup_recovery(runtime.run_lock_handle())
+        recovery = queue_recovery._record_startup_recovery(runtime.run_lock_handle())
     except Exception:
         _log.exception(
             "couldn't check recovery before retrying job %s", job.id)
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "The saved recovery state could not be checked safely. No "
             "download was started. Restart Qobuz Librarian.",
         )
-    recovery_status = runtime._recovery_status_value(recovery)
+    recovery_status = queue_recovery._recovery_status_value(recovery)
 
-    completion_acknowledged = runtime._durable_completion_status(job)
+    completion_acknowledged = queue_recovery._durable_completion_status(job)
     if completion_acknowledged is None:
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "The saved completion record could not be checked safely. No "
             "download was started. Check the data-folder permissions, then "
@@ -1397,18 +1407,18 @@ async def job_retry(request: Request, job_id: str):
         )
     if completion_acknowledged:
         if recovery_status != "clear":
-            return runtime._durable_recovery_response(
+            return refusals._durable_recovery_response(
                 request,
                 "This download is already recorded as complete, but its "
                 "interrupted recovery proof is not settled yet. No download "
                 "was started. Check the application log, then restart Qobuz "
                 "Librarian.",
             )
-        busy = runtime._lock_busy_response(request)
+        busy = refusals._lock_busy_response(request)
         if busy is not None:
             return busy
-        if not runtime._reconcile_acknowledged_job(job):
-            return runtime._durable_recovery_response(
+        if not queue_recovery._reconcile_acknowledged_job(job):
+            return refusals._durable_recovery_response(
                 request,
                 "The completed download could not be saved to History. No "
                 "download was started. Check the data-folder permissions, "
@@ -1418,15 +1428,15 @@ async def job_retry(request: Request, job_id: str):
 
     # Behind a different album's unsettled recovery, this Retry waits for that
     # one to settle.
-    queue_behind = runtime._recovery_pause_is_another_download(job)
+    queue_behind = queue_recovery._recovery_pause_is_another_download(job)
 
     if recovery_submission:
-        if not runtime._recovery_submission_matches(
+        if not queue_recovery._recovery_submission_matches(
             job,
             recovery_operation_id,
             recovery_item_id,
         ):
-            return runtime._durable_recovery_response(
+            return refusals._durable_recovery_response(
                 request,
                 "That interrupted-download Retry is stale. No download was "
                 "started. Reload the job and use its current Retry button.",
@@ -1434,7 +1444,7 @@ async def job_retry(request: Request, job_id: str):
     elif (
         recovery_status != "clear" or job.attention == "recovery"
     ) and not queue_behind:
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "This download needs its exact recovery Retry control. No "
             "download was started. Reload the interrupted job and use Retry "
@@ -1445,17 +1455,17 @@ async def job_retry(request: Request, job_id: str):
         recovery_submission
         and
         recovery_status == "attention_required"
-        and runtime._durable_recovery_matches_job(job)
+        and queue_recovery._durable_recovery_matches_job(job)
     ):
 
-        with runtime._CREDENTIAL_LOCK:
-            if not runtime._credential_generation_is_active(credentials.generation):
+        with qobuz_access._CREDENTIAL_LOCK:
+            if not qobuz_access._credential_generation_is_active(credentials.generation):
                 message = job_mgr.qobuz_action_error_message(
                     CredentialChanged(),
                     unchanged=True,
                 )
                 return _land(error=message)
-            settled, reason = runtime._settle_durable_web_recovery(
+            settled, reason = queue_recovery._settle_durable_web_recovery(
                 job,
                 BlockedItemSettlementAction.RETRY,
             )
@@ -1464,23 +1474,23 @@ async def job_retry(request: Request, job_id: str):
             "succeeded" if settled
             else f"was refused: {(reason or 'no reason given').rstrip('.')}")
         if not settled:
-            reconciled = runtime._settled_completion_response(request, job)
+            reconciled = refusals._settled_completion_response(request, job)
             if reconciled is not None:
                 return reconciled
-            return runtime._durable_recovery_response(
+            return refusals._durable_recovery_response(
                 request,
                 reason or "The interrupted download remains blocked.",
             )
-        recovery = runtime.startup_recovery_result()
-        recovery_status = runtime._recovery_status_value(recovery)
+        recovery = queue_recovery.startup_recovery_result()
+        recovery_status = queue_recovery._recovery_status_value(recovery)
     durable_resume = (
         recovery_status == "resume_required"
-        and runtime._durable_recovery_matches_job(job)
+        and queue_recovery._durable_recovery_matches_job(job)
     )
     if job.attention == "recovery" and not (
         recovery_status == "clear" or durable_resume
     ):
-        return runtime._durable_recovery_response(
+        return refusals._durable_recovery_response(
             request,
             "This download needs recovery attention and cannot be retried "
             "safely. No download was started. Check the application log, "
@@ -1488,25 +1498,25 @@ async def job_retry(request: Request, job_id: str):
         )
     if not queue_behind:
         if recovery_status == "attention_required":
-            return runtime._durable_recovery_response(
+            return refusals._durable_recovery_response(
                 request,
                 "The saved interrupted download needs recovery attention. No "
                 "download was started. Check the application log, then restart "
                 "Qobuz Librarian.",
             )
         if recovery_status == "resume_required" and not durable_resume:
-            return runtime._durable_recovery_response(
+            return refusals._durable_recovery_response(
                 request,
                 "Saved recovery belongs to a different or changed download. No "
                 "download was started. Retry only the exact interrupted job.",
             )
         if recovery_status not in {"clear", "resume_required"}:
-            return runtime._durable_recovery_response(
+            return refusals._durable_recovery_response(
                 request,
                 "The saved recovery state could not be verified safely. No "
                 "download was started. Restart Qobuz Librarian.",
             )
-    busy = runtime._lock_busy_response(
+    busy = refusals._lock_busy_response(
         request,
         durable_resume_job_id=job.id if durable_resume else None,
         queue_behind_job=job if queue_behind else None,
@@ -1515,7 +1525,7 @@ async def job_retry(request: Request, job_id: str):
         return busy
     album_id = job.album_id
     retry_as_new = bool((job.execute_args or {}).get("new_edition"))
-    duplicate = runtime._find_job_touching_album(album_id)
+    duplicate = download_admission._find_job_touching_album(album_id)
     if duplicate:
         return _land(started=duplicate.id)
     try:
@@ -1523,24 +1533,24 @@ async def job_retry(request: Request, job_id: str):
         token = credentials.token
         album = None
         if not durable_resume:
-            album = await runtime._qobuz_call(
+            album = await qobuz_access._qobuz_call(
                 qobuz_search.get_album, album_id, token)
         same_edition_complete = bool(
             album is not None
             and retry_as_new
             and await loop.run_in_executor(
-                None, lambda: runtime._same_edition_is_complete(album)
+                None, lambda: download_admission._same_edition_is_complete(album)
             )
         )
         # Re-check under the submit lock.
-        with runtime._DOWNLOAD_SUBMIT_LOCK, runtime._CREDENTIAL_LOCK:
-            if not runtime._credential_generation_is_active(credentials.generation):
+        with download_admission._DOWNLOAD_SUBMIT_LOCK, qobuz_access._CREDENTIAL_LOCK:
+            if not qobuz_access._credential_generation_is_active(credentials.generation):
                 message = job_mgr.qobuz_action_error_message(
                     CredentialChanged(),
                     unchanged=True,
                 )
                 return _land(error=message)
-            duplicate = runtime._find_job_touching_album(album_id)
+            duplicate = download_admission._find_job_touching_album(album_id)
             if duplicate:
                 return _land(started=duplicate.id)
             # set_mode could have handed the lock to the terminal during the
@@ -1548,64 +1558,64 @@ async def job_retry(request: Request, job_id: str):
             # queue_download does) so a retry can't start a job after the CLI
             # handoff.
             if not runtime._run_lock_intact():
-                busy = runtime._lock_busy_response(request)
+                busy = refusals._lock_busy_response(request)
                 if busy is not None:
                     return busy
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The run lock was lost while Retry was preparing. No "
                     "download was started. Restart Qobuz Librarian.",
                 )
             try:
-                recovery_now = runtime._record_startup_recovery(runtime.run_lock_handle())
+                recovery_now = queue_recovery._record_startup_recovery(runtime.run_lock_handle())
             except Exception:
                 _log.exception(
                     "couldn't recheck recovery while retrying job %s", job.id)
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The saved recovery state changed while Retry was "
                     "preparing and could not be checked safely. No download "
                     "was started. Restart Qobuz Librarian.",
                 )
-            recovery_status_now = runtime._recovery_status_value(recovery_now)
+            recovery_status_now = queue_recovery._recovery_status_value(recovery_now)
             durable_resume_now = (
                 recovery_status_now == "resume_required"
-                and runtime._durable_recovery_matches_job(job)
+                and queue_recovery._durable_recovery_matches_job(job)
             )
-            if recovery_submission and not runtime._recovery_submission_matches(
+            if recovery_submission and not queue_recovery._recovery_submission_matches(
                 job,
                 recovery_operation_id,
                 recovery_item_id,
             ):
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The interrupted download changed while Retry was "
                     "preparing. No download was started. Reload the job and "
                     "try again.",
                 )
-            acknowledged_now = runtime._durable_completion_status(job)
+            acknowledged_now = queue_recovery._durable_completion_status(job)
             if acknowledged_now is None:
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The saved completion record could not be checked safely. "
                     "No download was started. Restart Qobuz Librarian.",
                 )
             if acknowledged_now:
                 if recovery_status_now == "clear" and (
-                    runtime._reconcile_acknowledged_job(job)
+                    queue_recovery._reconcile_acknowledged_job(job)
                 ):
                     return _land(started=job.id)
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "This download is already recorded as complete, but its "
                     "recovery could not be finalized safely. No download was "
                     "started. Restart Qobuz Librarian.",
                 )
-            queue_behind = runtime._recovery_pause_is_another_download(job)
+            queue_behind = queue_recovery._recovery_pause_is_another_download(job)
             if job.attention == "recovery" and not (
                 recovery_status_now == "clear" or durable_resume_now
             ):
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "This download needs recovery attention and cannot be "
                     "retried safely. No download was started. Restart Qobuz "
@@ -1613,7 +1623,7 @@ async def job_retry(request: Request, job_id: str):
                 )
             if not queue_behind:
                 if recovery_status_now == "attention_required":
-                    return runtime._durable_recovery_response(
+                    return refusals._durable_recovery_response(
                         request,
                         "The saved interrupted download needs recovery "
                         "attention. No download was started. Restart Qobuz "
@@ -1623,19 +1633,19 @@ async def job_retry(request: Request, job_id: str):
                     recovery_status_now == "resume_required"
                     and not durable_resume_now
                 ):
-                    return runtime._durable_recovery_response(
+                    return refusals._durable_recovery_response(
                         request,
                         "The saved interrupted download no longer matches this "
                         "job. No download was started. Restart Qobuz Librarian.",
                     )
                 if recovery_status_now not in {"clear", "resume_required"}:
-                    return runtime._durable_recovery_response(
+                    return refusals._durable_recovery_response(
                         request,
                         "The saved recovery state could not be verified safely. "
                         "No download was started. Restart Qobuz Librarian.",
                     )
             if durable_resume and recovery_status_now == "clear":
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The saved interrupted download changed while Retry was "
                     "preparing. No download was started. Restart Qobuz "
@@ -1647,7 +1657,7 @@ async def job_retry(request: Request, job_id: str):
                     error="This edition is already in your library. "
                           "Nothing to retry.",
                 )
-            busy = runtime._lock_busy_response(
+            busy = refusals._lock_busy_response(
                 request,
                 durable_resume_job_id=job.id if durable_resume else None,
                 queue_behind_job=job if queue_behind else None,
@@ -1656,9 +1666,9 @@ async def job_retry(request: Request, job_id: str):
                 return busy
             durable_planned = None
             if durable_resume:
-                durable_planned = runtime._durable_recovery_planned(job)
+                durable_planned = queue_recovery._durable_recovery_planned(job)
                 if durable_planned is None:
-                    return runtime._durable_recovery_response(
+                    return refusals._durable_recovery_response(
                         request,
                         "The exact saved download plan could not be loaded "
                         "safely. No download was started. Restart Qobuz "
@@ -1666,13 +1676,13 @@ async def job_retry(request: Request, job_id: str):
                     )
                 album = durable_planned.get("album")
                 if not isinstance(album, dict):
-                    return runtime._durable_recovery_response(
+                    return refusals._durable_recovery_response(
                         request,
                         "The exact saved download plan is invalid. No "
                         "download was started. Restart Qobuz Librarian.",
                     )
             elif album is None:
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The album lookup changed while Retry was preparing. No "
                     "download was started. Reload the job and try again.",
@@ -1686,7 +1696,7 @@ async def job_retry(request: Request, job_id: str):
             track = None
             as_new = False
             if durable_resume and single and single.get("track_id"):
-                return runtime._durable_recovery_response(
+                return refusals._durable_recovery_response(
                     request,
                     "The saved full-album recovery does not match this "
                     "single-track job. No download was started. Restart "
@@ -1698,7 +1708,7 @@ async def job_retry(request: Request, job_id: str):
                     (t for t in (album.get("tracks") or {}).get("items") or []
                      if str(t.get("id")) == tid), None)
             if track is not None:
-                run = runtime._make_single_track_run(album, track, token)
+                run = track_downloads._make_single_track_run(album, track, token)
             elif single and single.get("track_id"):
                 # The original was a single-track download but that track is no
                 # longer on Qobuz, so do NOT silently re-download the whole album.
@@ -1709,14 +1719,14 @@ async def job_retry(request: Request, job_id: str):
                 # without it the rebuilt run sees the album as already owned
                 # and skips the download the user explicitly asked for.
                 if durable_planned is not None:
-                    run = runtime._make_download_run(
+                    run = job_runs._make_download_run(
                         album,
                         token,
                         durable_planned=durable_planned,
                     )
                 else:
                     as_new = retry_as_new
-                    run = runtime._make_download_run(
+                    run = job_runs._make_download_run(
                         album,
                         token,
                         treat_as_new=as_new,
@@ -1728,7 +1738,7 @@ async def job_retry(request: Request, job_id: str):
             if durable_resume:
                 job.edition = edition
                 if not job_mgr.resubmit_failed(job, run):
-                    return runtime._durable_recovery_response(
+                    return refusals._durable_recovery_response(
                         request,
                         "The exact interrupted job could not be queued safely. "
                         "No download was started. Restart Qobuz Librarian.",
@@ -1758,7 +1768,7 @@ async def job_retry(request: Request, job_id: str):
                 submit = (job_mgr.submit_held if queue_behind
                           else job_mgr.submit)
                 if submit(new_job, run) is None:
-                    return runtime._job_admission_response(request)
+                    return refusals._job_admission_response(request)
                 # The retry is the answer to the failure, so the old row stops
                 # holding the Queue warning dot.
                 attention = job.attention
@@ -1774,7 +1784,7 @@ async def job_retry(request: Request, job_id: str):
         return _land(error=message)
     except Exception as exc:
         _log.warning("couldn't prepare retry for job %s", job.id, exc_info=True)
-        message = runtime._download_error_message(
+        message = download_outcomes._download_error_message(
             exc,
             "Couldn't prepare this retry. Try again.",
         )
@@ -1788,9 +1798,9 @@ async def job_undo(request: Request, job_id: str):
     # gate every other mutating route has; the in-process staging lock below
     # can't keep it off the library while a CLI session or another instance
     # holds the cross-process lock.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return HTMLResponse(
                 f'<div id="job-content">{busy.body.decode()}</div>')
         return busy
@@ -1822,14 +1832,14 @@ async def job_undo(request: Request, job_id: str):
         or not info.get("dir")
         or (info.get("removed") and not cleanup_retry)
     ):
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             if job:
-                return runtime._tr(request, "_job_body.html", {"job": job})
+                return rendering._tr(request, "_job_body.html", {"job": job})
             return HTMLResponse("", headers={"HX-Redirect": "/queue"})
         msg = ("That job is no longer in History." if not job
                else "Nothing to undo for that job.")
         return RedirectResponse(
-            url="/queue?error=" + runtime._notice_key(msg), status_code=303)
+            url="/queue?error=" + rendering._notice_key(msg), status_code=303)
 
     def _refresh_after_undo():
         artist = info.get("artist") or ""
@@ -1842,7 +1852,7 @@ async def job_undo(request: Request, job_id: str):
                 album,
                 {"dir": info.get("dir") or ""},
                 fallback_artist=artist,
-                token=runtime._get_optional_token(),
+                token=qobuz_access._get_optional_token(),
                 args=flows.build_args(),
                 upgrade=True,
                 downsample=True,
@@ -1921,12 +1931,12 @@ async def job_undo(request: Request, job_id: str):
     # staging mutex.
     loop = asyncio.get_running_loop()
     state, operation_token, lock = await loop.run_in_executor(
-        None, lambda: runtime._begin_direct_library_operation("Undo"))
+        None, lambda: write_gate._begin_direct_library_operation("Undo"))
     if state == "paused":
-        paused = runtime._lock_busy_response(request)
+        paused = refusals._lock_busy_response(request)
         if paused is not None:
             return paused
-        return runtime._tr(request, "lock_busy.html", {
+        return rendering._tr(request, "lock_busy.html", {
             "msg": "Library writes were paused before Undo could start."
         }, status_code=503)
     if state == "busy":
@@ -1935,11 +1945,11 @@ async def job_undo(request: Request, job_id: str):
                "when it finishes." if holder else
                "Another job is using the library right now. Try Undo again "
                "in a moment.")
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return HTMLResponse(
                 f'<div id="job-content">'
-                f'{runtime._ql_notice_html("warning", html.escape(msg))}</div>')
-        return runtime._tr(request, "lock_busy.html", {"msg": msg}, status_code=503)
+                f'{rendering._ql_notice_html("warning", html.escape(msg))}</div>')
+        return rendering._tr(request, "lock_busy.html", {"msg": msg}, status_code=503)
     lock_held = True
     try:
         removed, catalog_result = await loop.run_in_executor(None, _reverse)
@@ -2066,9 +2076,9 @@ async def job_undo(request: Request, job_id: str):
             )
             job.single = info
             job.summary = msg
-            if runtime._is_htmx(request):
-                return runtime._tr(request, "_job_body.html", {"job": job})
-            return runtime._tr(request, "lock_busy.html", {
+            if rendering._is_htmx(request):
+                return rendering._tr(request, "_job_body.html", {"job": job})
+            return rendering._tr(request, "lock_busy.html", {
                 "reason": "Undo needs attention",
                 "msg": msg,
                 "action": {"href": f"/jobs/{job.id}", "label": "Retry Undo"},
@@ -2077,8 +2087,8 @@ async def job_undo(request: Request, job_id: str):
         lock_held = False
         if refresh_needed:
             await loop.run_in_executor(None, _refresh_after_undo)
-        if runtime._is_htmx(request):
-            return runtime._tr(request, "_job_body.html", {"job": job})
+        if rendering._is_htmx(request):
+            return rendering._tr(request, "_job_body.html", {"job": job})
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
     finally:
         if lock_held:
@@ -2118,21 +2128,21 @@ async def job_cancel(
             message = "The cancel could not be saved to the data folder."
         dest = "/queue" if return_to_queue else f"/jobs/{job_id}"
         return RedirectResponse(
-            url=dest + "?error=" + runtime._notice_key(message),
+            url=dest + "?error=" + rendering._notice_key(message),
             status_code=303,
         )
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-        return RedirectResponse(url=runtime._job_nav_destination(job)[1], status_code=303)
+        return RedirectResponse(url=job_labels._job_nav_destination(job)[1], status_code=303)
     if return_to_queue:
         return RedirectResponse(url="/queue", status_code=303)
-    if job.execute_kind in runtime._JOB_NAV_SURFACES:
-        dest = runtime._job_nav_destination(job)[1]
+    if job.execute_kind in job_labels._JOB_NAV_SURFACES:
+        dest = job_labels._job_nav_destination(job)[1]
         # Both land on /library with no other sign the discard happened; a
         # review that was there a second ago is just gone otherwise.
         if was_review and job.execute_kind in ("library", "new_releases"):
             label = ("New releases review" if job.execute_kind == "new_releases"
                      else "Library review")
-            dest += "?notice=" + runtime._notice_key(f"{label} discarded.")
+            dest += "?notice=" + rendering._notice_key(f"{label} discarded.")
     else:
         dest = "/queue" if (was_review or was_pending) else f"/jobs/{job_id}"
     return RedirectResponse(url=dest, status_code=303)

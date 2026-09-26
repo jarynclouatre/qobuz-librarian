@@ -6,7 +6,17 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.web import flows, hidden_pages, runtime, saved_reviews, scans
+from qobuz_librarian.web import (
+    flows,
+    hidden_pages,
+    job_labels,
+    job_runs,
+    qobuz_access,
+    refusals,
+    rendering,
+    saved_reviews,
+    scans,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -21,10 +31,10 @@ async def downsample_page(request: Request):
     review_parked = any(
         j.execute_kind == "downsample"
         for j in job_mgr.registry.awaiting_review())
-    return runtime._tr(request, "downsample.html", {
+    return rendering._tr(request, "downsample.html", {
         "page": "downsample",
         "have_downsample": downsample_engine.HAVE_DOWNSAMPLE,
-        "creds_ok": runtime._creds_ok(),
+        "creds_ok": qobuz_access._creds_ok(),
         "downsample_state": state,
         "review_parked": review_parked,
         # A standalone refresh in flight, so the page shows "scan running"
@@ -33,7 +43,7 @@ async def downsample_page(request: Request):
             "downsample",
             statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
                       job_mgr.JobStatus.RUNNING)),
-        "last_run": runtime._tool_last_run_age("downsample"),
+        "last_run": job_labels._tool_last_run_age("downsample"),
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)})
 
 
@@ -61,7 +71,7 @@ async def downsample_hidden_restore_all(request: Request):
 @router.post("/downsample/review")
 async def downsample_review(request: Request):
     # No credential check: downsampling only reads and rewrites local files.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     loop = asyncio.get_running_loop()
@@ -75,7 +85,7 @@ async def downsample_review(request: Request):
 @router.post("/downsample")
 async def downsample_scan(request: Request):
     # No credential check: downsampling only reads and rewrites local files.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     job = job_mgr.Job(title="Downsample scan")
@@ -87,8 +97,8 @@ async def downsample_scan(request: Request):
         lambda j, chosen: flows.execute_downsamples(
             j,
             chosen,
-            token=runtime._get_optional_token(),
-            keep_originals=runtime._job_downsample_keep_originals(j),
+            token=qobuz_access._get_optional_token(),
+            keep_originals=job_runs._job_downsample_keep_originals(j),
         ),
         "downsample")
     if job is None:

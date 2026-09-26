@@ -18,11 +18,17 @@ from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.web import (
     flows,
     hidden_pages,
+    job_labels,
+    job_runs,
+    new_release_checks,
+    qobuz_access,
+    refusals,
+    rendering,
     review_badges,
     review_pages,
-    runtime,
     saved_reviews,
     scans,
+    storage,
 )
 from qobuz_librarian.web import jobs as job_mgr
 
@@ -95,7 +101,7 @@ def _review_job_from_library_state():
                 missing_generation if missing_generation else missing_updated
             ),
         }
-        job._execute_fn = runtime._resume_album_download(job, job.execute_args)
+        job._execute_fn = job_runs._resume_album_download(job, job.execute_args)
         for spec in specs:
             job.add_candidate(
                 kind=spec.get("kind", "album"),
@@ -204,7 +210,7 @@ def _library_header_context():
     page and for the header's poll alike."""
     library_generation = scans._truthful_library_generation()
     return {
-        "qobuz_ready": runtime._qobuz_ready(),
+        "qobuz_ready": qobuz_access._qobuz_ready(),
         "library_scan_state": scans._library_scan_state(),
         "baseline_complete": generation_state.baseline_complete(
             library_generation
@@ -238,7 +244,7 @@ def _library_page_context(page, tab, q):
     flows.apply_pending_review_removals()
     ctx = {
         **_library_header_context(),
-        "creds_ok": runtime._creds_ok(),
+        "creds_ok": qobuz_access._creds_ok(),
         "page": "library",
         # Freshness line: when a full gap scan last completed, and whether one
         # ever has (the new-release baseline is only seeded by a clean finish).
@@ -266,7 +272,7 @@ def _library_page_context(page, tab, q):
     ctx["library_resume"] = scans._library_resume_offer(
         ctx["library_generation"])
     if ljob is not None:
-        ctx["queue_wait"] = runtime._queue_wait(ljob)
+        ctx["queue_wait"] = job_labels._queue_wait(ljob)
         # A full load has to be able to land on either tab: the address is the
         # only thing a reload or a bookmark still carries.
         ctx.update(review_pages._review_context(ljob, page, q, tab=tab))
@@ -279,7 +285,7 @@ def _library_page_context(page, tab, q):
     # review below it), so it doesn't blink in and out with review state.
     if ctx["library_baseline_exists"] and (
             ljob is None or ljob.status == job_mgr.JobStatus.AWAITING_REVIEW):
-        ctx["census"] = runtime._census_view()
+        ctx["census"] = storage._census_view()
     badge_ack = None
     if (ljob is not None
             and ljob.status == job_mgr.JobStatus.AWAITING_REVIEW
@@ -305,15 +311,15 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
         notice_bits.append("Download queued.")
     # Bring all back redirects here with what happened, a store-write failure
     # included.
-    notice = runtime._notice_text(request.query_params.get("notice"))
+    notice = rendering._notice_text(request.query_params.get("notice"))
     if notice:
         notice_bits.append(notice)
     loop = asyncio.get_running_loop()
     ctx, badge_ack = await loop.run_in_executor(
         None, lambda: _library_page_context(page, tab, q))
     ctx["library_notice"] = " ".join(notice_bits)
-    ctx["error"] = runtime._notice_text(request.query_params.get("error"))
-    return runtime._tr(request, "library.html", ctx, review_badge_ack=badge_ack)
+    ctx["error"] = rendering._notice_text(request.query_params.get("error"))
+    return rendering._tr(request, "library.html", ctx, review_badge_ack=badge_ack)
 
 
 @router.get("/library/refresh-note", response_class=HTMLResponse)
@@ -337,7 +343,7 @@ async def library_refresh_note(request: Request):
         }
 
     ctx = await loop.run_in_executor(None, _context)
-    return runtime._tr(request, "_library_refresh.html", ctx)
+    return rendering._tr(request, "_library_refresh.html", ctx)
 
 
 @router.post("/library")
@@ -347,7 +353,7 @@ async def library_scan(
     force_full: str = Form(""),
     return_to: str = Form(""),
 ):
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     mode_norm = (mode or "").strip().lower()
@@ -370,38 +376,38 @@ async def library_scan(
         # Refuse and point at a library scan instead of running that empty crawl.
         if not new_releases.is_baseline_complete():
             msg = "Run a full library scan first."
-            if runtime._is_htmx(request):
+            if rendering._is_htmx(request):
                 return HTMLResponse(
                     f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                     status_code=200)
             return RedirectResponse(
-                url="/library?error=" + runtime._notice_key(msg), status_code=303)
-        existing = runtime._active_new_release_check()
+                url="/library?error=" + rendering._notice_key(msg), status_code=303)
+        existing = new_release_checks._active_new_release_check()
         if existing is not None:
             # A check already crawling. Land on it rather than starting a
             # second crawl over the same catalogue.
             return RedirectResponse(
                 url=f"/jobs/{existing.id}?waiting=1", status_code=303)
         try:
-            credentials = await runtime._authorize_qobuz_for_web(
+            credentials = await qobuz_access._authorize_qobuz_for_web(
                 QobuzAccess.CATALOGUE_ACTION
             )
-        except runtime._QOBUZ_ACTION_ERRORS as exc:
+        except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
             msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
-            if runtime._is_htmx(request):
+            if rendering._is_htmx(request):
                 return HTMLResponse(
-                    runtime._ql_notice_html("error", html.escape(msg)),
+                    rendering._ql_notice_html("error", html.escape(msg)),
                     status_code=200,
                 )
             return RedirectResponse(
-                url="/library?error=" + runtime._notice_key(msg),
+                url="/library?error=" + rendering._notice_key(msg),
                 status_code=303,
             )
         # Same job the dashboard auto-check submits; its own execute_kind so
         # the review screen badges the new releases (left un-ticked).
         job = await loop.run_in_executor(
             None,
-            lambda: runtime._start_new_release_check(credentials),
+            lambda: new_release_checks._start_new_release_check(credentials),
         )
         if job is None:
             return scans._scan_submission_failure_response(request, "/library")
@@ -409,28 +415,28 @@ async def library_scan(
     scan_state = scans._library_scan_state()
     if not scan_state["ready"]:
         msg = scan_state["message"]
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return HTMLResponse(
                 f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                 status_code=200)
         return RedirectResponse(
-            url=error_home + "?error=" + runtime._notice_key(msg), status_code=303)
+            url=error_home + "?error=" + rendering._notice_key(msg), status_code=303)
     existing = scans._active_library_scan()
     if existing is not None:
         return RedirectResponse(url="/library", status_code=303)
     try:
-        credentials = await runtime._authorize_qobuz_for_web(
+        credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION
         )
-    except runtime._QOBUZ_ACTION_ERRORS as exc:
+    except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
         msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return HTMLResponse(
-                runtime._ql_notice_html("error", html.escape(msg)),
+                rendering._ql_notice_html("error", html.escape(msg)),
                 status_code=200,
             )
         return RedirectResponse(
-            url=error_home + "?error=" + runtime._notice_key(msg), status_code=303)
+            url=error_home + "?error=" + rendering._notice_key(msg), status_code=303)
     # "library" (not "album") so the review screen knows this is the paced triage
     # surface; both modes run the same album executor and resume from a matching
     # checkpoint if one's waiting (see _start_library_scan / scan_library).
@@ -476,7 +482,7 @@ async def library_hidden_restore_all(request: Request):
     parked, so the restored candidates are folded back into it, clearing the
     store alone would leave them invisible until a future scan most users
     never run."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     loop = asyncio.get_running_loop()
@@ -530,7 +536,7 @@ async def library_bring_back_all(request: Request):
     reload rebuilds the review from saved state (albums since downloaded are
     dropped as owned), which is why nothing needs folding here; the finished
     state is only reachable with no live review parked."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     loop = asyncio.get_running_loop()
@@ -544,12 +550,12 @@ async def library_bring_back_all(request: Request):
         changed = await loop.run_in_executor(None, _bring_back)
     except OSError as e:
         return RedirectResponse(
-            url="/library?notice=" + runtime._notice_key(str(e)),
+            url="/library?notice=" + rendering._notice_key(str(e)),
             status_code=303)
     msg = ("Brought your dismissed results back to the Library review."
            if changed else "Nothing to bring back.")
     return RedirectResponse(
-        url="/library?notice=" + runtime._notice_key(msg), status_code=303)
+        url="/library?notice=" + rendering._notice_key(msg), status_code=303)
 
 
 def _last_scan_age() -> str | None:
@@ -558,4 +564,4 @@ def _last_scan_age() -> str | None:
         ts = float(cfg.LAST_SCAN_FILE.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    return runtime._format_age(ts)
+    return job_labels._format_age(ts)

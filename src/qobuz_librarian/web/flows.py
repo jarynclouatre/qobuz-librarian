@@ -73,7 +73,7 @@ from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log
-from qobuz_librarian.web import job_persistence, review_badges, settings_store
+from qobuz_librarian.web import job_persistence, review_badges, settings_store, storage
 from qobuz_librarian.web import jobs as job_mgr
 
 
@@ -4876,9 +4876,8 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         parts.append(space)
     # Show the manifest where the user can actually find it, the container
     # path means nothing from a phone. Settings does the same for every path
-    # it displays. Imported here because runtime.py imports flows at startup.
-    from qobuz_librarian.web.runtime import _resolve_host_path
-    manifest_display, _ = _resolve_host_path(str(manifest))
+    # it displays.
+    manifest_display, _ = storage._resolve_host_path(str(manifest))
     job.summary = ("; ".join(parts) + ". Unidentified and skipped files stay "
                    f"where they are. Full plan written to {manifest_display}.")
     # Not logged here: job.summary already renders on the job page, and the

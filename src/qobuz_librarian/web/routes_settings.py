@@ -17,8 +17,9 @@ from qobuz_librarian.library import generation_state
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.web import auth as web_auth
+from qobuz_librarian.web import diagnostics as diagnostics_mod
 from qobuz_librarian.web import jobs as job_mgr
-from qobuz_librarian.web import runtime, settings_store
+from qobuz_librarian.web import lifespan, qobuz_access, rendering, runtime, settings_store, storage
 
 router = APIRouter()
 _log = logging.getLogger("qobuz_librarian")
@@ -43,7 +44,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        quality_note=False, password_error="",
                        password_locked=False, lastfm_check="",
                        status_code=200):
-    creds = runtime._read_creds()
+    creds = qobuz_access._read_creds()
     values = settings_store.current()
     # If credentials come from environment or a secret-file declaration,
     # anything saved via the form lacks authority, so let the user know.
@@ -63,18 +64,18 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         music_storage = {
             "free": format_size(du.free), "total": format_size(du.total),
             "pct": round(du.used / du.total * 100, 1) if du.total else 0,
-            "own_volume": runtime._is_mount_point(cfg.MUSIC_ROOT),
+            "own_volume": storage._is_mount_point(cfg.MUSIC_ROOT),
         }
     except OSError:
         pass
-    census = runtime._census_view()
+    census = storage._census_view()
     library_size = census.get("total") if census else ""
-    return runtime._tr(request, "settings.html", {
+    return rendering._tr(request, "settings.html", {
         "music_storage": music_storage,
         "library_size": library_size,
         # True once Qobuz has accepted the saved token, False once it has
         # rejected it, None when it has never been asked.
-        "token_verified": runtime._token_valid_for(),
+        "token_verified": qobuz_access._token_valid_for(),
         "user_id": (
             cfg.QOBUZ_USER_ID or creds.get("user_id", "")
             if user_id is None else user_id
@@ -100,9 +101,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "rerendered": rerendered,
         "error": error,
         "warnings": warnings or [],
-        # Every warning a save can raise is about a field in the collapsed
-        # defaults section, and it re-rendered closed: the notice named a
-        # value the reader could not see or correct without hunting for it.
+        # A warning or an invalid value can name a field inside the collapsed
+        # Advanced drawer, and a save refused because the settings changed
+        # asks for the current values to be reviewed, so the drawer opens.
         "defaults_open": bool(warnings) or error in {
             "invalidsettings", "settingschanged"
         },
@@ -116,7 +117,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                 ("Beets database", cfg.BEETS_DB_PATH),
                 ("Streamrip config", cfg.STREAMRIP_CONFIG),
             )
-            for host, resolved in [runtime._resolve_host_path(cp)]
+            for host, resolved in [storage._resolve_host_path(cp)]
         ],
         "behavior_fields": settings_store.BEHAVIOR_FIELDS,
         "inert_notes": settings_store.inert_behaviour_notes(
@@ -128,7 +129,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
             "discover", values),
         "collection_backup_generation": settings_store.form_generation(
             "collection-backup", values),
-        "collection_backup": runtime._collection_backup_status(),
+        "collection_backup": diagnostics_mod._collection_backup_status(),
         "lastfm_check": (lastfm_check
                          if lastfm_check in ("ok", "rejected", "down") else ""),
         "option_labels": settings_store.ENUM_OPTION_LABELS,
@@ -144,7 +145,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
             store["original"] == settings_store.SETTINGS_FILE.name
             for store in state_file.corrupt_store_details()),
         "backup_dir_cleared": settings_store.cleared_backup_dir_notice(),
-        "diagnostics_html": runtime._diagnostics_fragment(request, diagnostics),
+        "diagnostics_html": diagnostics_mod._diagnostics_fragment(request, diagnostics),
         "web_login_available": (not web_auth.auth_disabled()
                                 and web_auth.credentials_configured()),
         "web_login_username": web_auth.current_username(),
@@ -170,9 +171,9 @@ async def settings_page(request: Request, saved: bool = False,
                         mode: str = "", quality_note: bool = False,
                         lastfm: str = ""):
     loop = asyncio.get_running_loop()
-    diags = await loop.run_in_executor(None, runtime._diagnostics)
+    diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
     if error not in _SETTINGS_ERROR_CODES:
-        error = runtime._notice_text(error)
+        error = rendering._notice_text(error)
     return _settings_response(request, saved=saved, queued=queued,
                               connected=connected, unverified=unverified,
                               envchecked=envchecked,
@@ -197,7 +198,7 @@ async def _classify_token_async(loop, token):
             loop.run_in_executor(
                 None,
                 lambda: api_client.call_within(
-                    cfg.WEB_TEST_AUTH_TIMEOUT, runtime._classify_token, token),
+                    cfg.WEB_TEST_AUTH_TIMEOUT, qobuz_access._classify_token, token),
             ),
             timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
         )
@@ -213,8 +214,8 @@ async def save_settings(
     credential_generation: str = Form(""),
 ):
     loop = asyncio.get_running_loop()
-    diags = await loop.run_in_executor(None, runtime._diagnostics)
-    existing = runtime._read_creds()
+    diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
+    existing = qobuz_access._read_creds()
     # Environment and secret-file credentials are authoritative for the live
     # process. Refuse a form value that claims to replace one: writing it only
     # to streamrip would report success while the app kept using the env value,
@@ -261,8 +262,8 @@ async def save_settings(
             return RedirectResponse(url="/settings?error=envrejected",
                                     status_code=303)
         if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
-            runtime._on_auth_state(
-                AuthEvidence(runtime._credentials_snapshot().generation, verdict))
+            qobuz_access._on_auth_state(
+                AuthEvidence(qobuz_access._credentials_snapshot().generation, verdict))
             return RedirectResponse(url="/settings?envchecked=1",
                                     status_code=303)
         return RedirectResponse(url="/settings?error=envunreachable",
@@ -291,7 +292,7 @@ async def save_settings(
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
     if (verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
-            and new_token and runtime._token_valid_for() is True
+            and new_token and qobuz_access._token_valid_for() is True
             and new_token != existing.get("auth_token", "")):
         # Couldn't check it, and the token already saved is one that has
         # authenticated. Overwriting a known-good credential with an unproven
@@ -303,8 +304,8 @@ async def save_settings(
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    with runtime._auto_check_lock, runtime._CREDENTIAL_LOCK:
-        active_credentials = runtime._credentials_snapshot()
+    with runtime._auto_check_lock, qobuz_access._CREDENTIAL_LOCK:
+        active_credentials = qobuz_access._credentials_snapshot()
         candidate_credentials = credentials_from_values(
             new_uid,
             new_token,
@@ -351,17 +352,17 @@ async def save_settings(
                 auth_token_prefill=auth_token.strip(),
                 diagnostics=diags,
             )
-        ok = runtime._write_creds(new_uid, new_token)
+        ok = qobuz_access._write_creds(new_uid, new_token)
         if not ok:
             return _settings_response(request, error="creds",
                                       user_id=user_id.strip(),
                                       auth_token_prefill=auth_token.strip(),
                                       diagnostics=diags)
-        saved_credentials = runtime._credentials_snapshot()
+        saved_credentials = qobuz_access._credentials_snapshot()
         if verdict not in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
-            runtime.set_token_state(None, saved_credentials.generation)
+            qobuz_access.set_token_state(None, saved_credentials.generation)
     if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
-        runtime._on_auth_state(AuthEvidence(saved_credentials.generation, verdict))
+        qobuz_access._on_auth_state(AuthEvidence(saved_credentials.generation, verdict))
     suffix = (
         "&unverified=1"
         if verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
@@ -418,7 +419,7 @@ async def save_behavior(request: Request):
         )
     except settings_store.SettingsChanged:
         loop = asyncio.get_running_loop()
-        diags = await loop.run_in_executor(None, runtime._diagnostics)
+        diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
         return _settings_response(
             request,
             error="settingschanged",
@@ -429,7 +430,7 @@ async def save_behavior(request: Request):
         # Re-render rather than redirect so the reason can name the field and
         # say what to change; a redirect can only carry the generic code.
         loop = asyncio.get_running_loop()
-        diags = await loop.run_in_executor(None, runtime._diagnostics)
+        diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
         return _settings_response(request, error="invalidsettings",
                                   warnings=warnings, diagnostics=diags,
                                   rerendered=True)
@@ -458,7 +459,7 @@ async def save_behavior(request: Request):
         # (a misspelt provider, an uninstalled beets plugin) without smuggling
         # user-typed values through the redirect URL.
         loop = asyncio.get_running_loop()
-        diags = await loop.run_in_executor(None, runtime._diagnostics)
+        diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
         # Re-rendering lands the reader at the top of the document, so the
         # outcome is drawn there rather than down beside the controls.
         return _settings_response(request, saved=True,
@@ -507,10 +508,10 @@ async def change_web_password(request: Request):
     # otherwise an unlimited guesser of the password it was opened with.
     ip = web_auth.client_ip(request)
     if not web_auth.begin_login_attempt(ip, username):
-        diags = await loop.run_in_executor(None, runtime._diagnostics)
+        diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
         return _settings_response(
             request,
-            password_error=(runtime._lockout_notice(ip, username)
+            password_error=(rendering._lockout_notice(ip, username)
                             or "Sign-in checks are busy. Try again shortly."),
             password_locked=True, diagnostics=diags, rerendered=True,
             status_code=429)
@@ -526,7 +527,7 @@ async def change_web_password(request: Request):
     password_locked = False
     if not holder:
         error = "That is not your current password."
-        wait = runtime._lockout_notice(ip, username, after_failure=True)
+        wait = rendering._lockout_notice(ip, username, after_failure=True)
         if wait:
             error += f" {wait}"
             password_locked = True
@@ -551,7 +552,7 @@ async def change_web_password(request: Request):
             error = ("The new password couldn't be saved. Check that the data "
                      "folder is writable, then try again.")
     if error:
-        diags = await loop.run_in_executor(None, runtime._diagnostics)
+        diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
         return _settings_response(request, password_error=error,
                                   password_locked=password_locked,
                                   diagnostics=diags, rerendered=True)
@@ -570,7 +571,7 @@ async def clear_corrupt_stores(request: Request):
     if ok:
         return RedirectResponse(url="/settings", status_code=303)
     return RedirectResponse(
-        url="/settings?error=" + runtime._notice_key(
+        url="/settings?error=" + rendering._notice_key(
             "One of the unreadable copies couldn't be deleted. Check the "
             "data folder's permissions, then try again."),
         status_code=303)
@@ -584,7 +585,7 @@ async def keep_corrupt_stores(request: Request):
     if ok:
         return RedirectResponse(url="/settings", status_code=303)
     return RedirectResponse(
-        url="/settings?error=" + runtime._notice_key(
+        url="/settings?error=" + rendering._notice_key(
             "One of the unreadable copies couldn't be moved. Check the data "
             "folder's permissions, then try again."),
         status_code=303)
@@ -628,7 +629,7 @@ async def set_mode(request: Request, target: str = Form("")):
 
         loop = asyncio.get_running_loop()
         if not await loop.run_in_executor(None, _handoff):
-            return RedirectResponse(url="/settings?error=" + runtime._notice_key(
+            return RedirectResponse(url="/settings?error=" + rendering._notice_key(
                 "Finish or cancel the running library work before handing off to the "
                 "terminal."), status_code=303)
         return RedirectResponse(url="/settings?mode=cli", status_code=303)
@@ -636,7 +637,7 @@ async def set_mode(request: Request, target: str = Form("")):
         # Durable recovery cannot inspect or reconcile saved work without
         # exact single-writer authority.
         return RedirectResponse(
-            url="/settings?error=" + runtime._notice_key(
+            url="/settings?error=" + rendering._notice_key(
                 "The run lock is required. Fix the data-folder filesystem or "
                 "permissions, then restart Qobuz Librarian."),
             status_code=303,
@@ -657,7 +658,7 @@ async def set_mode(request: Request, target: str = Form("")):
             else:
                 try:
                     with runtime._auto_check_lock:
-                        runtime._recover_under_web_run_lock(lease)
+                        lifespan._recover_under_web_run_lock(lease)
                         runtime.set_lock_busy_pid(None)
                         runtime.set_lock_unenforceable(False)
                         runtime.set_cli_mode(False)
@@ -672,7 +673,7 @@ async def set_mode(request: Request, target: str = Form("")):
                         "could not be read"
                     )
                     return RedirectResponse(
-                        url="/settings?error=" + runtime._notice_key(
+                        url="/settings?error=" + rendering._notice_key(
                             "Saved recovery state could not be checked. Web "
                             "mode stayed paused and its run lock was "
                             "released; check the data-folder permissions, "
@@ -683,7 +684,7 @@ async def set_mode(request: Request, target: str = Form("")):
             return RedirectResponse(url="/settings?mode=web", status_code=303)
         except run_lock.LockBusy:
             # A CLI session still holds the lock, so we can't take it back yet.
-            return RedirectResponse(url="/settings?error=" + runtime._notice_key(
+            return RedirectResponse(url="/settings?error=" + rendering._notice_key(
                 "The terminal is still using it. Finish your CLI command, then "
                 "resume."), status_code=303)
     return RedirectResponse(url="/settings", status_code=303)

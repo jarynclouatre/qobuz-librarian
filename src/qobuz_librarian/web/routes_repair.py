@@ -7,7 +7,17 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from qobuz_librarian import repair_log
 from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.library import scan_checkpoint
-from qobuz_librarian.web import flows, review_badges, review_pages, runtime, scans
+from qobuz_librarian.web import (
+    flows,
+    job_labels,
+    job_runs,
+    qobuz_access,
+    refusals,
+    rendering,
+    review_badges,
+    review_pages,
+    scans,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -40,15 +50,15 @@ def _repair_current_job():
 @router.get("/repair", response_class=HTMLResponse)
 async def repair_page(request: Request, page: int = 1):
     badge_generation = review_badges.ready_generation("repair")
-    creds_ok = runtime._creds_ok()
+    creds_ok = qobuz_access._creds_ok()
     # /repair is the SINGLE authoritative repair surface.
     rjob = _repair_current_job()
-    ctx = {"creds_ok": creds_ok, "qobuz_ready": runtime._qobuz_ready(),
+    ctx = {"creds_ok": creds_ok, "qobuz_ready": qobuz_access._qobuz_ready(),
            "page": "repair", "repair_job": rjob,
-           "error": runtime._notice_text(request.query_params.get("error")),
+           "error": rendering._notice_text(request.query_params.get("error")),
            "JobStatus": job_mgr.JobStatus}
     if rjob is not None:
-        ctx["queue_wait"] = runtime._queue_wait(rjob)
+        ctx["queue_wait"] = job_labels._queue_wait(rjob)
         ctx.update(review_pages._review_context(rjob, page))
     # The launcher renders when the surface is idle AND under a run that failed
     # or was cancelled (see _repair_current_job, which keeps those on the page
@@ -71,33 +81,33 @@ async def repair_page(request: Request, page: int = 1):
                 "saved": len(bundles),
                 "found": found,
             }
-        ctx["last_run"] = runtime._tool_last_run_age("repair")
+        ctx["last_run"] = job_labels._tool_last_run_age("repair")
     badge_ack = None
     if (rjob is not None
             and rjob.status == job_mgr.JobStatus.AWAITING_REVIEW
             and (ctx.get("review_counts") or {}).get("total")):
         badge_ack = ("repair", badge_generation)
-    return runtime._tr(request, "repair.html", ctx, review_badge_ack=badge_ack)
+    return rendering._tr(request, "repair.html", ctx, review_badge_ack=badge_ack)
 
 
 @router.post("/repair")
 async def repair_scan(request: Request):
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     try:
-        credentials = await runtime._authorize_qobuz_for_web(
+        credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION
         )
-    except runtime._QOBUZ_ACTION_ERRORS as exc:
+    except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
         msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         return RedirectResponse(
-            url="/repair?error=" + runtime._notice_key(msg), status_code=303)
+            url="/repair?error=" + rendering._notice_key(msg), status_code=303)
     job = job_mgr.Job(title="Repair scan")
     job.execute_kind = "repair"
     job.review_verb = "Repair"  # the action refills damaged tracks, not a download
     def _scan(j):
-        active = runtime._authorize_qobuz_live(
+        active = qobuz_access._authorize_qobuz_live(
             QobuzAccess.CATALOGUE_ACTION,
             expected_generation=credentials.generation,
         )
@@ -106,7 +116,7 @@ async def repair_scan(request: Request):
     job = await scans._submit_scan_deduped_async(
         job,
         _scan,
-        runtime._resume_repair(job, job.execute_args),
+        job_runs._resume_repair(job, job.execute_args),
         "repair")
     if job is None:
         return scans._scan_submission_failure_response(request, "/repair")
@@ -124,5 +134,5 @@ async def repair_history(request: Request):
     loop = asyncio.get_running_loop()
     entries = await loop.run_in_executor(
         None, lambda: repair_log.read_repair_log_entries(limit=500))
-    return runtime._tr(request, "repair_history.html",
+    return rendering._tr(request, "repair_history.html",
                {"page": "repair", "entries": entries})

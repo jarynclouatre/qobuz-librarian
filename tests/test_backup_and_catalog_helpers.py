@@ -586,10 +586,10 @@ def test_discard_redundant_backup_requires_byte_identical_files(tmp_path, monkey
 def _render_backup_diagnostics(rows):
     import types
 
-    from qobuz_librarian.web import runtime
+    from qobuz_librarian.web import diagnostics
 
     request = types.SimpleNamespace(state=types.SimpleNamespace(csrf_token=""))
-    return runtime._diagnostics_fragment(request, {
+    return diagnostics._diagnostics_fragment(request, {
         "checks": [], "orphans": rows, "undo": [], "leftovers": [],
     })
 

@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
-from qobuz_librarian.web import flows, runtime, scans
+from qobuz_librarian.web import flows, job_labels, qobuz_access, refusals, rendering, scans
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -26,11 +26,11 @@ async def lyrics_page(request: Request):
         and latest_lyrics.status == job_mgr.JobStatus.FAILED
         else None
     )
-    return runtime._tr(request, "lyrics.html", {
+    return rendering._tr(request, "lyrics.html", {
         "page": "lyrics",
         "have_lyrics": lyric_fetch.AVAILABLE,
-        "creds_ok": runtime._creds_ok(),
-        "last_run": runtime._tool_last_run_age("lyrics"),
+        "creds_ok": qobuz_access._creds_ok(),
+        "last_run": job_labels._tool_last_run_age("lyrics"),
         # A library-wide lyrics scan in flight, so the page says so instead of
         # showing the idle "Ready · Start lyrics scan" launcher while one runs.
         "lyrics_running": scans._active_scan(
@@ -45,7 +45,7 @@ async def lyrics_page(request: Request):
 async def lyrics_scan(request: Request):
     # No credential check: lyric fetching only reads/writes local files and
     # talks to the lyric providers, never Qobuz.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     form = await request.form()
@@ -55,7 +55,7 @@ async def lyrics_scan(request: Request):
     # yield, and everything from here to submit runs without yielding, so this
     # read-and-submit is atomic against the on-loop mode flip (same pattern as
     # queue_download).
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     existing = scans._active_scan(

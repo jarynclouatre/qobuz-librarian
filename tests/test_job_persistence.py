@@ -75,7 +75,7 @@ def test_failed_job_commit_cannot_ride_a_later_successful_commit(
 
 
 def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_path):
-    from qobuz_librarian.web import routes_jobs, runtime
+    from qobuz_librarian.web import job_runs, routes_jobs
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     job_persistence._reset_for_tests()
@@ -110,7 +110,7 @@ def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_pa
     assert [(c["payload"]["album_id"], c["selected"])
             for c in job.candidates] == expected
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-    jm.restore_jobs({"library": runtime._resume_album_download})
+    jm.restore_jobs({"library": job_runs._resume_album_download})
     reviews = jm.registry.awaiting_review()
     assert len(reviews) == 1
     assert [(c["payload"]["album_id"], c["selected"])

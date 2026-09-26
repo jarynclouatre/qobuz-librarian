@@ -7,7 +7,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian.web import auth as web_auth
-from qobuz_librarian.web import runtime
+from qobuz_librarian.web import rendering
 
 router = APIRouter()
 _log = logging.getLogger("qobuz_librarian")
@@ -22,11 +22,11 @@ async def login_page(request: Request):
     cookie = request.cookies.get(web_auth.SESSION_COOKIE)
     if cookie and web_auth.verify_session(cookie):
         return RedirectResponse(url="/", status_code=303)
-    return runtime.templates.TemplateResponse(
+    return rendering.templates.TemplateResponse(
         request=request, name="login.html",
-        context={"error": (runtime._notice_text(request.query_params.get("error"))
-                           or runtime._lockout_notice(web_auth.client_ip(request))),
-                 "username": runtime._notice_text(request.query_params.get("u")),
+        context={"error": (rendering._notice_text(request.query_params.get("error"))
+                           or rendering._lockout_notice(web_auth.client_ip(request))),
+                 "username": rendering._notice_text(request.query_params.get("u")),
                  "changed": request.query_params.get("changed") == "1",
                  "next_path": web_auth.safe_next_path(
                      request.query_params.get("next"))})
@@ -35,9 +35,9 @@ async def login_page(request: Request):
 def _login_again(error, username, next_path):
     """Send a refused sign-in back to the form by redirect, so Back from
     the page that follows never lands on a form post."""
-    params = {"error": runtime._notice_key(error)}
+    params = {"error": rendering._notice_key(error)}
     if username:
-        params["u"] = runtime._notice_key(username)
+        params["u"] = rendering._notice_key(username)
     if next_path:
         params["next"] = next_path
     return RedirectResponse(url="/login?" + urllib.parse.urlencode(params),
@@ -74,7 +74,7 @@ async def login_submit(request: Request, username: str = Form(""),
     if not has_session:
         reserved_attempt = web_auth.begin_login_attempt(ip, username)
         if not reserved_attempt:
-            refusal = runtime._lockout_notice(ip, username) or (
+            refusal = rendering._lockout_notice(ip, username) or (
                 "Sign-in checks are busy. Try again shortly."
             )
             return _login_again(refusal, username.strip(), next_path)
@@ -92,7 +92,7 @@ async def login_submit(request: Request, username: str = Form(""),
     if reserved_attempt:
         web_auth.finish_login_attempt(ip, username, success=ok)
     if not ok:
-        wait = runtime._lockout_notice(ip, username, after_failure=True)
+        wait = rendering._lockout_notice(ip, username, after_failure=True)
         # Keep what they typed, as the setup screen already does.
         return _login_again(
             "Incorrect username or password." + (f" {wait}" if wait else ""),
@@ -104,7 +104,7 @@ async def login_submit(request: Request, username: str = Form(""),
     except web_auth.SessionPersistenceError:
         _log.warning(
             "Couldn't persist a new web session; login refused.")
-        return runtime.templates.TemplateResponse(
+        return rendering.templates.TemplateResponse(
             request=request, name="login.html",
             context={"error": "Couldn't save your session. Check that the "
                               "data volume is writable, then try again.",
@@ -121,7 +121,7 @@ async def logout(request: Request):
     if not web_auth.revoke_session(
         request.cookies.get(web_auth.SESSION_COOKIE)
     ):
-        return runtime.render_error_page(
+        return rendering.render_error_page(
             request,
             503,
             "Couldn't log out",
@@ -140,7 +140,7 @@ async def setup_page(request: Request):
         return RedirectResponse(url="/", status_code=303)
     if web_auth.credentials_configured():
         return RedirectResponse(url="/", status_code=303)
-    return runtime.templates.TemplateResponse(request=request, name="setup.html",
+    return rendering.templates.TemplateResponse(request=request, name="setup.html",
                                       context={"error": "", "username": ""})
 
 
@@ -150,7 +150,7 @@ async def setup_submit(request: Request, username: str = Form(""),
     if web_auth.auth_disabled():
         return RedirectResponse(url="/", status_code=303)
     if web_auth.credentials_configured():
-        return runtime.templates.TemplateResponse(
+        return rendering.templates.TemplateResponse(
             request=request, name="setup.html",
             context={"setup_conflict": True}, status_code=409)
     user = username.strip()
@@ -163,7 +163,7 @@ async def setup_submit(request: Request, username: str = Form(""),
     else:
         err = ""
     if err:
-        return runtime.templates.TemplateResponse(
+        return rendering.templates.TemplateResponse(
             request=request, name="setup.html",
             context={"error": err, "username": user}, status_code=400)
     # First-run setup is unauthenticated by necessity (no creds exist yet), so
@@ -184,11 +184,11 @@ async def setup_submit(request: Request, username: str = Form(""),
                 user, password, require_unconfigured=True),
         )
     except web_auth.CredentialsAlreadyConfigured:
-        return runtime.templates.TemplateResponse(
+        return rendering.templates.TemplateResponse(
             request=request, name="setup.html",
             context={"setup_conflict": True}, status_code=409)
     if not stored:
-        return runtime.templates.TemplateResponse(
+        return rendering.templates.TemplateResponse(
             request=request, name="setup.html",
             context={"error": "Couldn't save the login: the data volume "
                               "isn't writable. Check PUID/PGID and volume "
@@ -200,7 +200,7 @@ async def setup_submit(request: Request, username: str = Form(""),
     except web_auth.SessionPersistenceError:
         _log.warning(
             "Couldn't persist the first web session; setup login was saved.")
-        return runtime.templates.TemplateResponse(
+        return rendering.templates.TemplateResponse(
             request=request, name="login.html",
             context={"error": "Your login was created, but its session couldn't "
                               "be saved. Check that the data volume is writable, "

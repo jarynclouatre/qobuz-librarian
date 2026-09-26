@@ -61,9 +61,9 @@ def test_get_track_marks_the_single_with_the_gap_toggle_off(
     import qobuz_librarian.library.catalog as cat_mod
     import qobuz_librarian.queue.executor as ex_mod
     import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian.web import runtime
+    from qobuz_librarian.web import qobuz_access
 
-    monkeypatch.setattr(runtime, "_get_token", lambda: "tok")
+    monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(search_mod, "get_album", lambda _id, _tok: {
         "id": "alb1", "title": "Girl With No Face", "year": 2024,
         "artist": {"name": "Allie X"},
@@ -102,7 +102,7 @@ def test_undo_removes_the_grabbed_track_and_clears_the_mark(client, monkeypatch,
     import qobuz_librarian.integrations.beets as beets_mod
     import qobuz_librarian.library.scanner as scanner_mod
     import qobuz_librarian.web.flows as flows_mod
-    from qobuz_librarian.web import runtime
+    from qobuz_librarian.web import qobuz_access
 
     d = tmp_path / "Allie X" / "Girl With No Face (2024)"
     d.mkdir(parents=True)
@@ -121,7 +121,7 @@ def test_undo_removes_the_grabbed_track_and_clears_the_mark(client, monkeypatch,
                   "marked": True, "new_folder": True,
                   "owned_path": _owned_path(d, f)}
     jm.registry.add(job)
-    monkeypatch.setattr(runtime, "_get_optional_token", lambda: "tok")
+    monkeypatch.setattr(qobuz_access, "_get_optional_token", lambda: "tok")
     monkeypatch.setattr(
         flows_mod,
         "_refresh_after_local_album_change",
@@ -192,7 +192,7 @@ def test_undo_no_isrc_removes_the_grabbed_disc_not_a_same_numbered_twin(
     import qobuz_librarian.library.catalog as cat_mod
     import qobuz_librarian.queue.executor as ex_mod
     import qobuz_librarian.web.app as app_mod
-    from qobuz_librarian.web import runtime
+    from qobuz_librarian.web import qobuz_access
 
     music_root = tmp_path / "music"
     d = music_root / "By Genre" / "Classical" / "Artist" / "Box Set (2020)"
@@ -203,7 +203,7 @@ def test_undo_no_isrc_removes_the_grabbed_disc_not_a_same_numbered_twin(
     cd2_grabbed = cd2 / "03 - Disc Two Three.flac"
     cd1_twin.write_bytes(b"cd1")
 
-    monkeypatch.setattr(runtime, "_get_token", lambda: "tok")
+    monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(app_mod.cfg, "MUSIC_ROOT", music_root)
     monkeypatch.setattr(search_mod, "get_album", lambda _id, _tok: {
         "id": "albx", "title": "Box Set", "year": 2020,

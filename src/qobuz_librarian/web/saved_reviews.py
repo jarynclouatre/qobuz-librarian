@@ -7,7 +7,14 @@ from fastapi.responses import RedirectResponse
 
 from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.quality import upgrade_state
-from qobuz_librarian.web import job_persistence, review_badges, runtime, settings_store
+from qobuz_librarian.web import (
+    job_labels,
+    job_persistence,
+    job_runs,
+    review_badges,
+    settings_store,
+    write_gate,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 
@@ -57,7 +64,7 @@ def _upgrade_state_summary():
         # Which of the two staleness causes applies, so the page can name it
         # instead of offering the user both and letting them guess.
         "stale_cause": "quality" if complete else "library",
-        "updated": runtime._format_age(updated_at) if updated_at else None,
+        "updated": job_labels._format_age(updated_at) if updated_at else None,
     }
 
 
@@ -98,7 +105,7 @@ def _downsample_state_summary():
         # age out either, so a saved run is stale only when it did not finish.
         "status": "current" if complete else "stale",
         "stale": bool(state.get("updated_at") and not complete),
-        "updated": runtime._format_age(updated_at) if updated_at else None,
+        "updated": job_labels._format_age(updated_at) if updated_at else None,
     }
 
 
@@ -373,7 +380,7 @@ def _sync_saved_review_job(job, surface, state, signature):
 
 def _publish_saved_review(job):
     """Admit one reconstructed review before exposing it in memory."""
-    if runtime._web_writes_paused():
+    if write_gate._web_writes_paused():
         return False
     if not job_persistence.admit(job):
         return False
@@ -435,7 +442,7 @@ def _review_job_from_upgrade_state(state):
         }
         job.review_verb = "Upgrade"
         job._saved_review_signature = signature
-        job._execute_fn = runtime._resume_upgrade(job, job.execute_args)
+        job._execute_fn = job_runs._resume_upgrade(job, job.execute_args)
         for spec in state.get("candidates") or []:
             job.add_candidate(
                 kind="upgrade",
@@ -470,7 +477,7 @@ def _review_job_from_downsample_state(state):
         job.execute_kind = "downsample"
         job.review_verb = "Downsample"
         job._saved_review_signature = signature
-        job._execute_fn = runtime._resume_downsample(job, job.execute_args)
+        job._execute_fn = job_runs._resume_downsample(job, job.execute_args)
         for spec in state.get("candidates") or []:
             payload = {
                 "album_dir": spec.get("album_dir") or "",

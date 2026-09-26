@@ -35,7 +35,22 @@ from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.errors import plural
-from qobuz_librarian.web import flows, runtime, scans
+from qobuz_librarian.web import (
+    download_admission,
+    download_outcomes,
+    flows,
+    job_labels,
+    job_runs,
+    new_release_checks,
+    qobuz_access,
+    refusals,
+    rendering,
+    runtime,
+    scans,
+    storage,
+    track_downloads,
+    write_gate,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -44,7 +59,7 @@ _log = logging.getLogger("qobuz_librarian")
 
 def _download_fragment(kind: str, body: str, outcome: str) -> HTMLResponse:
     return HTMLResponse(
-        runtime._ql_notice_html(kind, body),
+        rendering._ql_notice_html(kind, body),
         headers={"X-QL-Download-Outcome": outcome},
     )
 
@@ -90,8 +105,8 @@ def _unreadable_recheck_pending():
     look, from local state alone."""
     return bool(
         cfg.AUTO_LIBRARY_SCAN
-        and not runtime._web_writes_paused()
-        and runtime._qobuz_ready()
+        and not write_gate._web_writes_paused()
+        and qobuz_access._qobuz_ready()
         and generation_state.baseline_complete()
         and time.monotonic() - _unreadable_checked_at
             >= _UNREADABLE_RECHECK_SECONDS
@@ -104,8 +119,8 @@ def _library_scan_resume_due():
     state alone."""
     return bool(
         cfg.AUTO_LIBRARY_SCAN
-        and not runtime._web_writes_paused()
-        and runtime._qobuz_ready()
+        and not write_gate._web_writes_paused()
+        and qobuz_access._qobuz_ready()
         and not generation_state.baseline_complete()
         and scan_checkpoint.pending() is not None
     )
@@ -116,7 +131,7 @@ def _start_due_jobs_in_background():
     live Qobuz check, which must never hold up the page."""
     try:
         due = (_library_scan_resume_due() or _unreadable_recheck_pending()
-               or runtime._new_release_check_due())
+               or new_release_checks._new_release_check_due())
     except OSError as e:
         _log.warning(
             "automatic start from the dashboard skipped: %s", e)
@@ -129,7 +144,7 @@ def _start_due_jobs_in_background():
     def run():
         try:
             _maybe_resume_library_scan()
-            runtime._maybe_auto_check_new_releases()
+            new_release_checks._maybe_auto_check_new_releases()
         except Exception as e:
             _log.warning(
                 "automatic start from the dashboard failed: %s", e)
@@ -166,7 +181,7 @@ def _maybe_resume_library_scan():
             listed and unreadable_artists_mod.readable_again(listed))
         if not readable_again:
             return
-    credentials = runtime._auto_start_credentials()
+    credentials = new_release_checks._auto_start_credentials()
     if credentials is None:
         return
     with runtime._auto_check_lock:
@@ -218,8 +233,8 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             "library_resume": scans._library_resume_offer(library_generation),
             # A fresh install has no credentials; the page says so up front.
             # Filesystem-only.
-            "creds_ok": runtime._creds_ok(),
-            "qobuz_ready": runtime._qobuz_ready(),
+            "creds_ok": qobuz_access._creds_ok(),
+            "qobuz_ready": qobuz_access._qobuz_ready(),
             "lyric_retry_count":
                 len(lyrics_mode.load_lyric_retry()) if cfg.LYRIC_RETRY_FILE.exists() else 0,
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
@@ -238,12 +253,12 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_artist_name = str(artist_name or "").strip()[:200]
     search_album_id = str(album_id or "").strip()[:64] if search_kind == "album" else ""
     pending = job_mgr.registry.pending_and_running()
-    return runtime._tr(request, "index.html", {
+    return rendering._tr(request, "index.html", {
         "active_jobs": active_jobs,
         "pending": pending,
-        "queue_waits": {j.id: runtime._queue_wait(j) for j in pending},
+        "queue_waits": {j.id: job_labels._queue_wait(j) for j in pending},
         "review": job_mgr.registry.awaiting_review(),
-        "creds_token_valid": runtime._token_valid_for(),
+        "creds_token_valid": qobuz_access._token_valid_for(),
         "search_q": search_q,
         "search_kind": search_kind,
         "search_artist_id": search_artist_id,
@@ -259,7 +274,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
 async def lyric_retry(request: Request):
     # No credential check: lyric fetching only reads/writes local files and
     # talks to the lyric providers, never Qobuz.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     # A retry and a full backfill share the one lyric-state file and must
@@ -271,7 +286,7 @@ async def lyric_retry(request: Request):
     job = job_mgr.Job(title="Lyric retry")
     job.execute_kind = "lyrics"
     if job_mgr.submit(job, lambda j: flows.run_lyric_retry(j)) is None:
-        return runtime._job_admission_response(request)
+        return refusals._job_admission_response(request)
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
@@ -285,7 +300,7 @@ _OWNERSHIP_TIMEOUT = 20
 
 def _qobuz_quality_short_label(primary: dict | None,
                                fallback: dict | None = None) -> str:
-    bits, rate = runtime._qobuz_quality_bits_rate(primary, fallback)
+    bits, rate = download_admission._qobuz_quality_bits_rate(primary, fallback)
     if not bits or not rate:
         return ""
     return format_quality(bits, rate)
@@ -335,7 +350,7 @@ async def _fetch_album(album_id, query, token):
     raw = []
     error = None
     try:
-        raw = [await runtime._qobuz_call(
+        raw = [await qobuz_access._qobuz_call(
             qobuz_search.get_album, album_id, token)]
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
@@ -355,7 +370,7 @@ async def _fetch_track(track_id, token):
     raw = []
     error = None
     try:
-        track = await runtime._qobuz_call(
+        track = await qobuz_access._qobuz_call(
             qobuz_search.get_track, track_id, token)
         raw = [track] if track else []
         if not raw:
@@ -375,7 +390,7 @@ async def _fetch_artist_albums(artist_id, artist_name, query, token):
     selected_artist = None
     error = None
     try:
-        raw, artist_total = await runtime._qobuz_call(
+        raw, artist_total = await qobuz_access._qobuz_call(
             qobuz_search.get_artist_albums, artist_id, token,
             limit=cfg.ARTIST_CATALOG_LIMIT)
         selected_artist = {
@@ -394,7 +409,7 @@ async def _search_artists(query, token):
     artist_results = []
     error = None
     try:
-        artist_raw = await runtime._qobuz_call(
+        artist_raw = await qobuz_access._qobuz_call(
             qobuz_search.search_artists, query, token,
             limit=cfg.ARTIST_LOOKUP_LIMIT)
         for a in artist_raw:
@@ -428,7 +443,7 @@ async def _search_catalog(kind, query, token):
     error = None
     _search_fn = qobuz_search.search_tracks if kind == "track" else qobuz_search.search_albums
     try:
-        raw = await runtime._qobuz_call(
+        raw = await qobuz_access._qobuz_call(
             _search_fn, query, token, limit=cfg.SEARCH_LIMIT)
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
@@ -450,7 +465,7 @@ async def _track_results(raw, query, token, queued_tracks):
         alb = t.get("album") or {}
         if not t.get("id") or not alb.get("id"):
             continue
-        _tbd, _tsr = runtime._qobuz_quality_bits_rate(t, alb)
+        _tbd, _tsr = download_admission._qobuz_quality_bits_rate(t, alb)
         _timg = alb.get("image") or {}
         _tcover = _timg.get("small") or _timg.get("thumbnail") or ""
         _perf = (t.get("performer") or {}).get("name")
@@ -549,7 +564,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
     for a in raw:
         if not a.get("id"):
             continue
-        _bd, _sr = runtime._qobuz_quality_bits_rate(a)
+        _bd, _sr = download_admission._qobuz_quality_bits_rate(a)
         _img = a.get("image") or {}
         _cover = _img.get("small") or _img.get("thumbnail") or ""
         _qual = _qobuz_quality_short_label(a)
@@ -600,7 +615,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                         (exact_album.get("tracks") or {}).get("items")
                         or []
                     )
-                    if not runtime._album_tracks_complete(exact_album):
+                    if not download_admission._album_tracks_complete(exact_album):
                         continue
                     existing, _ = catalog.find_existing_tracks(
                         exact_album, album_dir=folder)
@@ -742,11 +757,11 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     artist_id = str(artist_id or "").strip()
     artist_name = str(artist_name or "").strip()
     album_id = str(album_id or "").strip()
-    if not runtime._is_htmx(request):
+    if not rendering._is_htmx(request):
         return RedirectResponse(url="/", status_code=303)
     if query or (kind == "album" and album_id):
         try:
-            token = runtime._get_token()
+            token = qobuz_access._get_token()
             is_qobuz_url, parsed = _qobuz_url(query)
             raw = []
             if kind == "album" and (album_id or (parsed and parsed[0] == "album")):
@@ -780,7 +795,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     kind, query, token)
 
             queued_albums, queued_tracks, scanning_albums = (
-                runtime._active_search_downloads())
+                download_admission._active_search_downloads())
             if kind == "track":
                 results = await _track_results(raw, query, token, queued_tracks)
             elif kind == "album" or selected_artist:
@@ -798,7 +813,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             _log.exception(
                 "search failed for %r", query)
             error = "Search failed. Try again."
-    creds_ok = runtime._creds_ok()
+    creds_ok = qobuz_access._creds_ok()
     search_state = f"{kind}|{query}"
     if artist_id:
         search_state += f"|artist:{artist_id}"
@@ -820,9 +835,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
            "search_state": search_state,
            "search_cacheable": not defer_search_views,
            "defer_search_views": defer_search_views,
-           "creds_ok": creds_ok, "qobuz_ready": runtime._qobuz_ready(), "page": "search"}
-    if runtime._is_htmx(request):
-        resp = runtime._tr(request, "_search_results.html", ctx)
+           "creds_ok": creds_ok, "qobuz_ready": qobuz_access._qobuz_ready(), "page": "search"}
+    if rendering._is_htmx(request):
+        resp = rendering._tr(request, "_search_results.html", ctx)
         # Put the search in the address bar, so a reload or Back lands on the
         # same results. GET / rehydrates from these.
         if query or (kind == "album" and album_id):
@@ -877,13 +892,13 @@ async def search_album_tracks(request: Request, album_id: str = ""):
     """The tracks under one search row, fetched when the row is opened rather
     than shipped with every result."""
     album_id = str(album_id or "").strip()
-    if not album_id or not runtime._qobuz_ready():
+    if not album_id or not qobuz_access._qobuz_ready():
         return HTMLResponse("")
     loop = asyncio.get_running_loop()
     error = ""
     tracks = []
     try:
-        token = runtime._get_token()
+        token = qobuz_access._get_token()
         tracks = await asyncio.wait_for(
             loop.run_in_executor(
                 None, lambda: _album_tracklist(album_id, token)),
@@ -902,7 +917,7 @@ async def search_album_tracks(request: Request, album_id: str = ""):
         _log.exception(
             "tracklist failed for album %r", album_id)
         error = "Qobuz could not list these tracks. Try again."
-    return runtime._tr(request, "_search_tracklist.html", {
+    return rendering._tr(request, "_search_tracklist.html", {
         "tracks": tracks,
         "multi_disc": len({t["disc"] for t in tracks}) > 1,
         "error": error,
@@ -913,18 +928,18 @@ async def search_album_tracks(request: Request, album_id: str = ""):
 async def queue_download(request: Request, album_id: str = Form(""),
                          as_new_edition: str = Form(""),
                          track_id: str = Form("")):
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     album_id = album_id.strip()
     track_id = track_id.strip()
     if not album_id:
         msg = "Missing album id."
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             # 200, not 400: htmx only swaps 2xx/3xx responses, so a 400
             # fragment is silently dropped and the user sees no feedback.
             return _download_fragment("error", html.escape(msg), "failed")
-        return RedirectResponse(url="/queue?error=" + runtime._notice_key(msg),
+        return RedirectResponse(url="/queue?error=" + rendering._notice_key(msg),
                                 status_code=303)
     # "Get this edition too": download a different edition of an album the
     # user already owns, as a separate album.
@@ -932,9 +947,9 @@ async def queue_download(request: Request, album_id: str = Form(""),
         "1", "true", "yes", "on")
     # Refuse true duplicates (same album already active or pending), but only
     # of the SAME intent (see _duplicate_download_job).
-    existing = runtime._duplicate_download_job(album_id, track_id, download_as_new_edition)
+    existing = download_admission._duplicate_download_job(album_id, track_id, download_as_new_edition)
     if existing:
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return _download_fragment(
                 "warning",
                 f'Already queued. <a href="/jobs/{existing.id}" '
@@ -946,26 +961,26 @@ async def queue_download(request: Request, album_id: str = Form(""),
     root_state, recorded_albums = await loop.run_in_executor(
         None, collection_snapshot.music_root_write_state)
     if root_state != "ready":
-        msg = runtime._music_write_target_message(root_state, recorded_albums)
-        if runtime._is_htmx(request):
+        msg = storage._music_write_target_message(root_state, recorded_albums)
+        if rendering._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(
-            url="/queue?error=" + runtime._notice_key(msg), status_code=303)
+            url="/queue?error=" + rendering._notice_key(msg), status_code=303)
     try:
-        credentials = await runtime._authorize_qobuz_for_web(
+        credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.DOWNLOAD_ACTION
         )
         token = credentials.token
-        album = await runtime._qobuz_call(qobuz_search.get_album, album_id, token)
+        album = await qobuz_access._qobuz_call(qobuz_search.get_album, album_id, token)
         if download_as_new_edition and await loop.run_in_executor(
-            None, lambda: runtime._same_edition_is_complete(album)
+            None, lambda: download_admission._same_edition_is_complete(album)
         ):
             msg = "This edition is already in your library."
-            if runtime._is_htmx(request):
+            if rendering._is_htmx(request):
                 return _download_fragment(
                     "warning", html.escape(msg), "owned")
             return RedirectResponse(
-                url="/queue?error=" + runtime._notice_key(msg), status_code=303)
+                url="/queue?error=" + rendering._notice_key(msg), status_code=303)
         if not download_as_new_edition and track_id:
             # A single track was excluded from the guard entirely, so nothing
             # checked whether that track was already on disk before fetching it
@@ -993,11 +1008,11 @@ async def queue_download(request: Request, album_id: str = Form(""),
 
             if await loop.run_in_executor(None, _track_already_there):
                 msg = "That track is already in your library."
-                if runtime._is_htmx(request):
+                if rendering._is_htmx(request):
                     return _download_fragment(
                         "warning", html.escape(msg), "owned")
                 return RedirectResponse(
-                    url="/queue?error=" + runtime._notice_key(msg), status_code=303)
+                    url="/queue?error=" + rendering._notice_key(msg), status_code=303)
 
         if not download_as_new_edition and not track_id:
             def _already_complete():
@@ -1018,7 +1033,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                         "album ownership read failed for album %s", album_id)
                     existing_tracks = []
                 qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-                return bool(existing_tracks and runtime._album_tracks_complete(album)) and not (
+                return bool(existing_tracks and download_admission._album_tracks_complete(album)) and not (
                     catalog.compute_missing(qobuz_tracks, existing_tracks)[0])
 
             # Resolving the album folder walks the (often NAS-mounted) library,
@@ -1026,7 +1041,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
             # every other request while this one request blocks.
             if await loop.run_in_executor(None, _already_complete):
                 msg = "This album is already in your library."
-                if runtime._is_htmx(request):
+                if rendering._is_htmx(request):
                     # Offer the deliberate second-edition path instead of a
                     # dead end: a remaster or a different mix can be kept
                     # alongside the owned copy, under its edition's name.
@@ -1048,7 +1063,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                         headers={"X-QL-Download-Outcome": "owned"},
                     )
                 return RedirectResponse(
-                    url="/queue?error=" + runtime._notice_key(msg),
+                    url="/queue?error=" + rendering._notice_key(msg),
                     status_code=303)
         title  = album.get("title") or "?"
         artist = (album.get("artist") or {}).get("name") or "?"
@@ -1059,13 +1074,13 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 (t for t in _tracks if str(t.get("id")) == track_id), None)
             if single_track is None:
                 msg = "That track isn't on this album."
-                if runtime._is_htmx(request):
+                if rendering._is_htmx(request):
                     # 200, not 400: htmx drops non-2xx/3xx fragments, so a 400
                     # here renders nothing. The notice conveys the failure.
                     return _download_fragment(
                         "error", html.escape(msg), "failed")
                 return RedirectResponse(
-                    url="/queue?error=" + runtime._notice_key(msg), status_code=303)
+                    url="/queue?error=" + rendering._notice_key(msg), status_code=303)
         job = job_mgr.Job(
             title=(single_track.get("title") or title) if single_track else title,
             artist=artist,
@@ -1091,10 +1106,10 @@ async def queue_download(request: Request, album_id: str = Form(""),
 
         # Re-check under the lock right before submitting: closes the race with
         # a concurrent /download for the same album across the get_album await.
-        with runtime._DOWNLOAD_SUBMIT_LOCK, runtime._CREDENTIAL_LOCK:
-            dup = runtime._duplicate_download_job(album_id, track_id, download_as_new_edition)
+        with download_admission._DOWNLOAD_SUBMIT_LOCK, qobuz_access._CREDENTIAL_LOCK:
+            dup = download_admission._duplicate_download_job(album_id, track_id, download_as_new_edition)
             if dup:
-                if runtime._is_htmx(request):
+                if rendering._is_htmx(request):
                     return _download_fragment(
                         "warning",
                         f'Already queued. <a href="/jobs/{dup.id}" '
@@ -1102,39 +1117,39 @@ async def queue_download(request: Request, album_id: str = Form(""),
                         "duplicate",
                     )
                 return RedirectResponse(url=f"/jobs/{dup.id}", status_code=303)
-            busy = runtime._lock_busy_response(request)
+            busy = refusals._lock_busy_response(request)
             if busy is not None:
                 return busy
-            if not runtime._credential_generation_is_active(credentials.generation):
+            if not qobuz_access._credential_generation_is_active(credentials.generation):
                 raise CredentialChanged(
                     "Qobuz credentials changed before the download was queued."
                 )
-            run_fn = (runtime._make_single_track_run(album, single_track, token)
+            run_fn = (track_downloads._make_single_track_run(album, single_track, token)
                       if single_track
-                      else runtime._make_download_run(
+                      else job_runs._make_download_run(
                           album, token, treat_as_new=download_as_new_edition))
             if job_mgr.submit(job, run_fn) is None:
-                return runtime._job_admission_response(request)
-        if runtime._is_htmx(request):
-            response = runtime._tr(request, "_job_queued.html", {"job": job})
+                return refusals._job_admission_response(request)
+        if rendering._is_htmx(request):
+            response = rendering._tr(request, "_job_queued.html", {"job": job})
             response.headers["X-QL-Download-Outcome"] = "queued"
             return response
         # Land on the new job's page so the user sees their download starting.
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
     except NoCredsError as exc:
         msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(url="/settings?error=creds", status_code=303)
     except Exception as e:
         _log.warning("couldn't queue download for album %s", album_id,
                      exc_info=True)
-        user_msg = runtime._download_error_message(
+        user_msg = download_outcomes._download_error_message(
             e,
             "Couldn't queue download. Try again.",
         )
-        if runtime._is_htmx(request):
+        if rendering._is_htmx(request):
             return _download_fragment(
                 "error", html.escape(user_msg), "failed")
-        msg = runtime._notice_key(user_msg)
+        msg = rendering._notice_key(user_msg)
         return RedirectResponse(url=f"/queue?error={msg}", status_code=303)

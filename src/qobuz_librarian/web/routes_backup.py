@@ -22,7 +22,18 @@ from qobuz_librarian.library import (
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.quality import decision as quality_decision
 from qobuz_librarian.ui_cli.errors import plural
-from qobuz_librarian.web import collection_restore, flows, runtime, scans
+from qobuz_librarian.web import (
+    collection_restore,
+    diagnostics,
+    flows,
+    job_runs,
+    qobuz_access,
+    refusals,
+    rendering,
+    scans,
+    storage,
+    write_gate,
+)
 from qobuz_librarian.web import jobs as job_mgr
 from qobuz_librarian.web.csrf import body_limit
 
@@ -33,7 +44,7 @@ _log = logging.getLogger("qobuz_librarian")
 @router.post("/collection/snapshot")
 async def collection_snapshot_now(request: Request, force: str = Form("")):
     """Write a collection snapshot now instead of waiting for the next scan."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     existing = scans._active_scan("collection_snapshot",
@@ -45,7 +56,7 @@ async def collection_snapshot_now(request: Request, force: str = Form("")):
     forced = bool((force or "").strip())
     if job_mgr.submit(
             job, lambda j: flows.run_collection_snapshot(j, force=forced)) is None:
-        return runtime._job_admission_response(request)
+        return refusals._job_admission_response(request)
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
@@ -57,14 +68,14 @@ async def collection_snapshot_download(request: Request):
         None, collection_snapshot.latest_status)
     if state == "unreadable":
         return RedirectResponse(
-            url="/settings?error=" + runtime._notice_key(
+            url="/settings?error=" + rendering._notice_key(
                 "The current collection backup couldn't be read safely, so it "
                 "was not downloaded. Check the backup folder in Settings."),
             status_code=303)
     path = collection_snapshot.latest_path()
     if state != "ready" or not path.is_file():
         return RedirectResponse(
-            url="/settings?error=" + runtime._notice_key(
+            url="/settings?error=" + rendering._notice_key(
                 "There is no snapshot yet. Run a library scan, or use Back up "
                 "now, and it will be here."),
             status_code=303)
@@ -74,14 +85,14 @@ async def collection_snapshot_download(request: Request):
 
 def _restore_response(request, message, *, redirect=None, kind="error"):
     """Answer the Settings upload form, which posts through htmx."""
-    if runtime._is_htmx(request):
+    if rendering._is_htmx(request):
         if redirect:
             return HTMLResponse("", headers={"HX-Redirect": redirect})
-        return HTMLResponse(runtime._ql_notice_html(kind, html.escape(message)))
+        return HTMLResponse(rendering._ql_notice_html(kind, html.escape(message)))
     if redirect:
         return RedirectResponse(url=redirect, status_code=303)
     return RedirectResponse(
-        url="/settings?error=" + runtime._notice_key(message), status_code=303)
+        url="/settings?error=" + rendering._notice_key(message), status_code=303)
 
 
 async def _read_backup_upload(upload):
@@ -113,7 +124,7 @@ async def collection_restore_upload(request: Request,
                                     backup: UploadFile = File(...),
                                     empty_replacement: str = Form("")):
     """Read a collection backup and park one review of what it can put back."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     existing = scans._active_scan(
@@ -124,8 +135,8 @@ async def collection_restore_upload(request: Request,
         # In the page, say so where the form sits and link the open review;
         # a bare redirect there would swap the whole page under the reader
         # without a word about why.
-        if runtime._is_htmx(request):
-            return HTMLResponse(runtime._ql_notice_html(
+        if rendering._is_htmx(request):
+            return HTMLResponse(rendering._ql_notice_html(
                 "error",
                 "A restore is already open. Finish or discard it before "
                 "uploading another backup. "
@@ -159,7 +170,7 @@ async def collection_restore_upload(request: Request,
     # upload marks it as an empty replacement folder.
     def _restore_target_state():
         root = Path(cfg.MUSIC_ROOT)
-        hint = runtime._music_root_hint()
+        hint = storage._music_root_hint()
         problem = scans._music_root_problem()
         if problem:
             return problem, None, None
@@ -210,9 +221,9 @@ async def collection_restore_upload(request: Request,
             f"folder, select that option and upload again. The current backup "
             f"will be kept.")
     try:
-        credentials = await runtime._authorize_qobuz_for_web(
+        credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION)
-    except runtime._QOBUZ_ACTION_ERRORS as exc:
+    except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
         return _restore_response(
             request, job_mgr.qobuz_action_error_message(exc, unchanged=True))
     job = job_mgr.Job(title="Restore from backup")
@@ -224,7 +235,7 @@ async def collection_restore_upload(request: Request,
                 "The music folder changed before the restore check began. "
                 "Check that it is mounted, then upload the backup again."
             )
-        active = runtime._authorize_qobuz_live(
+        active = qobuz_access._authorize_qobuz_live(
             QobuzAccess.CATALOGUE_ACTION,
             expected_generation=credentials.generation,
         )
@@ -233,16 +244,16 @@ async def collection_restore_upload(request: Request,
     submitted = await scans._submit_scan_deduped_async(
         job,
         _scan,
-        runtime._resume_album_download(job, job.execute_args),
+        job_runs._resume_album_download(job, job.execute_args),
         "collection_restore",
         statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
                   job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING),
     )
     if submitted is None:
-        busy = runtime._lock_busy_response(request)
+        busy = refusals._lock_busy_response(request)
         if busy is not None:
             return busy
-        return runtime._job_admission_response(request)
+        return refusals._job_admission_response(request)
     return _restore_response(request, "", redirect=f"/jobs/{submitted.id}")
 
 
@@ -250,17 +261,17 @@ def _diagnostics_result_notice(kind: str, body: str) -> str:
     """A Restore/Remove result on the diagnostics list."""
     if kind in ("success", "info"):
         return (f'<div id="download-toast" hx-swap-oob="beforeend">'
-                f'{runtime._ql_notice_html(kind, body)}</div>')
-    return runtime._ql_notice_html(kind, body)
+                f'{rendering._ql_notice_html(kind, body)}</div>')
+    return rendering._ql_notice_html(kind, body)
 
 
 def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
     """A refusal that names the backup's folder and offers to delete it
     unchecked."""
-    location, _is_host = runtime._resolve_host_path(str(target))
+    location, _is_host = storage._resolve_host_path(str(target))
     return _diagnostics_result_notice(
         "error",
-        runtime.templates.get_template("_stuck_backup_notice.html").render(
+        rendering.templates.get_template("_stuck_backup_notice.html").render(
             request=request, headline=headline, location=location,
             name=target.name),
     )
@@ -278,7 +289,7 @@ def _restore_refused_notice(request: Request, target: Path, origin) -> str:
     """Say why an upgrade restore refused, in the figures it refused on."""
     backup_size = backup_mod.album_tree_size(target)
     origin_size = backup_mod.album_tree_size(origin) if origin else None
-    origin_display, _is_host = runtime._resolve_host_path(str(origin or ""))
+    origin_display, _is_host = storage._resolve_host_path(str(origin or ""))
     if (backup_size and origin_size
             and origin_size[1] >= backup_size[1] > 0):
         headline = (
@@ -300,19 +311,19 @@ def _library_held(request: Request, operation: str, verb: str):
     """Hold the library for one diagnostics action. Yields None while it is
     held, or the refusal to answer with when library writes are paused or a
     job is working in the library."""
-    state, operation_token, lock = runtime._begin_direct_library_operation(
+    state, operation_token, lock = write_gate._begin_direct_library_operation(
         operation)
     if state == "paused":
         yield (_diagnostics_result_notice(
                    "warning", f"Library writes were paused before {verb} "
                    "could start. Resume the web app, then try again.")
-               + runtime._diagnostics_fragment(request))
+               + diagnostics._diagnostics_fragment(request))
         return
     if state == "busy":
         yield (_diagnostics_result_notice(
                    "warning", "A job is working in the library right now. "
                    "Try again once it finishes.")
-               + runtime._diagnostics_fragment(request))
+               + diagnostics._diagnostics_fragment(request))
         return
     try:
         yield None
@@ -335,7 +346,7 @@ def _backup_target(backup):
 async def _run_diagnostics_action(request: Request, action, arg):
     """Run a diagnostics-list button's work off the event loop and answer with
     its notice and the list redrawn."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     loop = asyncio.get_running_loop()
@@ -347,11 +358,11 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
     if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     with _library_held(request, "Backup removal", "Delete") as refusal:
         if refusal:
             return refusal
-        location, _is_host = runtime._resolve_host_path(str(target))
+        location, _is_host = storage._resolve_host_path(str(target))
         if backup_mod.discard_backup_unchecked(target):
             note = _diagnostics_result_notice(
                 "success", "Deleted the backup without checking it.")
@@ -359,7 +370,7 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
-    return note + runtime._diagnostics_fragment(request)
+    return note + diagnostics._diagnostics_fragment(request)
 
 
 def _restore_backup_sync(request: Request, backup: str) -> str:
@@ -367,7 +378,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
     if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     with _library_held(request, "Backup restore", "Restore") as refusal:
         if refusal:
             return refusal
@@ -423,7 +434,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _diagnostics_result_notice(
                         "success", f"Restored {plural(n, 'file')} to "
-                        f"{html.escape(runtime._resolve_host_path(str(origin))[0])}.")
+                        f"{html.escape(storage._resolve_host_path(str(origin))[0])}.")
                 else:
                     note = _diagnostics_result_notice(
                         "error", "The files were restored, but their saved "
@@ -444,7 +455,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             if ok and job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", f"Restored the album to "
-                    f"{html.escape(runtime._resolve_host_path(str(origin))[0])}.")
+                    f"{html.escape(storage._resolve_host_path(str(origin))[0])}.")
             elif ok:
                 note = _diagnostics_result_notice(
                     "error", "The album was restored, but its saved recovery "
@@ -457,7 +468,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "This backup has an unsupported recovery record, so "
                 "it was left untouched.")
-    return note + runtime._diagnostics_fragment(request)
+    return note + diagnostics._diagnostics_fragment(request)
 
 
 @router.post("/backups/restore", response_class=HTMLResponse)
@@ -471,7 +482,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
     if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     with _library_held(request, "Backup removal", "Remove") as refusal:
         if refusal:
             return refusal
@@ -487,7 +498,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "so this backup was left untouched. Check that the data "
                 "volume is writable, then try again.")
         elif backup_mod.discard_redundant_backup(target):
-            dest = html.escape(runtime._resolve_host_path(
+            dest = html.escape(storage._resolve_host_path(
                 str(carried.receipt.get("origin", "")))[0])
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
@@ -503,7 +514,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "error", "Couldn't verify every file is back byte-for-byte, "
                 "so the backup was left untouched. Restore is the safe way "
                 "to bring its files home.")
-    return note + runtime._diagnostics_fragment(request)
+    return note + diagnostics._diagnostics_fragment(request)
 
 
 def _release_undo_copy_sync(request: Request, backup: str) -> str:
@@ -512,7 +523,7 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
         return (_diagnostics_result_notice("error", "Those originals aren't there "
                                 "anymore. They may already be restored or "
                                 "cleared.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     with _library_held(request, "Backup removal", "Delete") as refusal:
         if refusal:
             return refusal
@@ -529,7 +540,7 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                 "volume is writable, then try again.")
         elif backup_mod.release_undo_copy(target):
             album = html.escape(
-                runtime._album_name_from_path(carried.receipt.get("origin", "")))
+                diagnostics._album_name_from_path(carried.receipt.get("origin", "")))
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", f"Deleted the hi-res originals of {album}. "
@@ -545,7 +556,7 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                 "error", "Couldn't confirm the album still holds every one of "
                 "these files, so the originals were left where they are. "
                 "Restore them instead if the album is incomplete.")
-    return note + runtime._diagnostics_fragment(request)
+    return note + diagnostics._diagnostics_fragment(request)
 
 
 def _staging_group_target(group):
@@ -562,14 +573,14 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
     if target is None:
         return (_diagnostics_result_notice(
                     "error", "That isn't a group of kept files.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     with _library_held(request, "Staging cleanup", "Remove") as refusal:
         if refusal:
             return refusal
-        location, _is_host = runtime._resolve_host_path(str(target))
+        location, _is_host = storage._resolve_host_path(str(target))
         stuck = _diagnostics_result_notice(
             "error", "The app couldn't remove them, so they were left where "
             f"they are. The row below offers to delete {html.escape(location)} "
@@ -587,7 +598,7 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
             removed = staging_mod.discard_group(target)
             note = (_diagnostics_result_notice("success", "Removed the kept files.")
                     if removed else stuck)
-    return note + runtime._diagnostics_fragment(request)
+    return note + diagnostics._diagnostics_fragment(request)
 
 
 def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
@@ -595,14 +606,14 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
     if target is None:
         return (_diagnostics_result_notice(
                     "error", "That isn't a group of kept files.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
-                + runtime._diagnostics_fragment(request))
+                + diagnostics._diagnostics_fragment(request))
     with _library_held(request, "Staging cleanup", "this") as refusal:
         if refusal:
             return refusal
-        location, _is_host = runtime._resolve_host_path(str(target))
+        location, _is_host = storage._resolve_host_path(str(target))
         if staging_mod.discard_group_unchecked(target):
             note = _diagnostics_result_notice(
                 "success", "Deleted the files without checking them.")
@@ -610,7 +621,7 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
-    return note + runtime._diagnostics_fragment(request)
+    return note + diagnostics._diagnostics_fragment(request)
 
 
 @router.post("/staging/discard-unchecked", response_class=HTMLResponse)

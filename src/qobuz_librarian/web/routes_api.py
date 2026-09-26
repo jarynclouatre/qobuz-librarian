@@ -10,7 +10,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.web import auth as web_auth
-from qobuz_librarian.web import job_persistence, runtime
+from qobuz_librarian.web import (
+    diagnostics,
+    download_admission,
+    job_labels,
+    job_persistence,
+    runtime,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -101,7 +107,7 @@ async def api_diagnostics(request: Request):
     """Htmx partial that returns just the diagnostics list items for the Recheck button."""
     loop = asyncio.get_running_loop()
     return HTMLResponse(await loop.run_in_executor(
-        None, runtime._diagnostics_fragment, request))
+        None, diagnostics._diagnostics_fragment, request))
 
 
 @router.get("/api/jobs/{job_id}/stream")
@@ -273,7 +279,7 @@ async def queue_count():
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
         # Status alone: the signature above moves every time a scan adds a
         # candidate, which would redraw the Queue on every poll for hours.
-        "rows": runtime._queue_rows_signature(active),
+        "rows": job_labels._queue_rows_signature(active),
         # Carried on the same poll so the nav's warning dot appears the moment
         # a job needs the user, not at their next full page load.
         "attention": job_persistence.attention_count(),
@@ -282,7 +288,7 @@ async def queue_count():
 
 @router.get("/api/search/availability")
 async def search_availability():
-    albums, tracks, scanning_albums = runtime._active_search_downloads()
+    albums, tracks, scanning_albums = download_admission._active_search_downloads()
     owned_albums, owned_tracks = _finished_search_downloads()
     # A re-queued album is active work again, so it reads as queued, not owned.
     owned_albums.difference_update(albums)

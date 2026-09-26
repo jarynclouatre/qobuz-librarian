@@ -14,7 +14,7 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.library import recommendations
 from qobuz_librarian.quality.tiers import format_quality
-from qobuz_librarian.web import runtime
+from qobuz_librarian.web import download_admission, job_labels, qobuz_access, rendering, runtime
 
 router = APIRouter()
 
@@ -36,10 +36,10 @@ def _discover_album_views(rows, queued=None, scanning=None):
     the same helpers the search results use so the two never disagree about
     what counts as hi-res."""
     if queued is None or scanning is None:
-        queued, _tracks, scanning = runtime._active_search_downloads()
+        queued, _tracks, scanning = download_admission._active_search_downloads()
     out = []
     for row in rows or []:
-        bits, rate = runtime._qobuz_quality_bits_rate(row)
+        bits, rate = download_admission._qobuz_quality_bits_rate(row)
         album_id = str(row.get("id") or "")
         out.append(dict(
             row,
@@ -78,8 +78,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "page": "discover",
         "discover_tab": tab,
         "discover_tabs": _DISCOVER_TABS,
-        "creds_ok": runtime._creds_ok(),
-        "qobuz_ready": runtime._qobuz_ready(),
+        "creds_ok": qobuz_access._creds_ok(),
+        "qobuz_ready": qobuz_access._qobuz_ready(),
         "feed": _discover_empty_feed(),
         "artists": [],
         "albums": [],
@@ -91,14 +91,14 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "library_count": 0,
     }
     if not context["qobuz_ready"]:
-        return runtime._tr(request, "discover.html", context)
+        return rendering._tr(request, "discover.html", context)
 
     try:
-        token = runtime._get_token()
+        token = qobuz_access._get_token()
     except NoCredsError:
         context["creds_ok"] = False
         context["qobuz_ready"] = False
-        return runtime._tr(request, "discover.html", context)
+        return rendering._tr(request, "discover.html", context)
     loop = asyncio.get_running_loop()
     if tab == "genres":
         tags_view = await loop.run_in_executor(
@@ -138,8 +138,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         context["library_count"] = len(recommendations.library())
         context["poll_url"] = "/discover"
     if context["feed"]["built_at"]:
-        context["feed_age"] = runtime._format_age(context["feed"]["built_at"])
-    return runtime._tr(request, "discover.html", context)
+        context["feed_age"] = job_labels._format_age(context["feed"]["built_at"])
+    return rendering._tr(request, "discover.html", context)
 
 
 @router.get("/discover", response_class=HTMLResponse)
@@ -169,13 +169,13 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
     than shipped with every card on the page."""
     if not runtime._discover_available():
         return _discover_unavailable_response()
-    if not artist_id or not runtime._qobuz_ready():
+    if not artist_id or not qobuz_access._qobuz_ready():
         return HTMLResponse("")
     loop = asyncio.get_running_loop()
     try:
-        token = runtime._get_token()
+        token = qobuz_access._get_token()
     except NoCredsError:
-        return runtime._tr(request, "_discover_albums.html", {
+        return rendering._tr(request, "_discover_albums.html", {
             "albums": [],
             "decades": [],
             "error": (
@@ -204,7 +204,7 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
     except QobuzError:
         error = "Qobuz could not list this artist. Try again."
     albums = _discover_album_views(rows)
-    return runtime._tr(request, "_discover_albums.html", {
+    return rendering._tr(request, "_discover_albums.html", {
         "albums": albums,
         "decades": _discover_decades(albums),
         "error": error,

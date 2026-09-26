@@ -10,6 +10,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from qobuz_librarian import config as cfg
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
+    lifespan,
+    rendering,
     routes_api,
     routes_auth,
     routes_backup,
@@ -24,7 +26,7 @@ from qobuz_librarian.web import (
     routes_search,
     routes_settings,
     routes_upgrade,
-    runtime,
+    write_gate,
 )
 from qobuz_librarian.web.csrf import (
     CSRFMiddleware,
@@ -37,7 +39,7 @@ _log = logging.getLogger("qobuz_librarian")
 
 
 app = FastAPI(title="Qobuz Librarian", docs_url=None, redoc_url=None,
-              openapi_url=None, lifespan=runtime._lifespan)
+              openapi_url=None, lifespan=lifespan._lifespan)
 
 # AuthMiddleware is added first so it ends up innermost, so it runs after the
 # CSRF middleware, which keeps CSRF validation on the login/setup POSTs and
@@ -63,19 +65,19 @@ app.include_router(routes_settings.router)
 app.include_router(routes_search.router)
 app.include_router(routes_jobs.router)
 
-app.mount("/static", StaticFiles(directory=str(runtime.static_dir)), name="static")
+app.mount("/static", StaticFiles(directory=str(rendering.static_dir)), name="static")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Serve the app icon for the browser's automatic /favicon.ico probe."""
-    return FileResponse(runtime.static_dir / "icon-192.png", media_type="image/png")
+    return FileResponse(rendering.static_dir / "icon-192.png", media_type="image/png")
 
 
 # Bake the asset version into the worker so its cache name changes whenever
 # the served assets change.
-_SW_JS = (runtime.static_dir / "sw.js").read_text(encoding="utf-8").replace(
-    "__APP_VERSION__", runtime._ASSET_VERSION)
+_SW_JS = (rendering.static_dir / "sw.js").read_text(encoding="utf-8").replace(
+    "__APP_VERSION__", rendering._ASSET_VERSION)
 
 
 @app.get("/sw.js")
@@ -101,13 +103,13 @@ async def healthz_head():
 
 @app.get("/readyz")
 async def readyz():
-    status_code, report = runtime._readiness_report()
+    status_code, report = write_gate._readiness_report()
     return JSONResponse(report, status_code=status_code)
 
 
 @app.head("/readyz")
 async def readyz_head():
-    status_code, _report = runtime._readiness_report()
+    status_code, _report = write_gate._readiness_report()
     return Response(status_code=status_code)
 
 
@@ -117,7 +119,7 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
     ``{"detail": "Not Found"}``. API routes and every non-404 status keep the
     JSON shape callers expect."""
     if exc.status_code == 404 and not request.scope["path"].startswith("/api/"):
-        return runtime.render_error_page(
+        return rendering.render_error_page(
             request, 404, "Page not found",
             "That page doesn't exist. The link may have moved or been "
             "mistyped.")
@@ -132,7 +134,7 @@ async def _validation_exception_handler(request: Request,
     page instead of dumping framework validation JSON into the browser. API
     routes keep the JSON detail machine callers want."""
     if not request.scope["path"].startswith("/api/"):
-        return runtime.render_error_page(
+        return rendering.render_error_page(
             request, 400, "Bad request",
             "That address has an invalid value in it. Check the link and try "
             "again.")
@@ -163,12 +165,12 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
                   "(PUID and PGID in Docker) and can be read and written."
                   if isinstance(file_error, PermissionError) else
                   "Check the file and the folder it is in, then try again.")
-        return runtime.render_error_page(
+        return rendering.render_error_page(
             request, 500, "A file can't be used",
             f"Qobuz Librarian can't use {file_error.filename}: "
             f"{file_error.strerror or file_error}. {advice}")
     if not request.scope["path"].startswith("/api/"):
-        return runtime.render_error_page(
+        return rendering.render_error_page(
             request, 500, "Something went wrong",
             "An unexpected error happened on the server. Try again, or check "
             "the container logs if it keeps happening.")

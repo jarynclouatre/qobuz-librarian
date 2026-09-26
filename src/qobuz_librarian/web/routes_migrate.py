@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library import migrate as migrate_engine
-from qobuz_librarian.web import flows, runtime, scans
+from qobuz_librarian.web import flows, refusals, rendering, scans
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -48,7 +48,7 @@ def _migrate_checks(src, dest):
 @router.get("/migrate", response_class=HTMLResponse)
 async def migrate_page(request: Request):
     src, dest = cfg.MIGRATE_SRC, cfg.MIGRATE_DEST
-    return runtime._tr(request, "migrate.html", {
+    return rendering._tr(request, "migrate.html", {
         # No nav item of its own; it's reached from Settings, so Settings
         # stays lit. The paths surface through migrate_checks, not directly.
         "page": "settings",
@@ -60,7 +60,7 @@ async def migrate_page(request: Request):
 @router.post("/migrate")
 async def migrate_scan(request: Request):
     # No credential check: migration only reads and reorganises local files.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     src, dest = cfg.MIGRATE_SRC, cfg.MIGRATE_DEST
@@ -73,7 +73,7 @@ async def migrate_scan(request: Request):
     else:
         err = migrate_engine.validate_paths(Path(src), Path(dest), in_place=in_place)
     if err:
-        return runtime._tr(request, "migrate.html", {
+        return rendering._tr(request, "migrate.html", {
             "page": "settings",
             "configured": bool(src and dest), "error": err,
             "migrate_checks": _migrate_checks(src, dest)})

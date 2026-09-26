@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import library_scan_state
-from qobuz_librarian.web import flows, review_pages, runtime
+from qobuz_librarian.web import flows, job_labels, refusals, rendering, review_pages
 
 
 def _hidden_filter(request):
@@ -57,14 +57,14 @@ def _hidden_view(request, scope, *, page, restore_action, back_url,
         groups, pg, rows=lambda g: g["rows"])
     for g in page_groups:
         for a in g["albums"]:
-            a["when"], a["when_exact"] = runtime._when_label(_hidden_ts_epoch(a.get("ts")))
+            a["when"], a["when_exact"] = job_labels._when_label(_hidden_ts_epoch(a.get("ts")))
 
-    return runtime._tr(request, "hidden.html", {
+    return rendering._tr(request, "hidden.html", {
         "page": page, "scope": scope, "back_url": back_url,
         "restore_action": restore_action,
         "restore_all_action": restore_all_action,
         "restore_all_count": total_rows,
-        "notice": runtime._notice_text(request.query_params.get("notice")),
+        "notice": rendering._notice_text(request.query_params.get("notice")),
         "hidden_q": q,
         "hidden_total_artists": len(groups),
         "hidden_page": pg, "hidden_pages": n_pages,
@@ -88,7 +88,7 @@ async def _restore_hidden_all(request, scope, dest, what, what_plural):
     library scope has its own richer endpoint (it also lifts a retired
     review); this covers the Upgrade and Downsample scopes, whose reviews
     re-derive from saved state at read time."""
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     q, fingerprints = await _restore_hidden_filter(request, scope)
@@ -116,7 +116,7 @@ def _hidden_query(q, notice, p=None):
     """Back to the Dismissed page with its filter and page still on, so a
     restore does not silently widen the list the next click acts on or drop
     the user back at page 1."""
-    parts = "?notice=" + runtime._notice_key(notice)
+    parts = "?notice=" + rendering._notice_key(notice)
     if q:
         parts += "&q=" + urllib.parse.quote(q)
     if p:
@@ -127,7 +127,7 @@ def _hidden_query(q, notice, p=None):
 async def _restore_hidden(request, scope, redirect):
     # Mutates the hidden store, so it honours the run-lock like every other
     # state-changing POST: a restore mustn't race a CLI run or another job.
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     form = await request.form()

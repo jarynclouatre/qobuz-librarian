@@ -5,7 +5,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.web import hidden_pages, runtime, saved_reviews
+from qobuz_librarian.web import (
+    hidden_pages,
+    job_labels,
+    qobuz_access,
+    refusals,
+    rendering,
+    runtime,
+    saved_reviews,
+)
 
 router = APIRouter()
 
@@ -15,10 +23,10 @@ async def upgrade_page(request: Request):
     if not runtime._upgrade_available():
         return saved_reviews._upgrade_unavailable_response()
     state = saved_reviews._upgrade_state_summary()
-    return runtime._tr(request, "upgrade.html", {
-        "creds_ok": runtime._creds_ok(), "qobuz_ready": runtime._qobuz_ready(), "page": "upgrade",
+    return rendering._tr(request, "upgrade.html", {
+        "creds_ok": qobuz_access._creds_ok(), "qobuz_ready": qobuz_access._qobuz_ready(), "page": "upgrade",
         "upgrade_state": state,
-        "last_run": runtime._tool_last_run_age("library"),
+        "last_run": job_labels._tool_last_run_age("library"),
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_UPGRADE)})
 
 
@@ -49,7 +57,7 @@ async def upgrade_hidden_restore_all(request: Request):
 
 @router.post("/upgrade/review")
 async def upgrade_review(request: Request):
-    busy = runtime._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
     if not runtime._upgrade_available():
