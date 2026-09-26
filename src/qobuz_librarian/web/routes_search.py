@@ -277,6 +277,11 @@ async def lyric_retry(request: Request):
 
 _SEARCH_SNAPSHOT_RESULT_LIMIT = 150
 
+# Seconds Search waits for its Owned marks, which can need an album's exact
+# track list after the folder check, before it renders the results with the
+# marks it has.
+_OWNERSHIP_TIMEOUT = 20
+
 
 def _qobuz_quality_short_label(primary: dict | None,
                                fallback: dict | None = None) -> str:
@@ -311,6 +316,414 @@ def _filter_artist_only_albums(albums, query):
     return kept
 
 
+def _qobuz_url(query):
+    """Whether ``query`` is a qobuz.com URL, and the (kind, id) it names."""
+    try:
+        parts = urllib.parse.urlsplit(query)
+        netloc = parts.netloc.lower()
+        is_qobuz_url = (parts.scheme in ("http", "https")
+                        and (netloc == "qobuz.com"
+                             or netloc.endswith(".qobuz.com")))
+    except ValueError:
+        is_qobuz_url = False
+    parsed = cli.parse_qobuz_url(query) if is_qobuz_url else None
+    return is_qobuz_url, parsed
+
+
+async def _fetch_album(album_id, query, token):
+    """One album by id, as a one-row result."""
+    raw = []
+    error = None
+    try:
+        raw = [await runtime._qobuz_call(
+            qobuz_search.get_album, album_id, token)]
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+    except (AuthLost, QobuzUnavailable):
+        raise
+    except QobuzError:
+        error = "Couldn't fetch that album."
+    except Exception:
+        _log.exception(
+            "album fetch failed for %r", query)
+        error = "Couldn't fetch that album."
+    return raw, error
+
+
+async def _fetch_track(track_id, token):
+    """The track a pasted track URL names, as a one-track result."""
+    raw = []
+    error = None
+    try:
+        track = await runtime._qobuz_call(
+            qobuz_search.get_track, track_id, token)
+        raw = [track] if track else []
+        if not raw:
+            error = "Couldn't fetch that track. Check the URL."
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+    except (AuthLost, QobuzUnavailable):
+        raise
+    except QobuzError:
+        error = "Couldn't fetch that track. Check the URL."
+    return raw, error
+
+
+async def _fetch_artist_albums(artist_id, artist_name, query, token):
+    """An artist's albums, and the header that names the artist."""
+    raw = []
+    selected_artist = None
+    error = None
+    try:
+        raw, artist_total = await runtime._qobuz_call(
+            qobuz_search.get_artist_albums, artist_id, token,
+            limit=cfg.ARTIST_CATALOG_LIMIT)
+        selected_artist = {
+            "id": artist_id,
+            "name": artist_name or query,
+            "total": artist_total,
+            "shown": len(raw),
+        }
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+    return raw, selected_artist, error
+
+
+async def _search_artists(query, token):
+    """Artists whose name matches ``query``."""
+    artist_results = []
+    error = None
+    try:
+        artist_raw = await runtime._qobuz_call(
+            qobuz_search.search_artists, query, token,
+            limit=cfg.ARTIST_LOOKUP_LIMIT)
+        for a in artist_raw:
+            if not a.get("id"):
+                continue
+            img = a.get("image") or {}
+            cover = ""
+            if isinstance(img, dict):
+                cover = img.get("small") or img.get("thumbnail") or ""
+            albums_count = a.get("albums_count")
+            artist_results.append({
+                "id": a.get("id"),
+                "name": a.get("name") or "?",
+                "cover": cover if str(cover).startswith(
+                    "https://static.qobuz.com/") else "",
+                "albums_count": (
+                    albums_count
+                    if isinstance(albums_count, int)
+                    and albums_count > 0 else None),
+            })
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+    return artist_results, error
+
+
+async def _search_catalog(kind, query, token):
+    """Albums or tracks matching ``query``, without the albums that match it
+    only by artist name."""
+    raw = []
+    artist_only_count = 0
+    error = None
+    _search_fn = qobuz_search.search_tracks if kind == "track" else qobuz_search.search_albums
+    try:
+        raw = await runtime._qobuz_call(
+            _search_fn, query, token, limit=cfg.SEARCH_LIMIT)
+    except asyncio.TimeoutError:
+        error = "Timed out reaching the Qobuz API."
+
+    if kind == "album":
+        kept = _filter_artist_only_albums(raw, query)
+        artist_only_count = len(raw) - len(kept)
+        raw = kept
+    return raw, artist_only_count, error
+
+
+async def _track_results(raw, query, token, queued_tracks):
+    """Rows for a track search, each marked owned when that track is on
+    disk."""
+    results = []
+    loop = asyncio.get_running_loop()
+    _track_raws = []
+    for t in raw:
+        alb = t.get("album") or {}
+        if not t.get("id") or not alb.get("id"):
+            continue
+        _tbd, _tsr = runtime._qobuz_quality_bits_rate(t, alb)
+        _timg = alb.get("image") or {}
+        _tcover = _timg.get("small") or _timg.get("thumbnail") or ""
+        _perf = (t.get("performer") or {}).get("name")
+        results.append({
+            "track_id":    t.get("id"),
+            "album_id":    alb.get("id"),
+            "title":       t.get("title") or "?",
+            "version":     t.get("version") or alb.get("version") or "",
+            "artist":      (alb.get("artist") or {}).get("name") or _perf or "?",
+            "artist_id":   (alb.get("artist") or {}).get("id"),
+            "album_title": alb.get("title") or "?",
+            "year":        catalog.album_year(alb) or "?",
+            "track_n":     t.get("track_number") or "?",
+            "total":       alb.get("tracks_count") or "?",
+            "quality":     _qobuz_quality_short_label(t, alb),
+            "hires":       _tbd >= 24,
+            "lossy":       _tbd == 0,
+            "bit_depth":   _tbd,
+            "sample_rate": _tsr,
+            "cover":       _tcover if _tcover.startswith(
+                "https://static.qobuz.com/") else "",
+            "owned":       False,
+            "queued":      (str(alb.get("id")), str(t.get("id")))
+                           in queued_tracks,
+            "scanning":    False,
+        })
+        _track_raws.append(t)
+
+    if _track_raws:
+        def _annotate_owned_tracks():
+            albums = {}
+            for res, track in zip(results, _track_raws):
+                album = track.get("album") or {}
+                album_id = str(album.get("id") or "")
+                group = albums.setdefault(
+                    album_id, {"album": album, "results": []})
+                group["results"].append(res)
+
+            for album_id, group in albums.items():
+                try:
+                    folder = catalog.find_album_dir_filesystem(group["album"])
+                    if folder is None:
+                        continue
+                    exact_album = api_client.call_within(
+                        cfg.WEB_FETCH_TIMEOUT,
+                        qobuz_search.get_album,
+                        album_id,
+                        token,
+                    )
+                    qobuz_tracks = (
+                        (exact_album.get("tracks") or {}).get("items")
+                        or []
+                    )
+                    if not qobuz_tracks:
+                        continue
+                    existing, _ = catalog.find_existing_tracks(
+                        exact_album, album_dir=folder)
+                    if not existing:
+                        continue
+                    _missing, present = catalog.compute_missing(
+                        qobuz_tracks, existing)
+                    present_ids = {
+                        str(track.get("id"))
+                        for track in present if track.get("id")
+                    }
+                    for res in group["results"]:
+                        res["owned"] = str(res["track_id"]) in present_ids
+                except Exception:
+                    _log.exception(
+                        "track ownership annotation failed for album %s", album_id)
+
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _annotate_owned_tracks),
+                timeout=_OWNERSHIP_TIMEOUT)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "track ownership annotation timed out (%ss) for %r; "
+                "results shown without Owned marks",
+                _OWNERSHIP_TIMEOUT,
+                query,
+            )
+        except Exception:
+            _log.exception(
+                "track ownership annotation failed for %r", query)
+    return results
+
+
+async def _album_results(raw, query, token, queued_albums, scanning_albums):
+    """Rows for an album list, marked owned, part-owned or missing, and
+    grouped one row per record."""
+    results = []
+    album_groups = []
+    loop = asyncio.get_running_loop()
+    _album_raws = []
+    for a in raw:
+        if not a.get("id"):
+            continue
+        _bd, _sr = runtime._qobuz_quality_bits_rate(a)
+        _img = a.get("image") or {}
+        _cover = _img.get("small") or _img.get("thumbnail") or ""
+        _qual = _qobuz_quality_short_label(a)
+        results.append({
+            "id":      a.get("id"),
+            "title":   a.get("title") or "?",
+            "artist":  (a.get("artist") or {}).get("name") or "?",
+            "artist_id": (a.get("artist") or {}).get("id"),
+            "year":    catalog.album_year(a) or "?",
+            "tracks":  a.get("tracks_count") or "?",
+            "quality": _qual,
+            "hires":   _bd >= 24,
+            "lossy":   _bd == 0,
+            "bit_depth": _bd,
+            "sample_rate": _sr,
+            "cover":   _cover if _cover.startswith(
+                "https://static.qobuz.com/") else "",
+            "owned":   False,
+            "ownership_unknown": True,
+            "queued":  str(a.get("id")) in queued_albums,
+            "scanning": str(a.get("id")) in scanning_albums,
+        })
+        _album_raws.append(a)
+
+    # Flag results already in the library so search never offers a
+    # plain Download on an album you own.
+    if _album_raws:
+        def _annotate_owned():
+            # Same filesystem resolver the download and scan paths use.
+            # Owned means every track is present; a part-finished
+            # album keeps its checkbox and its download button.
+            annotations = []
+            for alb in _album_raws:
+                res = {"ownership_unknown": True}
+                annotations.append(res)
+                try:
+                    folder = catalog.find_album_dir_filesystem(alb)
+                    if folder is None:
+                        res["ownership_unknown"] = False
+                        continue
+                    exact_album = api_client.call_within(
+                        cfg.WEB_FETCH_TIMEOUT,
+                        qobuz_search.get_album,
+                        alb["id"],
+                        token,
+                    )
+                    qobuz_tracks = (
+                        (exact_album.get("tracks") or {}).get("items")
+                        or []
+                    )
+                    if not runtime._album_tracks_complete(exact_album):
+                        continue
+                    existing, _ = catalog.find_existing_tracks(
+                        exact_album, album_dir=folder)
+                    if not existing:
+                        res["ownership_unknown"] = False
+                        continue
+                    missing, present = catalog.compute_missing(
+                        qobuz_tracks, existing)
+                    res["disk_year"] = catalog._dir_year(folder.name)
+                    if missing:
+                        res["partial"] = True
+                        res["have_tracks"] = len(present)
+                        res["want_tracks"] = len(qobuz_tracks)
+                        res["replaces_existing"] = download.downloads_whole_album(
+                            len(present), len(missing), len(qobuz_tracks))
+                    else:
+                        res["owned"] = True
+                    res["ownership_unknown"] = False
+                except Exception:
+                    _log.exception(
+                        "ownership annotation failed for album %s", alb.get("id"))
+            return annotations
+        try:
+            annotations = await asyncio.wait_for(
+                loop.run_in_executor(None, _annotate_owned),
+                timeout=_OWNERSHIP_TIMEOUT)
+            for res, annotation in zip(results, annotations):
+                res.update(annotation)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "ownership annotation timed out (%ss) for %r; results "
+                "shown without Owned marks", _OWNERSHIP_TIMEOUT, query)
+        except Exception:
+            _log.exception(
+                "ownership annotation failed for %r", query)
+
+    # Collapse the flat result list into one row per album: a
+    # remaster, deluxe, and box set of the same record group together
+    # with the alternates tucked under the main row, instead of the
+    # same album scattering down the page.
+    if _album_raws:
+        by_key = {}
+        for res, alb in zip(results, _album_raws):
+            ver = alb.get("version") or ""
+            identity_title = res["title"]
+            if ver:
+                identity_title += f" ({ver})"
+            fingerprint = hidden_mod.album_fingerprint(
+                res["artist"], tags.strip_leading_article(identity_title)
+            )
+            # Unknown identity must fail open into its own result.
+            # Sharing an empty fuzzy key hides unrelated releases.
+            key = (("album", fingerprint) if fingerprint else
+                   ("release", str(res["id"])))
+            g = by_key.get(key)
+            if g is None:
+                g = dict(res, editions=[])
+                by_key[key] = g
+                album_groups.append(g)
+            # A complete edition outranks a part-finished one: if any
+            # edition of this record is whole on disk, search must not
+            # offer a plain Download for the record at all.
+            g["owned"] = g["owned"] or res["owned"]
+            if res.get("disk_year"):
+                g["disk_year"] = res["disk_year"]
+            # Each edition keeps its own title and its own ownership
+            # verdict, so its row and download confirmation name that
+            # pressing and count its own tracks.
+            g["editions"].append({
+                "id": res["id"],
+                "title": res["title"],
+                "artist": res["artist"],
+                "artist_id": res["artist_id"],
+                "version": (alb.get("version") or "").strip(),
+                "year": res["year"], "tracks": res["tracks"],
+                "quality": res["quality"], "hires": res["hires"],
+                "lossy": res["lossy"], "bit_depth": res["bit_depth"],
+                "sample_rate": res["sample_rate"],
+                "cover": res["cover"],
+                "owned": bool(res["owned"]),
+                "queued": bool(res["queued"]),
+                "scanning": bool(res["scanning"]),
+                "partial": bool(res.get("partial")),
+                "have_tracks": res.get("have_tracks"),
+                "want_tracks": res.get("want_tracks"),
+                "replaces_existing": bool(res.get("replaces_existing")),
+                "ownership_unknown": res["ownership_unknown"],
+            })
+        for g in album_groups:
+            eds = g["editions"]
+            # The row shows exactly one edition, so it has to be one the
+            # ownership check actually ran against: a complete copy
+            # first (that is the one you own, and the rest read as
+            # "other versions"), then a part-finished one, so the
+            # "N of M" beside it counts the same pressing the Download
+            # button would fetch.
+            rep_i = 0
+            owned = [i for i, e in enumerate(eds) if e["owned"]]
+            part = [i for i, e in enumerate(eds) if e["partial"]]
+            if owned:
+                rep_i = owned[0]
+                if g.get("disk_year"):
+                    for i in owned:
+                        if str(eds[i]["year"]) == str(g["disk_year"]):
+                            rep_i = i
+                            break
+            elif part:
+                rep_i = part[0]
+            if rep_i:
+                eds.insert(0, eds.pop(rep_i))
+            rep = eds[0]
+            for f in ("id", "title", "artist", "artist_id", "year", "tracks",
+                      "quality", "hires", "lossy", "bit_depth",
+                      "sample_rate", "cover", "version", "queued",
+                      "scanning", "replaces_existing", "ownership_unknown"):
+                g[f] = rep[f]
+            g["partial"] = rep["partial"] and not g["owned"]
+            g["have_tracks"] = rep["have_tracks"]
+            g["want_tracks"] = rep["want_tracks"]
+            g["others"] = eds[1:]
+    return results, album_groups
+
+
 @router.post("/search", response_class=HTMLResponse)
 async def do_search(request: Request, q: str = Form("", max_length=500),
                     kind: str = Form("album"),
@@ -334,52 +747,17 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     if query or (kind == "album" and album_id):
         try:
             token = runtime._get_token()
-
-            try:
-                _split = urllib.parse.urlsplit(query)
-                netloc = _split.netloc.lower()
-                is_qobuz_url = (_split.scheme in ("http", "https")
-                                and (netloc == "qobuz.com"
-                                     or netloc.endswith(".qobuz.com")))
-            except ValueError:
-                is_qobuz_url = False
-            parsed = cli.parse_qobuz_url(query) if is_qobuz_url else None
+            is_qobuz_url, parsed = _qobuz_url(query)
             raw = []
-            loop = asyncio.get_running_loop()
             if kind == "album" and (album_id or (parsed and parsed[0] == "album")):
-                try:
-                    raw = [await runtime._qobuz_call(
-                        qobuz_search.get_album, album_id or parsed[1], token)]
-                except asyncio.TimeoutError:
-                    error = "Timed out reaching the Qobuz API."
-                except (AuthLost, QobuzUnavailable):
-                    raise
-                except QobuzError:
-                    error = "Couldn't fetch that album."
-                except Exception:
-                    _log.exception(
-                        "album fetch failed for %r", query)
-                    error = "Couldn't fetch that album."
+                raw, error = await _fetch_album(album_id or parsed[1], query, token)
             elif parsed and parsed[0] == "album" and kind == "track":
                 error = ("That's an album URL. Switch to Album to download it, "
                          "or paste a single track to download one track.")
             elif parsed and parsed[0] == "album" and kind == "artist":
                 error = "That's an album URL. Switch to Album to download it."
             elif parsed and parsed[0] == "track" and kind == "track":
-                # Tracks mode: resolve the pasted track URL to that one track;
-                # the track-results loop below renders it for a one-track download.
-                try:
-                    _t = await runtime._qobuz_call(
-                        qobuz_search.get_track, parsed[1], token)
-                    raw = [_t] if _t else []
-                    if not raw:
-                        error = "Couldn't fetch that track. Check the URL."
-                except asyncio.TimeoutError:
-                    error = "Timed out reaching the Qobuz API."
-                except (AuthLost, QobuzUnavailable):
-                    raise
-                except QobuzError:
-                    error = "Couldn't fetch that track. Check the URL."
+                raw, error = await _fetch_track(parsed[1], token)
             elif parsed and parsed[0] == "track":
                 # Album mode: a track URL points the user at the Track toggle.
                 error = ("That's a track URL. Switch to Track to download one "
@@ -393,330 +771,21 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     error = ("Only Qobuz album and track URLs are supported. "
                              "Search for an artist by name instead.")
             elif kind == "artist" and artist_id:
-                try:
-                    raw, artist_total = await runtime._qobuz_call(
-                        qobuz_search.get_artist_albums, artist_id, token,
-                        limit=cfg.ARTIST_CATALOG_LIMIT)
-                    selected_artist = {
-                        "id": artist_id,
-                        "name": artist_name or query,
-                        "total": artist_total,
-                        "shown": len(raw),
-                    }
-                except asyncio.TimeoutError:
-                    error = "Timed out reaching the Qobuz API."
+                raw, selected_artist, error = await _fetch_artist_albums(
+                    artist_id, artist_name, query, token)
             elif kind == "artist":
-                try:
-                    artist_raw = await runtime._qobuz_call(
-                        qobuz_search.search_artists, query, token,
-                        limit=cfg.ARTIST_LOOKUP_LIMIT)
-                    for a in artist_raw:
-                        if not a.get("id"):
-                            continue
-                        img = a.get("image") or {}
-                        cover = ""
-                        if isinstance(img, dict):
-                            cover = img.get("small") or img.get("thumbnail") or ""
-                        albums_count = a.get("albums_count")
-                        artist_results.append({
-                            "id": a.get("id"),
-                            "name": a.get("name") or "?",
-                            "cover": cover if str(cover).startswith(
-                                "https://static.qobuz.com/") else "",
-                            "albums_count": (
-                                albums_count
-                                if isinstance(albums_count, int)
-                                and albums_count > 0 else None),
-                        })
-                except asyncio.TimeoutError:
-                    error = "Timed out reaching the Qobuz API."
+                artist_results, error = await _search_artists(query, token)
             else:
-                _search_fn = qobuz_search.search_tracks if kind == "track" else qobuz_search.search_albums
-                try:
-                    raw = await runtime._qobuz_call(
-                        _search_fn, query, token, limit=cfg.SEARCH_LIMIT)
-                except asyncio.TimeoutError:
-                    error = "Timed out reaching the Qobuz API."
-
-                if kind == "album":
-                    kept = _filter_artist_only_albums(raw, query)
-                    artist_only_count = len(raw) - len(kept)
-                    raw = kept
+                raw, artist_only_count, error = await _search_catalog(
+                    kind, query, token)
 
             queued_albums, queued_tracks, scanning_albums = (
                 runtime._active_search_downloads())
-            _track_raws = []
-            for t in (raw if kind == "track" else []):
-                alb = t.get("album") or {}
-                if not t.get("id") or not alb.get("id"):
-                    continue
-                _tbd, _tsr = runtime._qobuz_quality_bits_rate(t, alb)
-                _timg = alb.get("image") or {}
-                _tcover = _timg.get("small") or _timg.get("thumbnail") or ""
-                _perf = (t.get("performer") or {}).get("name")
-                results.append({
-                    "track_id":    t.get("id"),
-                    "album_id":    alb.get("id"),
-                    "title":       t.get("title") or "?",
-                    "version":     t.get("version") or alb.get("version") or "",
-                    "artist":      (alb.get("artist") or {}).get("name") or _perf or "?",
-                    "artist_id":   (alb.get("artist") or {}).get("id"),
-                    "album_title": alb.get("title") or "?",
-                    "year":        catalog.album_year(alb) or "?",
-                    "track_n":     t.get("track_number") or "?",
-                    "total":       alb.get("tracks_count") or "?",
-                    "quality":     _qobuz_quality_short_label(t, alb),
-                    "hires":       _tbd >= 24,
-                    "lossy":       _tbd == 0,
-                    "bit_depth":   _tbd,
-                    "sample_rate": _tsr,
-                    "cover":       _tcover if _tcover.startswith(
-                        "https://static.qobuz.com/") else "",
-                    "owned":       False,
-                    "queued":      (str(alb.get("id")), str(t.get("id")))
-                                   in queued_tracks,
-                    "scanning":    False,
-                })
-                _track_raws.append(t)
-
-            if _track_raws:
-                def _annotate_owned_tracks():
-                    albums = {}
-                    for res, track in zip(results, _track_raws):
-                        album = track.get("album") or {}
-                        album_id = str(album.get("id") or "")
-                        group = albums.setdefault(
-                            album_id, {"album": album, "results": []})
-                        group["results"].append(res)
-
-                    for album_id, group in albums.items():
-                        try:
-                            folder = catalog.find_album_dir_filesystem(group["album"])
-                            if folder is None:
-                                continue
-                            exact_album = api_client.call_within(
-                                cfg.WEB_FETCH_TIMEOUT,
-                                qobuz_search.get_album,
-                                album_id,
-                                token,
-                            )
-                            qobuz_tracks = (
-                                (exact_album.get("tracks") or {}).get("items")
-                                or []
-                            )
-                            if not qobuz_tracks:
-                                continue
-                            existing, _ = catalog.find_existing_tracks(
-                                exact_album, album_dir=folder)
-                            if not existing:
-                                continue
-                            _missing, present = catalog.compute_missing(
-                                qobuz_tracks, existing)
-                            present_ids = {
-                                str(track.get("id"))
-                                for track in present if track.get("id")
-                            }
-                            for res in group["results"]:
-                                res["owned"] = str(res["track_id"]) in present_ids
-                        except Exception:
-                            _log.exception(
-                                "track ownership annotation failed for album %s", album_id)
-
-                try:
-                    _own_timeout = 20
-                    await asyncio.wait_for(
-                        loop.run_in_executor(None, _annotate_owned_tracks),
-                        timeout=_own_timeout)
-                except asyncio.TimeoutError:
-                    _log.warning(
-                        "track ownership annotation timed out (%ss) for %r; "
-                        "results shown without Owned marks",
-                        _own_timeout,
-                        query,
-                    )
-                except Exception:
-                    _log.exception(
-                        "track ownership annotation failed for %r", query)
-            _album_raws = []
-            for a in (raw if kind == "album" or selected_artist else []):
-                if not a.get("id"):
-                    continue
-                _bd, _sr = runtime._qobuz_quality_bits_rate(a)
-                _img = a.get("image") or {}
-                _cover = _img.get("small") or _img.get("thumbnail") or ""
-                _qual = _qobuz_quality_short_label(a)
-                results.append({
-                    "id":      a.get("id"),
-                    "title":   a.get("title") or "?",
-                    "artist":  (a.get("artist") or {}).get("name") or "?",
-                    "artist_id": (a.get("artist") or {}).get("id"),
-                    "year":    catalog.album_year(a) or "?",
-                    "tracks":  a.get("tracks_count") or "?",
-                    "quality": _qual,
-                    "hires":   _bd >= 24,
-                    "lossy":   _bd == 0,
-                    "bit_depth": _bd,
-                    "sample_rate": _sr,
-                    "cover":   _cover if _cover.startswith(
-                        "https://static.qobuz.com/") else "",
-                    "owned":   False,
-                    "ownership_unknown": True,
-                    "queued":  str(a.get("id")) in queued_albums,
-                    "scanning": str(a.get("id")) in scanning_albums,
-                })
-                _album_raws.append(a)
-
-            # Flag results already in the library so search never offers a
-            # plain Download on an album you own.
-            if _album_raws:
-                def _annotate_owned():
-                    # Same filesystem resolver the download and scan paths use.
-                    # Owned means every track is present; a part-finished
-                    # album keeps its checkbox and its download button.
-                    annotations = []
-                    for alb in _album_raws:
-                        res = {"ownership_unknown": True}
-                        annotations.append(res)
-                        try:
-                            folder = catalog.find_album_dir_filesystem(alb)
-                            if folder is None:
-                                res["ownership_unknown"] = False
-                                continue
-                            exact_album = api_client.call_within(
-                                cfg.WEB_FETCH_TIMEOUT,
-                                qobuz_search.get_album,
-                                alb["id"],
-                                token,
-                            )
-                            qobuz_tracks = (
-                                (exact_album.get("tracks") or {}).get("items")
-                                or []
-                            )
-                            if not runtime._album_tracks_complete(exact_album):
-                                continue
-                            existing, _ = catalog.find_existing_tracks(
-                                exact_album, album_dir=folder)
-                            if not existing:
-                                res["ownership_unknown"] = False
-                                continue
-                            missing, present = catalog.compute_missing(
-                                qobuz_tracks, existing)
-                            res["disk_year"] = catalog._dir_year(folder.name)
-                            if missing:
-                                res["partial"] = True
-                                res["have_tracks"] = len(present)
-                                res["want_tracks"] = len(qobuz_tracks)
-                                res["replaces_existing"] = download.downloads_whole_album(
-                                    len(present), len(missing), len(qobuz_tracks))
-                            else:
-                                res["owned"] = True
-                            res["ownership_unknown"] = False
-                        except Exception:
-                            _log.exception(
-                                "ownership annotation failed for album %s", alb.get("id"))
-                    return annotations
-                try:
-                    # Exact ownership may need the selected edition's track
-                    # list after the cheap folder check. Keep the annotation
-                    # bounded; search results are still useful without it.
-                    _own_timeout = 20
-                    annotations = await asyncio.wait_for(
-                        loop.run_in_executor(None, _annotate_owned),
-                        timeout=_own_timeout)
-                    for res, annotation in zip(results, annotations):
-                        res.update(annotation)
-                except asyncio.TimeoutError:
-                    _log.warning(
-                        "ownership annotation timed out (%ss) for %r; results "
-                        "shown without Owned marks", _own_timeout, query)
-                except Exception:
-                    _log.exception(
-                        "ownership annotation failed for %r", query)
-
-            # Collapse the flat result list into one row per album: a
-            # remaster, deluxe, and box set of the same record group together
-            # with the alternates tucked under the main row, instead of the
-            # same album scattering down the page.
-            if _album_raws:
-                by_key = {}
-                for res, alb in zip(results, _album_raws):
-                    ver = alb.get("version") or ""
-                    identity_title = res["title"]
-                    if ver:
-                        identity_title += f" ({ver})"
-                    fingerprint = hidden_mod.album_fingerprint(
-                        res["artist"], tags.strip_leading_article(identity_title)
-                    )
-                    # Unknown identity must fail open into its own result.
-                    # Sharing an empty fuzzy key hides unrelated releases.
-                    key = (("album", fingerprint) if fingerprint else
-                           ("release", str(res["id"])))
-                    g = by_key.get(key)
-                    if g is None:
-                        g = dict(res, editions=[])
-                        by_key[key] = g
-                        album_groups.append(g)
-                    # A complete edition outranks a part-finished one: if any
-                    # edition of this record is whole on disk, search must not
-                    # offer a plain Download for the record at all.
-                    g["owned"] = g["owned"] or res["owned"]
-                    if res.get("disk_year"):
-                        g["disk_year"] = res["disk_year"]
-                    # Each edition keeps its own title and its own ownership
-                    # verdict, so its row and download confirmation name that
-                    # pressing and count its own tracks.
-                    g["editions"].append({
-                        "id": res["id"],
-                        "title": res["title"],
-                        "artist": res["artist"],
-                        "artist_id": res["artist_id"],
-                        "version": (alb.get("version") or "").strip(),
-                        "year": res["year"], "tracks": res["tracks"],
-                        "quality": res["quality"], "hires": res["hires"],
-                        "lossy": res["lossy"], "bit_depth": res["bit_depth"],
-                        "sample_rate": res["sample_rate"],
-                        "cover": res["cover"],
-                        "owned": bool(res["owned"]),
-                        "queued": bool(res["queued"]),
-                        "scanning": bool(res["scanning"]),
-                        "partial": bool(res.get("partial")),
-                        "have_tracks": res.get("have_tracks"),
-                        "want_tracks": res.get("want_tracks"),
-                        "replaces_existing": bool(res.get("replaces_existing")),
-                        "ownership_unknown": res["ownership_unknown"],
-                    })
-                for g in album_groups:
-                    eds = g["editions"]
-                    # The row shows exactly one edition, so it has to be one the
-                    # ownership check actually ran against: a complete copy
-                    # first (that is the one you own, and the rest read as
-                    # "other versions"), then a part-finished one, so the
-                    # "N of M" beside it counts the same pressing the Download
-                    # button would fetch.
-                    rep_i = 0
-                    owned = [i for i, e in enumerate(eds) if e["owned"]]
-                    part = [i for i, e in enumerate(eds) if e["partial"]]
-                    if owned:
-                        rep_i = owned[0]
-                        if g.get("disk_year"):
-                            for i in owned:
-                                if str(eds[i]["year"]) == str(g["disk_year"]):
-                                    rep_i = i
-                                    break
-                    elif part:
-                        rep_i = part[0]
-                    if rep_i:
-                        eds.insert(0, eds.pop(rep_i))
-                    rep = eds[0]
-                    for f in ("id", "title", "artist", "artist_id", "year", "tracks",
-                              "quality", "hires", "lossy", "bit_depth",
-                              "sample_rate", "cover", "version", "queued",
-                              "scanning", "replaces_existing", "ownership_unknown"):
-                        g[f] = rep[f]
-                    g["partial"] = rep["partial"] and not g["owned"]
-                    g["have_tracks"] = rep["have_tracks"]
-                    g["want_tracks"] = rep["want_tracks"]
-                    g["others"] = eds[1:]
+            if kind == "track":
+                results = await _track_results(raw, query, token, queued_tracks)
+            elif kind == "album" or selected_artist:
+                results, album_groups = await _album_results(
+                    raw, query, token, queued_albums, scanning_albums)
         except NoCredsError:
             error = "No Qobuz credentials set. Visit Settings."
         except AuthLost:
