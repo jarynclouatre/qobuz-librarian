@@ -62,6 +62,12 @@ _warned_write_failure = False
 
 FINISHED_HISTORY_KEEP = 1000
 
+# An approved run of these kinds holds its picks until it starts, so a cancel
+# or a restart before then puts them back into the review.
+REVIEW_PICK_KINDS = ("library", "new_releases", "upgrade", "downsample",
+                     "repair", "collection_restore")
+_REVIEW_PICK_MARKS = ",".join("?" for _ in REVIEW_PICK_KINDS)
+
 
 @dataclass(frozen=True)
 class RecoveryResolutionPlan:
@@ -2000,12 +2006,13 @@ def load_all() -> list[dict]:
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 # A finished job never reopens its rows, so its text is not read back.
                 "CASE WHEN status='awaiting_review' OR (status='pending' "
-                "AND execute_kind IN ('library','upgrade','downsample','repair')) "
+                f"AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
                 "THEN candidates END, "
                 "error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
                 "recoveries, log_lines, quality_shortfall, edition "
-                "FROM jobs ORDER BY created_at"
+                "FROM jobs ORDER BY created_at",
+                REVIEW_PICK_KINDS,
             ).fetchall()
         except sqlite3.Error as e:
             _log.info("couldn't read jobs.db on startup (%s); starting fresh.", e)

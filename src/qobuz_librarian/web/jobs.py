@@ -266,6 +266,15 @@ RUN_TITLES = {
     "downsample": "Downsample run",
     "repair": "Repair",
 }
+# The name a run takes back on returning to review when its own review's
+# title was not saved with it.
+REVIEW_TITLES = {
+    "library": "Library scan",
+    "new_releases": "New releases",
+    "upgrade": "Albums to upgrade",
+    "downsample": "Albums to downsample",
+    "repair": "Repair scan",
+}
 
 
 def _new_id() -> str:
@@ -1765,10 +1774,9 @@ def _merge_key(candidate):
             (candidate.get("title") or "").lower())
 
 
-def _restore_untouched_review(
-    j: Job, parked=None, *, status=JobStatus.RUNNING,
-) -> bool:
-    if j.execute_kind in ("library", "upgrade", "downsample", "repair"):
+def _restore_untouched_review(j: Job, *, status=JobStatus.RUNNING) -> bool:
+    parked = None
+    if j.execute_kind in job_persistence.REVIEW_PICK_KINDS:
         parked = next((other for other in registry.awaiting_review()
                        if other is not j and other.execute_kind == j.execute_kind),
                       None)
@@ -1784,7 +1792,8 @@ def _restore_untouched_review(
                 job_locks.enter_context(item._lock)
             if j.status != status or j.cancel_requested:
                 return False
-            previous = (j.status, j.finished_at, j.error, j.candidates, j._cand_seq)
+            previous = (j.status, j.finished_at, j.error, j.candidates, j._cand_seq,
+                        j.title)
             should_merge = bool(
                 parked is not None
                 and parked.status == JobStatus.AWAITING_REVIEW
@@ -1813,6 +1822,10 @@ def _restore_untouched_review(
             j.status = JobStatus.AWAITING_REVIEW
             j.finished_at = None
             j.error = None
+            review_title = (j.execute_args or {}).get("_review_title")
+            if not review_title and j.title == RUN_TITLES.get(j.execute_kind):
+                review_title = REVIEW_TITLES.get(j.execute_kind)
+            j.title = review_title or j.title
             saved = (
                 job_persistence.restore_split_review(j, parked)
                 if should_merge
@@ -1820,7 +1833,7 @@ def _restore_untouched_review(
             )
             if not saved:
                 (j.status, j.finished_at, j.error,
-                 j.candidates, j._cand_seq) = previous
+                 j.candidates, j._cand_seq, j.title) = previous
                 return False
             if should_merge:
                 registry.discard_merged_review(parked)
@@ -1878,6 +1891,8 @@ def approve(
             "status": job.status,
             "finished_at": job.finished_at,
             "started_at": job.started_at,
+            "title": job.title,
+            "execute_args": job.execute_args,
         }
         previous_candidates = job.candidates
         previous_selected = [
@@ -1900,6 +1915,10 @@ def approve(
         # while every other tab, and a reload, showed the right one.
         run_title = RUN_TITLES.get(getattr(job, "execute_kind", ""))
         if run_title:
+            # Saved with the run so a cancel or a restart that puts the picks
+            # back can give the review its own name again.
+            job.execute_args = {**(job.execute_args or {}),
+                                "_review_title": job.title}
             job.title = run_title
         # Restart the elapsed clock at approve so the execute phase (downloading /
         # repairing) times itself; otherwise it keeps counting from the scan
@@ -1967,7 +1986,7 @@ def approve(
                                           CandidateStale,
                                           SystemExit))):
                 raise
-            if not _restore_untouched_review(j, parked):
+            if not _restore_untouched_review(j):
                 raise RuntimeError(
                     "The review could not be saved back to the data folder."
                 ) from e
@@ -2152,7 +2171,7 @@ def restore_jobs(
             _restore_log_lines(job)
         pending_review = (
             status == JobStatus.PENDING
-            and job.execute_kind in ("library", "upgrade", "downsample", "repair")
+            and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
             and bool(job.candidates or row.get("candidates_unreadable"))
         )
         if row.get("single_unreadable"):
@@ -2485,7 +2504,7 @@ def request_cancel(job: Job) -> bool:
         if review_canceled is None:
             return False
     if (job.status == JobStatus.PENDING
-            and job.execute_kind in ("library", "upgrade", "downsample", "repair")
+            and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
             and job.candidates):
         if _restore_untouched_review(job, status=JobStatus.PENDING):
             job.notify_review_changed()

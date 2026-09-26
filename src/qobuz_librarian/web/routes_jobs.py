@@ -2132,7 +2132,12 @@ async def job_cancel(
             status_code=303,
         )
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-        return RedirectResponse(url=job_labels._job_nav_destination(job)[1], status_code=303)
+        # Back in its review, which for these two is the job page itself.
+        if job.execute_kind in ("new_releases", "collection_restore"):
+            dest = f"/jobs/{job_id}"
+        else:
+            dest = job_labels._job_nav_destination(job)[1]
+        return RedirectResponse(url=dest, status_code=303)
     if return_to_queue:
         return RedirectResponse(url="/queue", status_code=303)
     if job.execute_kind in job_labels._JOB_NAV_SURFACES:

@@ -3,6 +3,8 @@
 import queue
 import sqlite3
 
+import pytest
+
 from qobuz_librarian import config as cfg
 from qobuz_librarian.web import job_persistence
 from qobuz_librarian.web import jobs as jm
@@ -74,7 +76,9 @@ def test_failed_job_commit_cannot_ride_a_later_successful_commit(
     assert accepted.id in saved_ids
 
 
-def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_path):
+@pytest.mark.parametrize("kind", ["library", "new_releases"])
+def test_cancel_approved_review_preserves_picks_after_reload(
+        monkeypatch, tmp_path, kind):
     from qobuz_librarian.web import job_runs, routes_jobs
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
@@ -92,7 +96,7 @@ def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_pa
         job.add_candidate("album", "Left parked", payload={"album_id": "parked"},
                           selected=False)
 
-    job = jm.Job(title="Library scan", execute_kind="library")
+    job = jm.Job(title="Library scan", execute_kind=kind)
     assert jm.submit_scan(job, scan, lambda *_: None) is job
     queued, run = work.get_nowait()
     run(queued)
@@ -110,7 +114,7 @@ def test_cancel_approved_review_preserves_picks_after_reload(monkeypatch, tmp_pa
     assert [(c["payload"]["album_id"], c["selected"])
             for c in job.candidates] == expected
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
-    jm.restore_jobs({"library": job_runs._resume_album_download})
+    jm.restore_jobs({kind: job_runs._resume_album_download})
     reviews = jm.registry.awaiting_review()
     assert len(reviews) == 1
     assert [(c["payload"]["album_id"], c["selected"])
