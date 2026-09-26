@@ -3661,7 +3661,7 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
     name = artist_dir.name
     proof_before = _capture_repair_artist_proof(artist_dir)
     if proof_before is None:
-        raise OSError("artist files could not be sealed before Repair checked them")
+        raise OSError("artist files could not be recorded before Repair checked them")
     agg = {"verified_ok": 0, "unverified": 0, "failed": 0, "checked": 0,
            "specs": []}
     for album_dir in list_artist_album_dirs(artist_dir):

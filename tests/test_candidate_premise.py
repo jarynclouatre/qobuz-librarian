@@ -37,8 +37,9 @@ def test_album_candidate_receipt_accepts_unchanged_and_rejects_changed_bytes(
     assert validate(candidate) == premise
 
     track.write_bytes(b"different audio bytes")
-    with pytest.raises(CandidateStale, match="local files changed"):
+    with pytest.raises(CandidateStale) as stale:
         validate(candidate)
+    assert stale.value.cause == "changed"
     # A pick saved before receipts existed is refused as well.
     del candidate["payload"]["_premise"]
     with pytest.raises(CandidateStale):

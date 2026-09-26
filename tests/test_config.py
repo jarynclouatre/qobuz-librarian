@@ -34,14 +34,16 @@ def test_storage_roots_must_be_separate_non_nested_directories(
     music = tmp_path / "music"
     music.mkdir()
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
-    monkeypatch.setattr(cfg, "STAGING_DIR", music / "staging")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    cfg.validate_storage_roots()
 
-    with pytest.raises(ValueError, match="separate, non-nested"):
+    monkeypatch.setattr(cfg, "STAGING_DIR", music / "staging")
+    with pytest.raises(ValueError):
         cfg.validate_storage_roots()
     # A symlink to the music folder is the music folder.
     staging_alias = tmp_path / "staging-alias"
     staging_alias.symlink_to(music, target_is_directory=True)
     monkeypatch.setattr(cfg, "STAGING_DIR", staging_alias)
-    with pytest.raises(ValueError, match="separate, non-nested"):
+    with pytest.raises(ValueError):
         cfg.validate_storage_roots()

@@ -825,7 +825,7 @@ def _xattr_snapshot(descriptor) -> list:
             for name in names
         ]
     except (AttributeError, OSError, TypeError, ValueError) as exc:
-        raise OSError("migration file metadata could not be sealed") from exc
+        raise OSError("migration file metadata could not be read") from exc
 
 
 def _decode_xattr_snapshot(value) -> list:

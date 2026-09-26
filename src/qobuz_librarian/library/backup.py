@@ -9301,7 +9301,7 @@ def restore_upgrade_backup(
                     "partial album contains a reserved backup metadata name")
             original_snapshot = _exact_tree_snapshot(original_fd)
             if original_snapshot is None:
-                raise OSError("partial album tree could not be sealed")
+                raise OSError("partial album tree could not be read safely")
             held_original = {}
             _hold_snapshot_files(
                 original_fd, original_snapshot, held_original)
@@ -9435,7 +9435,7 @@ def restore_upgrade_backup(
                 raise OSError("restore copy did not match the held backup")
             restored_snapshot = _exact_tree_snapshot(stage_fd)
             if restored_snapshot is None:
-                raise OSError("restore stage could not be sealed")
+                raise OSError("restore copy could not be read safely")
             held_restored = {}
             _hold_snapshot_files(
                 stage_fd, restored_snapshot, held_restored)

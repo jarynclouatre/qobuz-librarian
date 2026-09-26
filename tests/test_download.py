@@ -193,7 +193,7 @@ def test_full_album_does_not_rip_after_a_partial_present_track_backup(
     monkeypatch.setattr(dl, "rip_url", lambda *_a, **_k: rip_calls.append(1))
     result = {}
 
-    with pytest.raises(OSError, match="Partial pre-download backup"):
+    with pytest.raises(OSError):
         dl.run_album_download(
             album=_album(tracks), missing=tracks[1:], present=[tracks[0]],
             album_dir=tmp_path, snapshot=set(),

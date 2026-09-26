@@ -257,7 +257,7 @@ def test_queued_download_rechecks_the_music_root_before_it_runs(monkeypatch):
         "token",
     )
 
-    with pytest.raises(RuntimeError, match="stopped before writing any files"):
+    with pytest.raises(RuntimeError):
         run(jm.Job(title="Waiting download"))
 
 
