@@ -15,6 +15,23 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def tagged_flac():
+    from mutagen.flac import FLAC
+
+    def write(path, **tags):
+        streaminfo = bytearray(34)
+        streaminfo[10:18] = ((44100 << 44) | (1 << 41) | (15 << 36) | 1).to_bytes(8, "big")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fLaC\x80\x00\x00\x22" + streaminfo)
+        audio = FLAC(path)
+        audio.update({key: str(value) for key, value in tags.items()})
+        audio.save()
+        return path
+
+    return write
+
+
 @pytest.fixture(autouse=True)
 def _isolate_collection_backups(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg

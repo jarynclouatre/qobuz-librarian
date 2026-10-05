@@ -204,6 +204,46 @@ def test_full_album_does_not_rip_after_a_partial_present_track_backup(
     assert result["gap_fill_backup_path"] is partial
 
 
+def test_resumed_album_selection_backs_up_its_versioned_tracks(
+        monkeypatch, tmp_path, tagged_flac):
+    from qobuz_librarian.library import scanner
+    from qobuz_librarian.modes import album as album_mode
+    from qobuz_librarian.queue import executor, journal
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    folder = music / "Artist" / "Album (1970)"
+    source = tagged_flac(folder / "01.flac", TITLE="Song (Live 1970)", ALBUM="Album")
+    original = source.read_bytes()
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+    cfg.STAGING_DIR.mkdir()
+    scanner.clear_scan_caches()
+    album = {**_album([{"id": "live", "title": "Song", "version": "Live 1970"}]),
+             "version": "Live 1970", "maximum_bit_depth": 16}
+    args = flows.build_args()
+    args.force = True
+    monkeypatch.setattr(album_mode, "ask", lambda _prompt: "q")
+    queued = []
+    album_mode._interactive_album_action(album, args, "tok", queued, lambda: None)
+    item = journal._deserialize_queue_item(journal._serialize_queue_item(queued[0]))
+    executor._validate_queue_item_premise(item)
+    item["snapshot_before"] = set()
+
+    def interrupted(*_a, **_kw):
+        assert not source.exists()
+        raise RuntimeError("interrupted download")
+
+    monkeypatch.setattr(dl, "rip_url", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted download"):
+        executor._download_for_queue_item(item)
+    backup = item["gap_fill_backup_path"]
+    assert backup.complete
+    assert next(backup.rglob("*.flac")).read_bytes() == original
+
+
 def test_same_title_twin_failure_stays_failed(monkeypatch, tmp_path):
     tracks = [{"id": 1, "title": "Song", "track_number": 1},
               {"id": 2, "title": "Song", "track_number": 2}]

@@ -20,7 +20,8 @@ def _capture_source_premise(album_dir, *, upgrade_only, auto_upgrade,
 def _build_queue_item(*, album, album_dir, label, missing, present,
                       upgrade_only, auto_upgrade,
                       siblings_to_delete=None, quality=None,
-                      force_track_by_track=False, source_premise=_UNSET):
+                      force_track_by_track=False, exact_edition=False,
+                      source_premise=_UNSET):
     """Bundle a confirmed download decision for batch processing.
     siblings_to_delete: list of sibling album dirs to remove after this item
     lands successfully.
@@ -54,6 +55,7 @@ def _build_queue_item(*, album, album_dir, label, missing, present,
         "siblings_to_delete": list(siblings_to_delete or []),
         "quality": quality,
         "force_track_by_track": bool(force_track_by_track),
+        "exact_edition": bool(exact_edition),
         "_source_premise": source_premise,
         "_gap_fill_receipts": candidate_premise.gap_fill_receipts(source_premise),
     }

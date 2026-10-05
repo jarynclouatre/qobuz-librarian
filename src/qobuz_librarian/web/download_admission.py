@@ -133,27 +133,11 @@ def _album_tracks_complete(album: dict) -> bool:
 
 
 def _same_edition_is_complete(album: dict) -> bool:
-    """Prove that this exact release year is already complete on disk.
-
-    The ordinary album resolver may fall back to a similarly named folder.
-    That is useful for gap detection, but it is not enough to refuse a
-    deliberate second edition. Require the submitted release year to match
-    the resolved folder before comparing its complete track list.
-    """
+    """Check this edition's track tags and complete track list."""
 
     try:
-        folder = catalog.find_album_dir_filesystem(album)
-        release_year = catalog.album_year(album)
-        if (
-            folder is None
-            or not release_year
-            or str(catalog._dir_year(folder.name) or "") != str(release_year)
-        ):
-            return False
-        existing, _ = catalog.find_existing_tracks(album, album_dir=folder)
-        wanted = (album.get("tracks") or {}).get("items") or []
-        return bool(existing and _album_tracks_complete(album)) and not catalog.compute_missing(
-            wanted, existing)[0]
+        existing, _folder, missing, _present = catalog.find_edition_tracks(album)
+        return bool(existing and _album_tracks_complete(album) and not missing)
     except Exception:
         _log.exception(
             "edition ownership check failed for album %s", album.get("id"))

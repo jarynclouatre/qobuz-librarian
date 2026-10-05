@@ -281,7 +281,7 @@ def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypa
 
 @pytest.mark.parametrize(
     "failure",
-    ["import", "cleanup"],
+    ["tagging", "import", "cleanup"],
 )
 def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
         monkeypatch, tmp_path, failure):
@@ -309,6 +309,7 @@ def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
         },
         album_dir=album_dir,
         auto_upgrade=True,
+        exact_edition=failure == "tagging",
     )
     queue = [item]
 
@@ -355,6 +356,12 @@ def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
     monkeypatch.setattr(
         executor, "track_signatures_for_album_dirs", lambda _dirs: []
     )
+    if failure == "tagging":
+        monkeypatch.setattr(
+            executor, "_prepare_staging_tags",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError(errno.ENOSPC, "cannot write edition tags")),
+        )
 
     def import_album(_dirs, **_kwargs):
         if failure == "import":
@@ -387,7 +394,7 @@ def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
             token="tok",
         )
 
-    if failure == "import":
+    if failure != "cleanup":
         _results, drained = execute()
         assert drained is False
         assert item["result"] == "disk_full"

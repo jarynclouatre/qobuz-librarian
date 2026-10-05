@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from qobuz_librarian.integrations.rip import flac_audio_offset
-from qobuz_librarian.repair_log import scan_dir_for_isrc_repairs
+from qobuz_librarian import repair_log
+from qobuz_librarian.integrations import rip
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def _make_flac(path: Path, *, seconds=4, amp=0.5, isrc="USABC1234500"):
 
 
 def _frame_corrupt(path: Path):
-    off = flac_audio_offset(str(path)) or 8192
+    off = rip.flac_audio_offset(str(path)) or 8192
     size = path.stat().st_size
     start = off + (size - off) // 2
     n = min(4096, size - start - 16)
@@ -73,7 +73,7 @@ def test_shallow_scan_catches_frame_crc_corruption(tmp_path, _need_tools):
 
     with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
                return_value=_QT):
-        r = scan_dir_for_isrc_repairs(album, "token", deep=False)
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=False)
 
     assert "01.flac" in _names(r["verified_truncated"]), (
         "shallow sweep must flag a frame-CRC-corrupt FLAC, not pass it as ok "
@@ -92,7 +92,7 @@ def test_shallow_scan_does_not_false_flag_healthy(tmp_path, _need_tools):
 
     with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
                return_value=_QT):
-        r = scan_dir_for_isrc_repairs(album, "token", deep=False)
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=False)
 
     assert r["verified_truncated"] == [], f"healthy files must not be flagged (got {r})"
     assert r["verified_ok"] == 2
@@ -117,7 +117,7 @@ def test_scan_diagnoses_a_file_it_cannot_lease(tmp_path, _need_tools):
                return_value=None), \
          patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
                return_value=_QT):
-        r = scan_dir_for_isrc_repairs(album, "token", deep=False)
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=False)
 
     assert r["unverified"] == 0, f"lease refusal must not skip diagnosis (got {r})"
     assert r["verified_ok"] == 1
@@ -133,13 +133,10 @@ def _qt(title, duration, isrc):
             "isrc": isrc}
 
 
-def test_short_file_is_left_alone_when_its_isrc_names_another_song(
+def test_repair_leaves_wrong_recordings_and_editions_alone(
         tmp_path, _need_tools):
-    """A wrong ISRC tag resolves to a stranger, and a stranger's duration is
-    not evidence about this file. Measured on a real library: a 128 s Crass
-    track carried an ISRC belonging to a 407 s recording of a different song,
-    so the scan called it truncated and offered to replace it with that other
-    song wearing the original's tags."""
+    from mutagen import flac
+
     album = tmp_path / "Crass" / "Yes Sir, I Will (1983)"
     album.mkdir(parents=True)
     p = album / "The Five Knuckle Shuffle.flac"
@@ -149,10 +146,27 @@ def test_short_file_is_left_alone_when_its_isrc_names_another_song(
     with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
                return_value=_qt("A Rock 'n' Roll Swindler", 407.0,
                                 "GBBTF1800330")):
-        r = scan_dir_for_isrc_repairs(album, "token", deep=True)
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
 
     assert r["verified_truncated"] == [], (
         f"a healthy file must not be offered for repair (got {r})")
     assert _names(r["isrc_mismatch"]) == {"The Five Knuckle Shuffle.flac"}, (
         f"it belongs under the mismatch heading instead (got {r})")
     assert r["isrc_mismatch"][0]["local_title"] == "The Five Knuckle Shuffle"
+
+    tags = flac.FLAC(p)
+    tags["album"] = "Yes Sir, I Will (2026 Mix)"
+    tags.save()
+    _frame_corrupt(p)
+    replacement = {
+        **_qt(p.stem, 4.0, "GBBTF1800330"), "version": "2009 Remaster",
+    }
+    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=replacement):
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
+    assert not r["verified_truncated"]
+    assert r["isrc_mismatch"][0].get("diagnostic")
+
+    replacement["version"] = "2026 Mix"
+    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=replacement):
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
+    assert _names(r["verified_truncated"]) == {p.name}

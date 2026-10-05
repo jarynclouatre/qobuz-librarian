@@ -506,7 +506,8 @@ async def _track_results(raw, query, token, queued_tracks):
 
             for album_id, group in albums.items():
                 try:
-                    folder = catalog.find_album_dir_filesystem(group["album"])
+                    folder = (catalog.find_album_dir_filesystem(group["album"])
+                              or catalog.find_album_dir_filesystem(group["album"], exact_edition=True))
                     if folder is None:
                         continue
                     exact_album = api_client.call_within(
@@ -521,16 +522,7 @@ async def _track_results(raw, query, token, queued_tracks):
                     )
                     if not qobuz_tracks:
                         continue
-                    existing, _ = catalog.find_existing_tracks(
-                        exact_album, album_dir=folder)
-                    if not existing:
-                        continue
-                    _missing, present = catalog.compute_missing(
-                        qobuz_tracks, existing)
-                    present_ids = {
-                        str(track.get("id"))
-                        for track in present if track.get("id")
-                    }
+                    present_ids = catalog.owned_edition_track_ids(exact_album)
                     for res in group["results"]:
                         res["owned"] = str(res["track_id"]) in present_ids
                 except Exception:
@@ -583,25 +575,24 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
             "cover":   _cover if _cover.startswith(
                 "https://static.qobuz.com/") else "",
             "owned":   False,
+            "as_new_edition": False,
             "ownership_unknown": True,
             "queued":  str(a.get("id")) in queued_albums,
             "scanning": str(a.get("id")) in scanning_albums,
         })
         _album_raws.append(a)
 
-    # Flag results already in the library so search never offers a
-    # plain Download on an album you own.
     if _album_raws:
         def _annotate_owned():
-            # Same filesystem resolver the download and scan paths use.
-            # Owned means every track is present; a part-finished
-            # album keeps its checkbox and its download button.
+            # Owned needs the edition and all its tracks, not just the songs
+            # on another mix. Partial copies keep their download button.
             annotations = []
             for alb in _album_raws:
                 res = {"ownership_unknown": True}
                 annotations.append(res)
                 try:
-                    folder = catalog.find_album_dir_filesystem(alb)
+                    folder = (catalog.find_album_dir_filesystem(alb)
+                              or catalog.find_album_dir_filesystem(alb, exact_edition=True))
                     if folder is None:
                         res["ownership_unknown"] = False
                         continue
@@ -617,15 +608,14 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                     )
                     if not download_admission._album_tracks_complete(exact_album):
                         continue
-                    existing, _ = catalog.find_existing_tracks(
-                        exact_album, album_dir=folder)
+                    existing, matched_folder, missing, present = catalog.find_edition_tracks(exact_album)
                     if not existing:
+                        res["as_new_edition"] = True
                         res["ownership_unknown"] = False
                         continue
-                    missing, present = catalog.compute_missing(
-                        qobuz_tracks, existing)
-                    res["disk_year"] = catalog._dir_year(folder.name)
+                    res["disk_year"] = catalog._dir_year(matched_folder.name)
                     if missing:
+                        res["as_new_edition"] = len(existing) > len(present)
                         res["partial"] = True
                         res["have_tracks"] = len(present)
                         res["want_tracks"] = len(qobuz_tracks)
@@ -696,6 +686,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 "sample_rate": res["sample_rate"],
                 "cover": res["cover"],
                 "owned": bool(res["owned"]),
+                "as_new_edition": res["as_new_edition"],
                 "queued": bool(res["queued"]),
                 "scanning": bool(res["scanning"]),
                 "partial": bool(res.get("partial")),
@@ -730,7 +721,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
             for f in ("id", "title", "artist", "artist_id", "year", "tracks",
                       "quality", "hires", "lossy", "bit_depth",
                       "sample_rate", "cover", "version", "queued",
-                      "scanning", "replaces_existing", "ownership_unknown"):
+                      "scanning", "as_new_edition", "replaces_existing", "ownership_unknown"):
                 g[f] = rep[f]
             g["partial"] = rep["partial"] and not g["owned"]
             g["have_tracks"] = rep["have_tracks"]
@@ -859,21 +850,13 @@ def _track_length(seconds):
 
 
 def _album_tracklist(album_id, token):
-    """One release's tracks, with the ones already on disk marked.
-
-    Presence is the same folder resolve and pairing the search rows use, so a
-    marked line and an Owned row can never disagree."""
+    """One release's tracks, with the matching versions on disk marked."""
     album = api_client.call_within(
         cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
     items = (album.get("tracks") or {}).get("items") or []
     present_ids = set()
     try:
-        folder = catalog.find_album_dir_filesystem(album)
-        if folder is not None and items:
-            existing, _ = catalog.find_existing_tracks(album, album_dir=folder)
-            if existing:
-                _missing, present = catalog.compute_missing(items, existing)
-                present_ids = {str(t.get("id")) for t in present if t.get("id")}
+        present_ids = catalog.owned_edition_track_ids(album)
     except Exception:
         # A library that can't be read still leaves a usable tracklist; the
         # marks are the only thing lost.
@@ -987,23 +970,12 @@ async def queue_download(request: Request, album_id: str = Form(""),
             # again. Ask about the one track, not the whole album.
             def _track_already_there():
                 try:
-                    album_dir = catalog.find_album_dir_filesystem(album)
-                except Exception:
-                    _log.exception(
-                        "track ownership folder lookup failed for album %s", album_id)
-                    return False
-                if album_dir is None:
-                    return False
-                try:
-                    existing_tracks, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
+                    _existing, _folder, _missing, present = catalog.find_edition_tracks(
+                        album, track_id=track_id)
                 except Exception:
                     _log.exception(
                         "track ownership read failed for album %s", album_id)
                     return False
-                qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-                if not (existing_tracks and qobuz_tracks):
-                    return False
-                _missing, present = catalog.compute_missing(qobuz_tracks, existing_tracks)
                 return any(str(t.get("id") or "") == track_id for t in present)
 
             if await loop.run_in_executor(None, _track_already_there):
@@ -1015,56 +987,18 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     url="/queue?error=" + rendering._notice_key(msg), status_code=303)
 
         if not download_as_new_edition and not track_id:
-            def _already_complete():
-                try:
-                    album_dir = catalog.find_album_dir_filesystem(album)
-                except Exception:
-                    _log.exception(
-                        "album ownership folder lookup failed for album %s", album_id)
-                    return False
-                if album_dir is None:
-                    return False
-                try:
-                    # Already resolved above; pass it through so we don't repeat
-                    # the cached-subdir scan + fuzzy fallback for the same album.
-                    existing_tracks, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
-                except Exception:
-                    _log.exception(
-                        "album ownership read failed for album %s", album_id)
-                    existing_tracks = []
-                qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-                return bool(existing_tracks and download_admission._album_tracks_complete(album)) and not (
-                    catalog.compute_missing(qobuz_tracks, existing_tracks)[0])
-
-            # Resolving the album folder walks the (often NAS-mounted) library,
-            # so keep it off the event loop; otherwise a large library stalls
-            # every other request while this one request blocks.
-            if await loop.run_in_executor(None, _already_complete):
-                msg = "This album is already in your library."
+            existing, folder, missing, present = await loop.run_in_executor(
+                None, catalog.find_edition_tracks, album)
+            if existing and not missing and download_admission._album_tracks_complete(album):
+                msg = "This edition is already in your library."
                 if rendering._is_htmx(request):
-                    # Offer the deliberate second-edition path instead of a
-                    # dead end: a remaster or a different mix can be kept
-                    # alongside the owned copy, under its edition's name.
-                    aid = html.escape(album_id)
-                    return HTMLResponse(
-                        f'<div class="ql-download-choice">'
-                        f'<div class="ql-download-choice-copy">'
-                        f'<p>{html.escape(msg)}</p>'
-                        f'<span>A remaster or different mix downloads into a '
-                        f'folder of its own, named after its edition, beside '
-                        f'the existing library copy.</span></div>'
-                        f'<form hx-post="/download" hx-target="#download-toast" '
-                        f'hx-swap="innerHTML">'
-                        f'<input type="hidden" name="album_id" value="{aid}">'
-                        f'<input type="hidden" name="as_new_edition" value="1">'
-                        f'<button type="submit" class="ql-btn ql-btn-primary ql-btn-sm '
-                        f'w-full sm:w-auto whitespace-nowrap">'
-                        f'Download this edition anyway</button></form></div>',
-                        headers={"X-QL-Download-Outcome": "owned"},
-                    )
+                    return _download_fragment("warning", html.escape(msg), "owned")
                 return RedirectResponse(
                     url="/queue?error=" + rendering._notice_key(msg),
                     status_code=303)
+            other = await loop.run_in_executor(None, catalog.find_album_dir_filesystem, album)
+            download_as_new_edition = bool(other and (
+                folder is None or len(existing) > len(present)))
         title  = album.get("title") or "?"
         artist = (album.get("artist") or {}).get("name") or "?"
         single_track = None

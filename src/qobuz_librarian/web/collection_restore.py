@@ -1,9 +1,6 @@
 """Build a download review from a collection snapshot."""
 from __future__ import annotations
 
-from collections import Counter
-
-from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
 from qobuz_librarian.api.search import (
     find_qobuz_track_by_isrc,
@@ -11,19 +8,12 @@ from qobuz_librarian.api.search import (
     search_albums,
 )
 from qobuz_librarian.library import candidate_premise, catalog, discovery, scanner
-from qobuz_librarian.library.catalog import (
-    dedup_album_versions,
-    is_lossless_album,
-)
+from qobuz_librarian.library.catalog import is_lossless_album
 from qobuz_librarian.library.tags import normalize
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.web import flows
 
-# An album whose folder was renamed still carries its ISRCs. Half of them
-# matching the artist's on-disk set is the album, not a coincidence: ISRCs are
-# per-recording, so two different albums share them only when one reissues the
-# other, which is the same music either way.
 ISRC_OWNED_RATIO = 0.5
 
 # How many of an album's ISRCs are worth spending a Qobuz lookup on before
@@ -65,10 +55,34 @@ def _matches_snapshot(found, album, artist_name) -> bool:
     found_artist = found.get("artist") or {}
     if isinstance(found_artist, dict):
         found_artist = found_artist.get("name") or ""
-    return (
+    if not (
         _title_key(found.get("title")) == _title_key(_snapshot_album_title(album))
         and _name_key(found_artist) == _name_key(artist_name)
-    )
+    ):
+        return False
+    saved = _snapshot_release(album)
+    if not saved["tracks"]["items"]:
+        return catalog._edition_title_parts(
+            catalog._release_title(found)) == catalog._edition_title_parts(
+                album.get("name") or saved["title"], folder=True)
+    available = [{
+        "title": catalog._release_title(t), "isrc": t.get("isrc"),
+        "discnumber": t.get("media_number"),
+        "album": catalog._release_title(found),
+    } for t in (found.get("tracks") or {}).get("items") or []]
+    missing, _ = catalog.edition_missing(
+        saved, available, None, album_folder=album.get("name"))
+    return not missing
+
+
+def _snapshot_release(album):
+    return {
+        "title": _snapshot_album_title(album),
+        "tracks": {"items": [
+            {**t, "media_number": t.get("disc"), "track_number": t.get("number")}
+            for t in album.get("tracks") or [] if isinstance(t, dict)
+        ]},
+    }
 
 
 class _OnDisk:
@@ -112,63 +126,41 @@ class _OnDisk:
         return self._isrcs[album_dir]
 
 
-def _owned_folder(disk, artist_dir, album, backup_ids):
-    """The folder that holds this backed-up album now, or None.
-
-    ``backup_ids`` maps the backup's folder names to their Qobuz ids. A folder
-    the backup also names carries that id, and two known ids settle whether a
-    same-titled folder is this album; without one the year must agree, so a
-    2001 "Weezer" is not taken for the 1994 one.
-    """
+def _owned_folder(disk, artist_dir, album):
+    """Find the folder retaining the most tracks of the saved edition."""
     album_dirs = disk.album_dirs(artist_dir)
     name = album.get("name") or ""
-    for d in album_dirs:
-        if d.name == name:
-            return d
-    wanted_id = str(album.get("qobuz_album_id") or "")
     wanted_year = catalog._dir_year(name)
     keys = {discovery.owned_title_key(album.get("name")),
             discovery.owned_title_key(album.get("title"))} - {""}
-    for d in album_dirs:
-        if discovery.owned_title_key(d.name) not in keys:
+    wanted = _album_isrcs(album)
+    best, best_matched = None, 0
+    for d in sorted(album_dirs, key=lambda d: d.name != name):
+        held_year = catalog._dir_year(d.name)
+        same_name = discovery.owned_title_key(d.name) in keys and (
+            wanted_year is None or held_year is None or held_year == wanted_year)
+        have = disk.isrcs(d)
+        overlap = sum(1 for code in wanted if code in have)
+        if not same_name and not (wanted and overlap / len(wanted) >= ISRC_OWNED_RATIO):
             continue
-        held_id = backup_ids.get(d.name)
-        if wanted_id and held_id:
-            if held_id == wanted_id:
+        if not album.get("tracks"):
+            if d.name == name:
                 return d
             continue
-        held_year = catalog._dir_year(d.name)
-        if wanted_year is None or held_year is None or held_year == wanted_year:
-            return d
-    wanted = _album_isrcs(album)
-    if not wanted:
-        return None
-    best, best_matched = None, 0
-    for d in album_dirs:
-        have = disk.isrcs(d)
-        matched = sum(1 for code in wanted if code in have)
+        _, present = catalog.edition_missing(
+            _snapshot_release(album), disk.tracks(d), d, album_folder=name)
+        matched = len(present)
         if matched > best_matched:
             best, best_matched = d, matched
-    if best is not None and best_matched / len(wanted) >= ISRC_OWNED_RATIO:
-        return best
-    return None
+    return best
 
 
 def _lost_tracks(disk, album_dir, album) -> int:
     """How many of the backup's tracks for this album its folder lacks."""
-    isrcs = disk.isrcs(album_dir)
-    titles = Counter(normalize(t.get("title") or "")
-                     for t in disk.tracks(album_dir))
-    lost = 0
-    for track in album.get("tracks") or []:
-        if not isinstance(track, dict):
-            continue
-        title = normalize(track.get("title") or "")
-        if titles[title] > 0:
-            titles[title] -= 1
-        elif _isrc(track.get("isrc")) not in isrcs:
-            lost += 1
-    return lost
+    missing, _ = catalog.edition_missing(
+        _snapshot_release(album), disk.tracks(album_dir), album_dir,
+        album_folder=album.get("name"))
+    return len(missing)
 
 
 def _usable(album) -> bool:
@@ -180,7 +172,7 @@ def _usable(album) -> bool:
     return is_lossless_album(album) and bool(tracks or count)
 
 
-def _by_stored_id(album, token):
+def _by_stored_id(album, artist_name, token):
     album_id = album.get("qobuz_album_id")
     if not album_id:
         return None
@@ -190,7 +182,7 @@ def _by_stored_id(album, token):
         raise
     except Exception:
         return None
-    return found if _usable(found) else None
+    return found if _usable(found) and _matches_snapshot(found, album, artist_name) else None
 
 
 def _by_isrc(album, artist_name, token):
@@ -223,8 +215,7 @@ def _by_search(album, artist_name, token):
     except Exception:
         return None
     lossless = [a for a in results if is_lossless_album(a)]
-    for found, _versions in dedup_album_versions(
-            lossless, prefer_hires=cfg.PREFER_HIRES):
+    for found in lossless:
         if _title_key(found.get("title")) != wanted:
             continue
         found_artist = (found.get("artist") or {}).get("name") or ""
@@ -236,14 +227,14 @@ def _by_search(album, artist_name, token):
             raise
         except Exception:
             continue
-        if _usable(full):
+        if _usable(full) and _matches_snapshot(full, album, artist_name):
             return full
     return None
 
 
 def _resolve(album, artist_name, token):
     """Find one backed-up album on Qobuz. Returns (album dict, reason)."""
-    found = _by_stored_id(album, token)
+    found = _by_stored_id(album, artist_name, token)
     if found is not None:
         return found, None
     stored_failed = bool(album.get("qobuz_album_id"))
@@ -294,11 +285,9 @@ def scan_restore(job, snapshot, token):
         artist_dir = disk.artist_dir(artist_name)
         artist_key = artist_dir.name if artist_dir is not None else None
         albums = [a for a in entry.get("albums") or [] if isinstance(a, dict)]
-        backup_ids = {a["name"]: str(a["qobuz_album_id"]) for a in albums
-                      if a.get("name") and a.get("qobuz_album_id")}
         for album in albums:
             title = _snapshot_album_title(album) or "?"
-            folder = (_owned_folder(disk, artist_dir, album, backup_ids)
+            folder = (_owned_folder(disk, artist_dir, album)
                       if artist_dir is not None else None)
             if folder is not None and not _lost_tracks(disk, folder, album):
                 owned += 1
@@ -313,13 +302,13 @@ def scan_restore(job, snapshot, token):
                 continue
             missing = []
             if folder is not None:
-                missing, _present = catalog.compute_missing(
-                    (found.get("tracks") or {}).get("items") or [],
-                    disk.tracks(folder))
+                missing, present = catalog.edition_missing(found, disk.tracks(folder), folder)
                 if not missing:
                     unlisted += 1
                     job.push_line(f"{artist_name} - {title}: {NO_QOBUZ_TRACKS}.")
                     continue
+                if not present:
+                    folder = None
             added = flows.add_restore_candidate(
                 job, found, artist_name, artist_key=artist_key,
                 album_dir=folder, missing=missing)

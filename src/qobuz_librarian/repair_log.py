@@ -31,7 +31,7 @@ from qobuz_librarian.file_exclusion import (
     inode_write_exclusion_scope,
 )
 from qobuz_librarian.integrations.rip import flac_audio_offset, flac_audio_ok
-from qobuz_librarian.library import repair_cache, scanner
+from qobuz_librarian.library import catalog, repair_cache, scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks, parse_track_num
 from qobuz_librarian.library.tags import similarity, strip_edition_suffix
 from qobuz_librarian.ui_cli.colors import C, fmt
@@ -143,12 +143,9 @@ def _flac_decode_ok(path, *, descriptor=None):
 # against its live version), which stays trusted.
 _SAME_RECORDING_SIM = 0.50
 
-# Said about a file that is genuinely damaged but whose ISRC resolves to some
-# other song. The damage is real, the refill target is not, so the file is
-# offered a whole-album re-download rather than a swap for that other song.
 _MISMATCHED_DAMAGE_DIAGNOSTIC = (
-    "damaged, but its ISRC names a different recording, so a single-track "
-    "refill would fetch the wrong song")
+    "damaged, but the recording or edition could not be confirmed for a "
+    "single-track refill")
 
 
 def _same_recording(local_title, qobuz_title):
@@ -377,6 +374,7 @@ def _read_held_audio_meta(source):
     info = parsed.info
     return {
         "title": title,
+        "album": first("album"),
         "isrc": first("isrc").strip().replace("-", "").upper(),
         "tracknumber": parse_track_num(first("tracknumber")),
         "discnumber": parse_track_num(first("discnumber")) or 1,
@@ -510,21 +508,13 @@ def _scan_held_repair_source(
         "local_title": title,
         "local_track_number": parse_track_num(et.get("tracknumber")),
     }
-    # Whether the ISRC named this song at all decides what may be done about
-    # any damage, not whether damage is looked for. Detection below never
-    # consults it; the refill target always does, because refilling by an ISRC
-    # that names a stranger fetches the stranger.
-    same_recording = _same_recording(title, qt.get("title"))
+    matched_album = {**(qt.get("album") or {}), "tracks": {"items": [qt]}}
+    same_recording = (
+        _same_recording(title, qt.get("title"))
+        and bool(catalog.edition_files(matched_album, [et], source.album_dir)))
 
     def damaged(reason, **extra):
-        """File the damage against the right bucket for its identity.
-
-        A file whose ISRC names the same recording can be refilled from that
-        one track. A file whose ISRC names something else cannot, however
-        certain the damage is, so it goes to isrc_mismatch carrying a
-        diagnostic, which offers a whole-album re-download instead of a
-        surgical swap for a different song.
-        """
+        """Offer a track refill only when its recording and edition match."""
         entry.update(reason=reason, **extra)
         if same_recording:
             _append_verified_truncated(report, source, entry)
@@ -590,7 +580,7 @@ def scan_dir_for_isrc_repairs(album_dir, token,
     * verified_ok: ISRC match, nothing wrong (a count, not a list).
     * no_isrc_tag: no ISRC tag, so recording identity is unverifiable.
     * isrc_no_match: ISRC tag present, Qobuz returned nothing.
-    * isrc_mismatch: ISRC tag present, but the match is a different song. Two
+    * isrc_mismatch: the recording or edition could not be confirmed. Two
       kinds live here. Without a `diagnostic` the file merely runs short, so
       the shortfall means nothing and it is reported and left alone. With a
       `diagnostic` the file is genuinely damaged, and it is offered a
@@ -598,10 +588,8 @@ def scan_dir_for_isrc_repairs(album_dir, token,
       refilling it from an ISRC that names another recording.
 
     Everything outside verified_truncated is surfaced without modification.
-    ISRC identity is mandatory: album-edition guessing
-    (find_qobuz_album_for_dir) can silently swap a 1992 master for its 2011
-    remaster, which is wrong for surgical repair. The tag can still be wrong,
-    which is what the isrc_mismatch bucket is for.
+    Single-track refills require both an ISRC match and matching edition
+    labels. A different or unproven edition stays outside verified_truncated.
     """
     report = {
         "verified_truncated": [],
@@ -615,10 +603,6 @@ def scan_dir_for_isrc_repairs(album_dir, token,
         "verified_ok_isrcs": Counter(),
         "no_isrc_tag": [],
         "isrc_no_match": [],
-        # Matched an ISRC that turned out to name a different song. Kept apart
-        # from isrc_no_match: there the lookup found nothing, here it found the
-        # wrong thing, and only the second case means the file's own tag is
-        # suspect.
         "isrc_mismatch": [],
         # FLACs we could not decode-check because the flac tool is absent,
         # counted so the summary can say so, never reported as "verified ok".

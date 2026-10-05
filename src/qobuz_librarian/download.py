@@ -52,7 +52,7 @@ from qobuz_librarian.library.backup import (
     backup_gap_fill_files,
     library_backup_record,
 )
-from qobuz_librarian.library.catalog import find_extras_in_existing
+from qobuz_librarian.library.catalog import edition_files, find_extras_in_existing
 from qobuz_librarian.library.scanner import read_album_dir, read_audio_meta
 from qobuz_librarian.library.tags import normalize, strip_edition_suffix
 from qobuz_librarian.recovery import normalise_recovery_owner
@@ -757,7 +757,7 @@ def disc_names_overwrite(album):
 
 def downloads_whole_album(n_present, n_missing, n_total):
     """Whether a gap fill fetches the whole album instead of the gaps."""
-    return n_present == 0 or n_missing >= max(4, int(n_total * 0.7))
+    return n_present == 0 or n_missing == n_total or n_missing >= max(4, int(n_total * 0.7))
 
 
 def run_album_download(
@@ -771,6 +771,7 @@ def run_album_download(
     quality=None,
     upgrade_only=False,
     force_track_by_track=False,
+    exact_edition=False,
     result=None,
     recovery_owner=None,
     recovery_checkpoint=None,
@@ -922,8 +923,11 @@ def run_album_download(
         # permanently lost tracks.
         if present and album_dir:
             ex = existing if existing is not None else read_album_dir(album_dir)
-            extra_paths = {e["path"] for e in find_extras_in_existing(qobuz_tracks, ex)}
-            to_clear = [e for e in ex if e["path"] not in extra_paths]
+            if exact_edition:
+                to_clear = edition_files(album, ex, album_dir)
+            else:
+                extra_paths = {e["path"] for e in find_extras_in_existing(qobuz_tracks, ex)}
+                to_clear = [e for e in ex if e["path"] not in extra_paths]
             if to_clear:
                 exact_receipts = expected_gap_fill_receipts
                 if expected_gap_fill_receipts is not None:

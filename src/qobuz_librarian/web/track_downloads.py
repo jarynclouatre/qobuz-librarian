@@ -453,21 +453,23 @@ def _make_single_track_run(album, track, token):
         artist = (album.get("artist") or {}).get("name") or "?"
         title = album.get("title") or "?"
         t_title = track.get("title") or "?"
-        qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-        existing, album_dir = catalog.find_existing_tracks(album)
-        missing, _present = catalog.compute_missing(qobuz_tracks, existing)
+        existing, album_dir, missing, _present = catalog.find_edition_tracks(
+            album, track_id=track.get("id"))
         missing_ids = {str(t.get("id")) for t in missing}
         # Already own this exact track? Don't re-rip it; that just lands a beets
         # ".1.flac" duplicate beside the copy you have, and don't mark anything.
         if str(track.get("id")) not in missing_ids:
             j.summary = f"You already have “{t_title}”. Nothing downloaded."
             return
+        if album_dir is None:
+            existing, album_dir = catalog.find_existing_tracks(album)
         qi = queue_builder._build_queue_item(
             album=album, album_dir=album_dir,
             label=f"{artist}, {t_title}  [single]",
             missing=[track], present=existing,
             upgrade_only=False, auto_upgrade=False,
             force_track_by_track=True,
+            exact_edition=True,
         )
         qi["_capture_import_ownership"] = True
         qi["_defer_post_import_relocation_handoff"] = True

@@ -829,6 +829,7 @@ def execute_durable_new_album(
             quality=plan.effective_tier,
             upgrade_only=bool(item.get("upgrade_only")),
             force_track_by_track=False,
+            exact_edition=item.get("exact_edition", False),
             result=item,
             recovery_owner=_owner_record(owner),
             recovery_checkpoint=checkpoint_staging,

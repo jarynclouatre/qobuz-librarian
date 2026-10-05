@@ -142,6 +142,7 @@ def _make_download_run(
                         "Qobuz credentials changed before the download began."
                     )
             durable_item = None
+            separate = treat_as_new
             if durable_planned is not None:
                 if treat_as_new:
                     raise ValueError(
@@ -155,9 +156,10 @@ def _make_download_run(
                         "the saved durable retry album changed before execution"
                     )
             elif not treat_as_new and catalog.is_lossless_album(album):
-                qobuz_tracks = (album.get("tracks") or {}).get("items") or []
-                existing, album_dir = catalog.find_existing_tracks(album)
-                missing, present = catalog.compute_missing(qobuz_tracks, existing)
+                existing, album_dir, missing, present = catalog.find_edition_tracks(album)
+                other = catalog.find_album_dir_filesystem(album)
+                separate = bool(missing and other and (
+                    album_dir is None or len(existing) > len(present)))
                 candidate = queue_builder._build_queue_item(
                     album=album,
                     album_dir=album_dir,
@@ -169,13 +171,14 @@ def _make_download_run(
                     present=present,
                     upgrade_only=False,
                     auto_upgrade=False,
+                    exact_edition=True,
                 )
-                if durable_album.plan_durable_new_album(candidate, args) is not None:
+                if not separate and durable_album.plan_durable_new_album(candidate, args) is not None:
                     durable_item = candidate
             if durable_item is None:
                 r = process_mode.process_album(album, args, allow_force=False,
                                   already_confirmed=True, token=active_token,
-                                  treat_as_new=treat_as_new) or {}
+                                  treat_as_new=separate, exact_edition=True) or {}
             else:
                 try:
                     results, drained = queue_executor._execute_download_queue(
@@ -362,7 +365,7 @@ def _make_download_run(
             if retryable:
                 flows._fold_partial_gap_fill(
                     album, (album.get("artist") or {}).get("name") or "",
-                    retryable)
+                    retryable, album_dir=r.get("dir"))
             hidden_mod.unmark_single(
                 (album.get("artist") or {}).get("name") or "?",
                 album.get("title") or "?",

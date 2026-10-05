@@ -225,6 +225,74 @@ def test_title_fallback_cannot_hand_an_isrc_twin_to_another_track():
     assert not missing
 
 
+def test_edition_ownership_keeps_recording_versions(tmp_path):
+    track = {"id": "new-mix", "title": "Song", "version": "2026 Mix", "isrc": "GBAAA0000001"}
+    album = {"title": "Album", "version": "2026 Mix", "tracks": {"items": [track]}}
+    original = {"title": "Song", "album": "Album", "isrc": track["isrc"]}
+    plain_folder = tmp_path / "Album (1965)"
+    assert catalog.edition_missing(album, [original], plain_folder)[0] == [track]
+
+    tagged = {**original, "title": "Song (2026 Mix)"}
+    assert not catalog.edition_missing(album, [tagged], plain_folder)[0]
+    conflicting = {**tagged, "isrc": "GBBBB0000002"}
+    assert catalog.edition_missing(album, [conflicting], plain_folder)[0] == [track]
+
+    labelled_folder = tmp_path / "Album (2026 Mix) (1965)"
+    assert not catalog.edition_missing(album, [original], labelled_folder)[0]
+    old_track = {**track, "version": ""}
+    old_album = {"title": "Album", "tracks": {"items": [old_track]}}
+    assert catalog.edition_missing(old_album, [original], labelled_folder)[0] == [old_track]
+    assert not catalog.edition_missing(
+        old_album, [original], tmp_path / "Album (FLAC) (1965)")[0]
+    album_only = {**album, "tracks": {"items": [old_track]}}
+    assert catalog.edition_missing(album_only, [original], plain_folder)[0] == [old_track]
+    assert not catalog.edition_missing(album_only, [tagged], plain_folder)[0]
+    inline = {"title": "Album (2026 Mix)", "tracks": {"items": [
+        {**old_track, "title": "Song (2026 Mix)"}]}}
+    assert not catalog.edition_missing(inline, [tagged], plain_folder)[0]
+    dashed = {**old_album, "tracks": {"items": [{**old_track, "title": "Song - 2011 Remaster"}]}}
+    assert catalog.edition_missing(dashed, [original], plain_folder)[0]
+    colon = {**old_album, "title": "Album: 2026 Remaster"}
+    assert catalog.edition_missing(colon, [original], plain_folder)[0] == [old_track]
+    assert not catalog.edition_missing(colon, [
+        {**original, "album": "Album (2026 Remaster)"}], plain_folder)[0]
+    bonus = {**album, "version": "Bonus Content", "tracks": {"items": [old_track]}}
+    assert not catalog.edition_missing(bonus, [
+        {**original, "album": "Album (Bonus Content)"}], plain_folder)[0]
+
+    natural = {**old_track, "title": "Norwegian Wood (This Bird Has Flown)"}
+    natural_album = {**old_album, "tracks": {"items": [natural]}}
+    assert not catalog.edition_missing(natural_album, [
+        {**original, "title": natural["title"]}], plain_folder)[0]
+
+    live = {**track, "version": "Live 1970"}
+    deluxe = {"title": "Album", "version": "Deluxe Edition", "tracks": {"items": [live]}}
+    assert catalog.edition_missing(
+        deluxe, [original], tmp_path / "Album (Deluxe Edition)")[0] == [live]
+    remastered_live = {**album, "version": "2026 Remaster", "tracks": {"items": [live]}}
+    local_live = {**original, "title": "Song (Live 1970)"}
+    assert catalog.edition_missing(remastered_live, [local_live], plain_folder)[0] == [live]
+    assert not catalog.edition_missing(remastered_live, [
+        {**local_live, "album": "Album (2026 Remaster)"}], plain_folder)[0]
+
+
+def test_same_mix_in_two_folders_keeps_the_selected_destination(
+        tmp_path, monkeypatch, tagged_flac):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    folders = [tmp_path / "Artist" / name for name in ("Album (1965)", "Album (2026 Mix) (1965)")]
+    for folder in folders:
+        tagged_flac(folder / "01.flac", TITLE="Song (2026 Mix)",
+                    ALBUM="Album (2026 Mix)", ARTIST="Artist", TRACKNUMBER="1")
+    scanner.clear_scan_caches()
+    signatures = catalog.track_signatures_for_album_dirs([folders[1]])
+    assert catalog.find_album_dir_by_track_signatures(signatures) is None
+    assert catalog.find_album_dir_by_track_signatures(
+        signatures, expected_dir=folders[1]) == folders[1]
+
+
 def test_publishing_a_migration_directory_never_closes_a_reused_number(
         tmp_path, monkeypatch):
     """The FileExistsError reclaim closes the reserved descriptor and then

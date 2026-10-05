@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from qobuz_librarian.modes import process as proc
+
 
 def _args(**over):
     base = dict(force=False, yes=True, no_import=False, dry_run=False,
@@ -12,10 +14,109 @@ def _args(**over):
     return SimpleNamespace(**base)
 
 
+@pytest.mark.parametrize("existing_mix", [False, True])
+def test_forcing_a_mix_never_moves_the_original(
+        tmp_path, monkeypatch, tagged_flac, existing_mix):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import download
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    folder = music / "Artist" / "Album (1965)"
+    original = tagged_flac(folder / "01.flac", TITLE="Song", ALBUM="Album", ISRC="GBAAA0000001")
+    files = [original]
+    if existing_mix:
+        files.append(tagged_flac(folder / "01-mix.flac", TITLE="Song (2026 Mix)",
+                                 ALBUM="Album", ISRC="GBAAA0000001"))
+    before = {path: path.read_bytes() for path in files}
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+    cfg.STAGING_DIR.mkdir()
+    scanner.clear_scan_caches()
+    album = {"id": "mix", "title": "Album", "version": "2026 Mix",
+             "artist": {"name": "Artist"}, "maximum_bit_depth": 16,
+             "tracks": {"items": [{"id": "song", "title": "Song",
+                                     "version": "2026 Mix", "isrc": "GBAAA0000001"}]}}
+    prompts = []
+    monkeypatch.setattr(proc, "confirm", lambda *a, **kw: prompts.append(kw) or True)
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+
+    def interrupted(*_args, **_kwargs):
+        assert original.read_bytes() == before[original]
+        if existing_mix:
+            assert not files[1].exists()
+        raise RuntimeError("interrupted download")
+
+    monkeypatch.setattr(download, "rip_url", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted download"):
+        proc.process_album(album, _args(force=True), exact_edition=True, already_confirmed=True)
+    assert {path: path.read_bytes() for path in files} == before
+    assert len(prompts) == int(existing_mix)
+    assert all(not prompt["auto_yes"] for prompt in prompts)
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_forced_edition_follows_beets_folder_rename(
+        tmp_path, monkeypatch, tagged_flac, verified):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    folder = music / "Artist" / "Album (1965)"
+    staged = tmp_path / "staging" / "Album"
+    replacement = folder.with_name("Album (2026 Mix) (1965)")
+    tags = dict(TITLE="Song (2026 Mix)", ALBUM="Album", ARTIST="Artist",
+                ALBUMARTIST="Artist", ISRC="GBAAA0000001", TRACKNUMBER="1")
+    original = tagged_flac(folder / "01.flac", **tags)
+    before = original.read_bytes()
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "STAGING_DIR", staged.parent)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    staged.parent.mkdir()
+    scanner.clear_scan_caches()
+    album = {"id": "mix", "title": "Album", "version": "2026 Mix",
+             "artist": {"name": "Artist"}, "maximum_bit_depth": 16,
+             "tracks": {"items": [{"id": "song", "title": "Song",
+                                     "version": "2026 Mix", "isrc": tags["ISRC"]}]}}
+
+    def download(**kwargs):
+        tagged_flac(staged / "01.flac", **tags)
+        kwargs["result"].update(n_ok=1, n_fail=0, n_lossy=0,
+                                failed_tracks=[], lossy_tracks=[], elapsed=0)
+
+    def import_album(**kwargs):
+        assert not kwargs["album_dir"].exists()
+        kwargs["album_dirs"][0].rename(replacement)
+        return True
+
+    monkeypatch.setattr(proc, "confirm", lambda *_a, **_kw: True)
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(proc, "capture_beets_album_entries", lambda _folder: [])
+    monkeypatch.setattr(proc, "retire_replaced_beets_entries", lambda *_a: True)
+    monkeypatch.setattr(proc, "run_album_download", download)
+    monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "beets_import_paths", import_album)
+    if not verified:
+        monkeypatch.setattr(proc, "folder_holds_all_tracks", lambda *_a, **_kw: False)
+
+    result = proc.process_album(album, _args(force=True),
+                                exact_edition=True, already_confirmed=True)
+    assert (replacement / "01.flac").is_file()
+    if verified:
+        assert result["imported"] and result["dir"] == replacement
+        assert not result["upgrade_unverified"] and not result["catalogue_unverified"]
+        assert not folder.exists()
+    else:
+        assert not result["imported"] and result["upgrade_unverified"]
+        assert original.read_bytes() == before
+
+
 def test_direct_download_refuses_files_changed_after_confirmation(
         monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.modes import process as proc
 
     music = tmp_path / "music"
     album_dir = music / "Artist" / "Album"
@@ -104,7 +205,6 @@ def test_upgrade_carries_hand_added_tags_to_the_replacement(monkeypatch, tmp_pat
     from mutagen.flac import FLAC, Picture
 
     from qobuz_librarian.library.backup import backup_album_dir
-    from qobuz_librarian.modes import process as proc
 
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg not available")
@@ -343,7 +443,6 @@ def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
 
 
 def test_upgrade_verification_rejects_a_masked_per_track_downgrade(monkeypatch, tmp_path):
-    from qobuz_librarian.modes import process as proc
 
     backup = tmp_path / "backup"
     backup.mkdir()

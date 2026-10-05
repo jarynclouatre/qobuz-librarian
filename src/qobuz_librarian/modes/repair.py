@@ -2357,7 +2357,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         f"{len(verified_truncated)} verified truncated  ·  "
         f"{len(isrc_no_match)} ISRC has no Qobuz match  ·  "
         f"{len(no_isrc_tag)} no ISRC tag  ·  "
-        f"{len(isrc_mismatch)} ISRC names another song"))
+        f"{len(isrc_mismatch)} recording or edition not confirmed"))
     if unverified:
         log.warning(fmt(C.YELLOW,
             f"  ⚠  Scan incomplete: {unverified} unverified."))
@@ -2416,9 +2416,9 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
 
     if mismatch_damaged:
         log.info(fmt(C.YELLOW,
-            "\n  Damaged, but the ISRC names a different song, so a "
-            "single-track refill would fetch that song instead. Re-download "
-            "the whole album, or fix the ISRC tag first:"))
+            "\n  Damaged, but the recording or edition could not be confirmed. "
+            "Review a whole-album re-download, or check the recording and "
+            "edition tags before retrying:"))
         for x in mismatch_damaged[:10]:
             _mismatch_row(x, C.YELLOW)
         if len(mismatch_damaged) > 10:
@@ -2427,8 +2427,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
 
     if mismatch_short:
         log.info(fmt(C.GRAY,
-            "\n  Left alone (runs short, but its ISRC names a different "
-            "song, so the length proves nothing):"))
+            "\n  Left alone (shorter than the match, but its recording or "
+            "edition could not be confirmed):"))
         for x in mismatch_short[:10]:
             _mismatch_row(x, C.WHITE)
         if len(mismatch_short) > 10:

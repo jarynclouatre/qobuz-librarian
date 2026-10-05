@@ -409,6 +409,7 @@ def _queue_item_inputs(item):
         "siblings_to_delete": [str(p) for p in item.get("siblings_to_delete") or []],
         "quality": item.get("quality"),
         "force_track_by_track": item.get("force_track_by_track", False),
+        **({"exact_edition": True} if item.get("exact_edition") else {}),
         "source_premise": item.get("_source_premise"),
     }
 
@@ -432,6 +433,7 @@ def _deserialize_queue_item(data):
         siblings_to_delete=[Path(path) for path in planned["siblings_to_delete"]],
         quality=planned["quality"],
         force_track_by_track=planned["force_track_by_track"],
+        exact_edition=planned.get("exact_edition", False),
         source_premise=planned["source_premise"],
     )
 
@@ -471,7 +473,8 @@ def _validate_planned(value: Any) -> dict[str, Any]:
 
 
 def _checked_planned(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != _PLANNED_KEYS:
+    if not isinstance(value, dict) or frozenset(value) not in (
+            _PLANNED_KEYS, _PLANNED_KEYS | {"exact_edition"}):
         raise ValueError("planned queue inputs have an invalid schema")
     if not isinstance(value["album"], dict):
         raise ValueError("planned album must be an object")
@@ -487,6 +490,8 @@ def _checked_planned(value: Any) -> dict[str, Any]:
     for name in ("upgrade_only", "auto_upgrade", "force_track_by_track"):
         if type(value[name]) is not bool:
             raise ValueError(f"planned {name} must be a boolean")
+    if "exact_edition" in value and type(value["exact_edition"]) is not bool:
+        raise ValueError("planned exact_edition must be a boolean")
     if value["quality"] is not None and type(value["quality"]) is not int:
         raise ValueError("planned quality must be an integer or null")
     if value["source_premise"] is not None:

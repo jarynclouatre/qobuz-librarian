@@ -27,14 +27,17 @@ from qobuz_librarian.download import (
     retire_download_staging_after_import,
     retire_empty_download_staging,
     run_album_download,
+    staged_track_bindings,
     validated_staged_album_dirs,
 )
 from qobuz_librarian.download_result import incomplete_track_counts
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
+    _prepare_staging_tags,
     beets_import_albums,
     durable_import_possible,
+    prepare_managed_staging_tags,
     relocate_disc_album_artwork,
     retire_backup_beets_entries,
     staging_preflight,
@@ -75,6 +78,8 @@ from qobuz_librarian.library.candidate_premise import (
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
     _is_split_album_merge,
+    edition_album_title,
+    edition_files,
     find_album_dir_by_track_signatures,
     find_album_dir_filesystem,
     folder_holds_all_tracks,
@@ -87,7 +92,7 @@ from qobuz_librarian.library.post_import_relocation import (
     RelocationKind,
     relocate_post_import_album,
 )
-from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches
+from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches, read_album_dir
 from qobuz_librarian.quality.decision import mark_local_album_capped
 from qobuz_librarian.quality.verify import (
     redownload_with_staged_fallback,
@@ -959,6 +964,7 @@ def _download_for_queue_item(item):
         quality=item.get("quality"),
         upgrade_only=item["upgrade_only"],
         force_track_by_track=item.get("force_track_by_track", False),
+        exact_edition=item.get("exact_edition", False),
         result=item,
         expected_gap_fill_receipts=item.get(
             "_validated_gap_fill_receipts"
@@ -1389,6 +1395,15 @@ def _resolve_queue_item(
     item["imported"] = imported_globally
     bp = item.get("backup_path")
     album_dir = item["album_dir"]
+
+    def imported_dir():
+        signatures = item.get("post_import_signatures")
+        if item.get("exact_edition") and album_dir is not None:
+            found = find_album_dir_by_track_signatures(signatures, expected_dir=album_dir)
+            if found is not None or bp is None:
+                return found
+        return find_album_dir_by_track_signatures(signatures)
+
     _sibs = item.get("siblings_to_delete", [])
     item["_siblings_preserved"] = [os.fspath(path) for path in _sibs]
 
@@ -1426,9 +1441,7 @@ def _resolve_queue_item(
     )
     migration_source_dir = ownership_source_dir
     if migration_requested and not ownership_source_required:
-        migration_source_dir = find_album_dir_by_track_signatures(
-            item.get("post_import_signatures")
-        )
+        migration_source_dir = imported_dir()
     deferred_web_single_migration = (
         migration_requested
         and deferred_relocation_handoff
@@ -1498,10 +1511,9 @@ def _resolve_queue_item(
         and imported_globally
         and not ownership_source_required
     ):
-        post_dir = find_album_dir_by_track_signatures(
-            item.get("post_import_signatures"))
+        post_dir = imported_dir()
         post_dir_exact = post_dir is not None
-    if post_dir is None and not ownership_source_required:
+    if post_dir is None and not ownership_source_required and not item.get("exact_edition"):
         post_dir = find_album_dir_filesystem(item["album"])
     # For brand-new albums (album_dir=None), find_album_dir_filesystem may
     # return None if the cache hasn't refreshed. Clear and retry once.
@@ -1509,10 +1521,11 @@ def _resolve_queue_item(
         post_dir is None
         and imported_globally
         and not ownership_source_required
+        and not item.get("exact_edition")
     ):
         clear_scan_caches()
         post_dir = find_album_dir_filesystem(item["album"])
-    if post_dir is None:
+    if post_dir is None and not item.get("exact_edition"):
         post_dir = album_dir
     album_has_content = (
         post_dir is not None and post_dir.exists()
@@ -1865,6 +1878,7 @@ def _resolve_queue_item(
                 post_dir,
                 (item["album"].get("tracks") or {}).get("items") or [],
                 destructive=True,
+                edition=item["album"] if item.get("exact_edition") else None,
             )
         )
         _filled_receipt = (
@@ -1876,6 +1890,9 @@ def _resolve_queue_item(
                 gfb,
                 post_dir,
                 _filled_receipt,
+                **({"replacement_audio_paths": [t["path"] for t in edition_files(
+                    item["album"], read_album_dir(post_dir), post_dir)]}
+                   if item.get("exact_edition") else {}),
             ):
                 item["recovery_unverified"] = True
                 item["catalogue_unverified"] = True
@@ -1896,6 +1913,8 @@ def _resolve_queue_item(
                         replacement,
                         (item["album"].get("tracks") or {}).get("items") or [],
                         destructive=True,
+                        edition=item["album"] if item.get("exact_edition") else None,
+                        folder_label=post_dir.name,
                     )
                 ),
             ):
@@ -3258,6 +3277,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
 
         if plan is not None:
             def _prepare_staged(album_dirs, checkpoint_sources):
+                title = edition_album_title(album) if item.get("exact_edition") else None
+                if title:
+                    prepare_managed_staging_tags(
+                        album_dirs, staged_track_bindings(item), album_title=title,
+                        authority_check=lambda: _require_executor_authority(authority))
+                    checkpoint_sources(SourceTransitionKind.BEETS_TAG_CLEAN)
                 return _run_pre_import_hooks_for_dirs(
                     album_dirs,
                     args,
@@ -3479,6 +3504,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  repair retag step failed: {_e_rt}"))
                 try:
+                    if item.get("exact_edition"):
+                        _prepare_staging_tags(album_dirs, album_title=edition_album_title(album))
                     prepared = _run_pre_import_hooks_for_dirs(album_dirs, args)
                     sigs, resampled_n = prepared
                     item["resampled_n"] = resampled_n
@@ -3497,6 +3524,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     item["result"] = "interrupted"
                     results.append(_resolve_queue_item(
                         item, args, False, authority=authority))
+                    continue
+                except OSError as exc:
+                    _handle_download_exception(item, exc, phase="staged preparation")
                     continue
 
                 parking_receipts = tuple(
@@ -3673,6 +3703,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     )
     if (consolidate_duplicates
             and any_imported
+            and not any(item.get("exact_edition") for item in items)
             and not ownership_scope_resolved):
         try:
             protected_ownership_dirs = [

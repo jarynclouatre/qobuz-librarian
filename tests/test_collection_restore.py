@@ -17,11 +17,11 @@ def _snapshot(artists):
             "artists": artists}
 
 
-def _qobuz_album(album_id, title, artist="Bonobo", tracks=8):
-    return {"id": album_id, "title": title, "tracks_count": tracks,
+def _qobuz_album(album_id, title, artist="Bonobo", track_title=None):
+    return {"id": album_id, "title": title, "tracks_count": 1,
             "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1,
             "artist": {"name": artist},
-            "tracks": {"items": [{"id": f"t{i}"} for i in range(tracks)]}}
+            "tracks": {"items": [{"id": f"{album_id}-t1", "title": track_title or title}]}}
 
 
 class Library:
@@ -106,7 +106,7 @@ def test_a_dead_album_id_falls_back_to_the_isrc_then_the_name(library, qobuz):
     library.add("Bonobo", "Black Sands", [_track("Kiara", 1)])
     qobuz["albums"]["a9"] = _qobuz_album("a9", "Migration")
     qobuz["isrc_tracks"]["GBCEL1600123"] = {"album": {"id": "a9"}}
-    qobuz["albums"]["a8"] = _qobuz_album("a8", "Fragments")
+    qobuz["albums"]["a8"] = _qobuz_album("a8", "Fragments", track_title="Rosewood")
     qobuz["search"]["Bonobo Fragments"] = [_qobuz_album("a8", "Fragments")]
 
     job = _run(_snapshot([{"name": "Bonobo", "albums": [
@@ -121,7 +121,7 @@ def test_a_dead_album_id_falls_back_to_the_isrc_then_the_name(library, qobuz):
 
 def test_an_unmounted_library_refuses_an_absent_artist_row(library, qobuz,
                                                           monkeypatch):
-    qobuz["albums"]["a1"] = _qobuz_album("a1", "Room 25", artist="Noname")
+    qobuz["albums"]["a1"] = _qobuz_album("a1", "Room 25", artist="Noname", track_title="Self")
     job = _run(_snapshot([{"name": "Noname", "albums": [
         {"name": "Room 25", "qobuz_album_id": "a1",
          "tracks": [_track("Self", 1)]}]}]))
@@ -154,3 +154,26 @@ def test_unreadable_artist_is_not_offered_as_missing(library, qobuz, monkeypatch
     assert [row["artist"] for row in job.candidates] == ["Bonobo"]
     assert job.unchecked_artists == 1
     assert blocked.name in job.summary
+
+
+def test_restore_keeps_the_saved_mix_when_the_original_shares_its_isrc(library, qobuz):
+    track = _track("Drive My Car", 1, isrc="GBAYE6500001")
+    library.add("The Beatles", "Rubber Soul (1965)", [track])
+    original = _qobuz_album("original", "Rubber Soul", "The Beatles", "Drive My Car")
+    original["tracks"]["items"][0]["isrc"] = track["isrc"]
+    remix = {**original, "id": "remix", "version": "2026 Mix"}
+    qobuz["albums"].update(original=original, remix=remix)
+    qobuz["isrc_tracks"][track["isrc"]] = {"album": {"id": "original"}}
+    qobuz["search"]["The Beatles Rubber Soul"] = [original, remix]
+    snapshot = _snapshot([{"name": "The Beatles", "albums": [{
+        "title": "Rubber Soul", "name": "Rubber Soul (2026 Mix) (1965)",
+        "qobuz_album_id": "original", "tracks": [track],
+    }]}])
+
+    job = _run(snapshot)
+    assert [c["payload"]["album_id"] for c in job.candidates] == ["remix"]
+    assert not job.candidates[0]["payload"].get("album_dir")
+    assert candidate_premise.validate(job.candidates[0])["kind"] == "missing"
+
+    library.add("The Beatles", "Rubber Soul (2026 Mix) (1965)", [track])
+    assert not _run(snapshot).candidates

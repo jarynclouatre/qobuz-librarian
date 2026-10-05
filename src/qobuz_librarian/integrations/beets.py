@@ -925,6 +925,7 @@ def _prepare_staging_tags(
     managed_bindings=None,
     allow_managed_rewrite=False,
     authority_check=None,
+    album_title=None,
 ):
     """Set aside untagged FLACs and clean the survivors' path tags in a
     single pass, so each file is opened by mutagen once rather than twice.
@@ -1048,6 +1049,9 @@ def _prepare_staging_tags(
                 vlog(f"couldn't quarantine {f.name}: {e}")
             continue
         changed = False
+        if album_title and list(tags.get("album") or []) != [album_title]:
+            tags["album"] = [album_title]
+            changed = True
         for key in ("album", "albumartist", "artist", "title"):
             vals = tags.get(key)
             if not vals:
@@ -1092,8 +1096,8 @@ def _prepare_staging_tags(
                 if authority_check is not None:
                     authority_check()
             except Exception as e:
-                if managed is not None:
-                    raise OSError("managed beets tag-clean rewrite failed") from e
+                if managed is not None or album_title is not None:
+                    raise OSError("beets tag-clean rewrite failed") from e
                 vlog(f"couldn't rewrite cleaned tags on {f.name}: {e}")
         if managed is not None:
             refreshed_receipt = staging_mod.capture_file(
@@ -1198,6 +1202,7 @@ def prepare_managed_staging_tags(
     bindings,
     *,
     authority_check,
+    album_title=None,
 ):
     """Clean exact staged path tags before managed Beets carrier creation."""
     if not callable(authority_check):
@@ -1207,6 +1212,7 @@ def prepare_managed_staging_tags(
         managed_bindings=bindings,
         allow_managed_rewrite=True,
         authority_check=authority_check,
+        album_title=album_title,
     )
 
 
@@ -7728,7 +7734,8 @@ def _backup_receipt(value):
     return getattr(value, "receipt", None)
 
 
-def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
+def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
+                               *, replacement_audio_paths=None):
     """Retire exact old rows before disposing a moved-aside backup."""
     backup_receipt = _backup_receipt(backup)
     try:
@@ -7741,6 +7748,11 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt):
             return False
         old_paths = frozenset(old_paths)
         replacement_paths = frozenset(replacement_paths)
+        if replacement_audio_paths is not None:
+            selected = frozenset(Path(path) for path in replacement_audio_paths)
+            if not selected or not selected.issubset(replacement_paths):
+                return False
+            replacement_paths = selected
         old_only_paths = old_paths - replacement_paths
         if (
             len(old_paths) > 4096

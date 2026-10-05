@@ -61,7 +61,6 @@ from qobuz_librarian.library.scanner import (
     clear_scan_caches,
     list_artist_album_dirs,
     list_library_artists,
-    read_album_dir,
 )
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes import process as process_mode
@@ -704,11 +703,7 @@ def _refresh_restored_missing_spec(spec, token):
         tracks = (album.get("tracks") or {}).get("items") or []
         if not tracks:
             return spec
-        album_dir = catalog.find_album_dir_filesystem(album)
-        if album_dir is None:
-            return spec
-        existing, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
-        missing, _ = catalog.compute_missing(tracks, existing)
+        _existing, _album_dir, missing, _present = catalog.find_edition_tracks(album)
     except Exception as exc:
         log.info(f"  couldn't refresh restored album {album_id}: {exc}")
         return spec
@@ -717,10 +712,10 @@ def _refresh_restored_missing_spec(spec, token):
     if len(missing) == len(tracks):
         return spec
 
-    album = dict(album)
-    album["_partial_missing_count"] = len(missing)
-    refreshed = _album_candidate_spec(
-        album, spec.get("artist") or "", selected=False)
+    refreshed = _partial_gap_fill_spec(
+        album, spec.get("artist") or "", len(missing), album_dir=_album_dir)
+    if refreshed is None:
+        return spec
     restored = dict(spec)
     restored["detail"] = refreshed["detail"]
     restored["payload"] = {**payload, **refreshed["payload"]}
@@ -961,24 +956,38 @@ def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
     return True
 
 
-def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
-                           park_when_absent=False):
-    """Fold a partial download's missing tracks into an unticked Gap Fill row.
-
-    Create a review only when ``park_when_absent`` is set. Return False if
-    receipts or saving fail, True if saved or no review is needed.
-    """
-    album_dir = catalog.find_album_dir_filesystem(full_album)
+def _partial_gap_fill_spec(full_album, artist_name, n_missing, *,
+                           album_dir=None, exact_edition=True):
+    if album_dir is None:
+        if exact_edition:
+            _existing, album_dir, _missing, _present = catalog.find_edition_tracks(full_album)
+        else:
+            album_dir = catalog.find_album_dir_filesystem(full_album)
+    if album_dir is None:
+        return None
+    album_dir = Path(album_dir)
     premise = candidate_premise.capture("gap-fill", album_dir)
     if premise is None:
-        return False
-    spec = _album_candidate_spec(
+        return None
+    return _album_candidate_spec(
         {**full_album, "_partial_missing_count": n_missing},
         artist_name, selected=False, extra_payload={
             "album_dir": str(album_dir),
+            "exact_edition": exact_edition,
             "_premise": premise,
             "_gap_fill_receipts": candidate_premise.gap_fill_receipts(premise),
         })
+
+
+def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
+                           album_dir=None, exact_edition=True,
+                           park_when_absent=False):
+    """Return a partial download to Gap Fill, creating a review only if requested."""
+    spec = _partial_gap_fill_spec(
+        full_album, artist_name, n_missing,
+        album_dir=album_dir, exact_edition=exact_edition)
+    if spec is None:
+        return False
     folded = refold_into_living_review([spec], ticked=False)
     if folded is False:
         return False
@@ -1116,11 +1125,7 @@ def owned_missing_candidate_ids(job, token, candidate_ids=None):
             tracks = (album.get("tracks") or {}).get("items") or []
             if not tracks:
                 continue
-            album_dir = catalog.find_album_dir_filesystem(album)
-            if album_dir is None:
-                continue
-            existing, _ = catalog.find_existing_tracks(album, album_dir=album_dir)
-            missing, _ = catalog.compute_missing(tracks, existing)
+            existing, _album_dir, missing, _present = catalog.find_edition_tracks(album)
             if existing and not missing:
                 owned.add(cid)
         except Exception as exc:
@@ -2523,6 +2528,9 @@ def execute_albums(job, chosen, token):
             failed_cands.append(cand)
             continue
         _note_staging_wait(job, "Downloading albums", i - 1, len(chosen))
+        exact_edition = bool(
+            is_restore_run or is_nr_run or not is_gap_candidate(cand)
+            or cand["payload"].get("exact_edition"))
         try:
             with job_mgr.staging_lock():
                 if candidate_premise.expected_kind(cand) == "missing":
@@ -2531,14 +2539,11 @@ def execute_albums(job, chosen, token):
                     # artist tree. That is safe only while this exact edition
                     # still has no local folder of its own.
                     clear_scan_caches()
-                    found = find_album_dir_filesystem(full)
+                    _existing, found, _missing, present = catalog.find_edition_tracks(full)
                     # A folder holding none of this edition's tracks is
                     # another album that shares its title, such as an
                     # artist's second self-titled record.
-                    if found is not None and catalog.compute_missing(
-                        (full.get("tracks") or {}).get("items") or [],
-                        read_album_dir(found),
-                    )[1]:
+                    if found is not None and present:
                         raise CandidateStale(
                             "This missing album appeared locally after the "
                             "review was built. Refresh the review; nothing "
@@ -2548,6 +2553,7 @@ def execute_albums(job, chosen, token):
                     premise = candidate_premise.validate(cand)
                 result = process_mode.process_album(full, args, allow_force=False,
                                        already_confirmed=True, token=token,
+                                       exact_edition=exact_edition,
                                        expected_album_receipt=(
                                            premise["receipt"]
                                            if premise["kind"] == "gap-fill"
@@ -2613,6 +2619,7 @@ def execute_albums(job, chosen, token):
                 elif (is_library_run or is_restore_run) and retryable:
                     _remember_review_save(_fold_partial_gap_fill(
                         full, cand.get("artist") or "", retryable,
+                        album_dir=result.get("dir"), exact_edition=exact_edition,
                         park_when_absent=True))
             elif attention_kind:
                 attention_counts[attention_kind] += 1
@@ -3595,15 +3602,15 @@ def _repair_album_outcome(album_dir, name, token):
         out["warns"].append(f"  {name} - {album_dir.name}: {detail}")
     for entry in scan.get("isrc_mismatch", []):
         if entry.get("diagnostic"):
-            # Damaged as well as mis-tagged, so it is picked up below as a
+            # Damaged as well as unmatched, so it is picked up below as a
             # re-download candidate and reported there. Saying it here too
             # printed the same file twice in slightly different words.
             continue
         out["warns"].append(
             f"    ~ {album_dir.name} - {entry.get('local_title') or '?'}: "
-            f"shorter than its ISRC match, but that match is "
-            f"\"{entry.get('title') or '?'}\", a different recording. "
-            "Left alone; check the file's ISRC tag if you think it is wrong.")
+            f"shorter than \"{entry.get('title') or '?'}\", but the recording "
+            "or edition could not be confirmed. Left alone; check the "
+            "recording and edition tags before retrying.")
     # Damaged files that can't be matched to a Qobuz recording can't be
     # surgically refilled, so offer a whole-album re-download instead (the user
     # confirms it in review). Every bucket that can hold one carries them: no
@@ -3615,7 +3622,7 @@ def _repair_album_outcome(album_dir, name, token):
             m_title = matched.get("title") or album_dir.name
             m_year = album_year(matched) or "?"
             detail = (f"{plural(len(suspicious), 'damaged file')} can't be "
-                      f"verified by ID. Re-download the whole album fresh "
+                      f"matched to a recording and edition. Re-download the whole album fresh "
                       f"as “{m_title}” ({m_year})")
             payload = {"album_dir": str(album_dir), "artist_name": name,
                        "album_id": matched.get("id"),

@@ -528,7 +528,7 @@ def test_album_search_drops_artist_only_matches(client, monkeypatch):
     from qobuz_librarian.web import qobuz_access
 
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
-    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a: None)
+    monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a, **_kw: None)
     monkeypatch.setattr(search_mod, "qobuz_get", lambda *_a, **_kw: {
         "albums": {"items": [
             {"id": "crystal-castles-iii", "title": "(III)",
@@ -573,7 +573,7 @@ def test_new_edition_download_rechecks_exact_ownership(
     monkeypatch.setattr(
         catalog_mod,
         "find_album_dir_filesystem",
-        lambda _album: folder[0],
+        lambda _album, **_kw: folder[0],
     )
     monkeypatch.setattr(
         catalog_mod,
@@ -617,6 +617,157 @@ def test_new_edition_download_rechecks_exact_ownership(
     )
     assert stale.headers["X-QL-Download-Outcome"] == "owned"
     assert len(submitted) == 1
+
+
+def test_album_search_keeps_a_new_mix_available_beside_the_original(
+        client, monkeypatch, tmp_path, tagged_flac):
+    import html.parser
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.api import search
+    from qobuz_librarian.library import candidate_premise, scanner
+    from qobuz_librarian.modes import process
+    from qobuz_librarian.queue import executor
+    from qobuz_librarian.web import flows, job_runs, qobuz_access, routes_search
+
+    original = {
+        "id": "rubber-soul", "title": "Rubber Soul",
+        "artist": {"name": "The Beatles"},
+        "release_date_original": "1965-12-03", "tracks_count": 2,
+        "maximum_bit_depth": 16,
+        "tracks": {"items": [
+            {"id": "drive", "title": "Drive My Car"},
+            {"id": "norwegian", "title": "Norwegian Wood"},
+        ]},
+    }
+    remix = {**original, "id": "rubber-soul-2026", "version": "2026 Mix",
+             "tracks": {"items": [
+                 {**track, "id": f"{track['id']}-2026", "version": "2026 Mix"}
+                 for track in original["tracks"]["items"]
+             ]}}
+    albums = {album["id"]: album for album in (remix, original)}
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    folder = tmp_path / "The Beatles" / "Rubber Soul (1965)"
+    folder.mkdir(parents=True)
+    for track in original["tracks"]["items"]:
+        tagged_flac(folder / f"{track['id']}.flac", TITLE=track["title"],
+                    ALBUM="Rubber Soul", ARTIST="The Beatles")
+    scanner.clear_scan_caches()
+    monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
+    monkeypatch.setattr(search, "get_album", lambda album_id, _token: albums[album_id])
+    monkeypatch.setattr(flows, "get_album", lambda album_id, _token: albums[album_id])
+    monkeypatch.setattr(search, "qobuz_get", lambda *_args, **_kwargs: {
+        "albums": {"items": list(albums.values())},
+    })
+
+    results, _groups = asyncio.run(routes_search._album_results(
+        list(albums.values()), "Rubber Soul", "tok", set(), set()))
+    assert {r["id"]: r["owned"] for r in results} == {
+        "rubber-soul": True, "rubber-soul-2026": False,
+    }
+    assert not any(t["owned"] for t in routes_search._album_tracklist(remix["id"], "tok"))
+
+    class DownloadForms(html.parser.HTMLParser):
+        def __init__(self, markup):
+            super().__init__()
+            self.forms = []
+            self.current = None
+            self.feed(markup)
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form" and "data-search-download-form" in attrs:
+                self.current = {}
+                self.forms.append(self.current)
+            elif tag == "input" and self.current is not None:
+                self.current[attrs.get("name")] = attrs.get("value", "")
+
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.current = None
+
+    headers = {"HX-Request": "true"}
+    response = client.post(
+        "/search", data={"q": "Rubber Soul", "kind": "album"}, headers=headers)
+    forms = DownloadForms(response.text).forms
+    assert len(forms) == 2  # Table and grid offer the same separate copy.
+    assert all(form["album_id"] == remix["id"] and form.get("as_new_edition") == "1"
+               for form in forms)
+
+    submitted = []
+    monkeypatch.setattr(job_runs, "_make_download_run", lambda *_a, **_kw: lambda _j: None)
+    runs = []
+
+    def submit(job, run):
+        submitted.append(job)
+        runs.append(run)
+        return job
+
+    monkeypatch.setattr(jm, "submit", submit)
+    queued = client.post("/download", data=forms[0], headers=headers)
+    assert queued.headers["X-QL-Download-Outcome"] == "queued"
+    assert submitted[0].execute_args == {"new_edition": True}
+
+    wanted_track = remix["tracks"]["items"][0]
+    track_results = asyncio.run(routes_search._track_results(
+        [{**wanted_track, "album": remix}], "Drive My Car", "tok", set()))
+    assert not track_results[0]["owned"]
+    queued_track = client.post("/download", data={
+        "album_id": remix["id"], "track_id": wanted_track["id"],
+    }, headers=headers)
+    assert queued_track.headers["X-QL-Download-Outcome"] == "queued"
+    captured = []
+    monkeypatch.setattr(executor, "_execute_download_queue", lambda queue, *_a, **_kw: captured.extend(queue))
+    runs[1](submitted[1])
+    assert captured[0]["missing"] == [wanted_track]
+    assert captured[0]["force_track_by_track"]
+
+    partial = folder.with_name("Rubber Soul (2026 Mix) (1965)")
+    tagged_flac(partial / "drive.flac", TITLE="Drive My Car (2026 Mix)",
+                ALBUM="Rubber Soul (2026 Mix)", ARTIST="The Beatles")
+    scanner.clear_scan_caches()
+    folded = []
+    planned = []
+
+    def stop_download(**kwargs):
+        planned.append((kwargs["album_dir"], kwargs["missing"]))
+        raise RuntimeError("download interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(flows, "refold_into_living_review",
+                      lambda specs, **_kw: folded.extend(specs) or True)
+        patch.setattr(process, "staging_preflight", lambda _args: None)
+        patch.setattr(process, "run_album_download", stop_download)
+        assert flows._fold_partial_gap_fill(remix, "The Beatles", 1)
+        candidate = folded[0]
+        job = jm.Job("library", "Retry", execute_kind="library")
+        flows.execute_albums(job, [candidate], "tok")
+        assert planned == [(partial, [remix["tracks"]["items"][1]])]
+
+    restored = flows._refresh_restored_missing_spec(
+        flows._album_candidate_spec(remix, "The Beatles"), "tok")
+    premise = candidate_premise.validate(restored)
+    assert premise["kind"] == "gap-fill" and Path(premise["path"]) == partial
+    assert restored["payload"]["exact_edition"]
+
+    old_folder = folder.with_name("Rubber Soul (1966)")
+    folder.rename(old_folder)
+    kept = folder
+    kept.mkdir()
+    for track in original["tracks"]["items"]:
+        tagged_flac(kept / f"{track['id']}.flac", TITLE=f"{track['title']} (2026 Mix)",
+                    ALBUM="Rubber Soul", ARTIST="The Beatles")
+    scanner.clear_scan_caches()
+    results, _groups = asyncio.run(routes_search._album_results(
+        list(albums.values()), "Rubber Soul", "tok", set(), set()))
+    assert all(r["owned"] for r in results)
+    assert all(t["owned"] for t in routes_search._album_tracklist(remix["id"], "tok"))
+    track_results = asyncio.run(routes_search._track_results(
+        [{**wanted_track, "album": remix}], "Drive My Car", "tok", set()))
+    assert track_results[0]["owned"]
+    stale = client.post("/download", data=forms[0], headers=headers)
+    assert stale.headers["X-QL-Download-Outcome"] == "owned"
+    assert len(submitted) == 2
 
 
 # The Doors put out a 25-track "50th Anniversary Deluxe Edition" and two plain
@@ -2555,7 +2706,7 @@ def _backup_file(album_count=1, padding=0):
 
 def test_uploading_a_backup_parks_one_restore_review(client, monkeypatch,
                                                      tmp_path):
-    album = {"id": "a0", "title": "Room 25", "tracks_count": 8,
+    album = {"id": "a0", "title": "Album 0", "tracks_count": 8,
              "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1,
              "artist": {"name": "Noname"},
              "tracks": {"items": [{"id": "t1"}]}}
