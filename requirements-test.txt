@@ -83,7 +83,9 @@ typing-inspection==0.4.4
     #   fastapi
     #   pydantic
 urllib3==2.8.0
-    # via requests
+    # via
+    #   qobuz-librarian (pyproject.toml)
+    #   requests
 uvicorn==0.54.0
     # via qobuz-librarian (pyproject.toml)
 uvloop==0.22.1

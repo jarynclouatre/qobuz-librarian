@@ -2,12 +2,13 @@
 # Builds a self-contained virtualenv and the Tailwind CSS bundle. `git`,
 # build-essential, and the Node toolchain live ONLY here, so they never
 # reach the runtime image.
-FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS builder
+FROM python:3.14-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS builder
 
 # git: for the pinned streamrip install (git+https). build-essential: some
 # transitive deps compile C extensions if no wheel is available. nodejs/npm:
 # Tailwind CLI for the production CSS bundle.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         git \
         build-essential \
         nodejs \
@@ -27,13 +28,13 @@ WORKDIR /app
 # when a Qobuz-side schema change forces it; verify with scripts/smoke_test.sh
 # before changing the SHA. Last verified: 2026-07 against streamrip dev.
 #
-# streamrip and beets install --no-deps: both cap a few helpers (Pillow,
-# aiofiles, tomlkit) far below the versions the librarian runs and verifies, so
+# streamrip and beets install --no-deps: streamrip caps a few helpers (Pillow,
+# aiofiles, tomlkit) below the versions the librarian runs and verifies, so
 # letting them resolve their own trees would either downgrade those or fail the
 # build outright. image-lock.txt supplies the whole dependency set instead.
 # core beets, the fetchart + inline plugins (beets-default.yaml), the
 # chroma/AcoustID path (pyacoustid here, fpcalc via libchromaprint-tools in the
-# runtime stage) that beets-chroma.yaml and the migration fingerprint stage use,
+# runtime stage) for beets-chroma.yaml, the migration AcoustID lookup,
 # the app's own deps, and every transitive dependency, pinned to a verified
 # resolution so a rebuild can't drift to newer releases. Regenerate it with
 # scripts/lock-image-deps.sh after changing the streamrip ref or beets pin.
@@ -61,16 +62,16 @@ RUN npm ci --no-audit --no-fund \
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 # No git, no compilers, no pip caches, just the venv + ffmpeg + tiny helpers.
-FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS runtime
+FROM python:3.14-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS runtime
 
 LABEL org.opencontainers.image.title="Qobuz Librarian"
 LABEL org.opencontainers.image.description="Qobuz downloader + library maintenance (CLI + web UI)"
 LABEL org.opencontainers.image.source="https://github.com/jarynclouatre/qobuz-librarian"
 # The image REDISTRIBUTES third-party tools under their own licenses (streamrip
-# is GPL-3.0-or-later, mutagen GPL-2.0-or-later, plus ffmpeg/flac/beets), so the
+# is GPL-3.0-only, mutagen GPL-2.0-or-later, plus ffmpeg/flac/beets), so the
 # standard machine-readable label reflects the whole image, not just this app.
 # This project's OWN source is MIT. See the dedicated label below and LICENSE.
-LABEL org.opencontainers.image.licenses="MIT AND GPL-3.0-or-later AND GPL-2.0-or-later"
+LABEL org.opencontainers.image.licenses="MIT AND GPL-3.0-only AND GPL-2.0-or-later"
 LABEL com.qobuzlibrarian.app-code-license="MIT"
 
 # ffmpeg: rip/compress (runtime). flac: `flac -t` integrity checks and
@@ -80,7 +81,8 @@ LABEL com.qobuzlibrarian.app-code-license="MIT"
 # libchromaprint-tools: fpcalc, for the optional beets `chroma` (AcoustID)
 # plugin used to identify untagged files. curl: POST_JOB_HOOK one-liners
 # (ntfy, Discord, …) run inside this container, so it has to be here.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \
         gosu \

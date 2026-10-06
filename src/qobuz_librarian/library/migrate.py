@@ -30,6 +30,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -70,6 +71,19 @@ ACOUSTID_RATE_DELAY = 0.34
 # A fingerprint match below this confidence, or one that disagrees with another
 # high-scoring match, is treated as "couldn't identify" rather than guessed.
 ACOUSTID_MIN_SCORE = 0.9
+
+_FINGERPRINT_FORMATS = {
+    ".flac": "flac", ".m4a": "mov", ".mp3": "mp3", ".aac": "aac",
+    ".ogg": "ogg", ".opus": "ogg", ".wav": "wav",
+}
+_FINGERPRINT_CODECS = (
+    "aac,aac_fixed,alac,flac,mp3,mp3float,opus,libopus,vorbis,libvorbis,speex,libspeex,"
+    "pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_u16le,pcm_u16be,"
+    "pcm_s24le,pcm_s24be,pcm_u24le,pcm_u24be,"
+    "pcm_s32le,pcm_s32be,pcm_u32le,pcm_u32be,pcm_s64le,pcm_s64be,"
+    "pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw,"
+    "adpcm_ima_wav,adpcm_ms"
+)
 
 PLACE = "place"
 UNPLACEABLE = "unplaceable"
@@ -2014,34 +2028,60 @@ def identify_from_lookup(resp: dict, min_score: float, stem: str,
 
 def fingerprint_identify(path: Path, min_score: float = ACOUSTID_MIN_SCORE,
                          ext: str = "", *, descriptor=None) -> Optional[dict]:
-    """Identify one file by audio fingerprint via AcoustID, resolving an album
-    so the file can actually be placed. None if no confident match (or the
-    fingerprinter isn't available).
-
-    Lazily imports ``acoustid`` - it and ``fpcalc`` ship only in the container,
-    so this whole stage is a no-op on a host without them. The lookup asks for
-    release groups + releases so a recording match yields an album and year, not
-    just a title."""
+    """Resolve an album through AcoustID, or None without a confident match."""
     try:
         import acoustid
+        import mutagen
+        from mutagen._util import FileThing
     except ImportError:
         vlog("acoustid not installed; skipping fingerprint stage")
         return None
     try:
-        if descriptor is None:
-            duration, fp = acoustid.fingerprint_file(str(path))
-        else:
-            completed = subprocess.run(
-                ["fpcalc", "-json", f"/proc/self/fd/{int(descriptor)}"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                pass_fds=(int(descriptor),),
-            )
-            payload = json.loads(completed.stdout)
-            duration = payload["duration"]
-            fp = payload["fingerprint"]
+        suffix = (ext or path.suffix).lower()
+        input_format = _FINGERPRINT_FORMATS.get(suffix)
+        if input_format is None:
+            return None
+        source = (f"/proc/self/fd/{int(descriptor)}" if descriptor is not None
+                  else str(path))
+        with open(source, "rb") as fileobj:
+            audio = mutagen.File(FileThing(fileobj, str(path), str(path)))
+        if audio is None:
+            return None
+        input_options = [
+            "-f", input_format, "-format_whitelist", input_format,
+            "-codec_whitelist", _FINGERPRINT_CODECS,
+            "-protocol_whitelist", "file",
+        ]
+        pass_fds = () if descriptor is None else (int(descriptor),)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", *input_options,
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", source],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=60, pass_fds=pass_fds,
+        )
+        # ffprobe also opens cover/video decoders, which the whitelist rejects.
+        duration = (float(probe.stdout.strip()) if probe.returncode == 0
+                    else audio.info.length)
+        if not math.isfinite(duration) or duration <= 0:
+            return None
+        completed = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+             *input_options, "-i", source,
+             "-map", "0:a:0", "-vn", "-sn", "-dn", "-t", "120",
+             # Match fpcalc's resampler.
+             "-af", "aresample=11025:filter_size=16:phase_shift=8:linear_interp=1:cutoff=0.8",
+             "-ac", "1", "-ar", "11025", "-f", "chromaprint", "-"],
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            pass_fds=pass_fds,
+        )
+        fp = completed.stdout.strip()
+        if not fp:
+            return None
         resp = acoustid.lookup(ACOUSTID_API_KEY, fp, duration,
                                meta="recordings releasegroups releases")
     except Exception as e:

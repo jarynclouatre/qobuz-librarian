@@ -341,7 +341,10 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
     """
     try:
         r = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(src),
+            ["ffmpeg", "-hide_banner", "-nostdin",
+             "-f", "flac", "-format_whitelist", "flac",
+             "-codec_whitelist", "flac", "-protocol_whitelist", "file",
+             "-i", str(src),
              "-map", "0:a", "-af", f"{af_filter},astats=metadata=1:reset=0",
              "-ar", str(rate), "-c:a", "pcm_f32le", "-f", "null", "-"],
             capture_output=True, timeout=600, stdin=subprocess.DEVNULL,
@@ -774,11 +777,10 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-f", "flac", "-format_whitelist", "flac",
+                "-codec_whitelist", "flac", "-protocol_whitelist", "file",
                 "-i", str(source_path),
-                # Audio only. The comments and pictures are carried over
-                # below, and a cover in a format the FLAC muxer cannot store
-                # (GIF, WebP) fails the whole encode if it is mapped here,
-                # even under -c:v copy.
+                # Comments and pictures are copied verbatim below.
                 "-map", "0:a",
                 "-af", enc_af,
                 "-ar", str(rate),

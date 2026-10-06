@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "mutagen>=1.47",
     "requests>=2.31",
+    "urllib3>=2.8.0",
     # Web UI
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",

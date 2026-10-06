@@ -1,6 +1,7 @@
 """Library migration: placement correctness and the copy-safety guarantees."""
 import csv
 import json
+import shutil
 import stat
 import subprocess
 import sys
@@ -90,6 +91,50 @@ def test_acoustid_rejects_low_confidence_and_ambiguous_matches():
     ]) is None
     chosen = m.choose_acoustid_match([{"score": 0.97, "artist": "Oasis", "title": "T"}])
     assert chosen["artist"] == "Oasis"
+
+
+def test_fingerprinting_keeps_full_duration_and_rejects_disguised_playlists(
+        tmp_path, monkeypatch):
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg and ffprobe not available")
+    formats = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-formats"],
+        capture_output=True, text=True, check=True,
+    )
+    if "chromaprint" not in formats.stdout:
+        pytest.skip("ffmpeg has no Chromaprint support")
+    track = tmp_path / "untagged.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=123",
+         "-c:a", "adpcm_ima_wav", str(track)],
+        check=True,
+    )
+    lookups = []
+
+    def lookup(_key, fingerprint, duration, **_kwargs):
+        lookups.append((fingerprint, duration))
+        return {"results": [{"score": 0.99, "recordings": [{
+            "title": "Song", "artists": [{"name": "Artist"}],
+            "releasegroups": [{"title": "Album", "type": "Album"}],
+        }]}]}
+
+    monkeypatch.setitem(sys.modules, "acoustid", SimpleNamespace(lookup=lookup))
+    with track.open("rb") as source:
+        result = m.fingerprint_identify(track, descriptor=source.fileno())
+    assert result is not None and result["album"] == "Album"
+    assert lookups[0][0]
+    assert lookups[0][1] == pytest.approx(123, abs=0.1)
+
+    track.write_text('<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period></MPD>')
+
+    def decode_unrecognized_file(*_args, **_kwargs):
+        pytest.fail("unrecognized audio reached the native decoder")
+
+    monkeypatch.setattr(m.subprocess, "run", decode_unrecognized_file)
+    with track.open("rb") as source:
+        assert m.fingerprint_identify(track, descriptor=source.fileno()) is None
+    assert len(lookups) == 1
 
 
 
