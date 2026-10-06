@@ -56,7 +56,7 @@
               class="ql-btn ql-btn-primary w-full sm:w-auto"
               {% if writes_paused %}disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Preview migration</button>
       <p class="ql-form-note">
-        Preview writes a manifest only. Copy or move happens after review.
+        Preview records the plan. Copy or move happens after review.
       </p>
     </form>
   </div>
@@ -91,7 +91,7 @@
       </li>
       <li>
         <span class="ql-step-number">3</span>
-        <span>Restart the container, then return to this page.</span>
+        <span>Recreate the service with <code>docker compose up -d</code>, then return to this page.</span>
       </li>
     </ol>
   </div>

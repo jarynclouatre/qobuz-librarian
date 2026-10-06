@@ -222,8 +222,7 @@ BEETS_PATH_COMP      = os.environ.get("BEETS_PATH_COMP", "").strip()
 # Comma-separated list of beets plugins to choose. Empty honours whatever is
 # set in /config/beets/config.yaml. A custom list replaces those choices for
 # managed imports; the import override adds inline, artwork requirements, and
-# the internal guard plugins. For example:
-# BEETS_PLUGINS="fetchart,lastgenre,replaygain,scrub"
+# the internal guard plugins.
 BEETS_PLUGINS = [p.strip() for p in
                  os.environ.get("BEETS_PLUGINS", "").split(",")
                  if p.strip()]

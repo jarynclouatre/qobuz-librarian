@@ -21,7 +21,9 @@ The scanner expects a two-level tree under your music library. In Docker, this i
         └── 01 - Track.flac
 ```
 
-The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, and `2017 - Album` all work. The year is optional; matching uses track tags, not folder names. Per-disc subdirs (`CD1/`, `CD2/`) are recursed into; hidden directories and the staging dir are skipped. Flat (`/music/<track>.flac`) and extra-nested (`/music/<Genre>/<Artist>/...`) layouts are not detected, so point `QL_MUSIC_DIR` at the folder that contains the artist folders.
+The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, and `2017 - Album` all work. The year is optional. Matching locates artist and album folders, then checks track tags; edition labels in tags and folder names distinguish mixes and remasters. Per-disc subdirs (`CD1/`, `CD2/`) are recursed into; hidden directories and the staging dir are skipped. Flat (`/music/<track>.flac`) and extra-nested (`/music/<Genre>/<Artist>/...`) layouts are not detected, so point `QL_MUSIC_DIR` at the folder that contains the artist folders.
+
+An older copy without enough edition information may still be offered for download. A shared recording ID alone does not identify a particular mix or remaster.
 
 ## Migrating into the layout
 
@@ -29,9 +31,11 @@ If your library is not already organised as artist folders with album folders in
 
 It places each file by its tags (album artist, album, title, track, disc). For files whose tags are not enough to place them, an optional AcoustID fingerprint pass identifies them by sound (slower, needs network, off by default; no API key required).
 
+Fingerprinting reads local FLAC, M4A, MP3, AAC, Ogg, Opus and WAV audio. Source installs need FFmpeg with Chromaprint support, ffprobe, and `pyacoustid` in the app's Python environment; Docker includes these.
+
 Library migration copies by default, so the source library stays where it is. Optional move mode relocates the originals after preview and removes source folders that become empty. The tool previews the plan first: how many files it can place, how many it could not place or would collide with an existing file, and how much space the destination needs (in the terminal, `--verbose` lists the files it could not place). Nothing is copied or moved until you confirm. Files it cannot confidently place are left alone and listed.
 
-An approved migration writes two CSVs at the destination: a `migration-manifest-*.csv` recording the full plan (including everything left behind and why) and a `migration-results-*.csv` recording what the run copied, moved, skipped, or failed on. Each file gets a unique timestamped name, so repeated runs never overwrite an earlier record; the approved plan and the finished run both report the exact filename they wrote. A `--dry-run` prints the preview without writing either file or otherwise changing the destination.
+An approved migration writes two CSVs at the destination: a `migration-manifest-*.csv` recording the full plan (including everything left behind and why) and a `migration-results-*.csv` recording what the run copied, moved, skipped, or failed on. Each file gets a unique timestamped name, so repeated runs never overwrite an earlier record; the approved plan and the finished run both report the exact filename they wrote. A `--dry-run` prints the preview without writing either CSV or copying or moving music. Preview briefly creates and removes files to check filename handling, so the destination filesystem must be writable.
 
 Mount the source library and destination folder into the container, then set `MIGRATE_SRC` and `MIGRATE_DEST` to those container paths. Keep the source mount read-only if you only plan to copy; move mode needs the source to be writable.
 
@@ -53,7 +57,7 @@ Then either:
 
 After migration finishes, point `QL_MUSIC_DIR` at the new destination and run a Library scan.
 
-Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist, no disc numbers) cannot be recognised as one, so each track lands under its own track artist. The year comes from tags only, so a file tagged without one lands in `Artist/Album/` rather than `Artist/Album (Year)/`. In copy mode, spot-check the destination before switching `QL_MUSIC_DIR` to it. In move mode, review the preview carefully before confirming.
+Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist, no disc numbers) cannot be recognised as one, so each track lands under its own track artist. In the tags-only pass, the year comes from tags, so a file tagged without one lands in `Artist/Album/` rather than `Artist/Album (Year)/`. In copy mode, spot-check the destination before switching `QL_MUSIC_DIR` to it. In move mode, review the preview carefully before confirming.
 
 ## Bringing an existing beets database
 
@@ -78,13 +82,15 @@ docker compose run --rm qobuz-librarian \
   beet -c /app/docker/beets-chroma.yaml import /music/<your-untagged-folder>
 ```
 
-It shows the matching MusicBrainz releases one album at a time, for you to accept, skip, or replace. Lookups use beets' built-in AcoustID key; you only need your own (from <https://acoustid.org/new-application>, added as `acoustid: {apikey: "KEY"}`) to submit fingerprints with `beet submit`.
+It shows the matching MusicBrainz releases one album at a time, for you to accept, skip, or replace. Lookups use beets' built-in AcoustID key; you only need your own user API key (from <https://acoustid.org/api-key>, added as `acoustid: {apikey: "KEY"}`) to submit fingerprints with `beet submit`.
+
+Run manual beets fingerprinting only on files you trust. It uses beets' own media readers, without Library migration's audio-only restrictions.
 
 Stop Qobuz Librarian completely before running this or any other manual `beet` command. Waiting for downloads to finish is not enough: manual commands do not participate in the app's database coordination and must not run alongside it. To also re-folder the files into the layout, use [Library migration](#migrating-into-the-layout) instead.
 
 ## The first scan on a big library
 
-A library-wide scan makes roughly one Qobuz call per artist directory (cached on re-scans, so repeated scans mostly use cached data), fanned across a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). There is no artificial delay between calls (`ARTIST_API_DELAY`, default 0); Qobuz's rate limit is handled by automatic retry and back-off, so raise it only if you get throttled. It is scan-then-review, not a daemon. After the first scan, use the Library refresh for music added outside the app. Singles and very short EPs are hidden from the missing-albums step by default; lower `MISSING_ALBUMS_MIN_TRACKS` (e.g. to 1) to surface them. (A single-artist run can also pass `--include-singles`.)
+A library-wide scan fetches artist matches, catalogue pages and owned-album tracklists from Qobuz, with caches reducing repeat requests. It scans a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). Qobuz rate limits are handled by automatic retry and back-off. It is scan-then-review, not a daemon. After the first scan, use the Library refresh for music added outside the app. Singles and very short EPs are hidden from the missing-albums step by default; lower `MISSING_ALBUMS_MIN_TRACKS` (e.g. to 1) to surface them. (A single-artist run can also pass `--include-singles`.)
 
 Review choices are remembered, so a large library can be handled over several sessions. Library dismissals hide missing-album suggestions, Upgrade dismissals hide skipped upgrades, and Downsample remembers albums you keep hi-res. Restore them from each page's **Dismissed** view (Downsample calls it **Kept hi-res**). Saved choices are per album, so a new release by an already-reviewed artist still surfaces. Explicit single-artist CLI scans do not use the hidden list.
 

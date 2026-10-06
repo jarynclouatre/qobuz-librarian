@@ -1,6 +1,20 @@
 # Changelog
 
-All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/); dates are when each version was tagged during local development.
+All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
+
+## [1.3.1] - 2026-10-06
+
+Search keeps mixes and remasters apart, and a selected edition keeps its
+name through downloads and retries.
+
+- Search marks an album or track Owned only when it matches the edition on disk. A new mix or remaster stays available alongside an older copy, in the web app and terminal.
+- Downloading a selected edition keeps its name in the album tags, including single tracks and downloads resumed from the Queue. Another mix or remaster can be kept as a separate copy.
+- Retrying a partial Search download keeps the selected edition and its folder. Bringing that album back from Dismissed uses the same check.
+- Restore from a backup looks for the edition recorded in the backup. Library scans still group editions of the same album.
+- Re-downloading a selected edition replaces only that edition's tracks and checks the completed download before deleting its saved originals.
+- Repair checks both the recording and the edition before offering a single-track replacement. Files it cannot match are reported for review.
+- Downsample and Library migration fingerprinting restrict their media readers to local audio, with video decoders and network streams disabled.
+- Docker moves to Python 3.14.8 with updated Debian security packages. Source installations require urllib3 2.8.0 or newer.
 
 ## [1.3.0] - 2026-09-25
 

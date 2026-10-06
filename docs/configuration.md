@@ -49,7 +49,7 @@ out of library scans and import targets.
 | `LYRICS_PROVIDERS` | unset | Ordered comma list; unset tries `Lrclib`, `NetEase` and `Musixmatch`, in that order |
 | `LYRICS_PROVIDER_TIMEOUT` | `30` | Maximum seconds for one provider lookup before its circuit-breaker records a failure |
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
-| `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path where the collection backup is written after each library scan |
+| `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path for collection backups from completed Library scans |
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
 | `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
@@ -99,7 +99,7 @@ To keep hi-res masters smaller, pull tier `4` and either enable import-time down
 
 ## beets & streamrip config
 
-The bundled tools' full config files live in the persistent `config` volume, seeded once and never overwritten:
+The bundled tools' full config files live in the persistent `config` volume. They are seeded on first run; the app maintains its required streamrip options and saved Qobuz credentials:
 
 - `…/beets/config.yaml`: tagging, paths, plugins ([beets docs](https://beets.readthedocs.io/))
 - `…/streamrip/config.toml`: downloader settings ([streamrip docs](https://github.com/nathom/streamrip))
@@ -112,7 +112,7 @@ Set folder and file naming with `BEETS_PATH_DEFAULT` and `BEETS_PATH_COMP` on th
 BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'
 ```
 
-Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field and its internal import guards. Plugins that need their own config block, such as a lastgenre API key or replaygain backend, still require an edit to `config.yaml`.
+Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian. The app then adds `inline` for its multi-disc folder field and its internal import guards. Plugin settings, such as the replaygain backend, go in `config.yaml`. Extra plugins may need dependencies not bundled in the image; [lastgenre](https://beets.readthedocs.io/en/stable/plugins/lastgenre.html), for example, needs `beets[lastgenre]==2.14.1` installed in the same Python environment. Docker users need a custom image for those additions.
 
 For a `pip` or `pipx` installation, install beets 2.14.1 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused because the import and recovery contract is verified against 2.14.1.
 
@@ -126,11 +126,11 @@ For its own imports, the downloader pins these beets settings regardless of your
 - `incremental: no` rescans on retry
 - `duplicate_action: merge` keeps an import from deleting files already in your library
 - `singletons: no` imports each download as one album
-- `timeout: 60` waits up to a minute for another program using the beets database, such as `beet web` (half of `BEETS_TIMEOUT` when that is under two minutes)
+- `timeout: 60` waits up to a minute for another program using the beets database, such as `beet web` (half of a nonzero `BEETS_TIMEOUT` below two minutes)
 
 It also handles these itself:
 
-- A download for an album you already have, a gap fill or an upgrade, goes into the album's existing folder, with files named by your path template. If beets would rename that folder, as its default `replace` rules do to a trailing dot, the tracks are not imported and stay in staging recovery. A whole-album download can still be filed by the template when the folder holds audio that isn't part of the release.
+- Gap fills and upgrades use the album's existing folder while it remains in place, with files named by your path template. If beets would rename that folder, as its default `replace` rules do to a trailing dot, the tracks are not imported and stay in staging recovery. A whole-album replacement that sets the old folder aside, a separately kept edition, or a download whose existing folder holds other audio can be filed by the current template and edition name.
 - A release tagged as a compilation or credited to Various Artists is filed with the compilation template.
 - `ARTWORK` works whatever plugins you choose. With `embed` or `both`, the cover the download saved is embedded in any track that has none before beets imports it. With `sidecar` or `both`, `fetchart` files that cover from the album folder. `embed` leaves no cover file.
 - `filefilter` is not loaded, since it would drop tracks from a download.
@@ -171,7 +171,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 `WEB_AUTH=none` disables login. Use it only on a trusted LAN or behind your own authenticating proxy. The container logs a warning every boot while login is off.
 
-**Host names.** With `WEB_AUTH=none`, and on the first-visit setup screen, the web UI answers only to an IP address, `localhost`, a single-label name such as `nas`, a name ending in `.local`, `.lan`, `.home`, `.home.arpa`, `.internal`, `.localdomain` or `.fritz.box`, or a name listed in `WEB_ALLOWED_HOSTS` (comma-separated, without scheme or port). Any other name gets a plain 400 page naming that setting. Requests from a proxy named in `FORWARDED_ALLOW_IPS` are not checked; the proxy's own host routing decides. On every page, a form or request the browser reports as coming from another site is refused with a 403, CSRF token or not.
+**Host names.** With `WEB_AUTH=none`, and on the first-visit setup screen, the web UI answers only to an IP address, `localhost`, a single-label name such as `nas`, a name ending in `.local`, `.lan`, `.home`, `.home.arpa`, `.internal`, `.localdomain` or `.fritz.box`, or a name listed in `WEB_ALLOWED_HOSTS` (comma-separated, without scheme or port). Any other name gets a plain 400 page naming that setting. Requests from a proxy named in `FORWARDED_ALLOW_IPS` are not checked; the proxy's own host routing decides. State-changing requests the browser reports as coming from another site are refused with a 403, CSRF token or not.
 
 **Container probes.** `/healthz` is a cheap process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, the run lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`; this keeps the usable read-only interface and Diagnostics available instead of inviting a restart loop. Both routes are available without signing in and return only category names, never paths or credentials.
 
@@ -226,7 +226,7 @@ On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`)
 
 - **Library gap-fill** can add missing albums or missing tracks after review. It fetches only the missing tracks, except when little of the album is present: then it downloads the whole album, sets the tracks you have aside, and removes them once the new files verify.
 - **After a download**, it re-checks the new album's track lengths against Qobuz and flags **Repair** if one is short. Read-only (a clean truncation can still decode).
-- **Upgrade** and **Downsample** change files only when you start them. Upgrade moves the original album into the backup area and deletes it as soon as the new album verifies; if the new album does not verify, the original is put back and the download is set aside in the backup area instead. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`; you're asked to choose keep or delete on your first downsample), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends.
+- **Upgrade** and **Downsample** change files only when you start them. Upgrade backs up the original album and removes that backup only after replacement and catalogue checks pass. If verification fails, it restores the original where safe; otherwise the backup remains for review. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`; you're asked to choose keep or delete on your first downsample), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends.
 - **Lyrics** writes tags or `.lrc` sidecars, not the audio.
 - **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation).
 - **`MIGRATE_MULTI_ARTIST`** (off) re-files `A, B/Album` under `A/Album` after import.

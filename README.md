@@ -24,22 +24,22 @@ Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what y
 
 - **Missing albums and Gap Fill.** Run a Library scan to find missing albums from artists already in your library, plus albums you own that are missing tracks (Gap Fill). Download only what you choose. The app tracks its own downloads; if music lands in the folders from outside it, the refresh icon in the Library header folds the new finds into the review you already have open, keeping your picks. Library scans group editions of the same album. Search checks track versions, recording identifiers and album labels before marking an edition **In library**. Other pressings fold under the **versions** control; pick **Download** to keep a different mix, remaster or deluxe alongside the existing copy.
 - **Single tracks.** Switch search to **Track** to download an individual track. By default this does not hide the rest of the album from future gap scans; there is a setting if you want single-track downloads treated as deliberate singles.
-- **Verified quality.** Every download is checked against the actual FLACs Qobuz served. If they come in below what your quality setting implies, the app retries once from the higher source; anything it cannot resolve is flagged in History instead of slipping into your library silently.
+- **Verified quality.** Import quality checks compare downloaded FLACs with the selected tier and flag shortfalls in History.
 - **Quality upgrades.** The Library refresh finds albums Qobuz can now serve at higher quality. Review and queue them from **Upgrade**, or set `UPGRADE_SCAN_ENABLED=false` to hide Upgrade and skip that pass entirely.
 - **Downsample.** Convert hi-res FLACs to 44.1 / 48 kHz FLAC to reclaim space. Run it on demand, or apply it automatically to new downloads.
 - **New releases.** A periodic pass lists new albums by artists in your library for review and leaves them un-ticked so they cannot all be queued by accident.
 - **Discover.** With a Last.fm API key saved, a Discover tab suggests artists like the ones already in your library and names the artists that vouch for each, browses the genres of your library, searches for artists similar to a name you type, and lists the albums you saved on Qobuz that are not on disk yet. Suggested artists and albums are resolved on Qobuz, and short single-track releases are left out.
-- **Clean import.** beets handles tagging and cover art, and files land in your library in a single move. Lyrics are fetched on import; **Lyrics** mode backfills tracks you already have.
-- **Repair.** ISRC-anchored scanning finds truncated or corrupt FLACs and refills exact tracks when the ISRC resolves to that same recording. Damage is found whatever the tag says, but a file whose ISRC is missing, unmatched, or names a different song is never offered a single-track swap; the review offers a whole-album redownload instead.
+- **Clean import.** beets imports the supplied tags and cover art and moves downloaded files into the library. Lyrics are fetched on import; **Lyrics** mode backfills tracks you already have.
+- **Repair.** Scanning finds truncated or corrupt FLACs and refills individual tracks only when the recording ID and edition match. Unmatched files are reported without a single-track replacement.
 - **Library migration.** Reorganise an existing library into the folder structure `Artist/Album (Year)`. Copy mode leaves the original library in place; optional move mode relocates originals after preview. Merging existing duplicate album folders is a CLI-only option.
-- **Collection backup.** After each library scan, a JSON list of every artist, album and track in your library is written to a folder you choose, with the Qobuz ids the app has resolved. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it, so an unmounted drive cannot overwrite a good copy. Upload a backup file again later and the app lists every album in it that is not in your library, as one review to download from.
+- **Collection backup.** After a completed library scan, a JSON list of every artist, album and track in your library is written to a folder you choose, with the Qobuz ids the app has resolved. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it, so an unmounted drive cannot overwrite a good copy. Upload a backup file again later and the app offers missing albums it can match on Qobuz, with unmatched entries named in the job log.
 - **Crash-safe queue.** Job records and review lists survive restarts. Search downloads that had not started keep their place in the queue; an interrupted download is marked failed and can be retried. A shared run lock keeps the web app and CLI from writing at the same time within one deployment.
 
 ## How it works
 
 A single Docker image bundles streamrip, beets, ffmpeg, and the FLAC tools, with no sidecar containers. The web UI is the primary interface; the CLI runs the same engine for scripted or unattended jobs. Day-to-day behaviour (quality, lyrics, artwork, beets layout, scan cadence) lives on the **Settings** page; paths, ports, and a few advanced knobs come from environment variables (see [Configuration](docs/configuration.md)).
 
-Most scan modes work the same way: **scan → review → act.** A scan runs in the background and saves a checklist of findings, and nothing changes on disk until items are selected and approved. Two exceptions: Search downloads straight from its results, and Lyrics writes missing lyrics as the job runs.
+Most scan modes work the same way: **scan → review → act.** A scan runs in the background and saves a checklist of findings, and your music files remain unchanged until items are selected and approved. Two exceptions: Search downloads straight from its results, and Lyrics writes missing lyrics as the job runs.
 
 | Page | What it does |
 |---|---|
@@ -48,7 +48,7 @@ Most scan modes work the same way: **scan → review → act.** A scan runs in t
 | **Discover** | Suggested artists, library genres, similar-artist search, and your saved Qobuz albums (needs a Last.fm API key) |
 | **Upgrade** | Re-rip albums Qobuz can now serve at higher quality |
 | **Downsample** | Bring hi-res files down to 44.1 / 48 kHz (local, no login) |
-| **Repair** | Refill truncated or partial FLACs (ISRC-verified) |
+| **Repair** | Refill truncated or partial FLACs (recording and edition verified) |
 | **Lyrics** | Fetch lyrics for tracks missing them (no Qobuz login; uses internet lyric websites) |
 | **Library migration** (on Settings) | Reorganise an existing library into the folder structure `Artist/Album (Year)` (copies by default; optional move mode) |
 | **Queue / History** | Running and waiting work, plus a record of finished jobs |
@@ -100,7 +100,7 @@ Get the token from the [Qobuz web player](https://play.qobuz.com): sign in, open
 
 The token is enough for Search, Library, Discover, New releases, Upgrade, and Repair. Downloads also need the email or user ID.
 
-If you already run streamrip elsewhere, copy `password_or_token` from `~/.config/streamrip/config.toml` instead.
+If your streamrip config has `use_auth_token = true`, its `password_or_token` value in `~/.config/streamrip/config.toml` is the token.
 
 ## Documentation
 
@@ -121,8 +121,8 @@ For internet exposure, put it behind an authenticating reverse proxy, a VPN, or 
 ## Operational limitations
 
 - **Stop before database maintenance.** Never sync, restore, or replace the live beets/SQLite database while Qobuz Librarian is running; stop the app first.
-- **A repair that can't prove itself keeps a backup.** Repair moves the files it replaces (or the full original album, for whole-album Repair) into a recovery backup and removes it once every replacement verifies. When that proof can't complete, the backup is kept and flagged on Settings → Diagnostics, and the job page states what actually happened to the files: the replacement may already be in the album with your original only in the backup. Review both before restoring or removing it.
-- **Some filesystem metadata may differ after a copy.** Cross-filesystem migrations and safety backups preserve the music and ordinary file metadata, but do not guarantee exact extended attributes, access-control lists (ACLs), or file ownership.
+- **Repair backups.** Repair backs up what it replaces. Verified replacements allow that backup to be removed; failed refills may restore the originals automatically. Any unresolved backup remains in Settings → Diagnostics. The job page states what happened to the files: the replacement may already be in the album with your original only in the backup. Review both before restoring or removing it.
+- **Filesystem metadata.** Cross-filesystem migration requires a destination that can preserve file ownership, permissions, timestamps and extended attributes, including Linux ACLs. Some per-track safety-backup copies use the app's ownership.
 - **One library, one container.** The staging area is single-writer. The run-lock keeps the CLI and web container from running at the same time in one stack, but two stacks pointed at the same mount can still conflict.
 - **Qobuz only.** This drives streamrip's Qobuz path; Tidal, Deezer, and SoundCloud are not supported.
 - **FLAC output only.** Imports, repairs, upgrades, and downsampling keep the library in FLAC; MP3 and other lossy output formats are not supported.

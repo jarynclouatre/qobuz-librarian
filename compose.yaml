@@ -98,7 +98,7 @@ services:
       # Comma-separated list of beets plugins. Empty = honour /config/beets/
       # config.yaml. A custom list replaces its choices for managed imports;
       # the app adds inline, artwork requirements, and its import guards.
-      # Useful choices: lastgenre, replaygain, scrub, edit, embedart.
+      # Extra plugins may need dependencies not bundled in the image.
       BEETS_PLUGINS: "${BEETS_PLUGINS:-}"
 
       # streamrip config (generated on first run)
