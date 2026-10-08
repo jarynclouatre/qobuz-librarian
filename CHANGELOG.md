@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.3.2] - 2026-10-08
+
+Partial albums keep existing tracks, and Library reviews keep their choices and reading position.
+
+- Library gap-fill downloads only missing tracks, in the web app and terminal. Tracks already on disk stay untouched.
+- Upgrades and explicit re-downloads carry personal lyrics, custom tags and additional artwork onto the replacement. Saved originals remain available when replacement checks cannot finish.
+- Library migration keeps timed lyric files beside their songs under the new filenames.
+- Lyrics respects synced-only when completing a missing copy and preserves text written outside the app. Preview leaves lyric-file permissions unchanged.
+- Library reviews check the displayed choices before starting work and retain loaded pages and reading position across updates. Retired reviews stay closed when older saves finish.
+- Search restores the query, selected tab and results together with Back and Forward. Download retries distinguish whole albums, individual tracks and separate editions.
+- Discover keeps expanded album lists open during refresh and lets an unavailable list retry.
+- Sign-ins use the current saved password, including when it changes during login. An unreadable saved login remains protected from first-run setup.
+
 ## [1.3.1] - 2026-10-06
 
 Search keeps mixes and remasters apart, and a selected edition keeps its
