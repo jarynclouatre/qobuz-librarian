@@ -826,11 +826,9 @@ def write_post_import_sidecars(
                         sidecar_exclusion=sidecar_exclusion,
                         parent_fd=parent_fd,
                         parent_guard=parent_guard,
-                        track_guard=track_guard,
                     ):
                         return (
                             sidecar_exclusion.intact()
-                            and track_guard() is True
                             and _held_track_is_named(
                                 sidecar,
                                 parent_fd,
@@ -842,6 +840,12 @@ def write_post_import_sidecars(
 
                     if not sidecar_guard():
                         raise OSError(f"{sidecar.name}: sidecar changed before tag strip")
+                    preserved = lyric_fetch._read_bound_sidecar(
+                        fp, parent_fd, parent_guard, track_guard)
+                    if preserved is None or any(
+                            value.strip() != preserved.strip()
+                            for value in lyric_fetch.embedded_lyric_values(f)):
+                        continue
                     had = False
                     for _k in ("lyrics", "unsyncedlyrics"):
                         if _k in f.tags:

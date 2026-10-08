@@ -167,31 +167,43 @@ def test_copy_mode_leaves_originals_untouched(tmp_path):
         ns=(1_600_000_000_000_000_000, 1_600_000_010_000_000_000),
     )
     source_times = src.stat()
+    lyrics = "[00:01.00]Words kept with the song\n"
+    src.with_suffix(".lrc").write_text(lyrics)
     plan = m.build_plan(
         [(src, _meta(title="Song 0", track=1), "tags")],
         plan.dest_root,
     )
     res = m.execute_plan(plan, in_place=False)
     assert res.copied == 1 and res.failed == 0
-    assert src.exists()                                   # original sacred
+    assert src.exists()
     dst = plan.dest_root / plan.placed[0].dest_rel
     assert dst.stat().st_mode & 0o777 == 0o640
     assert m.os.getxattr(dst, "user.qobuz-migration-test") == b"preserved"
     assert dst.stat().st_atime_ns == source_times.st_atime_ns
     assert dst.stat().st_mtime_ns == source_times.st_mtime_ns
     assert dst.read_bytes() == src.read_bytes()
+    assert dst.with_suffix(".lrc").read_text() == lyrics
+    assert src.with_suffix(".lrc").read_text() == lyrics
     assert not dst.with_name(dst.name + ".partial").exists()
 
 
 
 
 def test_in_place_mode_moves_only_after_verified_copy(tmp_path):
-    plan = _placed_plan(tmp_path)
-    src = plan.placed[0].source
+    plan = _placed_plan(tmp_path, n=2)
+    for entry in plan.placed:
+        entry.source.with_suffix(".lrc").write_text(entry.source.name)
+    plan = m.build_plan(
+        [(entry.source, entry.meta, entry.source_of_truth) for entry in plan.placed],
+        plan.dest_root,
+    )
     res = m.execute_plan(plan, in_place=True)
-    assert res.copied == 1
-    assert not src.exists()                               # moved
-    assert (plan.dest_root / plan.placed[0].dest_rel).exists()
+    assert res.copied == 2 and res.companions == 2
+    for entry in plan.placed:
+        assert not entry.source.exists()
+        destination = plan.dest_root / entry.dest_rel
+        assert destination.exists()
+        assert destination.with_suffix(".lrc").read_text() == entry.source.name
 
 
 def test_execute_never_overwrites_a_destination_that_wins_publish_race(

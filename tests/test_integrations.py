@@ -137,23 +137,25 @@ def test_write_lyrics_saves_atomically_and_keeps_unsynced_lyrics(tmp_path):
 
 
 def test_lyrics_pass_leaves_lyrics_it_did_not_write(
-        tmp_path, monkeypatch, _need_ffmpeg):
-    from mutagen.flac import FLAC
+        tmp_path, monkeypatch, tagged_flac):
+    from mutagen import flac
 
     from qobuz_librarian.integrations import lyric_fetch
 
     monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
     track = tmp_path / "Artist" / "Album" / "track.flac"
-    _make_silent_flac(track)
-    tagged = FLAC(track)
-    tagged["title"] = "Song"
-    tagged["artist"] = "Artist"
-    tagged["LYRICS"] = "words typed in by hand"
-    tagged.save()
-    monkeypatch.setattr(
-        lyric_fetch, "search_lyrics",
-        lambda *_args, **_kwargs: ("[00:00.50]provider line", "Lrclib",
-                                   "synced", 1, 0))
+    tagged_flac(track, title="Song", artist="Artist")
+    original = ["", "words typed in by hand"]
+    audio = flac.FLAC(track)
+    audio["lyrics"] = original
+    audio.save()
+    calls = []
+
+    def provider(*_args, **_kwargs):
+        calls.append(True)
+        return "[00:00.50]provider line", "Lrclib", "synced", 1, 0
+
+    monkeypatch.setattr(lyric_fetch, "search_lyrics", provider)
 
     lyric_fetch.fetch_for_paths(
         [track],
@@ -164,7 +166,60 @@ def test_lyrics_pass_leaves_lyrics_it_did_not_write(
         lyrics_format="embed",
     )
 
-    assert FLAC(track)["lyrics"] == ["words typed in by hand"]
+    assert flac.FLAC(track)["lyrics"] == original
+    assert not calls
+
+    lyric_fetch.fetch_for_paths(
+        [track], owned_root=tmp_path, state_path=tmp_path / "state.json",
+        rescan=True, workers=1, lyrics_format="both", synced_only=True,
+    )
+
+    assert flac.FLAC(track)["lyrics"] == original
+    assert len(calls) == 1
+    assert lyric_fetch.classify(track.with_suffix(".lrc").read_text()) == "synced"
+
+
+def test_post_import_sidecar_removes_only_the_preserved_embedded_copy(
+        tmp_path, monkeypatch, tagged_flac):
+    from mutagen import flac
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyrics
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(cfg, "LYRICS_FORMAT", "sidecar")
+    monkeypatch.setattr(lyrics, "HAVE_LYRIC_FETCH", True)
+    words = "[00:01.00]Words kept with the song"
+    track = tagged_flac(tmp_path / "Album" / "track.flac", title="Song",
+                        lyrics=words, unsyncedlyrics=words, comment="Personal note")
+
+    lyrics.write_post_import_sidecars([track.parent])
+
+    audio = flac.FLAC(track)
+    assert track.with_suffix(".lrc").read_text() == words
+    assert "lyrics" not in audio and "unsyncedlyrics" not in audio
+    assert audio["title"] == ["Song"] and audio["comment"] == ["Personal note"]
+
+
+def test_lyrics_preview_keeps_sidecar_permissions(tmp_path, monkeypatch, tagged_flac):
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    track = tmp_path / "track.flac"
+    tagged_flac(track, title="Song", artist="Artist")
+    track.chmod(0o644)
+    sidecar = track.with_suffix(".lrc")
+    sidecar.write_text("[00:00.50]line\n")
+    sidecar.chmod(0o600)
+    options = dict(owned_root=tmp_path, state_path=tmp_path / "state.json",
+                   rescan=True, workers=1, lyrics_format="sidecar")
+
+    lyric_fetch.fetch_for_paths([track], dry_run=True, **options)
+    assert sidecar.stat().st_mode & 0o777 == 0o600
+
+    lyric_fetch.fetch_for_paths([track], **options)
+    assert sidecar.stat().st_mode & 0o777 == 0o644
 
 
 def test_lyric_fetch_refuses_paths_outside_or_linked_out_of_its_owned_root(tmp_path, monkeypatch):

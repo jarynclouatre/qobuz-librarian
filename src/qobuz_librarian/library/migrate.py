@@ -2348,6 +2348,42 @@ def _enumerate_source_descriptors(binding, *, cancel_check=None,
     return audio, companions
 
 
+def _lyric_destinations(entries):
+    targets = {}
+    for entry in entries:
+        if entry.dest_rel is None or entry.source_receipt is None:
+            continue
+        source = Path(*entry.source_receipt["relative"]).with_suffix("")
+        targets.setdefault(source, set()).add(Path(entry.dest_rel).with_suffix(".lrc"))
+    return targets
+
+
+def _ambiguous_lyric_targets(plan, entries):
+    targets = _lyric_destinations(entries)
+    sources, destinations = {}, {}
+    for receipt in plan.companion_receipts:
+        relative = Path(*receipt["relative"])
+        if relative.suffix.lower() != ".lrc":
+            continue
+        for target in targets.get(relative.with_suffix(""), ()):
+            key = _destination_collision_key(target, plan.destination_name_semantics)
+            sources.setdefault(key, set()).add(relative)
+            destinations.setdefault(key, set()).add(target)
+    return {target for key, paths in destinations.items() if len(sources[key]) > 1
+            for target in paths}
+
+
+def _companion_targets(companions, folder, lyric_destinations):
+    for receipt in companions:
+        relative = Path(*receipt["relative"])
+        if relative.suffix.lower() == ".lrc":
+            for target in sorted(lyric_destinations.get(relative.with_suffix(""), ())):
+                if target.parent == folder:
+                    yield receipt, target
+        else:
+            yield receipt, folder / relative.name
+
+
 def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                            entry_map,
                            resume_entries=None,
@@ -2355,7 +2391,8 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                            cancel_check: Optional[Callable[[], bool]] = None,
                            source_root_binding=None,
                            destination_root_binding=None,
-                           done_pairs=frozenset(),
+                           copied_companions,
+                           lyric_conflicts,
                            ) -> None:
     """Copy each migrated album folder's non-audio companions into the
     destination folder(s) that received its audio. Always a copy (never a
@@ -2364,10 +2401,10 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
     source folder may still hold audio that failed/skipped, and a duplicated
     cover image is harmless.
 
-    ``done_pairs`` holds the (source folder, destination folder) pairs an
-    in-place run already carried as their tracks landed.
+    ``copied_companions`` records copies completed as in-place tracks landed.
     """
     folder_map: dict = {}
+    landed = []
 
     def _cancelled() -> bool:
         if cancel_check is not None and cancel_check():
@@ -2385,6 +2422,7 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
         source_folder = tuple(entry.source_receipt["relative"][:-1])
         folder_map.setdefault(source_folder, set()).add(
             Path(entry.dest_rel).parent)
+        landed.append(entry)
         return True
 
     for source, dest_rel, status, _reason in result.outcomes:
@@ -2518,27 +2556,35 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
             continue
         receipts_by_folder.setdefault(folder, []).append(receipt)
 
+    lyric_destinations = _lyric_destinations(landed)
     for src_folder, dst_folders in folder_map.items():
         if _cancelled():
             return
-        targets = [folder for folder in dst_folders
-                   if (src_folder, folder) not in done_pairs]
         if not _copy_companions(
-                result, receipts_by_folder.get(src_folder, ()), targets,
+                result, receipts_by_folder.get(src_folder, ()), dst_folders,
                 progress=progress, cancelled=_cancelled,
                 source_root_binding=source_root_binding,
-                destination_root_binding=destination_root_binding):
+                destination_root_binding=destination_root_binding,
+                lyric_destinations=lyric_destinations,
+                copied_companions=copied_companions,
+                lyric_conflicts=lyric_conflicts):
             return
 
 
 def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
-                     source_root_binding, destination_root_binding) -> bool:
+                     source_root_binding, destination_root_binding,
+                     lyric_destinations, copied_companions, lyric_conflicts) -> bool:
     """Copy one source folder's companions into each of ``dst_folders``.
     Returns False once the run has been cancelled."""
     for dst_folder in dst_folders:
-        for receipt in companions:
+        for receipt, destination_path in _companion_targets(
+                companions, Path(dst_folder), lyric_destinations):
+            key = (tuple(receipt["relative"]), destination_path)
+            if key in copied_companions:
+                continue
             if cancelled():
                 return False
+            copied_companions.add(key)
             opened = None
             published = None
             discard_publication = False
@@ -2548,8 +2594,9 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
             name = Path(receipt["relative"][-1]).name
             source_path = source_root_binding.path.joinpath(
                 *receipt["relative"])
-            destination_path = Path(dst_folder) / name
             try:
+                if destination_path in lyric_conflicts:
+                    raise OSError("multiple lyric files map to this destination")
                 if progress:
                     progress(
                         "Carrying cover art and sidecars", 0, 0, name)
@@ -5035,18 +5082,14 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
         def source_folder(entry):
             return tuple((entry.source_receipt or {}).get("relative", ())[:-1])
 
-        def cancelled():
-            if cancel_check is not None and cancel_check():
-                result.cancelled = True
-            return result.cancelled
-
         companions_by_folder: dict = {}
         for receipt in plan.companion_receipts:
             companions_by_folder.setdefault(
                 tuple(receipt["relative"][:-1]), []).append(receipt)
         waiting.update(source_folder(entry) for entry in placed)
         retired_by_folder: dict = {}
-        carried_pairs = set()
+        copied_companions = set()
+        lyric_conflicts = _ambiguous_lyric_targets(plan, [*placed, *resume_entries])
 
         total = len(placed)
         for i, entry in enumerate(placed, 1):
@@ -5279,18 +5322,20 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             if in_place:
                 folder = source_folder(entry)
                 waiting[folder] -= 1
-                pair = (folder, Path(entry.dest_rel).parent)
                 if moved:
                     retired_by_folder.setdefault(folder, []).append(
                         entry.source_receipt)
                     folder_chains[folder] = entry.source_receipt["parents"]
-                if moved and pair not in carried_pairs:
-                    carried_pairs.add(pair)
+                if moved:
                     _copy_companions(
                         result, companions_by_folder.get(folder, ()),
-                        [pair[1]], progress=None, cancelled=cancelled,
+                        [Path(entry.dest_rel).parent], progress=None,
+                        cancelled=lambda: result.cancelled,
                         source_root_binding=source_root,
-                        destination_root_binding=destination_root)
+                        destination_root_binding=destination_root,
+                        lyric_destinations=_lyric_destinations([entry]),
+                        copied_companions=copied_companions,
+                        lyric_conflicts=lyric_conflicts)
                 if not waiting[folder] and not result.cancelled:
                     _prune_retired_source_parents(
                         source_root,
@@ -5308,7 +5353,8 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 progress=progress, cancel_check=cancel_check,
                 source_root_binding=source_root,
                 destination_root_binding=destination_root,
-                done_pairs=carried_pairs)
+                copied_companions=copied_companions,
+                lyric_conflicts=lyric_conflicts)
         if in_place and not result.cancelled:
             _prune_retired_source_parents(
                 source_root,

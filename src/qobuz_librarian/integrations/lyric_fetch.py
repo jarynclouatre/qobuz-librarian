@@ -381,14 +381,17 @@ def classify(text: Optional[str]) -> str:
     return "synced" if SYNCED_RE.search(text) else "plain"
 
 
+def embedded_lyric_values(f):
+    return [value for key in ("lyrics", "LYRICS", "unsyncedlyrics", "UNSYNCEDLYRICS")
+            for value in f.tags.get(key, ()) if value.strip()]
+
+
 def get_existing_lyrics(f, path=None, include_sidecar=False, *,
                         parent_fd=None, parent_guard=None,
                         track_guard=None) -> Optional[str]:
-    for key in ("lyrics", "LYRICS", "unsyncedlyrics", "UNSYNCEDLYRICS"):
-        if key in f.tags:
-            v = f.tags[key]
-            if v:
-                return v[0]
+    values = embedded_lyric_values(f)
+    if values:
+        return values[0]
     # Sidecars are only trusted through the exact no-follow parent and track
     # binding used by the caller. An unbound path lookup could follow an .lrc
     # symlink outside the owned library and falsely complete this track.
@@ -1999,7 +2002,7 @@ def _process_bound_file(
         binding.chain_is_named,
         track_guard,
     )
-    if sidecar is not None:
+    if sidecar is not None and not dry_run:
         _open_up_private_sidecar(binding.parent_fd, path)
     if not track_guard():
         log.warning("track changed during lyric discovery: %s", path)
@@ -2030,7 +2033,9 @@ def _process_bound_file(
     # Only lyrics this app wrote may be replaced; anything else stays as it is.
     tagged = f.tags.get("lyrics") if f.tags is not None else None
     ours = {
-        "embed": bool(tagged) and len(tagged) == 1 and (
+        "embed": bool(tagged) and len(tagged) == 1 and all(
+            value == tagged[0] for value in embedded_lyric_values(f)
+        ) and (
             _lyrics_digest(tagged[0]) == st.written if st.written
             else unchanged_since_fetch),
         # Before the written digest was kept, the format "both" wrote the
@@ -2067,7 +2072,8 @@ def _process_bound_file(
         kind = "synced"
         action = "wrote-synced"
         st.last_seen = time.time()
-    elif missing and existing_kind != "none":
+    elif (missing and existing_kind != "none"
+          and not (synced_only and existing_kind == "plain")):
         # A requested representation is absent, but the other one already has
         # usable lyrics. Complete the configured format locally instead of
         # making a provider call or rewriting the representation we trust.
@@ -2098,9 +2104,9 @@ def _process_bound_file(
             commit(state, key, st)
             return "already-plain"
 
-        if not missing and existing_kind == "plain":
-            # Only plain lyrics this app wrote are upgraded to synced ones.
-            upgradable = [name for name in required if ours[name]]
+        if existing_kind == "plain":
+            # Fill missing copies, but replace only lyrics this app wrote.
+            upgradable = [name for name in required if name in missing or ours[name]]
             if not upgradable:
                 st.status = "plain"
                 st.source = "kept-existing"
