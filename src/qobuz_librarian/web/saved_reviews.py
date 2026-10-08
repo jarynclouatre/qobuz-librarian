@@ -106,6 +106,7 @@ def _downsample_state_summary():
         "status": "current" if complete else "stale",
         "stale": bool(state.get("updated_at") and not complete),
         "updated": job_labels._format_age(updated_at) if updated_at else None,
+        "updated_at": updated_at,
     }
 
 

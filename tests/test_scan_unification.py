@@ -6,6 +6,56 @@ import pytest
 from qobuz_librarian.web import jobs as jm
 
 
+def test_compilations_stay_in_downsample_results_after_a_library_refresh(
+        tmp_path, monkeypatch, tagged_flac):
+    from mutagen import flac
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import downsample_state, library_scan_state
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    track = tagged_flac(music / "Various Artists" / "Compilation" / "01.flac")
+    audio = flac.FLAC(track)
+    audio.info.sample_rate = 96000
+    audio.save()
+    original = track.read_bytes()
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "UPGRADE_SCAN_ENABLED", False)
+    for setting in (
+        "LIBRARY_SCAN_STATE_FILE", "LIBRARY_GENERATION_STATE_FILE",
+        "SCAN_CHECKPOINT_FILE", "NEW_RELEASE_STATE_FILE", "DOWNSAMPLE_STATE_FILE",
+        "UNREADABLE_ARTISTS_FILE", "HIDDEN_FILE",
+    ):
+        monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
+
+    job = jm.Job(title="Downsample")
+    flows.scan_downsamples(job)
+
+    assert not job.error
+    assert len(job.candidates) == 1
+    assert job.candidates[0]["artist"] == "Various Artists"
+    assert job.candidates[0]["selected"] is False
+    assert len(downsample_state.visible_candidates()) == 1
+
+    tagged_flac(music / "Artist" / "Album" / "01.flac")
+    checked = []
+
+    def scan_artist(artist, *_args, **_kwargs):
+        checked.append(artist.name)
+        return artist.name, artist.name, [], artist.name, [], {}
+
+    monkeypatch.setattr(flows, "_scan_library_artist", scan_artist)
+    baseline = jm.Job(title="Library scan")
+    flows.scan_library(baseline, "")
+
+    assert not baseline.error
+    assert checked == ["Artist"]
+    assert library_scan_state.kind_state("missing")["complete"] is True
+    assert [c["artist"] for c in downsample_state.visible_candidates()] == ["Various Artists"]
+    assert track.read_bytes() == original
+
+
 @pytest.mark.parametrize("readable_names", [("Readable",), ()])
 def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readable_names):
     from qobuz_librarian import config as cfg

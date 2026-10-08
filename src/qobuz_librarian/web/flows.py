@@ -1557,14 +1557,16 @@ def _scan_library_impl(
 ):
     clear_scan_caches()
     unreadable_artists = set()
+    local_discovery_errors = {}
 
-    def artist_read_failed(artist_dir, _error):
+    def artist_read_failed(artist_dir, error):
+        local_discovery_errors[artist_dir.name] = str(error)
         if normalize(artist_dir.name) not in VA_NORMALIZED:
             unreadable_artists.add(artist_dir.name)
 
-    # Drop the Various-Artists folder: it has no single Qobuz artist catalog
-    # to diff against, so a gap scan can only mis-resolve it.
-    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
+    all_artists = list_library_artists(on_artist_error=artist_read_failed)
+    # Compilations have no single artist catalogue to compare.
+    artists = [d for d in all_artists
                if normalize(d.name) not in VA_NORMALIZED]
     discovery_errors = len(unreadable_artists)
     if not artists and not discovery_errors:
@@ -1647,10 +1649,11 @@ def _scan_library_impl(
         return f"Step {_passes.index(name) + 1} of {len(_passes)}: {name}"
 
     downsample_refresh_started_at = time.time()
-    log.info(f"Reading albums from {plural(len(artists), 'artist folder')} on disk…")
+    log.info(f"Reading albums from {plural(len(all_artists), 'artist folder')} on disk…")
     downsample_refresh = downsample_state.refresh_for_artists(
-        artists,
+        all_artists,
         hidden=hidden,
+        discovery_errors=local_discovery_errors,
         cancel_check=lambda: bool(job.cancel_requested),
         persist=False,
         skip_unchanged=cheap_refresh,
@@ -3125,22 +3128,14 @@ def _note_scan_wrap_up(job, done, total):
 
 
 def scan_downsamples(job):
-    """Scan the library for FLACs stored above CD rate.
-
-    Local only, the answer comes off disk, so unlike the upgrade scan there's
-    no Qobuz lookup and no token. Serial (the per-file read is fast and disk-
-    bound; fanning out would just thrash the spindle) with a cancel check and
-    per-artist progress.
-    """
+    """Scan local files for albums stored above CD rate."""
     clear_scan_caches()
     unreadable_artists = {}
 
     def artist_read_failed(artist_dir, error):
-        if normalize(artist_dir.name) not in VA_NORMALIZED:
-            unreadable_artists[artist_dir.name] = str(error)
+        unreadable_artists[artist_dir.name] = str(error)
 
-    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
-               if normalize(d.name) not in VA_NORMALIZED]
+    artists = list_library_artists(on_artist_error=artist_read_failed)
     if not artists and not unreadable_artists:
         _set_empty_library_summary(job)
         return

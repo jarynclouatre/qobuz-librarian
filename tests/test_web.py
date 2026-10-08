@@ -177,6 +177,7 @@ def test_per_artist_rescan_supersedes_only_that_artists_parked_review(
             return True
 
     monkeypatch.setattr(runtime, "_RUN_LOCK_HANDLE", Authority())
+    monkeypatch.setattr(runtime, "_JOBS_RESTORED", True)
 
     def _park(artist):
         j = jm.Job(title="Artist scan", artist=artist)

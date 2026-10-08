@@ -25,9 +25,12 @@ router = APIRouter()
 @router.get("/downsample", response_class=HTMLResponse)
 async def downsample_page(request: Request):
     state = saved_reviews._downsample_state_summary()
-    # A fresh scan supersedes the parked review (see _submit_scan_deduped), so
-    # the Refresh confirm must say so instead of quietly dropping the user's
-    # ticks.
+    latest = scans._last_finished("downsample")
+    failed = latest if latest and latest.status == job_mgr.JobStatus.FAILED else None
+    if (failed and state["complete"]
+            and (state.get("updated_at") or 0) > (failed.finished_at or failed.created_at)):
+        failed = None
+    # Refresh replaces the saved picks.
     review_parked = any(
         j.execute_kind == "downsample"
         for j in job_mgr.registry.awaiting_review())
@@ -37,12 +40,11 @@ async def downsample_page(request: Request):
         "creds_ok": qobuz_access._creds_ok(),
         "downsample_state": state,
         "review_parked": review_parked,
-        # A standalone refresh in flight, so the page shows "scan running"
-        # instead of the idle launcher.
         "downsample_running": scans._active_scan(
             "downsample",
             statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
                       job_mgr.JobStatus.RUNNING)),
+        "downsample_failed": failed,
         "last_run": job_labels._tool_last_run_age("downsample"),
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)})
 

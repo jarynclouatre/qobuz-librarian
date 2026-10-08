@@ -19,21 +19,17 @@
   {% set refresh_confirm = "Refresh local downsample results?" %}
   {% endif %}
 
-  {# While a downsample is in flight this page describes a job it does not
-     watch, so it kept saying "Downsampling now" long after the run ended and
-     only a manual reload put it right. Poll while there is a run to follow;
-     the replacement drops these attributes once there isn't, so the polling
-     stops on its own. #}
   <div id="downsample-body" class="ql-tool-body"{% if downsample_running %} hx-get="/downsample"
        hx-trigger="every 3s" hx-target="#downsample-body"
        hx-select="#downsample-body" hx-swap="outerHTML"{% endif %}>
 
+  {% set failed = downsample_failed and not downsample_running %}
   <div class="ql-work-status ql-quality-status">
-    <span class="ql-status-chip {% if downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
-      {% if downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
+    <span class="ql-status-chip {% if failed %}is-error{% elif downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
+      {% if failed %}Last run failed{% elif downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
     </span>
     <span>
-      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run and downsample_state.complete %}Last downsample refresh {{ last_run }}.{% else %}No scan has finished yet.{% endif %}
+      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run and downsample_state.complete %}Last downsample refresh {{ last_run }}.{% elif not failed %}No scan has finished yet.{% endif %}
     </span>
     {% if hidden_count %}
     <a href="/downsample/hidden">
@@ -42,11 +38,16 @@
     {% endif %}
   </div>
 
+  {% if failed %}
+  <div class="ql-tool-note ql-tool-note-warning" role="alert">
+    <p class="ql-tool-note-title">Last Downsample run failed</p>
+    {% if downsample_failed.summary and downsample_failed.summary != downsample_failed.error %}<p>{{ downsample_failed.summary }}</p>{% endif %}
+    <p>{% if downsample_failed.error %}{{ downsample_failed.error }} {% endif %}<a href="/jobs/{{ downsample_failed.id }}" class="ql-inline-link">Open details →</a></p>
+  </div>
+  {% endif %}
+
   {% if have_downsample %}
     {% if downsample_running %}
-    {# The execute phase rewrites files in place. Calling that "Checking your
-       files" told the user nothing had been touched while albums were already
-       being replaced. The Job carries the phase; use it. #}
     {% set _ds_executing = downsample_running.phase == 'execute' or downsample_running.status.value == 'running' %}
     <div class="ql-tool-note {{ 'ql-tool-note-warning' if _ds_executing else 'ql-tool-note-info' }}">
       <p class="ql-tool-note-title">{% if _ds_executing %}Downsampling now{% elif downsample_running.status.value == 'pending' %}Downsample scan queued{% else %}Downsample scan running{% endif %}</p>
