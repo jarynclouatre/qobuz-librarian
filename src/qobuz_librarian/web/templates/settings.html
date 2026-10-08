@@ -345,7 +345,7 @@
   </div>
 </details>
 
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if settings_section == 'behaviour' %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="behaviour" tabindex="-1" class="ql-anchor-target">Behaviour</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -475,7 +475,7 @@
   </div>
 </details>
 
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if settings_section == 'discover' %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="discover" tabindex="-1" class="ql-anchor-target">Discover</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -526,7 +526,7 @@
   </div>
 </details>
 
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if settings_section == 'collection-backup' %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="collection-backup" tabindex="-1" class="ql-anchor-target">Collection backup</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>

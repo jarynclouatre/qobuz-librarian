@@ -830,7 +830,7 @@ def test_clearing_a_field_goes_back_to_the_compose_value(tmp_path, monkeypatch):
     assert "BEETS_PATH_DEFAULT" not in json.loads(store.read_text())
 
 
-def test_settings_save_keeps_custom_timer_values(client, tmp_path, monkeypatch):
+def test_settings_retry_keeps_edits_and_custom_timer_values(client, tmp_path, monkeypatch):
     import html.parser
 
     from qobuz_librarian import config as cfg
@@ -880,6 +880,16 @@ def test_settings_save_keeps_custom_timer_values(client, tmp_path, monkeypatch):
     assert page.status_code == 200
     form = next(data for data in Forms(page.text).forms if "form_complete" in data)
     del form["LYRICS_ENABLED"]
+    path = form["BEETS_PATH_DEFAULT"]
+    form["BEETS_PATH_DEFAULT"] = "/music/$albumartist/$album"
+    rejected = client.post("/settings/behavior", data=form, follow_redirects=False)
+    assert rejected.status_code == 200
+    retained = next(data for data in Forms(rejected.text).forms if "form_complete" in data)
+    assert retained == form
+    assert cfg.LYRICS_ENABLED is True
+    assert not store.exists()
+    retained["BEETS_PATH_DEFAULT"] = path
+    form = retained
     response = client.post("/settings/behavior", data=form, follow_redirects=False)
 
     assert response.status_code == 303

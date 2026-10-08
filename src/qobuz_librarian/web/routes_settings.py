@@ -43,20 +43,29 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        auth_token_prefill="", diagnostics=None, warnings=None,
                        quality_note=False, password_error="",
                        password_locked=False, lastfm_check="",
+                       section="", submitted_values=None,
+                       submitted_generation="",
                        status_code=200):
     creds = qobuz_access._read_creds()
     values = settings_store.current()
+    generations = {
+        name: settings_store.form_generation(name, values)
+        for name in settings_store.FORM_KEYS
+    }
+    if submitted_values is not None:
+        values = {
+            **values,
+            **{key: value for key, value in submitted_values.items()
+               if key in settings_store.FORM_KEYS[section]
+               and key not in settings_store.SECRET_KEYS},
+        }
+        generations[section] = submitted_generation
     # If credentials come from environment or a secret-file declaration,
     # anything saved via the form lacks authority, so let the user know.
     creds_from_env = _qobuz_token_is_env_owned()
     cli_only_env = os.environ.get("QL_CLI_ONLY", "").strip().lower() in (
         "1", "true", "yes", "on")
-    # Two separate facts. disk_usage() measures the FILESYSTEM the music folder
-    # sits on, never the folder. It was labelled "Music folder: 3.31 TB used"
-    # while the folder held 1.6 MB. The library's own size comes from the census
-    # the Library page already shows, and the volume figure is labelled by what
-    # it actually covers: its own mount (the usual Docker bind, or a dataset
-    # with a quota) or a disk shared with everything else on the machine.
+    # Free space belongs to the volume; library size comes from the scan.
     music_storage = None
     try:
         du = shutil.disk_usage(cfg.MUSIC_ROOT)
@@ -99,13 +108,11 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "unverified": unverified,
         "envchecked": envchecked,
         "rerendered": rerendered,
+        "settings_section": section,
         "error": error,
         "warnings": warnings or [],
-        # A warning or an invalid value can name a field inside the collapsed
-        # Advanced drawer, and a save refused because the settings changed
-        # asks for the current values to be reviewed, so the drawer opens.
         "defaults_open": bool(warnings) or error in {
-            "invalidsettings", "settingschanged"
+            "invalidsettings", "settingschanged", "persist"
         },
         "page": "settings",
         "library_paths": [
@@ -123,12 +130,9 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "inert_notes": settings_store.inert_behaviour_notes(
             values, have_downsample=downsample_engine.HAVE_DOWNSAMPLE),
         "text_fields": settings_store.TEXT_FIELDS,
-        "behavior_generation": settings_store.form_generation(
-            "behaviour", values),
-        "lastfm_generation": settings_store.form_generation(
-            "discover", values),
-        "collection_backup_generation": settings_store.form_generation(
-            "collection-backup", values),
+        "behavior_generation": generations["behaviour"],
+        "lastfm_generation": generations["discover"],
+        "collection_backup_generation": generations["collection-backup"],
         "collection_backup": diagnostics_mod._collection_backup_status(),
         "lastfm_check": (lastfm_check
                          if lastfm_check in ("ok", "rejected", "down") else ""),
@@ -137,9 +141,6 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         # a choice the app asks for once can still be handed back to it.
         "unset_enum_keys": settings_store.UNSET_ENUM_KEYS,
         "behavior": values,
-        # The worst store to lose without being told: quality tier and
-        # downsample policy revert to the env defaults and this page then shows
-        # them as if they were chosen.
         "corrupt_stores": state_file.corrupt_store_details(),
         "settings_file_reset": any(
             store["original"] == settings_store.SETTINGS_FILE.name
@@ -425,15 +426,17 @@ async def save_behavior(request: Request):
             error="settingschanged",
             diagnostics=diags,
             rerendered=True,
+            section=anchor,
         )
-    if ok is None:
-        # Re-render rather than redirect so the reason can name the field and
-        # say what to change; a redirect can only carry the generic code.
+    if not ok:
         loop = asyncio.get_running_loop()
         diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
-        return _settings_response(request, error="invalidsettings",
+        return _settings_response(request,
+                                  error="invalidsettings" if ok is None else "persist",
                                   warnings=warnings, diagnostics=diags,
-                                  rerendered=True)
+                                  rerendered=True, section=anchor,
+                                  submitted_values=values,
+                                  submitted_generation=submitted_generation)
     # A quality or singles change leaves a saved Upgrade review promising
     # targets the settings no longer produce, and a saved Library scan whose
     # lists were built under the old policy (library_scan_state signature).
@@ -450,10 +453,6 @@ async def save_behavior(request: Request):
             bool((state or {}).get("candidates"))
             or await loop.run_in_executor(
                 None, generation_state.baseline_complete))
-    # Durable publication is the settings store's admission point; failure
-    # leaves both the live config and any deferred overlay unchanged.
-    if not ok:
-        return RedirectResponse(url=f"/settings?error=persist#{anchor}", status_code=303)
     if warnings:
         # Re-render in place so we can name exactly which entries were dropped
         # (a misspelt provider, an uninstalled beets plugin) without smuggling
@@ -466,7 +465,7 @@ async def save_behavior(request: Request):
                                   queued=settings_store._any_active_job(),
                                   warnings=warnings, diagnostics=diags,
                                   quality_note=quality_note,
-                                  rerendered=True)
+                                  rerendered=True, section=anchor)
     queued = settings_store._any_active_job()
     suffix = "&queued=1" if queued else ""
     if quality_note:
