@@ -292,6 +292,7 @@ def release_title(title, edition="") -> str:
 @dataclass
 class Job:
     id: str           = field(default_factory=_new_id)
+    _retired: bool    = field(default=False, init=False, repr=False)
     title: str        = ""
     artist: str       = ""
     album_id: str     = ""
@@ -1836,6 +1837,8 @@ def _restore_untouched_review(j: Job, *, status=JobStatus.RUNNING) -> bool:
                  j.candidates, j._cand_seq, j.title) = previous
                 return False
             if should_merge:
+                parked._retired = True
+                parked.status = JobStatus.CANCELED
                 registry.discard_merged_review(parked)
     if parked is not None and should_merge:
         parked.end_stream()

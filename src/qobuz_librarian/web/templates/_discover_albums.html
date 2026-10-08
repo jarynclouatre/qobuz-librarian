@@ -1,4 +1,7 @@
 {% from "_search_results.html" import download_form, quality_badge with context %}
+{% if error %}
+<div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
+{% else %}
 {# The years are Qobuz's own, so a chip press filters what is already on
    screen instead of asking for the list again. #}
 <div class="ql-discover-expand" data-decade-scope>
@@ -26,10 +29,7 @@
     </div>
   </div>
   {% else %}
-  {% if error %}
-  <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
-  {% else %}
   <p class="ql-empty-state">Qobuz has nothing listed for this artist.</p>
-  {% endif %}
   {% endfor %}
 </div>
+{% endif %}

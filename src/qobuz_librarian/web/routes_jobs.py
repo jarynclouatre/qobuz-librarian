@@ -174,10 +174,9 @@ async def job_content(request: Request, job_id: str, page: int = 1,
 
 @router.get("/jobs/{job_id}/review", response_class=HTMLResponse)
 async def job_review_page(request: Request, job_id: str, page: int = 1,
-                          q: str = "", tab: str = ""):
-    """One page of the paginated review list (groups + pager + summary), for
-    Prev/Next, the whole-set artist filter, and a library review's tab switch.
-    Rendered from saved selection flags, so ticks persist and span pages."""
+                          q: str = "", tab: str = "", through: bool = False,
+                          anchor: str = ""):
+    """Review fragment, optionally including earlier loaded pages."""
     job = job_mgr.registry.get(job_id)
     if not job:
         job = job_mgr.load_historical_job(job_id)
@@ -185,7 +184,8 @@ async def job_review_page(request: Request, job_id: str, page: int = 1,
             return HTMLResponse("", status_code=404)
     review_badge_ack = _review_badge_ack_for(job)
     ctx = {"job": job, "JobStatus": job_mgr.JobStatus}
-    ctx.update(review_pages._review_context(job, page, q, tab))
+    ctx.update(review_pages._review_context(
+        job, page, q, tab, through=through, anchor=anchor))
     return rendering._tr(
         request, "_review_page.html", ctx,
         review_badge_ack=review_badge_ack,
@@ -271,6 +271,7 @@ async def job_approve(request: Request, job_id: str):
     # A library review approves per tab: the button acts on the tab the user
     # is looking at, and only that tab.
     form = await request.form()
+    selection_token = form.get("selection_token")
     migration_low_space_required = bool(
         job.execute_kind == "migration"
         and (job.execute_args or {}).get("requires_low_space_override")
@@ -375,6 +376,7 @@ async def job_approve(request: Request, job_id: str):
                         "picked_albums":
                             _named_albums(selected_candidate_snapshot),
                         "downsample_originals_choice": current_choice,
+                        "review_selection_token": selection_token,
                         "backup_retention_days":
                             cfg.UPGRADE_BACKUP_RETENTION_DAYS})
             downsample_keep_originals = choice == "keep"
@@ -446,6 +448,9 @@ async def job_approve(request: Request, job_id: str):
                     return copy.deepcopy(candidates)
 
             current_selected = current_selected_candidates()
+            if (selection_token is not None
+                    and selection_token != review_pages._selection_token(job, tab)):
+                return "review_changed"
             if {
                 c.get("cid") for c in current_selected
             } != selected_candidate_ids:
@@ -830,23 +835,28 @@ def _get_reviewable_job(job_id):
 def _selection_payload(job, *, persist_failed=False):
     """JSON the selection/hide endpoints return so every open tab can refresh
     its counts from the server instead of recounting a partial DOM."""
-    c = job.selection_counts()
-    payload = {
-        "selected": c["selected"],
-        "total": c["total"],
-        "artists": c["artists"],
-        "reclaimable": c["reclaimable"],
-        "reclaimable_label": format_size(c["reclaimable"]) if c["reclaimable"] else "",
-    }
-    if persist_failed:
-        payload["persist_failed"] = True
-    if job.execute_kind == "library":
-        totals = review_pages._review_tab_totals(job)
-        payload["missing_total"] = totals["missing"]
-        payload["gap_total"] = totals["gaps"]
-        payload["missing_selected"] = totals["missing_selected"]
-        payload["gap_selected"] = totals["gaps_selected"]
-    return payload
+    with job._lock:
+        c = job.selection_counts()
+        payload = {
+            "selection_tokens": {
+                tab: review_pages._selection_token(job, tab)
+                for tab in (("", "missing", "gaps") if job.execute_kind == "library" else ("",))
+            },
+            "selected": c["selected"],
+            "total": c["total"],
+            "artists": c["artists"],
+            "reclaimable": c["reclaimable"],
+            "reclaimable_label": format_size(c["reclaimable"]) if c["reclaimable"] else "",
+        }
+        if persist_failed:
+            payload["persist_failed"] = True
+        if job.execute_kind == "library":
+            totals = review_pages._review_tab_totals(job)
+            payload["missing_total"] = totals["missing"]
+            payload["gap_total"] = totals["gaps"]
+            payload["missing_selected"] = totals["missing_selected"]
+            payload["gap_selected"] = totals["gaps_selected"]
+        return payload
 
 
 def _filtered_selection_payload(job, query, tab):
@@ -866,7 +876,7 @@ def _set_all_selected_with_membership(job, on, cids):
     wanted = set(cids) if cids is not None else None
     accepted_cids = []
     changed = 0
-    with job._lock:
+    with job._review_action_lock, job._lock:
         if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
             return None, []
         for candidate in job.candidates:
@@ -954,6 +964,11 @@ async def job_select_all(request: Request, job_id: str):
         loop = asyncio.get_running_loop()
         saved = await loop.run_in_executor(
             None, lambda: job_persistence.persist(job))
+        if job._retired:
+            return JSONResponse(
+                {"error": "review is no longer awaiting selection"},
+                status_code=409,
+            )
         persist_failed = not saved
         job.notify_review_changed(_review_origin(request))
     payload = _selection_payload(job, persist_failed=persist_failed)
@@ -1096,17 +1111,14 @@ async def job_hide(request: Request, job_id: str):
                         "review_query": q})
         else:
             resp = HTMLResponse("")  # whole artist hidden, outerHTML drops it
-        if n:
-            # Carry the fresh authoritative counts so the page updates the
-            # summary/selected/reclaimable without recounting a partial DOM.
-
-            counts = _selection_payload(job)
-            counts["hidden_total"] = hidden_mod.count(
-                review_pages._hide_scope(job.execute_kind))
-            if q:
-                counts.update(_filtered_selection_payload(job, q, tab))
-            resp.headers["HX-Trigger-After-Swap"] = json.dumps(
-                {"qlHidden": {"n": n, "counts": counts}})
+        # Counts include pages that have not been loaded.
+        counts = _selection_payload(job)
+        counts["hidden_total"] = hidden_mod.count(
+            review_pages._hide_scope(job.execute_kind))
+        if q:
+            counts.update(_filtered_selection_payload(job, q, tab))
+        resp.headers["HX-Trigger-After-Swap"] = json.dumps(
+            {"qlHidden": {"n": n, "counts": counts}})
         return resp
     return HTMLResponse("")
 
@@ -1525,7 +1537,10 @@ async def job_retry(request: Request, job_id: str):
         return busy
     album_id = job.album_id
     retry_as_new = bool((job.execute_args or {}).get("new_edition"))
-    duplicate = download_admission._find_job_touching_album(album_id)
+    retry_track_id = str((job.single or {}).get("track_id") or "")
+    duplicate = download_admission._duplicate_download_job(
+        album_id, retry_track_id, retry_as_new,
+    )
     if duplicate:
         return _land(started=duplicate.id)
     try:
@@ -1550,7 +1565,9 @@ async def job_retry(request: Request, job_id: str):
                     unchanged=True,
                 )
                 return _land(error=message)
-            duplicate = download_admission._find_job_touching_album(album_id)
+            duplicate = download_admission._duplicate_download_job(
+                album_id, retry_track_id, retry_as_new,
+            )
             if duplicate:
                 return _land(started=duplicate.id)
             # set_mode could have handed the lock to the terminal during the

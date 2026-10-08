@@ -1,4 +1,6 @@
 """Grouping and paging for review lists."""
+import hashlib
+import json
 import re
 
 from qobuz_librarian.library import hidden as hidden_mod
@@ -6,50 +8,54 @@ from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.web import flows
 
 
-def _review_context(job, page=1, query="", tab=""):
-    """Template vars for a paginated awaiting-review body: the current page's
-    artist groups, the page number/count, and the authoritative whole-set
-    counts. Cheap no-op for non-review states (no candidates → one empty page).
+def _selection_token(job, tab=""):
+    with job._lock:
+        selected = sorted(
+            c["cid"] for c in job.candidates if c.get("selected")
+            and (not tab or flows.is_gap_candidate(c) == (tab == "gaps")))
+    return hashlib.sha256(json.dumps([job.id, selected]).encode()).hexdigest()
 
-    A library review always splits into its two tabs, Missing Albums and Gap
-    Fill, and ``tab`` picks one. With no explicit pick, land on Missing Albums
-    unless it's empty and Gap Fill isn't. Other review kinds render untabbed.
-    """
-    tab_counts = None
-    if job.execute_kind == "library":
-        totals = _review_tab_totals(job)
-        if totals["missing"] or totals["gaps"]:
-            tab_counts = totals
-    if tab_counts:
-        if tab not in ("missing", "gaps"):
-            tab = ("gaps" if tab_counts["gaps"] and not tab_counts["missing"]
-                   else "missing")
-    else:
-        tab = ""
-    groups = _review_artist_groups(job, query, tab)
-    page_groups, page, n_pages = _paginate_groups(groups, page)
-    counts = job.selection_counts()
-    filtered_total = sum(len(rows) for _artist, rows in groups)
-    filtered_rest = _filtered_rest_of(groups)
-    return {
-        "review_groups": page_groups,
-        "review_page": page,
-        "review_pages": n_pages,
-        "review_query": query,
-        # What "Dismiss unselected" would actually take under this filter, so
-        # the button cannot quote the tab total while acting on a subset.
-        "review_filtered_total": filtered_total,
-        "review_filtered_selected": filtered_total - filtered_rest,
-        "review_filtered_rest": filtered_rest,
-        "review_tab": tab,
-        "review_tab_counts": tab_counts,
-        "review_hidden_count": hidden_mod.count(_hide_scope(job.execute_kind)),
-        "review_counts": counts,
-        "review_summary_line": _review_summary_line(job),
-        "review_reclaimable_label": (format_size(counts["reclaimable"])
-                                     if counts["reclaimable"] else ""),
-        "review_page_size": REVIEW_PAGE_ARTISTS,
-    }
+
+def _review_context(job, page=1, query="", tab="", *, through=False, anchor=""):
+    """Saved choices, counts and artist groups for a review page."""
+    hidden_count = hidden_mod.count(_hide_scope(job.execute_kind))
+    with job._lock:
+        tab_counts = None
+        if job.execute_kind == "library":
+            totals = _review_tab_totals(job)
+            if totals["missing"] or totals["gaps"]:
+                tab_counts = totals
+        if tab_counts:
+            if tab not in ("missing", "gaps"):
+                tab = ("gaps" if tab_counts["gaps"] and not tab_counts["missing"]
+                       else "missing")
+        else:
+            tab = ""
+        groups = _review_artist_groups(job, query, tab)
+        page_groups, page, n_pages = _paginate_groups(
+            groups, page, through=through, anchor=anchor)
+        counts = job.selection_counts()
+        filtered_total = sum(len(rows) for _artist, rows in groups)
+        filtered_rest = _filtered_rest_of(groups)
+        return {
+            "review_groups": page_groups,
+            "review_page": page,
+            "review_pages": n_pages,
+            "review_query": query,
+            # Dismiss counts follow the current filter.
+            "review_filtered_total": filtered_total,
+            "review_filtered_selected": filtered_total - filtered_rest,
+            "review_filtered_rest": filtered_rest,
+            "review_tab": tab,
+            "review_selection_token": _selection_token(job, tab),
+            "review_tab_counts": tab_counts,
+            "review_hidden_count": hidden_count,
+            "review_counts": counts,
+            "review_summary_line": _review_summary_line(job),
+            "review_reclaimable_label": (format_size(counts["reclaimable"])
+                                         if counts["reclaimable"] else ""),
+            "review_page_size": REVIEW_PAGE_ARTISTS,
+        }
 
 
 # The generated summaries that say nothing but the size of the review. A
@@ -114,7 +120,7 @@ def _review_artist_groups(job, query="", tab=""):
     just the one on screen. ``tab`` narrows a library review to one side of its
     Missing Albums / Gap Fill split. Returns a list of (artist, items) pairs."""
     with job._lock:
-        cands = list(job.candidates)
+        cands = [c.copy() for c in job.candidates]
     q = (query or "").strip().lower()
     groups: dict = {}
     for c in cands:
@@ -131,7 +137,8 @@ def _review_artist_groups(job, query="", tab=""):
     return ordered
 
 
-def _paginate_groups(groups, page, rows=lambda group: len(group[1])):
+def _paginate_groups(groups, page, rows=lambda group: len(group[1]), *,
+                     through=False, anchor=""):
     """Slice artist groups into one page. Returns (page_groups, page, n_pages).
     ``page`` is clamped into range so a stale/empty page lands somewhere valid.
 
@@ -153,6 +160,13 @@ def _paginate_groups(groups, page, rows=lambda group: len(group[1])):
         pages.append(cur)
     n_pages = max(1, len(pages))
     page = max(1, min(int(page or 1), n_pages))
+    if through:
+        if anchor:
+            for i, batch in enumerate(pages):
+                if any(artist == anchor for artist, _items in batch):
+                    page = max(page, i + 1)
+                    break
+        return [group for batch in pages[:page] for group in batch], page, n_pages
     return (pages[page - 1] if pages else []), page, n_pages
 
 

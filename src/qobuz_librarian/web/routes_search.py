@@ -831,7 +831,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         resp = rendering._tr(request, "_search_results.html", ctx)
         # Put the search in the address bar, so a reload or Back lands on the
         # same results. GET / rehydrates from these.
-        if query or (kind == "album" and album_id):
+        if ((query or (kind == "album" and album_id))
+                and request.headers.get("HX-History-Restore-Request") != "true"):
             params = {"kind": kind, "q": query}
             if artist_id:
                 params["artist_id"] = artist_id

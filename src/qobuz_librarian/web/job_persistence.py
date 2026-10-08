@@ -550,6 +550,8 @@ _TERMINAL_STATUSES = ("done", "failed", "canceled")
 
 def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
     """Serialise one job while its lock is held, or return None."""
+    if job._retired:
+        return None
     try:
         candidates_json = json.dumps(
             _compact_candidates(job.candidates or []), default=str)
@@ -708,6 +710,8 @@ def persist(job) -> bool:
 def persist_review_mutation(job, mutation) -> tuple[bool, object]:
     """Save one candidate-list mutation or restore its exact prior state."""
     with job._review_action_lock, job._lock:
+        if job._retired:
+            return False, None
         had_saved_signature = hasattr(job, "_saved_review_signature")
         previous = (
             copy.deepcopy(job.candidates),

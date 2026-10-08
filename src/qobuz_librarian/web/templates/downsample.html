@@ -88,7 +88,7 @@
     {% else %}
     <section class="ql-work-card ql-quality-entry-card">
       <div class="ql-work-card-copy">
-      <p class="ql-work-card-title">{% if downsample_state.complete %}No albums to downsample{% else %}No Downsample results yet{% endif %}</p>
+      {% if not downsample_state.complete %}<p class="ql-work-card-title">No Downsample results yet</p>{% endif %}
         <p class="ql-work-card-text">Refresh checks the files already on disk.</p>
       </div>
       <div class="ql-work-card-actions">

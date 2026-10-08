@@ -13,13 +13,13 @@
           </p>
         </div>
       </div>
-      <button type="button" class="ql-vchip" data-discover-toggle
+      <button type="button" class="ql-vchip" data-discover-toggle id="discover-toggle-{{ a.artist_id }}"
               aria-expanded="false" aria-controls="discover-albums-{{ a.artist_id }}"
               hx-get="/discover/artist-albums?artist_id={{ a.artist_id | urlencode }}&name={{ a.name | urlencode }}"
               hx-target="#discover-albums-{{ a.artist_id }}" hx-swap="innerHTML"
               hx-trigger="click">{{ a.albums | length }} Album{{ 's' if a.albums | length != 1 }}</button>
     </div>
-    <div id="discover-albums-{{ a.artist_id }}" class="hidden"></div>
+    <div id="discover-albums-{{ a.artist_id }}" class="hidden" hx-preserve></div>
     {% endfor %}
   </div>
 </div>

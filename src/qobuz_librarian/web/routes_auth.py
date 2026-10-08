@@ -83,15 +83,15 @@ async def login_submit(request: Request, username: str = Form(""),
     # that runs on the loop thread).
     loop = asyncio.get_running_loop()
     try:
-        ok = await loop.run_in_executor(
-            None, web_auth.verify_login, username.strip(), password)
+        generation = await loop.run_in_executor(
+            None, web_auth.verify_login_generation, username.strip(), password)
     except BaseException:
         if reserved_attempt:
             web_auth.cancel_login_attempt(ip, username)
         raise
     if reserved_attempt:
-        web_auth.finish_login_attempt(ip, username, success=ok)
-    if not ok:
+        web_auth.finish_login_attempt(ip, username, success=bool(generation))
+    if not generation:
         wait = rendering._lockout_notice(ip, username, after_failure=True)
         # Keep what they typed, as the setup screen already does.
         return _login_again(
@@ -100,7 +100,9 @@ async def login_submit(request: Request, username: str = Form(""),
     web_auth.clear_login_failures(ip, username)
     resp = RedirectResponse(url=next_path or "/", status_code=303)
     try:
-        web_auth.set_session_cookie(resp, request)
+        web_auth.set_session_cookie(resp, request, expected_generation=generation)
+    except web_auth.CredentialsChanged:
+        return RedirectResponse(url="/login?changed=1", status_code=303)
     except web_auth.SessionPersistenceError:
         _log.warning(
             "Couldn't persist a new web session; login refused.")
@@ -178,16 +180,13 @@ async def setup_submit(request: Request, username: str = Form(""),
     # finished, reading a false "created in another browser" conflict.
     loop = asyncio.get_running_loop()
     try:
-        stored = await loop.run_in_executor(
-            None,
-            lambda: web_auth.set_credentials(
-                user, password, require_unconfigured=True),
-        )
+        generation = await loop.run_in_executor(
+            None, web_auth.setup_credentials, user, password)
     except web_auth.CredentialsAlreadyConfigured:
         return rendering.templates.TemplateResponse(
             request=request, name="setup.html",
             context={"setup_conflict": True}, status_code=409)
-    if not stored:
+    if not generation:
         return rendering.templates.TemplateResponse(
             request=request, name="setup.html",
             context={"error": "Couldn't save the login: the data volume "
@@ -196,7 +195,9 @@ async def setup_submit(request: Request, username: str = Form(""),
             status_code=500)
     resp = RedirectResponse(url="/", status_code=303)
     try:
-        web_auth.set_session_cookie(resp, request)
+        web_auth.set_session_cookie(resp, request, expected_generation=generation)
+    except web_auth.CredentialsChanged:
+        return RedirectResponse(url="/login?changed=1", status_code=303)
     except web_auth.SessionPersistenceError:
         _log.warning(
             "Couldn't persist the first web session; setup login was saved.")

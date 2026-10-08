@@ -1050,21 +1050,25 @@
     out.classList.toggle("is-chosen", !!file);
   });
 
-  // Keep the search field metadata in step with the search mode.
+  function syncSearchLabel(form) {
+    var q = form && form.querySelector('input[name="q"]');
+    var mode = form && form.querySelector('input[name="kind"]:checked');
+    if (!q || !mode) return;
+    var label = mode.value === "artist" ? "Artist name"
+      : mode.value === "track" ? "Track title" : "Album title";
+    q.setAttribute("placeholder", label);
+    q.setAttribute("aria-label", label);
+  }
+
   document.addEventListener("change", function (evt) {
     var radio = evt.target;
     if (!radio.matches || !radio.matches('input[name="kind"]')) return;
     var form = radio.closest("form");
     var q = form && form.querySelector('input[name="q"]');
     if (!q) return;
-    var placeholder = "Album title";
-    if (radio.value === "artist") placeholder = "Artist name";
-    if (radio.value === "track") placeholder = "Track title";
-    q.setAttribute("placeholder", placeholder);
-    q.setAttribute("aria-label", placeholder);
+    syncSearchLabel(form);
     saveSearchSnapshot();
-    latestSearchSubmission += 1;
-    activeSearchRequests.slice().forEach(function (xhr) { xhr.abort(); });
+    cancelSearchRequests();
     form.querySelectorAll("[data-deep-link]").forEach(function (node) { node.remove(); });
     var results = document.getElementById("search-results");
     if (results) results.replaceChildren();
@@ -1092,6 +1096,25 @@
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
     var first = panel && panel.firstElementChild;
     if (first && !first.hasAttribute("data-flash")) evt.preventDefault();
+  });
+  var discoverFocus = null;
+  document.addEventListener("htmx:beforeSwap", function (evt) {
+    var target = evt.detail.target;
+    if (!target || target.id !== "discover-body") return;
+    var active = document.activeElement;
+    discoverFocus = target.contains(active) ? active : null;
+  });
+  document.addEventListener("htmx:afterSwap", function (evt) {
+    if (!evt.detail.target || evt.detail.target.id !== "discover-body") return;
+    document.querySelectorAll("[data-discover-toggle]").forEach(function (button) {
+      var panel = document.getElementById(button.getAttribute("aria-controls"));
+      if (panel) button.setAttribute("aria-expanded", panel.classList.contains("hidden") ? "false" : "true");
+    });
+    var previous = discoverFocus;
+    discoverFocus = null;
+    if (!previous || document.activeElement !== document.body) return;
+    var target = previous.isConnected ? previous : previous.id && document.getElementById(previous.id);
+    if (target) target.focus({ preventScroll: true });
   });
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest
@@ -1198,10 +1221,8 @@
     // on <body>, which costs a dead Tab and then restarts at "Skip to content".
     if (hadFocus) {
       var summary = dd.querySelector("summary");
-      if (summary && summary.focus) summary.focus();
-      else if (document.activeElement && document.activeElement.blur) {
-        document.activeElement.blur();
-      }
+      var target = summary && summary.getClientRects().length ? summary : document.getElementById("main-content");
+      if (target) target.focus({ preventScroll: true });
     }
     if (!document.querySelector(".ql-mobile-drawer.ql-mobile-drawer-open")) {
       unlockDrawerPage();
@@ -1291,7 +1312,7 @@
     // Keep warnings/errors visible; auto-clear low-risk notices and toasts.
     document.querySelectorAll("[data-flash].ql-notice-success, [data-flash].ql-notice-info, [data-flash].ql-flash-info")
       .forEach(function (el) { setTimeout(function () { fade(el); }, 6000); });
-    document.querySelectorAll("#download-toast [data-flash]")
+    document.querySelectorAll("#download-toast [data-flash]:not([data-flash-persistent])")
       .forEach(function (el) { setTimeout(function () { fade(el); }, 8000); });
   }
   function normalizeFlashAnnouncements() {
@@ -1359,7 +1380,7 @@
   // `message` is a string (rendered as text, never markup) or a prebuilt
   // node. The node form is what lets a receipt carry a real link, which a
   // textContent-only toast structurally couldn't.
-  function showToast(message, kind) {
+  function showToast(message, kind, persistentKey) {
     var host = document.getElementById("download-toast");
     if (!host && document.body) {
       host = document.createElement("div");
@@ -1369,6 +1390,11 @@
       document.body.appendChild(host);
     }
     if (!host) return;
+    if (persistentKey) {
+      host.querySelectorAll("[data-flash-persistent]").forEach(function (notice) {
+        if (notice.dataset.flashPersistent === persistentKey) notice.remove();
+      });
+    }
     var el = document.createElement("div");
     var noticeKind = kind || "info";
     el.className = "ql-notice ql-notice-" + noticeKind;
@@ -1383,17 +1409,21 @@
       el.appendChild(span);
     }
     host.appendChild(el);
-    setTimeout(function () { fade(el); }, 8000);
+    if (persistentKey) {
+      el.dataset.flashPersistent = persistentKey;
+      var close = document.createElement("button");
+      close.type = "button";
+      close.className = "ql-icon-button min-h-11 min-w-11 shrink-0";
+      close.setAttribute("aria-label", "Dismiss notice");
+      close.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-width="1.8" d="m6 6 12 12M6 18 18 6"/></svg>';
+      close.addEventListener("click", function () { fade(el); });
+      el.appendChild(close);
+    } else {
+      setTimeout(function () { fade(el); }, 8000);
+    }
+    return el;
   }
   window.qlShowToast = showToast;
-
-  // Did the request fail because nothing could be reached, rather than because
-  // the server answered with an error? fetch() rejects with a TypeError when
-  // the connection never completes, and navigator.onLine covers a drop that
-  // happened while the answer was in flight.
-  function serverUnreachable(why) {
-    return why instanceof TypeError || !navigator.onLine;
-  }
 
   // Reloading is how the raw fetch() paths recover from a failed action, and
   // with the connection down it is the worst thing they can do: the service
@@ -1544,7 +1574,10 @@
     }
     document.documentElement.classList.remove("ql-search-restoring");
     if (form.dataset.searchAuto === "1" && window.htmx) {
-      window.htmx.trigger(form, "submit");
+      window.htmx.ajax("POST", "/search", {
+        source: form, target: "#search-results", swap: "innerHTML",
+        headers: { "HX-History-Restore-Request": "true" }
+      }).catch(function () {});
     }
   }
 
@@ -2504,17 +2537,6 @@
       var b = cont.querySelector("[data-review-tab].is-active");
       return b ? b.getAttribute("data-review-tab") : "";
     }
-    // Approve acts on the tab in front of you, so the gap-fill sentence has to
-    // follow it. The submit button sits outside the swapped fragment.
-    var baseConfirm = submit ? (submit.getAttribute("data-confirm") || "") : "";
-    var gapConfirm = submit ? (submit.getAttribute("data-gap-confirm") || "") : "";
-    function syncSubmitConfirm() {
-      if (!submit || !gapConfirm) return;
-      submit.setAttribute(
-        "data-confirm",
-        curTab() === "gaps" ? baseConfirm + " " + gapConfirm : baseConfirm);
-    }
-    syncSubmitConfirm();
     // Last server counts payload. Seeded from the initial render's data
     // attributes so tab switches can re-scope the bulk bar without a request.
     var lastCounts = {
@@ -2553,6 +2575,8 @@
         filtered_selected: parseInt(box.dataset.filteredSelected || "0", 10),
         filtered_rest: parseInt(box.dataset.filteredRest || "0", 10),
       };
+      c.selection_tokens = {};
+      c.selection_tokens[curTab()] = box.dataset.selectionToken;
       if (box.dataset.reviewMissingTotal !== undefined) {
         c.missing_total = parseInt(box.dataset.reviewMissingTotal || "0", 10);
         c.missing_selected = parseInt(box.dataset.reviewMissingSelected || "0", 10);
@@ -2562,11 +2586,102 @@
       return c;
     }
 
+    var pendingWrites = 0;
+    var choiceQueue = Promise.resolve();
+    var pendingChoices = new Map();
+    var choicesUnknown = false;
+    var refreshNeeded = false;
+    var recovering = null;
+    var dismissPending = false;
+    var choiceVersion = 0;
+
+    function actionsBlocked() {
+      return pendingWrites > 0 || choicesUnknown || dismissPending || pageLoading;
+    }
+
+    function syncActions() {
+      var blocked = actionsBlocked();
+      if (submit) submit.disabled = reviewBlocked || blocked || tabCounts(lastCounts).selected === 0;
+      form.querySelectorAll("[data-hide], #review-dismiss-rest, [formaction$='/cancel']").forEach(function (button) {
+        if (blocked && !button.disabled) {
+          button.disabled = true;
+          button.dataset.selectionLocked = "1";
+        } else if (!blocked && button.dataset.selectionLocked) {
+          button.disabled = false;
+          delete button.dataset.selectionLocked;
+        }
+      });
+    }
+
+    function applyPendingChoices() {
+      cont.querySelectorAll("input.cb").forEach(function (cb) {
+        if (pendingChoices.has(cb.value)) cb.checked = pendingChoices.get(cb.value);
+      });
+    }
+
+    function recoverChoices() {
+      if (pendingWrites || dismissPending || recovering || !cont.isConnected) return;
+      var message = document.createElement("span");
+      message.textContent = "Couldn't confirm the saved choices. Check them before continuing. ";
+      var retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "ql-inline-link";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", recoverChoices);
+      message.appendChild(retry);
+      var notice = showToast(message, "error", "review-connection-" + id);
+      pendingChoices.clear();
+      recovering = refreshReview().then(function (loaded) {
+        recovering = null;
+        if (loaded) {
+          choicesUnknown = false;
+          if (notice) notice.remove();
+        }
+        syncActions();
+      });
+    }
+
+    function queueChoice(url, body, accept) {
+      pendingWrites += 1;
+      choiceVersion += 1;
+      syncActions();
+      var request = choiceQueue.then(function () {
+        if (choicesUnknown) return Promise.reject("uncertain");
+        return post(url, body).then(function (r) {
+          return r.ok ? r.json() : Promise.reject();
+        }).then(accept);
+      });
+      choiceQueue = request.catch(function (why) {
+        if (why !== "navigation") choicesUnknown = true;
+      }).then(function () {
+        pendingWrites -= 1;
+        syncActions();
+        if (!pendingWrites) {
+          if (choicesUnknown) recoverChoices();
+          else if (refreshNeeded) refreshReview();
+        }
+      });
+      return request;
+    }
+
+    function scopedCounts(c, tab, query, generation) {
+      if (tab === curTab() && query === curQuery() && generation === loadGen) return c;
+      var counts = Object.assign({}, c);
+      delete counts.filtered_total;
+      delete counts.filtered_selected;
+      delete counts.filtered_rest;
+      return counts;
+    }
+
     // Counts come from the server because the DOM only holds one page. The
     // bulk bar (submit + dismiss-unselected) is scoped to the active tab.
     function applyCounts(c) {
       if (!c) return;
       lastCounts = c;
+      var token = form.elements.namedItem("selection_token");
+      if (token && c.selection_tokens && c.selection_tokens[curTab()]) {
+        token.value = c.selection_tokens[curTab()];
+      }
       if (typeof c.filtered_total === "number") {
         var fb = pageBox();
         if (fb) {
@@ -2577,7 +2692,7 @@
       }
       var tc = tabCounts(c);
       if (submit) {
-        submit.disabled = reviewBlocked || tc.selected === 0;
+        submit.disabled = reviewBlocked || actionsBlocked() || tc.selected === 0;
         submit.textContent = tc.selected
           ? (submit.dataset.reviewVerb || "Download") + " " + formatCount(tc.selected) + " selected"
           : (submit.dataset.emptyLabel || "Select " + reviewItemPlural);
@@ -2626,6 +2741,7 @@
         }
       }
       updateDismissRest();
+      syncActions();
     }
 
     // What the button will actually take. Under a filter the action is scoped
@@ -2679,60 +2795,50 @@
 
     function warnPersistFailed(c) {
       if (!c || !c.persist_failed) return;
-      showToast("Your choices changed, but couldn't be saved to disk. They may not survive a restart. Check the data folder.", "error");
+      showToast("Your choices changed, but couldn't be saved to disk. They may not survive a restart. Check the data folder.", "error", "review-save-" + id);
     }
 
     // Save one checkbox to the server, then refresh counts from its response.
     function saveTick(cb) {
       var previous = !cb.checked;
-      // Under a filter the response also recounts what Dismiss unselected
-      // would take, so the button can't quote the number from render time.
+      if (choicesUnknown || dismissPending || pageLoading) {
+        cb.checked = previous;
+        return;
+      }
+      var on = cb.checked;
+      var requestTab = curTab();
+      var requestQuery = curQuery();
+      var requestGeneration = loadGen;
+      // Dismiss counts follow the current filter.
       var scopeQ = curQuery()
         ? "&q=" + encodeURIComponent(curQuery()) +
           "&tab=" + encodeURIComponent(curTab())
         : "";
       var det = cb.closest("details[data-artist]");
-      function revert() {
-        cb.checked = previous;
-        cb.style.outline = "2px solid #ef4444";
-        setTimeout(function () { cb.style.outline = ""; }, 1500);
-      }
-      // Serialize per-box saves so the server matches the checkbox. NOT by
-      // disabling it: disabling the element that has focus hands focus to
-      // <body>, and re-enabling never gives it back, so a keyboard user had to
-      // Tab from the top of the page again for every single tick. A busy flag
-      // does the same job and leaves focus where the user put it.
+      // Keep keyboard focus on the checkbox while its save is pending.
       if (cb.dataset.saving === "1") {
-        // The box already flipped visually; putting it back beats letting the
-        // screen contradict the server with nothing to heal it.
         cb.checked = previous;
         return;
       }
       cb.dataset.saving = "1";
+      pendingChoices.set(cb.value, on);
       cb.setAttribute("aria-busy", "true");
       function done() {
         delete cb.dataset.saving;
         cb.removeAttribute("aria-busy");
       }
       var body = "cid=" + encodeURIComponent(cb.value) + "&checked=" + (cb.checked ? "1" : "0") + scopeQ;
-      post("/jobs/" + id + "/select", body)
-        .then(function (r) {
-          if (r.status === 403) return Promise.reject("stale");
-          return r.ok ? r.json() : Promise.reject();
-        })
-        .then(function (c) {
+      queueChoice("/jobs/" + id + "/select", body, function (c) {
           done();
+          pendingChoices.delete(cb.value);
+          cb.checked = on;
           if (det) delete det.dataset.selectionOverride;
-          if (c) applyCounts(c);
+          if (c) applyCounts(scopedCounts(c, requestTab, requestQuery, requestGeneration));
           updateHideLabels();
           updateArtistChecks();
         })
-        .catch(function (why) {
+        .catch(function () {
           done();
-          if (why === "navigation") return;
-          revert();
-          if (why === "stale") { pageWentStale(); return; }
-          showToast("Couldn't save that choice. Try again.", "error");
         });
     }
 
@@ -2765,7 +2871,7 @@
     }
 
     function bulkSelect(on, scope, artist) {
-      if (bulkBusy) {
+      if (bulkBusy || actionsBlocked()) {
         showToast("Another selection is still saving. Try again in a moment.", "error");
         applyCounts(lastCounts);
         return Promise.resolve({ ok: false, busy: true });
@@ -2785,21 +2891,12 @@
           });
         });
       }
-      return post("/jobs/" + id + "/select-all", body)
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
-        .then(function (c) {
+      return queueChoice("/jobs/" + id + "/select-all", body, function (c) {
           bulkBusy = false;
           var current = requestTab === curTab() &&
                         requestQuery === curQuery() &&
                         requestGeneration === loadGen;
-          var counts = c;
-          if (!current && typeof c.filtered_rest === "number") {
-            counts = Object.assign({}, c);
-            delete counts.filtered_total;
-            delete counts.filtered_selected;
-            delete counts.filtered_rest;
-          }
-          applyCounts(counts);
+          applyCounts(scopedCounts(c, requestTab, requestQuery, requestGeneration));
           warnPersistFailed(c);
           var accepted = new Set(c.accepted_cids || []);
           if (current && (scope === "all" || scope === "page")) {
@@ -2810,6 +2907,7 @@
               applyGroupChoice(det, on, true);
             });
           }
+          applyPendingChoices();
           updateHideLabels();
           updateArtistChecks();
           return { ok: true, counts: c, current: current, accepted: accepted };
@@ -2819,28 +2917,8 @@
           if (why === "navigation") {
             return { ok: false, busy: false, navigating: true };
           }
-          flashSelectError();
-          if (serverUnreachable(why)) {
-            // Nothing was saved, and a reload would only reach the offline
-            // page, so put the boxes back to the server's last answer.
-            applyCounts(lastCounts);
-            showToast("Couldn't reach the server, so those choices weren't saved."
-              + " Check your connection, then try again.", "error");
-            return { ok: false, busy: false, unreachable: true };
-          }
-          showToast("Couldn't confirm those choices. Reloading the review.", "error");
-          reloadToRecover();
-          return { ok: false, busy: false };
+          return { ok: false, uncertain: true };
         });
-    }
-
-    function flashSelectError() {
-      var box = pageBox();
-      if (!box) return;
-      box.querySelectorAll(".cb").forEach(function (cb) {
-        cb.style.outline = "2px solid #ef4444";
-        setTimeout(function () { cb.style.outline = ""; }, 1500);
-      });
     }
 
     function groupSelect(det, on) {
@@ -2861,23 +2939,14 @@
           return result.accepted.has(cid);
         })) {
           applyGroupChoice(det, on, true);
-        } else if (!result.ok) {
+        } else if (!result.ok && !result.uncertain) {
           delete det.dataset.selectionOverride;
-          det.dataset.selectionRecovering = "1";
           det.querySelectorAll(".cb").forEach(function (cb, index) {
             if (index < previousRows.length) cb.checked = previousRows[index];
           });
           restoreGroupHeader(det);
-          if (!result.busy && !result.unreachable) {
-            loadGroupItems(det, true).then(function (loaded) {
-              if (loaded) delete det.dataset.selectionRecovering;
-              updateHideLabels();
-              updateArtistChecks();
-            });
-          } else {
-            delete det.dataset.selectionRecovering;
-          }
         }
+        applyPendingChoices();
         updateHideLabels();
         updateArtistChecks();
       });
@@ -2907,8 +2976,7 @@
         var lbl = btn.querySelector("[data-hide-label]");
         if (!det || !lbl) return;
         var lazy = det.querySelector("[data-lazy-items]");
-        var useSavedCounts = det.dataset.selectionRecovering !== undefined
-          || (lazy && !lazy.dataset.loaded);
+        var useSavedCounts = lazy && !lazy.dataset.loaded;
         var total = useSavedCounts
           ? parseInt(det.dataset.groupTotal || "0", 10)
           : det.querySelectorAll(".cb").length;
@@ -2941,8 +3009,7 @@
         var det = cb.closest("details");
         if (!det) return;
         var lazy = det.querySelector("[data-lazy-items]");
-        var useSavedCounts = det.dataset.selectionRecovering !== undefined
-          || (lazy && !lazy.dataset.loaded);
+        var useSavedCounts = lazy && !lazy.dataset.loaded;
         var total = useSavedCounts
           ? parseInt(det.dataset.groupTotal || "0", 10)
           : det.querySelectorAll(".cb").length;
@@ -2959,17 +3026,21 @@
     }
 
     function loadGroupItems(det, force) {
+      if (pendingWrites) return choiceQueue.then(function () { return loadGroupItems(det, force); });
       var boxEl = det.querySelector("[data-lazy-items]");
       if (!boxEl || (boxEl.dataset.loaded && !force)) return Promise.resolve(true);
       // One in-flight fetch per box: the restore path and the toggle handler
       // both ask for the same rows in the same tick.
       if (boxEl._loadPromise && !force) return boxEl._loadPromise;
       var generation = (boxEl._loadGeneration || 0) + 1;
+      var choicesAtStart = choiceVersion;
       boxEl._loadGeneration = generation;
       boxEl.dataset.loading = "1";
       var p = sessionFetch(boxEl.dataset.itemsUrl)
         .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
         .then(function (txt) {
+          if (!det.isConnected) return false;
+          if (choicesAtStart !== choiceVersion) return loadGroupItems(det, true);
           if (boxEl._loadGeneration !== generation) return false;
           delete boxEl.dataset.loading;
           boxEl.innerHTML = txt;
@@ -2977,6 +3048,7 @@
           if (det.dataset.selectionOverride !== undefined) {
             applyGroupChoice(det, det.dataset.selectionOverride === "1", false);
           }
+          applyPendingChoices();
           updateHideLabels();
           updateArtistChecks();
           return true;
@@ -3003,10 +3075,13 @@
 
     // Append the next page in place.
     function loadMore(page) {
+      if (pendingWrites) return choiceQueue.then(function () { return loadMore(page); });
+      if (choicesUnknown || dismissPending) return Promise.resolve(false);
       if (loading) return loadingPromise || Promise.resolve(false);
       if (pageLoading) return Promise.resolve(false);
       loading = true;
       var gen = ++loadGen;
+      var choicesAtStart = choiceVersion;
       var url = "/jobs/" + id + "/review?page=" + (page || 2) +
                 "&q=" + encodeURIComponent(curQuery()) +
                 "&tab=" + encodeURIComponent(curTab());
@@ -3014,6 +3089,11 @@
         .then(function (r) { return r.ok ? r.text() : null; })
         .then(function (txt) {
           if (gen !== loadGen) return false;
+          if (choicesAtStart !== choiceVersion) {
+            loading = false;
+            loadingPromise = null;
+            return loadMore(page);
+          }
           if (txt == null) {
             showToast("Couldn't load those results. Try again.", "error");
             return false;
@@ -3129,34 +3209,61 @@
       if (target) target.focus({ preventScroll: true });
     }
 
-    // Fetch and swap one review page. Requests are generation-tagged and only
-    // the newest response may render: a tab click while a fetch is in flight
-    // issues its own request instead of being dropped, and the slow old-tab
-    // response is discarded on arrival. Otherwise its rows would paint under
-    // the newly selected tab while the hidden approval field already points
-    // at the new tab.
-    function loadPage(page, query, tab, mode) {
+    function refreshReview() {
+      if (pendingWrites || dismissPending || pageLoading) {
+        refreshNeeded = true;
+        return Promise.resolve(false);
+      }
+      refreshNeeded = false;
+      return loadPage(curPage(), curQuery(), curTab(), "replace", true);
+    }
+
+    // Only the newest request may replace the page.
+    function loadPage(page, query, tab, mode, preservePlace) {
       var gen = ++loadGen;
       var requestedQuery = (query || "").trim();
       var requestedTab = tab === undefined ? curTab() : tab;
+      if (pendingWrites) {
+        pageLoading = true;
+        syncActions();
+        return choiceQueue.then(function () {
+          if (gen !== loadGen) return false;
+          return loadPage(page, requestedQuery, requestedTab, mode, preservePlace);
+        });
+      }
       loading = false;   // a page swap supersedes any in-flight append
       loadingPromise = null;
       pageLoading = true;
       pendingTab = requestedTab;
-      // Pause the outgoing page's Load More until the response lands. A click
-      // on it (or the auto-clicking observer) in that gap would bump the
-      // generation, discard this page-1 response, and append page 2 beneath
-      // the wrong rows. A failed fetch re-enables the still-valid control.
+      syncActions();
+      var anchors = [];
+      var moved = false;
+      function noteMove() { moved = true; }
+      var moveEvents = ["wheel", "touchmove", "pointerdown", "keydown"];
+      if (preservePlace) {
+        var sticky = cont.querySelector(".ql-review-sticky");
+        var top = sticky ? sticky.getBoundingClientRect().bottom : 0;
+        var groups = Array.from(cont.querySelectorAll("details[data-artist]"));
+        var index = groups.findIndex(function (d) { return d.getBoundingClientRect().bottom > top; });
+        if (index >= 0) {
+          anchors = groups.slice(index).concat(groups.slice(0, index).reverse()).map(function (d) {
+            return { artist: d.dataset.artist, top: d.getBoundingClientRect().top };
+          });
+        }
+        moveEvents.forEach(function (name) { window.addEventListener(name, noteMove, { passive: true }); });
+      }
+      // An old Load More request must not supersede this page change.
       var staleMore = document.getElementById("review-loadmore");
       var staleMoreButton = staleMore && staleMore.querySelector("button");
       if (staleMoreButton) staleMoreButton.disabled = true;
       var url = "/jobs/" + id + "/review?page=" + (page || 1) +
                 "&q=" + encodeURIComponent(requestedQuery) +
                 "&tab=" + encodeURIComponent(requestedTab);
-      sessionFetch(url)
+      if (preservePlace) url += "&through=1&anchor=" + encodeURIComponent(anchors.length ? anchors[0].artist : "");
+      return sessionFetch(url)
         .then(function (r) { return r.ok ? r.text() : Promise.reject("response"); })
         .then(function (txt) {
-          if (gen !== loadGen) return;
+          if (gen !== loadGen) return false;
           var host = document.getElementById("review-page");
           if (host) {
             pageLoading = false;
@@ -3174,7 +3281,6 @@
               });
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
-              syncSubmitConfirm();
             }
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;
@@ -3190,12 +3296,30 @@
             updateHideLabels();
             updateArtistChecks();
             updateDismissRest();
-            restoreReviewFocus(focusSpot);
+            var waits = [];
+            host.querySelectorAll("details[data-artist][open]").forEach(function (d) {
+              waits.push(loadGroupItems(d, false));
+            });
+            return Promise.all(waits).then(function () {
+              if (gen !== loadGen) return false;
+              if (!moved) {
+                restoreReviewFocus(focusSpot);
+                for (var i = 0; i < anchors.length; i++) {
+                  var anchor = host.querySelector('details[data-artist="' + CSS.escape(anchors[i].artist) + '"]');
+                  if (anchor) {
+                    window.scrollBy(0, anchor.getBoundingClientRect().top - anchors[i].top);
+                    break;
+                  }
+                }
+              }
+              return true;
+            });
           } else {
             pageLoading = false;
             pendingTab = null;
             if (staleMoreButton) staleMoreButton.disabled = false;
           }
+          return false;
         })
         .catch(function (why) {
           if (why !== "navigation" && gen === loadGen) {
@@ -3205,6 +3329,12 @@
             if (filterInput) filterInput.value = loadedQuery;
             showToast("Couldn't load those results. Check your connection.", "error");
           }
+          return false;
+        }).then(function (loaded) {
+          moveEvents.forEach(function (name) { window.removeEventListener(name, noteMove); });
+          syncActions();
+          if (loaded && refreshNeeded && !pendingWrites) refreshReview();
+          return loaded;
         });
     }
 
@@ -3270,6 +3400,9 @@
     });
     if (dismissRest) {
       dismissRest.addEventListener("click", function () {
+        if (actionsBlocked()) return;
+        var requestTab = curTab();
+        var requestQuery = curQuery();
         var rest = restCount();
         if (rest <= 0) return;
         // The number is the filtered one when a filter is on, so the question
@@ -3282,27 +3415,25 @@
         window.qlConfirm(confirmMsg, {
           action: isDownsampleReview ? "Keep hi-res" : "Dismiss",
         }).then(function (ok) {
-          if (!ok) return;
-          var prev = dismissRest.textContent;
-          dismissRest.disabled = true;
+          if (!ok || actionsBlocked() || requestTab !== curTab() || requestQuery !== curQuery()) return;
+          dismissPending = true;
+          choiceVersion += 1;
+          syncActions();
           dismissRest.textContent = dismissBusyLabel();
           post("/jobs/" + id + "/dismiss-rest",
-               "tab=" + encodeURIComponent(curTab()) +
-               "&q=" + encodeURIComponent(curQuery()))
+               "tab=" + encodeURIComponent(requestTab) +
+               "&q=" + encodeURIComponent(requestQuery))
             .then(function (r) {
               if (r.status === 403) return Promise.reject("stale");
-              return r.json().catch(function () { return {}; }).then(function (body) {
-                if (!r.ok) return Promise.reject({ dismissFailure: true, body: body });
-                return body;
-              });
+              return r.ok ? r.json() : Promise.reject();
             })
             .then(function (c) {
               if (c.review_done) { location.reload(); return; }
-              dismissRest.disabled = false;
+              dismissPending = false;
               applyCounts(c);
-              loadPage(1, curQuery());
+              refreshReview();
               if (c.finalize_failed) {
-                showToast("The albums were dismissed, but the finished review couldn't be saved. Check the data folder and reload.", "error");
+                showToast("The albums were dismissed, but the finished review couldn't be saved. Check the data folder and reload.", "error", "review-save-" + id);
               } else {
                 showToast(c.hidden ? dismissToast(c.hidden)
                                    : "Nothing to dismiss on this filter.",
@@ -3310,28 +3441,12 @@
               }
             })
             .catch(function (why) {
+              dismissPending = false;
+              choicesUnknown = true;
+              syncActions();
               if (why === "navigation") return;
               if (why === "stale") { pageWentStale(); return; }
-              if (serverUnreachable(why)) {
-                dismissRest.disabled = false;
-                dismissRest.textContent = prev;
-                showToast("Couldn't reach the server, so nothing was dismissed."
-                  + " Check your connection, then try again.", "error");
-                return;
-              }
-              dismissRest.disabled = true;
-              dismissRest.textContent = "Reloading…";
-              var hidden = why && why.dismissFailure
-                ? parseInt(why.body && why.body.hidden || "0", 10) : 0;
-              showToast(
-                hidden > 0
-                  ? (isDownsampleReview
-                      ? "Kept " + plural(hidden, "album") + " hi-res before the rest failed. Reloading the review."
-                      : "Dismissed " + countLabel(hidden, dismissItemSingular(), dismissItemPlural()) + " before the rest failed. Reloading the review.")
-                  : "Couldn't confirm those dismissals. Reloading the review.",
-                "error"
-              );
-              reloadToRecover();
+              recoverChoices();
             });
         });
       });
@@ -3407,6 +3522,8 @@
     // Refresh counts and reload a page if hiding empties it.
     function onQlHidden(e) {
       var d = e.detail || {};
+      dismissPending = false;
+      dismissRequest = null;
       if (d.counts) applyCounts(d.counts);
       var box = pageBox();
       var empty = box && box.querySelectorAll(
@@ -3415,7 +3532,7 @@
       dismissFocus = null;
       if (empty || document.getElementById("review-loadmore")) {
         pendingReviewFocus = spot;
-        loadPage(1, curQuery());
+        refreshReview();
       } else {
         updateHideLabels();
         restoreReviewFocus(spot);
@@ -3425,12 +3542,33 @@
     // A group's Dismiss redraws the group, or removes it, once its request
     // is done; note where focus was before the button is disabled.
     var dismissFocus = null;
+    var dismissRequest = null;
     function onDismissRequest(e) {
       var btn = e.detail && e.detail.elt;
       if (!btn || !btn.matches || !btn.matches("[data-hide]") || !cont.contains(btn)) return;
+      if (actionsBlocked()) { e.preventDefault(); return; }
+      dismissPending = true;
+      dismissRequest = e.detail.xhr;
+      choiceVersion += 1;
       dismissFocus = btn === document.activeElement ? reviewFocusSpot(btn) : null;
+      syncActions();
+    }
+    function afterDismissRequest(e) {
+      if (!e.detail || e.detail.xhr !== dismissRequest) return;
+      if (e.type === "htmx:afterRequest" && e.detail.successful) return;
+      dismissRequest = null;
+      dismissPending = false;
+      if (e.type === "htmx:afterRequest") {
+        choicesUnknown = true;
+        recoverChoices();
+      } else if (refreshNeeded) {
+        refreshReview();
+      }
+      syncActions();
     }
     document.addEventListener("htmx:beforeRequest", onDismissRequest);
+    document.addEventListener("htmx:afterRequest", afterDismissRequest);
+    document.addEventListener("htmx:afterSwap", afterDismissRequest);
 
     // A refresh or Back rebuilds the page collapsed, so the browser's own
     // scroll restore lands past the end of a list fifteen times shorter and
@@ -3516,33 +3654,47 @@
     // Keep review pages in sync across tabs.
     var rsrc = new EventSource("/api/jobs/" + id + "/review-stream");
     var reviewNavigating = false;
-    function beginReviewNavigation() { reviewNavigating = true; }
+    function beginReviewNavigation(e) {
+      if (actionsBlocked()) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      reviewNavigating = true;
+    }
+    function recoverOnConnection() {
+      if (choicesUnknown) recoverChoices();
+    }
+    window.addEventListener("online", recoverOnConnection);
     function shutReview() {
       try { rsrc.close(); } catch (e) {}
-      form.removeEventListener("submit", beginReviewNavigation);
+      form.removeEventListener("submit", beginReviewNavigation, true);
       document.body.removeEventListener("qlHidden", onQlHidden);
       document.removeEventListener("htmx:beforeRequest", onDismissRequest);
+      document.removeEventListener("htmx:afterRequest", afterDismissRequest);
+      document.removeEventListener("htmx:afterSwap", afterDismissRequest);
       document.removeEventListener("htmx:beforeSwap", onReviewSwap);
       window.removeEventListener("popstate", onPopState);
       window.removeEventListener("scroll", savePlace);
       window.removeEventListener("pagehide", recordPlace);
+      window.removeEventListener("online", recoverOnConnection);
       if (placeTimer) clearTimeout(placeTimer);
     }
-    form.addEventListener("submit", beginReviewNavigation);
+    form.addEventListener("submit", beginReviewNavigation, true);
     function onReviewSwap(e) {
       if (e.detail && e.detail.target && e.detail.target.id === "job-content") shutReview();
     }
     document.addEventListener("htmx:beforeSwap", onReviewSwap);
     rsrc.addEventListener("review", function (e) {
       if ((e.data || "") === "save_failed") {
-        showToast("Your latest choice couldn't be saved to disk. It may not survive a restart. Check the data folder.", "error");
+        showToast("Your latest choice couldn't be saved to disk. It may not survive a restart. Check the data folder.", "error", "review-save-" + id);
         return;
       }
       // Our own change echoing back. The DOM and counts are already current
       // from the action's response, and reloading now would swap the page out
       // from under the user's next click.
       if (reviewNavigating || (e.data || "") === TAB_ID) return;
-      loadPage(1, curQuery());
+      refreshReview();
     });
     rsrc.addEventListener("closed", function (e) {
       // An archived/restored review has no live producer, so the server ends
@@ -3584,7 +3736,30 @@
   var keyboardSearchForm = null;
   var pendingSearchFocus = null;
   var activeSearchRequests = [];
+  var activeHistoryRequest = null;
   var latestSearchSubmission = 0;
+
+  function cancelHistoryRequest() {
+    if (activeHistoryRequest) activeHistoryRequest.abort();
+    activeHistoryRequest = null;
+  }
+
+  function cancelSearchRequests() {
+    latestSearchSubmission += 1;
+    cancelHistoryRequest();
+    activeSearchRequests.slice().forEach(function (xhr) { xhr.abort(); });
+  }
+
+  window.addEventListener("popstate", cancelSearchRequests, true);
+
+  document.addEventListener("htmx:historyCacheMiss", function (event) {
+    cancelHistoryRequest();
+    var xhr = event.detail.xhr;
+    activeHistoryRequest = xhr;
+    xhr.addEventListener("loadend", function () {
+      if (activeHistoryRequest === xhr) activeHistoryRequest = null;
+    });
+  });
 
   function isSearchRequestForm(form) {
     return form && form.matches && form.matches("form")
@@ -3600,6 +3775,7 @@
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!isSearchRequestForm(form)) return;
+    cancelHistoryRequest();
     latestSearchSubmission += 1;
     form.dataset.searchSubmission = latestSearchSubmission;
   }, true);
@@ -3607,6 +3783,7 @@
   document.addEventListener("htmx:beforeRequest", function (event) {
     var form = searchRequestForm(event);
     if (!form || !event.detail.xhr) return;
+    cancelHistoryRequest();
     saveSearchSnapshot();
     var generation = parseInt(form.dataset.searchSubmission || "0", 10);
     if (!generation || activeSearchRequests.some(function (xhr) {
@@ -3654,6 +3831,7 @@
       form.querySelectorAll('input[name="kind"]').forEach(function (radio) {
         radio.checked = radio.value === kind;
       });
+      syncSearchLabel(form);
     } catch (error) { /* leave the form alone if the address cannot be read */ }
   }
 
@@ -3774,15 +3952,43 @@
   }
 
   function restoreSearchHistory() {
+    restoreSearchFormFromUrl();
     var results = document.getElementById("search-results");
-    if (!results || !results.querySelector("[data-search-results-root]")) return;
+    if (!results) return;
+    var state = searchStateFromUrl();
+    if (state && searchResponseState(results) !== state) {
+      var record = readSearchRecord(state);
+      pendingSearchRestoreY = record && typeof record.scrollY === "number"
+        ? record.scrollY : 0;
+      var snapshot = readSearchSnapshot(state);
+      if (snapshot) {
+        results.innerHTML = snapshot;
+        window.htmx.process(results);
+        finishSearchRestore(record);
+      } else {
+        results.innerHTML = "";
+        var form = document.querySelector(".ql-search-form");
+        var params = new URL(location.href).searchParams;
+        var values = {};
+        ["q", "kind", "artist_id", "artist_name", "album_id"].forEach(function (key) {
+          values[key] = params.get(key) || "";
+        });
+        window.htmx.ajax("POST", "/search", {
+          source: form, target: results, swap: "innerHTML", values: values,
+          headers: { "HX-History-Restore-Request": "true" }
+        }).catch(function () {});
+        return;
+      }
+    }
+    results.setAttribute("aria-busy", "false");
+    var status = document.getElementById("search-status");
+    if (status) status.textContent = "";
     results.querySelectorAll("[data-search-wired]").forEach(function (node) {
       node.removeAttribute("data-search-wired");
     });
     results.querySelectorAll("[data-cover-fallback-wired]").forEach(function (node) {
       node.removeAttribute("data-cover-fallback-wired");
     });
-    restoreSearchFormFromUrl();
     initSearchResults();
     initCoverFallbacks();
   }
@@ -3834,6 +4040,8 @@
       }
       if (tabs && tabs.offsetHeight) {
         root.style.setProperty("--ql-tabbar-h", tabs.offsetHeight + "px");
+      } else if (drawerScrollY !== null) {
+        window.qlCloseDropdowns();
       }
     }
     window.addEventListener("resize", apply);

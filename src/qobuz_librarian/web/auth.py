@@ -292,28 +292,24 @@ def _constant_time_eq(a: str, b: str) -> bool:
 
 def _read() -> dict:
     global _cred_cache, _cred_cache_path
-    current = str(cfg.WEB_AUTH_FILE)
-    if _cred_cache is not None and _cred_cache_path == current:
-        return _cred_cache
-    try:
-        data = json.loads(cfg.WEB_AUTH_FILE.read_text(encoding="utf-8"))
-        _cred_cache = data if isinstance(data, dict) else {}
-        _cred_cache_path = current
-        return _cred_cache
-    except FileNotFoundError:
-        # No creds file yet (fresh install), a stable "unconfigured" state,
-        # safe to cache so the open-setup phase doesn't re-stat every request.
-        _cred_cache = {}
-        _cred_cache_path = current
-        return _cred_cache
-    except (OSError, ValueError):
-        # A transient read failure (NFS/CIFS not ready, a brief I/O error, a
-        # half-written file) must NOT be cached: caching {} would permanently
-        # report "no creds configured" and re-expose the open /setup page until
-        # the next set_credentials(). Return a throwaway dict and retry next call.
-        _cred_cache = None
-        _cred_cache_path = None
-        return {}
+    with _credentials_lock:
+        current = str(cfg.WEB_AUTH_FILE)
+        if _cred_cache is not None and _cred_cache_path == current:
+            return _cred_cache
+        try:
+            data = json.loads(cfg.WEB_AUTH_FILE.read_text(encoding="utf-8"))
+            _cred_cache = data if isinstance(data, dict) else {}
+            _cred_cache_path = current
+            return _cred_cache
+        except FileNotFoundError:
+            _cred_cache = {}
+            _cred_cache_path = current
+            return _cred_cache
+        except (OSError, ValueError):
+            # Retry failed reads rather than caching an unconfigured login.
+            _cred_cache = None
+            _cred_cache_path = None
+            return {}
 
 
 def current_username() -> str:
@@ -336,16 +332,14 @@ def credentials_configured() -> bool:
 
 
 def creds_file_present_but_unreadable() -> bool:
-    """True when the creds file exists but can't be read as valid credentials,
-    a transient I/O error or a corrupt/half-written file. Distinct from a fresh
-    install (no file at all): something IS configured here, we just can't read it,
-    so callers must fail closed rather than fall back to the unauthenticated
-    /setup page, which would overwrite the admin account."""
+    """Distinguish unavailable saved credentials from a fresh installation."""
     try:
-        present = cfg.WEB_AUTH_FILE.exists()
+        cfg.WEB_AUTH_FILE.stat()
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True  # can't even stat the volume → treat as present-but-unavailable
-    return present and not credentials_configured()
+        return True
+    return not credentials_configured()
 
 
 def _set_aside_damaged_credentials() -> bool:
@@ -447,6 +441,13 @@ def set_credentials(username: str, password: str, *,
         return True
 
 
+def setup_credentials(username: str, password: str) -> str | None:
+    with _credentials_lock:
+        if not set_credentials(username, password, require_unconfigured=True):
+            return None
+        return _read()["session_secret"]
+
+
 def _env_password() -> str:
     """WEB_AUTH_PASSWORD from the env, or WEB_AUTH_PASSWORD_FILE (Docker-secret
     form) when the env var is unset, so the admin password can stay out of
@@ -526,24 +527,31 @@ def apply_env_credentials() -> str:
 
 
 def verify_login(username: str, password: str) -> bool:
-    """Constant-time check of both fields. The password is always run through
-    the KDF when a hash exists, so a wrong username and a wrong password take
-    the same time and neither is distinguishable by timing."""
+    return bool(verify_login_generation(username, password))
+
+
+def verify_login_generation(username: str, password: str) -> str | None:
+    """Return the credential generation for a valid login."""
     d = _read()
     stored_hash = d.get("password_hash") or ""
     if not stored_hash:
-        return False
+        return None
     user_ok = _constant_time_eq(username, d.get("username") or "")
     pass_ok = _verify_hash(stored_hash, password)
-    return user_ok and pass_ok
+    return str(d.get("session_secret") or "") if user_ok and pass_ok else None
 
 
-def mint_session() -> str:
+def mint_session(*, expected_generation: str | None = None) -> str:
     """Issue a fresh per-login session token (the cookie value) and return it."""
     token = secrets.token_urlsafe(32)
     now = time.time()
-    digest = _token_digest(token)
-    with _sessions_lock:
+    with _credentials_lock, _sessions_lock:
+        generation = str(_read().get("session_secret") or "")
+        if (expected_generation is not None
+                and (not expected_generation
+                     or not _constant_time_eq(expected_generation, generation))):
+            raise CredentialsChanged("the web login changed before sign-in completed")
+        digest = _token_digest(token)
         previous_sessions = dict(_sessions)
         for t, exp in list(_sessions.items()):
             if exp <= now:
@@ -568,7 +576,7 @@ def revoke_session(token: str) -> bool:
     """
     if not token:
         return True
-    with _sessions_lock:
+    with _credentials_lock, _sessions_lock:
         digest = _token_digest(token)
         previous = _sessions.pop(digest, None)
         if previous is None:
@@ -581,7 +589,7 @@ def revoke_session(token: str) -> bool:
 
 def revoke_all_sessions() -> None:
     """Invalidate every session (e.g. on a password change)."""
-    with _sessions_lock:
+    with _credentials_lock, _sessions_lock:
         _sessions.clear()
         _save_sessions_locked()
 
@@ -590,7 +598,7 @@ def verify_session(cookie_value: str) -> bool:
     if not cookie_value:
         return False
     now = time.time()
-    with _sessions_lock:
+    with _credentials_lock, _sessions_lock:
         digest = _token_digest(cookie_value)
         exp = _sessions.get(digest)
         if exp is None:
@@ -606,14 +614,14 @@ def _secure(request) -> bool:
     return request_is_https(request)
 
 
-def set_session_cookie(response, request) -> None:
+def set_session_cookie(response, request, *, expected_generation=None) -> None:
     # SameSite=strict (matching the CSRF cookie): the session is the auth
     # credential, and no app flow needs it carried on a cross-site first hop.
     # a deep link from elsewhere just bounces once through /login, which
     # re-issues it. Strict keeps the auth cookie off every cross-site request.
     response.set_cookie(
         SESSION_COOKIE,
-        mint_session(),
+        mint_session(expected_generation=expected_generation),
         max_age=_COOKIE_MAX_AGE,
         httponly=True,
         samesite="strict",

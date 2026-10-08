@@ -33,7 +33,7 @@
 
   {# A build publishes as it goes, so the page re-asks for itself while one is
      running, and stops when the replacement arrives without the trigger. #}
-  <div id="discover-body"{% if feed.phase in ('building', 'waiting') %} hx-get="{{ poll_url }}"
+  <div id="discover-body" hx-disinherit="hx-select"{% if feed.phase in ('building', 'waiting') %} hx-get="{{ poll_url }}"
        hx-trigger="every 2s" hx-target="#discover-body"
        hx-select="#discover-body" hx-swap="outerHTML"{% endif %}>
 

@@ -1344,6 +1344,12 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
     assert detail.status_code == 200
     assert archived.title in detail.text
 
+    sibling = jm.Job(title="Sour Times", album_id="al1")
+    sibling.single = {"album_id": "al1", "track_id": "sour-times-live"}
+    jm.registry.add(sibling)
+    queued = []
+    monkeypatch.setattr(jm._download_queue, "put", queued.append)
+
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     outage = {"active": True}
 
@@ -1398,6 +1404,10 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
     assert new_job.edition == "Live Version"
     assert new_job.display_title == "Roads (Live Version)"
     assert job_persistence.load_one(new_id)["edition"] == "Live Version"
+    repeated = client.post(f"/jobs/{archived.id}/retry", follow_redirects=False)
+    assert repeated.headers["location"] == f"/jobs/{new_id}"
+    assert len(queued) == 1
+    _remove_job(sibling)
     _remove_job(new_job)
 
 
@@ -1484,10 +1494,7 @@ def _remove_job(job):
             pass
 
 
-def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch):
-    """Downloading from one tab must consume only that tab: the other tab's
-    candidates (and their saved ticks) split into their own parked review
-    instead of dying with the executing job."""
+def test_library_approve_checks_choices_and_splits_off_other_tab(client, monkeypatch):
     from qobuz_librarian.web import qobuz_access
     monkeypatch.setattr(
         "qobuz_librarian.library.candidate_premise.validate_all",
@@ -1516,21 +1523,31 @@ def test_library_approve_scoped_to_tab_splits_off_other_tab(client, monkeypatch)
                                "gap_fill": 1}, selected=False)
     split = None
     try:
-        r = client.post(f"/jobs/{job.id}/approve", data={"tab": "missing"},
+        old = client.post(f"/jobs/{job.id}/select",
+                          data={"cid": "c0", "checked": "0"}).json()
+        current = client.post(f"/jobs/{job.id}/select",
+                              data={"cid": "c0", "checked": "1"}).json()
+        stale = client.post(
+            f"/jobs/{job.id}/approve",
+            data={"tab": "missing", "selection_token": old["selection_tokens"]["missing"]},
+            follow_redirects=False,
+        )
+        assert stale.status_code == 303
+        assert job.status == jm.JobStatus.AWAITING_REVIEW
+        assert len(job.candidates) == 3
+
+        r = client.post(f"/jobs/{job.id}/approve",
+                        data={"tab": "missing", "selection_token": current["selection_tokens"]["missing"]},
                         follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/library?approved=1"
-        # The approved job carries only the active tab's candidates.
         assert [c["title"] for c in job.candidates] == ["Third"]
         assert job.status != jm.JobStatus.AWAITING_REVIEW
-        # The gap candidates live on in a new parked review, ticks intact.
         split = next(j for j in jm.registry.all()
                      if j is not job and j.execute_kind == "library"
                      and j.status == jm.JobStatus.AWAITING_REVIEW)
         titles = {c["title"]: c["selected"] for c in split.candidates}
         assert titles == {"Dummy": True, "Untrue": False}
-        # History lists a parked review by its summary, and the split used to
-        # carry none, so the row arrived with nothing in it.
         assert split.summary
         assert split._execute_fn is not None
     finally:
@@ -2308,6 +2325,9 @@ def test_every_non_auth_mutation_route_requires_a_session(monkeypatch, tmp_path)
 
 
 def test_a_password_set_in_settings_survives_a_restart(monkeypatch, tmp_path):
+    import errno
+    from pathlib import Path
+
     from qobuz_librarian import config as cfg
     from qobuz_librarian.web import auth as web_auth
 
@@ -2323,6 +2343,29 @@ def test_a_password_set_in_settings_survives_a_restart(monkeypatch, tmp_path):
     assert web_auth.apply_env_credentials() == "kept"
     assert web_auth.verify_login("admin", "quiet harbour lantern")
     assert not web_auth.verify_login("admin", "ember orbit atlas")
+
+    saved = cfg.WEB_AUTH_FILE.read_bytes()
+    read_text, stat = Path.read_text, Path.stat
+
+    def unavailable_read(path, *args, **kwargs):
+        if path == cfg.WEB_AUTH_FILE:
+            raise OSError(errno.EIO, "storage unavailable")
+        return read_text(path, *args, **kwargs)
+
+    def unavailable_stat(path, *args, **kwargs):
+        if path == cfg.WEB_AUTH_FILE:
+            raise OSError(errno.EIO, "storage unavailable")
+        return stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(web_auth, "_cred_cache", None)
+        fault.setattr(web_auth, "_cred_cache_path", None)
+        fault.setattr(Path, "read_text", unavailable_read)
+        fault.setattr(Path, "stat", unavailable_stat)
+        assert not web_auth.setup_credentials("replacement", "another secure password")
+        assert web_auth.apply_env_credentials() == "failed"
+    assert cfg.WEB_AUTH_FILE.read_bytes() == saved
+    assert web_auth.verify_login("admin", "quiet harbour lantern")
 
     # Editing the environment is still the way back in after a forgotten
     # password, so a new value there has to win.
@@ -2408,6 +2451,8 @@ def test_password_rotation_rejects_old_sessions_after_failed_session_save(tmp_pa
         web_auth._sessions = {}
     try:
         assert web_auth.set_credentials("admin", "first secure password")
+        generation = web_auth.verify_login_generation("admin", "first secure password")
+        assert generation
         old_token = web_auth.mint_session()
         assert web_auth.verify_session(old_token)
         # Signing one browser out leaves another signed in.
@@ -2419,6 +2464,8 @@ def test_password_rotation_rejects_old_sessions_after_failed_session_save(tmp_pa
         # file does not. Simulate process reconstruction from that stale file.
         monkeypatch.setattr(web_auth, "_save_sessions_locked", lambda: False)
         assert web_auth.set_credentials("admin", "second secure password")
+        with pytest.raises(web_auth.CredentialsChanged):
+            web_auth.mint_session(expected_generation=generation)
         with web_auth._sessions_lock:
             web_auth._sessions = web_auth._load_sessions()
 

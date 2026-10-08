@@ -106,7 +106,10 @@ def test_cancel_approved_review_preserves_picks_after_reload(
         job, split_review=lambda review: routes_jobs._build_unapproved_review(review, ""),
     ) is True
     assert job.status == jm.JobStatus.PENDING
+    parked, = jm.registry.awaiting_review()
     assert jm.request_cancel(job) is True
+    assert job_persistence.persist(parked) is False
+    assert parked.set_selected(parked.candidates[0]["cid"], True) is None
 
     reviews = jm.registry.awaiting_review()
     assert reviews == [job]

@@ -117,6 +117,7 @@
           data-job-id="{{ job.id }}" data-review-kind="{{ job.execute_kind }}"
           data-review-blocked="{{ '1' if _review_qobuz_blocked else '0' }}">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="selection_token" value="{{ review_selection_token }}">
       {% if job.execute_kind == 'downsample' %}<input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">{% endif %}
       {% if review_tab %}<input type="hidden" name="tab" id="review-tab-field" value="{{ review_tab }}">{% endif %}
       {% if job.execute_kind == 'migration' and job.execute_args.get('requires_low_space_override') %}
@@ -142,7 +143,7 @@
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Each file is replaced only after its new copy verifies, and an album too damaged to patch is downloaded again in full. Your originals are set aside while that happens and removed once the replacement is proven good, so a repair cannot be undone. A replacement that cannot be verified keeps them, restorable from Settings."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
-            {%- else %} data-confirm="Download {count} selected album{s}? Downloads queue now and import into your library."{% if review_tab_counts and review_tab_counts.gaps %} data-gap-confirm="An album that is mostly missing is downloaded whole, replacing the tracks you already have."{% endif %}
+            {%- else %} data-confirm="Download {count} selected album{s}? Downloads queue now and import into your library."
             {%- endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-irreversible{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-irreversible{% endif %}
