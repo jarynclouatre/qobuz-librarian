@@ -293,14 +293,9 @@ def test_failed_download_leaving_only_art_stays_retryable(
 def test_incomplete_gap_fill_puts_the_owned_tracks_back(
     tmp_path, monkeypatch, authority
 ):
-    # A whole-album gap fill moves the owned tracks aside before the rip. When
-    # Qobuz withholds a track nothing is imported, so they must go back and
-    # the queue must carry on instead of waiting on the backup.
-    from qobuz_librarian.integrations.staging import create_staging_run
-    from qobuz_librarian.library.backup import (
-        backup_gap_fill_files,
-        library_backup_record,
-    )
+    from qobuz_librarian.integrations import staging
+    from qobuz_librarian.library import backup as backup_module
+    from qobuz_librarian.queue import builder, durable_album
 
     album_dir = tmp_path / "music" / "Artist" / "Album"
     album_dir.mkdir(parents=True)
@@ -314,7 +309,7 @@ def test_incomplete_gap_fill_puts_the_owned_tracks_back(
         {"id": str(number), "media_number": 1, "track_number": number}
         for number in range(1, 6)
     ]
-    item = _build_queue_item(
+    item = builder._build_queue_item(
         album={
             "id": "42",
             "title": "Album",
@@ -324,14 +319,14 @@ def test_incomplete_gap_fill_puts_the_owned_tracks_back(
         },
         album_dir=album_dir,
         label="Album",
-        missing=tracks[1:],
+        missing=tracks,
         present=tracks[:1],
         upgrade_only=False,
         auto_upgrade=False,
         quality=4,
     )
     args = Namespace(no_import=False, no_downsample=True)
-    plan = plan_durable_new_album(item, args)
+    plan = durable_album.plan_durable_new_album(item, args)
     assert plan is not None and plan.library_backup_kind == "gap-fill"
     monkeypatch.setattr(durable_runner, "snapshot_staging", lambda: set())
 
@@ -339,14 +334,14 @@ def test_incomplete_gap_fill_puts_the_owned_tracks_back(
         owner = kwargs["recovery_owner"]
         checkpoint = kwargs["recovery_checkpoint"]
         result = kwargs["result"]
-        backup = backup_gap_fill_files(
+        backup = backup_module.backup_gap_fill_files(
             [owned], album_dir, owner=owner, on_intent=checkpoint)
         result["gap_fill_backup_path"] = backup
         checkpoint({
             "version": 1,
             "kind": "library-backup-carrier",
             "owner": dict(owner),
-            "carrier": library_backup_record(backup, expected_owner=owner),
+            "carrier": backup_module.library_backup_record(backup, expected_owner=owner),
         })
 
         def created(record):
@@ -358,7 +353,7 @@ def test_incomplete_gap_fill_puts_the_owned_tracks_back(
                 "record": record,
             })
 
-        run = create_staging_run(owner=owner, on_created=created)
+        run = staging.create_staging_run(owner=owner, on_created=created)
         (run.path / "02.flac").write_bytes(b"partial")
         assert not owned.exists()
 

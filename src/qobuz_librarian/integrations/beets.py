@@ -1251,6 +1251,7 @@ class ManagedBeetsImportResult:
     evidence: dict | None = None
     spawned: bool = False
     reservation: dict | None = None
+    replaced_entries: dict | None = None
 
 
 def _ownership_identity(value):
@@ -1457,7 +1458,11 @@ def _valid_managed_snapshot(value):
         return False
     return (
         type(value) is dict
-        and set(value) == fields
+        and set(value) in (fields, fields | {"replaced_entries"})
+        and ("replaced_entries" not in value or (
+            value.get("generation") in (0, 1)
+            and _beets_snapshot_from_record(value["replaced_entries"]) is not None
+        ))
         and value.get("version")
         in {
             _LEGACY_MANAGED_SNAPSHOT_VERSION,
@@ -1821,11 +1826,12 @@ def _managed_album_directory_identity(root, root_identity, relative):
                 pass
 
 
-def _managed_catalogue_album(connection, destinations, root):
+def _managed_catalogue_album(connection, destinations, root, *, replaced_entries=None,
+                              allow_overlap=False):
     """Identify the one album with one row for every managed destination."""
     item_columns = {row[1] for row in connection.execute("PRAGMA table_info(items)")}
     album_columns = {row[1] for row in connection.execute("PRAGMA table_info(albums)")}
-    if not {"path", "album_id"}.issubset(item_columns) or "id" not in album_columns:
+    if not {"id", "path", "album_id"}.issubset(item_columns) or "id" not in album_columns:
         return None
     destinations = frozenset(destinations)
     if not destinations or any(
@@ -1834,13 +1840,17 @@ def _managed_catalogue_album(connection, destinations, root):
     ):
         return None
     root_path = os.path.abspath(root)
+    ignored = (_captured_beets_item_ids(connection, replaced_entries)
+               if replaced_entries is not None else frozenset())
     destination_counts = {}
     album_paths = {}
     # A library imported in place elsewhere keeps rows outside the music
     # folder. They can't be a destination, only a reason to distrust an album
     # that also holds one.
     outside_albums = set()
-    for raw, album_id in connection.execute("SELECT path, album_id FROM items"):
+    for item_id, raw, album_id in connection.execute("SELECT id, path, album_id FROM items"):
+        if item_id in ignored:
+            continue
         if isinstance(raw, bytes):
             raw = os.fsdecode(raw)
         if not isinstance(raw, str) or not raw or "\x00" in raw:
@@ -1867,6 +1877,10 @@ def _managed_catalogue_album(connection, destinations, root):
         for count in counts.values()
     ):
         return None
+    if not allow_overlap and any(
+            sum(counts.get(path, 0) for counts in destination_counts.values()) != 1
+            for path in destinations):
+        return None
     candidates = [
         album_id
         for album_id, counts in destination_counts.items()
@@ -1887,7 +1901,8 @@ def _managed_catalogue_album(connection, destinations, root):
     return album_id, tuple(paths)
 
 
-def _managed_album_boundary(destinations, root, root_identity, *, database_anchor=None):
+def _managed_album_boundary(destinations, root, root_identity, *, database_anchor=None,
+                            replaced_entries=None):
     """Bind imported destinations to one live Beets album directory."""
     current_anchor = None
     anchor = database_anchor
@@ -1905,7 +1920,7 @@ def _managed_album_boundary(destinations, root, root_identity, *, database_ancho
         def inspect(connection):
             root_path = os.path.abspath(root)
             catalogue_album = _managed_catalogue_album(
-                connection, destinations, root_path
+                connection, destinations, root_path, replaced_entries=replaced_entries,
             )
             if catalogue_album is None:
                 return None
@@ -1940,7 +1955,7 @@ def _managed_album_boundary(destinations, root, root_identity, *, database_ancho
             _close_beets_database_anchor(current_anchor)
 
 
-def _managed_database_matches(database_anchor, destinations, root):
+def _managed_database_matches(database_anchor, destinations, root, *, replaced_entries=None):
     current_anchor = None
     anchor = database_anchor
     try:
@@ -1964,7 +1979,7 @@ def _managed_database_matches(database_anchor, destinations, root):
                 anchor,
                 _beets_database_anchor_matches,
                 lambda connection: _managed_catalogue_album(
-                    connection, destinations, root
+                    connection, destinations, root, replaced_entries=replaced_entries,
                 )
                 is not None,
                 connect=sqlite3.connect,
@@ -2031,6 +2046,7 @@ def _read_managed_ownership_evidence(capture, *, database_anchor=None):
         or first["root"] != capture.get("root")
         or first["root_identity"] != capture.get("root_identity")
         or first["intent"] != capture.get("intent")
+        or first.get("replaced_entries") != capture.get("replaced_entries")
     ):
         return None
     intent_slots = set()
@@ -2059,6 +2075,9 @@ def _read_managed_ownership_evidence(capture, *, database_anchor=None):
             or snapshot["root"] != first["root"]
             or snapshot["root_identity"] != first["root_identity"]
             or snapshot["intent"] != first["intent"]
+            or (generation == 1 and "replaced_entries" in snapshot
+                and snapshot["replaced_entries"]
+                != first.get("replaced_entries"))
             or (snapshot["sealed"] and snapshot is not snapshots[-1])
         ):
             return None
@@ -2144,7 +2163,10 @@ def _read_managed_ownership_evidence(capture, *, database_anchor=None):
         except OSError:
             return None
         return None
-    if not _managed_database_matches(database_anchor, destinations, final["root"]):
+    replaced = (_beets_snapshot_from_record(first["replaced_entries"])
+                if "replaced_entries" in first else None)
+    if not _managed_database_matches(database_anchor, destinations, final["root"],
+                                     replaced_entries=replaced):
         return None
     return (
         final
@@ -2155,7 +2177,8 @@ def _read_managed_ownership_evidence(capture, *, database_anchor=None):
     )
 
 
-def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None):
+def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None,
+                                      replaced_entries=None):
     try:
         if (
             type(carrier) is not dict
@@ -2261,6 +2284,7 @@ def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None
             evidence["root"],
             root_identity,
             database_anchor=database_anchor,
+            replaced_entries=replaced_entries,
         )
         if album_boundary is None:
             return None
@@ -2292,7 +2316,13 @@ def managed_completion_evidence(result):
         or result.spawned is not True
     ):
         return None
-    return _managed_completion_from_snapshot(result.carrier, result.evidence)
+    replaced = (_beets_snapshot_from_record(result.replaced_entries)
+                if result.replaced_entries is not None else None)
+    if result.replaced_entries is not None and replaced is None:
+        return None
+    return _managed_completion_from_snapshot(
+        result.carrier, result.evidence, replaced_entries=replaced,
+    )
 
 
 class ManagedEvidenceUnavailable(OSError):
@@ -2466,6 +2496,9 @@ def _managed_carrier_history(
             or snapshot["intent"] != first["intent"]
             or snapshot["sealed"]
             and snapshot is not snapshots[-1]
+            or (generation == 1 and "replaced_entries" in snapshot
+                and snapshot["replaced_entries"]
+                != first.get("replaced_entries"))
         ):
             return None
         current_mappings = {}
@@ -3834,6 +3867,9 @@ class ManagedEvidenceLease:
             self._carrier,
             snapshot,
             database_anchor=self._database_anchor,
+            replaced_entries=_beets_snapshot_from_record(
+                self._capture["replaced_entries"])
+                if "replaced_entries" in self._capture else None,
         )
         after = _managed_carrier_stat(self._capture["_file"])
         if before != after:
@@ -4024,6 +4060,8 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
             "_root_chain": root_chain,
             "_root_names": root_names,
         }
+        if "replaced_entries" in first:
+            capture["replaced_entries"] = first["replaced_entries"]
         if not _managed_carrier_namespace_matches(capture) or not _managed_root_namespace_matches(
             capture
         ):
@@ -4146,6 +4184,7 @@ def _managed_generation_zero_matches(capture):
             and snapshot["root"] == capture["root"]
             and snapshot["root_identity"] == capture["root_identity"]
             and snapshot["intent"] == capture["intent"]
+            and snapshot.get("replaced_entries") == capture.get("replaced_entries")
             and _managed_carrier_namespace_matches(capture)
             and _managed_root_namespace_matches(capture)
         )
@@ -4185,6 +4224,8 @@ def _managed_launch_boundary_matches(capture):
             "generation": 1,
             "previous_hash": origin["hash"],
         }
+        if "replaced_entries" not in launch:
+            expected_launch.pop("replaced_entries", None)
         expected_launch["hash"] = _managed_payload_hash(expected_launch)
         return (
             origin["version"] == _MANAGED_SNAPSHOT_VERSION
@@ -4200,6 +4241,7 @@ def _managed_launch_boundary_matches(capture):
             and origin["root"] == capture["root"]
             and origin["root_identity"] == capture["root_identity"]
             and origin["intent"] == capture["intent"]
+            and origin.get("replaced_entries") == capture.get("replaced_entries")
             and _managed_carrier_namespace_matches(capture)
             and _managed_root_namespace_matches(capture)
         )
@@ -5372,6 +5414,9 @@ def _prepare_managed_beets_run(
     if album_folder is not None and plugin_config["folder"] != album_folder:
         _report_renamed_folder(album_folder, plugin_config["folder"])
         return None
+    replaced = capture_beets_album_entries(album_dir) if album_dir is not None else None
+    if album_dir is not None and replaced is None:
+        return None
 
     before = _normalise_managed_bindings(bindings, roots)
     intent = _prepare_staging_tags(
@@ -5419,6 +5464,8 @@ def _prepare_managed_beets_run(
             "_root_chain": root_chain,
             "_root_names": root_names,
         }
+        if replaced is not None:
+            capture["replaced_entries"] = _beets_snapshot_record(replaced)
         reservation = _managed_carrier_reservation(capture)
         capture["reservation"] = reservation
         on_reservation(
@@ -5469,6 +5516,8 @@ def _prepare_managed_beets_run(
             "mappings": [],
             "cleanup_directories": [],
         }
+        if "replaced_entries" in capture:
+            generation_zero["replaced_entries"] = capture["replaced_entries"]
         capture["last_hash"] = _write_managed_snapshot(carrier_file.fileno(), generation_zero)
 
         os.fsync(parent_fd)
@@ -5898,6 +5947,7 @@ def beets_import_managed(
         evidence=evidence,
         spawned=spawned,
         reservation=reservation,
+        replaced_entries=capture.get("replaced_entries"),
     )
 
 
@@ -7232,7 +7282,7 @@ def _consolidation_row_key(row):
     return tuple((type(value), value) for value in row)
 
 
-def _catalogue_item_path(value):
+def _catalogue_item_path(value, *, allow_external=False):
     raw = os.fspath(value)
     if isinstance(raw, bytes):
         raw = os.fsdecode(raw)
@@ -7250,6 +7300,8 @@ def _catalogue_item_path(value):
     try:
         relative = Path(path).relative_to(root)
     except ValueError:
+        if allow_external:
+            return Path(path)
         raise ValueError("beets item is outside the library") from None
     if not relative.parts:
         raise ValueError("invalid beets item path")
@@ -7337,6 +7389,152 @@ class BeetsAlbumSnapshot:
         return tuple(row[index] for row in self.album_rows)
 
 
+@dataclass(frozen=True)
+class _BeetsValueDigest:
+    kind: str
+    digest: str
+
+
+def _beets_value_digest(value):
+    kind = "text" if type(value) is str else "blob"
+    raw = value.encode("utf-8", errors="surrogatepass") if kind == "text" else value
+    return _BeetsValueDigest(kind, hashlib.sha256(raw).hexdigest())
+
+
+def _beets_snapshot_row_key(row):
+    return tuple(
+        _beets_value_digest(value) if type(value) in (str, bytes)
+        else value if isinstance(value, _BeetsValueDigest)
+        else (type(value), value)
+        for value in row
+    )
+
+
+def _beets_snapshot_record(snapshot):
+    def scalar(value):
+        if type(value) in (str, bytes) and len(value) > 128:
+            digest = _beets_value_digest(value)
+            return {"kind": digest.kind, "sha256": digest.digest}
+        return {"bytes": value.hex()} if type(value) is bytes else value
+
+    return {
+        name: {
+            "columns": list(getattr(snapshot, f"{name}_columns")),
+            "rows": [[scalar(value) for value in row]
+                     for row in getattr(snapshot, f"{name}_rows")],
+        }
+        for name in ("item", "item_attribute", "album", "album_attribute")
+    }
+
+
+def _beets_snapshot_from_record(record):
+    names = ("item", "item_attribute", "album", "album_attribute")
+    if type(record) is not dict or set(record) != set(names):
+        return None
+    parts = []
+    try:
+        for name in names:
+            table = record[name]
+            if type(table) is not dict or set(table) != {"columns", "rows"}:
+                return None
+            columns, rows = table["columns"], table["rows"]
+            if (type(columns) is not list or type(rows) is not list
+                    or not all(type(column) is str and column for column in columns)
+                    or len(columns) != len(set(columns))
+                    or rows and "id" not in columns):
+                return None
+            decoded = []
+            for row in rows:
+                if type(row) is not list or len(row) != len(columns):
+                    return None
+                values = []
+                for value in row:
+                    if type(value) is dict and set(value) == {"kind", "sha256"}:
+                        digest = value["sha256"]
+                        if (value["kind"] not in ("text", "blob")
+                                or type(digest) is not str or len(digest) != 64
+                                or any(char not in "0123456789abcdef" for char in digest)):
+                            return None
+                        value = _BeetsValueDigest(value["kind"], digest)
+                    elif type(value) is dict and set(value) == {"bytes"}:
+                        raw = bytes.fromhex(value["bytes"])
+                        if raw.hex() != value["bytes"]:
+                            return None
+                        value = raw
+                    elif value is not None and type(value) not in (str, int, float):
+                        return None
+                    values.append(value)
+                decoded.append(tuple(values))
+            if decoded:
+                identities = [row[columns.index("id")] for row in decoded]
+                if (any(type(value) is not int or value <= 0 for value in identities)
+                        or len(identities) != len(set(identities))):
+                    return None
+            parts.extend((tuple(columns), tuple(decoded)))
+        snapshot = BeetsAlbumSnapshot(*parts)
+        if snapshot.item_columns and not {"id", "path", "album_id"}.issubset(
+                snapshot.item_columns):
+            return None
+        if any(getattr(snapshot, f"{name}_columns") for name in names) and not all(
+                getattr(snapshot, f"{name}_columns") for name in names):
+            return None
+        return snapshot
+    except (TypeError, ValueError):
+        return None
+
+
+def _captured_beets_item_ids(connection, snapshot):
+    columns = _replacement_catalogue_columns(connection)
+    expected = (snapshot.album_columns, snapshot.item_columns,
+                snapshot.album_attribute_columns, snapshot.item_attribute_columns)
+    if snapshot.item_columns and tuple(map(tuple, columns)) != expected:
+        raise sqlite3.IntegrityError("captured Beets schema changed")
+    if not snapshot.item_ids:
+        return frozenset()
+
+    def unchanged(name, actual, wanted):
+        if tuple(map(_beets_snapshot_row_key, actual)) != tuple(
+                map(_beets_snapshot_row_key, wanted)):
+            raise sqlite3.IntegrityError(f"captured Beets {name} changed")
+
+    items = _consolidation_rows_for_ids(
+        connection, "items", snapshot.item_columns, "id", snapshot.item_ids,
+    )
+    attributes = _consolidation_rows_for_ids(
+        connection, "item_attributes", snapshot.item_attribute_columns,
+        "entity_id", snapshot.item_ids,
+    )
+    if items:
+        unchanged("items", items, snapshot.item_rows)
+        unchanged("item metadata", attributes, snapshot.item_attribute_rows)
+        album_ids = snapshot.album_ids
+    else:
+        if attributes:
+            raise sqlite3.IntegrityError("captured Beets item metadata remains")
+        attribute_ids = tuple(row[snapshot.item_attribute_columns.index("id")]
+                              for row in snapshot.item_attribute_rows)
+        if _consolidation_rows_for_ids(
+                connection, "item_attributes", snapshot.item_attribute_columns,
+                "id", attribute_ids):
+            raise sqlite3.IntegrityError("captured Beets item metadata was reassigned")
+        album_ids = tuple(album_id for album_id in snapshot.album_ids if connection.execute(
+            "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,),
+        ).fetchone())
+    wanted_albums = tuple(row for row in snapshot.album_rows
+                          if row[snapshot.album_columns.index("id")] in album_ids)
+    wanted_attributes = tuple(row for row in snapshot.album_attribute_rows
+                              if row[snapshot.album_attribute_columns.index("entity_id")]
+                              in album_ids)
+    unchanged("albums", _consolidation_rows_for_ids(
+        connection, "albums", snapshot.album_columns, "id", snapshot.album_ids,
+    ), wanted_albums)
+    unchanged("album metadata", _consolidation_rows_for_ids(
+        connection, "album_attributes", snapshot.album_attribute_columns,
+        "entity_id", snapshot.album_ids,
+    ), wanted_attributes)
+    return frozenset(snapshot.item_ids) if items else frozenset()
+
+
 def _replacement_catalogue_columns(connection):
     known_tables = {
         "albums",
@@ -7415,7 +7613,7 @@ def capture_beets_album_entries(album_dir):
                 f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
                 "FROM items ORDER BY id"
             ):
-                item_path = _catalogue_item_path(row[item_path_index])
+                item_path = _catalogue_item_path(row[item_path_index], allow_external=True)
                 if item_path == root or root in item_path.parents:
                     item_id = row[item_id_index]
                     album_id = row[item_album_index]
@@ -7482,7 +7680,8 @@ def capture_beets_album_entries(album_dir):
         _close_beets_database_anchor(database_anchor)
 
 
-def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
+def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
+                                  *, before_commit=None):
     """Retire only captured rows after proving the replacement catalogue."""
     if not isinstance(snapshot, BeetsAlbumSnapshot):
         return False
@@ -7523,33 +7722,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
             album_attribute_columns,
             item_attribute_columns,
         ) = _replacement_catalogue_columns(connection)
-        if snapshot.item_columns and (
-            tuple(item_columns) != snapshot.item_columns
-            or tuple(item_attribute_columns) != snapshot.item_attribute_columns
-            or tuple(album_columns) != snapshot.album_columns
-            or tuple(album_attribute_columns) != snapshot.album_attribute_columns
-        ):
-            raise sqlite3.DatabaseError("beets schema changed during replacement")
-
-        item_ids = snapshot.item_ids
-        current_items = _consolidation_rows_for_ids(
-            connection, "items", item_columns, "id", item_ids
-        )
-        if tuple(map(_consolidation_row_key, current_items)) != tuple(
-            map(_consolidation_row_key, snapshot.item_rows)
-        ):
-            raise sqlite3.IntegrityError("captured beets items changed")
-        current_item_attributes = _consolidation_rows_for_ids(
-            connection,
-            "item_attributes",
-            item_attribute_columns,
-            "entity_id",
-            item_ids,
-        )
-        if tuple(map(_consolidation_row_key, current_item_attributes)) != tuple(
-            map(_consolidation_row_key, snapshot.item_attribute_rows)
-        ):
-            raise sqlite3.IntegrityError("captured beets item metadata changed")
+        item_ids = tuple(sorted(_captured_beets_item_ids(connection, snapshot)))
 
         item_id_index = item_columns.index("id")
         item_path_index = item_columns.index("path")
@@ -7560,7 +7733,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
             "FROM items ORDER BY id"
         ):
             item_id = row[item_id_index]
-            path = _catalogue_item_path(row[item_path_index])
+            path = _catalogue_item_path(row[item_path_index], allow_external=True)
             if item_id in captured_ids:
                 continue
             if path in replacement_rows:
@@ -7581,42 +7754,6 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
                 ).fetchone()
                 if remaining is None:
                     retiring_album_ids.append(album_id)
-
-            if retiring_album_ids:
-                album_id_index = snapshot.album_columns.index("id")
-                expected_albums = tuple(
-                    row
-                    for row in snapshot.album_rows
-                    if row[album_id_index] in retiring_album_ids
-                )
-                current_albums = _consolidation_rows_for_ids(
-                    connection,
-                    "albums",
-                    album_columns,
-                    "id",
-                    retiring_album_ids,
-                )
-                if tuple(map(_consolidation_row_key, current_albums)) != tuple(
-                    map(_consolidation_row_key, expected_albums)
-                ):
-                    raise sqlite3.IntegrityError("captured beets albums changed")
-                expected_attributes = tuple(
-                    row
-                    for row in snapshot.album_attribute_rows
-                    if row[snapshot.album_attribute_columns.index("entity_id")]
-                    in retiring_album_ids
-                )
-                current_attributes = _consolidation_rows_for_ids(
-                    connection,
-                    "album_attributes",
-                    album_attribute_columns,
-                    "entity_id",
-                    retiring_album_ids,
-                )
-                if tuple(map(_consolidation_row_key, current_attributes)) != tuple(
-                    map(_consolidation_row_key, expected_attributes)
-                ):
-                    raise sqlite3.IntegrityError("captured beets album metadata changed")
 
             deleted_attributes = connection.execute(
                 f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
@@ -7652,7 +7789,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
 
         if not item_ids:
             connection.rollback()
-            return True
+            return before_commit is None or before_commit()
 
         def validate(current):
             if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
@@ -7665,13 +7802,14 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
             for item_id, raw_path in current.execute("SELECT id, path FROM items"):
                 if item_id in captured_ids:
                     return False
-                path = _catalogue_item_path(raw_path)
+                path = _catalogue_item_path(raw_path, allow_external=True)
                 if path in counts:
                     counts[path] += 1
             return all(count == 1 for count in counts.values())
 
         transaction.commit_and_publish(
-            lambda: _beets_database_anchor_matches(database_anchor), validate
+            lambda: (_beets_database_anchor_matches(database_anchor)
+                     and (before_commit is None or before_commit())), validate,
         )
         clear_scan_caches()
         return True
@@ -7693,6 +7831,46 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths):
         if transaction is not None:
             transaction.close()
         _close_beets_database_anchor(database_anchor)
+
+
+def retire_managed_replacement_entries(carrier, owner, replacement_dir,
+                                       replacement_receipt, *, authority_check):
+    """Retire captured rows, or return None for a carrier without that proof."""
+    try:
+        authority_check()
+        with reopen_managed_evidence(carrier, owner) as lease:
+            managed = lease.revalidate()
+            record = lease._capture.get("replaced_entries")
+            if record is None:
+                return None
+            snapshot = _beets_snapshot_from_record(record)
+            root_identity = dict(lease._capture["root_identity"])
+            root = Path(managed.library_root)
+            album = root / managed.album_path
+            paths = tuple(root / mapping.destination_path for mapping in managed.mappings)
+            if (snapshot is None or album != Path(replacement_dir)
+                    or set(paths) != set(_receipt_audio_paths(replacement_receipt, album) or ())):
+                return False
+
+        def unchanged():
+            authority_check()
+            current = inspect_managed_carrier(carrier, owner)
+            return (
+                current.outcome is ManagedCarrierInspectionOutcome.SEALED
+                and current.manifest_hash == managed.manifest_hash
+                and all(_managed_destination_matches(
+                    managed.library_root, root_identity,
+                    {"path": mapping.destination_path,
+                     "identity": dict(zip(_OWNERSHIP_IDENTITY_FIELDS,
+                                          mapping.destination_identity))},
+                ) for mapping in managed.mappings)
+            )
+
+        return unchanged() and retire_replaced_beets_entries(
+            snapshot, album, paths, before_commit=unchanged,
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
 
 
 def _receipt_audio_paths(receipt, root):
@@ -7802,7 +7980,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
             for path in replacement_paths
         }
         catalogue_album = _managed_catalogue_album(
-            connection, replacement_relatives, music_root
+            connection, replacement_relatives, music_root, allow_overlap=True,
         )
         if catalogue_album is None:
             raise sqlite3.IntegrityError("exact Beets replacement proof failed")
@@ -7815,7 +7993,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
             "FROM items ORDER BY id"
         ):
             item_id = row[item_id_index]
-            path = _catalogue_item_path(row[item_path_index])
+            path = _catalogue_item_path(row[item_path_index], allow_external=True)
             if path not in old_paths and path not in replacement_rows:
                 continue
             if type(item_id) is not int or item_id <= 0:
@@ -7912,7 +8090,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
             for item_id, album_id, raw_path in current.execute(
                 "SELECT id, album_id, path FROM items"
             ):
-                path = _catalogue_item_path(raw_path)
+                path = _catalogue_item_path(raw_path, allow_external=True)
                 if item_id in retiring_ids or path in old_only_paths:
                     return False
                 if path in counts:
@@ -8332,7 +8510,7 @@ def forget_beets_entries(paths):
 
     def matches(raw_path):
         try:
-            return _catalogue_item_path(raw_path) in target_paths
+            return _catalogue_item_path(raw_path, allow_external=True) in target_paths
         except (OSError, TypeError, ValueError) as exc:
             raise sqlite3.DatabaseError(
                 "beets item path is outside the managed library"

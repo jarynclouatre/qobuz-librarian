@@ -16,6 +16,7 @@ from qobuz_librarian.integrations.beets import (
     _MANAGED_OWNERSHIP_MODE,
     _MANAGED_SNAPSHOT_VERSION,
     _OWNERSHIP_MARKER,
+    _OWNERSHIP_MAX_BYTES,
     _OWNERSHIP_MAX_SOURCE_ROOTS,
     _managed_payload_hash,
     _merge_absolute_parts,
@@ -38,7 +39,6 @@ _MANIFEST_FD_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_FD"
 _NONCE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_NONCE"
 _SOURCE_ROOTS_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_SOURCE_ROOTS"
 _MODE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_MODE"
-_MAX_MANIFEST_BYTES = 1024 * 1024
 _COPY_COMPARE_CHUNK = 1024 * 1024
 
 
@@ -283,7 +283,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 not stat.S_ISREG(manifest_stat.st_mode)
                 or manifest_stat.st_uid != os.geteuid()
                 or stat.S_IMODE(manifest_stat.st_mode) != 0o600
-                or not 0 < manifest_stat.st_size <= _MAX_MANIFEST_BYTES
+                or not 0 < manifest_stat.st_size <= _OWNERSHIP_MAX_BYTES
             ):
                 return ()
             raw = os.pread(self._fd, manifest_stat.st_size + 1, 0)
@@ -293,7 +293,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             if len(lines) != 2:
                 return ()
             origin, launch = (
-                decode_recovery_json(line, max_bytes=_MAX_MANIFEST_BYTES)
+                decode_recovery_json(line, max_bytes=_OWNERSHIP_MAX_BYTES)
                 for line in lines
             )
             expected_launch = {
@@ -301,6 +301,8 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 "generation": 1,
                 "previous_hash": origin.get("hash"),
             }
+            if "replaced_entries" not in launch:
+                expected_launch.pop("replaced_entries", None)
             expected_launch["hash"] = _managed_payload_hash(expected_launch)
             if (
                 not _valid_managed_snapshot(origin)
@@ -1473,7 +1475,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             separators=(",", ":"),
         ).encode("ascii") + b"\n"
         current_size = os.fstat(self._fd).st_size
-        if current_size + len(encoded) > _MAX_MANIFEST_BYTES:
+        if current_size + len(encoded) > _OWNERSHIP_MAX_BYTES:
             raise OSError("ownership manifest is too large")
         offset = 0
         while offset < len(encoded):

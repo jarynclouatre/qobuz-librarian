@@ -27,7 +27,8 @@ def test_forcing_a_mix_never_moves_the_original(
     files = [original]
     if existing_mix:
         files.append(tagged_flac(folder / "01-mix.flac", TITLE="Song (2026 Mix)",
-                                 ALBUM="Album", ISRC="GBAAA0000001"))
+                                 ALBUM="Album", ISRC="GBAAA0000001",
+                                 LYRICS="Handwritten words", COMMENT="Personal note"))
     before = {path: path.read_bytes() for path in files}
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
@@ -55,6 +56,41 @@ def test_forcing_a_mix_never_moves_the_original(
     assert {path: path.read_bytes() for path in files} == before
     assert len(prompts) == int(existing_mix)
     assert all(not prompt["auto_yes"] for prompt in prompts)
+
+    if existing_mix:
+        from mutagen import flac
+
+        from qobuz_librarian.library import backup
+
+        staged = cfg.STAGING_DIR / "Album"
+
+        def completed_download(**kwargs):
+            saved = backup.backup_gap_fill_files([files[1]], folder)
+            assert saved is not None and saved.complete
+            tagged_flac(staged / "01-mix.flac", TITLE="Song (2026 Mix)",
+                        ALBUM="Album", ARTIST="Artist", ALBUMARTIST="Artist",
+                        ISRC="GBAAA0000001", TRACKNUMBER="1")
+            kwargs["result"].update(
+                gap_fill_backup_path=saved, n_ok=1, n_fail=0, n_lossy=0,
+                failed_tracks=[], lossy_tracks=[], elapsed=0)
+
+        def import_album(**_kwargs):
+            (staged / "01-mix.flac").rename(files[1])
+            scanner.clear_scan_caches()
+            return True
+
+        monkeypatch.setattr(proc, "run_album_download", completed_download)
+        monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
+        monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+        monkeypatch.setattr(proc, "beets_import_paths", import_album)
+        monkeypatch.setattr(proc, "retire_backup_beets_entries", lambda *_a, **_kw: True)
+        result = proc.process_album(album, _args(force=True),
+                                    exact_edition=True, already_confirmed=True)
+        assert result["result"] == "downloaded" and not result["recovery_unverified"]
+        assert original.read_bytes() == before[original]
+        assert flac.FLAC(files[1])["lyrics"] == ["Handwritten words"]
+        assert flac.FLAC(files[1])["comment"] == ["Personal note"]
+        assert not list(cfg.UPGRADE_BACKUP_DIR.iterdir())
 
 
 @pytest.mark.parametrize("verified", [True, False])
@@ -198,22 +234,14 @@ def test_partial_retention_moves_only_the_recorded_download_run(
     )
 
 
-def test_upgrade_carries_hand_added_tags_to_the_replacement(monkeypatch, tmp_path):
-    import shutil
-    import subprocess
-
+def test_upgrade_carries_hand_added_tags_to_the_replacement(
+        monkeypatch, tmp_path, tagged_flac):
     from mutagen.flac import FLAC, Picture
 
-    from qobuz_librarian.library.backup import backup_album_dir
-
-    if shutil.which("ffmpeg") is None:
-        pytest.skip("ffmpeg not available")
+    from qobuz_librarian.library import backup as backup_mod
 
     def track(path, **tags):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
-                        "sine=d=1", "-c:a", "flac", "-y", str(path)], check=True)
-        f = FLAC(path)
+        f = FLAC(tagged_flac(path))
         for key, value in {"TITLE": "Song", "TRACKNUMBER": "1",
                            "DISCNUMBER": "1", "ISRC": "USAAA2100001",
                            **tags}.items():
@@ -224,28 +252,39 @@ def test_upgrade_carries_hand_added_tags_to_the_replacement(monkeypatch, tmp_pat
     music = tmp_path / "music"
     album_dir = music / "Artist" / "Album"
     original = track(album_dir / "01 Song.flac", COMMENT="my note",
-                     MY_TAG="mine", REPLAYGAIN_TRACK_GAIN="-3 dB")
+                     MY_TAG=["mine", "also mine"], LYRICS="my transcription",
+                     REPLAYGAIN_TRACK_GAIN="-3 dB")
     back = Picture()
     back.type, back.mime, back.data = 4, "image/png", b"back-cover"
     original.add_picture(back)
     original.save()
     monkeypatch.setattr(proc.cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(proc.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
-    backup = backup_album_dir(album_dir)
+    backup = backup_mod.backup_album_dir(album_dir)
     assert backup is not None and backup.complete
-    track(album_dir / "01 Song.flac")
+    track(album_dir / "01 Song.flac", COMMENT="downloaded note",
+          MY_TAG="downloaded", LYRICS="fetched lyrics",
+          UNSYNCEDLYRICS="fetched alias")
 
+    assert not proc._track_annotations_preserved(backup.path, album_dir)
     proc._carry_non_audio_from_backup({"id": "x"}, album_dir, backup,
                                       replacement_dir=album_dir)
+    assert proc._track_annotations_preserved(backup.path, album_dir)
 
     replacement = FLAC(album_dir / "01 Song.flac")
     assert replacement["COMMENT"] == ["my note"]
-    assert replacement["MY_TAG"] == ["mine"]
+    assert replacement["MY_TAG"] == ["mine", "also mine"]
+    assert replacement["LYRICS"] == ["my transcription"]
+    assert "UNSYNCEDLYRICS" not in replacement
     assert "REPLAYGAIN_TRACK_GAIN" not in replacement
     assert [p.data for p in replacement.pictures] == [b"back-cover"]
+    replacement["UNSYNCEDLYRICS"] = ["downloaded alias"]
+    replacement.save()
+    assert not proc._track_annotations_preserved(backup.path, album_dir)
 
 
 def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path):
+    import json
     import os
     import sqlite3
 
@@ -258,6 +297,8 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
     old_files = [album / "01.flac", album / "02.flac"]
     for path in old_files:
         path.write_bytes(b"old")
+    external = tmp_path / "external.flac"
+    external.write_bytes(b"external")
 
     database = tmp_path / "beets.db"
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
@@ -278,6 +319,15 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
             "id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, key TEXT, value TEXT)"
         )
         connection.execute("INSERT INTO albums VALUES (10, 'Original')")
+        connection.execute("INSERT INTO albums VALUES (40, 'External')")
+        connection.execute("INSERT INTO items VALUES (?, ?, 40, 'External')",
+                           (31, os.fsencode(external)))
+        connection.execute(
+            "INSERT INTO album_attributes VALUES (3, 40, 'source', 'external')"
+        )
+        connection.execute(
+            "INSERT INTO item_attributes VALUES (3, 31, 'source', 'external')"
+        )
         connection.executemany(
             "INSERT INTO items VALUES (?, ?, 10, ?)",
             [
@@ -293,23 +343,42 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
         )
     connection.close()
 
+    lyrics = "歌詞の行\n" * 420
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE items ADD COLUMN lyrics TEXT")
+        connection.execute("UPDATE items SET lyrics = ? WHERE id = 1", (lyrics,))
+    connection.close()
+
     snapshot = beets.capture_beets_album_entries(album)
     assert snapshot is not None
 
     backup = tmp_path / "backup"
     album.rename(backup)
     album.mkdir()
-    replacement_files = [album / f"0{number}.flac" for number in range(1, 4)]
+    replacement_files = [album / f"0{number}.flac" for number in range(1, 3)]
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    bindings, mappings = [], []
     for path in replacement_files:
-        path.write_bytes(b"new")
+        source = staging / path.name
+        source.write_bytes(b"new")
+        binding = {"slot": path.stem, "path": str(source),
+                   "identity": list(beets._staged_identity(source.stat()))}
+        bindings.append(binding)
+        source.rename(path)
+        mappings.append({
+            "slot": binding["slot"],
+            "source": {"path": binding["path"], "identity": binding["identity"]},
+            "destination": {"path": path.relative_to(music).as_posix(),
+                            "identity": beets._ownership_identity(path.stat())},
+        })
     with sqlite3.connect(database) as connection:
         connection.execute("INSERT INTO albums VALUES (20, 'Replacement')")
         connection.executemany(
-            "INSERT INTO items VALUES (?, ?, 20, ?)",
+            "INSERT INTO items (id, path, album_id, title) VALUES (?, ?, 20, ?)",
             [
                 (11, os.fsencode(replacement_files[0]), "New one"),
                 (12, os.fsencode(replacement_files[1]), "New two"),
-                (13, os.fsencode(replacement_files[2]), "New three"),
             ],
         )
         connection.execute(
@@ -320,23 +389,87 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
         )
     connection.close()
 
-    assert beets.retire_replaced_beets_entries(
-        snapshot, album, replacement_files
-    )
+    nonce = "a" * 64
+    owner = {"operation_id": "b" * 64, "item_id": "c" * 64}
+    carrier_path = tmp_path / f".qobuz-managed-beets-{nonce}.jsonl"
+    origin = {
+        "version": 3, "generation": 0, "previous_hash": None,
+        "nonce": nonce, "owner": owner, "root": str(music),
+        "root_identity": beets._ownership_identity(music.stat()),
+        "sealed": False, "intent": bindings, "mappings": [],
+        "cleanup_directories": [],
+        "replaced_entries": json.loads(json.dumps(beets._beets_snapshot_record(snapshot))),
+    }
+    with carrier_path.open("w+b") as stream:
+        os.chmod(carrier_path, 0o600)
+        origin_hash = beets._write_managed_snapshot(stream.fileno(), origin)
+        launch = {**origin, "generation": 1, "previous_hash": origin_hash}
+        launch_hash = beets._write_managed_snapshot(stream.fileno(), launch)
+        sealed = {**launch, "generation": 2, "previous_hash": launch_hash,
+                  "sealed": True, "mappings": mappings}
+        sealed.pop("replaced_entries")
+        beets._write_managed_snapshot(stream.fileno(), sealed)
+    stat = carrier_path.stat()
+    parent = tmp_path.stat()
+    carrier = {
+        "version": 2, "path": str(carrier_path), "device": stat.st_dev,
+        "inode": stat.st_ino, "parent_device": parent.st_dev,
+        "parent_inode": parent.st_ino, "nonce": nonce, "owner": owner,
+    }
+    receipt = {"tree": {"files": {path.name: {} for path in replacement_files}}}
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE items SET lyrics = ? WHERE id = 1", (lyrics + "変更",))
+    connection.close()
+    assert beets.retire_managed_replacement_entries(
+        carrier, owner, album, receipt, authority_check=lambda: None,
+    ) is False
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE items SET lyrics = ? WHERE id = 1", (lyrics,))
+        connection.execute("UPDATE albums SET title = 'Edited' WHERE id = 10")
+    connection.close()
+    assert beets.retire_managed_replacement_entries(
+        carrier, owner, album, receipt, authority_check=lambda: None,
+    ) is False
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE albums SET title = 'Original' WHERE id = 10")
+        connection.execute("INSERT INTO albums VALUES (30, 'Unrelated')")
+        connection.execute("INSERT INTO items (id, path, album_id, title) VALUES (?, ?, 30, 'Unrelated')",
+                           (21, os.fsencode(replacement_files[0])))
+    connection.close()
+    assert beets.retire_managed_replacement_entries(
+        carrier, owner, album, receipt, authority_check=lambda: None,
+    ) is False
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM items WHERE id = 21")
+        connection.execute("DELETE FROM albums WHERE id = 30")
+    connection.close()
+    with beets.reopen_managed_evidence(carrier, owner) as lease:
+        assert len(lease.revalidate().mappings) == 2
+    assert beets.retire_managed_replacement_entries(
+        carrier, owner, album, receipt, authority_check=lambda: None,
+    ) is True
+    assert beets.retire_managed_replacement_entries(
+        carrier, owner, album, receipt, authority_check=lambda: None,
+    ) is True
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT id FROM items ORDER BY id").fetchall() == [
-            (11,), (12,), (13,)
+            (11,), (12,), (31,)
         ]
         assert connection.execute("SELECT id FROM albums ORDER BY id").fetchall() == [
-            (20,)
+            (20,), (40,)
         ]
         assert connection.execute(
             "SELECT entity_id FROM item_attributes ORDER BY id"
-        ).fetchall() == [(11,)]
+        ).fetchall() == [(11,), (31,)]
         assert connection.execute(
             "SELECT entity_id FROM album_attributes ORDER BY id"
-        ).fetchall() == [(20,)]
+        ).fetchall() == [(20,), (40,)]
+        assert connection.execute("SELECT path, title FROM items WHERE id = 31").fetchone() == (
+            os.fsencode(external), "External",
+        )
     connection.close()
+    assert external.read_bytes() == b"external"
 
 
 @pytest.mark.parametrize("scenario", ["clean", "ambiguous"])
@@ -355,6 +488,7 @@ def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
     shared = album / "01.flac"
     added = album / "02.flac"
     retired = album / "Old name.flac"
+    external = tmp_path / "external.flac"
     shared.write_bytes(b"replacement-one")
     added.write_bytes(b"replacement-two")
 
@@ -383,7 +517,7 @@ def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
         )
         connection.executemany(
             "INSERT INTO albums VALUES (?, ?)",
-            [(10, "Retired partial"), (20, "Full replacement")],
+            [(10, "Retired partial"), (20, "Full replacement"), (40, "External")],
         )
         connection.executemany(
             "INSERT INTO items VALUES (?, ?, ?, ?)",
@@ -392,6 +526,7 @@ def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
                 (2, os.fsencode(retired), 10, "Old name"),
                 (11, os.fsencode(shared), 20, "Replacement one"),
                 (12, os.fsencode(added), 20, "Replacement two"),
+                (31, os.fsencode(external), 40, "External"),
             ],
         )
         connection.execute(
@@ -434,12 +569,15 @@ def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
         album_ids = connection.execute(
             "SELECT id FROM albums ORDER BY id"
         ).fetchall()
+        assert connection.execute("SELECT path, title FROM items WHERE id = 31").fetchone() == (
+            os.fsencode(external), "External",
+        )
     if scenario == "ambiguous":
-        assert item_ids == [(1,), (2,), (3,), (11,), (12,)]
-        assert album_ids == [(10,), (20,)]
+        assert item_ids == [(1,), (2,), (3,), (11,), (12,), (31,)]
+        assert album_ids == [(10,), (20,), (40,)]
     else:
-        assert item_ids == [(11,), (12,)]
-        assert album_ids == [(20,)]
+        assert item_ids == [(11,), (12,), (31,)]
+        assert album_ids == [(20,), (40,)]
 
 
 def test_upgrade_verification_rejects_a_masked_per_track_downgrade(monkeypatch, tmp_path):

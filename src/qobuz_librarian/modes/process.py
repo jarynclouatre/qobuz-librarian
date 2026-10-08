@@ -37,6 +37,7 @@ from qobuz_librarian.integrations.rip import (
 from qobuz_librarian.library import candidate_premise, catalog, post_import_relocation, tags
 from qobuz_librarian.library.backup import (
     backup_album_dir,
+    backup_files_preserved,
     capture_album_source_receipt,
     carry_backup_companions,
     companion_conflicts,
@@ -492,13 +493,66 @@ _REPLACEMENT_OWNED_PREFIXES = (
 )
 
 
-def _carry_track_annotations(backup_path, replacement_path):
+def _original_track_tags(source):
+    return [
+        (key, value) for key, value in (source.tags or [])
+        if key.lower() not in _REPLACEMENT_OWNED_TAGS
+        and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
+        and (key.lower() not in {"lyrics", "unsyncedlyrics"} or value.strip())
+    ]
+
+
+def _missing_track_pictures(source, target):
+    embedded = {picture.data for picture in target.pictures}
+    has_front = any(picture.type == 3 for picture in target.pictures)
+    return [
+        picture for picture in source.pictures
+        if picture.data not in embedded
+        and not (picture.type == 3 and has_front)
+    ]
+
+
+def _track_annotations_preserved(backup_path, replacement_path):
+    from mutagen.flac import FLAC
+
+    new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
+    old_tracks, old_degraded = _folder_tracks_checked(backup_path)
+    pairs = (None if new_degraded or old_degraded
+             else _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks))
+    if pairs is None:
+        return False
+    for old, new in pairs:
+        if (Path(old["path"]).suffix.lower() != ".flac"
+                or Path(new["path"]).suffix.lower() != ".flac"):
+            return False
+        try:
+            source = FLAC(old["path"])
+            target = FLAC(new["path"])
+            original = {}
+            for key, value in _original_track_tags(source):
+                original.setdefault(key.lower(), []).append(value)
+            lyric_keys = {"lyrics", "unsyncedlyrics"}
+            if original.keys() & lyric_keys:
+                for key in lyric_keys:
+                    original.setdefault(key, [])
+            for key, values in original.items():
+                actual = [value for value in target.get(key, [])
+                          if key not in lyric_keys or value.strip()]
+                if values != actual:
+                    return False
+            if _missing_track_pictures(source, target):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
     """Give each replacement track the user's own tags and pictures.
 
-    A tag the new file has no value for is copied from its original, unless
-    the new download owns that kind of tag. Embedded pictures other than a
-    front cover the new file already has are added. Returns False when a
-    track could not be paired or written.
+    Original tags take precedence unless the new download owns that kind
+    of tag. Embedded pictures other than an existing front cover are added.
+    Returns False when a track could not be paired or written.
     """
     from mutagen.flac import FLAC
 
@@ -506,6 +560,8 @@ def _carry_track_annotations(backup_path, replacement_path):
 
     new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
     old_tracks, old_degraded = _folder_tracks_checked(backup_path)
+    if edition is not None:
+        new_tracks = catalog.edition_files(edition, new_tracks, replacement_path)
     pairs = (None if new_degraded or old_degraded
              else _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks))
     if pairs is None:
@@ -521,22 +577,18 @@ def _carry_track_annotations(backup_path, replacement_path):
             target = FLAC(str(target_path))
             if target.tags is None:
                 target.add_tags()
-            held = {key.lower() for key, _value in target.tags}
-            tags = [
-                (key, value) for key, value in (source.tags or [])
-                if key.lower() not in held
-                and key.lower() not in _REPLACEMENT_OWNED_TAGS
-                and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
-            ]
-            embedded = {picture.data for picture in target.pictures}
-            has_front = any(picture.type == 3 for picture in target.pictures)
-            pictures = [
-                picture for picture in source.pictures
-                if picture.data not in embedded
-                and not (picture.type == 3 and has_front)
-            ]
+            lyric_keys = {"lyrics", "unsyncedlyrics"}
+            tags = _original_track_tags(source)
+            pictures = _missing_track_pictures(source, target)
             if not tags and not pictures:
                 continue
+            if any(key.lower() in lyric_keys for key, _value in tags):
+                for key in lyric_keys:
+                    if key in target.tags:
+                        del target.tags[key]
+            for key in {key.lower() for key, _value in tags}:
+                if key in target.tags:
+                    del target.tags[key]
             target.tags.extend(tags)
             for picture in pictures:
                 target.add_picture(picture)
@@ -1741,11 +1793,24 @@ def process_album(album, args, *, allow_force=True, label=None,
                 _filled_ok = folder_holds_all_tracks(
                     _filled, qobuz_tracks, destructive=True,
                     edition=album if exact_edition else None)
+                _originals_ok = _filled_ok and (
+                    _carry_track_annotations(gap_fill_backup_path, _filled, edition=album)
+                    if force_tracks else backup_files_preserved(_filled, gap_fill_backup_path)
+                )
                 _filled_receipt = (
                     capture_album_source_receipt(_filled)
-                    if _filled_ok else None
+                    if _originals_ok else None
                 )
-                if _filled_ok and _filled_receipt is not None:
+                if _filled_ok and not _originals_ok:
+                    recovery_unverified = True
+                    if not pin_unverified_upgrade_backup(
+                            gap_fill_backup_path,
+                            "replacement backup kept; original files or tags could not be verified"):
+                        warn_pin_failed(gap_fill_backup_path)
+                    log.info(fmt(C.YELLOW,
+                        "  ⚠  Download landed, but the originals couldn't be verified; "
+                        "keeping the backup."))
+                elif _filled_ok and _filled_receipt is not None:
                     if not retire_backup_beets_entries(
                         gap_fill_backup_path,
                         _filled,
@@ -1769,11 +1834,13 @@ def process_album(album, args, *, allow_force=True, label=None,
                         gap_fill_backup_path,
                         replacement_path=_filled,
                         expected_replacement_receipt=_filled_receipt,
-                        replacement_validator=lambda replacement, _backup: (
+                        replacement_validator=lambda replacement, backup: (
                             folder_holds_all_tracks(
                                 replacement, qobuz_tracks, destructive=True,
                                 edition=album if exact_edition else None,
                                 folder_label=_filled.name)
+                            and (_intentional_replacement_verified(replacement, backup)
+                                 if force_tracks else backup_files_preserved(replacement, backup))
                         ),
                     ):
                         recovery_unverified = True

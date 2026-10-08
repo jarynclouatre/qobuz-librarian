@@ -22,8 +22,7 @@ Every menu mode has a flag that jumps straight to it; `--help` lists them all. T
 # The artist walk over every artist, queueing as you go
 docker compose run --rm -it qobuz-librarian cli --library-walk
 
-# Fill the gaps in albums you own (large gaps can refetch the whole
-# album and replace its existing tracks)
+# Fill missing tracks in albums you own
 docker compose run --rm -it qobuz-librarian cli --album-gaps
 
 # Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)

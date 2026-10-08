@@ -92,7 +92,7 @@ def _download_album_now(
             )
         return result
 
-    if is_lossless_album(album) and not keep_edition:
+    if is_lossless_album(album) and not keep_edition and not args.force:
         if existing_state is None:
             tracks = (album.get("tracks") or {}).get("items") or []
             existing, album_dir, missing, present = catalog.find_edition_tracks(album)
@@ -357,7 +357,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
         banner(f"Executing queue: {len(album_queue)} album(s)", C.GREEN)
         while album_queue:
             item = album_queue[0]
-            if item.get("keep_edition"):
+            if item.get("keep_edition") or args.force:
                 try:
                     _validate_queue_item_premise(item)
                 except CandidateStale as exc:

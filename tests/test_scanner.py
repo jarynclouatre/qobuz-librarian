@@ -21,16 +21,32 @@ def test_flac_cache_hits_when_unchanged_and_invalidates_on_change(tmp_path, monk
 
 
 def test_transient_read_error_is_a_walk_error_not_untagged(monkeypatch, tmp_path):
-    """A file mutagen can't READ (EIO/EACCES) is not a file with no tags: the
-    filename fallback would blank its ISRC and quality - undercounting the
-    censuses that gate backup deletion - and a cached negative would keep the
-    identity blanked on every later scan until the file changes."""
+    """An unreadable track must not shrink the census used for backup deletion."""
+    import os
+
+    import pytest
+
     from qobuz_librarian.library import flac_cache, scanner
 
     album = tmp_path / "Album"
     album.mkdir()
     f = album / "01 - Song.flac"
     f.write_bytes(b"x")
+
+    real_stat = os.stat
+
+    def denied(path, *args, **kwargs):
+        if os.fspath(path) == str(f):
+            raise PermissionError(13, "Permission denied", str(f))
+        return real_stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "stat", denied)
+        with pytest.raises(PermissionError):
+            scanner.read_album_dir(album)
+        errs = []
+        assert scanner.read_album_dir(album, walk_errors=errs) == []
+        assert errs
 
     calls = {"n": 0}
 

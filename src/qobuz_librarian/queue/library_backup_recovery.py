@@ -8,8 +8,12 @@ from enum import Enum
 from pathlib import Path
 
 from qobuz_librarian.completion import RecoveryOwner
-from qobuz_librarian.integrations.beets import retire_backup_beets_entries
+from qobuz_librarian.integrations.beets import (
+    retire_backup_beets_entries,
+    retire_managed_replacement_entries,
+)
 from qobuz_librarian.library.backup import (
+    backup_files_preserved,
     capture_album_source_receipt,
     carry_backup_companions,
     dispose_backup,
@@ -106,9 +110,12 @@ def _pin(backup, owner, reason, authority_check):
 
 def _replacement_validator(kind, album):
     if kind == "upgrade":
-        from qobuz_librarian.modes.process import _upgrade_trees_verified
+        from qobuz_librarian.modes import process
 
-        return _upgrade_trees_verified
+        return lambda replacement, backup: (
+            process._upgrade_trees_verified(replacement, backup)
+            and process._track_annotations_preserved(backup, replacement)
+        )
     if kind == "gap-fill":
         tracks = (
             (album.get("tracks") or {}).get("items")
@@ -117,10 +124,9 @@ def _replacement_validator(kind, album):
         )
         if not isinstance(tracks, list) or not tracks:
             return None
-        return lambda replacement, _backup: folder_holds_all_tracks(
-            replacement,
-            tracks,
-            destructive=True,
+        return lambda replacement, backup: (
+            folder_holds_all_tracks(replacement, tracks, destructive=True)
+            and backup_files_preserved(replacement, backup)
         )
     return None
 
@@ -370,16 +376,73 @@ def finish_library_backup_settlement(
         )
         return _attention(journal, "library-backup-replacement-changed")
 
+    def reconcile_disposal():
+        result = reconcile_library_backup_disposal(
+            data["carrier"],
+            data["disposal"],
+            replacement_path=replacement,
+            expected_replacement_receipt=data["replacement_receipt"],
+            expected_owner=owner_data,
+        )
+        authority_check()
+        return result
+
+    disposal_reconciliation = reconcile_disposal()
+    if disposal_reconciliation.state == "attention":
+        location = disposal_reconciliation.quarantine_path
+        reason = "library-backup-disposal-quarantine"
+        if location is not None:
+            reason = f"{reason}:{location}"
+        return _attention(journal, reason)
+
     backup = load_library_backup_record(
         data["carrier"],
         expected_owner=owner_data,
     )
     authority_check()
-    if not retire_backup_beets_entries(
-        data["carrier"],
-        replacement,
-        data["replacement_receipt"],
-    ):
+    if backup is None:
+        if not library_backup_record_absent(
+            data["carrier"],
+            expected_owner=owner_data,
+        ):
+            return _attention(journal, "library-backup-carrier-unavailable")
+        authority_check()
+        if disposal_reconciliation.state not in {"disposed", "none"}:
+            return _attention(
+                journal, "library-backup-disposal-needs-confirmation")
+    else:
+        if backup.complete is not True:
+            _pin(
+                backup,
+                owner_data,
+                "queue backup kept; source retirement did not finish exactly",
+                authority_check,
+            )
+            return _attention(journal, "library-backup-incomplete")
+        authority_check()
+        if not validator(replacement, backup.path):
+            _pin(
+                backup,
+                owner_data,
+                "queue backup kept; replacement did not prove the original safe",
+                authority_check,
+            )
+            return _attention(journal, "library-backup-replacement-unverified")
+        authority_check()
+
+    managed_carrier = next((reference for reference in current.recovery_references
+                            if reference.kind == "managed-beets"), None)
+    retired = None
+    if managed_carrier is not None:
+        retired = retire_managed_replacement_entries(
+            managed_carrier.data, owner, replacement, data["replacement_receipt"],
+            authority_check=authority_check,
+        )
+    if retired is None:
+        retired = retire_backup_beets_entries(
+            data["carrier"], replacement, data["replacement_receipt"],
+        )
+    if not retired:
         authority_check()
         _pin(
             backup,
@@ -391,52 +454,7 @@ def finish_library_backup_settlement(
         return _attention(journal, "library-backup-catalogue-unsettled")
     authority_check()
 
-    disposal_reconciliation = reconcile_library_backup_disposal(
-        data["carrier"],
-        data["disposal"],
-        replacement_path=replacement,
-        expected_replacement_receipt=data["replacement_receipt"],
-        expected_owner=owner_data,
-    )
-    authority_check()
-    if disposal_reconciliation.state == "attention":
-        location = disposal_reconciliation.quarantine_path
-        reason = "library-backup-disposal-quarantine"
-        if location is not None:
-            reason = f"{reason}:{location}"
-        return _attention(journal, reason)
-
-    if backup is None:
-        if not library_backup_record_absent(
-            data["carrier"],
-            expected_owner=owner_data,
-        ):
-            return _attention(journal, "library-backup-carrier-unavailable")
-        authority_check()
-        if data["carrier"]["kind"] == "upgrade":
-            if disposal_reconciliation.state not in {"disposed", "none"}:
-                # The exact settlement and replacement remain actionable
-                # evidence, but the old-vs-new semantic comparator cannot be
-                # rerun once the authorised backup deletion has crossed its
-                # final crash window.
-                return _attention(
-                    journal,
-                    "upgrade-backup-disposal-needs-confirmation",
-                )
-        elif not validator(replacement, None):
-            authority_check()
-            return _attention(journal, "library-backup-replacement-unverified")
-        authority_check()
-    else:
-        if backup.complete is not True:
-            _pin(
-                backup,
-                owner_data,
-                "queue backup kept; source retirement did not finish exactly",
-                authority_check,
-            )
-            return _attention(journal, "library-backup-incomplete")
-        authority_check()
+    if backup is not None:
         disposed = dispose_backup(
             backup,
             replacement_path=replacement,

@@ -27,6 +27,7 @@ class CompletionOriginKind(str, Enum):
 class SourceTransitionKind(str, Enum):
     DOWNSAMPLE = "downsample"
     LYRICS_TAG = "lyrics-tag"
+    ORIGINAL_TAGS = "original-tags"
     REPAIR_RETAG = "repair-retag"
     BEETS_TAG_CLEAN = "beets-tag-clean"
 

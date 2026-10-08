@@ -62,6 +62,7 @@ from qobuz_librarian.integrations.staging import (
 )
 from qobuz_librarian.library.backup import (
     backup_album_dir,
+    backup_files_preserved,
     capture_album_source_receipt,
     carry_backup_companions,
     dispose_backup,
@@ -1885,7 +1886,16 @@ def _resolve_queue_item(
             capture_album_source_receipt(post_dir)
             if _item_strict_success and _filled_whole else None
         )
-        if _item_strict_success and _filled_whole and _filled_receipt is not None:
+        if (_item_strict_success and _filled_whole and _filled_receipt is not None
+                and not backup_files_preserved(post_dir, gfb)):
+            item["recovery_unverified"] = True
+            if not pin_unverified_upgrade_backup(
+                    gfb, "gap-fill backup kept; original files differ from the import"):
+                warn_pin_failed(gfb)
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Gap-fill landed, but the original files differ; "
+                "keeping the backup."))
+        elif _item_strict_success and _filled_whole and _filled_receipt is not None:
             if not retire_backup_beets_entries(
                 gfb,
                 post_dir,
@@ -1908,7 +1918,7 @@ def _resolve_queue_item(
                 gfb,
                 replacement_path=post_dir,
                 expected_replacement_receipt=_filled_receipt,
-                replacement_validator=lambda replacement, _backup: (
+                replacement_validator=lambda replacement, backup: (
                     folder_holds_all_tracks(
                         replacement,
                         (item["album"].get("tracks") or {}).get("items") or [],
@@ -1916,6 +1926,7 @@ def _resolve_queue_item(
                         edition=item["album"] if item.get("exact_edition") else None,
                         folder_label=post_dir.name,
                     )
+                    and backup_files_preserved(replacement, backup)
                 ),
             ):
                 item["recovery_unverified"] = True
@@ -3048,16 +3059,16 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         _require_executor_authority(authority)
         requires_library_backup = queue_item_may_create_library_backup(item)
         plan = plan_durable_new_album(item, args, check_beets=False)
-        if plan is not None and not _durable_plan_allowed(
+        recoverable = _durable_plan_allowed(
             items,
             item,
             execution_mode=execution_mode,
             web_album_id=web_album_id,
-        ):
+        )
+        if not recoverable:
             plan = None
         # An album that finished before a restart is acknowledged even if a
         # beets path template changed since; it is already filed.
-        recoverable = plan is not None
         if plan is not None and not durable_import_possible(item.get("album_dir")):
             plan = None
 

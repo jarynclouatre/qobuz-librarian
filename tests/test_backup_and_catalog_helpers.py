@@ -1298,8 +1298,36 @@ def test_restore_refuses_a_silently_partial_backup_walk(tmp_path, monkeypatch):
 def test_reap_never_trusts_a_partial_backup_listing(tmp_path, monkeypatch):
     import qobuz_librarian.library.backup as bk
 
-    bp = tmp_path / "bkp"
-    bp.mkdir()
-    (bp / "01.flac").write_bytes(b"x")
-    monkeypatch.setattr(bk, "_list_tree", lambda root: None)
-    assert bk._backup_safe_to_reap(bp) is False
+    monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    real_stat = os.stat
+    for suffix in ("", "/02.flac"):
+        album = bk.cfg.MUSIC_ROOT / "Artist" / ("Root" if not suffix else "File")
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"kept")
+        (album / "02.flac").write_bytes(b"only copy")
+        backup = bk.backup_album_dir(album)
+        assert backup is not None and backup.complete
+        album.mkdir()
+        (album / "01.flac").write_bytes(b"kept")
+        faults = []
+
+        def unreadable(path, *args, **kwargs):
+            if not isinstance(path, int):
+                value = os.fspath(path)
+                if ("/qobuz-librarian-disposal-proof-" in value
+                        and value.endswith("/backup" + suffix)):
+                    faults.append(path)
+                    raise OSError(5, "I/O error", value)
+            return real_stat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "stat", unreadable)
+            if suffix:
+                removed = bk.discard_redundant_backup(backup.path)
+            else:
+                removed = bk._dispose_retention_candidate(
+                    backup, allow_smaller_audio=True)
+        assert faults
+        assert removed is False
+        assert (backup.path / "02.flac").read_bytes() == b"only copy"

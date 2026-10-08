@@ -18,6 +18,7 @@ Things worth knowing if you edit this:
 import logging
 import os
 import re
+import stat
 from pathlib import Path
 
 from qobuz_librarian import config
@@ -155,6 +156,13 @@ def read_audio_meta(path: Path):
 
 
 # ── Album directory scan ──────────────────────────────────────────────────────
+def _is_type(path, predicate):
+    try:
+        return predicate(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def read_album_dir(album_dir: Path, walk_errors=None):
     """Scan album_dir for audio files; return list of track-metadata dicts.
 
@@ -183,14 +191,13 @@ def read_album_dir(album_dir: Path, walk_errors=None):
     _exts = set(config.AUDIO_EXTS)
     try:
         for f in iter_tree_no_symlinks(album_dir, errors=walk_errors):
-            # is_file() re-raises EACCES/EIO/ESTALE (only ENOENT-class errors
-            # are swallowed by pathlib).
             try:
-                if f.suffix.lower() in _exts and f.is_file():
+                if f.suffix.lower() in _exts and _is_type(f, stat.S_ISREG):
                     audio_files.append(f)
             except OSError as e:
-                if walk_errors is not None:
-                    walk_errors.append(f"{f}: {e}")
+                if walk_errors is None:
+                    raise
+                walk_errors.append(f"{f}: {e}")
                 vlog(f"skipping unreadable entry {f} in {album_dir}: {e}")
     except OSError as e:
         if walk_errors is None:
@@ -291,7 +298,7 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
             try:
                 # Suffix first: an errors caller walks to the end, and
                 # stat'ing every entry would cost a syscall per file.
-                if f.suffix.lower() in exts and f.is_file():
+                if f.suffix.lower() in exts and _is_type(f, stat.S_ISREG):
                     found = True
                     if walk_errors is None:
                         _HAS_AUDIO_CACHE[key] = _AUDIO_FOUND_EARLY
@@ -345,7 +352,7 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
         return []
     for d in entries:
         try:
-            if not d.is_dir():
+            if not _is_type(d, stat.S_ISDIR):
                 continue
             if is_library_system_folder(d.name):  # .Trash, lost+found, etc.
                 continue
@@ -403,7 +410,7 @@ def list_artist_album_dirs(artist_dir: Path, walk_errors=None):
         return []
     try:
         for d in entries:
-            if not d.is_dir():
+            if not _is_type(d, stat.S_ISDIR):
                 continue
             if d.name.startswith("."):          # skip hidden dirs (.Trash, .DS_Store/, etc.)
                 continue
@@ -445,7 +452,8 @@ def _list_artist_subdirs_cached(artist_dir: Path):
     if cached is not None:
         return cached
     try:
-        subdirs = sorted((d for d in artist_dir.iterdir() if d.is_dir()),
+        subdirs = sorted((d for d in artist_dir.iterdir()
+                          if _is_type(d, stat.S_ISDIR)),
                          key=lambda p: p.name.lower())
     except OSError as e:
         vlog(f"  iterdir failed for {artist_dir}: {e}")

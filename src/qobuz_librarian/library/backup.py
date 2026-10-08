@@ -96,16 +96,14 @@ class IncompleteUpgradeRestoreOutcome:
 
 
 def _list_tree(root: Path):
-    """Every entry under ``root``, or None when the walk couldn't cover the
-    whole tree. rglob swallows subtree listing failures, so a partial walk can
-    pass for a complete one - every caller here draws a keep-or-delete
-    conclusion from the listing, and "couldn't see it" must never count as
-    "isn't there"."""
-    if not root.exists():
-        # A tree that isn't there holds nothing to lose - distinct from one
-        # that exists but can't be read (os.walk reports the latter as an
-        # error, and "couldn't see it" must not read as "empty").
+    """List every entry, returning None if any part is unreadable."""
+    try:
+        if not stat.S_ISDIR(root.stat().st_mode):
+            return None
+    except FileNotFoundError:
         return []
+    except OSError:
+        return None
     entries = []
     errors = []
     try:
@@ -2402,12 +2400,10 @@ def _tree_stats(d: Path):
         return None
     try:
         for f in entries:
-            if f.is_file():
+            info = f.stat()
+            if stat.S_ISREG(info.st_mode):
                 n_files += 1
-                try:
-                    n_bytes += f.stat().st_size
-                except OSError:
-                    return None
+                n_bytes += info.st_size
     except OSError:
         return None
     return (n_files, n_bytes)
@@ -4394,7 +4390,8 @@ def reconcile_library_backup_disposal(
             return BackupDisposalReconciliation(
                 "attention", quarantine_path)
 
-        if replacement_proof is None:
+        if (replacement_proof is None
+                or set(current["files"]).difference(_SIDECARS)):
             if not _tree_matches_ignoring_ctime(current, expected):
                 return BackupDisposalReconciliation(
                     "attention", quarantine_path)
@@ -5950,7 +5947,15 @@ _KEEP_MARKERS = (
 
 def backup_keep_markers_present(bp) -> bool:
     """True when an explicit keep pin protects this backup from the age sweep."""
-    return any((Path(bp) / marker).is_file() for marker in _KEEP_MARKERS)
+    for marker in _KEEP_MARKERS:
+        try:
+            if stat.S_ISREG((Path(bp) / marker).stat().st_mode):
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    return False
 
 
 def _backup_safe_to_reap(bp: Path) -> bool:
@@ -6092,11 +6097,12 @@ def awaiting_retention(path: Path) -> bool:
         return False
     try:
         for source in entries:
-            if not source.is_file() or source.name in _SIDECARS:
+            info = source.stat()
+            if not stat.S_ISREG(info.st_mode) or source.name in _SIDECARS:
                 continue
             destination = origin / source.relative_to(path)
             if (not destination.is_file()
-                    or destination.stat().st_size < source.stat().st_size):
+                    or destination.stat().st_size < info.st_size):
                 return False
     except (OSError, ValueError):
         return False
@@ -9778,7 +9784,14 @@ def _classify_backup_contents(
         entries = _list_tree(backup_view)
         if entries is None:
             return BackupClassification("unverified", "unreadable")
-        files = [f for f in entries if f.is_file() and f.name not in _SIDECARS]
+        files = []
+        for entry in entries:
+            mode = entry.stat().st_mode
+            if stat.S_ISREG(mode):
+                if entry.name not in _SIDECARS:
+                    files.append(entry)
+            elif not stat.S_ISDIR(mode):
+                return BackupClassification("unverified", "unreadable")
         files.sort(key=lambda f: (f.suffix.lower() in cfg.AUDIO_EXTS, str(f)))
         taken = {f.relative_to(backup_view) for f in files}
         skipped = False
@@ -9822,7 +9835,7 @@ def _classify_backup_contents(
                     return BackupClassification("retained", "different", str(relative))
         if skipped:
             return BackupClassification("unverified", "budget")
-        if not files and not audio_replacement:
+        if not files:
             return BackupClassification("retained", "empty")
         return BackupClassification(
             "removable", "replacement" if audio_replacement else "identical")
@@ -9852,7 +9865,8 @@ def _classify_retained_backup(path, origin, budget):
     if entries is None:
         return BackupClassification("unverified", "unreadable")
     try:
-        size = sum(f.stat().st_size for f in entries if f.is_file())
+        stats = [f.stat() for f in entries]
+        size = sum(info.st_size for info in stats if stat.S_ISREG(info.st_mode))
         if not budget.reserve(size):
             return BackupClassification("unverified", "budget")
         candidate = load_backup_result(path)
@@ -9894,12 +9908,17 @@ def _dispose_retention_candidate(
     replacement_receipt = capture_album_source_receipt(replacement)
     if replacement_receipt is None:
         return False
+    preserve_originals = (
+        candidate.receipt["kind"] == "gap-fill"
+        and not allow_smaller_audio and not match_recordings
+    )
     return dispose_backup(
         candidate,
         replacement_path=replacement,
         expected_replacement_receipt=replacement_receipt,
         replacement_validator=lambda replacement_view, backup_view: (
-            _retention_view_is_redundant(
+            backup_files_preserved(replacement_view, backup_view)
+            if preserve_originals else _retention_view_is_redundant(
                 replacement_view,
                 backup_view,
                 allow_smaller_audio=allow_smaller_audio,
@@ -9945,7 +9964,7 @@ def retire_verified_repair_backup(backup) -> bool:
         backup, allow_smaller_audio=True, match_recordings=True)
 
 
-def _views_are_byte_identical(replacement_view: Path, backup_view: Path) -> bool:
+def backup_files_preserved(replacement_view: Path, backup_view: Path) -> bool:
     return _classify_backup_contents(replacement_view, backup_view).removable
 
 
@@ -9967,7 +9986,7 @@ def discard_redundant_backup(path) -> bool:
         candidate,
         replacement_path=replacement,
         expected_replacement_receipt=replacement_receipt,
-        replacement_validator=_views_are_byte_identical,
+        replacement_validator=backup_files_preserved,
     )
 
 

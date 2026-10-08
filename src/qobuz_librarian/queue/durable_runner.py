@@ -1055,6 +1055,26 @@ def execute_durable_new_album(
             raise
 
     try:
+        if plan.library_backup_kind == "upgrade":
+            from qobuz_librarian.modes import process
+
+            _require_authority(authority)
+            backup = load_library_backup_record(
+                backup_carrier.data, expected_owner=_owner_record(owner),
+            )
+            if backup is None or len(album_dirs) != 1:
+                raise OSError("upgrade originals could not be read")
+            if not process._track_annotations_preserved(backup.path, album_dirs[0]):
+                if not process._carry_track_annotations(backup.path, album_dirs[0]):
+                    raise OSError("original track tags could not be carried")
+                checkpoint_sources(SourceTransitionKind.ORIGINAL_TAGS)
+            if (load_library_backup_record(
+                    backup_carrier.data, expected_owner=_owner_record(owner),
+                ) is None
+                    or not process._track_annotations_preserved(
+                        backup.path, album_dirs[0])):
+                raise OSError("original track tags could not be verified")
+            _require_authority(authority)
         cleaned_bindings = prepare_managed_staging_tags(
             album_dirs,
             binding_records,

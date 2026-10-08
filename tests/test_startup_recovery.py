@@ -88,14 +88,8 @@ def test_post_import_relocation_recovery_precedes_queue_recovery(
 
 
 def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
-    from qobuz_librarian.library.backup import (
-        backup_gap_fill_files,
-        library_backup_record,
-    )
-    from qobuz_librarian.queue.durable_album import (
-        initial_completion_input,
-        plan_durable_new_album,
-    )
+    from qobuz_librarian.library import backup as backup_module
+    from qobuz_librarian.queue import builder, durable_album
 
     music = tmp_path / "music"
     album_dir = music / "Artist" / "Album"
@@ -113,7 +107,7 @@ def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
         {"id": str(number), "media_number": 1, "track_number": number}
         for number in range(1, 6)
     ]
-    queued = _build_queue_item(
+    queued = builder._build_queue_item(
         album={
             "id": "1",
             "title": "Album",
@@ -137,16 +131,24 @@ def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
         "operation_id": owner.operation_id,
         "item_id": owner.item_id,
     }
-    plan = plan_durable_new_album(
-        queued,
-        SimpleNamespace(no_import=False, no_downsample=True),
+    slots = tuple(f"qobuz:{number}" for number in range(1, 6))
+    plan = durable_album.DurableNewAlbumPlan(
+        CompletionExpectation(
+            album_id="1",
+            scope=CompletionScope.ALBUM,
+            catalogue_slots=slots,
+            requested_slots=slots,
+            baseline_slots=(),
+            quality_targets=tuple(QualityTarget(slot, 24, 96000) for slot in slots),
+        ),
+        4,
+        "gap-fill",
     )
-    assert plan is not None
     current = journal.transition_journal_item(
         current,
         item_id,
         journal.QueuePhase.ACTIVE,
-        completion_input=initial_completion_input(
+        completion_input=durable_album.initial_completion_input(
             plan,
             owner,
             CompletionOrigin(CompletionOriginKind.CLI, "download-queue"),
@@ -165,7 +167,7 @@ def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
             "library-backup-intent"
         )
 
-    backup = backup_gap_fill_files(
+    backup = backup_module.backup_gap_fill_files(
         [owned],
         album_dir,
         owner=owner_record,
@@ -173,7 +175,7 @@ def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
     )
     assert backup is not None and backup.complete and not owned.exists()
     intent = current.items[0].recovery_references[0]
-    carrier = library_backup_record(backup, expected_owner=owner_record)
+    carrier = backup_module.library_backup_record(backup, expected_owner=owner_record)
     assert carrier is not None
     current = journal.promote_library_backup_carrier(
         current,
@@ -250,6 +252,7 @@ def test_giving_up_a_restart_blocked_gap_fill_puts_the_owned_tracks_back(
     ),
     (
         ("before-move", False, False, True, "none"),
+        ("before-delete", False, False, True, "restored"),
         ("before-delete", True, False, True, "restored"),
         ("after-unlink", False, False, True, "disposed"),
         ("after-unlink", False, True, True, "attention"),
@@ -276,12 +279,18 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
     monkeypatch.setattr(backup_module.cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(backup_module.cfg, "UPGRADE_BACKUP_DIR", backups)
     owner = {"operation_id": "a" * 64, "item_id": "b" * 64}
-    backup = backup_module.backup_gap_fill_files(
-        [original],
-        album,
-        owner=owner,
-        on_intent=lambda _record: None,
-    )
+    if crash_point == "before-delete" and not change_replacement and persisted_disposal:
+        backup = backup_module.backup_album_dir(
+            album, owner=owner, on_intent=lambda _record: None,
+        )
+        album.mkdir(exist_ok=True)
+    else:
+        backup = backup_module.backup_gap_fill_files(
+            [original],
+            album,
+            owner=owner,
+            on_intent=lambda _record: None,
+        )
     assert backup is not None and backup.complete
     carrier = backup_module.library_backup_record(
         backup, expected_owner=owner)
@@ -388,7 +397,8 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
     elif expected_state == "restored":
         assert not quarantine.exists()
         assert (backup.path / "01.flac").read_bytes() == b"original"
-        assert replacement.read_bytes() == b"changed replacement"
+        assert replacement.read_bytes() == (
+            b"changed replacement" if change_replacement else b"replacement")
     else:
         assert not quarantine.exists()
         assert not backup.path.exists()

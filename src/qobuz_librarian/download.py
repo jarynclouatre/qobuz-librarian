@@ -757,7 +757,7 @@ def disc_names_overwrite(album):
 
 def downloads_whole_album(n_present, n_missing, n_total):
     """Whether a gap fill fetches the whole album instead of the gaps."""
-    return n_present == 0 or n_missing == n_total or n_missing >= max(4, int(n_total * 0.7))
+    return n_present == 0 or n_missing == n_total
 
 
 def run_album_download(
@@ -780,9 +780,8 @@ def run_album_download(
 ):
     """Download ``missing`` for one album and reconcile what actually landed.
 
-    Picks a single full-album rip when most of the album is missing, else
-    fetches track by track. ``existing`` is the on-disk track list (dicts with
-    "path") used to stash already-owned tracks before a full-album re-rip;
+    Fetches partial albums track by track. ``existing`` is the on-disk track list
+    (dicts with "path") used to stash already-owned tracks before a full-album re-rip;
     pass None to have it read from ``album_dir`` only if that branch is reached.
 
     Writes into ``result`` (created if None) as it goes - ``gap_fill_backup_path``
@@ -853,10 +852,6 @@ def run_album_download(
     qobuz_tracks = (album.get("tracks") or {}).get("items") or []
     n_tracks_total = len(qobuz_tracks)
 
-    # Streamrip's track-URL path crashes with KeyError: 'body' on some tracks
-    # (older catalog, edge metadata), so prefer the album URL when most of the
-    # album is missing - beets merges any redundant duplicate of a present
-    # track on import.
     if force_track_by_track:
         download_full_album = False
     elif upgrade_only:

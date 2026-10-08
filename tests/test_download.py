@@ -52,7 +52,7 @@ def _patch(monkeypatch, *, rip, added, cleanup, cancel=False):
 def test_full_album_with_present_tracks_counts_fail_against_total(monkeypatch, tmp_path):
     tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in range(1, 11)]
     tracks[8]["title"] = "T1"
-    missing = tracks[3:]
+    missing = tracks
     present = tracks[:4]
     album = tmp_path / "Artist" / "Album (2020)"
     album.mkdir(parents=True)
@@ -154,7 +154,7 @@ def test_full_album_backs_up_present_tracks_before_rip(monkeypatch, tmp_path):
     monkeypatch.setattr(dl, "find_extras_in_existing", lambda *a, **k: [])
 
     result = {}
-    dl.run_album_download(album=_album(tracks), missing=tracks[1:],
+    dl.run_album_download(album=_album(tracks), missing=tracks,
                           present=[tracks[0]], album_dir=album_dir, snapshot=set(),
                           result=result, recovery_owner=owner,
                           recovery_checkpoint=checkpoint,
@@ -195,13 +195,53 @@ def test_full_album_does_not_rip_after_a_partial_present_track_backup(
 
     with pytest.raises(OSError):
         dl.run_album_download(
-            album=_album(tracks), missing=tracks[1:], present=[tracks[0]],
+            album=_album(tracks), missing=tracks, present=[tracks[0]],
             album_dir=tmp_path, snapshot=set(),
             existing=[{"path": str(owned)}], result=result,
         )
 
     assert not rip_calls
     assert result["gap_fill_backup_path"] is partial
+
+
+def test_gap_fill_preserves_owned_tracks_when_most_are_missing(
+        monkeypatch, tmp_path, tagged_flac):
+    from mutagen.flac import FLAC
+
+    album = tmp_path / "music" / "Artist" / "Album"
+    owned = tagged_flac(album / "01 - T1.flac", TITLE="T1", TRACKNUMBER="1",
+                        LYRICS="Handwritten words", COMMENT="My note")
+    audio = FLAC(owned)
+    audio.info.bits_per_sample = 24
+    audio.info.sample_rate = 96000
+    audio.save()
+    original = owned.read_bytes()
+    tracks = [{"id": i, "title": f"T{i}", "track_number": i}
+              for i in range(1, 6)]
+    landed = []
+    requested = []
+
+    def rip(url, **_kwargs):
+        assert "/track/" in url
+        assert owned.read_bytes() == original
+        number = int(url.rsplit("/", 1)[1])
+        requested.append(number)
+        landed.append(tagged_flac(
+            tmp_path / "staging" / f"0{number} - T{number}.flac",
+            TITLE=f"T{number}", TRACKNUMBER=number))
+        return 0, ""
+
+    _patch(monkeypatch, rip=rip, added=lambda _s: landed,
+           cleanup=lambda files: (files, [], []))
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+    result = dl.run_album_download(
+        album=_album(tracks), missing=tracks[1:], present=tracks[:1],
+        album_dir=album, snapshot=set(), existing=[{"path": str(owned)}],
+    )
+
+    assert requested == [2, 3, 4, 5]
+    assert (result["n_ok"], result["n_fail"]) == (4, 0)
+    assert owned.read_bytes() == original
 
 
 def test_resumed_album_selection_backs_up_its_versioned_tracks(
