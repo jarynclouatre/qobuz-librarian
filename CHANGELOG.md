@@ -2,6 +2,18 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.3.3] - 2026-10-09
+
+Search recognises owned deluxe and remastered editions, Downsample includes compilations, and Settings keeps edits when a save needs correcting.
+
+- Search and the terminal recognise owned deluxe, expanded, anniversary and remastered editions from their recordings, including copies whose folders carry no edition name. Different mixes, and remasters whose files carry another release's copyright, stay available as separate downloads.
+- Downsample includes Various Artists compilations in its own refresh and in the local results gathered by a Library refresh.
+- Downsample shows the last failed run with a link to its details. Valid saved results stay available; new complete results clear the earlier failure notice.
+- Behaviour and collection-backup settings retain edits after rejected saves and reopen the affected section. Older forms still cannot overwrite newer saved choices.
+- History shows what album batches and maintenance work accomplished, including partially completed and cancelled runs.
+- After a restart, downloads and scans wait until saved downloads and reviews can be read, then retry on their own and resume unfinished downloads in their saved order.
+- Library migration stops when the destination runs out of space and keeps the originals.
+
 ## [1.3.2] - 2026-10-08
 
 Partial albums keep existing tracks, and Library reviews keep their choices and reading position.
