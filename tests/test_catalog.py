@@ -225,7 +225,7 @@ def test_title_fallback_cannot_hand_an_isrc_twin_to_another_track():
     assert not missing
 
 
-def test_edition_ownership_keeps_recording_versions(tmp_path):
+def test_edition_ownership_keeps_recording_versions(tmp_path, tagged_flac):
     track = {"id": "new-mix", "title": "Song", "version": "2026 Mix", "isrc": "GBAAA0000001"}
     album = {"title": "Album", "version": "2026 Mix", "tracks": {"items": [track]}}
     original = {"title": "Song", "album": "Album", "isrc": track["isrc"]}
@@ -274,6 +274,33 @@ def test_edition_ownership_keeps_recording_versions(tmp_path):
     assert catalog.edition_missing(remastered_live, [local_live], plain_folder)[0] == [live]
     assert not catalog.edition_missing(remastered_live, [
         {**local_live, "album": "Album (2026 Remaster)"}], plain_folder)[0]
+
+    remastered = {**old_track, "version": "Remastered"}
+    remaster = {**old_album, "version": "Remastered 2009", "tracks": {"items": [remastered]}}
+    legacy = {**original, "title": "Song (Remastered)"}
+    assert not catalog.edition_missing(remaster, [legacy], plain_folder)[0]
+    assert catalog.edition_missing(remaster, [
+        {**legacy, "isrc": ""}], plain_folder)[0] == [remastered]
+    assert catalog.edition_missing(remaster, [
+        {**legacy, "album": "Album (2011 Remaster)"}], plain_folder)[0] == [remastered]
+    assert catalog.edition_missing(remaster, [
+        {**legacy, "title": "Song (Mono) (Remastered)"}], plain_folder)[0] == [remastered]
+    assert not catalog.edition_missing(
+        {**old_album, "version": "Deluxe Edition"}, [original], plain_folder)[0]
+    explicit = {**old_album, "tracks": {"items": [
+        {**old_track, "isrc": "", "version": "Album Version (Explicit)"}]}}
+    assert not catalog.edition_missing(explicit, [
+        {**original, "isrc": "", "title": "Song (Album Version (Explicit))"}], plain_folder)[0]
+
+    reissue = {**old_album, "version": "Remastered", "copyright": "2018 Lost Henry"}
+    same_release = {**original, "path": str(tagged_flac(
+        tmp_path / "same.flac", TITLE="Song", COPYRIGHT="(P) 2018 Lost Henry"))}
+    older_release = {**original, "path": str(tagged_flac(
+        tmp_path / "older.flac", TITLE="Song", COPYRIGHT="1973 Asylum Records"))}
+    assert not catalog.edition_missing(reissue, [same_release], plain_folder)[0]
+    assert catalog.edition_missing(reissue, [older_release], plain_folder)[0] == [old_track]
+    assert catalog.edition_missing(
+        {**reissue, "version": "Mono"}, [same_release], plain_folder)[0] == [old_track]
 
 
 def test_same_mix_in_two_folders_keeps_the_selected_destination(

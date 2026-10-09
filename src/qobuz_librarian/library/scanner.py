@@ -155,6 +155,19 @@ def read_audio_meta(path: Path):
     return meta
 
 
+
+def read_copyright(path):
+    """The file's copyright tag, or "" when it has none or cannot be read."""
+    if not HAVE_MUTAGEN:
+        return ""
+    try:
+        f = mutagen.File(str(path), easy=True)
+    except Exception:
+        return ""
+    values = (f.tags or {}).get("copyright") if f is not None else None
+    return values[0] if values and isinstance(values, list) else ""
+
+
 # ── Album directory scan ──────────────────────────────────────────────────────
 def _is_type(path, predicate):
     try:

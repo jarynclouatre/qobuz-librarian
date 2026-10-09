@@ -632,27 +632,30 @@ def test_album_search_keeps_a_new_mix_available_beside_the_original(
     from qobuz_librarian.web import flows, job_runs, qobuz_access, routes_search
 
     original = {
-        "id": "rubber-soul", "title": "Rubber Soul",
+        "id": "rubber-soul", "title": "Rubber Soul", "version": "Remastered 2009",
         "artist": {"name": "The Beatles"},
         "release_date_original": "1965-12-03", "tracks_count": 2,
         "maximum_bit_depth": 16,
         "tracks": {"items": [
-            {"id": "drive", "title": "Drive My Car"},
-            {"id": "norwegian", "title": "Norwegian Wood"},
+            {"id": "drive", "title": "Drive My Car", "version": "Remastered",
+             "isrc": "GBAYE0601479"},
+            {"id": "norwegian", "title": "Norwegian Wood (This Bird Has Flown)",
+             "version": "Remastered", "isrc": "GBAYE0601480"},
         ]},
     }
     remix = {**original, "id": "rubber-soul-2026", "version": "2026 Mix",
              "tracks": {"items": [
-                 {**track, "id": f"{track['id']}-2026", "version": "2026 Mix"}
-                 for track in original["tracks"]["items"]
+                 {**track, "id": f"{track['id']}-2026", "version": "2026 Mix", "isrc": isrc}
+                 for track, isrc in zip(original["tracks"]["items"],
+                                        ("GBUM72600368", "GBUM72600369"))
              ]}}
     albums = {album["id"]: album for album in (remix, original)}
     monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
     folder = tmp_path / "The Beatles" / "Rubber Soul (1965)"
     folder.mkdir(parents=True)
     for track in original["tracks"]["items"]:
-        tagged_flac(folder / f"{track['id']}.flac", TITLE=track["title"],
-                    ALBUM="Rubber Soul", ARTIST="The Beatles")
+        tagged_flac(folder / f"{track['id']}.flac", TITLE=f"{track['title']} (Remastered)",
+                    ALBUM="Rubber Soul", ARTIST="The Beatles", ISRC=track["isrc"])
     scanner.clear_scan_caches()
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(search, "get_album", lambda album_id, _token: albums[album_id])
@@ -666,6 +669,7 @@ def test_album_search_keeps_a_new_mix_available_beside_the_original(
     assert {r["id"]: r["owned"] for r in results} == {
         "rubber-soul": True, "rubber-soul-2026": False,
     }
+    assert all(t["owned"] for t in routes_search._album_tracklist(original["id"], "tok"))
     assert not any(t["owned"] for t in routes_search._album_tracklist(remix["id"], "tok"))
 
     class DownloadForms(html.parser.HTMLParser):
@@ -725,7 +729,7 @@ def test_album_search_keeps_a_new_mix_available_beside_the_original(
 
     partial = folder.with_name("Rubber Soul (2026 Mix) (1965)")
     tagged_flac(partial / "drive.flac", TITLE="Drive My Car (2026 Mix)",
-                ALBUM="Rubber Soul (2026 Mix)", ARTIST="The Beatles")
+                ALBUM="Rubber Soul (2026 Mix)", ARTIST="The Beatles", ISRC=wanted_track["isrc"])
     scanner.clear_scan_caches()
     folded = []
     planned = []
@@ -755,9 +759,9 @@ def test_album_search_keeps_a_new_mix_available_beside_the_original(
     folder.rename(old_folder)
     kept = folder
     kept.mkdir()
-    for track in original["tracks"]["items"]:
+    for track in remix["tracks"]["items"]:
         tagged_flac(kept / f"{track['id']}.flac", TITLE=f"{track['title']} (2026 Mix)",
-                    ALBUM="Rubber Soul", ARTIST="The Beatles")
+                    ALBUM="Rubber Soul", ARTIST="The Beatles", ISRC=track["isrc"])
     scanner.clear_scan_caches()
     results, _groups = asyncio.run(routes_search._album_results(
         list(albums.values()), "Rubber Soul", "tok", set(), set()))

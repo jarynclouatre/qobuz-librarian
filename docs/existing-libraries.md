@@ -21,9 +21,9 @@ The scanner expects a two-level tree under your music library. In Docker, this i
         └── 01 - Track.flac
 ```
 
-The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, and `2017 - Album` all work. The year is optional. Matching locates artist and album folders, then checks track tags; edition labels in tags and folder names distinguish mixes and remasters. Per-disc subdirs (`CD1/`, `CD2/`) are recursed into; hidden directories and the staging dir are skipped. Flat (`/music/<track>.flac`) and extra-nested (`/music/<Genre>/<Artist>/...`) layouts are not detected, so point `QL_MUSIC_DIR` at the folder that contains the artist folders.
+The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, and `2017 - Album` all work. The year is optional. Matching locates artist and album folders, then checks track tags; mix and remaster labels in tags and folder names distinguish editions, while deluxe, expanded and other packaging labels do not. Per-disc subdirs (`CD1/`, `CD2/`) are recursed into; hidden directories and the staging dir are skipped. Flat (`/music/<track>.flac`) and extra-nested (`/music/<Genre>/<Artist>/...`) layouts are not detected, so point `QL_MUSIC_DIR` at the folder that contains the artist folders.
 
-An older copy without enough edition information may still be offered for download. A shared recording ID alone does not identify a particular mix or remaster.
+A shared recording ID alone does not identify a particular mix or remaster. When only the files or only the catalogue name a remaster, the copyright tag in the files decides. An older copy without enough edition information may still be offered for download.
 
 ## Migrating into the layout
 

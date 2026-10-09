@@ -40,6 +40,7 @@ from qobuz_librarian.library.scanner import (
     _list_artist_subdirs_cached,
     iter_tree_no_symlinks,
     read_album_dir,
+    read_copyright,
 )
 from qobuz_librarian.library.sqlite_atomic import inspect_sqlite_source
 from qobuz_librarian.library.tags import (
@@ -619,26 +620,39 @@ _VERSION_LABEL_RE = re.compile(
     r"demo|take|edit|version|session|edition|deluxe|expanded|anniversary|reissue)\b",
     re.IGNORECASE,
 )
-_TITLE_SUFFIX_RE = re.compile(
-    r"\s*(?:\(([^()]*)\)|\[([^\[\]]*)\]|(?:\s[-\u2013\u2014]\s+|:\s*)(.+))\s*$")
+_RECORDING_LABEL_RE = re.compile(
+    r"mix|remaster|mono|stereo|live|acoustic|instrumental|demo|take|session|edit(?!ion)")
+_PACKAGING_LABEL_RE = re.compile(
+    r"(?:album|anniversary|bonus|collectors|deluxe|digital|edition|expanded|legacy|limited|lp|"
+    r"pa|special|split|standard|super|the|tracks?|uk|us|version|"
+    r"[0-9]+(?:st|nd|rd|th)?)+")
+_TITLE_BRACKET_RE = re.compile(
+    r"\s*(?:\(((?:[^()]|\([^()]*\))*)\)|\[((?:[^\[\]]|\[[^\[\]]*\])*)\])\s*$")
+_TITLE_SUFFIX_RE = re.compile(r"(?:\s[-\u2013\u2014]\s+|:\s*)(.+)\s*$")
+
+
+def _label_parts(label):
+    return {canonical_track_title(part) for part in re.split(r"\s*[/;]\s*", label)} - {""}
 
 
 def _edition_title_parts(title, version="", *, folder=False, known_versions=()):
     title = (title or "").strip()
-    labels = set()
+    labels, seen = set(), set()
     if version:
-        labels.add(canonical_track_title(version))
+        seen.add(canonical_track_title(version))
+        labels |= _label_parts(version)
     if folder:
         title = _DECORATION_YEAR_RE.sub("", title).strip()
-    while match := _TITLE_SUFFIX_RE.search(title):
+    while match := _TITLE_BRACKET_RE.search(title) or _TITLE_SUFFIX_RE.search(title):
         label = next(part for part in match.groups() if part is not None)
         key = canonical_track_title(label)
         if re.fullmatch(r"Qobuz [a-zA-Z0-9]+", label):
             title = title[:match.start()].strip()
             continue
-        if key not in labels and key not in known_versions and not _VERSION_LABEL_RE.search(label):
+        if key not in seen and key not in known_versions and not _VERSION_LABEL_RE.search(label):
             break
-        labels.add(key)
+        seen.add(key)
+        labels |= _label_parts(label)
         title = title[:match.start()].strip()
     return canonical_track_title(beets_sanitize(title)), frozenset(labels)
 
@@ -651,6 +665,60 @@ def edition_album_title(album, *, separate=False):
         label = "Explicit" if album.get("parental_warning") else f"Qobuz {album.get('id')}"
         return f"{title} ({label})"
     return None
+
+
+def _remaster_years(labels):
+    remasters = {
+        label: match for label in labels
+        if (match := re.fullmatch(r"([0-9]{4})?remaster(?:ed)?([0-9]{4})?", label))
+    }
+    return remasters, {year for match in remasters.values() for year in match.groups() if year}
+
+
+def _compatible_remaster_labels(left, right):
+    editions = []
+    for labels in (left, right):
+        remasters, years = _remaster_years(labels)
+        if not remasters or len(years) > 1:
+            return False
+        editions.append((labels - remasters.keys(), years))
+    (left_other, left_years), (right_other, right_years) = editions
+    return (left_other == right_other
+            and (not left_years or not right_years or left_years == right_years))
+
+
+def _same_recording_labels(track_labels, album_labels, local_labels, *, same_isrc,
+                           same_release=lambda: False):
+    """Whether labels allow a track match. Packaging labels such as Deluxe
+    Edition never decide it. With the same ISRC, only mix and master labels
+    count: an album label may be missing from the files when their track label
+    names the same mix or master, and a remaster label that only one side
+    states is settled by the files carrying this release's copyright."""
+    if not same_isrc:
+        return ({label for label in track_labels | album_labels
+                 if not _PACKAGING_LABEL_RE.fullmatch(label)}
+                == {label for label in local_labels if not _PACKAGING_LABEL_RE.fullmatch(label)})
+    track_labels, album_labels, local_labels = (
+        {label for label in labels if _RECORDING_LABEL_RE.search(label)}
+        for labels in (track_labels, album_labels, local_labels))
+    wanted = track_labels | album_labels
+    if _compatible_remaster_labels(wanted, local_labels):
+        return True
+    named = " ".join(track_labels & local_labels)
+    unconfirmed = {word for label in local_labels - wanted
+                   for word in _RECORDING_LABEL_RE.findall(label)}
+    unconfirmed |= {word for label in wanted - local_labels
+                    for word in _RECORDING_LABEL_RE.findall(label) if word not in named}
+    if not unconfirmed:
+        return True
+    wanted_years, local_years = _remaster_years(wanted)[1], _remaster_years(local_labels)[1]
+    return (unconfirmed == {"remaster"}
+            and not (wanted_years and local_years and wanted_years != local_years)
+            and same_release())
+
+
+def _copyright_key(text):
+    return canonical_track_title(re.sub(r"\([pc]\)", "", text or "", flags=re.IGNORECASE))
 
 
 def _edition_pairs(album, existing, folder, *, album_folder=None):
@@ -669,12 +737,23 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
     local_isrcs = [_norm_isrc(t.get("isrc")) for t in existing]
     local_albums = [_edition_title_parts(t.get("album"), known_versions=known_versions)
                     for t in existing]
+    release_copyright = _copyright_key(album.get("copyright"))
+    copyrights = {}
+
+    def same_release(local):
+        path = local.get("path")
+        if not release_copyright or not path:
+            return False
+        if path not in copyrights:
+            copyrights[path] = _copyright_key(read_copyright(path))
+        return copyrights[path] == release_copyright
+
     used = set()
     pairs = {}
     for index in sorted(range(len(tracks)), key=lambda i: not tracks[i].get("isrc")):
         track = tracks[index]
-        wanted, version = _edition_title_parts(_release_title(track), track.get("version"))
-        version = version | album_version
+        wanted, track_version = _edition_title_parts(_release_title(track), track.get("version"))
+        version = track_version | album_version
         isrc = _norm_isrc(track.get("isrc"))
         matches = []
         for local_index, local in enumerate(existing):
@@ -684,14 +763,16 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
                 continue
             if disc_scoped and (track.get("media_number") or 1) != (local.get("discnumber") or 1):
                 continue
-            local_title, track_version = local_keys[local_index]
+            local_title, local_version = local_keys[local_index]
             local_album, tag_version = local_albums[local_index]
-            local_version = track_version
             if not version or not version.issubset(local_version):
                 local_version = local_version | (tag_version or folder_version)
-            if version != local_version:
-                continue
             same_recording = bool(isrc and isrc == local_isrcs[local_index])
+            if version != local_version and not _same_recording_labels(
+                    track_version, album_version, local_version,
+                    same_isrc=same_recording and canonical_recording_id(isrc, "isrc"),
+                    same_release=lambda: same_release(local)):
+                continue
             same_album = album_key in (local_album, folder_key)
             if same_recording or (wanted and wanted == local_title and same_album):
                 matches.append(local_index)
