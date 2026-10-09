@@ -11,9 +11,10 @@ def test_compilations_stay_in_downsample_results_after_a_library_refresh(
     from mutagen import flac
 
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import downsample_state, library_scan_state
+    from qobuz_librarian.library import downsample, downsample_state, library_scan_state
     from qobuz_librarian.web import flows
 
+    monkeypatch.setattr(downsample, "HAVE_DOWNSAMPLE", True)
     music = tmp_path / "music"
     track = tagged_flac(music / "Various Artists" / "Compilation" / "01.flac")
     audio = flac.FLAC(track)
