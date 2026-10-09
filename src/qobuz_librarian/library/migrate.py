@@ -2627,6 +2627,8 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                 if exc.interrupted:
                     result.cancelled = True
                     cleanup_primary = exc.cause
+                elif exc.errno == errno.ENOSPC:
+                    result.cancelled = True
                 elif not isinstance(exc.cause, Exception):
                     result.cancelled = True
                     fatal_exception = exc.cause
@@ -2650,6 +2652,8 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                 ))
             except (OSError, shutil.Error) as exc:
                 log.info(f"  ⚠  couldn't carry {name}: {exc}")
+                if getattr(exc, "errno", None) == errno.ENOSPC:
+                    result.cancelled = True
                 result.companion_outcomes.append((
                     source_path,
                     destination_path,
@@ -5189,6 +5193,9 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                     result.cancelled = True
                     stop_after_item = True
                     cleanup_primary = exc.cause
+                elif exc.errno == errno.ENOSPC:
+                    result.cancelled = True
+                    stop_after_item = True
                 elif not isinstance(exc.cause, Exception):
                     result.cancelled = True
                     fatal_exception = exc.cause
