@@ -109,6 +109,11 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                 "queued. Check the permissions of that file and the data "
                 "folder, and free space, then restart Qobuz Librarian."
             )
+    elif not runtime._JOBS_RESTORED:
+        reason = "Saved downloads and reviews could not be loaded."
+        msg = (reason + " Downloads and scans are paused; "
+               "Qobuz Librarian retries automatically.")
+        action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
     elif (queue_recovery._startup_recovery_status_value() == "attention_required"):
         relocation = queue_recovery._post_import_relocation_recovery()
         if relocation is not None:
@@ -268,6 +273,7 @@ def _web_writes_paused() -> bool:
         or bool(storage._unwritable_volumes())
         or not storage._data_dir_available()
         or not job_mgr.job_persistence.ready_for_admission()
+        or not runtime._JOBS_RESTORED
         or runtime._LOCK_UNENFORCEABLE
         or not runtime._run_lock_intact()
         or queue_recovery._startup_recovery_status_value() in {
@@ -292,6 +298,9 @@ def _readiness_report() -> tuple[int, dict]:
         and not job_mgr.job_persistence.ready_for_admission()
     ):
         failed.append("job_persistence")
+    if (not runtime._CLI_MODE and runtime._run_lock_intact()
+            and not runtime._JOBS_RESTORED):
+        failed.append("saved_jobs")
     if runtime._LOCK_UNENFORCEABLE or (
         not runtime._CLI_MODE
         and runtime._LOCK_BUSY_PID is None

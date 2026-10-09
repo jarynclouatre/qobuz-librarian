@@ -122,18 +122,27 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
 
 
 async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
-    """Retry a busy lock and an acquired lease whose recovery read failed."""
-    while runtime._LOCK_BUSY_PID is not None or queue_recovery._STARTUP_RECOVERY_UNKNOWN:
+    """Retry lock acquisition and saved-job restoration while Web is active."""
+    while True:
         await asyncio.sleep(delay)
         with runtime._auto_check_lock:
-            if runtime._CLI_MODE:
+            if runtime._SHUTTING_DOWN:
                 return
+            if runtime._CLI_MODE:
+                continue
+            if runtime._run_lock_intact():
+                if not runtime._JOBS_RESTORED:
+                    _restore_jobs_once()
+                continue
+            if (runtime._LOCK_BUSY_PID is None
+                    and not queue_recovery._STARTUP_RECOVERY_UNKNOWN):
+                continue
         try:
             lease = run_lock.acquire("web")
         except run_lock.LockBusy as busy:
             with runtime._auto_check_lock:
                 if runtime._CLI_MODE:
-                    return
+                    continue
                 runtime._LOCK_BUSY_PID = busy.pid
             continue
 
@@ -141,7 +150,7 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
             if runtime._CLI_MODE:
                 if lease is not None:
                     _close_web_run_lock(lease)
-                return
+                continue
             if lease is None:
                 runtime._RUN_LOCK_HANDLE = None
                 runtime._LOCK_BUSY_PID = None
@@ -151,7 +160,7 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
                     "paused until a lock-capable data folder is available "
                     "and the app is restarted."
                 )
-                return
+                continue
             try:
                 result = _recover_under_web_run_lock(lease)
             except Exception:
@@ -168,18 +177,18 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
             "Lock acquired; durable queue startup state: %s.",
             result.status.value,
         )
-        return
 
 
-def _restore_jobs_once() -> None:
+def _restore_jobs_once() -> bool:
     with runtime._JOBS_RESTORE_LOCK:
         if runtime._JOBS_RESTORED:
-            return
-        # Ahead of the restore, which would otherwise reopen a gone backup as a
-        # failure pointing at the notice this settles away, and ahead of the
-        # first page render, which carries the attention count.
-        rendering._retire_gone_recoveries(job_persistence.recovery_history())
+            return True
         try:
+            job_persistence.init()
+            if not job_persistence.ready_for_admission():
+                return False
+            rendering._retire_gone_recoveries(
+                job_persistence.recovery_history(strict=True))
             job_mgr.restore_jobs(
                 job_runs._RESUME_EXECUTE,
                 durable_recovery_clear=(
@@ -190,13 +199,12 @@ def _restore_jobs_once() -> None:
             )
         except Exception as exc:
             _log.warning(
-                "couldn't restore prior jobs: %s. Starting fresh.",
+                "couldn't restore saved jobs; downloads stay paused: %s",
                 exc,
             )
-        finally:
-            # restore_jobs publishes into the registry only after it has built
-            # the full batch.
-            runtime._JOBS_RESTORED = True
+            return False
+        runtime._JOBS_RESTORED = True
+        return True
 
 
 def _watch_stop_signal(loop) -> None:
@@ -342,11 +350,7 @@ async def _lifespan(_app: FastAPI):
     ticker = None
     token_probe_task = None
     try:
-        lock_retry_task = (
-            asyncio.create_task(_retry_web_run_lock(_log))
-            if runtime._LOCK_BUSY_PID is not None
-            else None
-        )
+        lock_retry_task = asyncio.create_task(_retry_web_run_lock(_log))
 
         problems = storage._unwritable_volumes()
         if problems:
@@ -369,6 +373,8 @@ async def _lifespan(_app: FastAPI):
             except Exception as e:
                 _log.debug("repair-cache prune error: %s", e)
         maintenance_task = None
+        if runtime._run_lock_intact():
+            _restore_jobs_once()
         run_startup_maintenance = _has_startup_write_authority()
         if run_startup_maintenance:
             # The CLI runs these too. A browsing-only Web process must leave them
@@ -411,10 +417,6 @@ async def _lifespan(_app: FastAPI):
             _log.warning("`flac` not found; FLAC integrity checks fall back to a size heuristic")
         if not shutil.which("ffmpeg"):
             _log.warning("`ffmpeg` not found; hi-res downsampling disabled")
-        # A second Web process must not rebadge the first process's live jobs
-        # as failed merely because it cannot take the run lock.
-        if runtime._run_lock_intact():
-            _restore_jobs_once()
         # Probe the saved token against Qobuz so a stale slot (non-empty but
         # not actually authenticated) surfaces in the dashboard banner rather
         # than failing the user's first search.

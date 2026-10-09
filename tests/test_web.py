@@ -1690,12 +1690,11 @@ def test_a_finished_download_is_not_failed_by_another_items_recovery(
 
 
 def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
-        monkeypatch):
-    # Hundreds of queued albums came back as failed rows to retry one by
-    # one. Only the download that had started may be failed: replaying it
-    # could repeat work that already touched the library.
-    from qobuz_librarian.web import job_persistence, job_runs
+        client, monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import job_persistence, lifespan, runtime, write_gate
 
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     job_persistence._reset_for_tests()
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
@@ -1703,14 +1702,55 @@ def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
                      status=jm.JobStatus.RUNNING)
     third = jm.Job(title="Third", album_id="3", created_at=300.0)
     second = jm.Job(title="Second", album_id="2", created_at=200.0)
-    for job in (started, third, second):
+    finished = jm.Job(title="Finished", album_id="4", created_at=50.0)
+    for job in (started, third, second, finished):
         job_persistence.persist(job)
+    connection = job_persistence._conn
+    connection.execute(
+        "INSERT INTO durable_job_completions "
+        "(job_id, job_created_at, album_id, operation_id, item_id, "
+        "completion_hash, acknowledged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (finished.id, finished.created_at, finished.album_id,
+         "completed-import", "album", "a" * 64, 75.0),
+    )
+    connection.commit()
+
+    class UnavailableRead:
+        query = "FROM jobs ORDER BY created_at"
+
+        def execute(self, query, *args):
+            if self.query in query:
+                raise sqlite3.OperationalError("disk I/O error")
+            return connection.execute(query, *args)
+
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+    unavailable = UnavailableRead()
+    monkeypatch.setattr(job_persistence, "_conn", unavailable)
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
     monkeypatch.setattr(jm, "_held_downloads", [])
+    monkeypatch.setattr(runtime, "_JOBS_RESTORED", False)
 
-    jm.restore_jobs({}, requeue=job_runs._requeued_download_run)
+    assert lifespan._restore_jobs_once() is False
+    assert write_gate._web_writes_paused()
+    assert write_gate._readiness_report()[0] == 503
+    assert not jm.registry.all()
+    assert not jm._held_downloads
+
+    unavailable.query = "FROM durable_job_completions"
+    assert lifespan._restore_jobs_once() is False
+    assert not jm.registry.all()
+    assert not jm._held_downloads
+
+    monkeypatch.setattr(job_persistence, "_conn", connection)
+    assert lifespan._restore_jobs_once() is True
+    assert lifespan._restore_jobs_once() is True
+    assert write_gate._readiness_report()[0] == 200
 
     assert jm.registry.get(started.id).status == jm.JobStatus.FAILED
+    assert jm.registry.get(finished.id).status == jm.JobStatus.DONE
+    assert len(jm.registry.all()) == 4
     assert [job.id for job, _run in jm._held_downloads] == [second.id, third.id]
     assert {job.status for job, _run in jm._held_downloads} == {
         jm.JobStatus.PENDING}

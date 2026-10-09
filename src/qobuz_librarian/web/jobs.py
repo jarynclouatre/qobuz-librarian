@@ -2187,6 +2187,7 @@ def restore_jobs(
                     job.id,
                     job_created_at=job.created_at,
                     album_id=job.album_id,
+                    strict=True,
                 )
                 is True
             )

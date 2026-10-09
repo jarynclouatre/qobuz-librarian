@@ -1197,6 +1197,7 @@ def durable_completion_acknowledged(
     *,
     job_created_at: float,
     album_id: str,
+    strict: bool = False,
 ) -> bool | None:
     """Check an exact job incarnation and album, or None if DB is unavailable."""
     if (
@@ -1209,6 +1210,8 @@ def durable_completion_acknowledged(
     with _lock:
         conn = _get_conn()
         if conn is None:
+            if strict:
+                raise RuntimeError("saved download completions are unavailable")
             return None
         try:
             return conn.execute(
@@ -1217,6 +1220,8 @@ def durable_completion_acknowledged(
                 (job_id, job_created_at, album_id),
             ).fetchone() is not None
         except sqlite3.Error as exc:
+            if strict:
+                raise
             _log.debug(
                 "couldn't inspect durable completion for %s: %s",
                 job_id,
@@ -1822,11 +1827,14 @@ def history_page(limit: int, offset: int,
     return result
 
 
-def recovery_history(*, attention_only: bool = False) -> list[dict]:
+def recovery_history(*, attention_only: bool = False,
+                     strict: bool = False) -> list[dict]:
     """Unresolved recoveries, optionally limited to terminal attention."""
     with _lock:
         conn = _get_conn()
         if conn is None:
+            if strict:
+                raise RuntimeError("saved recovery history is unavailable")
             return []
         try:
             attention_clause = (
@@ -1843,6 +1851,8 @@ def recovery_history(*, attention_only: bool = False) -> list[dict]:
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC"
             ).fetchall()
         except sqlite3.Error as exc:
+            if strict:
+                raise
             _log.debug("recovery_history failed: %s", exc)
             return []
     result = []
@@ -1997,30 +2007,23 @@ def clear_history(*, retain_job_id: str | None = None) -> bool:
 
 
 def load_all() -> list[dict]:
-    """Return persisted jobs with logs left encoded until needed.
-
-    Returns [] when the db can't be opened.
-    """
+    """Read saved jobs, leaving logs encoded until needed. Raise on failure."""
     with _lock:
         conn = _get_conn()
         if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT id, title, artist, album_id, kind, status, phase, "
-                # A finished job never reopens its rows, so its text is not read back.
-                "CASE WHEN status='awaiting_review' OR (status='pending' "
-                f"AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
-                "THEN candidates END, "
-                "error, summary, review_verb, execute_kind, "
-                "execute_args, created_at, finished_at, single, attention, "
-                "recoveries, log_lines, quality_shortfall, edition "
-                "FROM jobs ORDER BY created_at",
-                REVIEW_PICK_KINDS,
-            ).fetchall()
-        except sqlite3.Error as e:
-            _log.info("couldn't read jobs.db on startup (%s); starting fresh.", e)
-            return []
+            raise RuntimeError("saved jobs are unavailable")
+        rows = conn.execute(
+            "SELECT id, title, artist, album_id, kind, status, phase, "
+            # A finished job never reopens its rows, so its text is not read back.
+            "CASE WHEN status='awaiting_review' OR (status='pending' "
+            f"AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
+            "THEN candidates END, "
+            "error, summary, review_verb, execute_kind, "
+            "execute_args, created_at, finished_at, single, attention, "
+            "recoveries, log_lines, quality_shortfall, edition "
+            "FROM jobs ORDER BY created_at",
+            REVIEW_PICK_KINDS,
+        ).fetchall()
     out = []
     for r in rows:
         try:
