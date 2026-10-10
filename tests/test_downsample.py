@@ -285,3 +285,28 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
     assert len(rewrites) == 1
     assert rewrites[0]["keep_originals"] is True
     assert cfg.DOWNSAMPLE_KEEP_ORIGINALS is None
+
+
+def test_clearing_staging_leaves_hires_alone_when_downsample_is_off(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets, lyrics, rip
+
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "01 - Song.flac").write_bytes(b"x")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_HIRES_ENABLED", False)
+    monkeypatch.setattr(rip, "cleanup_staging_residue", lambda: 0)
+    monkeypatch.setattr(beets, "ask", lambda *_a, **_k: "1")
+    calls = []
+    monkeypatch.setattr(de, "HAVE_DOWNSAMPLE", True)
+    monkeypatch.setattr(de, "downsample_dir", lambda d, **_k: calls.append(d))
+
+    def stop(_directory):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lyrics, "_run_lyric_hook", stop)
+
+    with pytest.raises(SystemExit):
+        beets.staging_preflight(SimpleNamespace(yes=False, no_downsample=False))
+    assert calls == []

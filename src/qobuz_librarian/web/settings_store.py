@@ -602,6 +602,7 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
     # baseline that decides whether a posted value is actually a change.
     baseline = current() if baseline is None else baseline
     clean = {}
+    unchanged = set()
     warnings = []
     for k in BEHAVIOR_KEYS:
         if k in values:
@@ -634,6 +635,10 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             items = _str_to_list(raw) if isinstance(raw, str) else list(raw or [])
             kept, dropped = _validate_list(key, items)
             clean[key] = ",".join(kept)
+            # "lrclib,netease" from Compose saves as "Lrclib,NetEase"; that is
+            # no change and must not pin the field.
+            if kept == _validate_list(key, _str_to_list(baseline.get(key) or ""))[0]:
+                unchanged.add(key)
             if dropped:
                 warnings.append(_dropped_warning(key, dropped))
         else:
@@ -659,7 +664,7 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             # is what carrying no key means, so the key leaves the store rather
             # than pinning a blank over the Compose value for good.
             persisted.pop(k, None)
-        elif k in persisted or v != baseline.get(k):
+        elif k in persisted or (v != baseline.get(k) and k not in unchanged):
             persisted[k] = v
 
     # cfg has to follow in this session, not only after the next restart.

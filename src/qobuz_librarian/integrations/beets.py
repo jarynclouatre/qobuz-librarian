@@ -8744,7 +8744,8 @@ def staging_preflight(args):
             downsample_dir,
         )
 
-        if HAVE_DOWNSAMPLE and not getattr(args, "no_downsample", False):
+        if (cfg.DOWNSAMPLE_HIRES_ENABLED and HAVE_DOWNSAMPLE
+                and not getattr(args, "no_downsample", False)):
             try:
                 for _directory in _pre_dirs:
                     downsample_dir(_directory, verbose=True, base_dir=cfg.STAGING_DIR, log=log.info)

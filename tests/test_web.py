@@ -906,6 +906,21 @@ def test_settings_retry_keeps_edits_and_custom_timer_values(client, tmp_path, mo
     assert json.loads(store.read_text()) == {"LYRICS_ENABLED": False}
 
 
+def test_unchanged_lyric_providers_from_compose_are_not_pinned(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
+    monkeypatch.setattr(cfg, "LYRICS_PROVIDERS", ["lrclib", "netease"])
+    with ss._pending_lock:
+        ss._pending_apply = None
+
+    ok, _ = ss.save({"LYRICS_PROVIDERS": ss.current()["LYRICS_PROVIDERS"]})
+    assert ok
+    assert "LYRICS_PROVIDERS" not in (ss._read_settings() or {})
+
+
 def test_concurrent_settings_saves_merge_without_losing_either_change(tmp_path, monkeypatch):
     import json
     import threading
