@@ -2070,11 +2070,14 @@ def process_album(album, args, *, allow_force=True, label=None,
     else:
         section("Result")
         log.info("")
+        # A damaged file that could not be tied to its track is already that
+        # track's failure; don't count the same song twice.
+        n_incomplete = max(n_retryable - n_fail, 0)
         log.info(f"  {fmt(C.GREEN if n_ok else C.GRAY,    '✓ downloaded:')}    {n_ok}")
         if n_truly_lossy:
             log.info(f"  {fmt(C.YELLOW, '⚠ lossy on Qobuz:')} {n_truly_lossy}")
-        if broken_tracks:
-            log.info(f"  {fmt(C.YELLOW, '⚠ incomplete:')}    {len(broken_tracks)}")
+        if n_incomplete:
+            log.info(f"  {fmt(C.YELLOW, '⚠ incomplete:')}    {n_incomplete}")
         if n_fail:
             log.info(f"  {fmt(C.RED, '✗ failed:')}        {n_fail}")
         if downsample_outcome["downsample_errors"]:
@@ -2110,7 +2113,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 "\n  only available lossy on Qobuz (would need another source):"))
             for t in truly_lossy[:10]:
                 log.info(f"     {truncate(t, 60)}")
-        if broken_tracks:
+        if n_incomplete:
             log.info(fmt(C.YELLOW,
                 "\n  arrived incomplete and were discarded (another run fetches them again):"))
             for t in broken_tracks[:10]:

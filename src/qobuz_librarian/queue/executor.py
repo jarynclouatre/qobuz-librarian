@@ -3457,6 +3457,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                             retry_preserves_original=lambda: (
                                 retry_preserves_track_coverage(
                                     item, retry_item)))
+                        # Kept or not, a throttled re-download slows the next album.
+                        if retry_item.get("rate_limited"):
+                            item["rate_limited"] = True
                         if retry_kept:
                             retire_empty_download_staging(item)
                             for key in ("n_ok", "n_fail", "n_lossy",

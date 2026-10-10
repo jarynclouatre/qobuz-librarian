@@ -215,6 +215,37 @@ def _capture_file_identities(paths, context_tracks):
     return {str(Path(path)): _file_track_identity(path, context_tracks) for path in paths}
 
 
+def _cool_down(last_out):
+    """Pause before the next rip, longer when Qobuz throttled the last one."""
+    seconds = cfg.DELAY_BETWEEN
+    if detect_rate_limited(last_out):
+        seconds = cfg.RATE_LIMIT_COOLDOWN
+        log.info(
+            fmt(
+                C.YELLOW,
+                f"    ⏳ Qobuz rate-limit detected - cooling down "
+                f"{int(seconds)}s before the next track.",
+            )
+        )
+    # Stop must not wait out a 30s cooldown.
+    while seconds > 0 and not is_cancel_requested():
+        step = min(0.5, seconds)
+        time.sleep(step)
+        seconds -= step
+
+
+def _single_track_rip_identities(paths, track, context_tracks):
+    """A track URL that yields one audio file yielded that track.
+
+    A truncated FLAC can lose the tags that would otherwise place it, and on a
+    deluxe edition its filename number and bare title repeat on another disc.
+    """
+    identities = _capture_file_identities(paths, context_tracks)
+    if len(paths) == 1:
+        identities[str(Path(paths[0]))] = {**_track_identity(track), "conflicted": False}
+    return identities
+
+
 def _pair_files_to_tracks(paths, tracks, identities, context_tracks):
     """Pair downloaded files to Qobuz tracks without guessing at twins.
 
@@ -867,6 +898,8 @@ def run_album_download(
     # Keep failed tracks as their Qobuz objects. Titles are display text, not
     # identity: two requested tracks can share one across discs or versions.
     failed_track_objs = []
+    rip_identities = {}
+    last_out = ""
     full_album_rc = None
     rate_limited = False
 
@@ -1011,6 +1044,7 @@ def run_album_download(
                 "the download was not started."
             )
         rc, out = _rip(url, timeout=cfg.RIP_TIMEOUT, live_output=True, quality=quality)
+        last_out = out
         full_album_rc = rc
         if detect_auth_lost(out):
             raise AuthLost("rip output contained auth-lost markers")
@@ -1054,19 +1088,29 @@ def run_album_download(
                 + f"  {fmt(C.WHITE, truncate(tnum_prefix + ttl, 60))}"
             )
             report_progress("Downloading", i, len(missing), ttl)
+            track_snapshot = snapshot_staging()
             rc, out = _rip(
                 f"https://play.qobuz.com/track/{tid}", timeout=cfg.RIP_TIMEOUT, quality=quality
             )
+            track_audio = [
+                f for f in _run_files_since(track_snapshot) if f.suffix.lower() in cfg.AUDIO_EXTS
+            ]
+            rip_identities.update(_single_track_rip_identities(track_audio, t, qobuz_tracks))
             if detect_auth_lost(out):
                 raise AuthLost("rip output contained auth-lost markers")
             if detect_disk_full(out):
                 raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
             rate_limited = rate_limited or detect_rate_limited(out)
-            if rc == 0:
+            if rc == 0 and track_audio:
                 log.info(fmt(C.GREEN, "    ✓ ok"))
             elif is_cancel_requested():
                 # rip exited because we asked it to stop, not a real failure.
                 break
+            elif rc == 0:
+                # streamrip logs a refused track and still exits 0.
+                failed_track_objs.append(t)
+                log.info(fmt(C.RED, "    ✗ no file arrived"))
+                log.info(fmt(C.GRAY, "      " + out[-200:].replace("\n", " ")))
             else:
                 failed_track_objs.append(t)
                 if "KeyError: 'body'" in out:
@@ -1083,18 +1127,9 @@ def run_album_download(
             # Qobuz throttles sustained per-track pulls; when the last rip shows
             # throttle signals, pause longer before the next so we stop pounding
             # the limit.
-            cooldown = cfg.RATE_LIMIT_COOLDOWN if detect_rate_limited(out) else 0
-            if cooldown and i < len(missing):
-                log.info(
-                    fmt(
-                        C.YELLOW,
-                        f"    ⏳ Qobuz rate-limit detected - cooling down "
-                        f"{int(cooldown)}s before the next track.",
-                    )
-                )
-                time.sleep(cooldown)
-            else:
-                time.sleep(cfg.DELAY_BETWEEN)
+            last_out = out
+            if i < len(missing):
+                _cool_down(out)
 
     new_files = _run_files_since(snapshot)
     audio_new = [f for f in new_files if f.suffix.lower() in cfg.AUDIO_EXTS]
@@ -1102,6 +1137,7 @@ def run_album_download(
     # cleanup_lossy removes rejects, so capture their tags and path-derived
     # disc/track identity first. A title alone is not safe for same-title twins.
     file_identities = _capture_file_identities(audio_new, qobuz_tracks)
+    file_identities.update(rip_identities)
     if recovery_owner is None:
         kept, lossy, broken = cleanup_lossy(audio_new)
     else:
@@ -1140,6 +1176,9 @@ def run_album_download(
                     continue
                 # Collect this target independently. A clean same-title file
                 # produced by another retry must never vouch for this one.
+                _cool_down(last_out)
+                if is_cancel_requested():
+                    break
                 retry_snapshot = snapshot_staging()
                 rc, out = _rip(
                     f"https://play.qobuz.com/track/{tid}", timeout=cfg.RIP_TIMEOUT, quality=quality
@@ -1149,20 +1188,23 @@ def run_album_download(
                 if detect_disk_full(out):
                     raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
                 rate_limited = rate_limited or detect_rate_limited(out)
+                last_out = out
                 retry_audio = [
                     f
                     for f in _run_files_since(retry_snapshot)
                     if f.suffix.lower() in cfg.AUDIO_EXTS
                 ]
-                retry_identities = _capture_file_identities(retry_audio, qobuz_tracks)
+                retry_identities = _single_track_rip_identities(retry_audio, t, qobuz_tracks)
                 if recovery_owner is None:
-                    retry_kept, _, _ = cleanup_lossy(retry_audio)
+                    retry_kept, retry_lossy, retry_broken = cleanup_lossy(retry_audio)
                 else:
-                    retry_kept, _, _ = cleanup_lossy(
+                    retry_kept, retry_lossy, retry_broken = cleanup_lossy(
                         retry_audio,
                         owner=recovery_owner,
                         on_intent=recovery_checkpoint,
                     )
+                # A second reject of the same track is surplus to the first.
+                resolved_rejects.extend(retry_lossy + retry_broken)
                 matches = _pair_files_to_tracks(retry_kept, [t], retry_identities, qobuz_tracks)
                 if not matches:
                     continue
@@ -1227,6 +1269,7 @@ def run_album_download(
             )
             recovered = 0
             for t in hard_targets:
+                _cool_down(last_out)
                 if is_cancel_requested():
                     break
                 hard_snapshot = snapshot_staging()
@@ -1240,11 +1283,11 @@ def run_album_download(
                 if detect_disk_full(out):
                     raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
                 rate_limited = rate_limited or detect_rate_limited(out)
-                time.sleep(cfg.DELAY_BETWEEN)
+                last_out = out
                 hard_audio = [
                     f for f in _run_files_since(hard_snapshot) if f.suffix.lower() in cfg.AUDIO_EXTS
                 ]
-                hard_identities = _capture_file_identities(hard_audio, qobuz_tracks)
+                hard_identities = _single_track_rip_identities(hard_audio, t, qobuz_tracks)
                 if recovery_owner is None:
                     hard_kept, hard_lossy, hard_broken = cleanup_lossy(hard_audio)
                 else:

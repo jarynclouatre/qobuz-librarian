@@ -114,6 +114,92 @@ def test_lossy_track_retried_once_and_recovers(monkeypatch, tmp_path):
     assert (r["n_ok"], r["n_lossy"], r["n_fail"]) == (2, 0, 0)
 
 
+def test_untagged_broken_track_on_deluxe_twin_disc_is_retried(monkeypatch, tmp_path):
+    # Houses of the Holy deluxe: disc 1 and disc 2 both open track 2 with
+    # "The Rain Song", and a truncated rip has no tags to place it.
+    tracks = [
+        {"id": 101, "title": "The Rain Song", "version": "Remaster",
+         "media_number": 1, "track_number": 2},
+        {"id": 202, "title": "The Rain Song", "version": "Mix Minus Piano",
+         "media_number": 2, "track_number": 2},
+    ]
+    broken = tmp_path / "02. The Rain Song (Remaster).flac"
+    recovered = tmp_path / "02. The Rain Song (Remaster) retry.flac"
+    broken.write_bytes(b"truncated")
+    recovered.write_bytes(b"x")
+    rips = []
+
+    def rip(url, **_k):
+        rips.append(url)
+        return (0, "")
+
+    deltas = iter([[broken], [broken], [recovered]])
+    cleans = iter([([], [], [broken]), ([recovered], [], [])])
+    _patch(monkeypatch, rip=rip,
+           added=lambda _s: next(deltas, []),
+           cleanup=lambda _f: next(cleans, ([], [], [])))
+    monkeypatch.setattr(dl, "read_audio_meta", lambda _p: {})
+
+    r = dl.run_album_download(album=_album(tracks), missing=tracks[:1],
+                              present=tracks[1:], album_dir=None, snapshot=set())
+
+    assert rips == ["https://play.qobuz.com/track/101"] * 2
+    assert (r["n_ok"], r["n_fail"]) == (1, 0)
+
+
+def test_track_rip_that_exits_cleanly_without_a_file_is_retried(monkeypatch, tmp_path):
+    tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in (1, 2)]
+    landed = tmp_path / "02 - T2.flac"
+    landed.write_bytes(b"x")
+    rips = []
+
+    def rip(url, **_k):
+        rips.append(url)
+        return (0, "ERROR Track 2 not available for stream")
+
+    deltas = iter([[], [], [landed]])
+    _patch(monkeypatch, rip=rip,
+           added=lambda _s: next(deltas, []),
+           cleanup=lambda f: (list(f), [], []))
+
+    r = dl.run_album_download(album=_album(tracks), missing=tracks[1:],
+                              present=tracks[:1], album_dir=None, snapshot=set())
+
+    assert rips == ["https://play.qobuz.com/track/2"] * 2
+    assert (r["n_ok"], r["n_fail"]) == (1, 0)
+
+
+def test_throttled_last_track_cools_down_before_its_retry(monkeypatch, tmp_path):
+    track = {"id": 7, "title": "T7", "track_number": 7}
+    first = tmp_path / "07 - T7.flac"
+    second = tmp_path / "07 - T7 again.flac"
+    for path in (first, second):
+        path.write_bytes(b"truncated")
+    events = []
+
+    def rip(url, **_k):
+        events.append("rip")
+        return (0, "HTTP 429")
+
+    deltas = iter([[first], [first], [second]])
+    cleans = iter([([], [], [first]), ([], [], [second])])
+    discarded = []
+    _patch(monkeypatch, rip=rip,
+           added=lambda _s: next(deltas, []),
+           cleanup=lambda _f: next(cleans, ([], [], [])))
+    monkeypatch.setattr(dl, "detect_rate_limited", lambda out: "429" in out)
+    monkeypatch.setattr(dl.time, "sleep", events.append)
+    monkeypatch.setattr(dl, "discard_quarantined_file",
+                        lambda path: discarded.append(Path(path)) or True)
+
+    dl.run_album_download(album=_album([track]), missing=[track], present=[],
+                          album_dir=None, snapshot=set(), force_track_by_track=True)
+
+    retry = events.index("rip", 1)
+    assert sum(events[1:retry]) == cfg.RATE_LIMIT_COOLDOWN
+    assert sorted(discarded) == sorted([first, second])
+
+
 def test_full_album_backs_up_present_tracks_before_rip(monkeypatch, tmp_path):
     from qobuz_librarian.library.backup import library_backup_matches_intent
 
