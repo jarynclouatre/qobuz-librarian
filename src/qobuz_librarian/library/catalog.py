@@ -577,7 +577,9 @@ def _disc_scoped_match(qobuz_tracks, existing_tracks):
 
 
 def _qobuz_keys(qobuz_tracks, disc_scoped=True):
-    return [_track_key(qt.get("title"), qt.get("media_number", 1) or 1,
+    # Qobuz keeps "Live" or "Mix Minus Piano" in the version field; the file's
+    # title tag carries it, so compare the same full title.
+    return [_track_key(_release_title(qt), qt.get("media_number", 1) or 1,
                        qt.get("isrc"), disc_scoped=disc_scoped)
             for qt in qobuz_tracks]
 
@@ -721,6 +723,14 @@ def _copyright_key(text):
     return canonical_track_title(re.sub(r"\([pc]\)", "", text or "", flags=re.IGNORECASE))
 
 
+def _version_in_title(track):
+    version = (track.get("version") or "").strip()
+    title = track.get("title") or ""
+    return bool(version
+                and re.search(rf"(?<!\w){re.escape(version)}(?!\w)", title, re.IGNORECASE)
+                and canonical_track_title(version) in _edition_title_parts(title)[0])
+
+
 def _edition_pairs(album, existing, folder, *, album_folder=None):
     tracks = (album.get("tracks") or {}).get("items") or []
     album_key, album_version = _edition_title_parts(
@@ -731,6 +741,8 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
         canonical_track_title(t["version"]) for t in tracks if t.get("version"))
     folder_key, folder_version = _edition_title_parts(
         folder.name if folder is not None else "", folder=True, known_versions=known_versions)
+    track_labels = [_label_parts(t["version"]) if t.get("version") else frozenset()
+                    for t in tracks]
     disc_scoped = _disc_scoped_match(tracks, existing)
     local_keys = [_edition_title_parts(t.get("title"), known_versions=known_versions)
                   for t in existing]
@@ -752,8 +764,17 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
     pairs = {}
     for index in sorted(range(len(tracks)), key=lambda i: not tracks[i].get("isrc")):
         track = tracks[index]
-        wanted, track_version = _edition_title_parts(_release_title(track), track.get("version"))
-        version = track_version | album_version
+        # "To Live Is to Fly" with version "Live": the word is the title's own.
+        title_word = _version_in_title(track)
+        wanted, track_version = _edition_title_parts(
+            _release_title(track), "" if title_word else track.get("version"))
+        track_album = album_version - _label_parts(track["version"]) if title_word else album_version
+        if track_version:
+            # Blue Lines is "2012 Mix/Master" because eight tracks are; the
+            # ninth says "Remastered 2012" and is not bound by their label.
+            track_album = track_album - frozenset().union(
+                *(labels for i, labels in enumerate(track_labels) if i != index))
+        version = track_version | track_album
         isrc = _norm_isrc(track.get("isrc"))
         matches = []
         for local_index, local in enumerate(existing):
@@ -761,15 +782,16 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
                 continue
             if isrc and local_isrcs[local_index] and isrc != local_isrcs[local_index]:
                 continue
-            if disc_scoped and (track.get("media_number") or 1) != (local.get("discnumber") or 1):
+            same_recording = bool(isrc and isrc == local_isrcs[local_index])
+            if (disc_scoped and not same_recording
+                    and (track.get("media_number") or 1) != (local.get("discnumber") or 1)):
                 continue
             local_title, local_version = local_keys[local_index]
             local_album, tag_version = local_albums[local_index]
             if not version or not version.issubset(local_version):
                 local_version = local_version | (tag_version or folder_version)
-            same_recording = bool(isrc and isrc == local_isrcs[local_index])
             if version != local_version and not _same_recording_labels(
-                    track_version, album_version, local_version,
+                    track_version, track_album, local_version,
                     same_isrc=same_recording and canonical_recording_id(isrc, "isrc"),
                     same_release=lambda: same_release(local)):
                 continue
@@ -777,7 +799,9 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
             if same_recording or (wanted and wanted == local_title and same_album):
                 matches.append(local_index)
         if matches:
-            picked = max(matches, key=lambda i: bool(isrc and isrc == local_isrcs[i]))
+            picked = max(matches, key=lambda i: (
+                bool(isrc and isrc == local_isrcs[i]),
+                (track.get("media_number") or 1) == (existing[i].get("discnumber") or 1)))
             used.add(picked)
             pairs[index] = picked
     return pairs

@@ -83,6 +83,12 @@ def test_compute_missing_disc_and_edition_handling():
     assert len(p) == 1 and not m
     m, p = compute_missing([_qt("Song")], [_et("Song (Acoustic)")])
     assert len(m) == 1 and not p
+    # Qobuz keeps the recording label in "version": a studio file does not
+    # own the live take, but still owns a remaster.
+    m, p = compute_missing([{**_qt("Song"), "version": "Live"}], [_et("Song")])
+    assert len(m) == 1 and not p
+    m, p = compute_missing([{**_qt("Song"), "version": "2014 Remaster"}], [_et("Song")])
+    assert len(p) == 1 and not m
     # A rip that tags both discs as disc 1 is still complete.
     qobuz = [_qt("One"), _qt("Two"), _qt("Three", disc=2), _qt("Four", disc=2)]
     m, p = compute_missing(qobuz, [_et(t["title"]) for t in qobuz])
@@ -274,6 +280,23 @@ def test_edition_ownership_keeps_recording_versions(tmp_path, tagged_flac):
     assert catalog.edition_missing(remastered_live, [local_live], plain_folder)[0] == [live]
     assert not catalog.edition_missing(remastered_live, [
         {**local_live, "album": "Album (2026 Remaster)"}], plain_folder)[0]
+
+    odd = {**track, "id": "odd", "version": "Remastered 2012", "isrc": "GBAAA0000009"}
+    blue_lines = {**album, "version": "2012 Mix/Master", "tracks": {"items": [
+        {**track, "version": "2012 Mix/Master"}, odd]}}
+    odd_file = {**original, "title": "Song (Remastered 2012)", "isrc": odd["isrc"]}
+    assert catalog.edition_missing(blue_lines, [odd_file], plain_folder)[0] == [
+        blue_lines["tracks"]["items"][0]]
+    word = {**track, "title": "To Live Is to Fly", "version": "Live"}
+    assert not catalog.edition_missing(
+        {**album, "version": "Live", "tracks": {"items": [word]}},
+        [{**original, "title": "To Live Is to Fly"}], plain_folder)[0]
+    disc_two = {**track, "id": "d2", "isrc": "GBAAA0000010", "media_number": 2}
+    moved = {**album, "version": "", "tracks": {"items": [
+        {**old_track, "media_number": 1}, {**disc_two, "version": ""}]}}
+    assert not catalog.edition_missing(moved, [
+        {**original, "discnumber": 2}, {**original, "isrc": disc_two["isrc"], "discnumber": 1}],
+        plain_folder)[0]
 
     remastered = {**old_track, "version": "Remastered"}
     remaster = {**old_album, "version": "Remastered 2009", "tracks": {"items": [remastered]}}
