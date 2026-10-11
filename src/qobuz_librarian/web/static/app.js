@@ -2757,6 +2757,19 @@
       return tc.total - tc.selected;
     }
 
+    // A tab change carries open artists over and Back reopens them, so the
+    // one control reads the groups rather than its own last press.
+    function syncExpandAll() {
+      var btn = cont.querySelector("[data-expand-all]");
+      var box = pageBox();
+      if (!btn || !box) return;
+      var groups = Array.from(box.querySelectorAll("details[data-artist]"));
+      var allOpen = groups.length > 0 && groups.every(function (d) { return d.open; });
+      btn.setAttribute("data-expand-all", allOpen ? "0" : "1");
+      btn.textContent = allOpen ? "Collapse all" : "Expand all";
+    }
+    cont.addEventListener("toggle", syncExpandAll, true);
+
     function updateDismissRest() {
       if (!dismissRest) return;
       var rest = restCount();
@@ -2836,6 +2849,7 @@
           if (c) applyCounts(scopedCounts(c, requestTab, requestQuery, requestGeneration));
           updateHideLabels();
           updateArtistChecks();
+          syncExpandAll();
         })
         .catch(function () {
           done();
@@ -2910,6 +2924,7 @@
           applyPendingChoices();
           updateHideLabels();
           updateArtistChecks();
+          syncExpandAll();
           return { ok: true, counts: c, current: current, accepted: accepted };
         })
         .catch(function (why) {
@@ -3051,6 +3066,7 @@
           applyPendingChoices();
           updateHideLabels();
           updateArtistChecks();
+          syncExpandAll();
           return true;
         })
         .catch(function (why) {
@@ -3113,6 +3129,7 @@
           if (window.htmx) window.htmx.process(document.getElementById("review-page"));
           updateHideLabels();
           updateArtistChecks();
+          syncExpandAll();
           return true;
         })
         .catch(function (why) {
@@ -3295,6 +3312,7 @@
             if (window.htmx) window.htmx.process(host);
             updateHideLabels();
             updateArtistChecks();
+            syncExpandAll();
             updateDismissRest();
             var waits = [];
             host.querySelectorAll("details[data-artist][open]").forEach(function (d) {
@@ -3386,9 +3404,7 @@
         if (box) {
           box.querySelectorAll("details[data-artist]").forEach(function (d) { d.open = openAll; });
         }
-        // The one control flips between the two actions.
-        expBtn.setAttribute("data-expand-all", openAll ? "0" : "1");
-        expBtn.textContent = openAll ? "Collapse all" : "Expand all";
+        syncExpandAll();
         return;
       }
     });
@@ -3784,7 +3800,9 @@
     var form = searchRequestForm(event);
     if (!form || !event.detail.xhr) return;
     cancelHistoryRequest();
-    saveSearchSnapshot();
+    // The same save as leaving the page: on desktop the list scrolls in its
+    // own panel, and Back should find it where it was.
+    (searchExitSave || saveSearchSnapshot)();
     var generation = parseInt(form.dataset.searchSubmission || "0", 10);
     if (!generation || activeSearchRequests.some(function (xhr) {
       return xhr.qlSearchSubmission === generation;
@@ -3819,19 +3837,23 @@
     }, 2000);
   });
 
-  function restoreSearchFormFromUrl() {
+  function setSearchForm(kind, q) {
     var form = document.querySelector(".ql-search-form");
-    if (!form || typeof URL !== "function") return;
+    if (!form) return;
+    if (["artist", "album", "track"].indexOf(kind) === -1) kind = "artist";
+    var query = form.querySelector('input[name="q"]');
+    if (query) query.value = q || "";
+    form.querySelectorAll('input[name="kind"]').forEach(function (radio) {
+      radio.checked = radio.value === kind;
+    });
+    syncSearchLabel(form);
+  }
+
+  function restoreSearchFormFromUrl() {
+    if (typeof URL !== "function") return;
     try {
       var url = new URL(location.href);
-      var kind = url.searchParams.get("kind");
-      if (["artist", "album", "track"].indexOf(kind) === -1) kind = "artist";
-      var query = form.querySelector('input[name="q"]');
-      if (query) query.value = url.searchParams.get("q") || "";
-      form.querySelectorAll('input[name="kind"]').forEach(function (radio) {
-        radio.checked = radio.value === kind;
-      });
-      syncSearchLabel(form);
+      setSearchForm(url.searchParams.get("kind"), url.searchParams.get("q"));
     } catch (error) { /* leave the form alone if the address cannot be read */ }
   }
 
@@ -3941,6 +3963,15 @@
   function rememberSearchSwap(event) {
     var target = event.detail && event.detail.target;
     if (!target || target.id !== "search-results") return;
+    // An artist link or "Search results" runs a search of its own; the box
+    // and tab say which one, so Search repeats what is listed.
+    var source = event.detail.requestConfig && event.detail.requestConfig.elt;
+    if (source && source.matches
+        && source.matches(".ql-result-action-form, .ql-result-link-form, .ql-search-back-form")) {
+      var kindField = source.querySelector('input[name="kind"]');
+      var queryField = source.querySelector('input[name="q"]');
+      if (kindField && queryField) setSearchForm(kindField.value, queryField.value);
+    }
     if (!target.querySelector("[data-search-results-root]")) {
       searchExitSave = saveSearchSnapshot;
     }
