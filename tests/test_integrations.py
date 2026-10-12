@@ -179,6 +179,158 @@ def test_lyrics_pass_leaves_lyrics_it_did_not_write(
     assert lyric_fetch.classify(track.with_suffix(".lrc").read_text()) == "synced"
 
 
+def test_synced_lyrics_must_fit_the_length_of_this_cut(
+        tmp_path, monkeypatch, tagged_flac):
+    from types import SimpleNamespace
+
+    from mutagen import flac
+
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    album = tmp_path / "Humble Pie" / "Performance"
+    studio = tagged_flac(album / "01.flac", seconds=227, title="Four Day Creep",
+                         artist="Humble Pie", album="Performance")
+    jam = tagged_flac(album / "02.flac", seconds=1007, artist="Humble Pie",
+                      title="Rollin' Stone (Live At Fillmore East)", album="Performance")
+    asked = []
+
+    def get(_url, params, timeout):
+        asked.append(params)
+        if params["track_name"] == "Four Day Creep":
+            return SimpleNamespace(status_code=200, json=lambda: {
+                "syncedLyrics": "[00:12.00]exact take\n[03:30.00]end",
+                "plainLyrics": "exact take"})
+        return SimpleNamespace(status_code=404, json=lambda: {})
+
+    def search(_query, providers, synced_only=False, plain_only=False):
+        return "[00:20.00]studio take\n[04:10.00]end" if synced_only else "studio words"
+
+    monkeypatch.setattr(lyric_fetch, "_lrclib_session",
+                        lambda: SimpleNamespace(get=get))
+    monkeypatch.setattr(lyric_fetch, "syncedlyrics", SimpleNamespace(search=search))
+
+    lyric_fetch.fetch_for_paths([studio, jam], owned_root=tmp_path,
+                                state_path=tmp_path / "state.json", workers=1)
+
+    assert asked[0] == {"track_name": "Four Day Creep", "artist_name": "Humble Pie",
+                        "album_name": "Performance", "duration": 227}
+    assert flac.FLAC(studio)["lyrics"] == ["[00:12.00]exact take\n[03:30.00]end"]
+    # Studio timing on a 17-minute jam: the words without it.
+    assert flac.FLAC(jam)["lyrics"] == ["studio words"]
+
+
+def test_recheck_removes_only_its_own_lyrics_from_instrumentals(
+        tmp_path, monkeypatch, tagged_flac):
+    from mutagen import flac
+
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    album = tmp_path / "Artist" / "Album"
+    fetched = tagged_flac(album / "01.flac", title="La La (Backing Track)",
+                          artist="Artist")
+    typed = tagged_flac(album / "02.flac", title="Theme (Instrumental)",
+                        artist="Artist", lyrics="words typed in by hand")
+    monkeypatch.setattr(
+        lyric_fetch, "search_lyrics",
+        lambda *_args, **_kwargs: ("[00:00.50]vocal take", "Lrclib", "synced", 1, 0))
+    options = dict(owned_root=tmp_path, state_path=tmp_path / "state.json",
+                   rescan=True, workers=1, lyrics_format="embed")
+    # Written before backing tracks counted as instrumentals.
+    detect = lyric_fetch.is_instrumental
+    monkeypatch.setattr(lyric_fetch, "is_instrumental", lambda _title: False)
+    lyric_fetch.fetch_for_paths([fetched], **options)
+    assert flac.FLAC(fetched)["lyrics"] == ["[00:00.50]vocal take"]
+    monkeypatch.setattr(lyric_fetch, "is_instrumental", detect)
+
+    counts = lyric_fetch.fetch_for_paths([fetched, typed], **options)
+
+    assert counts == {"removed-instrumental": 1, "already-plain": 1}
+    assert "lyrics" not in flac.FLAC(fetched)
+    assert flac.FLAC(typed)["lyrics"] == ["words typed in by hand"]
+    assert lyric_fetch.load_state(tmp_path / "state.json")[str(typed)].status == "plain"
+
+
+def _import_with_lyric_hook(tagged_flac):
+    import shutil
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyrics
+
+    staged = tagged_flac(cfg.STAGING_DIR / ".qobuz-run-1" / "Album" / "01.flac",
+                         title="Song", artist="Artist")
+    lyrics._run_lyric_hook(staged.parent)
+    imported = cfg.MUSIC_ROOT / "Artist" / "Album" / "01 - Song.flac"
+    imported.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(staged, imported)
+    return imported
+
+
+def test_plain_lyrics_written_during_import_still_upgrade_to_synced(
+        tmp_path, monkeypatch, tagged_flac):
+    from mutagen import flac
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyric_fetch, lyrics
+    from qobuz_librarian.library import lyrics as library_lyrics
+
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "LYRIC_FETCH_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    answers = [("plain words", "Lrclib", "plain", 1, 0),
+               ("[00:01.00]synced words", "Lrclib", "synced", 1, 0)]
+    monkeypatch.setattr(lyric_fetch, "search_lyrics",
+                        lambda *_args, **_kwargs: answers[0])
+    imported = _import_with_lyric_hook(tagged_flac)
+    audio = flac.FLAC(imported)
+    audio["tracknumber"] = "1"
+    audio.save()
+    lyrics.write_post_import_sidecars([imported.parent])
+    lyrics._prune_lyric_state_orphans()
+    answers.pop(0)
+    library_lyrics.run_library_lyrics()
+
+    assert flac.FLAC(imported)["lyrics"] == ["[00:01.00]synced words"]
+
+
+def test_import_leaves_lyrics_it_did_not_write_in_the_album_alone(
+        tmp_path, monkeypatch, tagged_flac):
+    # Another file in the album already holds the same words from another
+    # tool, and the import rewrites its tags. Neither copy can be told apart,
+    # so neither becomes the app's to replace.
+    from mutagen import flac
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import lyric_fetch, lyrics
+    from qobuz_librarian.library import lyrics as library_lyrics
+
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "LYRIC_FETCH_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    answers = [("plain words", "Lrclib", "plain", 1, 0),
+               ("[00:01.00]synced words", "Lrclib", "synced", 1, 0)]
+    monkeypatch.setattr(lyric_fetch, "search_lyrics",
+                        lambda *_args, **_kwargs: answers[0])
+    own = tagged_flac(cfg.MUSIC_ROOT / "Artist" / "Album" / "02 - Song (Live).flac",
+                      title="Song (Live)", artist="Artist", tracknumber="2",
+                      lyrics="plain words")
+    imported = _import_with_lyric_hook(tagged_flac)
+    sibling = flac.FLAC(own)
+    sibling["replaygain_album_gain"] = "-6.00 dB"
+    sibling.save()
+    lyrics.write_post_import_sidecars([imported.parent])
+    lyrics._prune_lyric_state_orphans()
+    answers.pop(0)
+    library_lyrics.run_library_lyrics()
+
+    assert flac.FLAC(own)["lyrics"] == ["plain words"]
+
+
 def test_post_import_sidecar_removes_only_the_preserved_embedded_copy(
         tmp_path, monkeypatch, tagged_flac):
     from mutagen import flac

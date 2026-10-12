@@ -4676,7 +4676,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         job.summary = (
             f"Nothing needed checking, all {plural(total, 'track')} have "
             "lyrics or were checked before. Tick “Re-check everything” to "
-            "redo them.")
+            "check them again.")
         log.info(job.summary)
         _close_completed_job(job)
         return
@@ -4691,13 +4691,17 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         (counts["already"],
          f"{plural(counts['already'], 'track')} already had lyrics"),
         (counts["not_found"],
-         f"no lyrics found for {plural(counts['not_found'], 'track')}"),
+         f"no lyrics found for {plural(counts['not_found'], 'track')} "
+         f"(tried again after {lyric_fetch.RECHECK_AFTER_DAYS} days)"),
         (counts["missing_tags"],
          f"{plural(counts['missing_tags'], 'track')} missing tags"),
         (counts["too_long"],
          f"{plural(counts['too_long'], 'track')} too long"),
         (counts["instrumental"],
          f"{plural(counts['instrumental'], 'track')} instrumental"),
+        (counts["cleared_instrumental"],
+         "lyrics removed from "
+         f"{plural(counts['cleared_instrumental'], 'instrumental track')}"),
         (counts["policy_skipped"],
          f"{plural(counts['policy_skipped'], 'track')} skipped by policy"),
         (counts["unsafe"],

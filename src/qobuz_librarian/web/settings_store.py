@@ -46,11 +46,7 @@ BEHAVIOR_FIELDS = [
 ]
 BEHAVIOR_KEYS = [k for k, _, _ in BEHAVIOR_FIELDS]
 
-# Provider names lyric_fetch.py knows how to drive (mirrors the provider list
-# it wires up).
-LYRICS_PROVIDER_CHOICES = [
-    "Lrclib", "NetEase", "Megalobiz", "Musixmatch", "Genius",
-]
+LYRICS_PROVIDER_CHOICES = list(cfg.LYRICS_PROVIDER_NAMES)
 
 # (key, label, help, kind, choices, placeholder).
 TEXT_FIELDS = [
@@ -411,7 +407,10 @@ def _apply(values: dict):
         raw = values[key]
         if kind == "list":
             items = _str_to_list(raw) if isinstance(raw, str) else list(raw or [])
-            items, _ = _validate_list(key, items)
+            # Lyric providers are checked where they are used: a list of only
+            # unknown names means no provider, not the built-in list.
+            if key != "LYRICS_PROVIDERS":
+                items, _ = _validate_list(key, items)
             setattr(cfg, key, items)
         elif kind == "enum":
             v = str(raw or "").strip().lower()
@@ -475,7 +474,21 @@ def _normalise(data) -> bool:
     for key in _blank_overrides(data):
         del data[key]
         changed = True
+    # A saved copy of the Compose providers changes nothing today but would
+    # hide later Compose edits for good.
+    saved = data.get("LYRICS_PROVIDERS")
+    compose = _ENV_DEFAULTS.get("LYRICS_PROVIDERS") or []
+    if saved and compose and _same_list("LYRICS_PROVIDERS", saved, compose):
+        del data["LYRICS_PROVIDERS"]
+        changed = True
     return changed
+
+
+def _same_list(key, first, second) -> bool:
+    def items(value):
+        return _str_to_list(value) if isinstance(value, str) else list(value or [])
+
+    return _validate_list(key, items(first))[0] == _validate_list(key, items(second))[0]
 
 
 def load():

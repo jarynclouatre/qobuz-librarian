@@ -8,6 +8,7 @@ import signal
 import threading
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library.lyrics import (
     HAVE_LYRICS,
     run_library_lyrics,
@@ -45,7 +46,8 @@ def run_library_lyrics_mode(args):
             "the [lyrics] extra (`pip install 'syncedlyrics>=1.0'` also works).")))
         die("syncedlyrics not installed", EXIT_CONFIG)
 
-    providers = ", ".join(cfg.LYRICS_PROVIDERS) or "Lrclib, NetEase, Musixmatch"
+    providers = (", ".join(lyric_fetch.usable_providers(cfg.LYRICS_PROVIDERS))
+                 or "no known provider (check LYRICS_PROVIDERS)")
     log.info(fmt(C.GRAY,
         f"  Writing {(cfg.LYRICS_FORMAT or 'embed').lower()} lyrics via {providers}."))
     if args.lyrics_rescan:
@@ -113,8 +115,8 @@ def _report_summary(res, *, dry_run):
     if not processed and not summary["stopped"] and not unreadable:
         log.info(fmt(C.GRAY,
             f"     Nothing needed checking; all {plural(total, 'track')} "
-            "have lyrics or were checked before (--lyrics-rescan redoes "
-            "them)."))
+            "have lyrics or were checked before (--lyrics-rescan checks "
+            "them again)."))
         log.info(fmt(C.GRAY, "  Nothing to do."))
         return False
 
@@ -127,6 +129,9 @@ def _report_summary(res, *, dry_run):
         f" · {summary['unfinished']} left for the next run"
         if summary["unfinished"] else ""
     )
+    retry_part = (
+        f" (tried again after {lyric_fetch.RECHECK_AFTER_DAYS} days)"
+        if summary["not_found"] else "")
     checked_part = (
         f"{processed} of {plural(summary['candidate_total'], 'track')} checked"
         if summary["stopped"] else f"{plural(processed, 'track')} checked"
@@ -135,7 +140,7 @@ def _report_summary(res, *, dry_run):
         f"     {checked_part} · {verb.lower()} "
         f"{wrote_synced} synced + {wrote_plain} plain · "
         f"{summary['already']} already had lyrics · "
-        f"{summary['not_found']} no lyrics found"
+        f"{summary['not_found']} no lyrics found{retry_part}"
         f"{skipped_part}{unfinished_part}.")))
     if summary["missing_tags"]:
         log.info(fmt(C.YELLOW,
@@ -149,6 +154,10 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['instrumental'], 'track')} skipped as "
             "instrumental."))
+    if summary["cleared_instrumental"]:
+        log.info(fmt(C.YELLOW,
+            f"     {'Would remove' if dry_run else 'Removed'} lyrics this app "
+            f"wrote from {plural(summary['cleared_instrumental'], 'instrumental track')}."))
     if summary["policy_skipped"]:
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['policy_skipped'], 'track')} skipped by "

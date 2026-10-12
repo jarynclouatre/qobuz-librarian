@@ -959,6 +959,11 @@ def test_unchanged_lyric_providers_from_compose_are_not_pinned(tmp_path, monkeyp
     assert ok
     assert "LYRICS_PROVIDERS" not in (ss._read_settings() or {})
 
+    monkeypatch.setitem(ss._ENV_DEFAULTS, "LYRICS_PROVIDERS", ["lrclib", "netease"])
+    (tmp_path / "s.json").write_text('{"LYRICS_PROVIDERS": "Lrclib,NetEase"}')
+    ss.load()
+    assert "LYRICS_PROVIDERS" not in (ss._read_settings() or {})
+
 
 def test_concurrent_settings_saves_merge_without_losing_either_change(tmp_path, monkeypatch):
     import json

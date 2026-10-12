@@ -160,7 +160,7 @@ Qobuz Librarian is glue around several open-source projects, bundled into the Do
 - **[FFmpeg](https://ffmpeg.org/)**: audio probing and transcoding. LGPL/GPL depending on build.
 - **[FLAC](https://xiph.org/flac/)** (Xiph.Org): integrity verification and header reads. BSD.
 
-Lyrics come via [syncedlyrics](https://github.com/moehmeni/syncedlyrics) (LRCLIB, NetEase, Megalobiz, Musixmatch, Genius). The web UI uses [FastAPI](https://fastapi.tiangolo.com/), [htmx](https://htmx.org/), and [Tailwind CSS](https://tailwindcss.com/) with Qobuz Librarian's own `ql-*` component layer. Thanks to all their maintainers.
+Lyrics come from [LRCLIB](https://lrclib.net/) and via [syncedlyrics](https://github.com/moehmeni/syncedlyrics) (LRCLIB, NetEase, Megalobiz, Musixmatch, Genius). The web UI uses [FastAPI](https://fastapi.tiangolo.com/), [htmx](https://htmx.org/), and [Tailwind CSS](https://tailwindcss.com/) with Qobuz Librarian's own `ql-*` component layer. Thanks to all their maintainers.
 
 ## License
 

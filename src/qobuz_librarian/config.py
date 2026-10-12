@@ -452,6 +452,20 @@ LYRICS_FORMAT    = _env_choice("LYRICS_FORMAT", "embed", ("embed", "sidecar", "b
 LYRICS_PROVIDERS = [p.strip() for p in
                     os.environ.get("LYRICS_PROVIDERS", "").split(",")
                     if p.strip()]
+LYRICS_PROVIDER_NAMES = ("Lrclib", "NetEase", "Megalobiz", "Musixmatch", "Genius")
+_unknown_providers = [
+    p for p in LYRICS_PROVIDERS
+    if p.lower() not in {name.lower() for name in LYRICS_PROVIDER_NAMES}]
+if _unknown_providers:
+    _one = len(_unknown_providers) == 1
+    _warn(f"LYRICS_PROVIDERS: {', '.join(_unknown_providers)} "
+          f"{'is not a known provider' if _one else 'are not known providers'} "
+          f"({', '.join(LYRICS_PROVIDER_NAMES)}); "
+          + (("ignoring it." if _one else "ignoring them.")
+             if len(_unknown_providers) < len(LYRICS_PROVIDERS)
+             else "no lyrics are fetched until this is fixed."))
+    del _one
+del _unknown_providers
 # A provider library must not be able to park every lyrics worker forever.
 # This is an application-level wall-clock budget around one provider lookup;
 # timed-out providers count toward the existing per-run circuit breaker.

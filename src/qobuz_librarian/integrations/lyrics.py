@@ -4,6 +4,7 @@ import os
 import stat
 from collections import Counter
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -34,6 +35,8 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "kept-existing-plain",
     "not-found",
     "skipped-instrumental",
+    "removed-instrumental",
+    "dry:removed-instrumental",
     "skipped-long",
     "skipped-tags",
     "skipped",
@@ -149,7 +152,8 @@ def _run_lyric_hook(album_dir):
         f"lyrics: {synced} synced, {plain} plain, "
         f"{already} already, {nofnd} not found"
     )
-    instrumental = counts.get("skipped-instrumental", 0)
+    instrumental = (counts.get("skipped-instrumental", 0)
+                    + counts.get("removed-instrumental", 0))
     if instrumental:
         msg += f"; {instrumental} skipped as instrumental"
     too_long = counts.get("skipped-long", 0)
@@ -641,6 +645,82 @@ def _sidecar_identity_from_receipt(path, receipt):
     return dict(identity)
 
 
+def _carry_written_lyric_state(album_dirs, owned_tracks=None):
+    """Move the import hook's record of the lyrics it wrote from the staged
+    path to the imported file, so a later pass can still replace them. The
+    imported file is matched by its lyrics: exactly what the hook wrote into a
+    staged file that has since left staging. Another file in the folder can
+    hold the same words from somewhere else, so a record moves only to a file
+    changed since it was written, and only when the files holding those words
+    are exactly as many as the staged files they were written into."""
+    staging = os.path.join(os.path.abspath(os.fspath(cfg.STAGING_DIR)), "")
+    try:
+        state = lyric_fetch.load_state(cfg.LYRIC_FETCH_STATE_FILE)
+    except Exception as e:
+        vlog(f"lyric state carry: state load failed: {e}")
+        return
+    written = {}
+    for key, st in state.items():
+        if st.written and key.startswith(staging) and not os.path.exists(key):
+            written.setdefault(st.written, []).append((key, st.last_seen))
+    if not written:
+        return
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    holders = {}
+    for fp, parent_fd, _guard, _expected in _iter_post_import_flacs(
+            album_dirs, owned_tracks, set()):
+        try:
+            descriptor = os.open(fp.name, flags, dir_fd=parent_fd)
+        except OSError:
+            continue
+        try:
+            held = os.fstat(descriptor)
+            values = lyric_fetch.embedded_lyric_values(
+                lyric_fetch.FLAC(f"/proc/self/fd/{descriptor}"))
+        except Exception:
+            continue
+        finally:
+            os.close(descriptor)
+        if not stat.S_ISREG(held.st_mode) or not values or any(
+                value != values[0] for value in values):
+            continue
+        digest = lyric_fetch._lyrics_digest(values[0])
+        staged = written.get(digest)
+        if not staged:
+            continue
+        known = state.get(str(fp))
+        if held.st_ctime < min(at for _key, at in staged) or (
+                known is not None and int(known.mtime) == int(held.st_mtime)
+                and known.size == held.st_size):
+            continue
+        holders.setdefault(digest, []).append(
+            (str(fp), held.st_mtime, held.st_size))
+    carried = {}
+    for digest, files in holders.items():
+        staged = written[digest]
+        if len(files) != len(staged):
+            continue
+        for (path, mtime, size), (key, _at) in zip(sorted(files), sorted(staged)):
+            carried[path] = (key, digest, mtime, size)
+    if not carried:
+        return
+
+    def rekey(state):
+        for path, (staged, digest, mtime, size) in carried.items():
+            st = state.get(staged)
+            if st is not None and st.written == digest:
+                state[path] = replace(
+                    st, mtime=mtime, size=size, representations="embed")
+        for staged, *_ in carried.values():
+            state.pop(staged, None)
+
+    try:
+        lyric_fetch.update_state(rekey, cfg.LYRIC_FETCH_STATE_FILE)
+    except Exception as e:
+        vlog(f"lyric state carry: update failed: {e}")
+
+
 def write_post_import_sidecars(
     album_dirs,
     *,
@@ -649,7 +729,8 @@ def write_post_import_sidecars(
     directory_changes_out=None,
     owned_tracks=None,
 ):
-    """Write .lrc sidecars next to imported FLACs when LYRICS_FORMAT
+    """Carry the lyric hook's records over to the imported FLACs, then write
+    .lrc sidecars next to them when LYRICS_FORMAT
     requests them. Embedded tag is removed afterward for 'sidecar' mode,
     kept for 'both'. Optional output lists receive exact identity changes and
     sidecars that this pass can prove it created, plus exact parent-directory
@@ -664,6 +745,7 @@ def write_post_import_sidecars(
     # absent but mutagen is present.)
     if getattr(lyric_fetch, "FLAC", None) is None:
         return
+    _carry_written_lyric_state(album_dirs, owned_tracks)
     lyr_fmt = (cfg.LYRICS_FORMAT or "embed").strip().lower()
     if lyr_fmt not in ("sidecar", "both"):
         return

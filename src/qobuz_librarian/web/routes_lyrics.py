@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("/lyrics", response_class=HTMLResponse)
 async def lyrics_page(request: Request):
-    providers = ", ".join(cfg.LYRICS_PROVIDERS) or "Lrclib, NetEase, Musixmatch"
+    providers = ", ".join(lyric_fetch.usable_providers(cfg.LYRICS_PROVIDERS)) or "none known"
     lyrics_format = (cfg.LYRICS_FORMAT or "embed").lower()
     lyrics_format_label = {
         "embed": "Embedded tags",
