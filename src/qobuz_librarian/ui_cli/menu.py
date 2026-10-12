@@ -28,7 +28,7 @@ _CHOICES = [
      "one-time setup: reorganise an existing library into the Artist/Album "
      "layout (copies by default, never touches originals)"),
     ("8", "Downsample", Mode.DOWNSAMPLE,
-     "bring hi-res files you own down to CD quality to reclaim space"),
+     "bring files you own above 48 kHz down to 44.1 / 48 kHz to reclaim space"),
     ("9", "Lyrics", Mode.LYRICS,
      "fetch lyrics for tracks you own that are missing them"),
 ]

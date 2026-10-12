@@ -22,11 +22,11 @@ Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what y
 
 ## Features
 
-- **Missing albums and Gap Fill.** Run a Library scan to find missing albums from artists already in your library, plus albums you own that are missing tracks (Gap Fill). Download only what you choose. The app tracks its own downloads; if music lands in the folders from outside it, the refresh icon in the Library header folds the new finds into the review you already have open, keeping your picks. Library scans group editions of the same album. Search marks an edition **In library** when your files hold its recordings: the same recording ID (ISRC), or for files without one, the same title and mix or remaster label; deluxe and other packaging labels do not separate editions. Other pressings fold under the **versions** control. **Download** adds an edition's missing tracks to the folder that holds its other tracks; when none of them are on disk, it downloads as a separate copy beside the version you have.
+- **Missing albums and Gap Fill.** Run a Library scan to find missing albums from artists already in your library, plus albums you own that are missing tracks (Gap Fill). Missing Albums lists the releases Qobuz files as each artist's albums, one edition each; switches on the review add live releases, compilations, and EPs and singles. Download only what you choose. The app tracks its own downloads; if music lands in the folders from outside it, the refresh icon in the Library header folds the new finds into the review you already have open, keeping your picks. Library scans group editions of the same album. Search marks an edition **In library** when your files hold its recordings: the same recording ID (ISRC), or for files without one, the same title and mix or remaster label; deluxe and other packaging labels do not separate editions. Other pressings fold under the **versions** control. **Download** adds an edition's missing tracks to the folder that holds its other tracks; when none of them are on disk, it downloads as a separate copy beside the version you have.
 - **Single tracks.** Switch search to **Track** to download an individual track. By default this does not hide the rest of the album from future gap scans; there is a setting if you want single-track downloads treated as deliberate singles.
 - **Verified quality.** Import quality checks compare downloaded FLACs with the selected tier and flag shortfalls in History.
 - **Quality upgrades.** The Library refresh finds albums Qobuz can now serve at higher quality. Review and queue them from **Upgrade**, or set `UPGRADE_SCAN_ENABLED=false` to hide Upgrade and skip that pass entirely.
-- **Downsample.** Convert hi-res FLACs to 44.1 / 48 kHz FLAC to reclaim space. Run it on demand, or apply it automatically to new downloads.
+- **Downsample.** Convert FLACs above 48 kHz to 44.1 / 48 kHz FLAC to reclaim space. Run it on demand, or apply it automatically to new downloads.
 - **New releases.** A periodic pass lists new albums by artists in your library for review and leaves them un-ticked so they cannot all be queued by accident.
 - **Discover.** With a Last.fm API key saved, a Discover tab suggests artists like the ones already in your library and names the artists that vouch for each, browses the genres of your library, searches for artists similar to a name you type, and lists the albums you saved on Qobuz that are not on disk yet. Suggested artists and albums are resolved on Qobuz, and short single-track releases are left out.
 - **Clean import.** beets imports the supplied tags and cover art and moves downloaded files into the library. Lyrics are fetched on import; **Lyrics** mode backfills tracks you already have.
@@ -47,7 +47,7 @@ Most scan modes work the same way: **scan → review → act.** A scan runs in t
 | **Library** | Find missing albums and albums to fill, then check for new releases |
 | **Discover** | Suggested artists, library genres, similar-artist search, and your saved Qobuz albums (needs a Last.fm API key) |
 | **Upgrade** | Re-rip albums Qobuz can now serve at higher quality |
-| **Downsample** | Bring hi-res files down to 44.1 / 48 kHz (local, no login) |
+| **Downsample** | Bring files above 48 kHz down to 44.1 / 48 kHz (local, no login) |
 | **Repair** | Refill truncated or partial FLACs (recording and edition verified) |
 | **Lyrics** | Fetch lyrics for tracks missing them (no Qobuz login; uses internet lyric websites) |
 | **Library migration** (on Settings) | Reorganise an existing library into the folder structure `Artist/Album (Year)` (copies by default; optional move mode) |
@@ -69,7 +69,7 @@ mkdir -p music   # skip if QL_MUSIC_DIR points at an existing folder
 docker compose up -d
 ```
 
-Then open <http://localhost:8666>. The first visit sets a web username and password; sign in, paste your Qobuz token on **Settings** (see below), and search for an artist, album, or track. After you connect, the Search page offers a first Library scan; run it or skip it.
+Then open <http://localhost:8666>. The first visit sets a web username and password. Then paste your Qobuz token and your email or user ID on **Settings** (see below), and search for an artist, album, or track. After you connect, the Search page offers a first Library scan; run it or skip it.
 
 > **Point `QL_MUSIC_DIR` at a dedicated music library**, not your home folder or a drive with other files mixed in. The app moves and merges files within that tree, and Upgrade replaces files in place.
 
@@ -98,7 +98,7 @@ Auth is by token, not your password, and needs a paid Qobuz account.
 
 Get the token from the [Qobuz web player](https://play.qobuz.com): sign in, open dev tools (F12), and find Local Storage for `play.qobuz.com` (**Application** tab in Chrome/Edge, **Storage** in Firefox). Open the `localuser` entry and copy its `token` value; the `id` field next to it is your user id. Paste the token into **Auth token** on Settings; **Email or user ID** takes either your email or that numeric id.
 
-The token is enough for Search, Library, Discover, New releases, Upgrade, and Repair. Downloads also need the email or user ID.
+The token is enough to search and to scan your library: Search, Library, Discover, New releases, and the Upgrade and Repair scans. Anything that downloads, including running an Upgrade or Repair, also needs the email or user ID.
 
 If your streamrip config has `use_auth_token = true`, its `password_or_token` value in `~/.config/streamrip/config.toml` is the token.
 

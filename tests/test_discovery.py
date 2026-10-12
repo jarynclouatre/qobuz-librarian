@@ -14,7 +14,7 @@ import pytest
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library import catalog as cat
-from qobuz_librarian.library import discovery
+from qobuz_librarian.library import discovery, hidden
 from qobuz_librarian.library.discovery import (
     DiscoveryOpts,
     find_missing_for_artist,
@@ -53,11 +53,13 @@ class FakeQobuz:
     """Stands in for the Qobuz search/catalog API. Holds artist search hits,
     one catalog per artist id, and full album dicts keyed by id."""
 
-    def __init__(self, *, artists, catalog, total=None):
+    def __init__(self, *, artists, catalog, total=None, release_types=None):
         self._artists = artists                       # search_artists results
         self._full = {a["id"]: a for a in catalog}    # get_album by id
         self._catalog = [_catalog_entry(a) for a in catalog]
         self._total = total if total is not None else len(catalog)
+        # None stands for lists Qobuz didn't answer.
+        self._release_types = release_types
 
     def search_artists(self, query, token, limit=5):
         return self._artists
@@ -68,6 +70,9 @@ class FakeQobuz:
     def get_album(self, album_id, token):
         return self._full[album_id]
 
+    def get_artist_release_types(self, artist_id, token, album_ids, fresh=False):
+        return self._release_types
+
     def search_albums(self, query, token, limit=12):
         # Per-folder search fallback: the fixtures keep everything in the
         # catalog, so the fallback returns nothing.
@@ -76,6 +81,8 @@ class FakeQobuz:
     def install(self, monkeypatch):
         monkeypatch.setattr(discovery, "search_artists", self.search_artists)
         monkeypatch.setattr(discovery, "get_artist_albums", self.get_artist_albums)
+        monkeypatch.setattr(discovery, "get_artist_release_types",
+                            self.get_artist_release_types)
         monkeypatch.setattr(discovery, "get_album", self.get_album)
         monkeypatch.setattr(cat, "get_album", self.get_album)
         monkeypatch.setattr(cat, "search_albums", self.search_albums)
@@ -265,6 +272,45 @@ def test_saved_artist_pick_moves_to_the_namesake_whose_catalog_holds_the_folders
     assert saved["unchecked"] == []
 
 
+def test_missing_albums_are_what_qobuz_files_as_the_artists_albums(
+        monkeypatch, tmp_path):
+    # What Qobuz files as the artist's albums lists as albums, except that a
+    # two-track one counts as a single and one credited first to another
+    # artist as a compilation; a label reissue filed elsewhere is not offered
+    # at all. When the lists can't be read the artist keeps every album,
+    # untyped, rather than losing them all.
+    owned = _album("o1", "Vænir", "Monolord", 2015,
+                   [_qt(f"v{i}", f"ISRCV{i}") for i in range(4)])
+    short = _album("s1", "It's All The Same", "Monolord", 2023,
+                   [_qt("a"), _qt("b")])
+    duet = _album("d1", "Split", "Elder", 2019, [_qt(f"d{i}") for i in range(5)])
+    live = _album("l1", "Live at Roadburn", "Monolord", 2020,
+                  [_qt(f"l{i}") for i in range(7)])
+    reissue = _album("r1", "Empress Rising", "Monolord", 2012,
+                     [_qt(f"e{i}") for i in range(5)])
+    studio = _album("a1", "Rust", "Monolord", 2017, [_qt(f"r{i}") for i in range(5)])
+    catalog = [owned, short, duet, live, reissue, studio]
+    layout = {"Monolord": {"Vænir (2015)":
+                           [_et(f"v{i}", f"ISRCV{i}") for i in range(4)]}}
+    artists = [{"name": "Monolord", "id": "monolord", "albums_count": 5}]
+
+    _library(monkeypatch, tmp_path, layout)
+    FakeQobuz(artists=artists, catalog=catalog, release_types={
+        "o1": "album", "s1": "album", "d1": "album", "l1": "live", "a1": "album",
+    }).install(monkeypatch)
+    res = find_missing_for_artist("Monolord", token="tok",
+                                  artist_dir=tmp_path / "Monolord")
+    typed = {g.qobuz_album["title"]: g.release_type for g in res.fully_missing}
+    assert typed == {"Rust": "album", "It's All The Same": "epSingle",
+                     "Split": "compilation", "Live at Roadburn": "live"}
+
+    FakeQobuz(artists=artists, catalog=catalog).install(monkeypatch)
+    res = find_missing_for_artist("Monolord", token="tok",
+                                  artist_dir=tmp_path / "Monolord")
+    assert {g.qobuz_album["title"]: g.release_type for g in res.fully_missing} == {
+        "Live at Roadburn": None, "Empress Rising": None, "Rust": None}
+
+
 def test_zero_overlap_match_is_skipped_as_false_match(monkeypatch, tmp_path, beatles_search):
     # One file with no track number fits a same-titled one-track single
     # better than the album. The single shares no track with the folder, so
@@ -356,3 +402,14 @@ def test_new_releases_surface_only_what_appeared_since_the_baseline(
         "Billie Eilish", token="tok", opts=opts,
         seen_by_id={str(first.artist_id): ["101"]}, artist_dir=ad)
     assert _titles(recency.new_gaps) == ["Hit Me Hard And Soft"]
+
+    # The only folder began as a Track download and has since been filled in.
+    # Scans leave its single mark alone, so the check has to see the folder
+    # is whole or it skips the artist for good.
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    hidden.mark_single("Billie Eilish", "Ocean Eyes", "2016", 101)
+    filled = find_new_releases_for_artist(
+        "Billie Eilish", token="tok", opts=opts, hidden=hidden.load(),
+        single_store=hidden.load(),
+        seen_by_id={str(first.artist_id): ["101", "202"]}, artist_dir=ad)
+    assert _titles(filled.new_gaps) == ["Hit Me Hard And Soft"]

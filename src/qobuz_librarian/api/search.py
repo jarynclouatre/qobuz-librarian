@@ -373,6 +373,61 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     return items, qobuz_total
 
 
+# The lists artist/getReleasesList files an artist's releases under that
+# missing albums can offer. Other (guest spots, other artists' releases, label
+# reissues) and download-only releases are never offered, so never fetched.
+RELEASE_LISTS = ("album", "live", "compilation", "epSingle")
+_RELEASE_LIST_PAGES = 6
+
+
+def get_artist_release_types(artist_id, token, album_ids, fresh=False):
+    """{album id: list name} for the artist's releases in RELEASE_LISTS.
+
+    None when the answer can't cover ``album_ids``: a list runs past the pages
+    read, or every list is empty for an artist with albums. Cached with the
+    catalogue's TTL, and reused only while every id in ``album_ids`` is one
+    the cached answer was fetched for, so a new release fetches it again."""
+    album_ids = {str(album_id) for album_id in album_ids}
+    cache_key = f"{artist_id}:release-types"
+    if not fresh:
+        cached = album_cache.get_catalog(cache_key, config.ARTIST_CATALOG_CACHE_TTL)
+        if cached is not None:
+            types, known = cached.get("types"), cached.get("ids")
+            if (
+                isinstance(types, dict)
+                and isinstance(known, list)
+                and all(name in RELEASE_LISTS for name in types.values())
+                and album_ids <= set(known) | set(types)
+            ):
+                return types
+    types = {}
+    for name in RELEASE_LISTS:
+        offset = 0
+        for _ in range(_RELEASE_LIST_PAGES):
+            data = _expect_dict(qobuz_get("artist/getReleasesList", {
+                "artist_id": artist_id,
+                "release_type": name,
+                "limit": config.ARTIST_CATALOG_PAGE,
+                "offset": offset,
+                "sort": "release_date",
+            }, token), "artist/getReleasesList")
+            items = data.get("items")
+            if not isinstance(items, list):
+                raise QobuzError("artist/getReleasesList returned malformed items")
+            for item in items:
+                if isinstance(item, dict) and item.get("id") is not None:
+                    types.setdefault(str(item["id"]), name)
+            offset += len(items)
+            if not data.get("has_more"):
+                break
+        else:
+            return None
+    if album_ids and not types:
+        return None
+    album_cache.put_catalog(cache_key, {"types": types, "ids": sorted(album_ids)})
+    return types
+
+
 def get_user_favorites(token, limit=None):
     """The albums this account has starred on Qobuz, newest first.
 

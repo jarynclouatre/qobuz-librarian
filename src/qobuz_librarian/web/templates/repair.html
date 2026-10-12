@@ -40,9 +40,7 @@
   <span class="ql-status-chip {% if repair_resume %}is-warning{% else %}is-neutral{% endif %}">
     {% if repair_resume %}Resume available{% elif last_run %}Ready to scan{% else %}Not scanned yet{% endif %}
   </span>
-  <span>
-    {% if last_run %}Last repair scan {{ last_run }}.{% else %}No scan has finished yet.{% endif %}
-  </span>
+  {% if last_run %}<span>Last repair scan {{ last_run }}{% if last_summary %}: {{ last_summary }}{% else %}.{% endif %}</span>{% endif %}
   <a href="/repair/history">View history</a>
 </div>
 

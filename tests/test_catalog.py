@@ -118,6 +118,8 @@ def test_find_extras_flags_bonus_tracks_for_upgrade_safety():
 def test_dedup_album_versions_collapses_editions_but_keeps_distinct_years():
     pairs = [_qalbum("Abbey Road", 1969), _qalbum("Abbey Road (Remaster)", 1969)]
     assert len(dedup_album_versions(pairs)) == 1
+    pairs = [_qalbum("Grateful Dead", 1967), _qalbum("The Grateful Dead", 1967)]
+    assert len(dedup_album_versions(pairs)) == 1
     pairs = [_qalbum("American Football", 1999), _qalbum("American Football", 2016)]
     assert len(dedup_album_versions(pairs)) == 2
     cjk = [_qalbum("東京", 2020), _qalbum("大阪", 2021)]

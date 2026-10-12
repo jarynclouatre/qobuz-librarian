@@ -34,7 +34,7 @@ class DownsampleCandidate:
     @property
     def rate_label(self):
         src = "/".join(_khz(r) for r in self.source_rates)
-        dst = _khz(self.target_rates[0]) if len(self.target_rates) == 1 else "CD rate"
+        dst = "/".join(_khz(r) for r in self.target_rates)
         return f"{src} → {dst}"
 
     @property

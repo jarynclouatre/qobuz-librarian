@@ -1,5 +1,5 @@
 {% for c in items %}
-<label class="ql-review-candidate">
+<label class="ql-review-candidate{% if job.execute_kind == 'repair' %} ql-review-candidate--note{% endif %}">
   <input type="checkbox" class="ql-checkbox cb" name="cid"
          value="{{ c.cid }}" data-seq="{{ c.seq }}"
          {% if c.selected %}checked{% endif %}>
@@ -20,7 +20,12 @@
       <span class="ql-badge ql-badge-new ql-badge-xs">new</span>{% endif %}{% if c.payload.version %}
       <span class="ql-sub-version">{{ c.payload.version }}</span>{% endif %}
     </span>
-    <span class="ql-review-candidate-detail">{% if job.execute_kind == 'upgrade' and c.payload.year %}{{ c.payload.year }} · {% endif %}{% if review_tab|default('') == 'gaps' %}{{ c.detail | replace('gap-fill: ', '') }}{% else %}{{ c.detail }}{% endif %}</span>
+    {% set _release_label = {'live': 'Live', 'compilation': 'Compilation', 'epSingle': 'EP or single'}.get(c.payload.release_type) if review_tab|default('') == 'missing' %}
+    {% if _release_label and (c.payload.version or '') | lower == _release_label | lower %}{% set _release_label = '' %}{% endif %}
+    {% set _detail = (c.detail | replace('gap-fill: ', '')) if review_tab|default('') == 'gaps' else c.detail %}
+    {# Each "·" part stays on one line, so "24-bit/96kHz" or "9 missing of
+       10" never breaks inside on a phone. #}
+    <span class="ql-review-candidate-detail">{% if _release_label %}{{ _release_label }} · {% endif %}{% if job.execute_kind == 'upgrade' and c.payload.year %}{{ c.payload.year }} · {% endif %}{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in (_detail or '').split(' · ') %}{% if not loop.first %} · {% endif %}{% for _step in _part.split(' → ') %}{% if not loop.first %} {% endif %}<span class="whitespace-nowrap">{% if not loop.first %}→ {% endif %}{{ _step }}</span>{% endfor %}{% endfor %}{% endif %}</span>
     {% if c.payload.verified_truncated %}
     <span class="ql-review-truncated">
       {% for t in c.payload.verified_truncated[:12] %}

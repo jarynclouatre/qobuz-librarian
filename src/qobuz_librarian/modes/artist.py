@@ -2,8 +2,8 @@
 
   Step 1, Gap fill: walk every album you own by this artist and offer to
            download the missing tracks of each.
-  Step 2, Missing albums: list everything on Qobuz by this artist you
-           don't have, and offer to download.
+  Step 2, Missing albums: list the releases Qobuz files as this artist's
+           albums that you don't have, and offer to download.
 
 The matching itself (which folder is which Qobuz edition, what's missing,
 and what's a false match) lives in library.discovery, the one engine the web
@@ -17,6 +17,7 @@ from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
 from qobuz_librarian.library import hidden as hidden_mod
+from qobuz_librarian.library import missing_types
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
@@ -29,6 +30,7 @@ from qobuz_librarian.library.catalog import (
 from qobuz_librarian.library.discovery import (
     ArtistSearchUnavailable,
     DiscoveryOpts,
+    artist_release_types,
     discover_fully_missing,
     match_album_dir,
     owned_album_titles,
@@ -580,12 +582,26 @@ def _gap_fill_result_bucket(result):
     return "other"
 
 
+def _unlisted_types_note(release_types):
+    """Name what the --include-* flags would add, or ""."""
+    flags = (
+        (missing_types.LIVE, "live release", "live releases", "--include-live"),
+        (missing_types.COMPILATION, "compilation", "compilations",
+         "--include-comps"),
+        (missing_types.EP, "EP or single", "EPs and singles",
+         "--include-singles"),
+    )
+    parts = [f"{plural(release_types.count(name), one, many)} ({flag})"
+             for name, one, many, flag in flags if name in release_types]
+    return ("Not listed: " + ", ".join(parts) + ".") if parts else ""
+
+
 def run_artist_missing_albums(artist_name, owned_titles, args, token,
                       artist_id=None, handled_ids=None, resolved_dirs=None,
                       prefetched_catalog=None, *, shared_queue=None, fresh=False,
                       hidden=None):
-    """List the artist's full Qobuz catalog with already-owned albums filtered
-    out, prompt to download some. The matching is discovery.discover_fully_missing;
+    """List the artist's Qobuz albums with already-owned ones filtered out,
+    prompt to download some. The matching is discovery.discover_fully_missing;
     this is the numbered-list presentation around it. Returns
     ``(count_downloaded_or_queued, needs_attention)``.
 
@@ -632,22 +648,35 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
 
     opts = DiscoveryOpts(prefer_hires=args.prefer_hires,
                          include_comps=args.include_comps,
-                         include_singles=getattr(args, "include_singles", False))
+                         include_singles=args.include_singles,
+                         include_live=args.include_live)
+    handled_keys = {str(album_id) for album_id in handled_ids or ()}
+    release_types = artist_release_types(
+        artist_id, artist_name, token,
+        [a for a in catalog if str(a.get("id")) not in handled_keys])
     gaps = discover_fully_missing(
         artist_name, catalog, opts,
         hidden=hidden,
         handled_ids=handled_ids or set(),
         resolved_dirs=resolved_dirs or set(),
-        owned_titles=owned_titles or {}, token=token)
+        owned_titles=owned_titles or {}, token=token,
+        release_types=release_types)
 
     # Partially-present albums (a collaboration filed elsewhere) list first.
     partials = [g for g in gaps if g.on_disk_dir is not None]
-    fully = [g for g in gaps if g.on_disk_dir is None]
+    included = opts.included_types()
+    fully = [g for g in gaps if g.on_disk_dir is None
+             and missing_types.shown(g.release_type, included)]
     ordered = partials + fully
     n_partial = len(partials)
+    unlisted = _unlisted_types_note(
+        [g.release_type for g in gaps if g.on_disk_dir is None
+         and not missing_types.shown(g.release_type, included)])
 
     if not ordered:
         log.info(fmt(C.GREEN, "\n  ✓  No new albums to suggest.\n"))
+        if unlisted:
+            log.info(fmt(C.GRAY, f"  {unlisted}\n"))
         return 0, False
 
     print()
@@ -668,6 +697,8 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
             header += (f"  ({n_dismissed} dismissed in the Library review, "
                        "listed because you asked for this artist)")
     log.info(fmt(C.BOLD + C.WHITE, header + ":"))
+    if unlisted:
+        log.info(fmt(C.GRAY, f"  {unlisted}"))
     print()
     for i, gap in enumerate(ordered, 1):
         a = gap.qobuz_album

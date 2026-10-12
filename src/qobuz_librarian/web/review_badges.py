@@ -6,6 +6,7 @@ from contextlib import ExitStack, contextmanager
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
+from qobuz_librarian.library import hidden as hidden_mod
 
 SURFACES = {"library", "upgrade", "downsample", "repair"}
 _VERSION = 1
@@ -15,7 +16,7 @@ _STATE_LOCK = threading.RLock()
 def _empty() -> dict:
     return {
         "version": _VERSION,
-        "surfaces": {name: {"ready_at": 0.0, "seen_at": 0.0}
+        "surfaces": {name: {"ready_at": 0.0, "seen_at": 0.0, "offered": []}
                      for name in sorted(SURFACES)},
     }
 
@@ -42,10 +43,14 @@ def load(*, fail_closed=False) -> dict:
         entry = surfaces.get(name)
         if not isinstance(entry, dict):
             continue
+        offered = entry.get("offered")
         try:
             state["surfaces"][name] = {
                 "ready_at": float(entry.get("ready_at") or 0.0),
                 "seen_at": float(entry.get("seen_at") or 0.0),
+                # None for a store saved before offers were kept.
+                "offered": ([str(key) for key in offered]
+                            if isinstance(offered, list) else None),
             }
         except (TypeError, ValueError):
             continue
@@ -88,6 +93,12 @@ def _ts(now=None) -> float:
     return float(time.time() if now is None else now)
 
 
+def _light(entry, now=None) -> None:
+    seen_at = float(entry.get("seen_at") or 0.0)
+    ready_at = float(entry.get("ready_at") or 0.0)
+    entry["ready_at"] = max(_ts(now), seen_at + 0.000001, ready_at + 0.000001)
+
+
 def mark_ready(surface: str, *, now=None) -> None:
     if surface not in SURFACES:
         return
@@ -97,12 +108,46 @@ def mark_ready(surface: str, *, now=None) -> None:
         state = _load_for_mutation()
         if state is None:
             return
+        _light(state["surfaces"][surface], now)
+        _save(state)
+
+
+def _offer_key(candidate) -> str:
+    artist, title = candidate.get("artist"), candidate.get("title")
+    return hidden_mod.album_fingerprint(artist, title) or f"{artist}|{title}"
+
+
+def sync_candidates(surface: str, saved: dict, visible, *, now=None) -> None:
+    """Light the dot for a candidate the surface's page lists and has not
+    offered before; put it out when the page lists nothing.
+
+    ``saved`` is the surface's saved snapshot, dismissed candidates included,
+    and ``visible`` what its page lists. A candidate stays offered while it
+    is saved, so a refresh or a download that leaves the same candidates
+    does not light the dot again, opened or not.
+    """
+    if surface not in SURFACES:
+        return
+    offered_now = sorted({_offer_key(c)
+                          for c in (saved or {}).get("candidates") or []})
+    with _mutation_lock() as locked:
+        if not locked:
+            return
+        state = _load_for_mutation()
+        if state is None:
+            return
         entry = state["surfaces"][surface]
-        seen_at = float(entry.get("seen_at") or 0.0)
-        ready_at = float(entry.get("ready_at") or 0.0)
-        entry["ready_at"] = max(
-            _ts(now), seen_at + 0.000001, ready_at + 0.000001
-        )
+        offered = entry.get("offered")
+        known = set(offered or ())
+        if not visible:
+            entry["ready_at"] = 0.0
+        elif offered is None and entry["seen_at"]:
+            # A store from before offers were recorded: take what the page
+            # lists now as already offered.
+            pass
+        elif any(_offer_key(c) not in known for c in visible):
+            _light(entry, now)
+        entry["offered"] = offered_now
         _save(state)
 
 

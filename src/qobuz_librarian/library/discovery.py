@@ -29,14 +29,21 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
-from qobuz_librarian.api.search import get_album, get_artist_albums, search_artists
+from qobuz_librarian.api.search import (
+    get_album,
+    get_artist_albums,
+    get_artist_release_types,
+    search_artists,
+)
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.library import tags
+from qobuz_librarian.library import missing_types, tags
 from qobuz_librarian.library.catalog import (
+    _count_audio_files_in,
     _dir_year,
     _paths_equal,
     album_released_within,
     album_year,
+    album_year_int,
     compute_missing,
     dedup_album_versions,
     filter_compilation_albums,
@@ -130,32 +137,38 @@ def cached_artist_resolutions() -> dict:
     Discover reads it to learn what Qobuz calls each artist on the shelf, which
     is usually how Last.fm spells them too.
     """
-    return dict(_load_resolve_cache())
+    cache = _load_resolve_cache()
+    with _resolve_cache_lock:
+        return dict(cache)
 
 
 def flush_resolve_cache():
     """Persist the resolution cache to disk, only if it changed."""
     global _resolve_cache_dirty
-    if not _resolve_cache_dirty or _resolve_cache is None:
-        return
-    path = cfg.ARTIST_RESOLVE_CACHE_FILE
-    tmp = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    # Scan workers keep matching artists while this runs, so the snapshot is
+    # taken under the lock their changes hold.
+    with _resolve_cache_lock:
+        if not _resolve_cache_dirty or _resolve_cache is None:
+            return
         payload = json.dumps({
             "version": _RESOLVE_CACHE_VERSION,
             "entries": _resolve_cache,
             "unchecked": sorted(q for q in _resolve_unchecked
                                 if q in _resolve_cache),
         })
+        _resolve_cache_dirty = False
+    path = cfg.ARTIST_RESOLVE_CACHE_FILE
+    tmp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".arcache.")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(payload)
         os.replace(tmp, path)
         tmp = None
-        _resolve_cache_dirty = False
     except OSError:
-        pass
+        with _resolve_cache_lock:
+            _resolve_cache_dirty = True
     finally:
         if tmp is not None:
             try:
@@ -245,8 +258,9 @@ def resolve_artist(query, token, owned_titles=None):
         if not owned_titles or query not in _resolve_unchecked:
             return hit[0], hit[1]
         if _titles_listed(hit[0], token, owned_titles) >= len(owned_titles):
-            _resolve_unchecked.discard(query)
-            _resolve_cache_dirty = True
+            with _resolve_cache_lock:
+                _resolve_unchecked.discard(query)
+                _resolve_cache_dirty = True
             return hit[0], hit[1]
     try:
         results = search_artists(query, token, limit=cfg.ARTIST_LOOKUP_LIMIT)
@@ -270,12 +284,13 @@ def resolve_artist(query, token, owned_titles=None):
     # the callers need the id, so caching [None, name] would skip the artist on
     # every later scan. Treat it as a miss (don't cache); a later scan retries.
     if aid:
-        cache[query] = [aid, aname]
-        if owned_titles:
-            _resolve_unchecked.discard(query)
-        else:
-            _resolve_unchecked.add(query)
-        _resolve_cache_dirty = True
+        with _resolve_cache_lock:
+            cache[query] = [aid, aname]
+            if owned_titles:
+                _resolve_unchecked.discard(query)
+            else:
+                _resolve_unchecked.add(query)
+            _resolve_cache_dirty = True
     return aid, aname
 
 
@@ -362,6 +377,15 @@ class DiscoveryOpts:
     prefer_hires: bool = False
     include_comps: bool = False
     include_singles: bool = False
+    include_live: bool = False
+
+    def included_types(self) -> frozenset:
+        """The release types listed beside albums."""
+        return frozenset(name for name, on in (
+            (missing_types.LIVE, self.include_live),
+            (missing_types.COMPILATION, self.include_comps),
+            (missing_types.EP, self.include_singles),
+        ) if on)
 
 
 @dataclass
@@ -372,6 +396,9 @@ class AlbumGap:
     on_disk_dir: Path | None
     missing: list = field(default_factory=list)
     present: list = field(default_factory=list)
+    # The Qobuz list a fully-missing album is filed in (see missing_types);
+    # None when the artist's lists could not be read.
+    release_type: str | None = None
 
     @property
     def fully_missing(self) -> bool:
@@ -496,6 +523,28 @@ def _collecting(single_store, artist_name, album_dirs, complete_dirs=()):
                for ad in album_dirs)
 
 
+def _filled_single_dirs(single_store, artist_name, album_dirs, catalog):
+    """Folders marked as a downloaded single that now hold as many tracks as
+    the marked album has. The new-release check has no owned-folder pass to
+    call them complete, and scans leave the mark in place, so an artist whose
+    single was filled in later would otherwise never be checked again."""
+    if single_store is None:
+        return set()
+    marked = {}
+    for album in catalog:
+        n = album.get("tracks_count")
+        if (isinstance(n, int) and n > 0
+                and _is_single(single_store, artist_name, album)):
+            key = hidden_mod.album_fingerprint(artist_name, album.get("title"))
+            marked[key] = min(n, marked.get(key, n))
+    filled = set()
+    for ad in album_dirs:
+        n = marked.get(hidden_mod.album_fingerprint(artist_name, ad.name))
+        if n and _count_audio_files_in(ad) >= n:
+            filled.add(str(ad))
+    return filled
+
+
 def _materialize_tracks(album, token):
     """Ensure the album dict carries its track list (get_artist_albums omits it).
     Returns (album, tracks); album may be the freshly fetched full dict."""
@@ -577,15 +626,93 @@ def _gap_held_by_siblings(m, matches):
     return bool(held) and not compute_missing(m.missing, held)[0]
 
 
+def _short(album):
+    return not filter_short_releases([(album, 1)], cfg.MISSING_ALBUMS_MIN_TRACKS)
+
+
+def _looks_live(album):
+    return cfg.EXCLUDE_LIVE_ALBUMS and _is_live_release(album.get("title") or "")
+
+
+def _filtered_albums(albums, artist_name, opts):
+    """One edition per album, past the compilation, length and live-title
+    filters: what an artist without readable release lists is offered."""
+    pairs = dedup_album_versions(albums, prefer_hires=opts.prefer_hires)
+    if not opts.include_comps:
+        pairs = filter_compilation_albums(pairs, artist_name)
+    if not opts.include_singles:
+        pairs = filter_short_releases(pairs, cfg.MISSING_ALBUMS_MIN_TRACKS)
+    return [album for album, _n in pairs]
+
+
+def _typed_albums(albums, release_types, artist_name, opts):
+    """(album, type) for each album in one of the offered Qobuz lists, one
+    edition per album and type. The older filters still sort what Qobuz
+    files: an album or compilation credited first to another artist counts
+    as a compilation (that artist's live releases and singles are left out),
+    anything else shorter than MISSING_ALBUMS_MIN_TRACKS as an EP or single,
+    and with EXCLUDE_LIVE_ALBUMS an album or compilation titled as a live
+    recording as live."""
+    by_type = {}
+    for album in albums:
+        rtype = release_types.get(str(album.get("id")))
+        if rtype is None:
+            continue
+        if not filter_compilation_albums([(album, 1)], artist_name):
+            if rtype in (missing_types.LIVE, missing_types.EP):
+                continue
+            rtype = missing_types.COMPILATION
+        elif _short(album):
+            rtype = missing_types.EP
+        elif rtype != missing_types.EP and _looks_live(album):
+            rtype = missing_types.LIVE
+        by_type.setdefault(rtype, []).append(album)
+    typed = []
+    for rtype, group in by_type.items():
+        pairs = dedup_album_versions(group, prefer_hires=opts.prefer_hires)
+        typed.extend((album, rtype) for album, _n in pairs)
+    return typed
+
+
+def artist_release_types(artist_id, artist_name, token, albums):
+    """The Qobuz list each of ``albums`` is filed in, for
+    discover_fully_missing, or None when the lists can't be read and the
+    artist's albums are offered untyped."""
+    album_ids = [a["id"] for a in albums
+                 if is_lossless_album(a) and a.get("id") is not None]
+    if not album_ids:
+        return {}
+    try:
+        types = get_artist_release_types(artist_id, token, album_ids)
+    except (AuthLost, QobuzUnavailable):
+        raise
+    except QobuzError as e:
+        log.info(f"  {artist_name}: Qobuz's release lists couldn't be read "
+                 f"({e}); listing every release.")
+        return None
+    if types is None:
+        log.info(f"  {artist_name}: Qobuz's release lists came back "
+                 "incomplete; listing every release.")
+    return types
+
+
 def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                            handled_ids=frozenset(), resolved_dirs=frozenset(),
                            owned_titles=None, token=None, quick=False,
-                           single_store=None, include_hidden=False):
+                           single_store=None, include_hidden=False,
+                           release_types=None):
     """Catalog albums the owned-album pass didn't account for: fully-missing
     releases, plus a collaboration filed under another artist's folder that
     still has track gaps. Shared by the CLI missing-albums step and the web
     scan. handled_ids / resolved_dirs / owned_titles come from the owned pass so
     an album already matched to a folder isn't re-offered as missing.
+
+    release_types (artist_release_types) decides what counts as missing: only
+    albums Qobuz files as the artist's albums, live releases, compilations or
+    EPs and singles, each gap carrying its type for the caller to show or not
+    (missing_types.shown). Without it, missing albums pass the older
+    compilation, length and live-title filters and carry no type. The track
+    gaps always do.
 
     quick=True is the new-release path: only fully-missing albums are returned
     and no track lists are fetched, so the cost stays at the catalog list alone.
@@ -599,17 +726,22 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
         str(album_id) for album_id in handled_ids if album_id is not None
     }
     gaps = []
-    pairs = dedup_album_versions(
-        [a for a in catalog if is_lossless_album(a)],
-        prefer_hires=opts.prefer_hires)
-    if not opts.include_comps:
-        pairs = filter_compilation_albums(pairs, artist_name)
-    if not opts.include_singles:
-        pairs = filter_short_releases(pairs, cfg.MISSING_ALBUMS_MIN_TRACKS)
+    lossless = [a for a in catalog if is_lossless_album(a)]
+    fillable = _filtered_albums(lossless, artist_name, opts)
+    if release_types is None:
+        offered = [(album, missing_types.LIVE if _looks_live(album) else None)
+                   for album in fillable]
+    else:
+        offered = _typed_albums(lossless, release_types, artist_name, opts)
     if cfg.EXCLUDE_LIVE_ALBUMS:
-        pairs = [(a, n) for (a, n) in pairs
-                 if not _is_live_release(a.get("title") or "")]
-    for album, _n_versions in pairs:
+        fillable = [album for album in fillable if not _looks_live(album)]
+    fill_keys = {id(album) for album in fillable}
+    types = {id(album): rtype for album, rtype in offered}
+    albums = {id(album): album for album in fillable}
+    albums.update((id(album), album) for album, _rtype in offered)
+    for album in sorted(albums.values(), key=lambda a: (
+            album_year_int(a), normalize(a.get("title") or ""))):
+        key = id(album)
         album_id = album.get("id")
         if album_id is not None and str(album_id) in handled_id_keys:
             continue
@@ -639,14 +771,14 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             # different but similarly-named album that merely shares a title
             # (an "Intro") can land here.
             if len(present) * 2 >= len(existing):
-                if missing and present:
+                if key in fill_keys and missing and present:
                     gaps.append(AlbumGap(album, album_dir,
                                          list(missing), list(present)))
                 continue
         # Not resolved, or resolved to a wrong folder.
-        if _owned_by_name(owned_titles, album, artist_name):
+        if key not in types or _owned_by_name(owned_titles, album, artist_name):
             continue
-        gaps.append(AlbumGap(album, None))
+        gaps.append(AlbumGap(album, None, release_type=types[key]))
     return gaps
 
 
@@ -670,7 +802,10 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
     """Find what's missing for one artist.
 
     query        - artist name (or folder name) used to resolve the Qobuz artist.
-    opts         - DiscoveryOpts (prefer_hires / include_comps / include_singles).
+    opts         - DiscoveryOpts (prefer_hires; include_comps / include_singles
+                   loosen the filters an artist without readable release
+                   lists falls back to). Fully-missing albums of every
+                   offered type come back, each with its release_type.
     artist_dir   - the artist's on-disk folder; resolved from query when omitted.
     hidden       - a loaded hidden-store (library.hidden.load()) to filter bulk
                    walks; pass None for a single-artist request, which sees all.
@@ -728,10 +863,15 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
     if want_missing and (hidden is None
                          or _collecting(single_store, artist_name, album_dirs,
                                         complete_dirs)):
+        handled_keys = {str(album_id) for album_id in handled_ids}
+        release_types = artist_release_types(
+            artist_id, artist_name, token,
+            [a for a in catalog if str(a.get("id")) not in handled_keys])
         result.gaps.extend(discover_fully_missing(
             artist_name, catalog, opts, hidden=hidden, handled_ids=handled_ids,
             resolved_dirs=resolved_dirs, owned_titles=owned_titles, token=token,
-            single_store=single_store, include_hidden=include_hidden))
+            single_store=single_store, include_hidden=include_hidden,
+            release_types=release_types))
 
     vlog(f"  discovery({artist_name!r}): {len(result.partials)} partial, "
          f"{len(result.fully_missing)} fully-missing, "
@@ -748,7 +888,9 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
 
     Unlike find_missing_for_artist this skips the owned-folder matching pass and
     never fetches track lists (a fully-missing album is read straight off the
-    catalog list), so the cost is about one Qobuz call per artist.
+    catalog list), so the cost is about one Qobuz call per artist, plus the
+    release lists for an artist with something new. A new release is listed
+    only when its type is among opts.included_types(), as in Missing Albums.
 
     seen_by_id maps artist_id → the catalog album ids known at the last check.
     The first time an artist is seen its baseline is recorded and nothing is
@@ -796,7 +938,9 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     # Still record the baseline so a later real album doesn't dump the back
     # catalogue as "new" - but an artist you own only singles by isn't one
     # you're collecting, so don't surface their releases.
-    if not _collecting(single_store, artist_name, album_dirs):
+    if not _collecting(single_store, artist_name, album_dirs,
+                       _filled_single_dirs(single_store, artist_name,
+                                           album_dirs, catalog)):
         return NewReleaseResult(artist_id, artist_name, [], current_ids)
 
     seen = (seen_by_id or {}).get(artist_id)
@@ -820,7 +964,12 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     new_gaps = discover_fully_missing(
         artist_name, fresh, opts, hidden=hidden,
         owned_titles=owned_album_titles(album_dirs), token=token, quick=True,
-        single_store=single_store)
+        single_store=single_store,
+        release_types=artist_release_types(
+            artist_id, artist_name, token, lossless))
+    included = opts.included_types()
+    new_gaps = [gap for gap in new_gaps
+                if missing_types.shown(gap.release_type, included)]
     return NewReleaseResult(artist_id, artist_name, new_gaps, current_ids)
 
 
@@ -874,7 +1023,5 @@ def classify_owned_match(result, m, hidden, single_store, artist_name,
             return
         result.gaps.append(AlbumGap(m.qobuz_album, ad, m.missing, m.present))
     else:
-        # A single mark on a complete folder is left alone: it belongs to the
-        # download that made it, and completeness here is a match verdict.
         result.complete.append({"dir": ad, "qobuz_album": m.qobuz_album,
                                  "existing": m.existing})

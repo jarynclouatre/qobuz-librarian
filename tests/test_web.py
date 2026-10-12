@@ -523,6 +523,15 @@ def test_health_separates_liveness_from_readiness(client, monkeypatch,
     assert client.request("HEAD", "/readyz").status_code == 503
 
 
+def test_a_form_address_opened_again_goes_to_its_page(client):
+    # A phone restoring a tab opens the address a form posted to, which only
+    # takes POST; it showed the framework's bare JSON.
+    for form, page in (("/settings/behavior", "/settings"),
+                       ("/jobs/abc/approve", "/jobs/abc")):
+        response = client.get(form, follow_redirects=False)
+        assert (response.status_code, response.headers["location"]) == (303, page)
+
+
 def test_album_search_drops_artist_only_matches(client, monkeypatch):
     import qobuz_librarian.api.search as search_mod
     import qobuz_librarian.library.catalog as catalog_mod
@@ -872,6 +881,14 @@ def test_clearing_a_field_goes_back_to_the_compose_value(tmp_path, monkeypatch):
     assert cfg.BEETS_PATH_DEFAULT == "$albumartist/$album"
     assert "BEETS_PATH_DEFAULT" not in json.loads(store.read_text())
 
+    # A switch turned off and on again lands back on the Compose value, so it
+    # stops overriding it.
+    monkeypatch.setitem(ss._ENV_DEFAULTS, "LYRICS_ENABLED", True)
+    ok, _ = ss.save({"LYRICS_ENABLED": False})
+    assert ok is True and json.loads(store.read_text()) == {"LYRICS_ENABLED": False}
+    ok, _ = ss.save({"LYRICS_ENABLED": True})
+    assert ok is True and json.loads(store.read_text()) == {}
+
 
 def test_settings_retry_keeps_edits_and_custom_timer_values(client, tmp_path, monkeypatch):
     import html.parser
@@ -1138,6 +1155,32 @@ def test_upgrade_saved_review_respects_hidden_candidates(
         j for j in job_mgr.registry.awaiting_review()
         if j.execute_kind == "upgrade"
     ]) == 1
+
+
+def test_opening_upgrade_clears_its_review_dot(client, monkeypatch, tmp_path):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import review_badges, saved_reviews
+
+    monkeypatch.setattr(cfg, "REVIEW_BADGE_STATE_FILE",
+                        tmp_path / "review-badges.json")
+    state = {
+        "updated_at": time.time(),
+        "complete": True,
+        "quality_signature": saved_reviews._effective_upgrade_quality_signature(),
+        "candidates": [{
+            "title": "Dummy",
+            "artist": "Portishead",
+            "detail": "16-bit/44.1 kHz -> 24-bit/96 kHz",
+            "payload": {"album_id": "up1", "year": "1994", "cover": ""},
+        }],
+    }
+    _make_saved_surface_current(monkeypatch, "upgrade", state)
+    monkeypatch.setattr(
+        "qobuz_librarian.quality.upgrade_state.load", lambda: state)
+    review_badges.mark_ready("upgrade")
+
+    assert client.get("/upgrade").status_code == 200
+    assert review_badges.snapshot()["upgrade"] is False
 
 
 @pytest.mark.parametrize("execute_kind", ["library", "upgrade"])
@@ -1624,6 +1667,66 @@ def test_library_approve_checks_choices_and_splits_off_other_tab(client, monkeyp
         assert titles == {"Dummy": True, "Untrue": False}
         assert split.summary
         assert split._execute_fn is not None
+    finally:
+        _remove_job(job)
+        if split is not None:
+            _remove_job(split)
+
+
+def test_library_switches_decide_what_missing_albums_selects_and_downloads(
+        client, monkeypatch, tmp_path):
+    # Live releases sit in the saved review behind their switch. Select all,
+    # the tab count and Download selected must all leave them out while the
+    # switch is off, even ticked, and keep them parked for later.
+    from qobuz_librarian.web import qobuz_access
+    monkeypatch.setattr("qobuz_librarian.config.MISSING_TYPES_FILE",
+                        tmp_path / "types.json")
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.validate_all",
+        lambda _candidates: [],
+    )
+    monkeypatch.setattr(
+        "qobuz_librarian.library.candidate_premise.stale_candidate_ids",
+        lambda _candidates, **_kw: set(),
+    )
+    monkeypatch.setattr(qobuz_access, "_read_creds",
+                        lambda: {"auth_token": "t", "user_id": "u"})
+    monkeypatch.setattr(qobuz_access, "_TOKEN_VALID", True)
+    monkeypatch.setattr(jm._scan_queue, "put", lambda item: None)
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    job.review_verb = "Download"
+    job._execute_fn = lambda j, chosen: None
+    for title, payload in (
+            ("Darkness", {"album_id": "dark", "release_type": "album"}),
+            ("Live 1975-85", {"album_id": "live", "release_type": "live"}),
+            ("Nebraska", {"album_id": "nebraska"})):
+        job.add_candidate(kind="album", title=title, artist="Bruce Springsteen",
+                          payload=payload, selected=False)
+    split = None
+    try:
+        r = client.post(f"/jobs/{job.id}/select-all",
+                        data={"on": "1", "scope": "all", "tab": "missing"}).json()
+        assert (r["missing_total"], r["missing_selected"]) == (2, 2)
+        r = client.post(f"/jobs/{job.id}/missing-types",
+                        data={"type": "live", "on": "1"}).json()
+        assert (r["missing_total"], r["missing_selected"]) == (3, 2)
+        client.post(f"/jobs/{job.id}/select-all",
+                    data={"on": "1", "scope": "all", "tab": "missing"})
+        r = client.post(f"/jobs/{job.id}/missing-types",
+                        data={"type": "live", "on": "0"}).json()
+        assert (r["missing_total"], r["missing_selected"]) == (2, 2)
+
+        client.post(f"/jobs/{job.id}/approve",
+                    data={"tab": "missing",
+                          "selection_token": r["selection_tokens"]["missing"]},
+                    follow_redirects=False)
+        assert sorted(c["title"] for c in job.candidates) == ["Darkness", "Nebraska"]
+        split = next(j for j in jm.registry.all()
+                     if j is not job and j.execute_kind == "library"
+                     and j.status == jm.JobStatus.AWAITING_REVIEW)
+        assert [(c["title"], c["selected"]) for c in split.candidates] == [
+            ("Live 1975-85", True)]
     finally:
         _remove_job(job)
         if split is not None:
@@ -2330,7 +2433,7 @@ def test_mode_handoff_to_cli_pauses_web_downloads(client, monkeypatch):
                         lambda: [])
     r = client.post("/settings/mode", data={"target": "cli"},
                     follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/settings?mode=cli"
+    assert r.status_code == 303 and r.headers["location"] == "/settings?mode=cli#mode"
     assert runtime._CLI_MODE is True
     # Download and scan endpoints are paused.
     blocked = client.post("/download", data={"album_id": "123"},
@@ -2339,7 +2442,7 @@ def test_mode_handoff_to_cli_pauses_web_downloads(client, monkeypatch):
     # Resume restores web mode.
     back = client.post("/settings/mode", data={"target": "web"},
                        follow_redirects=False)
-    assert back.status_code == 303 and back.headers["location"] == "/settings?mode=web"
+    assert back.status_code == 303 and back.headers["location"] == "/settings?mode=web#mode"
     assert runtime._CLI_MODE is False
 
 

@@ -221,8 +221,8 @@ def census():
     if not _db.ensure():
         return None
     flush_pending()
-    tiers = {"cd": [0, 0], "hires96": [0, 0], "hires192": [0, 0],
-             "unknown": [0, 0]}
+    tiers = {"cd": [0, 0], "hires48": [0, 0], "hires96": [0, 0],
+             "hires192": [0, 0], "unknown": [0, 0]}
     artists: dict = {}
     reclaim = 0
     music_root = str(cfg.MUSIC_ROOT).rstrip("/") + "/"
@@ -255,17 +255,20 @@ def census():
         bits = nonnegative_int(meta.get("bits"))
         sr = nonnegative_int(meta.get("sample_rate"))
         size = nonnegative_int(meta.get("size"))
+        # Split at 48 kHz, the rate Downsample works above.
         if not bits or not sr:
             tier = "unknown"
+        elif sr > 96000:
+            tier = "hires192"
+        elif sr > 48000:
+            tier = "hires96"
         elif bits <= 16:
             tier = "cd"
-        elif sr <= 96000:
-            tier = "hires96"
         else:
-            tier = "hires192"
+            tier = "hires48"
         tiers[tier][0] += 1
         tiers[tier][1] += size
-        if tier in ("hires96", "hires192"):
+        if tier in ("hires48", "hires96", "hires192"):
             # The integer-ratio family the resampler targets: 88.2/176.4 land
             # on 44.1, everything else on 48.
             target = 44100 if sr % 44100 == 0 else 48000

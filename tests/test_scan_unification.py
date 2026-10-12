@@ -57,6 +57,21 @@ def test_compilations_stay_in_downsample_results_after_a_library_refresh(
     assert track.read_bytes() == original
 
 
+def test_a_scan_of_a_new_empty_library_does_not_fail(tmp_path, monkeypatch):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows
+
+    music = tmp_path / "music"
+    music.mkdir()
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+
+    job = jm.Job(title="Downsample")
+    flows.scan_downsamples(job)
+
+    assert not job.error
+    assert job.status != jm.JobStatus.FAILED
+
+
 @pytest.mark.parametrize("readable_names", [("Readable",), ()])
 def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readable_names):
     from qobuz_librarian import config as cfg
@@ -101,6 +116,7 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
         gap = discovery.AlbumGap(
             qobuz_album={"id": artist.name, "title": "Missing album"},
             on_disk_dir=None,
+            release_type="album",
         )
         return artist.name, artist.name, [gap], artist.name, [artist.name], {}
 
@@ -257,7 +273,8 @@ def test_dismissed_album_survives_a_refresh_without_a_rescan(
             "title": title,
             "artist": "Artist",
             "detail": "2024 · CD quality · 10 tracks",
-            "payload": {"album_id": title, "_artist_dir": "Artist"},
+            "payload": {"album_id": title, "_artist_dir": "Artist",
+                        "release_type": "album"},
             "selected": False,
         }
         for title in ("Kept Album", "Dismissed Album")

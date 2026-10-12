@@ -11,6 +11,7 @@ from qobuz_librarian.web import (
     qobuz_access,
     refusals,
     rendering,
+    review_badges,
     runtime,
     saved_reviews,
 )
@@ -22,12 +23,14 @@ router = APIRouter()
 async def upgrade_page(request: Request):
     if not runtime._upgrade_available():
         return saved_reviews._upgrade_unavailable_response()
+    badge_generation = review_badges.ready_generation("upgrade")
     state = saved_reviews._upgrade_state_summary()
     return rendering._tr(request, "upgrade.html", {
         "creds_ok": qobuz_access._creds_ok(), "qobuz_ready": qobuz_access._qobuz_ready(), "page": "upgrade",
         "upgrade_state": state,
         "last_run": job_labels._tool_last_run_age("library"),
-        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_UPGRADE)})
+        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_UPGRADE)},
+        review_badge_ack=("upgrade", badge_generation))
 
 
 @router.get("/upgrade/hidden", response_class=HTMLResponse)

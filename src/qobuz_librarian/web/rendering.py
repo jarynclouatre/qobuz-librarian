@@ -287,6 +287,8 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     creds_ok = credentials.configured
     context.setdefault("qobuz_ready", qobuz_access._qobuz_ready())
     context.setdefault("health_qobuz_missing", not creds_ok)
+    context.setdefault("health_user_id_missing",
+                       creds_ok and not credentials.downloader_ready)
     context.setdefault(
         "health_token_invalid",
         qobuz_access._token_valid_for(credentials) is False,

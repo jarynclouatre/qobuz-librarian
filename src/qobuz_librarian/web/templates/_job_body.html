@@ -21,6 +21,9 @@
     <div class="ql-job-heading">
       <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}{{ job.display_title }}{% elif job.execute_kind == 'new_releases' %}New releases{% elif job.execute_kind == 'downsample' and job.status.value == 'awaiting_review' %}{{ labels.review_title(job) }}{% else %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}{% endif %}</h1>
     </div>
+    {% if job.status.value == 'awaiting_review' %}
+    <a href="{{ job_return_href }}" class="ql-page-action ql-inline-link">{{ job_return_label }}</a>
+    {% else %}
     <span id="job-status-badge" class="ql-status-chip ql-job-status
       {%- if job.status.value == 'done' and _attention == 'cancel_late' %} is-warning
       {%- elif job.tracks_missing %} is-warning
@@ -30,6 +33,7 @@
       {%- elif job.status.value == 'awaiting_review' %} is-info
       {%- elif job.status.value == 'running' %} is-active
       {%- else %} is-warning{% endif %}">{{ labels.status_chip_label(job) }}</span>
+    {% endif %}
   </header>
   {% endif %}
 
@@ -90,7 +94,7 @@
   {% if s == 'awaiting_review' %}
     {% if _review_qobuz_blocked and not embedded_surface|default(false) %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
-      <span><a href="/settings" class="ql-inline-link">Connect Qobuz</a> to act on this review.</span>
+      <span><a href="/settings#qobuz" class="ql-inline-link">Connect Qobuz</a> to act on this review.</span>
     </div>
     {% endif %}
     {# The scan's own summary carries its caveats, an artist it couldn't check,
@@ -134,7 +138,7 @@
       {% endif %}
       {% include "_review_candidates.html" %}
       {% include "_writes_paused_reason.html" %}
-      <div class="ql-review-footer">
+      <div id="review-footer" class="ql-review-footer{% if review_counts.total and not _bar_total %} hidden{% endif %}">
         <div class="ql-review-footer-actions">
           <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary{% if not review_counts.total %} hidden{% endif %}"
             data-review-verb="{{ job.review_verb }}"
@@ -152,24 +156,21 @@
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-irreversible
             {%- else %} data-confirm-action="Download"
             {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
+          {% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %}~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
           {# A spent review has nothing to download, so the way out takes the
              bar's place. #}
           {{ labels.discard_review(job, _review_thing, labels.discard_confirm(job) | trim,
                                    'ql-btn ql-btn-secondary ql-review-footer-secondary' ~ (' hidden' if review_counts.total else ''),
                                    'review-footer-discard') }}
-          {% if not embedded_surface|default(false) %}
-          <div class="ql-review-footer-secondary-group">
-            <a href="{{ job_return_href }}" id="review-footer-back" class="ql-btn ql-btn-secondary ql-btn-sm{% if not review_counts.total %} hidden{% endif %}">{{ job_return_label }}</a>
-          </div>
-          {% endif %}
         </div>
       </div>
     </form>
 
-    {% if job.log_lines %}
+    {% set _review_log = review_log_lines if review_log_lines is defined else job.log_lines %}
+    {% if _review_log %}
     <div class="ql-section-divider">Activity log</div>
     <div class="log-console log-console--review">
-      {%- for line in job.log_lines %}{{ line }}
+      {%- for line in _review_log %}{{ line }}
 {% endfor -%}
     </div>
     {% endif %}

@@ -258,10 +258,10 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
     monkeypatch.setattr(mode.downsample_state, "load", lambda: {})
     monkeypatch.setattr(
         mode.downsample_state,
-        "has_visible_candidates",
-        lambda *_args: False,
+        "visible_candidates",
+        lambda *_args: [],
     )
-    monkeypatch.setattr(mode.review_badges, "set_ready", lambda *_args: None)
+    monkeypatch.setattr(mode.review_badges, "sync_candidates", lambda *_args: None)
 
     result = mode.run_downsample_walk_mode(
         SimpleNamespace(dry_run=False, yes=True),

@@ -160,10 +160,6 @@ def visible_candidates(state=None, hidden=None):
     return visible_of(state.get("candidates") or [], hidden)
 
 
-def has_visible_candidates(state=None, hidden=None):
-    return bool(visible_candidates(state=state, hidden=hidden))
-
-
 def remove_album_dir(album_dir) -> bool:
     """Suppress one exact locally-capped album without contacting Qobuz."""
     def resolved(value):

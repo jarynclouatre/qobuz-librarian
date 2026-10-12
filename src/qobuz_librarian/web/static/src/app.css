@@ -286,7 +286,7 @@ h1, h2, h3 {
 /* By name, not by container: the class means "line icon" wherever it sits,
    and scoping it to the desktop nav left the phone tab bar rendering raw
    black fills. */
-.ql-nav-icon-stroke {
+svg.ql-nav-icon-stroke {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -1076,21 +1076,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-search-idle-mark {
   width: 5.75rem;
   height: 5.75rem;
-  margin-bottom: 0.65rem;
   color: var(--ql-text-3);
-}
-.ql-search-idle p {
-  margin: 0;
-  font-family: var(--ql-font-display);
-  color: color-mix(in oklab, var(--ql-text) 88%, transparent);
-  font-size: 1.25rem;
-  font-weight: 600;
-  line-height: 1.3;
-}
-.ql-search-idle span {
-  color: var(--ql-text-3);
-  font-size: 0.8125rem;
-  line-height: 1.4;
 }
 /* Background work under the results: a short list after a hairline, each
    job one title and one quiet line, its state a coloured word. */
@@ -1424,19 +1410,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-vchip[aria-expanded="true"] {
   color: var(--ql-text);
 }
-.ql-table-row .ql-vchip-wide {
-  display: none;
-}
-@media (min-width: 760px) {
-  .ql-table-row .ql-vchip:has(.ql-vchip-wide) {
-    width: 1.75rem;
-    justify-content: center;
-    padding: 0;
-  }
-  .ql-table-row .ql-vchip:has(.ql-vchip-wide)::after {
-    margin-left: 0;
-  }
-}
 .ql-vchip:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
   outline-offset: 2px;
@@ -1704,7 +1677,8 @@ details.ql-mobile-drawer[open]::before {
   white-space: nowrap;
   cursor: pointer;
 }
-.ql-search-filter {
+.ql-search-filter,
+.ql-review-switch {
   display: inline-flex;
   align-items: center;
   gap: 0.55rem;
@@ -1741,15 +1715,18 @@ details.ql-mobile-drawer[open]::before {
   background-color: var(--ql-text-2);
   transition: transform 150ms ease, background-color 150ms ease;
 }
-.ql-search-filter[aria-pressed="true"] .ql-toggle-switch {
+.ql-search-filter[aria-pressed="true"] .ql-toggle-switch,
+.ql-review-switch[aria-pressed="true"] .ql-toggle-switch {
   border-color: var(--ql-text);
   background-color: var(--ql-text);
 }
-.ql-search-filter[aria-pressed="true"] .ql-toggle-switch i {
+.ql-search-filter[aria-pressed="true"] .ql-toggle-switch i,
+.ql-review-switch[aria-pressed="true"] .ql-toggle-switch i {
   transform: translateX(0.9375rem);
   background-color: var(--ql-bg);
 }
-.ql-search-filter:focus-visible {
+.ql-search-filter:focus-visible,
+.ql-review-switch:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
   outline-offset: 2px;
 }
@@ -2219,6 +2196,16 @@ details.ql-mobile-drawer[open]::before {
 .ql-grid-tile:hover {
   border-color: var(--ql-line);
 }
+/* Discover tiles open nothing in place, so a row of them can share one
+   height with the download buttons along the bottom. */
+.ql-grid-view--even .ql-grid-tile {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+}
+.ql-grid-view--even .ql-grid-footer {
+  margin-top: auto;
+}
 .ql-grid-tile:has(.ql-checkbox:checked) {
   border-color: color-mix(in oklab, var(--ql-text) 40%, transparent);
   background-color: color-mix(in oklab, var(--ql-text) 5%, var(--ql-surface));
@@ -2459,6 +2446,7 @@ details.ql-mobile-drawer[open]::before {
     grid-row: 1;
     align-self: center;
     justify-content: flex-start;
+    padding-left: 0.75rem;
   }
   .ql-table-title-cell,
   .ql-table-muted,
@@ -2525,7 +2513,7 @@ details.ql-mobile-drawer[open]::before {
     align-self: center;
     justify-content: flex-end;
   }
-  /* Title, artist, then one line of year, quality and the Tracks and
+  /* Title, artist, a line of year and quality, then the Tracks and
      Versions chips. The chips' own box and the edition line join it. */
   .ql-table-copy {
     display: flex;
@@ -2548,12 +2536,9 @@ details.ql-mobile-drawer[open]::before {
   }
   .ql-table-copy .ql-row-chips {
     order: 1;
+    flex-basis: 100%;
     justify-content: flex-start;
     margin: 0;
-  }
-  .ql-table-copy .ql-row-chips::before {
-    content: "·";
-    color: var(--ql-text-3);
   }
   /* A track's album line keeps its two-line cap and gives way to the
      quality chip, which drops below it rather than being cut off. */
@@ -2950,6 +2935,7 @@ details.ql-mobile-drawer[open]::before {
   padding: var(--ql-pad-card);
 }
 .ql-connect-inline {
+  flex: 1;
   padding-top: 0;
 }
 .ql-connect-layout {
@@ -3221,25 +3207,25 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   margin-bottom: 0;
 }
-.ql-review-count {
-  margin: 0;
+.ql-review-reclaimable {
   color: var(--ql-text-2);
   font-size: 0.8125rem;
-  line-height: 1.35;
+  text-align: center;
 }
-.ql-review-count [data-summary-count],
-.ql-review-reclaimable {
-  color: var(--ql-text);
-  font-weight: 650;
+.ql-review-reclaimable:empty {
+  display: none;
 }
 .ql-review-dismissed-link {
   font-size: 0.8125rem;
   white-space: nowrap;
 }
 .ql-review-summary-row.hidden,
-.ql-review-tabs.hidden,
+.ql-review-tabs-row.hidden,
+.ql-review-switches.hidden,
 .ql-review-filter-row.hidden,
 .ql-review-empty.hidden,
+.ql-review-tool-group.hidden,
+.ql-review-footer.hidden,
 .ql-review-footer-secondary.hidden {
   display: none !important;
 }
@@ -3326,6 +3312,21 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-review-tabs {
   margin-bottom: 0;
+}
+/* The release-type switches share the tab strip's row, and take the row
+   under it where the strip leaves no room. */
+.ql-review-tabs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 var(--ql-space-4);
+}
+.ql-review-switches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--ql-space-4);
 }
 /* The one count pill: the sidebar's Queue count, a tab strip's counts and
    the Queue section headings. */
@@ -3525,6 +3526,14 @@ details.ql-mobile-drawer[open]::before {
   justify-content: space-between;
   gap: var(--ql-space-3);
 }
+/* The refresh button keeps its tap size without making the header taller
+   than the title, so Library's title sits where every other page's does. */
+.ql-page-header--split .ql-header-refresh {
+  margin-block: -0.5rem;
+}
+#library-refresh-failure:not(:has(*)) {
+  display: none;
+}
 .ql-header-refresh {
   position: relative;
   display: inline-flex;
@@ -3610,10 +3619,6 @@ details.ql-mobile-drawer[open]::before {
   .ql-settings-page {
     width: min(100%, 70rem);
     max-width: none;
-  }
-  .ql-tool-page:not(.ql-tool-page--wide) > :not(.ql-page-header):not(.ql-quality-tabs) {
-    width: min(100%, 56rem);
-    margin-inline: auto;
   }
   .ql-list-page > :not(.ql-page-header),
   .ql-settings-page > :not(.ql-page-header) {
@@ -4352,7 +4357,8 @@ details.ql-mobile-drawer[open]::before {
   height: 100%;
 }
 .ql-census-seg-cd    { background: color-mix(in oklab, var(--ql-gold) 14%, var(--ql-surface-2)); }
-.ql-census-seg-h96   { background: color-mix(in oklab, var(--ql-gold) 48%, transparent); }
+.ql-census-seg-h48   { background: color-mix(in oklab, var(--ql-gold) 30%, transparent); }
+.ql-census-seg-h96   { background: color-mix(in oklab, var(--ql-gold) 55%, transparent); }
 .ql-census-seg-h192  { background: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-surface)); }
 .ql-census-seg-other { background: color-mix(in oklab, var(--ql-text-3) 35%, var(--ql-surface-2)); }
 /* The whole queue card opens its job's surface, a thumb target, not just the
@@ -4376,7 +4382,9 @@ details.ql-mobile-drawer[open]::before {
   cursor: pointer;
   color: var(--ql-text-2);
   font-size: 0.8rem;
-  border-bottom: 1px dotted color-mix(in oklab, currentColor 55%, transparent);
+  text-decoration: underline dotted color-mix(in oklab, currentColor 55%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.25em;
   transition: color 150ms ease;
 }
 .ql-link-action:hover:not(:disabled) {
@@ -4572,19 +4580,6 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text-3);
   font-size: 0.8125rem;
 }
-.ql-storage-bar {
-  height: 6px;
-  margin-top: var(--ql-space-2);
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--ql-text) 8%, transparent);
-  overflow: hidden;
-}
-.ql-storage-bar i {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--ql-text-3);
-}
 .ql-settings-section-copy p {
   max-width: 68ch;
   margin: 0.3rem 0 0;
@@ -4625,12 +4620,6 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-required {
   color: var(--ql-danger);
-}
-.ql-field-optional {
-  margin-left: 0.35rem;
-  color: var(--ql-text-3);
-  font-size: 0.75rem;
-  font-weight: 500;
 }
 /* The browser's file control cannot be styled, so it is hidden behind a label
    wearing the normal button styles and the chosen name is written beside it.
@@ -4754,6 +4743,7 @@ details.ql-mobile-drawer[open]::before {
   cursor: pointer;
 }
 .ql-setting-help {
+  display: block;
   max-width: 68ch;
   margin-top: var(--ql-space-1);
   color: var(--ql-text-2);
@@ -4789,11 +4779,16 @@ details.ql-mobile-drawer[open]::before {
 /* Download quality standing on its own above the toggle list. */
 .ql-quality-field {
   margin-bottom: 1.1rem;
-  padding-bottom: 1.1rem;
-  border-bottom: 1px solid color-mix(in oklab, var(--ql-text) 9%, transparent);
 }
 .ql-default-control {
   min-width: 0;
+}
+.ql-default-control .ql-field-help {
+  max-width: 68ch;
+}
+/* A link to one field lands with its label and the fields before it in view. */
+.ql-default-control > :target {
+  scroll-margin-top: 30vh;
 }
 .ql-path-list {
   display: grid;
@@ -5318,15 +5313,6 @@ details[open] > summary .ql-review-chevron {
 .ql-review-footer-secondary {
   width: 100%;
 }
-.ql-review-footer-secondary-group {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--ql-space-2);
-}
-.ql-review-footer-secondary-group .ql-btn {
-  flex: 1 1 0;
-}
 .ql-section-divider {
   display: flex;
   align-items: center;
@@ -5383,19 +5369,6 @@ details[open] > summary .ql-review-chevron {
     width: 100%;
   }
 }
-@media (max-width: 639.98px) {
-  .ql-review-footer-secondary-group {
-    justify-content: center;
-  }
-  .ql-review-footer-secondary-group .ql-btn {
-    flex: none;
-    width: auto;
-    min-width: 0;
-    border-color: transparent;
-    background: transparent;
-    box-shadow: none;
-  }
-}
 @media (min-width: 640px) {
   .ql-review-footer-actions {
     flex-direction: row;
@@ -5405,15 +5378,6 @@ details[open] > summary .ql-review-chevron {
   .ql-review-footer-primary,
   .ql-review-footer-secondary {
     width: auto;
-  }
-  .ql-review-footer-secondary-group {
-    display: flex;
-    align-items: center;
-    gap: var(--ql-space-2);
-    margin-left: auto;
-  }
-  .ql-review-footer-secondary-group .ql-btn {
-    flex: none;
   }
 }
 .ql-review-candidate {
@@ -5530,6 +5494,14 @@ details[open] > summary .ql-review-chevron {
     justify-self: end;
     overflow-wrap: anywhere;
     text-align: right;
+  }
+  /* A sentence-long reason reads under the title, not squeezed right. */
+  .ql-review-candidate--note .ql-review-candidate-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ql-review-candidate--note .ql-review-candidate-detail {
+    justify-self: start;
+    text-align: left;
   }
   .ql-review-truncated {
     grid-column: 1 / -1;
@@ -6148,6 +6120,7 @@ details[data-artist].htmx-swapping {
   .ql-page-tabs a,
   .ql-page-tabs button,
   .ql-search-filter,
+  .ql-review-switch,
   .ql-search-select-all,
   .ql-search-back,
   .ql-disclosure-summary {

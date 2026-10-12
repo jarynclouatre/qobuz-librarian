@@ -8,16 +8,18 @@
         {% if a.cover %}<img src="{{ a.cover }}" alt="" width="52" height="52" class="ql-result-art" loading="lazy">{% endif %}
         <div class="ql-result-copy">
           <p class="ql-result-title">{{ a.name }}</p>
-          <p class="ql-discover-reason">{% if discover_tab == 'search' %}Similar to{% else %}Because you have{% endif %}
+          {% if discover_tab != 'search' %}
+          <p class="ql-discover-reason">Because you have
             {% for s in a.seeds %}<span class="ql-seed-chip">{{ s }}</span>{% endfor %}
           </p>
+          {% endif %}
         </div>
       </div>
       <button type="button" class="ql-vchip" data-discover-toggle id="discover-toggle-{{ a.artist_id }}"
               aria-expanded="false" aria-controls="discover-albums-{{ a.artist_id }}"
               hx-get="/discover/artist-albums?artist_id={{ a.artist_id | urlencode }}&name={{ a.name | urlencode }}"
               hx-target="#discover-albums-{{ a.artist_id }}" hx-swap="innerHTML"
-              hx-trigger="click">{{ a.albums | length }} Album{{ 's' if a.albums | length != 1 }}</button>
+              hx-trigger="click">{{ a.albums | length }} album{{ 's' if a.albums | length != 1 }}</button>
     </div>
     <div id="discover-albums-{{ a.artist_id }}" class="hidden" hx-preserve></div>
     {% endfor %}

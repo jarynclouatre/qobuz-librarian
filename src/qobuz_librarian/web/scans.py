@@ -155,7 +155,6 @@ def _music_root_problem():
 def _library_scan_state():
     """Whether a whole-library scan has something valid to scan."""
     root = Path(cfg.MUSIC_ROOT)
-    hint = storage._music_root_hint()
     problem = _music_root_problem()
     if problem:
         return {
@@ -186,13 +185,17 @@ def _library_scan_state():
                 "message": storage._music_write_target_message(
                     write_state, recorded, diagnostic=True),
             }
+        if cfg.in_container():
+            elsewhere = ("If your music is already on this machine, map its "
+                         f"folder onto {root} with QL_MUSIC_DIR in your .env.")
+        else:
+            elsewhere = ("If your music is elsewhere, set MUSIC_ROOT to the "
+                         "folder that holds your artist folders.")
         return {
             "ready": False,
             "empty": True,
             "count": 0,
-            "message": (
-                f"No artist folders with audio were found in {root}. {hint}"
-            ),
+            "message": f"Download an album to start. {elsewhere}",
         }
     return {"ready": True, "empty": False, "count": len(artists),
             "message": ""}

@@ -34,13 +34,11 @@ BEHAVIOR_FIELDS = [
      "After import, file albums credited to multiple artists under the primary "
      "album artist instead of a combined artist folder."),
     ("DOWNSAMPLE_HIRES_ENABLED", "Downsample new hi-res downloads",
-     "Before import, reduce new hi-res downloads to 44.1 or 48 kHz; the "
+     "Before import, reduce new downloads above 48 kHz to 44.1 or 48 kHz; the "
      "hi-res files are not kept."),
-    ("SUPPRESS_SINGLE_TRACK_GAPS", "Treat track downloads as singles",
+    ("SUPPRESS_SINGLE_TRACK_GAPS", "Skip albums you only took tracks from",
      "Library scans and new-release checks don't offer the rest of an album "
-     "you took tracks from with a Track download, and skip artists whose "
-     "only folders came from such downloads. Other one-track folders are "
-     "scanned as usual."),
+     "you took tracks from, and skip artists you have nothing else by."),
     ("LYRICS_ENABLED", "Fetch lyrics",
      "Fetch lyrics during import, using synced lyrics when providers have them."),
 ]
@@ -57,8 +55,8 @@ TEXT_FIELDS = [
      "How lyrics are written when fetched.",
      "enum", ["embed", "sidecar", "both"], ""),
     ("ARTWORK", "Album art",
-     "Where cover art goes: a file in the album folder (sidecar), embedded in "
-     "the track tags with no leftover file (embed), or both.",
+     "Where cover art goes: a cover file in the album folder, embedded in the "
+     "track tags with no leftover file, or both.",
      "enum", ["sidecar", "embed", "both"], ""),
     ("LYRICS_PROVIDERS", "Lyrics providers",
      "Providers to try in order, from Lrclib, NetEase, Megalobiz, Musixmatch "
@@ -79,7 +77,7 @@ TEXT_FIELDS = [
     ("BEETS_PATH_COMP", "Beets path: compilation",
      "Folder and file naming for compilations; empty uses the .env value or "
      "the Beets default.",
-     "text", None, "e.g. Various Artists/$album ($year)/$track - $title"),
+     "text", None, "e.g. Compilations/$album ($year)/$track - $title"),
     ("BEETS_PLUGINS", "Beets plugins",
      "Beets plugins to enable in place of the config.yaml list; empty uses "
      "the .env value or that list, and unknown names are dropped.",
@@ -186,7 +184,7 @@ ENUM_OPTION_LABELS = {
 }
 
 
-def inert_behaviour_notes(values, have_downsample=True) -> dict:
+def inert_behaviour_notes(values, have_downsample=True, have_lyrics=True) -> dict:
     """What a saved combination has switched off, keyed by the setting it hits.
 
     Download quality is the cap streamrip is invoked with, so at 16-bit /
@@ -194,19 +192,23 @@ def inert_behaviour_notes(values, have_downsample=True) -> dict:
     toggle on screen with nothing to act on, and hi-res edition picking still
     deciding the edition but no longer the quality. Neither is refused, so the
     page has to say which one still does something. Without ffmpeg and flac
-    the downsample toggle never runs at any quality.
+    the downsample toggle never runs at any quality, and without syncedlyrics
+    no lyrics are fetched.
     """
     notes = {}
     if not have_downsample:
         notes["DOWNSAMPLE_HIRES_ENABLED"] = (
             "ffmpeg or flac is missing, so this never runs.")
+    if not have_lyrics:
+        notes["LYRICS_ENABLED"] = (
+            "syncedlyrics is not installed, so this never runs.")
     if str(values.get("STREAMRIP_QUALITY", "")) != "2":
         return notes
     quality = ENUM_OPTION_LABELS["STREAMRIP_QUALITY"]["2"]
     if values.get("DOWNSAMPLE_HIRES_ENABLED") and have_downsample:
         notes["DOWNSAMPLE_HIRES_ENABLED"] = (
-            f"Your download quality is {quality}, so nothing arrives above CD "
-            "rate and this never runs.")
+            f"Your download quality is {quality}, so nothing arrives above "
+            "48 kHz and this never runs.")
     if values.get("PREFER_HIRES"):
         notes["PREFER_HIRES"] = (
             f"At {quality} there is no hi-res to prefer, so this only "
@@ -474,14 +476,24 @@ def _normalise(data) -> bool:
     for key in _blank_overrides(data):
         del data[key]
         changed = True
-    # A saved copy of the Compose providers changes nothing today but would
-    # hide later Compose edits for good.
-    saved = data.get("LYRICS_PROVIDERS")
-    compose = _ENV_DEFAULTS.get("LYRICS_PROVIDERS") or []
-    if saved and compose and _same_list("LYRICS_PROVIDERS", saved, compose):
-        del data["LYRICS_PROVIDERS"]
+    for key in [key for key in data if _matches_env(key, data[key])]:
+        del data[key]
         changed = True
     return changed
+
+
+def _matches_env(key, value) -> bool:
+    """Whether a saved value is what the environment gives anyway. Keeping it
+    would change nothing today but hide a later .env edit for good."""
+    if key not in _ENV_DEFAULTS:
+        return False
+    env = _ENV_DEFAULTS[key]
+    if key in BEHAVIOR_KEYS:
+        return bool(value) == bool(env)
+    kind = _FIELD_KINDS.get(key, "text")
+    if kind == "list":
+        return _same_list(key, value, env)
+    return _field_str(value, kind).strip().lower() == _field_str(env, kind).strip().lower()
 
 
 def _same_list(key, first, second) -> bool:
@@ -672,11 +684,12 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
     persisted = _read_settings() or {}
     cleared = _blank_overrides(clean)
     for k, v in clean.items():
-        if k in cleared:
-            # Emptied: the field goes back to tracking whatever the environment
-            # supplies, or the beets config file when it supplies nothing. That
-            # is what carrying no key means, so the key leaves the store rather
-            # than pinning a blank over the Compose value for good.
+        if k in cleared or _matches_env(k, v):
+            # Emptied, or set back to the environment's value: the field goes
+            # back to tracking whatever the environment supplies, or the beets
+            # config file when it supplies nothing. That is what carrying no
+            # key means, so the key leaves the store rather than pinning a
+            # value over the Compose one for good.
             persisted.pop(k, None)
         elif k in persisted or (v != baseline.get(k) and k not in unchanged):
             persisted[k] = v

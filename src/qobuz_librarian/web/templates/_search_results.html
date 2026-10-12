@@ -354,7 +354,7 @@
                             data-version-toggle
                             aria-expanded="false"
                             aria-controls="search-versions-{{ gi }}"
-                            aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} version{{ 's' if g.others | length != 1 else '' }}</button>
+                            aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }}</button>
                     {% endif %}
                   </span>
                 </div>
@@ -437,7 +437,7 @@
                 data-version-toggle
                 aria-expanded="false"
                 aria-controls="search-grid-versions-{{ gi }}"
-                aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} version{{ 's' if g.others | length != 1 else '' }}</button>
+                aria-label="{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }} for {{ g.title }}">{{ g.others | length }} other version{{ 's' if g.others | length != 1 else '' }}</button>
         <div id="search-grid-versions-{{ gi }}" class="ql-grid-version-panel hidden"
              data-version-panel>
           {% for e in g.others %}
@@ -485,22 +485,22 @@
   {% endif %}
 
 {% elif q and not error %}
-{% if not selected_artist %}
-<div class="ql-search-context">
-  <div class="ql-search-context-main">{{ search_heading() }}</div>
-</div>
-{% endif %}
 <div class="ql-empty-state ql-search-empty">
+  {% if artist_only_count %}
+  <p>{{ artist_only_label }} matched only the artist name.</p>
+  <span><button type="button" class="ql-inline-link ql-inline-link-hit" data-search-by-artist="{{ q }}">Search by Artist</button> to see them.</span>
+  {% else %}
   <p>
     {% if kind == 'artist' and selected_artist %}No albums found for {{ selected_artist.name }}.
-    {% elif kind == 'artist' %}No artists found for "{{ q }}".
-    {% else %}No results for "{{ q }}".{% endif %}
+    {% elif kind == 'artist' %}No artists found for “{{ q }}”.
+    {% else %}No results for “{{ q }}”.{% endif %}
   </p>
   <span>
     {% if kind == 'artist' %}Try a different artist name.
     {% elif kind == 'track' %}Try a different track title.
     {% else %}Try a different album title.{% endif %}
   </span>
+  {% endif %}
 </div>
 {% elif not q and not error %}
 <div class="ql-empty-state ql-search-empty">

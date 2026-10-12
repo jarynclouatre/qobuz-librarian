@@ -17,11 +17,13 @@ from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import (
     AuthLost,
     CredentialChanged,
+    DownloaderNotReady,
     NoCredsError,
     QobuzAccess,
     QobuzError,
     QobuzUnavailable,
 )
+from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations import lyrics as lyrics_mode
 from qobuz_librarian.library import (
     catalog,
@@ -265,6 +267,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         "search_artist_name": search_artist_name,
         "search_album_id": search_album_id,
         "auto_search": bool(search_q or search_album_id),
+        "have_lyrics": lyric_fetch.AVAILABLE,
         "page": "dashboard",
         **disk,
     })
@@ -840,7 +843,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
            "error": error, "kind": kind,
            "search_count_label": search_count_label,
            "artist_only_count": artist_only_count,
-           "artist_only_label": plural(artist_only_count, "result"),
+           "artist_only_label": plural(artist_only_count, "album"),
            "search_state": search_state,
            "search_cacheable": not defer_search_views,
            "defer_search_views": defer_search_views,
@@ -1088,11 +1091,11 @@ async def queue_download(request: Request, album_id: str = Form(""),
             return response
         # Land on the new job's page so the user sees their download starting.
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
-    except NoCredsError as exc:
+    except (NoCredsError, DownloaderNotReady) as exc:
         msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         if rendering._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
-        return RedirectResponse(url="/settings?error=creds", status_code=303)
+        return RedirectResponse(url="/settings#qobuz", status_code=303)
     except Exception as e:
         _log.warning("couldn't queue download for album %s", album_id,
                      exc_info=True)

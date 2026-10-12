@@ -14,6 +14,7 @@ from qobuz_librarian.web import (
     qobuz_access,
     refusals,
     rendering,
+    review_badges,
     saved_reviews,
     scans,
 )
@@ -24,6 +25,7 @@ router = APIRouter()
 
 @router.get("/downsample", response_class=HTMLResponse)
 async def downsample_page(request: Request):
+    badge_generation = review_badges.ready_generation("downsample")
     state = saved_reviews._downsample_state_summary()
     latest = scans._last_finished("downsample")
     failed = latest if latest and latest.status == job_mgr.JobStatus.FAILED else None
@@ -46,7 +48,8 @@ async def downsample_page(request: Request):
                       job_mgr.JobStatus.RUNNING)),
         "downsample_failed": failed,
         "last_run": job_labels._tool_last_run_age("downsample"),
-        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)})
+        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)},
+        review_badge_ack=("downsample", badge_generation))
 
 
 @router.get("/downsample/hidden", response_class=HTMLResponse)

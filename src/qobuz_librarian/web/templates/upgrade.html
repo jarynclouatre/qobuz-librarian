@@ -13,6 +13,8 @@
   {% set active_tab = 'upgrade' %}
   {% include "_quality_tabs.html" %}
 
+  {# Without Qobuz the connect button is the one thing to do first. #}
+  {% set _entry_btn = 'ql-btn-primary' if qobuz_ready else 'ql-btn-secondary ql-secondary-action' %}
   {% if not qobuz_ready %}
   <section class="ql-work-card">
     {% with connect_embedded=True %}
@@ -24,9 +26,11 @@
     <span class="ql-status-chip {% if upgrade_state.stale %}is-warning{% elif upgrade_state.count %}is-info{% else %}is-neutral{% endif %}">
       {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}{% if hidden_count %}Nothing left to review{% else %}No upgrades found{% endif %}{% else %}Not scanned yet{% endif %}
     </span>
+    {% if upgrade_state.stale or upgrade_state.updated or last_run %}
     <span>
-      {% if upgrade_state.stale %}{% if upgrade_state.stale_cause == 'quality' %}Your quality settings changed after these results were built.{% else %}Your Library changed after these results were built.{% endif %}{% elif upgrade_state.updated %}Results refreshed {{ upgrade_state.updated }}.{% elif last_run %}Last library scan {{ last_run }}.{% else %}No scan has finished yet.{% endif %}
+      {% if upgrade_state.stale %}{% if upgrade_state.stale_cause == 'quality' %}Your quality settings changed after these results were built.{% else %}Your Library changed after these results were built.{% endif %}{% elif upgrade_state.updated %}Results refreshed {{ upgrade_state.updated }}.{% else %}Last library scan {{ last_run }}.{% endif %}
     </span>
+    {% endif %}
     {% if hidden_count %}
     <a href="/upgrade/hidden">
       {{ hidden_count }} dismissed upgrade{% if hidden_count != 1 %}s{% endif %}
@@ -43,7 +47,7 @@
       <p class="ql-work-card-title">Upgrade results need a Library refresh</p>
     </div>
     <div class="ql-work-card-actions">
-      <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>
+      <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>
     </div>
   </section>
   {% elif upgrade_state.count %}
@@ -54,7 +58,7 @@
     <div class="ql-work-card-actions">
       <form action="/upgrade/review" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
+        <button type="submit" class="ql-btn {{ _entry_btn }} w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
 >Review albums</button>
       </form>
     </div>
@@ -65,7 +69,7 @@
       <p class="ql-work-card-text">The latest Library scan checked the whole catalogue with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}</p>
     </div>
     <div class="ql-work-card-actions">
-      <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>
+      <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>
     </div>
   </section>
   {% else %}
@@ -75,7 +79,7 @@
       <p class="ql-work-card-text">A Library scan builds them.</p>
     </div>
     <div class="ql-work-card-actions">
-      <a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>
+      <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>
     </div>
   </section>
   {% endif %}

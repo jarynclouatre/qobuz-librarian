@@ -4,15 +4,16 @@ import json
 import re
 
 from qobuz_librarian.library import hidden as hidden_mod
+from qobuz_librarian.library import missing_types
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.web import flows
 
 
 def _selection_token(job, tab=""):
+    in_tab = flows.review_tab_filter(tab)
     with job._lock:
         selected = sorted(
-            c["cid"] for c in job.candidates if c.get("selected")
-            and (not tab or flows.is_gap_candidate(c) == (tab == "gaps")))
+            c["cid"] for c in job.candidates if c.get("selected") and in_tab(c))
     return hashlib.sha256(json.dumps([job.id, selected]).encode()).hexdigest()
 
 
@@ -21,10 +22,8 @@ def _review_context(job, page=1, query="", tab="", *, through=False, anchor=""):
     hidden_count = hidden_mod.count(_hide_scope(job.execute_kind))
     with job._lock:
         tab_counts = None
-        if job.execute_kind == "library":
-            totals = _review_tab_totals(job)
-            if totals["missing"] or totals["gaps"]:
-                tab_counts = totals
+        if job.execute_kind == "library" and job.candidates:
+            tab_counts = _review_tab_totals(job)
         if tab_counts:
             if tab not in ("missing", "gaps"):
                 tab = ("gaps" if tab_counts["gaps"] and not tab_counts["missing"]
@@ -49,9 +48,11 @@ def _review_context(job, page=1, query="", tab="", *, through=False, anchor=""):
             "review_tab": tab,
             "review_selection_token": _selection_token(job, tab),
             "review_tab_counts": tab_counts,
+            "review_type_switches": RELEASE_TYPE_SWITCHES,
             "review_hidden_count": hidden_count,
             "review_counts": counts,
             "review_summary_line": _review_summary_line(job),
+            "review_log_lines": _review_log_lines(job),
             "review_reclaimable_label": (format_size(counts["reclaimable"])
                                          if counts["reclaimable"] else ""),
             "review_page_size": REVIEW_PAGE_ARTISTS,
@@ -59,9 +60,8 @@ def _review_context(job, page=1, query="", tab="", *, through=False, anchor=""):
 
 
 # The generated summaries that say nothing but the size of the review. A
-# review screen carries its own counts row, which is live; a summary that only
-# restates the count contradicts it the moment a row is dismissed and keeps
-# the old number until the job is rebuilt from disk.
+# summary that only restates the count is wrong the moment a row is dismissed
+# and keeps the old number until the job is rebuilt from disk.
 _COUNT_ONLY_SUMMARY = re.compile(
     r"(?:[0-9][0-9,]* to review across Missing Albums \([0-9][0-9,]*\)"
     r" and Gap Fill \([0-9][0-9,]*\)(?:, from your last library scan)?"
@@ -69,15 +69,32 @@ _COUNT_ONLY_SUMMARY = re.compile(
     r"|[0-9][0-9,]* upgradeable albums? Qobuz can serve at higher quality"
     r"|[0-9][0-9,]* albums? can be upgraded"
     r"|[0-9][0-9,]* albums? can be downsampled"
-    r"|[0-9][0-9,]* albums? stored above CD rate"
+    r"|[0-9][0-9,]* albums? stored above (?:CD rate|48 kHz)"
     r"|[0-9][0-9,]* new releases? found across the library)\."
 )
 
 
 def _review_summary_line(job) -> str:
     """The scan's own summary as a review screen should show it: its caveats
-    kept, its bare count dropped in favour of the live counts row."""
+    kept, its bare count dropped."""
     return review_summary_without_count(job.execute_kind, job.summary)
+
+
+def _review_log_lines(job):
+    """The review's activity log without the scan's bare count, which a
+    dismissal or a release-type switch makes untrue."""
+    with job._lock:
+        lines = list(job.log_lines)
+    if job.execute_kind not in _TRIAGE_KINDS:
+        return lines
+    kept = []
+    for line in lines:
+        count = _COUNT_ONLY_SUMMARY.match(line)
+        if count is None:
+            kept.append(line)
+        elif rest := line[count.end():].strip():
+            kept.append(rest)
+    return kept
 
 
 def review_summary_without_count(execute_kind, summary) -> str:
@@ -126,9 +143,10 @@ def _review_artist_groups(job, query="", tab=""):
     with job._lock:
         cands = [c.copy() for c in job.candidates]
     q = (query or "").strip().lower()
+    in_tab = flows.review_tab_filter(tab)
     groups: dict = {}
     for c in cands:
-        if tab and flows.is_gap_candidate(c) != (tab == "gaps"):
+        if not in_tab(c):
             continue
         artist = c.get("artist") or ""
         if q and not flows.candidate_matches_query(c, q):
@@ -179,19 +197,46 @@ def _filtered_rest_of(groups):
                for row in rows if not row.get("selected"))
 
 
+# The Missing Albums switches, in the order the review shows them.
+RELEASE_TYPE_SWITCHES = (
+    (missing_types.LIVE, "Live"),
+    (missing_types.COMPILATION, "Compilations"),
+    (missing_types.EP, "EPs & singles"),
+)
+
+
 def _review_tab_totals(job):
     """Whole-set totals and selected counts behind a library review's Missing
     Albums / Gap Fill tabs, ignoring the page filter so the tab labels stay
     truthful. Selected counts feed the tab-scoped bulk bar: what the user sees
-    on the active tab is exactly what Download/Dismiss will act on."""
-    gaps = gaps_sel = missing_sel = 0
+    on the active tab is exactly what Download/Dismiss will act on. Missing
+    Albums counts the release types switched on, named in ``included``;
+    ``switched_off`` counts the rows the other switches hold back and
+    ``switched_off_under`` names those switches. ``typed`` says whether any
+    of its rows carries a type, which a review saved before types were read
+    does not."""
+    included = missing_types.load()
+    in_missing = flows.review_tab_filter("missing", included)
+    gaps = gaps_sel = missing = missing_sel = 0
+    held_back = {}
+    typed = False
     with job._lock:
-        total = len(job.candidates)
         for c in job.candidates:
             if flows.is_gap_candidate(c):
                 gaps += 1
                 gaps_sel += 1 if c.get("selected") else 0
-            elif c.get("selected"):
-                missing_sel += 1
-    return {"missing": total - gaps, "gaps": gaps,
-            "missing_selected": missing_sel, "gaps_selected": gaps_sel}
+                continue
+            release_type = (c.get("payload") or {}).get("release_type")
+            typed = typed or bool(release_type)
+            if in_missing(c):
+                missing += 1
+                missing_sel += 1 if c.get("selected") else 0
+            else:
+                held_back[release_type] = held_back.get(release_type, 0) + 1
+    return {"missing": missing, "gaps": gaps,
+            "missing_selected": missing_sel, "gaps_selected": gaps_sel,
+            "included": sorted(included), "typed": typed,
+            "switched_off": sum(held_back.values()),
+            "switched_off_under": [label for release_type, label
+                                   in RELEASE_TYPE_SWITCHES
+                                   if held_back.get(release_type)]}

@@ -3,9 +3,10 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Match
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.web import auth as web_auth
@@ -113,16 +114,33 @@ async def readyz_head():
     return Response(status_code=status_code)
 
 
+def _page_above(request: Request) -> str:
+    """The nearest address above ``request``'s that opens a page."""
+    parts = request.scope["path"].rstrip("/").split("/")
+    while len(parts) > 1:
+        parts.pop()
+        path = "/".join(parts) or "/"
+        scope = {"type": "http", "path": path, "method": "GET", "root_path": ""}
+        if any(route.matches(scope)[0] == Match.FULL
+               for route in request.app.router.routes):
+            return path
+    return "/"
+
+
 @app.exception_handler(StarletteHTTPException)
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Render a styled page for a mistyped/stale URL instead of a bare
-    ``{"detail": "Not Found"}``. API routes and every non-404 status keep the
-    JSON shape callers expect."""
-    if exc.status_code == 404 and not request.scope["path"].startswith("/api/"):
+    ``{"detail": "Not Found"}``, and send a form's address opened again (a
+    restored tab, the back button) to the page above it. API routes and every
+    other status keep the JSON shape callers expect."""
+    browser = not request.scope["path"].startswith("/api/")
+    if exc.status_code == 404 and browser:
         return rendering.render_error_page(
             request, 404, "Page not found",
             "That page doesn't exist. The link may have moved or been "
             "mistyped.")
+    if exc.status_code == 405 and browser and request.method in ("GET", "HEAD"):
+        return RedirectResponse(url=_page_above(request), status_code=303)
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
                         headers=getattr(exc, "headers", None))
 

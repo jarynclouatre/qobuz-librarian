@@ -806,18 +806,20 @@
     }
   });
   // Settings sections stay shut until they are wanted, so a link or a save
-  // that names one has to open it. The heading itself is in the summary, so
-  // the browser can land on it either way; this only unfolds what is under it.
+  // that names one has to open it, and the Advanced drawer too when the link
+  // names a field inside it. A heading is in its summary, so the browser can
+  // land on it either way; this only unfolds what is under it.
   function openSettingsSectionFromHash() {
     var hash = window.location.hash;
     if (hash.length < 2) return;
     var target;
     try { target = document.querySelector(hash); } catch (e) { return; }
     if (!target || !target.closest) return;
-    var section = target.closest("details.ql-settings-section");
-    if (!section || section.open) return;
-    section.open = true;
-    target.scrollIntoView();
+    var opened = false;
+    for (var d = target.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) {
+      if (!d.open) { d.open = true; opened = true; }
+    }
+    if (opened) target.scrollIntoView();
   }
   window.addEventListener("hashchange", openSettingsSectionFromHash);
 
@@ -2462,10 +2464,10 @@
     if (!cont || !form) return;
     var submit = document.getElementById("review-submit");
     var summaryRow = document.getElementById("review-summary-row");
-    var summaryCount = document.querySelector("#review-candidates [data-summary-count]");
     var emptyBox = document.getElementById("review-empty");
     var footerDiscard = document.getElementById("review-footer-discard");
-    var footerBack = document.getElementById("review-footer-back");
+    var footer = document.getElementById("review-footer");
+    var selectTools = document.getElementById("review-select-tools");
     var filterRow = document.getElementById("review-filter-row");
     var filterInput = document.getElementById("review-filter");
     var dsTotal = document.querySelector("[data-downsample-total]");
@@ -2473,7 +2475,6 @@
     var reviewKind = form.getAttribute("data-review-kind") || "";
     var reviewBlocked = form.getAttribute("data-review-blocked") === "1";
     var isDownsampleReview = reviewKind === "downsample";
-    var reviewItemSingular = cont.dataset.reviewItemSingular || "album";
     var reviewItemPlural = cont.dataset.reviewItemPlural || "albums";
     // Live, not baked: on a library review the dismiss vocabulary follows
     // whichever tab is active now. The data attributes only know the tab the
@@ -2581,6 +2582,7 @@
         c.missing_selected = parseInt(box.dataset.reviewMissingSelected || "0", 10);
         c.gap_total = parseInt(box.dataset.reviewGapTotal || "0", 10);
         c.gap_selected = parseInt(box.dataset.reviewGapSelected || "0", 10);
+        c.missing_types_on = (box.dataset.reviewTypesOn || "").split(",").filter(Boolean);
       }
       return c;
     }
@@ -2696,22 +2698,22 @@
           ? (submit.dataset.reviewVerb || "Download") + " " + formatCount(tc.selected) + " selected"
           : (submit.dataset.emptyLabel || "Select " + reviewItemPlural);
       }
-      if (summaryCount) {
-        summaryCount.textContent = countLabel(c.total, reviewItemSingular, reviewItemPlural) + " across " + plural(c.artists, "artist");
-      }
       if (summaryRow) summaryRow.classList.toggle("hidden", c.total === 0);
       if (emptyBox) emptyBox.classList.toggle("hidden", c.total > 0);
       if (submit) submit.classList.toggle("hidden", c.total === 0);
       if (footerDiscard) footerDiscard.classList.toggle("hidden", c.total > 0);
-      if (footerBack) footerBack.classList.toggle("hidden", c.total === 0);
+      // An empty tab of a review that still has rows on the other tab has
+      // nothing to select or download.
+      if (footer) footer.classList.toggle("hidden", c.total > 0 && tc.total === 0);
+      if (selectTools) selectTools.classList.toggle("hidden", tc.total === 0);
       var tabsNav = cont.querySelector("[data-review-tabs]");
       if (tabsNav) tabsNav.classList.toggle("hidden", c.total === 0);
-      if (filterRow && !curQuery()) filterRow.classList.toggle("hidden", c.artists < 4);
+      if (filterRow && !curQuery()) filterRow.classList.toggle("hidden", c.artists < 4 || tc.total === 0);
       if (dsTotal) {
         // "smaller", not "reclaimed": with originals kept, the run costs more
         // disk than it saves until the backups expire.
         dsTotal.textContent = c.reclaimable_label
-          ? " · selected: ~" + c.reclaimable_label + " smaller" : "";
+          ? "~" + c.reclaimable_label + " smaller" : "";
       }
       cont.dataset.reviewTotal = c.total;
       cont.dataset.reviewSelected = c.selected;
@@ -2729,6 +2731,13 @@
         var gc = cont.querySelector('[data-tab-count="gaps"]');
         if (mc) mc.textContent = formatCount(c.missing_total);
         if (gc) gc.textContent = formatCount(c.gap_total);
+      }
+      // Another tab may have flipped a release-type switch.
+      if (c.missing_types_on) {
+        cont.querySelectorAll("[data-review-switch]").forEach(function (b) {
+          var on = c.missing_types_on.indexOf(b.getAttribute("data-review-switch")) >= 0;
+          b.setAttribute("aria-pressed", on ? "true" : "false");
+        });
       }
       // Only hide/dismiss responses carry hidden_total; a plain tick doesn't
       // change it, so its absence means "leave the link alone".
@@ -2933,6 +2942,22 @@
           }
           return { ok: false, uncertain: true };
         });
+    }
+
+    // The switch only changes which saved rows Missing Albums lists, so the
+    // list reloads where the user stands once the choice is saved.
+    function switchReleaseType(btn) {
+      if (actionsBlocked()) return;
+      var on = btn.getAttribute("aria-pressed") !== "true";
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      var body = "type=" + encodeURIComponent(btn.getAttribute("data-review-switch")) +
+                 "&on=" + (on ? "1" : "0");
+      queueChoice("/jobs/" + id + "/missing-types", body, function (c) {
+        refreshNeeded = true;
+        applyCounts(c);
+      }).catch(function () {
+        btn.setAttribute("aria-pressed", on ? "false" : "true");
+      });
     }
 
     function groupSelect(det, on) {
@@ -3297,6 +3322,8 @@
               });
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
+              var switches = cont.querySelector("[data-review-switches]");
+              if (switches) switches.classList.toggle("hidden", requestedTab !== "missing");
             }
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;
@@ -3384,6 +3411,8 @@
       if (pageBtn) { bulkSelect(true, "page"); return; }
       var more = t.closest("[data-load-more]");
       if (more) { loadMore(parseInt(more.getAttribute("data-next-page") || "2", 10)); return; }
+      var switchBtn = t.closest("[data-review-switch]");
+      if (switchBtn) { switchReleaseType(switchBtn); return; }
       var tabBtn = t.closest("[data-review-tab]");
       if (tabBtn && (
         !tabBtn.classList.contains("is-active") || pageLoading

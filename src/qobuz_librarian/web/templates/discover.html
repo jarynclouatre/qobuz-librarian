@@ -55,14 +55,14 @@
         {%- if not feed.total -%}
         {%- if discover_tab == 'favourites' -%}Reading your saved albums.
         {%- elif discover_tab == 'search' -%}Asking Last.fm who sounds like {{ query }}.
-        {%- elif discover_tab == 'genres' and tag -%}Asking Last.fm what is tagged {{ tag }}.
+        {%- elif discover_tab == 'genres' and tag -%}Asking Last.fm what is tagged {{ tag | lower }}.
         {%- else -%}Reading your library.{%- endif -%}
         {%- elif discover_tab == 'search' -%}
         Checked {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} Last.fm suggested.
         {%- elif discover_tab == 'genres' and not tag -%}
         Read the tags on {{ feed.checked }} of {{ feed.total }} of your artists.
         {%- elif discover_tab == 'genres' -%}
-        Checked {{ feed.checked }} of {{ feed.total }} album{{ 's' if feed.total != 1 }} tagged {{ tag }}.
+        Checked {{ feed.checked }} of {{ feed.total }} album{{ 's' if feed.total != 1 }} tagged {{ tag | lower }}.
         {%- elif discover_tab == 'favourites' -%}
         Checked {{ feed.checked }} of {{ feed.total }} saved album{{ 's' if feed.total != 1 }}.
         {%- elif feed.stage == 'catalogue' -%}
@@ -93,8 +93,8 @@
       <span class="ql-status-chip is-info ql-status-chip--wrap">{% if query %}{{ artists | length }} artist{{ 's' if artists | length != 1 }} like {{ query }}{% else %}Search{% endif %}</span>
       {% if query and artists %}<span>Artists Qobuz can serve that are not in your library.</span>{% endif %}
       {% elif discover_tab == 'genres' %}
-      <span class="ql-status-chip is-info ql-status-chip--wrap">{% if tag %}{{ tag }}{% else %}Genres{% endif %}</span>
-      {% if tag and albums %}<span>{{ albums | length }} album{{ 's' if albums | length != 1 }} tagged {{ tag }} that are not in your library.</span>{% endif %}
+      <span class="ql-status-chip is-info ql-status-chip--wrap">{% if tag %}{{ tag | lower }}{% else %}Genres{% endif %}</span>
+      {% if tag and albums %}<span>{{ albums | length }} album{{ 's' if albums | length != 1 }} tagged {{ tag | lower }} that are not in your library.</span>{% endif %}
       {% elif discover_tab == 'favourites' %}
       <span class="ql-status-chip is-info">Favourites</span>
       {% if albums %}<span>{{ albums | length }} album{{ 's' if albums | length != 1 }} you saved on Qobuz that are not in your library.</span>{% endif %}
@@ -118,13 +118,13 @@
     <div class="ql-tag-row" role="group" aria-label="Tags in your library">
       {% for t in tags %}
       <a href="/discover/genres?tag={{ t | urlencode }}"
-         class="ql-dchip{% if t == tag %} is-active{% endif %}">{{ t }}</a>
+         class="ql-dchip{% if t == tag %} is-active{% endif %}">{{ t | lower }}</a>
       {% endfor %}
     </div>
     {% endif %}
     {% include "_discover_grid.html" %}
     {% if tag and not albums and feed.phase == 'ready' %}
-    <p class="ql-empty-state">Qobuz has nothing tagged {{ tag }} that is not already in your library.</p>
+    <p class="ql-empty-state">Qobuz has nothing tagged {{ tag | lower }} that is not already in your library.</p>
     {% endif %}
     {% else %}
     {% include "_discover_feed.html" %}

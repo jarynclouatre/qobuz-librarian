@@ -51,7 +51,7 @@
   --ql-line-soft: rgb(43 32 19 / 0.09);
   --ql-text: #2b2013;
   --ql-text-2: #6d5a41;
-  --ql-text-3: #766446;
+  --ql-text-3: #735f42;
   --ql-gold: #b97e1e;
   --ql-gold-strong: #80500a;
   --ql-gold-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
@@ -254,10 +254,11 @@
   background-image:
     linear-gradient(45deg, transparent 50%, currentColor 50%),
     linear-gradient(135deg, currentColor 50%, transparent 50%);
+  /* Whole pixels, so the two halves meet without a seam at any zoom. */
   background-position:
-    calc(100% - 1rem) 52%,
-    calc(100% - 0.68rem) 52%;
-  background-size: 0.32rem 0.32rem, 0.32rem 0.32rem;
+    calc(100% - 17px) 52%,
+    calc(100% - 12px) 52%;
+  background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
 }
 

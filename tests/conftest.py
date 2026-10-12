@@ -80,6 +80,7 @@ def _isolate_data_dir():
     )
     cfg.HIDDEN_FILE          = tmp_root / ".qobuz_hidden.json"
     cfg.REVIEW_BADGE_STATE_FILE = tmp_root / ".qobuz_review_badges.json"
+    cfg.MISSING_TYPES_FILE = tmp_root / ".qobuz_missing_types.json"
     cfg.SCAN_SEEN_FILE       = tmp_root / ".qobuz_scan_seen.json"
     cfg.NEW_RELEASE_STATE_FILE = tmp_root / ".qobuz_new_releases.json"
     cfg.SCAN_CHECKPOINT_FILE = tmp_root / ".qobuz_scan_checkpoint.json"

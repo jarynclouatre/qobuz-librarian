@@ -59,11 +59,11 @@ out of library scans and import targets.
 | `REPAIR_CACHE_TTL_DAYS` | `30` | How long a cached ISRC lookup is reused before re-verifying (`0` = keep until the db is deleted) |
 | `UPGRADE_SCAN_ENABLED` | `true` | Show Upgrade and include the quality-upgrade pass in Library scans (`false` hides Upgrade and skips that pass) |
 | `AUTO_UPGRADE_ENABLED` | `false` | Let an ordinary CLI download or gap-fill run also upgrade an album Qobuz can now serve better, after confirmation. Ordinary web downloads keep the selected edition; use the Upgrade page to review and approve web replacements. |
-| `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample hi-res FLACs as they download (see below) |
+| `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample FLACs above 48 kHz as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
 | `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Web Library scans and new-release checks don't offer the rest of an album you took tracks from with a Search **Track** download, and skip an artist whose only folders came from such downloads. Folders that hold one track for any other reason are scanned as usual, and the CLI walks ignore this setting |
-| `EXCLUDE_LIVE_ALBUMS` | `false` | Drop obvious live/tour/session/acoustic releases from the missing-albums gap list; a studio album whose real title merely contains "Live" is never dropped |
+| `EXCLUDE_LIVE_ALBUMS` | `false` | Count a release whose title marks it live, on tour, a session or acoustic as a live release in Missing Albums even when Qobuz files it as an album or compilation, so it shows only with **Live** switched on; a studio album whose real title merely contains "Live" is never matched |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
 `MIGRATE_MULTI_ARTIST` affects new imports only. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.

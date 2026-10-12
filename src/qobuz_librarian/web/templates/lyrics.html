@@ -22,13 +22,15 @@
     <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
       {% if lyrics_running and lyrics_running.status.value == 'pending' %}Queued{% elif lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif not have_lyrics %}Not installed{% elif last_run %}Ready{% else %}Not scanned yet{% endif %}
     </span>
+    {% if lyrics_running or lyrics_failed or (have_lyrics and last_run) %}
     <span>
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif not have_lyrics %}{% elif last_run %}Last lyrics scan {{ last_run }}.{% else %}No scan has finished yet.{% endif %}
+      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% else %}Last lyrics scan {{ last_run }}.{% endif %}
     </span>
+    {% endif %}
     {% if have_lyrics and not lyrics_running %}
     <span>
       Output: {{ lyrics_format }}. Providers: {{ providers }}.
-      <a href="/settings#behaviour">Change</a>
+      <a href="/settings#f-LYRICS_PROVIDERS">Change</a>
     </span>
     {% endif %}
   </div>
@@ -48,30 +50,30 @@
   {% endif %}
   <form action="/lyrics" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <div class="ql-option-stack">
-      <label for="cb-synced" class="ql-option-row">
-        <input type="checkbox" name="synced_only" id="cb-synced" class="ql-toggle">
-        <span>
-          <span class="ql-option-title">Synced lyrics only</span>
-          <span class="ql-option-help">
+    <div class="ql-setting-list ql-option-stack">
+      <label for="cb-synced" class="ql-setting-row">
+        <span class="ql-setting-main">
+          <span class="ql-setting-title">Synced lyrics only</span>
+          <span class="ql-setting-help">
             Only write timed lyrics that scroll with the song; skip plain text.
           </span>
         </span>
+        <input type="checkbox" name="synced_only" id="cb-synced" class="ql-toggle shrink-0">
       </label>
-      <label for="cb-rescan" class="ql-option-row">
-        <input type="checkbox" name="rescan" id="cb-rescan" class="ql-toggle">
-        <span>
-          <span class="ql-option-title">Re-check everything</span>
-          <span class="ql-option-help">
+      <label for="cb-rescan" class="ql-setting-row">
+        <span class="ql-setting-main">
+          <span class="ql-setting-title">Re-check everything</span>
+          <span class="ql-setting-help">
             Check every track again, including ones already checked. Lyrics this app did not write stay as they are.
           </span>
         </span>
+        <input type="checkbox" name="rescan" id="cb-rescan" class="ql-toggle shrink-0">
       </label>
     </div>
     <section class="ql-work-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">Scan library for lyrics</p>
-        <p class="ql-work-card-text">Missing lyrics are written automatically to {{ lyrics_format|lower }}; there is no review step.</p>
+        <p class="ql-work-card-text">Missing lyrics are written to {{ lyrics_format|lower }}.</p>
       </div>
       <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
               data-confirm="Start a library-wide lyrics scan? Missing lyrics will be written to {{ lyrics_format|lower }} as the scan runs. This can take a while on a large library."
@@ -83,7 +85,7 @@
   <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">Lyrics support is not installed</p>
-      <p class="ql-work-card-text">Install Qobuz Librarian with lyrics support, then restart the app.</p>
+      <p class="ql-work-card-text">Run <code>pip install 'syncedlyrics&gt;=1.0'</code> in the Python environment Qobuz Librarian runs from, or <code>pipx inject qobuz-librarian 'syncedlyrics&gt;=1.0'</code> for a pipx install, then restart the app.</p>
     </div>
   </section>
   {% endif %}

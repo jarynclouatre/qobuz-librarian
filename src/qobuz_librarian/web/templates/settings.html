@@ -19,7 +19,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>Quality or singles settings changed. Run a Library refresh once the change takes effect.</span>
+  <span>{% if queued %}Once no job is running, refresh{% else %}Refresh{% endif %} the <a href="/library" class="ql-inline-link">Library</a> so its results follow the new quality or track download setting.</span>
 </div>
 {% endif %}
 
@@ -47,6 +47,101 @@
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <span>These settings changed after this form was opened, so the older save
   was not applied. Review the current values below, then try again.</span>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro qobuz_notices() %}
+{% if connected %}
+{% if unverified %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>Token saved. Qobuz could not be reached for verification.
+    Open the <a href="/" class="ql-link">Search page</a> and run a search to confirm
+    access.</span>
+</div>
+{% else %}
+<div class="ql-notice ql-notice-success" data-flash>
+  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+  <span>Connected. Your Qobuz token was saved.
+    <a href="/" class="ql-link font-semibold">Go to Search</a></span>
+</div>
+{% endif %}
+{% endif %}
+
+{% if envchecked %}
+<div class="ql-notice ql-notice-success" data-flash>
+  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+  <span>Qobuz accepted your token. It comes from your environment, so there was
+    nothing to save here.
+    <a href="/" class="ql-link font-semibold">Go to Search</a></span>
+</div>
+{% endif %}
+
+{% if error == "creds" %}
+<div class="ql-notice ql-notice-error" data-flash>
+  <span>Qobuz Librarian could not save the credentials. Give the config folder
+  write access, then try again.</span>
+</div>
+{% elif error == "envcreds" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>Your Qobuz credential is supplied by environment, so it was not changed.
+  Remove the environment or secret-file setting first if you want to manage it
+  from this page.</span>
+</div>
+{% elif error == "rejected" %}
+<div class="ql-notice ql-notice-error" data-flash>
+  <span>Qobuz rejected this token, so it was not saved. Get a fresh token from
+  play.qobuz.com, then try again.</span>
+</div>
+{% elif error == "unreachable" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>Qobuz couldn't be reached to check this token, so it was not saved
+  and the one you already have is still in use. Try again when you're back
+  online.</span>
+</div>
+{% elif error == "envrejected" %}
+<div class="ql-notice ql-notice-error" data-flash>
+  <span>Qobuz rejected the token that comes from your environment, so nothing on
+  this page can fix it. Get a fresh token from play.qobuz.com, set it where you
+  set the last one, then restart Qobuz Librarian.</span>
+</div>
+{% elif error == "envunreachable" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>Qobuz couldn't be reached, so your token could not be checked.
+  Nothing was changed; it comes from your environment. Try again when
+  you're back online.</span>
+</div>
+{% elif error == "empty" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>Token cannot be empty. Paste the <code>token</code> value from
+  <code>localuser</code> in play.qobuz.com, or configure Qobuz auth in
+  your environment.</span>
+</div>
+{% elif error == "needuser" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>Add your Qobuz account email or user ID to enable downloads. Your token
+  can still be used for Search and catalogue scans.</span>
+</div>
+{% elif error == "credsbusy" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>The account was not changed because Qobuz work is queued or running.
+  Wait for that album or scan to finish, then try again.</span>
+</div>
+{% elif error == "credschanged" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>The Qobuz account changed after this form was opened, so this older
+  save was not applied. Reload the page, check the current account, then try
+  again.</span>
+</div>
+{% elif error == "credsmode" %}
+<div class="ql-notice ql-notice-warning" data-flash>
+  <span>The Qobuz account was not changed because the web app does not hold
+  the run lock. Finish the other Qobuz Librarian run or resume the web app,
+  then try again.</span>
 </div>
 {% endif %}
 {% endmacro %}
@@ -93,7 +188,9 @@
 </div>
 {% endmacro %}
 
-
+{% set _qobuz_errors = ("creds", "envcreds", "rejected", "unreachable", "envrejected",
+                        "envunreachable", "empty", "needuser", "credsbusy",
+                        "credschanged", "credsmode") %}
 {% if rerendered %}{{ behaviour_notices() }}{% endif %}
 <div class="ql-settings-page">
 <header class="ql-page-header ql-settings-header">
@@ -101,35 +198,6 @@
 </header>
 
 {% include "_writes_paused_notice.html" %}
-
-{% if connected %}
-{% if unverified %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Token saved. Qobuz could not be reached for verification.
-    Open the <a href="/" class="ql-link">Search page</a> and run a search to confirm
-    access.</span>
-</div>
-{% else %}
-<div class="ql-notice ql-notice-success mb-6" data-flash>
-  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-  </svg>
-  <span>Connected. Your Qobuz token was saved.
-    <a href="/" class="ql-link font-semibold">Go to Search</a></span>
-</div>
-{% endif %}
-{% endif %}
-
-{% if envchecked %}
-<div class="ql-notice ql-notice-success mb-6" data-flash>
-  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-  </svg>
-  <span>Qobuz accepted your token. It comes from your environment, so there was
-    nothing to save here.
-    <a href="/" class="ql-link font-semibold">Go to Search</a></span>
-</div>
-{% endif %}
 
 {% if backup_dir_cleared %}
 <div class="ql-notice ql-notice-warning mb-6">
@@ -170,88 +238,18 @@
 </div>
 {% endif %}
 
-{% if error == "creds" %}
-<div class="ql-notice ql-notice-error mb-6" data-flash>
-  <span>Qobuz Librarian could not save the credentials. Give the config folder
-  write access, then try again.</span>
-</div>
-{% elif error == "envcreds" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Your Qobuz credential is supplied by environment, so it was not changed.
-  Remove the environment or secret-file setting first if you want to manage it
-  from this page.</span>
-</div>
-{% elif error == "rejected" %}
-<div class="ql-notice ql-notice-error mb-6" data-flash>
-  <span>Qobuz rejected this token, so it was not saved. Get a fresh token from
-  play.qobuz.com, then try again.</span>
-</div>
-{% elif error == "unreachable" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Qobuz couldn't be reached to check this token, so it was not saved
-  and the one you already have is still in use. Try again when you're back
-  online.</span>
-</div>
-{% elif error == "envrejected" %}
-<div class="ql-notice ql-notice-error mb-6" data-flash>
-  <span>Qobuz rejected the token that comes from your environment, so nothing on
-  this page can fix it. Get a fresh token from play.qobuz.com, set it where you
-  set the last one, then restart Qobuz Librarian.</span>
-</div>
-{% elif error == "envunreachable" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Qobuz couldn't be reached, so your token could not be checked.
-  Nothing was changed; it comes from your environment. Try again when
-  you're back online.</span>
-</div>
-{% elif error == "empty" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Token cannot be empty. Paste the <code>token</code> value from
-  <code>localuser</code> in play.qobuz.com, or configure Qobuz auth in
-  your environment.</span>
-</div>
-{% elif error == "needuser" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Add your Qobuz account email or user ID to enable downloads. Your token
-  can still be used for Search and catalogue scans.</span>
-</div>
-{% elif error == "credsbusy" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>The account was not changed because Qobuz work is queued or running.
-  Wait for that album or scan to finish, then try again.</span>
-</div>
-{% elif error == "credschanged" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>The Qobuz account changed after this form was opened, so this older
-  save was not applied. Reload the page, check the current account, then try
-  again.</span>
-</div>
-{% elif error == "credsmode" %}
-<div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>The Qobuz account was not changed because the web app does not hold
-  the run lock. Finish the other Qobuz Librarian run or resume the web app,
-  then try again.</span>
-</div>
-{% elif error and error not in ("invalidsettings", "persist", "settingschanged") %}
+{% if error and error not in _qobuz_errors and error not in ("invalidsettings", "persist", "settingschanged") and mode_changed != "refused" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
-{% if mode_changed == "cli" %}
-<div class="ql-notice ql-notice-info mb-6" data-flash>
-  <span>Terminal mode enabled. Web downloads and scans are paused until you
-  resume them below.</span>
-</div>
-{% elif mode_changed == "web" %}
-<div class="ql-notice ql-notice-success mb-6" data-flash><span>Web app resumed.</span></div>
-{% endif %}
-
 <div class="ql-settings-stack">
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if connected or envchecked or error in _qobuz_errors %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="qobuz" tabindex="-1" class="ql-anchor-target">Qobuz authentication</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
+    {{ qobuz_notices() }}
     <div class="ql-settings-section-head">
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
          Qobuz to have accepted it. A saved-but-unproven token says so. #}
@@ -272,7 +270,7 @@
     <details class="ql-settings-details">
       <summary class="ql-disclosure-summary">How do I find my token?</summary>
       <p class="ql-settings-details-copy">
-        Sign in at <a href="https://play.qobuz.com" target="_blank" rel="noopener" class="ql-link">play.qobuz.com</a>,
+        Sign in at <a href="https://play.qobuz.com" target="_blank" rel="noopener" class="ql-link ql-inline-link-hit">play.qobuz.com</a>,
         open dev tools (F12), then go to Local Storage →
         play.qobuz.com (<strong>Chrome/Edge:</strong> Application tab;
         <strong>Firefox:</strong> Storage tab). Click the <code>localuser</code>
@@ -283,7 +281,7 @@
     {% endif %}
     {# Once connected the whole form collapses. Replacing the account or
        token is a rare event and two open inputs read as a chore to fill. #}
-    {% if auth_token_set %}<details class="ql-settings-details">
+    {% if auth_token_set %}<details class="ql-settings-details"{% if error in _qobuz_errors %} open{% endif %}>
       <summary class="ql-disclosure-summary">Change account or token</summary>
     {% endif %}
 
@@ -311,7 +309,7 @@
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="credential_generation" value="{{ credential_generation }}">
       <div class="ql-field">
-        <label class="ql-field-label" for="user_id">Email or user ID <span class="ql-field-optional">Optional for scans</span></label>
+        <label class="ql-field-label" for="user_id">Email or user ID</label>
         <input type="text" name="user_id" id="user_id" value="{{ user_id or '' }}"
                placeholder="name@example.com or numeric ID"
                {% if env_user_id_set %}disabled aria-disabled="true"{% endif %}
@@ -437,9 +435,7 @@
       <p class="ql-storage-meta">Your library: {{ library_size }}, as of the last scan</p>
       {% endif %}
       {% if music_storage %}
-      <p class="ql-storage-meta">{% if music_storage.own_volume %}Music drive{% else %}Drive holding your music{% endif %}: {{ music_storage.free }} free of {{ music_storage.total }}</p>
-      <div class="ql-storage-bar" role="img"
-           aria-label="{{ music_storage.pct }}% of that drive is used"><i style="width: {{ music_storage.pct }}%"></i></div>
+      <p class="ql-storage-meta">{{ music_storage.free }} free on {% if music_storage.own_volume %}the music drive{% else %}the drive holding your music{% endif %}</p>
       {% endif %}
     </div>
     {% endif %}
@@ -460,7 +456,9 @@
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
         <p>
-          Re-reads every artist folder, ignoring the unchanged-folder cache.
+          Use it after large changes to the music folder made outside the app.
+          Every artist folder is checked again, which takes as long as the
+          first scan.
         </p>
       </div>
       <form action="/library" method="post" data-busy-submit>
@@ -638,7 +636,7 @@
         <input type="text" name="{{ key }}" id="f-{{ key }}"
                value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
                class="ql-input ql-mono max-w-lg">
-        <p class="ql-field-help">Writing to <code>{{ collection_backup.folder }}</code>. {{ help }}</p>
+        <p class="ql-field-help">{% if not behavior[key] %}Writing to <code>{{ collection_backup.folder }}</code>. {% endif %}{{ help }}</p>
       </div>
       {% endfor %}
       <div class="ql-settings-actions">
@@ -789,18 +787,21 @@
 {# Shown before credentials are saved too: the terminal's lock-busy message
    sends a fresh install here to switch modes, so the control it names has to
    be on the page. #}
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if mode_changed %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
+    {% if mode_changed == "refused" and error %}
+    <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
+    {% endif %}
     <details class="ql-settings-details">
       <summary class="ql-disclosure-summary">
         CLI command
       </summary>
       <div class="ql-code-block">
-        <code id="cli-command">docker compose exec qobuz-librarian qobuz-librarian</code>
+        <code id="cli-command">docker compose run --rm -it qobuz-librarian cli</code>
         <button type="button" class="ql-btn ql-btn-sm ql-btn-secondary ql-copy-button"
                 data-copy-target="#cli-command">Copy</button>
       </div>
@@ -835,7 +836,7 @@
     <div class="ql-mode-row">
       <div class="min-w-0">
         <p class="ql-mode-state">Web app active</p>
-        <p class="ql-mode-help">Scans and downloads can run from the web UI.</p>
+        <p class="ql-mode-help">Switch to terminal mode to run the command above. Web scans and downloads pause until you resume.</p>
       </div>
       <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

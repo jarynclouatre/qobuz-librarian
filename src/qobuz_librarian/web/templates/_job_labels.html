@@ -64,10 +64,6 @@
   {{ format_count(n) }} {{ review_item_singular(job) if n == 1 else review_item_plural(job) }}
 {%- endmacro %}
 
-{% macro review_summary_count(job, total, artists) -%}
-  {{ review_count(job, total) }} across {{ format_count(artists) }} artist{{ 's' if artists != 1 }}
-{%- endmacro %}
-
 {% macro review_empty_label(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
     Select albums to upgrade
@@ -150,7 +146,7 @@
   {%- if job.execute_kind == 'migration' -%}
     Discard this migration preview? No files will be moved or copied.
   {%- elif job.execute_kind == 'library' -%}
-    Discard this library review? Your ticks are cleared, but you can bring the whole review back from the Library page.
+    Discard this library review? Your ticks are cleared, and the next refresh or scan lists these albums again. Dismissed albums stay hidden.
   {%- elif job.execute_kind == 'new_releases' -%}
     Discard this New releases review? A later check does not list these releases again.
   {%- elif job.execute_kind == 'collection_restore' -%}
@@ -162,10 +158,10 @@
 
 {# A new-release check downloads what the user ticks, so its kind alone does
    not say what it is doing; testing it before the status made the chip read
-   "Checking Qobuz" while the page underneath said "Downloading album". #}
+   "Checking" while the page underneath said "Downloading album". #}
 {% macro job_activity(job) -%}
   {%- if job.execute_kind == 'new_releases' and job.status.value == 'scanning' -%}
-    Checking Qobuz
+    Checking
   {%- elif job.status.value == 'scanning' -%}
     Scanning
   {%- elif job.execute_kind == 'upgrade' -%}

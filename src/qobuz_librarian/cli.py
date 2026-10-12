@@ -24,6 +24,7 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.integrations.lyrics import _prune_lyric_state_orphans
 from qobuz_librarian.integrations.rip import HAVE_MUTAGEN
+from qobuz_librarian.library import missing_types
 from qobuz_librarian.library.backup import cleanup_old_upgrade_backups
 from qobuz_librarian.quality.tiers import streamrip_quality_cap
 from qobuz_librarian.queue import journal as queue_state
@@ -850,9 +851,9 @@ def parse_args():
                         "results when current, otherwise a fresh check. "
                         "Per-artist confirm (enter=skip), auto-advance.")
     modes.add_argument("--downsample-walk", action="store_true",
-                   help="scan the library for hi-res files and downsample them "
-                        "to CD rate in place (per-artist confirm; --dry-run lists "
-                        "only). Local; no Qobuz login needed.")
+                   help="scan the library for files above 48 kHz and downsample "
+                        "them to 44.1/48 kHz in place (per-artist confirm; "
+                        "--dry-run lists only). Local; no Qobuz login needed.")
     modes.add_argument("--lyrics-walk", action="store_true",
                    help="fetch lyrics for tracks already in the library that "
                         "are missing them (LYRICS_FORMAT / LYRICS_PROVIDERS "
@@ -871,15 +872,24 @@ def parse_args():
     offers.add_argument("--no-catalog",   action="store_true",
                    help="skip missing album suggestions in Artist mode and "
                         "Library walk")
-    offers.add_argument("--include-comps", action="store_true",
-                   help="include compilation/various-artists releases in "
-                        "missing album suggestions for Artist mode and "
-                        "Library walk")
-    # Missing-album noise filter: hide/show short releases.
-    offers.add_argument("--include-singles", action="store_true",
-                   help=f"include releases with fewer than {cfg.MISSING_ALBUMS_MIN_TRACKS} tracks "
-                        "in missing album suggestions for Artist mode and "
-                        "Library walk")
+    # Missing albums are the releases Qobuz files as the artist's albums.
+    # These add its other lists for one run; left unset, each follows its
+    # switch on the Library review.
+    offers.add_argument("--include-live", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="list live releases among missing albums in Artist "
+                        "mode and Library walk (default: the Library "
+                        "review's Live switch)")
+    offers.add_argument("--include-comps", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="list compilations among missing albums in Artist "
+                        "mode and Library walk (default: the Library "
+                        "review's Compilations switch)")
+    offers.add_argument("--include-singles", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="list EPs and singles among missing albums in "
+                        "Artist mode and Library walk (default: the Library "
+                        "review's EPs & singles switch)")
     # Default comes from config (PREFER_HIRES, env/Settings overridable) so
     # CLI and web behave the same. --no-prefer-hires overrides per-run.
     offers.add_argument("--prefer-hires", dest="prefer_hires",
@@ -970,12 +980,13 @@ def parse_args():
             and not args.migrate:
         p.error("--in-place / --acoustid / --migrate-src / --migrate-dest only "
                 "apply with --migrate")
-    # --include-singles only affects the missing-albums step of artist mode;
-    # which the library walk runs per artist, so it applies there too.
-    if (args.include_singles and not (args.artist or args.library_walk)
-            and (args.query or other_run_mode)):
-        p.error("--include-singles only applies to artist mode and "
-                "--library-walk")
+    # The --include-* flags only affect the missing-albums step of artist
+    # mode, which the library walk runs per artist, so they apply there too.
+    for flag in ("include_live", "include_comps", "include_singles"):
+        if (getattr(args, flag) and not (args.artist or args.library_walk)
+                and (args.query or other_run_mode)):
+            p.error(f"--{flag.replace('_', '-')} only applies to artist mode "
+                    "and --library-walk")
     # --no-catalog skips that same missing-albums step.
     if (args.no_catalog and not (args.artist or args.library_walk)
             and (args.query or other_run_mode)):
@@ -1013,12 +1024,6 @@ def parse_args():
         p.error("--quiet is for unattended runs and silences the interactive "
                 "menu. Name a mode (a query, --artist, --upgrade-walk, …) "
                 "or drop --quiet")
-    # --include-comps controls compilation filtering in artist mode (and the
-    # library walk's per-artist pass).
-    if (args.include_comps and not (args.artist or args.library_walk)
-            and (args.query or other_run_mode)):
-        p.error("--include-comps only applies to artist mode and "
-                "--library-walk")
     # --no-upgrade with --upgrade-walk is contradictory.
     if args.no_upgrade and args.upgrade_walk:
         p.error("--no-upgrade conflicts with --upgrade-walk")
@@ -1033,6 +1038,12 @@ def parse_args():
     if (args.lyrics_rescan or args.lyrics_synced_only) and not args.lyrics_walk:
         p.error("--lyrics-rescan / --lyrics-synced-only only apply with "
                 "--lyrics-walk")
+    switched_on = missing_types.load()
+    for flag, release_type in (("include_live", missing_types.LIVE),
+                               ("include_comps", missing_types.COMPILATION),
+                               ("include_singles", missing_types.EP)):
+        if getattr(args, flag) is None:
+            setattr(args, flag, release_type in switched_on)
     return args
 
 
@@ -1220,9 +1231,9 @@ def main():
         except NoCredsError:
             die(fmt(C.RED,
                 "\n✗  No Qobuz credentials configured.\n"
-                "   Paste your user_auth_token on the Settings page "
+                "   Paste your token and your email or user ID on the Settings page "
                 f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
-                "   or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"),
+                "   or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n"),
                 EXIT_AUTH)
         user_id, token = credentials.user_id, credentials.token
         require_music_root()
@@ -1572,7 +1583,8 @@ def _entry():
         except DownloaderNotReady:
             die(fmt(C.RED,
                 "\n✗  Your Qobuz token works, but downloads also need your "
-                "Qobuz user ID. Add it in Settings. Nothing changed.\n"),
+                "Qobuz user ID. Add it on the Settings page in the web UI or "
+                "set QOBUZ_USER_ID. Nothing changed.\n"),
                 EXIT_CONFIG)
         except CredentialChanged:
             die(fmt(C.YELLOW,

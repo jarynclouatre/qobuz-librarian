@@ -1,3 +1,4 @@
+{% import "_job_labels.html" as labels %}
 {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
 <div id="review-groups" class="ql-review-groups" data-page="{{ review_page }}"
      data-selection-token="{{ review_selection_token }}"
@@ -13,15 +14,21 @@
      {% if review_tab %}data-review-missing-total="{{ review_tab_counts.missing }}"
      data-review-missing-selected="{{ review_tab_counts.missing_selected }}"
      data-review-gap-total="{{ review_tab_counts.gaps }}"
-     data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"{% endif %}>
+     data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"
+     data-review-types-on="{{ review_tab_counts.included | join(',') }}"{% endif %}>
   {% for artist, items in review_groups %}
   {% with open = (review_groups | length == 1), lazy = (review_groups | length != 1) %}{% include "_review_group.html" %}{% endwith %}
   {% endfor %}
 </div>
 
 {% if not review_groups and (review_query or review_counts.total) %}
+{% set _off = review_tab_counts.switched_off if review_tab else 0 %}
+{% if _off %}
+{% set _under = review_tab_counts.switched_off_under %}
+{% set _under_text = (_under[:-1] | join(', ')) ~ (' or ' if _under | length > 1 else '') ~ _under[-1] %}
+{% endif %}
 <p class="ql-review-page-empty">
-  {% if review_query %}No artists or albums match your filter.{% elif review_tab == 'gaps' %}No albums to fill.{% elif review_tab == 'missing' %}No missing albums to review.{% else %}Nothing on this page.{% endif %}
+  {% if review_query %}No artists or albums match your filter.{% elif review_tab == 'gaps' %}No albums to fill.{% if _off and not review_tab_counts.missing %} Missing Albums has {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% elif review_tab == 'missing' %}No missing albums to review.{% if _off %} {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% else %}Nothing on this page.{% endif %}
 </p>
 {% endif %}
 

@@ -23,7 +23,12 @@ from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import CredentialChanged, NoCredsError, QobuzAccess
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
-from qobuz_librarian.library import candidate_premise, generation_state, new_releases
+from qobuz_librarian.library import (
+    candidate_premise,
+    generation_state,
+    missing_types,
+    new_releases,
+)
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.queue.startup_recovery import BlockedItemSettlementAction
 from qobuz_librarian.ui_cli.colors import format_size
@@ -199,15 +204,13 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
     ``discard_ids`` to a new parked review. The caller holds ``job._lock`` and
     admits both jobs before publishing either. Returns the unpublished parked
     job, or None, leaving ``job`` unchanged, when there is nothing to move."""
-    tab_scoped = tab in ("missing", "gaps")
-    gap_active = tab == "gaps"
+    in_tab = flows.review_tab_filter(tab)
     keep, split = [], []
     discard_ids = set(discard_ids)
     for c in job.candidates:
         if c.get("cid") in discard_ids:
             continue
-        in_scope = (not tab_scoped) or (flows.is_gap_candidate(c) == gap_active)
-        selected = in_scope and c.get("selected")
+        selected = in_tab(c) and c.get("selected")
         admitted = selected and (
             admission_filter is None or admission_filter(c)
         )
@@ -303,19 +306,12 @@ async def job_approve(request: Request, job_id: str):
     downsample_keep_originals = None
     downsample_choice_to_save = ""
     if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-        if tab:
-            gap_active = tab == "gaps"
-            with job._lock:
-                selected_candidate_ids = {
-                    c.get("cid") for c in job.candidates
-                    if (c.get("selected")
-                        and flows.is_gap_candidate(c) == gap_active)
-                }
-        else:
-            with job._lock:
-                selected_candidate_ids = {
-                    c.get("cid") for c in job.candidates if c.get("selected")
-                }
+        in_tab = flows.review_tab_filter(tab)
+        with job._lock:
+            selected_candidate_ids = {
+                c.get("cid") for c in job.candidates
+                if c.get("selected") and in_tab(c)
+            }
         with job._lock:
             selected_candidate_snapshot = copy.deepcopy([
                 c for c in job.candidates
@@ -428,6 +424,7 @@ async def job_approve(request: Request, job_id: str):
             download_admission._DOWNLOAD_SUBMIT_LOCK,
             qobuz_access._CREDENTIAL_LOCK,
             job._review_action_lock,
+            missing_types._lock,
         ):
             if write_gate._web_writes_paused():
                 return "paused"
@@ -435,16 +432,12 @@ async def job_approve(request: Request, job_id: str):
                 return False
 
             def current_selected_candidates():
+                in_tab = flows.review_tab_filter(tab)
                 with job._lock:
                     candidates = [
-                        c for c in job.candidates if c.get("selected")
+                        c for c in job.candidates
+                        if c.get("selected") and in_tab(c)
                     ]
-                    if tab:
-                        gap_active = tab == "gaps"
-                        candidates = [
-                            c for c in candidates
-                            if flows.is_gap_candidate(c) == gap_active
-                        ]
                     return copy.deepcopy(candidates)
 
             current_selected = current_selected_candidates()
@@ -489,6 +482,7 @@ async def job_approve(request: Request, job_id: str):
             split_review = None
             admission_decisions = {}
             already_downloading.clear()
+            in_approved_tab = flows.review_tab_filter(tab)
 
             def selection_filter(candidate):
                 key = candidate.get("cid")
@@ -502,11 +496,9 @@ async def job_approve(request: Request, job_id: str):
                 if key in stale_premise_candidate_ids:
                     admission_decisions[key] = False
                     return False
-                if tab:
-                    gap_active = tab == "gaps"
-                    if flows.is_gap_candidate(candidate) != gap_active:
-                        admission_decisions[key] = False
-                        return False
+                if not in_approved_tab(candidate):
+                    admission_decisions[key] = False
+                    return False
                 if job.execute_kind in (
                         "library", "new_releases", "collection_restore"):
                     album_id = completion.normalise_album_id(
@@ -856,6 +848,7 @@ def _selection_payload(job, *, persist_failed=False):
             payload["gap_total"] = totals["gaps"]
             payload["missing_selected"] = totals["missing_selected"]
             payload["gap_selected"] = totals["gaps_selected"]
+            payload["missing_types_on"] = totals["included"]
         return payload
 
 
@@ -941,15 +934,14 @@ async def job_select_all(request: Request, job_id: str):
     tab_scoped = (job.execute_kind == "library" and tab in ("missing", "gaps"))
     if (scope == "artist" or (scope == "page" and page_artists)
             or (cids is None and (tab_scoped or q))):
-        gap_active = tab == "gaps"
+        in_tab = flows.review_tab_filter(tab if tab_scoped else "")
         with job._lock:
             cids = [c["cid"] for c in job.candidates
                     if (scope != "artist" or (c.get("artist") or "") == artist)
                     and (scope != "page"
                          or not page_artists
                          or (c.get("artist") or "") in page_artists)
-                    and (not tab_scoped
-                         or flows.is_gap_candidate(c) == gap_active)
+                    and in_tab(c)
                     and (not q or flows.candidate_matches_query(c, q))]
     persist_failed = False
     changed, accepted_cids = _set_all_selected_with_membership(job, on, cids)
@@ -976,6 +968,30 @@ async def job_select_all(request: Request, job_id: str):
     if q:
         payload.update(_filtered_selection_payload(job, q, tab))
     return JSONResponse(payload)
+
+
+@router.post("/jobs/{job_id}/missing-types")
+async def job_missing_types(request: Request, job_id: str):
+    """Switch a release type in or out of Missing Albums. The choice is saved
+    for every Library review and CLI run. Nothing is scanned again: the review
+    holds every type and lists what is switched on."""
+    job = _get_reviewable_job(job_id)
+    if not job or job.execute_kind != "library":
+        return JSONResponse({"error": "not found"}, status_code=404)
+    form = await request.form()
+    release_type = (form.get("type") or "").strip()
+    if release_type not in missing_types.OPTIONAL:
+        return JSONResponse({"error": "unknown release type"}, status_code=400)
+    on = (form.get("on") or "").strip().lower() in ("1", "true", "on", "yes")
+    loop = asyncio.get_running_loop()
+    switched = await loop.run_in_executor(
+        None, lambda: missing_types.switch(release_type, on))
+    if switched is None:
+        return JSONResponse(
+            {"error": "The switch could not be saved. Check the data folder."},
+            status_code=503)
+    job.notify_review_changed(_review_origin(request))
+    return JSONResponse(_selection_payload(job))
 
 
 @router.get("/jobs/{job_id}/review-group-items", response_class=HTMLResponse)
@@ -1054,7 +1070,6 @@ async def job_hide(request: Request, job_id: str):
         tab = (form.get("tab") or "").strip()
         if job.execute_kind != "library" or tab not in ("missing", "gaps"):
             tab = ""
-        gap_only = (tab == "gaps") if tab else None
         # The filter narrows what the button sits next to, so it has to narrow
         # what the button takes; without it, one tap on a filtered row dismisses
         # every album by that artist, including the ones the filter is hiding.
@@ -1066,7 +1081,7 @@ async def job_hide(request: Request, job_id: str):
             with saved_reviews._SAVED_REVIEW_LOCK:
                 n = flows.dismiss_albums(job, artist,
                                          scope=review_pages._hide_scope(job.execute_kind),
-                                         gap_only=gap_only,
+                                         tab=tab,
                                          query=q)
         except OSError as e:
             # Nothing changed server-side; the non-2xx keeps htmx from
@@ -1141,16 +1156,16 @@ async def job_dismiss_rest(request: Request, job_id: str):
     tab = (form.get("tab") or "").strip()
     if job.execute_kind != "library" or tab not in ("missing", "gaps"):
         tab = ""
-    gap_only = (tab == "gaps") if tab else None
     # An active filter narrows the dismissal to the rows it shows, same
     # what-you-see-is-what-you-act-on rule as select-all.
     q = (form.get("q") or "").strip().lower()
+    in_tab = flows.review_tab_filter(tab)
     with job._lock:
         artists, seen = [], set()
         for c in job.candidates:
             if c.get("selected"):
                 continue
-            if gap_only is not None and flows.is_gap_candidate(c) != gap_only:
+            if not in_tab(c):
                 continue
             if q and not flows.candidate_matches_query(c, q):
                 continue
@@ -1172,7 +1187,7 @@ async def job_dismiss_rest(request: Request, job_id: str):
                     job,
                     a,
                     scope=scope,
-                    gap_only=gap_only,
+                    tab=tab,
                     query=q,
                 )
                 if hidden is None:

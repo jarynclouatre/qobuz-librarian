@@ -12,7 +12,7 @@ from qobuz_librarian import run_lock, state_file
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api import lastfm
 from qobuz_librarian.api.auth import AuthEvidence, AuthOutcome, credentials_from_values
-from qobuz_librarian.integrations import downsample_engine
+from qobuz_librarian.integrations import downsample_engine, lyric_fetch
 from qobuz_librarian.library import generation_state
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.colors import format_size
@@ -71,8 +71,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         du = shutil.disk_usage(cfg.MUSIC_ROOT)
 
         music_storage = {
-            "free": format_size(du.free), "total": format_size(du.total),
-            "pct": round(du.used / du.total * 100, 1) if du.total else 0,
+            "free": format_size(du.free),
             "own_volume": storage._is_mount_point(cfg.MUSIC_ROOT),
         }
     except OSError:
@@ -128,7 +127,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         ],
         "behavior_fields": settings_store.BEHAVIOR_FIELDS,
         "inert_notes": settings_store.inert_behaviour_notes(
-            values, have_downsample=downsample_engine.HAVE_DOWNSAMPLE),
+            values, have_downsample=downsample_engine.HAVE_DOWNSAMPLE,
+            have_lyrics=lyric_fetch.AVAILABLE),
         "text_fields": settings_store.TEXT_FIELDS,
         "behavior_generation": generations["behaviour"],
         "lastfm_generation": generations["discover"],
@@ -250,7 +250,7 @@ async def save_settings(
     if not auth_token.strip() and not user_id.strip() \
             and not existing.get("auth_token") \
             and not cfg.QOBUZ_USER_AUTH_TOKEN:
-        return RedirectResponse(url="/settings?error=empty", status_code=303)
+        return RedirectResponse(url="/settings?error=empty#qobuz", status_code=303)
     # Blank means "keep the existing value": the fields are not pre-filled,
     # so an empty submission must not wipe a previously-saved credential.
     if not auth_token.strip() and not user_id.strip() and cfg.QOBUZ_USER_AUTH_TOKEN:
@@ -260,14 +260,14 @@ async def save_settings(
         # environment token that everything was fine.
         verdict = await _classify_token_async(loop, cfg.QOBUZ_USER_AUTH_TOKEN)
         if verdict == AuthOutcome.REJECTED:
-            return RedirectResponse(url="/settings?error=envrejected",
+            return RedirectResponse(url="/settings?error=envrejected#qobuz",
                                     status_code=303)
         if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
             qobuz_access._on_auth_state(
                 AuthEvidence(qobuz_access._credentials_snapshot().generation, verdict))
-            return RedirectResponse(url="/settings?envchecked=1",
+            return RedirectResponse(url="/settings?envchecked=1#qobuz",
                                     status_code=303)
-        return RedirectResponse(url="/settings?error=envunreachable",
+        return RedirectResponse(url="/settings?error=envunreachable#qobuz",
                                 status_code=303)
     new_token = auth_token.strip() or existing.get("auth_token", "")
     new_uid = env_user_id.strip() or user_id.strip() or existing.get("user_id", "")
@@ -369,7 +369,7 @@ async def save_settings(
         if verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
         else ""
     )
-    return RedirectResponse(url=f"/settings?connected=1{suffix}", status_code=303)
+    return RedirectResponse(url=f"/settings?connected=1{suffix}#qobuz", status_code=303)
 
 
 @router.post("/settings/behavior", response_class=HTMLResponse)
@@ -590,6 +590,12 @@ async def keep_corrupt_stores(request: Request):
         status_code=303)
 
 
+def _mode_refused(text):
+    return RedirectResponse(
+        url="/settings?mode=refused&error=" + rendering._notice_key(text) + "#mode",
+        status_code=303)
+
+
 @router.post("/settings/mode")
 async def set_mode(request: Request, target: str = Form("")):
     """Hand the run-lock to the terminal (CLI), or take it back for the web.
@@ -628,19 +634,16 @@ async def set_mode(request: Request, target: str = Form("")):
 
         loop = asyncio.get_running_loop()
         if not await loop.run_in_executor(None, _handoff):
-            return RedirectResponse(url="/settings?error=" + rendering._notice_key(
+            return _mode_refused(
                 "Finish or cancel the running library work before handing off to the "
-                "terminal."), status_code=303)
-        return RedirectResponse(url="/settings?mode=cli", status_code=303)
+                "terminal.")
+        return RedirectResponse(url="/settings?mode=cli#mode", status_code=303)
     if want == "nolock":
         # Durable recovery cannot inspect or reconcile saved work without
         # exact single-writer authority.
-        return RedirectResponse(
-            url="/settings?error=" + rendering._notice_key(
-                "The run lock is required. Fix the data-folder filesystem or "
-                "permissions, then restart Qobuz Librarian."),
-            status_code=303,
-        )
+        return _mode_refused(
+            "The run lock is required. Fix the data-folder filesystem or "
+            "permissions, then restart Qobuz Librarian.")
     if want == "web":
         with runtime._auto_check_lock:
             prior_cli_mode = runtime.cli_mode()
@@ -671,19 +674,15 @@ async def set_mode(request: Request, target: str = Form("")):
                         "couldn't resume Web mode because durable recovery "
                         "could not be read"
                     )
-                    return RedirectResponse(
-                        url="/settings?error=" + rendering._notice_key(
-                            "Saved recovery state could not be checked. Web "
-                            "mode stayed paused and its run lock was "
-                            "released; check the data-folder permissions, "
-                            "then try again."
-                        ),
-                        status_code=303,
-                    )
-            return RedirectResponse(url="/settings?mode=web", status_code=303)
+                    return _mode_refused(
+                        "Saved recovery state could not be checked. Web "
+                        "mode stayed paused and its run lock was "
+                        "released; check the data-folder permissions, "
+                        "then try again.")
+            return RedirectResponse(url="/settings?mode=web#mode", status_code=303)
         except run_lock.LockBusy:
             # A CLI session still holds the lock, so we can't take it back yet.
-            return RedirectResponse(url="/settings?error=" + rendering._notice_key(
+            return _mode_refused(
                 "The terminal is still using it. Finish your CLI command, then "
-                "resume."), status_code=303)
+                "resume.")
     return RedirectResponse(url="/settings", status_code=303)

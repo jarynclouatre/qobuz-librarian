@@ -143,15 +143,16 @@ def _census_view():
     if raw:
         labels = {
             "cd": "CD quality (16-bit / 44.1–48 kHz)",
+            "hires48": "Hi-res up to 48 kHz",
             "hires96": "Hi-res up to 96 kHz",
-            "hires192": "Hi-res up to 192 kHz",
+            "hires192": "Hi-res above 96 kHz",
             "unknown": "Other formats",
         }
-        seg = {"cd": "cd", "hires96": "h96", "hires192": "h192",
-               "unknown": "other"}
+        seg = {"cd": "cd", "hires48": "h48", "hires96": "h96",
+               "hires192": "h192", "unknown": "other"}
         total_bytes = raw["total_bytes"] or 1
         rows, bar = [], []
-        for tier in ("cd", "hires96", "hires192", "unknown"):
+        for tier in ("cd", "hires48", "hires96", "hires192", "unknown"):
             n, size = raw["tiers"][tier]
             if not n:
                 continue

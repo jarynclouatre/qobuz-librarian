@@ -2383,12 +2383,11 @@ def _refresh_review_state_after_downloads(
                 # hidden list is what went missing.
                 review_badges.set_ready(surface, False)
             elif hidden is not None:
-                review_badges.set_ready(
+                saved = state_module.load()
+                review_badges.sync_candidates(
                     surface,
-                    state_module.has_visible_candidates(
-                        state_module.load(),
-                        hidden,
-                    ),
+                    saved,
+                    state_module.visible_candidates(saved, hidden),
                 )
     except Exception as exc:
         vlog(f"post-download review-badge refresh failed: {exc}")

@@ -124,10 +124,6 @@ def visible_candidates(state=None, hidden=None):
     ]
 
 
-def has_visible_candidates(state=None, hidden=None):
-    return bool(visible_candidates(state=state, hidden=hidden))
-
-
 def update_artist(
     artist_dir: Path,
     *,

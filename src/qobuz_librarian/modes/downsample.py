@@ -62,7 +62,7 @@ def run_downsample_walk_mode(args):
     ask. The interactive menu ignores it; --downsample-walk exits with it.
     """
     clear_scan_caches()
-    banner("Downsample: bring hi-res library files down to CD rate")
+    banner("Downsample: bring library files above 48 kHz down to 44.1 / 48 kHz")
 
     if not HAVE_DOWNSAMPLE:
         log.info(fmt(C.YELLOW,
@@ -202,7 +202,7 @@ def run_downsample_walk_mode(args):
             est_total_saving += est_total
             log.info(fmt(C.BOLD + C.WHITE, f"  {artist_name}"))
             log.info(fmt(C.MAGENTA,
-                f"  {plural(n_albums, 'album')} above CD rate, "
+                f"  {plural(n_albums, 'album')} above 48 kHz, "
                 f"~{format_size(est_total)} reclaimable:"))
             log.info("")
             for c in candidates:
@@ -268,9 +268,10 @@ def run_downsample_walk_mode(args):
             if artist_attempted:
                 downsample_state.update_artist(artist_dir)
                 saved_state = downsample_state.load()
-                review_badges.set_ready(
+                review_badges.sync_candidates(
                     "downsample",
-                    downsample_state.has_visible_candidates(saved_state, hidden),
+                    saved_state,
+                    downsample_state.visible_candidates(saved_state, hidden),
                 )
             log.info("")
             if interrupted:

@@ -108,7 +108,7 @@
         {% endif %}
       </svg>
       <span class="ql-notice-copy"><strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}</span>
-      {% if not library_scan_state.empty %}<a href="/settings" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Open Settings</a>{% endif %}
+      {% if library_scan_state.empty %}<a href="/" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Search</a>{% else %}<a href="/settings" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Open Settings</a>{% endif %}
     </div>
   </section>
 
@@ -147,6 +147,7 @@
     </svg>
     {% if library_review_retired_reason == 'discarded' %}
     <p class="ql-scan-hero-title">Review discarded</p>
+    <p class="ql-scan-hero-text">The next refresh lists these albums again.</p>
     {% else %}
     <p class="ql-scan-hero-title">Review complete</p>
     {% endif %}

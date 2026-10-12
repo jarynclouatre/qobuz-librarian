@@ -35,6 +35,7 @@ from qobuz_librarian.library import (
     generation_state,
     library_scan_state,
     lyrics,
+    missing_types,
     scan_checkpoint,
 )
 from qobuz_librarian.library import hidden as hidden_mod
@@ -60,6 +61,7 @@ from qobuz_librarian.library.discovery import (
 )
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
+    is_library_system_folder,
     list_artist_album_dirs,
     list_library_artists,
 )
@@ -91,6 +93,7 @@ def build_args():
         migrate_multi_artist=cfg.MIGRATE_MULTI_ARTIST,
         include_comps=False,
         include_singles=False,
+        include_live=False,
         no_catalog=False,
         auto_safe=False,
         # Whole-album replacement belongs to the explicit Upgrade review,
@@ -100,12 +103,27 @@ def build_args():
     )
 
 
+def _fresh_music_root():
+    """True when the music folder holds nothing yet and no collection backup
+    says it once held albums: a new install, not a dropped mount."""
+    try:
+        empty = not any(not is_library_system_folder(entry.name)
+                        for entry in Path(cfg.MUSIC_ROOT).iterdir())
+    except OSError:
+        return False
+    return empty and collection_snapshot.music_root_write_state()[0] == "ready"
+
+
 def _set_empty_library_summary(job):
     """Describe the expected layout and name where the music path is set.
 
     Inside the image the container path is meaningless on the host, and there
     is no Settings control for it, so the message has to name the mount.
     """
+    if _fresh_music_root():
+        job.summary = "Nothing to scan yet. The music folder is empty."
+        log.info("The music folder is empty, so there is nothing to scan yet.")
+        return
     if cfg.in_container():
         where = ("Nothing to scan: no artist folders were found under the "
                  "/music mount.")
@@ -124,7 +142,7 @@ def _set_empty_library_summary(job):
     job.status = job_mgr.JobStatus.FAILED
     log.info("No artist folders found in the configured music library.")
     log.info("  Expected layout: <music library>/<Artist>/<Album (Year)>/<track>.flac")
-    log.info("  Check the music library path in Settings.")
+    log.info(f"  {fix}")
 
 
 def _mark_job_failed(job):
@@ -173,11 +191,12 @@ def _sync_surface_badge(surface):
         state_module = downsample_state
     else:
         return
-    review_badges.set_ready(
-        surface,
-        generation_state.output_is_current(surface)
-        and state_module.has_visible_candidates(),
-    )
+    if not generation_state.output_is_current(surface):
+        review_badges.clear_ready(surface)
+        return
+    saved = state_module.load()
+    review_badges.sync_candidates(
+        surface, saved, state_module.visible_candidates(saved))
 
 
 def _artist_dir_from_result(album, result=None, fallback_artist=None):
@@ -397,6 +416,15 @@ def _spec_dismissed(spec, hidden):
     )
 
 
+def _read_without_release_types(candidates):
+    """Whether an artist's saved missing albums were found without Qobuz's
+    release lists, so a refresh reads the artist again rather than keep them
+    all listed."""
+    return any(not is_gap_candidate(c)
+               and not (c.get("payload") or {}).get("release_type")
+               for c in candidates)
+
+
 def _readd_candidate(job, c):
     """Re-add a candidate restored from a scan checkpoint, with a fresh cid."""
     _add_candidate_spec(job, c)
@@ -435,6 +463,8 @@ def _gap_candidate_spec(
         extra_payload["_gap_fill_receipts"] = (
             candidate_premise.gap_fill_receipts(premise) or {})
     else:
+        if gap.release_type:
+            extra_payload["release_type"] = gap.release_type
         artist_dir = cfg.MUSIC_ROOT / artist_key if artist_key else None
         extra_payload["_artist_dir_path"] = str(artist_dir or "")
         premise = (missing_premises or {}).get(artist_dir) if artist_dir else None
@@ -499,12 +529,27 @@ def is_gap_candidate(c):
     return "gap-fill:" in (c.get("detail") or "")
 
 
+def review_tab_filter(tab, included=None):
+    """Which candidates a library review lists on ``tab``: Gap Fill, or the
+    missing albums whose release type is switched on (``included``, else the
+    saved switches). Any other tab lists everything."""
+    if tab == "gaps":
+        return is_gap_candidate
+    if tab != "missing":
+        return lambda c: True
+    if included is None:
+        included = missing_types.load()
+    return lambda c: not is_gap_candidate(c) and missing_types.shown(
+        (c.get("payload") or {}).get("release_type"), included)
+
+
 def library_review_summary(candidates):
     """The parked library review's one-line summary, without the trailing
     period."""
     gaps = sum(1 for c in candidates if is_gap_candidate(c))
-    missing = len(candidates) - gaps
-    return (f"{len(candidates):,} to review across Missing Albums "
+    shown = review_tab_filter("missing")
+    missing = sum(1 for c in candidates if shown(c))
+    return (f"{missing + gaps:,} to review across Missing Albums "
             f"({missing:,}) and Gap Fill ({gaps:,})")
 
 
@@ -528,7 +573,7 @@ def split_review_summary(execute_kind, candidates):
         return (f"{plural(n, 'upgradeable album')} Qobuz can serve at "
                 "higher quality.")
     if execute_kind == "downsample":
-        return f"{plural(n, 'album')} stored above CD rate."
+        return f"{plural(n, 'album')} stored above 48 kHz."
     if execute_kind == "collection_restore":
         return f"{plural(n, 'album')} from the backup to restore."
     return ""
@@ -1228,7 +1273,7 @@ def _flag_new_since_last_scan(job, mode):
     _save_scan_seen(mode, seen_now)
 
 
-def dismiss_albums(job, artist, scope=hidden_mod.SCOPE_MISSING, gap_only=None,
+def dismiss_albums(job, artist, scope=hidden_mod.SCOPE_MISSING, tab="",
                    query=""):
     """Apply one hide action only while its review remains live."""
     with job._review_action_lock:
@@ -1236,13 +1281,13 @@ def dismiss_albums(job, artist, scope=hidden_mod.SCOPE_MISSING, gap_only=None,
             job,
             artist,
             scope=scope,
-            gap_only=gap_only,
+            tab=tab,
             query=query,
         )
 
 
 def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
-                           gap_only=None, query=""):
+                           tab="", query=""):
     """Hide ``artist``'s albums that aren't currently selected, in ``scope``.
 
     Selection is server-backed (saved as the user ticks), so "hide the rest"
@@ -1251,9 +1296,9 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
     selections are never touched, critical now that pagination means most of
     them aren't even on the page that triggered the hide.
 
-    ``gap_only`` narrows the hide to one side of a library review's tab split:
-    True drops only Gap Fill candidates, False only fully missing albums, None
-    (the default) both. The button only ever shows one tab's rows, so it must
+    ``tab`` narrows the hide to what one tab of a library review lists
+    (review_tab_filter): its Gap Fill rows, or the missing albums of the
+    switched-on types. The button only ever shows one tab's rows, so it must
     not silently dismiss the other tab's. ``query`` narrows the same way for
     an active review filter, only the rows the user can see leave.
 
@@ -1262,6 +1307,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
     number hidden, or False when the matching review snapshot could not be
     saved.
     """
+    in_tab = review_tab_filter(tab)
     # Snapshot + mutate under the lock in one go: a live scan appends candidates
     # from the worker thread, so reading job.candidates and replacing it in
     # separate steps could drop a concurrently-added album.
@@ -1287,7 +1333,7 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
                     kept.add(fp)
         to_hide = [c for c in job.candidates
                    if c.get("artist") == artist and not c.get("selected")
-                   and (gap_only is None or is_gap_candidate(c) == gap_only)
+                   and in_tab(c)
                    and (not query or candidate_matches_query(c, query))
                    and hidden_mod.album_fingerprint(
                        c.get("artist"), c.get("title")) not in kept]
@@ -1612,6 +1658,12 @@ def _scan_library_impl(
     # albums the user dismissed since the interruption are not re-added, and
     # so the parallel workers below see the same consistent view.
     hidden = hidden_mod.load()
+    # The review keeps every release type and lists what the Missing Albums
+    # switches pick; the running count follows the list.
+    missing_listed = review_tab_filter("missing")
+
+    def _listed(c):
+        return is_gap_candidate(c) or missing_listed(c)
     quality_sig = library_scan_state.quality_signature()
     # Dismissing and restoring deliberately do NOT bar the cheap path. The
     # snapshot holds every candidate the last crawl found, dismissed or not, so
@@ -1644,7 +1696,9 @@ def _scan_library_impl(
     _passes = ["Reading albums on disk"]
     if cfg.UPGRADE_SCAN_ENABLED:
         _passes.append("Checking upgrade quality")
-    _passes += ["Checking artist folders", "Scanning library"]
+    _finding = ("Finding Gap Fill candidates" if partial_only
+                else "Finding missing albums")
+    _passes += ["Checking artist folders", _finding]
 
     def _step(name):
         return f"Step {_passes.index(name) + 1} of {len(_passes)}: {name}"
@@ -1691,7 +1745,8 @@ def _scan_library_impl(
                 "upgrade", upgrade_state.reusable_result(upgrade_refresh))
     elif not cfg.UPGRADE_SCAN_ENABLED:
         review_badges.set_ready("upgrade", False)
-    target = "Gap Fill candidates in owned albums" if partial_only else "missing albums"
+    target = ("Gap Fill candidates in owned albums" if partial_only
+              else "missing albums and Gap Fill candidates")
     log.info(f"Scanning {plural(len(artists), 'library artist')} for {target}")
     fingerprints = {}
     for _i, _ad in enumerate(artists, 1):
@@ -1737,7 +1792,8 @@ def _scan_library_impl(
                                     year=(c.get("payload") or {}).get("year")):
                 continue
             _readd_candidate(job, c)
-            total += 1
+            if _listed(c):
+                total += 1
             if artist_key:
                 restored_by_artist.setdefault(artist_key, []).append(c)
         for name in scanned:
@@ -1781,12 +1837,14 @@ def _scan_library_impl(
             and saved_catalog_ids is not None
             and saved.get("fingerprint") == fingerprints.get(artist_dir.name)
             and (saved.get("artist_id") or not saved.get("candidates"))
+            and not _read_without_release_types(saved.get("candidates") or [])
         ):
             candidates = list(saved.get("candidates") or [])
             visible = [c for c in candidates if not _spec_dismissed(c, hidden)]
             for c in visible:
                 _readd_candidate(job, c)
-                total += 1
+            visible = [c for c in visible if _listed(c)]
+            total += len(visible)
             scanned.add(artist_dir.name)
             done += 1
             reused += 1
@@ -1800,7 +1858,7 @@ def _scan_library_impl(
             }
             hit = ({"artist": artist_dir.name, "albums": len(visible)}
                    if visible else None)
-            job.push_progress(_step("Scanning library"), done, n, artist_dir.name,
+            job.push_progress(_step(_finding), done, n, artist_dir.name,
                               found=total, hit=hit, unit="artist")
         else:
             todo.append(artist_dir)
@@ -1844,7 +1902,7 @@ def _scan_library_impl(
                     read_errors += 1
                     unreadable_artists.add(futures[fut].name)
                 log.info(f"    skipped {futures[fut].name}: {e}")
-                job.push_progress(_step("Scanning library"), done, n, futures[fut].name,
+                job.push_progress(_step(_finding), done, n, futures[fut].name,
                                   found=total, unit="artist")
                 continue
             scanned.add(name)
@@ -1869,8 +1927,9 @@ def _scan_library_impl(
                     continue
                 if _add_candidate_spec(job, spec) is not None:
                     artist_candidates.append(spec)
-                    total += 1
-                    shown += 1
+                    if _listed(spec):
+                        total += 1
+                        shown += 1
             if catalog_ids is not None:
                 state_artists[name] = {
                     "fingerprint": fingerprints.get(name, ""),
@@ -1882,11 +1941,11 @@ def _scan_library_impl(
             # preview the same moment the running total moves.
             hit = ({"artist": artist_name or name, "albums": shown}
                    if shown else None)
-            job.push_progress(_step("Scanning library"), done, n, artist_name or name,
+            job.push_progress(_step(_finding), done, n, artist_name or name,
                               found=total, hit=hit, unit="artist")
             if shown:
                 # A full scan's count holds missing albums and gaps together.
-                tail = "with Gap Fill candidates" if partial_only else "found"
+                tail = "with Gap Fill candidates" if partial_only else "to review"
                 log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
             checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     # Reached here only without an AuthLost/outage abort (that re-raises out
@@ -2025,7 +2084,7 @@ def _scan_library_impl(
                 )
         if publication is not None and not scan_state_save_failed:
             scan_generation = int(publication["generation"])
-            if not scan_state_save_failed:
+            if not scan_state_save_failed and not cheap_refresh:
                 _record_last_scan()
             _flag_new_since_last_scan(job, kind)
             # The crawl reached every artist cleanly, establish the new-release
@@ -2222,7 +2281,14 @@ def scan_new_releases(job, token):
     rebaseline = prev_limit is None or cur_limit > int(prev_limit)
     hidden = hidden_mod.load()
     single_store = hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None
-    opts = DiscoveryOpts(prefer_hires=cfg.PREFER_HIRES)
+    # A new release shows only where the Missing Albums switches would list it.
+    switched_on = missing_types.load()
+    opts = DiscoveryOpts(
+        prefer_hires=cfg.PREFER_HIRES,
+        include_live=missing_types.LIVE in switched_on,
+        include_comps=missing_types.COMPILATION in switched_on,
+        include_singles=missing_types.EP in switched_on,
+    )
     log.info(f"Checking {plural(len(artists), 'artist')} for new releases…")
     total = 0
     done = 0
@@ -2369,7 +2435,7 @@ def scan_new_releases(job, token):
         job.summary = ("No new releases found, but this check couldn't be "
                        "saved. Check again.")
     else:
-        job.summary = "No new releases since your last check."
+        job.summary = "No new releases since the last Library scan or check."
     if skipped_note:
         job.summary += f" {skipped_note}"
     if not total and (failed_count or saved is False):
@@ -3185,7 +3251,7 @@ def scan_downsamples(job):
         job.push_progress("Scanning for hi-res files", done, n, name,
                           found=total, hit=hit, unit="artist")
         if added:
-            log.info(f"  {name} - {plural(added, 'album')} above CD rate")
+            log.info(f"  {name} - {plural(added, 'album')} above 48 kHz")
         _note_scan_wrap_up(job, done, n)
 
     refresh = downsample_state.refresh_for_artists(
@@ -3211,7 +3277,7 @@ def scan_downsamples(job):
                        if total else "Stopped before anything turned up.")
     elif unchecked:
         job.summary = (
-            f"{plural(total, 'album')} stored above CD rate."
+            f"{plural(total, 'album')} stored above 48 kHz."
             if total else
             "No albums to downsample among the artists that could be checked."
         )
@@ -3223,10 +3289,10 @@ def scan_downsamples(job):
             job.error = "The Downsample scan did not complete."
             _mark_job_failed(job)
     else:
-        job.summary = (f"{plural(total, 'album')} stored above CD rate."
+        job.summary = (f"{plural(total, 'album')} stored above 48 kHz."
                        + _cap_note(job)
                        if total else
-                       "Every album is already at CD rate or lower.")
+                       "No album is stored above 48 kHz.")
     if unreadable_artists:
         job.summary += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
     log.info(job.summary)
@@ -3807,8 +3873,7 @@ def _scan_repairs_impl(job, token, checkpoint):
             f"{plural(total, 'album')} flagged so far."
         )
     log.info(f"Scanning {plural(len(artists), 'artist')} for damaged files. "
-             "Only problems are listed below; expect long quiet stretches. "
-             "Slow on a big library.")
+             "Only problems are listed below.")
     todo = [ad for ad in artists if ad.name not in scanned]
     n = len(artists)
     done = len(scanned)

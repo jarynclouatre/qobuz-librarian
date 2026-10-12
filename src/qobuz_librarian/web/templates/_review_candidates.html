@@ -7,7 +7,6 @@
      data-review-missing-selected="{{ review_tab_counts.missing_selected }}"
      data-review-gap-total="{{ review_tab_counts.gaps }}"
      data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"{% endif %}
-     data-review-item-singular="{{ labels.review_item_singular(job) }}"
      data-review-item-plural="{{ labels.review_item_plural(job) }}"
      data-review-dismiss-singular="{% if review_tab == 'gaps' %}album to fill{% elif review_tab == 'missing' %}missing album{% else %}album{% endif %}"
      data-review-dismiss-plural="{% if review_tab == 'gaps' %}albums to fill{% elif review_tab == 'missing' %}missing albums{% else %}albums{% endif %}"
@@ -21,7 +20,8 @@
 
   <div class="ql-review-sticky">
   {% if review_tab %}
-  <nav class="ql-page-tabs ql-review-tabs" aria-label="Result type" data-review-tabs>
+  <div class="ql-review-tabs-row" data-review-tabs>
+  <nav class="ql-page-tabs ql-review-tabs" aria-label="Result type">
     <button type="button" data-review-tab="missing"
             class="{% if review_tab == 'missing' %}is-active{% endif %}"
             {% if review_tab == 'missing' %}aria-current="true"{% endif %}>
@@ -33,28 +33,36 @@
       Gap Fill <span class="ql-count" data-tab-count="gaps">{{ labels.format_count(review_tab_counts.gaps) }}</span>
     </button>
   </nav>
+  {% if review_tab_counts.typed %}
+  <div class="ql-review-switches{% if review_tab != 'missing' %} hidden{% endif %}" role="group"
+       aria-label="Also list in Missing Albums" data-review-switches>
+    {% for release_type, label in review_type_switches %}
+    <button type="button" class="ql-review-switch" data-review-switch="{{ release_type }}"
+            aria-pressed="{{ 'true' if release_type in review_tab_counts.included else 'false' }}">
+      <span>{{ label }}</span>
+      <span class="ql-toggle-switch" aria-hidden="true"><i></i></span>
+    </button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  </div>
   {% endif %}
 
+  {% set _m_total = review_tab_counts.missing if review_tab == 'missing' else review_tab_counts.gaps if review_tab == 'gaps' else review_counts.total %}
+  {% set _m_selected = review_tab_counts.missing_selected if review_tab == 'missing' else review_tab_counts.gaps_selected if review_tab == 'gaps' else review_counts.selected %}
   <div id="review-summary-row"
        class="ql-review-summary-row{% if not review_counts.total %} hidden{% endif %}">
-    <div id="review-filter-row" class="ql-review-filter-row{% if review_counts.artists < 4 %} hidden{% endif %}">
+    <div id="review-filter-row" class="ql-review-filter-row{% if review_counts.artists < 4 or not (_m_total or review_query) %} hidden{% endif %}">
       <input type="search" id="review-filter" autocomplete="off"
              value="{{ review_query }}"
              placeholder="{% if job.execute_kind == 'migration' %}Filter by artist or folder&hellip;{% else %}Filter by artist or album&hellip;{% endif %}"
              aria-label="{% if job.execute_kind == 'migration' %}Filter the whole review list by artist or folder{% else %}Filter the whole review list by artist or album{% endif %}"
              class="ql-input ql-review-filter-input">
     </div>
-    {% if not review_tab %}
-    <p class="ql-review-count">
-      <span data-summary-count>{{ labels.review_summary_count(job, review_counts.total, review_counts.artists) }}</span>{% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %} · selected: ~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
-    </p>
-    {% endif %}
     <div class="ql-review-summary-actions">
-      <div class="ql-review-tool-group">
+      <div id="review-select-tools" class="ql-review-tool-group{% if not _m_total %} hidden{% endif %}">
         <label class="ql-review-master">
           {# Render the master checkbox from the saved selection. #}
-          {% set _m_total = review_tab_counts.missing if review_tab == 'missing' else review_tab_counts.gaps if review_tab == 'gaps' else review_counts.total %}
-          {% set _m_selected = review_tab_counts.missing_selected if review_tab == 'missing' else review_tab_counts.gaps_selected if review_tab == 'gaps' else review_counts.selected %}
           <input type="checkbox" class="ql-checkbox" data-select-master
                  {% if _m_total and _m_selected >= _m_total %}checked{% endif %}
                  aria-label="Select or deselect every {{ labels.review_item_singular(job) }} shown{% if review_tab %} on this tab{% endif %}">

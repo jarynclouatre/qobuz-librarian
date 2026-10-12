@@ -82,6 +82,11 @@ async def repair_page(request: Request, page: int = 1):
                 "found": found,
             }
         ctx["last_run"] = job_labels._tool_last_run_age("repair")
+        latest = max((j for j in job_mgr.registry.all()
+                      if j.execute_kind == "repair"),
+                     key=lambda j: j.created_at or 0, default=None)
+        if latest is not None and latest.status == job_mgr.JobStatus.DONE:
+            ctx["last_summary"] = latest.summary
     badge_ack = None
     if (rjob is not None
             and rjob.status == job_mgr.JobStatus.AWAITING_REVIEW

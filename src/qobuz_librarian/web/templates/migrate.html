@@ -72,18 +72,18 @@
     <dl class="ql-definition-list ql-migrate-definitions">
       <div>
         <dt>Source path (<code>MIGRATE_SRC</code>)</dt>
-        <dd>The existing library to organise, e.g. <code>/mnt/old-library</code>.</dd>
+        <dd>The existing library to organise, as a path inside the container, e.g. <code>/migrate-source</code>.</dd>
       </div>
       <div>
         <dt>Destination path (<code>MIGRATE_DEST</code>)</dt>
-        <dd>Where the organised copy goes, e.g. <code>/mnt/music</code>.</dd>
+        <dd>An empty folder for the organised copy, inside the container, e.g. <code>/migrate-dest</code>.</dd>
       </div>
     </dl>
 
     <ol class="ql-step-list">
       <li>
         <span class="ql-step-number">1</span>
-        <span>Add both folders to the container's Compose file.</span>
+        <span>Mount both folders in the container's Compose file, as in <a href="https://github.com/jarynclouatre/qobuz-librarian/blob/main/docs/existing-libraries.md" class="ql-inline-link">Existing libraries</a>.</span>
       </li>
       <li>
         <span class="ql-step-number">2</span>

@@ -28,9 +28,11 @@
     <span class="ql-status-chip {% if failed %}is-error{% elif downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
       {% if failed %}Last run failed{% elif downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
     </span>
+    {% if downsample_state.stale or downsample_state.updated or (last_run and downsample_state.complete) %}
     <span>
-      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% elif last_run and downsample_state.complete %}Last downsample refresh {{ last_run }}.{% elif not failed %}No scan has finished yet.{% endif %}
+      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% else %}Last downsample refresh {{ last_run }}.{% endif %}
     </span>
+    {% endif %}
     {% if hidden_count %}
     <a href="/downsample/hidden">
       {{ hidden_count }} album{% if hidden_count != 1 %}s{% endif %} kept hi-res

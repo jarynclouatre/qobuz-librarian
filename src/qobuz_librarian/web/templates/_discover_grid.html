@@ -1,6 +1,6 @@
 {% from "_search_results.html" import download_form, quality_badge with context %}
 {% if albums %}
-<div class="ql-grid-view">
+<div class="ql-grid-view ql-grid-view--even">
   {% for g in albums %}
   <div class="ql-grid-tile" data-search-item data-search-key="album-{{ g.id }}"
        data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">

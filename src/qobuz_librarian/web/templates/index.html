@@ -84,13 +84,13 @@
       </svg>
       <span class="min-w-0 flex-1 text-sm">
         {% if setup_scanning %}
-        <strong>Library scan running.</strong> Building the Missing Albums, Gap Fill, Upgrade, and Downsample reviews.
+        <strong>Library scan running.</strong> Looking for missing albums, missing tracks, and quality upgrades.
         {% elif not library_scan_state.ready %}
         <strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}
         {% elif library_resume %}
         <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. Resume to finish it.
         {% else %}
-        <strong>Scan your library.</strong> Builds the Missing Albums, Gap Fill, Upgrade, and Downsample reviews.
+        <strong>Scan your library.</strong> Finds missing albums, missing tracks, and quality upgrades.
         {% endif %}
       </span>
       {% if setup_scanning %}
@@ -164,10 +164,10 @@
             </svg>
           </div>
           <div class="ql-panel-header">
-            <h2>Qobuz credentials</h2>
-            <p>Connect Qobuz to enable Search.</p>
+            <h2>Connect Qobuz</h2>
+            <p>Add your Qobuz token in Settings.</p>
           </div>
-          <a href="/settings" class="ql-btn ql-btn-primary ql-locked-search-action">Open Settings</a>
+          <a href="/settings#qobuz" class="ql-btn ql-btn-primary ql-locked-search-action">Open Settings</a>
         </div>
 
         <div class="ql-locked-search-form" aria-hidden="true">
@@ -189,8 +189,8 @@
 
         <div class="ql-local-links">
           <span>Available without Qobuz:</span>
-          <a href="/downsample">Downsample</a>
-          <a href="/lyrics">Lyrics</a>
+          <a href="/downsample" class="ql-inline-link-hit">Downsample</a>
+          {% if have_lyrics %}<a href="/lyrics" class="ql-inline-link-hit">Lyrics</a>{% endif %}
         </div>
       </div>
       {% elif creds_token_valid == False %}
@@ -199,7 +199,7 @@
         <p>Your saved token was rejected.</p>
       </div>
       <div class="ql-panel-actions">
-        <a href="/settings" class="ql-btn ql-btn-primary">Reconnect Qobuz</a>
+        <a href="/settings#qobuz" class="ql-btn ql-btn-primary">Open Settings</a>
       </div>
       {% else %}
       <form action="/search" method="post"
@@ -283,7 +283,6 @@
           <circle cx="66" cy="66" r="13" stroke="currentColor" stroke-width="2"/>
           <path d="M75.5 75.5 85 85" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
-        <p>Search for an artist, album, or track.</p>
       </div>
       {% endif %}
     </div>

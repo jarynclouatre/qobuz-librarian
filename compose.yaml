@@ -148,7 +148,7 @@ services:
       DELAY_BETWEEN:             "${DELAY_BETWEEN:-1.0}"          # pause between consecutive album downloads (s)
       ARTIST_API_DELAY:          "${ARTIST_API_DELAY:-0.0}"      # pause between Qobuz API calls during library walks (s)
       ARTIST_SCAN_WORKERS:       "${ARTIST_SCAN_WORKERS:-4}"     # parallel artist lookups during a library scan (1-16)
-      MISSING_ALBUMS_MIN_TRACKS: "${MISSING_ALBUMS_MIN_TRACKS:-4}"  # hide singles / very short EPs in the missing-albums step
+      MISSING_ALBUMS_MIN_TRACKS: "${MISSING_ALBUMS_MIN_TRACKS:-4}"  # shorter releases count as EPs & singles in Missing Albums
 
       # ── Download quality ──────────────────────────────────────────────────
       # streamrip quality: 2=CD/16-bit lossless, 3=24-bit ≤96kHz,
@@ -174,9 +174,10 @@ services:
       CONSOLIDATE: "${CONSOLIDATE:-false}"
       # Move "Primary, Other/<album>" into "Primary/<album>" after import.
       MIGRATE_MULTI_ARTIST: "${MIGRATE_MULTI_ARTIST:-false}"
-      # Library scans and checks for new releases treat a single-track
-      # download as a single: the rest of its album is not offered, and an
-      # artist you own only singles from is skipped.
+      # Web Library scans and checks for new releases don't offer the rest of
+      # an album you took tracks from with a Search Track download, and skip an
+      # artist whose only folders came from such downloads. Other one-track
+      # folders are scanned as usual; the CLI walks ignore this setting.
       SUPPRESS_SINGLE_TRACK_GAPS: "${SUPPRESS_SINGLE_TRACK_GAPS:-false}"
       # Cover art placement: sidecar (image beside tracks) | embed | both.
       ARTWORK: "${ARTWORK:-sidecar}"
@@ -230,12 +231,14 @@ services:
       # decode-tested fresh each scan).
       REPAIR_CACHE_ENABLED:       "${REPAIR_CACHE_ENABLED:-true}"
       REPAIR_CACHE_TTL_DAYS:      "${REPAIR_CACHE_TTL_DAYS:-30}"
-      # Drop obvious live/tour/session releases from the missing-albums gap list.
+      # Count a release titled as live/tour/session as live in Missing Albums
+      # even when Qobuz files it as an album, so it shows only with Live on.
       EXCLUDE_LIVE_ALBUMS:   "${EXCLUDE_LIVE_ALBUMS:-false}"
       # Log verbosity: DEBUG | INFO | WARNING | ERROR | CRITICAL.
       LOG_LEVEL:             "${LOG_LEVEL:-INFO}"
       # Optional command run after every job; the job state (id, status, title,
-      # edition, display_title, artist, error, finished_at) arrives as JSON on stdin
+      # edition, display_title, artist, error, tracks_missing, finished_at)
+      # arrives as JSON on stdin
       # (e.g. POST_JOB_HOOK='curl -sX POST https://ntfy.sh/your-topic -d @-').
       # POST_JOB_HOOK_TIMEOUT caps a slow webhook.
       POST_JOB_HOOK:         "${POST_JOB_HOOK:-}"

@@ -1237,8 +1237,8 @@ def filter_short_releases(catalog_pairs, min_tracks=None):
 def dedup_album_versions(albums, prefer_hires=False):
     """Collapse multiple editions of the same album into one canonical entry.
 
-    Two albums dedup if their stripped-decoration titles normalize identically
-    AND share the same release year. Different years are kept as separate groups
+    Two albums dedup if their stripped-decoration titles normalize identically,
+    a leading article aside, AND share the same release year. Different years are kept as separate groups
     so self-titled albums from different years (Weezer's colour records, Peter
     Gabriel's four eponymous LPs) are not collapsed into one canonical entry.
     Within a group, picks (see _best_edition):
@@ -1253,7 +1253,7 @@ def dedup_album_versions(albums, prefer_hires=False):
     """
     groups = {}
     for a in albums:
-        bare = strip_album_decorations(a.get("title") or "")
+        bare = strip_leading_article(strip_album_decorations(a.get("title") or ""))
         # Pure-CJK / emoji titles normalize to '' (ASCII-fold drops them);
         # fall back to the raw title so they aren't silently dropped from the
         # missing list. Only a genuinely empty title is skipped.

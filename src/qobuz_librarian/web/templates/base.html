@@ -37,9 +37,11 @@
   {% set _att = history_attention.count if history_attention else 0 %}
   {% set _show_qobuz_missing = health_qobuz_missing %}
   {% set _show_token = health_token_invalid %}
-  {% set _show_qobuz = _show_qobuz_missing or _show_token %}
+  {% set _show_user_id = health_user_id_missing | default(false) %}
+  {% set _show_qobuz = _show_qobuz_missing or _show_token or _show_user_id %}
   {% set _status_msg = "Your Qobuz token was rejected. Reconnect it in Settings" if _show_token
-                       else "Set up Qobuz in Settings" if _show_qobuz_missing
+                       else "Connect Qobuz in Settings" if _show_qobuz_missing
+                       else "Add your Qobuz user ID in Settings to download" if _show_user_id
                        else "Another Qobuz Librarian run is active, so downloads are paused" %}
 
   <div class="ql-app-shell">
@@ -133,7 +135,7 @@
 
       <div class="ql-sidebar-bottom">
         {% if _show_qobuz or health_lock_busy %}
-        <a href="{{ '/settings' if _show_qobuz else '/' }}" class="ql-sidebar-alert">
+        <a href="{{ '/settings#qobuz' if _show_qobuz else '/' }}" class="ql-sidebar-alert">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5c.74 0 1.42.4 1.78 1.05l7.31 13.2A2.05 2.05 0 0 1 19.31 20.8H4.69a2.05 2.05 0 0 1-1.78-3.05l7.31-13.2A2.03 2.03 0 0 1 12 3.5Zm0 1.5a.53.53 0 0 0-.47.28l-7.31 13.2a.55.55 0 0 0 .47.82h14.62a.55.55 0 0 0 .47-.82l-7.31-13.2A.53.53 0 0 0 12 5Zm0 4.25c.41 0 .75.34.75.75v4a.75.75 0 0 1-1.5 0v-4c0-.41.34-.75.75-.75Zm0 7.75a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z"/></svg>
           <span>{{ _status_msg }}</span>
         </a>
@@ -166,7 +168,7 @@
         </a>
         <div class="ql-mobile-actions">
           {% if _show_qobuz or health_lock_busy %}
-          <a href="{{ '/settings' if _show_qobuz else '/' }}" title="{{ _status_msg }}" aria-label="{{ _status_msg }}"
+          <a href="{{ '/settings#qobuz' if _show_qobuz else '/' }}" title="{{ _status_msg }}" aria-label="{{ _status_msg }}"
              class="ql-icon-button {% if _show_token %}is-error{% else %}is-warning{% endif %}">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5c.74 0 1.42.4 1.78 1.05l7.31 13.2A2.05 2.05 0 0 1 19.31 20.8H4.69a2.05 2.05 0 0 1-1.78-3.05l7.31-13.2A2.03 2.03 0 0 1 12 3.5Zm0 1.5a.53.53 0 0 0-.47.28l-7.31 13.2a.55.55 0 0 0 .47.82h14.62a.55.55 0 0 0 .47-.82l-7.31-13.2A.53.53 0 0 0 12 5Zm0 4.25c.41 0 .75.34.75.75v4a.75.75 0 0 1-1.5 0v-4c0-.41.34-.75.75-.75Zm0 7.75a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z"/></svg>
           </a>

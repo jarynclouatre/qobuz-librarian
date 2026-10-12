@@ -112,9 +112,10 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
             reason="Upgrade could not refresh after a CLI replacement.",
         )
     upgrade_saved = upgrade_state.load()
-    review_badges.set_ready(
+    review_badges.sync_candidates(
         "upgrade",
-        upgrade_state.has_visible_candidates(upgrade_saved, hidden),
+        upgrade_saved,
+        upgrade_state.visible_candidates(upgrade_saved, hidden),
     )
     downsample_result = downsample_state.update_artist(artist_dir)
     if not downsample_result.complete:
@@ -124,9 +125,10 @@ def _refresh_saved_state_after_upgrade(album, result, token, args):
             reason="Downsample could not refresh after a CLI replacement.",
         )
     downsample_saved = downsample_state.load()
-    review_badges.set_ready(
+    review_badges.sync_candidates(
         "downsample",
-        downsample_state.has_visible_candidates(downsample_saved, hidden),
+        downsample_saved,
+        downsample_state.visible_candidates(downsample_saved, hidden),
     )
 
 

@@ -274,6 +274,9 @@ UNREADABLE_ARTISTS_FILE = DATA_DIR / ".qobuz_unreadable_artists.json"
 COLLECTION_BACKUP_DIR = os.environ.get("COLLECTION_BACKUP_DIR", "").strip()
 LIBRARY_GENERATION_STATE_FILE = DATA_DIR / ".qobuz_library_generation.json"
 REVIEW_BADGE_STATE_FILE = DATA_DIR / ".qobuz_review_badges.json"
+# The release types the Library review's Missing Albums switches add to
+# albums. See library/missing_types.py.
+MISSING_TYPES_FILE = DATA_DIR / ".qobuz_missing_types.json"
 # Albums the user dismissed from the bulk library/upgrade walks so they stop
 # resurfacing on every scan. User-driven and durable (no auto-expiry, unlike
 # CAPPED_FILE). See library/hidden.py.
@@ -630,8 +633,9 @@ ARTIST_CATALOG_LIMIT   = 1000
 ARTIST_CATALOG_PAGE    = 100
 # How many starred albums Discover reads back from Qobuz.
 FAVORITES_LIMIT        = 500
-# Hide releases shorter than this in the "missing albums" step of artist
-# mode (singles/small EPs are usually noise; lower it to 1 to surface them).
+# A release shorter than this counts as an EP or single among missing
+# albums. An artist whose Qobuz release lists can't be read has
+# shorter releases left out instead.
 MISSING_ALBUMS_MIN_TRACKS = _env("MISSING_ALBUMS_MIN_TRACKS", 4)
 
 # ── Retention windows (days) ──────────────────────────────────────────────────
@@ -670,10 +674,10 @@ PREFER_HIRES         = _env_bool("PREFER_HIRES",         True)
 CONSOLIDATE          = _env_bool("CONSOLIDATE",          False)
 MIGRATE_MULTI_ARTIST = _env_bool("MIGRATE_MULTI_ARTIST", False)
 
-# Drop obvious live/tour/session/acoustic releases from the "missing albums"
-# gap list. Off by default so behaviour is unchanged: many people do want the
-# live records, and the guard is conservative (it only fires on a clearly
-# tagged release, never on an album whose real title merely contains "Live").
+# Count obvious live/tour/session/acoustic releases as live among missing
+# albums even where Qobuz files them as albums, so they show only with Live
+# switched on. Conservative: it only fires on a clearly tagged release, never
+# on an album whose real title merely contains "Live".
 EXCLUDE_LIVE_ALBUMS = _env_bool("EXCLUDE_LIVE_ALBUMS", False)
 
 # ── Audio extensions ──────────────────────────────────────────────────────────

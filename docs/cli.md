@@ -50,8 +50,9 @@ Both confirm each album before anything downloads (download, queue, or skip), so
 # Download a specific album (URL or "Artist Album" string)
 docker compose run --rm -it qobuz-librarian cli https://open.qobuz.com/album/abcd1234
 
-# Work through one artist's catalogue (--include-singles and/or
-# --include-comps to also offer singles and compilation appearances)
+# Work through one artist's catalogue (--include-live, --include-comps and
+# --include-singles also list live releases, compilations, and EPs and
+# singles; each defaults to its switch in the web Library review)
 docker compose run --rm -it qobuz-librarian cli --artist "Paysage d'Hiver"
 ```
 
@@ -82,7 +83,7 @@ docker compose run --rm qobuz-librarian cli --help
 | Only in the terminal | Only in the web app |
 |---|---|
 | The Library walk and Album gaps walk, which ask as they go | The Library scan and the reviews it builds |
-| The `--include-singles` and `--include-comps` switches | New releases checks and Discover |
-| Downloading without importing (`--no-import`) | Dismissing and bringing back albums |
+| Downloading without importing (`--no-import`) | New releases checks and Discover |
+| | Dismissing and bringing back albums |
 | | Putting downsampled originals back, and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |
