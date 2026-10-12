@@ -6,8 +6,7 @@ import sys
 from urllib.parse import urlsplit
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.download import downloads_whole_album
-from qobuz_librarian.library import scanner
+from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.catalog import (
     album_quality_label,
     album_year,
@@ -633,12 +632,18 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
         log.info(f"  {fmt(C.YELLOW, '--force: will re-download all tracks regardless')}")
         return
 
+    other_dir = None if album_dir else catalog.other_version_dir(album)
     if album_dir:
         log.info(f"  {fmt(C.GRAY, 'found:')}    {album_dir}")
+    elif other_dir:
+        log.info(f"  {fmt(C.GRAY, 'found:')}    another version in {other_dir}")
     else:
         log.info(f"  {fmt(C.GRAY, 'found:')}    not found on disk")
 
-    if n_present == 0:
+    if n_present == 0 and other_dir:
+        log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
+                 "none of this version - full album will be fetched as a separate copy")
+    elif n_present == 0:
         log.info(f"  {fmt(C.GREEN, 'in your library:')}  none - full album will be fetched")
     elif n_missing == 0:
         log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
@@ -652,8 +657,3 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
             log.info(f"     {n:>2}.  {truncate(t.get('title') or '?', 60)}")
         if len(missing) > 25:
             log.info(fmt(C.GRAY, f"     … and {len(missing) - 25} more"))
-        if downloads_whole_album(n_present, n_missing, n_total):
-            log.info(fmt(C.YELLOW,
-                "  Too few tracks are present to fill one by one: the whole "
-                "album is "
-                "downloaded and replaces the tracks already here."))

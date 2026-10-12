@@ -811,8 +811,17 @@ def process_album(album, args, *, allow_force=True, label=None,
             use_force = treat_as_new = False
             missing = qobuz_tracks
         else:
-            treat_as_new = bool((missing or use_force) and (treat_as_new or (
-                other and (album_dir is None or mixed_folder))))
+            # A song the folder holds as another master is not fetched into
+            # it again; when that covers every gap, this edition is a
+            # separate copy, as when none of its tracks are on disk.
+            held = ([] if album_dir is None or treat_as_new or use_force else
+                    catalog.held_by_other_versions(album, existing, album_dir, missing))
+            if held and len(held) == len(missing):
+                treat_as_new = True
+            elif held:
+                missing = [t for t in missing if not any(t is h for h in held)]
+            treat_as_new = bool((missing or use_force) and (
+                treat_as_new or (other and album_dir is None)))
         if treat_as_new:
             existing, album_dir = [], None
             missing, present = qobuz_tracks, []

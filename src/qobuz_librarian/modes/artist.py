@@ -15,7 +15,6 @@ import time
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums
-from qobuz_librarian.download import downloads_whole_album
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.candidate_premise import CandidateStale
@@ -117,7 +116,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     vlog("  Resolving artist + pre-fetching catalog …")
     artist_search_failed = False
     try:
-        artist_id, resolved_name = resolve_artist(artist_name, token)
+        artist_id, resolved_name = resolve_artist(
+            artist_name, token, owned_album_titles(album_dirs))
     except ArtistSearchUnavailable:
         artist_id, resolved_name = None, None
         artist_search_failed = True
@@ -329,16 +329,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             continue
 
         album = m.qobuz_album
-        if album.get("id") is not None:
-            handled_ids.add(album["id"])
-        resolved_dirs.add(str(ad))
         qobuz_tracks = (album.get("tracks") or {}).get("items") or []
         n_total = len(qobuz_tracks)
-
-        if m.status == "no_tracks":
-            log.info(fmt(C.YELLOW, "    ⚠  Qobuz returned no tracks. Skipping."))
-            results.append({"dir": ad, "result": "no_tracks"})
-            continue
 
         if m.status == "false_match":
             log.info(fmt(C.YELLOW,
@@ -348,6 +340,15 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             results.append({"dir": ad, "result": "false_match",
                             "qobuz_title": album.get("title") or "?",
                             "n_existing": len(m.existing), "n_qobuz": n_total})
+            continue
+
+        if album.get("id") is not None:
+            handled_ids.add(album["id"])
+        resolved_dirs.add(str(ad))
+
+        if m.status == "no_tracks":
+            log.info(fmt(C.YELLOW, "    ⚠  Qobuz returned no tracks. Skipping."))
+            results.append({"dir": ad, "result": "no_tracks"})
             continue
 
         existing, missing, present = m.existing, m.missing, m.present
@@ -428,12 +429,6 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
         log.info(fmt(C.GRAY,
             f"    Qobuz: {album_year(album) or '?'} • {album_quality_label(album)}"
             f"{_downsample_note(album)}"))
-
-        if downloads_whole_album(len(present), len(missing), n_total):
-            log.info(fmt(C.YELLOW,
-                "    Too few tracks are present to fill one by one: the whole "
-                "album is "
-                "downloaded and replaces the tracks already here."))
 
         if args.dry_run:
             log.info(fmt(C.GRAY, "    --dry-run: would prompt to download here"))
@@ -603,7 +598,8 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     if artist_id is None:
         log.info(fmt(C.GRAY, "  Looking up artist on Qobuz …"))
         try:
-            artist_id, resolved_name = resolve_artist(artist_name, token)
+            artist_id, resolved_name = resolve_artist(artist_name, token,
+                                                      owned_titles)
         except ArtistSearchUnavailable:
             log.info(fmt(C.YELLOW,
                 "  ⚠  Qobuz couldn't complete the artist lookup. "

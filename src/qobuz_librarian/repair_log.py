@@ -164,6 +164,53 @@ def _same_recording(local_title, qobuz_title):
                       strip_edition_suffix(qobuz_title)) >= _SAME_RECORDING_SIM
 
 
+_TITLE_LABEL_RE = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]|\s[-\u2013]\s+(.+)$")
+_BRACKET_LABEL_RE = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]")
+_CUT_WORD_RE = re.compile(
+    r"\b(?:(re)?(mix|master)(?:e[ds]|s)?|(mono|stereo|live|acoustic|instrumental|demo|"
+    r"extended|edit|session|take)s?)\b", re.IGNORECASE)
+_YEAR_RE = re.compile(r"\b(?:19|20)[0-9]{2}\b")
+
+
+def _cut(versions, titles, folders=()):
+    """The mix, master and performance words in version fields, title labels
+    and bracketed folder labels, with any year given beside a mix or master.
+    A folder's " - " part is its name, as in "1994 - Live Through This"."""
+    labels = list(versions)
+    for names, pattern in ((titles, _TITLE_LABEL_RE), (folders, _BRACKET_LABEL_RE)):
+        for name in names:
+            labels += [next(part for part in match.groups() if part is not None)
+                       for match in pattern.finditer(name or "")]
+    words, years = set(), set()
+    for label in filter(None, labels):
+        for match in _CUT_WORD_RE.finditer(label):
+            prefix, kind, performance = match.groups()
+            if performance:
+                words.add(performance.lower())
+                continue
+            kind = kind.lower()
+            words.add("remix" if prefix and kind == "mix" else kind)
+            years.update(_YEAR_RE.findall(label))
+    return words, years
+
+
+def _same_cut(local, qobuz_track, album_dir):
+    """Whether a file and the Qobuz track that shares its ISRC name the same
+    mix, master and performance. A remaster, a live take or an extended mix
+    can carry the original's ISRC."""
+    album = qobuz_track.get("album") or {}
+    version = "" if catalog._version_in_title(qobuz_track) else qobuz_track.get("version")
+    track_cut, track_years = _cut([version], [qobuz_track.get("title")])
+    album_cut, album_years = _cut([album.get("version")], [album.get("title")])
+    held, held_years = _cut([], [local.get("title"), local.get("album")],
+                            [album_dir.name])
+    wanted, wanted_years = track_cut | album_cut, track_years | album_years
+    if wanted == held:
+        return not (wanted_years and held_years and not wanted_years & held_years)
+    # An album's own "Remastered" never reaches files filed as Album (Year).
+    return not held and not track_cut and album_cut == {"master"}
+
+
 def _stat_identity(value):
     return (
         int(value.st_dev),
@@ -508,10 +555,8 @@ def _scan_held_repair_source(
         "local_title": title,
         "local_track_number": parse_track_num(et.get("tracknumber")),
     }
-    matched_album = {**(qt.get("album") or {}), "tracks": {"items": [qt]}}
-    same_recording = (
-        _same_recording(title, qt.get("title"))
-        and bool(catalog.edition_files(matched_album, [et], source.album_dir)))
+    same_recording = (_same_recording(title, qt.get("title"))
+                      and _same_cut(et, qt, source.album_dir))
 
     def damaged(reason, **extra):
         """Offer a track refill only when its recording and edition match."""
@@ -588,8 +633,8 @@ def scan_dir_for_isrc_repairs(album_dir, token,
       refilling it from an ISRC that names another recording.
 
     Everything outside verified_truncated is surfaced without modification.
-    Single-track refills require both an ISRC match and matching edition
-    labels. A different or unproven edition stays outside verified_truncated.
+    Single-track refills require an ISRC match, a matching title, and the same
+    mix, master and performance labels on the file and the Qobuz track.
     """
     report = {
         "verified_truncated": [],

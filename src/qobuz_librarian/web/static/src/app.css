@@ -1582,6 +1582,7 @@ details.ql-mobile-drawer[open]::before {
    not things to press, so they are plain coloured text rather than chips. */
 .ql-owned-label,
 .ql-partial-label,
+.ql-other-version-label,
 .ql-quality-badge {
   display: inline-flex;
   align-items: center;
@@ -1595,7 +1596,8 @@ details.ql-mobile-drawer[open]::before {
   font-weight: 500;
 }
 .ql-owned-label,
-.ql-partial-label {
+.ql-partial-label,
+.ql-other-version-label {
   font-size: 0.8125rem;
   font-weight: 550;
 }
@@ -1611,6 +1613,10 @@ details.ql-mobile-drawer[open]::before {
    its download button. Reads as a caution, not a completion. */
 .ql-partial-label {
   color: var(--ql-warning);
+}
+.ql-other-version-label {
+  color: var(--ql-text-2);
+  white-space: normal;
 }
 .ql-search-quality-status {
   display: inline-flex;
@@ -2348,7 +2354,8 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.3rem;
 }
 .ql-grid-version-action .ql-owned-label,
-.ql-grid-version-action .ql-partial-label {
+.ql-grid-version-action .ql-partial-label,
+.ql-grid-version-action .ql-other-version-label {
   padding: 0.24rem 0.34rem;
   font-size: 0.59375rem;
 }

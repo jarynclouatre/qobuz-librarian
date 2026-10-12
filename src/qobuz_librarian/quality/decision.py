@@ -8,8 +8,9 @@ from pathlib import Path
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError
-from qobuz_librarian.api.search import get_artist_albums, search_artists
+from qobuz_librarian.api.search import get_artist_albums
 from qobuz_librarian.library import catalog as catalog_mod
+from qobuz_librarian.library import discovery
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.catalog import (
     album_quality_label,
@@ -434,17 +435,17 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
     if not album_dirs:
         return []
 
-    # Pre-fetch artist catalog once so per-folder matching stays local.
-    # Failure here is non-fatal; find_qobuz_album_for_dir falls back to search.
+    # Pre-fetch artist catalog once so per-folder matching stays local. The
+    # artist is the one the Library pass resolves, so both passes of a scan
+    # read the same catalog. Failure here is non-fatal;
+    # find_qobuz_album_for_dir falls back to search.
     catalog = []
     try:
-        artists = search_artists(artist_name, token, limit=cfg.ARTIST_LOOKUP_LIMIT)
-        if artists:
-            best_a = max(artists, key=lambda a: similarity(a.get("name", ""), artist_name))
-            if similarity(best_a.get("name", ""), artist_name) >= cfg.ARTIST_NAME_THRESH:
-                artist_id = best_a.get("id")
-                catalog, _ = get_artist_albums(artist_id, token, limit=cfg.ARTIST_CATALOG_LIMIT)
-    except QobuzError:
+        artist_id, _name = discovery.resolve_artist(
+            artist_name, token, discovery.owned_album_titles(album_dirs))
+        if artist_id:
+            catalog, _ = get_artist_albums(artist_id, token, limit=cfg.ARTIST_CATALOG_LIMIT)
+    except (QobuzError, discovery.ArtistSearchUnavailable):
         pass
 
     # Grabbed singles sit out the upgrade walk unless the user opted in.

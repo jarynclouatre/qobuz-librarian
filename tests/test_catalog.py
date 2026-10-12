@@ -231,17 +231,19 @@ def test_title_fallback_cannot_hand_an_isrc_twin_to_another_track():
     assert not missing
 
 
-def test_edition_ownership_keeps_recording_versions(tmp_path, tagged_flac):
+def test_edition_ownership_keeps_recording_versions(tmp_path):
     track = {"id": "new-mix", "title": "Song", "version": "2026 Mix", "isrc": "GBAAA0000001"}
     album = {"title": "Album", "version": "2026 Mix", "tracks": {"items": [track]}}
-    original = {"title": "Song", "album": "Album", "isrc": track["isrc"]}
     plain_folder = tmp_path / "Album (1965)"
-    assert catalog.edition_missing(album, [original], plain_folder)[0] == [track]
+    same_recording = {"title": "Song (2011 Remaster)", "album": "Album", "isrc": track["isrc"]}
+    assert not catalog.edition_missing(album, [same_recording], plain_folder)[0]
+    assert catalog.edition_missing(album, [
+        {**same_recording, "title": "Song (2026 Mix)", "isrc": "GBBBB0000002"}], plain_folder)[0] == [track]
 
+    original = {"title": "Song", "album": "Album", "isrc": ""}
+    assert catalog.edition_missing(album, [original], plain_folder)[0] == [track]
     tagged = {**original, "title": "Song (2026 Mix)"}
     assert not catalog.edition_missing(album, [tagged], plain_folder)[0]
-    conflicting = {**tagged, "isrc": "GBBBB0000002"}
-    assert catalog.edition_missing(album, [conflicting], plain_folder)[0] == [track]
 
     labelled_folder = tmp_path / "Album (2026 Mix) (1965)"
     assert not catalog.edition_missing(album, [original], labelled_folder)[0]
@@ -265,6 +267,8 @@ def test_edition_ownership_keeps_recording_versions(tmp_path, tagged_flac):
     bonus = {**album, "version": "Bonus Content", "tracks": {"items": [old_track]}}
     assert not catalog.edition_missing(bonus, [
         {**original, "album": "Album (Bonus Content)"}], plain_folder)[0]
+    assert not catalog.edition_missing(
+        {**old_album, "version": "Deluxe Edition"}, [original], plain_folder)[0]
 
     natural = {**old_track, "title": "Norwegian Wood (This Bird Has Flown)"}
     natural_album = {**old_album, "tracks": {"items": [natural]}}
@@ -284,7 +288,7 @@ def test_edition_ownership_keeps_recording_versions(tmp_path, tagged_flac):
     odd = {**track, "id": "odd", "version": "Remastered 2012", "isrc": "GBAAA0000009"}
     blue_lines = {**album, "version": "2012 Mix/Master", "tracks": {"items": [
         {**track, "version": "2012 Mix/Master"}, odd]}}
-    odd_file = {**original, "title": "Song (Remastered 2012)", "isrc": odd["isrc"]}
+    odd_file = {**original, "title": "Song (Remastered 2012)"}
     assert catalog.edition_missing(blue_lines, [odd_file], plain_folder)[0] == [
         blue_lines["tracks"]["items"][0]]
     word = {**track, "title": "To Live Is to Fly", "version": "Live"}
@@ -295,35 +299,37 @@ def test_edition_ownership_keeps_recording_versions(tmp_path, tagged_flac):
     moved = {**album, "version": "", "tracks": {"items": [
         {**old_track, "media_number": 1}, {**disc_two, "version": ""}]}}
     assert not catalog.edition_missing(moved, [
-        {**original, "discnumber": 2}, {**original, "isrc": disc_two["isrc"], "discnumber": 1}],
+        {**same_recording, "discnumber": 2}, {**same_recording, "isrc": disc_two["isrc"], "discnumber": 1}],
         plain_folder)[0]
 
-    remastered = {**old_track, "version": "Remastered"}
-    remaster = {**old_album, "version": "Remastered 2009", "tracks": {"items": [remastered]}}
-    legacy = {**original, "title": "Song (Remastered)"}
-    assert not catalog.edition_missing(remaster, [legacy], plain_folder)[0]
-    assert catalog.edition_missing(remaster, [
-        {**legacy, "isrc": ""}], plain_folder)[0] == [remastered]
-    assert catalog.edition_missing(remaster, [
-        {**legacy, "album": "Album (2011 Remaster)"}], plain_folder)[0] == [remastered]
-    assert catalog.edition_missing(remaster, [
-        {**legacy, "title": "Song (Mono) (Remastered)"}], plain_folder)[0] == [remastered]
-    assert not catalog.edition_missing(
-        {**old_album, "version": "Deluxe Edition"}, [original], plain_folder)[0]
     explicit = {**old_album, "tracks": {"items": [
         {**old_track, "isrc": "", "version": "Album Version (Explicit)"}]}}
     assert not catalog.edition_missing(explicit, [
-        {**original, "isrc": "", "title": "Song (Album Version (Explicit))"}], plain_folder)[0]
+        {**original, "title": "Song (Album Version (Explicit))"}], plain_folder)[0]
 
-    reissue = {**old_album, "version": "Remastered", "copyright": "2018 Lost Henry"}
-    same_release = {**original, "path": str(tagged_flac(
-        tmp_path / "same.flac", TITLE="Song", COPYRIGHT="(P) 2018 Lost Henry"))}
-    older_release = {**original, "path": str(tagged_flac(
-        tmp_path / "older.flac", TITLE="Song", COPYRIGHT="1973 Asylum Records"))}
-    assert not catalog.edition_missing(reissue, [same_release], plain_folder)[0]
-    assert catalog.edition_missing(reissue, [older_release], plain_folder)[0] == [old_track]
-    assert catalog.edition_missing(
-        {**reissue, "version": "Mono"}, [same_release], plain_folder)[0] == [old_track]
+
+def test_a_single_is_found_in_its_ep_folder(tmp_path, monkeypatch, tagged_flac):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    artist = tmp_path / "Matisyahu"
+    tagged_flac(artist / "Youth (2006)" / "01.flac", TITLE="Youth", ISRC="USSM10600001")
+    tagged_flac(artist / "Youth EP (2009)" / "01.flac", TITLE="Youth (Single Edit)",
+                ISRC="USSM10900002")
+    tagged_flac(artist / "We (2014)" / "01.flac", TITLE="We", ISRC="USSM11400001")
+    tagged_flac(artist / "Weep (2015)" / "01.flac", TITLE="We", ISRC="USSM11400002")
+    scanner.clear_scan_caches()
+
+    def owned_in(title, isrc, year):
+        single = {"title": title, "artist": {"name": "Matisyahu"},
+                  "release_date_original": f"{year}-06-02",
+                  "tracks": {"items": [{"id": isrc, "title": title, "isrc": isrc}]}}
+        return [folder.name for _, folder, _, present in catalog._edition_matches(single)
+                if present]
+
+    assert owned_in("Youth", "USSM10900002", 2009) == ["Youth EP (2009)"]
+    assert owned_in("We", "USSM11400002", 2014) == []
 
 
 def test_same_mix_in_two_folders_keeps_the_selected_destination(

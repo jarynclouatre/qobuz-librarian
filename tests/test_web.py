@@ -778,6 +778,45 @@ def test_album_search_keeps_a_new_mix_available_beside_the_original(
 # The Doors put out a 25-track "50th Anniversary Deluxe Edition" and two plain
 # 11-track pressings of Waiting for the Sun, none of which carries a version
 # field. That is the shape that breaks a grouped row.
+def test_album_search_leads_with_the_original_and_counts_other_masters_as_held(
+        monkeypatch, tmp_path, tagged_flac):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.api import search
+    from qobuz_librarian.library import scanner
+    from qobuz_librarian.web import routes_search
+
+    def album(album_id, title, year, tracks):
+        return {"id": album_id, "title": title, "artist": {"name": "The Doors"},
+                "release_date_original": f"{year}-07-03", "tracks_count": len(tracks),
+                "maximum_bit_depth": 16, "tracks": {"items": tracks}}
+
+    hello = {"id": "hello", "title": "Hello, I Love You", "isrc": "USEE10000001"}
+    love = {"id": "love", "title": "Love Street", "isrc": "USEE10000002"}
+    deluxe = album("deluxe", "Waiting for the Sun (50th Anniversary Deluxe Edition)", 1968,
+                   [hello, love, {"id": "demo", "title": "Not to Touch the Earth (Demo)",
+                                  "isrc": "USEE11800003"}])
+    reissue = album("reissue", "Waiting for the Sun", 1985, [hello, love])
+    original = album("original", "Waiting for the Sun", 1968, [hello, love])
+    albums = {a["id"]: a for a in (deluxe, reissue, original)}
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    folder = tmp_path / "The Doors" / "Waiting for the Sun (1968)"
+    tagged_flac(folder / "01.flac", TITLE="Hello, I Love You", ALBUM="Waiting for the Sun",
+                ARTIST="The Doors", ISRC=hello["isrc"], TRACKNUMBER="1")
+    tagged_flac(folder / "02.flac", TITLE="Love Street (2018 Remaster)",
+                ALBUM="Waiting for the Sun", ARTIST="The Doors", ISRC="USRH11800002",
+                TRACKNUMBER="2")
+    scanner.clear_scan_caches()
+    monkeypatch.setattr(search, "get_album", lambda album_id, _token: albums[album_id])
+
+    results, groups = asyncio.run(routes_search._album_results(
+        list(albums.values()), "Waiting for the Sun", "tok", set(), set()))
+    rows = {r["id"]: r for r in results}
+    assert rows["original"]["as_new_edition"] and not rows["original"].get("partial")
+    assert (rows["deluxe"]["have_tracks"], rows["deluxe"]["want_tracks"]) == (2, 3)
+    [group] = groups
+    assert group["id"] == "original"
+    assert [e["id"] for e in group["others"]] == ["deluxe", "reissue"]
+    assert (group["other_have"], group["other_want"]) == (2, 3)
 
 
 def test_settings_save_defers_apply_when_job_is_active(tmp_path, monkeypatch):

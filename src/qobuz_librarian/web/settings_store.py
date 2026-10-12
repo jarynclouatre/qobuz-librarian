@@ -37,9 +37,10 @@ BEHAVIOR_FIELDS = [
      "Before import, reduce new hi-res downloads to 44.1 or 48 kHz; the "
      "hi-res files are not kept."),
     ("SUPPRESS_SINGLE_TRACK_GAPS", "Treat track downloads as singles",
-     "Library scans and checks for new releases treat a single-track "
-     "download as a single: the rest of its album is not offered, and an "
-     "artist you own only singles from is skipped."),
+     "Library scans and new-release checks don't offer the rest of an album "
+     "you took tracks from with a Track download, and skip artists whose "
+     "only folders came from such downloads. Other one-track folders are "
+     "scanned as usual."),
     ("LYRICS_ENABLED", "Fetch lyrics",
      "Fetch lyrics during import, using synced lyrics when providers have them."),
 ]

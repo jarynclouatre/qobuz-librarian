@@ -154,6 +154,11 @@ def test_repair_leaves_wrong_recordings_and_editions_alone(
         f"it belongs under the mismatch heading instead (got {r})")
     assert r["isrc_mismatch"][0]["local_title"] == "The Five Knuckle Shuffle"
 
+    live = {**_qt(p.stem, 407.0, "GBBTF1800330"), "version": "Live"}
+    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=live):
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
+    assert r["verified_truncated"] == []
+
     tags = flac.FLAC(p)
     tags["album"] = "Yes Sir, I Will (2026 Mix)"
     tags.save()
@@ -168,5 +173,15 @@ def test_repair_leaves_wrong_recordings_and_editions_alone(
 
     replacement["version"] = "2026 Mix"
     with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=replacement):
+        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
+    assert _names(r["verified_truncated"]) == {p.name}
+
+    # A plain file of an album Qobuz calls "Remastered" is still its track.
+    tags = flac.FLAC(p)
+    tags["album"] = "Yes Sir, I Will"
+    tags.save()
+    remastered = {**_qt(p.stem, 4.0, "GBBTF1800330"),
+                  "album": {"title": "Yes Sir, I Will", "version": "Remastered"}}
+    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=remastered):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
     assert _names(r["verified_truncated"]) == {p.name}

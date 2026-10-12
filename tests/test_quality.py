@@ -59,6 +59,7 @@ def test_compare_album_quality_classifies_and_counts_unknown():
 
 def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import discovery
     from qobuz_librarian.quality import decision
 
     monkeypatch.setattr(cfg, "CAPPED_FILE", tmp_path / "capped.json")
@@ -78,7 +79,8 @@ def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatc
     decision.mark_local_album_capped(album_dir)
     monkeypatch.setattr(decision, "list_artist_album_dirs",
                         lambda _artist_dir: [album_dir])
-    monkeypatch.setattr(decision, "search_artists", lambda *a, **k: [])
+    monkeypatch.setattr(discovery, "_resolve_cache", {})
+    monkeypatch.setattr(discovery, "search_artists", lambda *a, **k: [])
     monkeypatch.setattr(
         "qobuz_librarian.library.catalog.find_qobuz_album_for_dir",
         lambda *a, **k: qobuz_album,

@@ -62,7 +62,7 @@ out of library scans and import targets.
 | `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample hi-res FLACs as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
 | `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
-| `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Library scans and checks for new releases treat a single-track download as a single: the rest of its album is not offered, and an artist you own only singles from is skipped |
+| `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Web Library scans and new-release checks don't offer the rest of an album you took tracks from with a Search **Track** download, and skip an artist whose only folders came from such downloads. Folders that hold one track for any other reason are scanned as usual, and the CLI walks ignore this setting |
 | `EXCLUDE_LIVE_ALBUMS` | `false` | Drop obvious live/tour/session/acoustic releases from the missing-albums gap list; a studio album whose real title merely contains "Live" is never dropped |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
@@ -130,7 +130,7 @@ For its own imports, the downloader pins these beets settings regardless of your
 
 It also handles these itself:
 
-- Gap fills and upgrades use the album's existing folder while it remains in place, with files named by your path template. If beets would rename that folder, as its default `replace` rules do to a trailing dot, the tracks are not imported and stay in staging recovery. A whole-album replacement that sets the old folder aside, a separately kept edition, or a download whose existing folder holds other audio can be filed by the current template and edition name.
+- Gap fills and upgrades use the album's existing folder while it remains in place, with files named by your path template. If beets would rename that folder, as its default `replace` rules do to a trailing dot, the tracks are not imported and stay in staging recovery. A whole-album replacement that sets the old folder aside, or a separately kept edition, can be filed by the current template and edition name.
 - A release tagged as a compilation or credited to Various Artists is filed with the compilation template.
 - `ARTWORK` works whatever plugins you choose. With `embed` or `both`, the cover the download saved is embedded in any track that has none before beets imports it. With `sidecar` or `both`, `fetchart` files that cover from the album folder. `embed` leaves no cover file.
 - `filefilter` is not loaded, since it would drop tracks from a download.

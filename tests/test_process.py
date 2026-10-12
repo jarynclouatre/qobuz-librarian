@@ -14,9 +14,7 @@ def _args(**over):
     return SimpleNamespace(**base)
 
 
-@pytest.mark.parametrize("existing_mix", [False, True])
-def test_forcing_a_mix_never_moves_the_original(
-        tmp_path, monkeypatch, tagged_flac, existing_mix):
+def test_forcing_a_mix_never_moves_the_original(tmp_path, monkeypatch, tagged_flac):
     from qobuz_librarian import config as cfg
     from qobuz_librarian import download
     from qobuz_librarian.library import scanner
@@ -24,11 +22,9 @@ def test_forcing_a_mix_never_moves_the_original(
     music = tmp_path / "music"
     folder = music / "Artist" / "Album (1965)"
     original = tagged_flac(folder / "01.flac", TITLE="Song", ALBUM="Album", ISRC="GBAAA0000001")
-    files = [original]
-    if existing_mix:
-        files.append(tagged_flac(folder / "01-mix.flac", TITLE="Song (2026 Mix)",
-                                 ALBUM="Album", ISRC="GBAAA0000001",
-                                 LYRICS="Handwritten words", COMMENT="Personal note"))
+    files = [original, tagged_flac(folder / "01-mix.flac", TITLE="Song (2026 Mix)",
+                                   ALBUM="Album", ISRC="GBAAA0000001",
+                                   LYRICS="Handwritten words", COMMENT="Personal note")]
     before = {path: path.read_bytes() for path in files}
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
@@ -46,51 +42,150 @@ def test_forcing_a_mix_never_moves_the_original(
 
     def interrupted(*_args, **_kwargs):
         assert original.read_bytes() == before[original]
-        if existing_mix:
-            assert not files[1].exists()
+        assert not files[1].exists()
         raise RuntimeError("interrupted download")
 
     monkeypatch.setattr(download, "rip_url", interrupted)
     with pytest.raises(RuntimeError, match="interrupted download"):
         proc.process_album(album, _args(force=True), exact_edition=True, already_confirmed=True)
     assert {path: path.read_bytes() for path in files} == before
-    assert len(prompts) == int(existing_mix)
+    assert len(prompts) == 1
     assert all(not prompt["auto_yes"] for prompt in prompts)
 
-    if existing_mix:
-        from mutagen import flac
+    from mutagen import flac
 
-        from qobuz_librarian.library import backup
+    from qobuz_librarian.library import backup
 
-        staged = cfg.STAGING_DIR / "Album"
+    staged = cfg.STAGING_DIR / "Album"
 
-        def completed_download(**kwargs):
-            saved = backup.backup_gap_fill_files([files[1]], folder)
-            assert saved is not None and saved.complete
-            tagged_flac(staged / "01-mix.flac", TITLE="Song (2026 Mix)",
-                        ALBUM="Album", ARTIST="Artist", ALBUMARTIST="Artist",
-                        ISRC="GBAAA0000001", TRACKNUMBER="1")
-            kwargs["result"].update(
-                gap_fill_backup_path=saved, n_ok=1, n_fail=0, n_lossy=0,
-                failed_tracks=[], lossy_tracks=[], elapsed=0)
+    def completed_download(**kwargs):
+        saved = backup.backup_gap_fill_files([files[1]], folder)
+        assert saved is not None and saved.complete
+        tagged_flac(staged / "01-mix.flac", TITLE="Song (2026 Mix)",
+                    ALBUM="Album", ARTIST="Artist", ALBUMARTIST="Artist",
+                    ISRC="GBAAA0000001", TRACKNUMBER="1")
+        kwargs["result"].update(
+            gap_fill_backup_path=saved, n_ok=1, n_fail=0, n_lossy=0,
+            failed_tracks=[], lossy_tracks=[], elapsed=0)
 
-        def import_album(**_kwargs):
-            (staged / "01-mix.flac").rename(files[1])
-            scanner.clear_scan_caches()
-            return True
+    def import_album(**_kwargs):
+        (staged / "01-mix.flac").rename(files[1])
+        scanner.clear_scan_caches()
+        return True
 
-        monkeypatch.setattr(proc, "run_album_download", completed_download)
-        monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
-        monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
-        monkeypatch.setattr(proc, "beets_import_paths", import_album)
-        monkeypatch.setattr(proc, "retire_backup_beets_entries", lambda *_a, **_kw: True)
-        result = proc.process_album(album, _args(force=True),
-                                    exact_edition=True, already_confirmed=True)
-        assert result["result"] == "downloaded" and not result["recovery_unverified"]
-        assert original.read_bytes() == before[original]
-        assert flac.FLAC(files[1])["lyrics"] == ["Handwritten words"]
-        assert flac.FLAC(files[1])["comment"] == ["Personal note"]
-        assert not list(cfg.UPGRADE_BACKUP_DIR.iterdir())
+    monkeypatch.setattr(proc, "run_album_download", completed_download)
+    monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "beets_import_paths", import_album)
+    monkeypatch.setattr(proc, "retire_backup_beets_entries", lambda *_a, **_kw: True)
+    result = proc.process_album(album, _args(force=True),
+                                exact_edition=True, already_confirmed=True)
+    assert result["result"] == "downloaded" and not result["recovery_unverified"]
+    assert original.read_bytes() == before[original]
+    assert flac.FLAC(files[1])["lyrics"] == ["Handwritten words"]
+    assert flac.FLAC(files[1])["comment"] == ["Personal note"]
+    assert not list(cfg.UPGRADE_BACKUP_DIR.iterdir())
+
+
+def test_partly_owned_edition_fills_a_folder_holding_another_version(
+        tmp_path, monkeypatch, tagged_flac):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import download
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    folder = music / "Slipknot" / "Slipknot (1999)"
+    owned = tagged_flac(folder / "01.flac", TITLE="Sic", ALBUM="Slipknot",
+                        ISRC="USRR19900001", TRACKNUMBER="1")
+    stray = tagged_flac(folder / "15.flac", TITLE="(sic) (Ulrich Wild Mix)", ALBUM="Slipknot",
+                        ISRC="USRR19900099", TRACKNUMBER="15")
+    before = {path: path.read_bytes() for path in (owned, stray)}
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+    cfg.STAGING_DIR.mkdir()
+    scanner.clear_scan_caches()
+    album = {"id": "tenth", "title": "Slipknot", "version": "10th Anniversary Edition",
+             "artist": {"name": "Slipknot"}, "maximum_bit_depth": 16,
+             "tracks": {"items": [
+                 {"id": "sic", "title": "Sic", "isrc": "USRR19900001", "track_number": 1},
+                 {"id": "eyeless", "title": "Eyeless", "isrc": "USRR19900002", "track_number": 2}]}}
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    ripped = []
+
+    def interrupted(url, **_kwargs):
+        ripped.append(url)
+        assert {path: path.read_bytes() for path in before} == before
+        raise RuntimeError("interrupted download")
+
+    monkeypatch.setattr(download, "rip_url", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted download"):
+        proc.process_album(album, _args(), exact_edition=True, already_confirmed=True)
+    assert ripped == ["https://play.qobuz.com/track/eyeless"]
+    assert {path: path.read_bytes() for path in before} == before
+
+    staged = cfg.STAGING_DIR / "Slipknot"
+
+    def completed_download(**kwargs):
+        assert kwargs["album_dir"] == folder
+        assert [t["id"] for t in kwargs["missing"]] == ["eyeless"]
+        tagged_flac(staged / "02.flac", TITLE="Eyeless", ALBUM="Slipknot (10th Anniversary Edition)",
+                    ARTIST="Slipknot", ALBUMARTIST="Slipknot", ISRC="USRR19900002", TRACKNUMBER="2")
+        kwargs["result"].update(n_ok=1, n_fail=0, n_lossy=0, failed_tracks=[],
+                                lossy_tracks=[], elapsed=0)
+
+    def import_album(**kwargs):
+        assert kwargs["album_dir"] == folder
+        (staged / "02.flac").rename(folder / "02.flac")
+        scanner.clear_scan_caches()
+        return True
+
+    monkeypatch.setattr(proc, "run_album_download", completed_download)
+    monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "beets_import_paths", import_album)
+    result = proc.process_album(album, _args(), exact_edition=True, already_confirmed=True)
+    assert result["result"] == "downloaded"
+    assert {path: path.read_bytes() for path in before} == before
+    assert sorted(path.name for path in folder.iterdir()) == ["01.flac", "02.flac", "15.flac"]
+
+
+def test_partly_owned_edition_skips_songs_the_folder_holds_as_another_master(
+        tmp_path, monkeypatch, tagged_flac):
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import download
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    folder = music / "Slipknot" / "Slipknot (1999)"
+    tagged_flac(folder / "01.flac", TITLE="Sic", ALBUM="Slipknot",
+                ISRC="USRR19900001", TRACKNUMBER="1")
+    tagged_flac(folder / "02.flac", TITLE="Eyeless (2009 Remaster)", ALBUM="Slipknot",
+                ISRC="USRR20900002", TRACKNUMBER="2")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+    cfg.STAGING_DIR.mkdir()
+    scanner.clear_scan_caches()
+    album = {"id": "tenth", "title": "Slipknot", "version": "10th Anniversary Edition",
+             "artist": {"name": "Slipknot"}, "maximum_bit_depth": 16,
+             "tracks": {"items": [
+                 {"id": "sic", "title": "Sic", "isrc": "USRR19900001", "track_number": 1},
+                 {"id": "eyeless", "title": "Eyeless", "isrc": "USRR19900002", "track_number": 2},
+                 {"id": "wait", "title": "Wait and Bleed", "isrc": "USRR19900003",
+                  "track_number": 3}]}}
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    ripped = []
+
+    def interrupted(url, **_kwargs):
+        ripped.append(url)
+        raise RuntimeError("interrupted download")
+
+    monkeypatch.setattr(download, "rip_url", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted download"):
+        proc.process_album(album, _args(), exact_edition=True, already_confirmed=True)
+    assert ripped == ["https://play.qobuz.com/track/wait"]
 
 
 @pytest.mark.parametrize("verified", [True, False])

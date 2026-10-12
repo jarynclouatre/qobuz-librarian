@@ -10,7 +10,7 @@ import urllib.parse
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from qobuz_librarian import cli, download, state_file
+from qobuz_librarian import cli, state_file
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api import search as qobuz_search
@@ -611,16 +611,25 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                     existing, matched_folder, missing, present = catalog.find_edition_tracks(exact_album)
                     if not existing:
                         res["as_new_edition"] = True
+                        other = catalog.other_version_dir(exact_album)
+                        if other is not None:
+                            res["folder"] = str(other.relative_to(cfg.MUSIC_ROOT))
                         res["ownership_unknown"] = False
                         continue
                     res["disk_year"] = catalog._dir_year(matched_folder.name)
-                    if missing:
-                        res["as_new_edition"] = len(existing) > len(present)
+                    held = catalog.held_by_other_versions(
+                        exact_album, existing, matched_folder, missing)
+                    gaps = [t for t in missing if not any(t is h for h in held)]
+                    if gaps:
                         res["partial"] = True
-                        res["have_tracks"] = len(present)
+                        res["folder"] = str(matched_folder.relative_to(cfg.MUSIC_ROOT))
+                        res["have_tracks"] = len(qobuz_tracks) - len(gaps)
                         res["want_tracks"] = len(qobuz_tracks)
-                        res["replaces_existing"] = download.downloads_whole_album(
-                            len(present), len(missing), len(qobuz_tracks))
+                    elif held:
+                        # Every song is on disk, some as another master: a
+                        # Download here is a separate copy, not a fill.
+                        res["as_new_edition"] = True
+                        res["folder"] = str(matched_folder.relative_to(cfg.MUSIC_ROOT))
                     else:
                         res["owned"] = True
                     res["ownership_unknown"] = False
@@ -648,6 +657,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
     # same album scattering down the page.
     if _album_raws:
         by_key = {}
+        group_raws = []
         for res, alb in zip(results, _album_raws):
             ver = alb.get("version") or ""
             identity_title = res["title"]
@@ -660,11 +670,12 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
             # Sharing an empty fuzzy key hides unrelated releases.
             key = (("album", fingerprint) if fingerprint else
                    ("release", str(res["id"])))
-            g = by_key.get(key)
-            if g is None:
-                g = dict(res, editions=[])
-                by_key[key] = g
-                album_groups.append(g)
+            if key not in by_key:
+                by_key[key] = (dict(res, editions=[]), [])
+                album_groups.append(by_key[key][0])
+                group_raws.append(by_key[key][1])
+            g, raws = by_key[key]
+            raws.append(alb)
             # A complete edition outranks a part-finished one: if any
             # edition of this record is whole on disk, search must not
             # offer a plain Download for the record at all.
@@ -692,20 +703,17 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 "partial": bool(res.get("partial")),
                 "have_tracks": res.get("have_tracks"),
                 "want_tracks": res.get("want_tracks"),
-                "replaces_existing": bool(res.get("replaces_existing")),
+                "folder": res.get("folder", ""),
                 "ownership_unknown": res["ownership_unknown"],
             })
-        for g in album_groups:
+        for g, raws in zip(album_groups, group_raws):
             eds = g["editions"]
-            # The row shows exactly one edition, so it has to be one the
-            # ownership check actually ran against: a complete copy
-            # first (that is the one you own, and the rest read as
-            # "other versions"), then a part-finished one, so the
-            # "N of M" beside it counts the same pressing the Download
-            # button would fetch.
-            rep_i = 0
+            # The row shows a complete copy you own, so the rest read as
+            # "other versions". Otherwise it shows the original release,
+            # not whichever deluxe or remaster Qobuz listed first; a
+            # part-finished edition keeps its own "N of M" among the
+            # versions.
             owned = [i for i, e in enumerate(eds) if e["owned"]]
-            part = [i for i, e in enumerate(eds) if e["partial"]]
             if owned:
                 rep_i = owned[0]
                 if g.get("disk_year"):
@@ -713,20 +721,30 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                         if str(eds[i]["year"]) == str(g["disk_year"]):
                             rep_i = i
                             break
-            elif part:
-                rep_i = part[0]
+            else:
+                original = catalog._best_edition(raws, prefer_hires=False)
+                rep_i = next(i for i, alb in enumerate(raws) if alb is original)
             if rep_i:
                 eds.insert(0, eds.pop(rep_i))
             rep = eds[0]
             for f in ("id", "title", "artist", "artist_id", "year", "tracks",
                       "quality", "hires", "lossy", "bit_depth",
-                      "sample_rate", "cover", "version", "queued",
-                      "scanning", "as_new_edition", "replaces_existing", "ownership_unknown"):
+                      "sample_rate", "cover", "version", "queued", "scanning",
+                      "as_new_edition", "folder", "ownership_unknown"):
                 g[f] = rep[f]
             g["partial"] = rep["partial"] and not g["owned"]
             g["have_tracks"] = rep["have_tracks"]
             g["want_tracks"] = rep["want_tracks"]
             g["others"] = eds[1:]
+            # Tracks of a part-owned version under the original still
+            # show on the row, as a count; the version's name is in its
+            # own row under Versions.
+            part = [e for e in eds[1:] if e["partial"]]
+            if part and not g["owned"] and not g["partial"]:
+                best = max(part, key=lambda e: e["have_tracks"] or 0)
+                g["other_have"] = best["have_tracks"]
+                g["other_want"] = best["want_tracks"]
+                g["other_folder"] = best["folder"]
     return results, album_groups
 
 
@@ -851,13 +869,13 @@ def _track_length(seconds):
 
 
 def _album_tracklist(album_id, token):
-    """One release's tracks, with the matching versions on disk marked."""
+    """One release's tracks, with the ones in its library folder marked."""
     album = api_client.call_within(
         cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
     items = (album.get("tracks") or {}).get("items") or []
     present_ids = set()
     try:
-        present_ids = catalog.owned_edition_track_ids(album)
+        present_ids = {str(t.get("id")) for t in catalog.find_edition_tracks(album)[3]}
     except Exception:
         # A library that can't be read still leaves a usable tracklist; the
         # marks are the only thing lost.
@@ -998,8 +1016,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                     url="/queue?error=" + rendering._notice_key(msg),
                     status_code=303)
             other = await loop.run_in_executor(None, catalog.find_album_dir_filesystem, album)
-            download_as_new_edition = bool(other and (
-                folder is None or len(existing) > len(present)))
+            download_as_new_edition = bool(other and folder is None)
         title  = album.get("title") or "?"
         artist = (album.get("artist") or {}).get("name") or "?"
         single_track = None
