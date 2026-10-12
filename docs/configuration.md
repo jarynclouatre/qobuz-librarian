@@ -51,7 +51,7 @@ out of library scans and import targets.
 | `ARTWORK` | `sidecar` | Cover art: `sidecar`, `embed`, or `both` |
 | `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path for collection backups from completed Library scans |
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
-| `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
+| `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle, waiting longer after each resume that fails (`false` turns both off; the manual Resume button still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
 | `NEW_RELEASE_MAX_AGE_DAYS` | `365` | Only flag albums released within this many days as new (`0` = any catalogue newcomer counts, including older releases Qobuz recently added) |
 | `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days |
@@ -132,7 +132,7 @@ It also handles these itself:
 
 - Gap fills and upgrades use the album's existing folder while it remains in place, with files named by your path template. If beets would rename that folder, as its default `replace` rules do to a trailing dot, the tracks are not imported and stay in staging recovery. A whole-album replacement that sets the old folder aside, or a separately kept edition, can be filed by the current template and edition name.
 - A release tagged as a compilation or credited to Various Artists is filed with the compilation template.
-- `ARTWORK` works whatever plugins you choose. With `embed` or `both`, the cover the download saved is embedded in any track that has none before beets imports it. With `sidecar` or `both`, `fetchart` files that cover from the album folder. `embed` leaves no cover file.
+- `ARTWORK` works whatever plugins you choose. With `embed` or `both`, the cover the download saved is embedded in any track that has none before beets imports it. With `sidecar` or `both`, `fetchart` files that cover from the album folder. `embed` leaves no cover file. An upgrade or whole-album Repair of an album that has its own cover file under the same name, such as `cover.jpg`, uses that file instead of the download's.
 - `filefilter` is not loaded, since it would drop tracks from a download.
 - Before beets updates an older database to its current schema, one copy of it is kept beside it, named with `-before-migrations.bak` added, instead of the copy beets makes before each step.
 
@@ -183,7 +183,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 ## Notifications
 
-`POST_JOB_HOOK` runs a command of your choice every time a background job finishes: downloads, scans, repairs, all of it. The job's final state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `tracks_missing`, `finished_at`); an album that imported with tracks still missing finishes as `done` with `tracks_missing` above 0, and `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint. The command runs inside the container, which bundles `curl` and Python for exactly this. A command that cannot start, times out, or exits nonzero is recorded in the application log without exposing the command or its stderr.
+`POST_JOB_HOOK` runs a command of your choice every time a background job finishes (downloads, scans, repairs, all of it) and when a scan parks results for you to review. The job's state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `tracks_missing`, `finished_at`, `kind`, `summary`, `review_items`). `status` is `done`, `failed` or `canceled` for a finished job; `awaiting_review` when a Library scan, new-release check, or Upgrade, Downsample or Repair scan has results waiting, with `review_items` saying how many; and `interrupted` for a job a restart cut short. A job you cancel stays `canceled`, as does a review you discard, whose `summary` says it was discarded. `kind` names the work (`download`, `library`, `new_releases`, `upgrade`, `downsample`, `repair`, `lyrics`, `migration`, `collection_snapshot`, `collection_restore`), and `summary` is the one-line result shown in History. An album that imported with tracks still missing finishes as `done` with `tracks_missing` above 0, and `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint. The command runs inside the container, which bundles `curl` and Python for exactly this. A command that cannot start, times out, or exits nonzero is recorded in the application log without exposing the command or its stderr.
 
 The hook must not run `beet` or otherwise edit its database while Qobuz Librarian is running.
 
@@ -197,11 +197,12 @@ For a readable message, point the hook at a small script in the config volume in
 
 ```sh
 #!/bin/sh
-# ntfy, one line per finished job: "done: Bonobo - Black Sands"
+# ntfy, one line per job: "done: Bonobo - Black Sands (14 tracks downloaded.)"
 msg=$(python3 -c 'import json,sys
 j = json.load(sys.stdin)
 line = j["status"] + ": " + " - ".join(x for x in (j.get("artist"), j.get("title")) if x)
-print(line + (" (" + j["error"] + ")" if j.get("error") else ""))')
+detail = j.get("error") or j.get("summary")
+print(line + (" (" + detail + ")" if detail else ""))')
 curl -s -o /dev/null -H "Title: Qobuz Librarian" -d "$msg" https://ntfy.sh/your-topic
 ```
 
@@ -226,7 +227,7 @@ On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`)
 
 - **Library gap-fill** adds missing albums or missing tracks after review. Existing tracks stay untouched; partial albums download only their missing tracks.
 - **After a download**, it re-checks the new album's track lengths against Qobuz and flags **Repair** if one is short. Read-only (a clean truncation can still decode).
-- **Upgrade** and **Downsample** change files only when you start them. Upgrade backs up the original album and removes that backup only after replacement and catalogue checks pass. If verification fails, it restores the original where safe; otherwise the backup remains for review. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`; you're asked to choose keep or delete on your first downsample), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends.
+- **Upgrade** and **Downsample** change files only when you start them. Upgrade backs up the original album and removes that backup only after replacement and catalogue checks pass. If verification fails, it restores the original where safe; otherwise the backup remains for review. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. An album still in its backup because the app or a terminal run was stopped before the replacement was imported is put back the next time either one starts, provided its folder is still missing and the folders above it are the same ones. The Search page says so once, and Diagnostics lists any album it could not put back. Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`; you're asked to choose keep or delete on your first downsample), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends.
 - **Lyrics** writes tags or `.lrc` sidecars, not the audio.
-- **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation).
+- **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation). The duplicate tracks it takes out wait in the backup area and are cleared after `UPGRADE_BACKUP_RETENTION_DAYS`, as long as the album kept in their place still holds a playable track at least as long for each.
 - **`MIGRATE_MULTI_ARTIST`** (off) re-files `A, B/Album` under `A/Album` after import.

@@ -307,15 +307,24 @@ def run_migrate_mode(args):
         log.info(fmt(C.GRAY,
             f"  Cleared {pruned} now-empty folder(s) from the source."))
     left = getattr(result, "left_in_source", ())
-    if left:
+    left_out = [(folder, names) for folder, names in left if names]
+    copies_only = len(left) - len(left_out)
+    if left_out:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  Kept {len(left)} source folder(s) with files still in "
-            f"{'it' if len(left) == 1 else 'them'}; cover art and sidecars "
-            "are copied, not moved:"))
-        for folder in left[:20]:
-            log.info(fmt(C.YELLOW, f"       {truncate(folder, 70)}"))
-        if len(left) > 20:
-            log.info(fmt(C.YELLOW, f"       … and {len(left) - 20} more"))
+            f"  ⚠  {plural(len(left_out), 'source folder')} still "
+            f"{'holds' if len(left_out) == 1 else 'hold'} files the new "
+            "library doesn't have:"))
+        for folder, names in left_out[:20]:
+            shown = ", ".join(names[:8]) + (
+                f" and {len(names) - 8} more" if len(names) > 8 else "")
+            log.info(fmt(C.YELLOW, f"       {truncate(folder, 50)}: {shown}"))
+        if len(left_out) > 20:
+            log.info(fmt(C.YELLOW, f"       … and {len(left_out) - 20} more"))
+    if copies_only:
+        log.info(fmt(C.GRAY,
+            f"  {plural(copies_only, 'source folder')} still "
+            f"{'holds' if copies_only == 1 else 'hold'} only cover art and "
+            "sidecars, which were copied."))
     if result.failed:
         log.info(fmt(C.RED, f"  ✗  {result.failed} failed:"))
         for src, reason in result.failures[:50]:

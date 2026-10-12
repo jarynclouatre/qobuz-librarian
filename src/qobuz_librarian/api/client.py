@@ -130,9 +130,29 @@ def _retry_after(resp) -> float | None:
     return min(max(v, 0.0), 30.0)
 
 
+_STOP_CHECK = None
+
+
+def set_stop_check(fn):
+    """Register a no-arg callable that returns True once the work making these
+    calls has been asked to stop, so a cancel or shutdown is not left waiting
+    on Qobuz retries."""
+    global _STOP_CHECK
+    _STOP_CHECK = fn
+
+
+def _stop_requested() -> bool:
+    return bool(_STOP_CHECK and _STOP_CHECK())
+
+
 def _retry_sleep(seconds: float):
-    """Backoff sleep, kept separate so tests can skip it."""
-    time.sleep(seconds)
+    """Backoff sleep, kept separate so tests can skip it. A stop ends it."""
+    end = time.monotonic() + seconds
+    while not _stop_requested():
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(0.5, left))
 
 
 def _net_reason(exc):
@@ -151,18 +171,21 @@ def qobuz_get(endpoint, params, token, *, report_auth: bool = True):
     url = f"{config.QOBUZ_API_BASE}/{endpoint}"
     generation = token_credential_generation(token)
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        if _stop_requested():
+            raise QobuzUnavailable("Stopped before Qobuz answered.")
         timeout = _attempt_timeout()
         if timeout is None:
-            raise QobuzUnavailable(
-                f"The Qobuz API timed out ({endpoint}). Try again later.")
+            vlog(f"{endpoint}: out of time")
+            raise QobuzUnavailable("The Qobuz API timed out. Try again later.")
         try:
             r = _get_session().get(url, params=params, headers=headers,
                                    timeout=timeout)
         except requests.RequestException as e:
             wait = _retry_delay(attempt, min(2 ** (attempt - 1), 8))
             if wait is None:
+                vlog(f"{endpoint}: network error ({e}); giving up")
                 raise QobuzUnavailable(
-                    f"{_net_reason(e)} ({endpoint}). Try again later.") from e
+                    f"{_net_reason(e)}. Try again later.") from e
             vlog(f"{endpoint}: network error ({e}); retry {attempt}/{_MAX_ATTEMPTS} in {wait}s")
             _retry_sleep(wait)
             continue
@@ -183,8 +206,9 @@ def qobuz_get(endpoint, params, token, *, report_auth: bool = True):
                     "Qobuz was still rate-limiting" if r.status_code == 429
                     else f"The Qobuz API kept returning HTTP {r.status_code}"
                 )
+                vlog(f"{endpoint}: HTTP {r.status_code}; giving up")
                 raise QobuzUnavailable(
-                    f"{reason} after {plural(attempt, 'attempt')} ({endpoint}). "
+                    f"{reason} after {plural(attempt, 'attempt')}. "
                     "Try again later.")
             if r.status_code == 429:
                 # Surface rate-limit waits in the shared logger so the web

@@ -826,6 +826,35 @@ def acknowledge_attention(job_id: str, expected_attention: str) -> bool:
             return False
 
 
+def mark_retried(job_id: str, retry_id: str) -> bool:
+    """Record that a finished download was retried as ``retry_id``, so it no
+    longer offers Retry itself."""
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT execute_args FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            args, unreadable = _decode_execute_args(row[0] if row else None)
+            if row is None or unreadable:
+                conn.rollback()
+                return False
+            args.update(retry_disabled="retried", retried_as=retry_id)
+            conn.execute(
+                "UPDATE jobs SET execute_args=? WHERE id=?",
+                (json.dumps(args, default=str), job_id),
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            _rollback_failed_write(conn)
+            _note_write_failure(f"mark {job_id} retried", exc)
+            return False
+
+
 def _persist_preserving_single_locked(job, *, admission=False) -> bool:
     """Save while preserving Undo; the caller holds ``job._lock``."""
     global _admission_ready
@@ -1743,14 +1772,40 @@ _HISTORY_SQL = (
     "('new_releases', 'collection_restore', 'migration')))"
 )
 
-# A scan cut short by a restart is saved as cancelled, and only the opening
-# of its summary tells it apart from one the user stopped.
+# Work cut short by a restart is saved as cancelled, or as failed when it
+# keeps a Retry, and only the opening of its summary or error tells it apart
+# from a stop or failure of its own.
 RESTART_INTERRUPTED = "Interrupted by a restart."
 
 
-def interrupted_by_restart(status: str, summary: str) -> bool:
-    return status == "canceled" and (summary or "").startswith(
+def interrupted_by_restart(status: str, summary: str, error=None) -> bool:
+    reason = summary if status == "canceled" else error
+    return status in ("canceled", "failed") and (reason or "").startswith(
         RESTART_INTERRUPTED)
+
+
+def record_stop(job) -> bool:
+    """Save the log and stop time of a job the app stops mid-run, leaving its
+    saved status for the next start to report as interrupted."""
+    with job._lock:
+        log_json = json.dumps(job.persisted_log_lines_locked(), default=str)
+        values = (log_json, time.time(), job.id)
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        try:
+            conn.execute(
+                "UPDATE jobs SET log_lines=?, finished_at=? "
+                "WHERE id=? AND status IN ('running', 'scanning')",
+                values,
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            _rollback_failed_write(conn)
+            _note_write_failure(f"record stop of {job.id}", e)
+            return False
 
 
 # History splits finished work into two layers: meaningful jobs get cards,
@@ -1843,7 +1898,8 @@ def history_page(limit: int, offset: int,
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
-            "interrupted_by_restart": interrupted_by_restart(row[4], row[6]),
+            "interrupted_by_restart": interrupted_by_restart(
+                row[4], row[6], row[5]),
             "execute_args": execute_args,
             "execute_args_unreadable": execute_args_unreadable,
             "created_at": _decode_timestamp(row[9]),
@@ -1897,7 +1953,8 @@ def recovery_history(*, attention_only: bool = False,
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
             "summary": row[6] or "", "execute_kind": row[7] or "",
-            "interrupted_by_restart": interrupted_by_restart(row[4], row[6]),
+            "interrupted_by_restart": interrupted_by_restart(
+                row[4], row[6], row[5]),
             "execute_args": execute_args,
             "execute_args_unreadable": execute_args_unreadable,
             "created_at": _decode_timestamp(row[9]),

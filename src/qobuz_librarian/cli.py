@@ -475,15 +475,23 @@ def acquire_run_lock():
         if busy.holder == "terminal":
             message += "   Run this again once it finishes.\n\n"
         else:
-            _svc = _compose_service_name()
             message += ("   Either:\n" if busy.holder == "web"
                         else "   If it is the web app, either:\n")
             message += (
                 f"     1. In the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT}), open Settings → Mode\n"
                 "        and switch to terminal mode, then re-run this command.\n"
-                f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
-                f"        then re-run, then `docker compose start {_svc}`.\n\n"
             )
+            if _in_container():
+                _svc = _compose_service_name()
+                message += (
+                    f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
+                    f"        then re-run, then `docker compose start {_svc}`.\n\n"
+                )
+            else:
+                message += (
+                    "     2. Stop qobuz-librarian-web instead, re-run, then start it\n"
+                    "        again.\n\n"
+                )
         message += "   Only one writer can use /staging at a time.\n"
         die(fmt(C.RED, message),
             EXIT_LOCK_BUSY)
@@ -1315,6 +1323,17 @@ def main():
     # Housekeeping deletes expired backups and rewrites state files, so a
     # dry run skips it.
     if not args.dry_run and not saved_queue:
+        from qobuz_librarian.library import backup as backup_mod
+        try:
+            for path, origin in backup_mod.albums_left_in_backups():
+                backup = backup_mod.album_backup_to_put_back(path, origin)
+                if backup is not None and backup_mod.restore_upgrade_backup(
+                        backup, origin, replace_partial=False):
+                    log.info(fmt(C.YELLOW,
+                        f"  ⟲  Put back {origin}, which an interrupted "
+                        "upgrade or repair had moved aside."))
+        except Exception as e:
+            vlog(f"album put-back error: {e}")
         # Sweep upgrade-backup dir of anything older than retention window.
         # Cheap (just stat + rmtree on stale dirs); silent unless something happens.
         try:

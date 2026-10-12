@@ -133,6 +133,11 @@
   </div>
   {% endif %}
 
+  {% if library_review_waiting %}
+  <div class="ql-notice ql-notice-info" role="status">
+    <span class="ql-notice-copy">Your saved review shows here again once downloads and scans resume.</span>
+  </div>
+  {% else %}
   {# The review tabs stay in place at zero once the review is worked
      through, so the page keeps its shape. #}
   <nav class="ql-page-tabs ql-review-tabs ql-review-tabs-static" aria-label="Result type">
@@ -168,6 +173,7 @@
     </div>
     {% endif %}
   </section>
+  {% endif %}
 
   {% include "_census.html" %}
   {% endif %}

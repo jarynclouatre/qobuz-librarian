@@ -207,6 +207,41 @@ async def _classify_token_async(loop, token):
         return AuthOutcome.TEMPORARY
 
 
+# The pages that offer Check again, where its answer lands.
+_QOBUZ_CHECK_PAGES = ("/", "/queue", "/library", "/upgrade", "/repair",
+                      "/discover", "/discover/genres", "/discover/search",
+                      "/discover/favourites")
+
+
+@router.post("/qobuz/check")
+async def check_qobuz_again(request: Request, return_to: str = Form("/")):
+    """Ask Qobuz again whether the saved token works, from the page that
+    reported it rejected or unreachable."""
+    destination = return_to if return_to in _QOBUZ_CHECK_PAGES else "/"
+    if not qobuz_access._creds_ok():
+        return RedirectResponse(url="/settings#qobuz", status_code=303)
+    loop = asyncio.get_running_loop()
+    try:
+        verdict = await asyncio.wait_for(
+            loop.run_in_executor(None, qobuz_access._check_saved_token),
+            timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        verdict = AuthOutcome.TEMPORARY
+    if verdict is AuthOutcome.ACCEPTED:
+        return RedirectResponse(url=destination, status_code=303)
+    if verdict is AuthOutcome.REJECTED:
+        msg = "Qobuz still rejects the saved token."
+    elif verdict is AuthOutcome.ENTITLEMENT:
+        msg = "Qobuz accepted the token, but this account cannot download."
+    else:
+        msg = "Qobuz still can't be reached."
+    return RedirectResponse(
+        url=f"{destination}?qobuz_check={rendering._notice_key(msg)}",
+        status_code=303,
+    )
+
+
 @router.post("/settings", response_class=HTMLResponse)
 async def save_settings(
     request: Request,
@@ -340,6 +375,7 @@ async def save_settings(
             (job.execute_kind or "download")
             not in {"downsample", "lyrics", "migration", "collection_snapshot"}
             and job.status != job_mgr.JobStatus.AWAITING_REVIEW
+            and not job_mgr.waiting_for_qobuz(job)
             for job in job_mgr.registry.pending_and_running()
         )
         if (
@@ -618,6 +654,7 @@ async def set_mode(request: Request, target: str = Form("")):
                 # /staging.
                 jobs_active = any(
                     j.status != job_mgr.JobStatus.AWAITING_REVIEW
+                    and not job_mgr.is_held(j)
                     for j in job_mgr.registry.pending_and_running()
                 )
                 if jobs_active or job_mgr.active_library_operations():
@@ -679,6 +716,8 @@ async def set_mode(request: Request, target: str = Form("")):
                         "mode stayed paused and its run lock was "
                         "released; check the data-folder permissions, "
                         "then try again.")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lifespan._put_back_albums_left_in_backups)
             return RedirectResponse(url="/settings?mode=web#mode", status_code=303)
         except run_lock.LockBusy:
             # A CLI session still holds the lock, so we can't take it back yet.

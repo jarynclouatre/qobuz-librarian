@@ -19,6 +19,7 @@ from qobuz_librarian.web import (
     flows,
     hidden_pages,
     job_labels,
+    job_persistence,
     job_runs,
     new_release_checks,
     qobuz_access,
@@ -29,10 +30,40 @@ from qobuz_librarian.web import (
     saved_reviews,
     scans,
     storage,
+    write_gate,
 )
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
+
+
+def _review_retired(state, missing):
+    """Whether the saved scan's Library review was worked through or
+    discarded, or never finished."""
+    if not missing.get("complete"):
+        return True
+    missing_generation = int(missing.get("generation") or 0)
+    # Generation is the durable review identity. Keep the timestamp
+    # fallback only for a pre-generation saved snapshot.
+    missing_updated = float(missing.get("updated_at") or 0.0)
+    retired_generation = int(state.get("review_retired_generation") or 0)
+    retired_at = float(state.get("review_retired_at") or 0.0)
+    return bool((
+        missing_generation
+        and retired_generation == missing_generation
+    ) or (
+        not missing_generation
+        and retired_at
+        and retired_at >= missing_updated
+    ))
+
+
+def _saved_review_waiting():
+    """Whether the saved scan holds a Library review, which this process can
+    only bring back once downloads and scans may run."""
+    with library_scan_state.review_state_lock():
+        header = library_scan_state.summary()
+    return not _review_retired(header, header["kinds"].get("missing") or {})
 
 
 def _review_job_from_library_state():
@@ -43,25 +74,6 @@ def _review_job_from_library_state():
     the Upgrade/Downsample saved-state reconstruction; the live job stays
     primary (callers only reach here when _library_current_job() is None).
     """
-
-    def _review_retired(state, missing):
-        if not missing.get("complete"):
-            return True
-        missing_generation = int(missing.get("generation") or 0)
-        # Generation is the durable review identity. Keep the timestamp
-        # fallback only for a pre-generation saved snapshot.
-        missing_updated = float(missing.get("updated_at") or 0.0)
-        retired_generation = int(state.get("review_retired_generation") or 0)
-        retired_at = float(state.get("review_retired_at") or 0.0)
-        return bool((
-            missing_generation
-            and retired_generation == missing_generation
-        ) or (
-            not missing_generation
-            and retired_at
-            and retired_at >= missing_updated
-        ))
-
     with library_scan_state.review_state_lock(), saved_reviews._SAVED_REVIEW_LOCK:
         # The header settles most calls without reading every saved row.
         header = library_scan_state.summary()
@@ -205,6 +217,19 @@ def _library_current_job():
     return cur
 
 
+def _interrupted_download_note():
+    """What a Library download cut short by a restart did, said on the first
+    Library visit after it and then not again."""
+    for j in job_mgr.registry.all():
+        if j.execute_kind == "library" and j.attention == "interrupted":
+            if job_persistence.acknowledge_attention(j.id, "interrupted"):
+                with j._lock:
+                    if j.attention == "interrupted":
+                        j.attention = ""
+            return j.summary
+    return ""
+
+
 def _library_header_context():
     """What the Library header and the failure notice under it read, for the
     page and for the header's poll alike."""
@@ -255,16 +280,23 @@ def _library_page_context(page, tab, q):
         "library_review_retired_reason": "",
         "unreadable_artists": unreadable_artists_mod.load(),
         "auto_library_scan": cfg.AUTO_LIBRARY_SCAN,
+        "interrupted_download_note": _interrupted_download_note(),
     }
     # Single-surface rule (same as /repair): a scan in flight or a parked
     # review renders inline right here, so results never hide behind the
     # launcher and never live under the Queue nav.
     ljob = _library_current_job()
+    ctx["library_review_waiting"] = False
     if ljob is None and ctx["library_baseline_exists"]:
         # No live job holds the surface, but the baseline is complete, so rebuild
         # the parked review from saved scan state so post-baseline ALWAYS shows
         # the Missing Albums / Gap Fill tabs, never "Baseline ready" with none.
-        ljob = _review_job_from_library_state()
+        # While the terminal holds the library the review can't be published,
+        # so the page says it comes back rather than calling it complete.
+        if write_gate._web_writes_paused():
+            ctx["library_review_waiting"] = _saved_review_waiting()
+        else:
+            ljob = _review_job_from_library_state()
     ctx["library_job"] = ljob
     ctx["census"] = None
     # Resume hint: an interrupted scan's checkpoint, while no scan runs. A
@@ -317,6 +349,8 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     loop = asyncio.get_running_loop()
     ctx, badge_ack = await loop.run_in_executor(
         None, lambda: _library_page_context(page, tab, q))
+    if ctx["interrupted_download_note"]:
+        notice_bits.append(ctx["interrupted_download_note"])
     ctx["library_notice"] = " ".join(notice_bits)
     ctx["error"] = rendering._notice_text(request.query_params.get("error"))
     return rendering._tr(request, "library.html", ctx, review_badge_ack=badge_ack)

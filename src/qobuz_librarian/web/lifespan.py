@@ -41,6 +41,70 @@ def _has_startup_write_authority() -> bool:
     return runtime._run_lock_intact() and not write_gate._web_writes_paused()
 
 
+# Set once the start-up clean-up has run, which waits for the library when
+# another run holds it as the app starts.
+_startup_maintained = False
+_put_back_pending = False
+
+
+def _startup_cleanup() -> None:
+    """Expire old upgrade backups and drop lyric state for files that are
+    gone. The CLI runs these too; only the process holding the library may."""
+    try:
+        n = backup_mod.cleanup_old_upgrade_backups()
+        if n:
+            _log.info(
+                "Cleaned up %s at startup.",
+                plural(n, "stale upgrade backup"),
+            )
+    except Exception as e:
+        _log.debug("upgrade-backup cleanup error at startup: %s", e)
+    try:
+        lyrics_mode._prune_lyric_state_orphans()
+    except Exception as e:
+        _log.debug("lyric-state prune error at startup: %s", e)
+
+
+def _prune_caches() -> None:
+    try:
+        n_pruned = flac_cache.prune_missing()
+        if n_pruned:
+            _log.info("Pruned %d stale tag-cache entries.", n_pruned)
+    except Exception as e:
+        _log.debug("flac-cache prune error: %s", e)
+    try:
+        repair_cache.prune_expired()
+    except Exception as e:
+        _log.debug("repair-cache prune error: %s", e)
+
+
+def _late_startup_maintenance() -> None:
+    """Run the start-up clean-up once the library is this process's, when
+    another run held it as the app started. Work already running here keeps
+    it waiting for the next try."""
+    global _startup_maintained
+    if _startup_maintained:
+        return
+    state, token, lock = write_gate._begin_direct_library_operation(
+        "Startup maintenance")
+    if state != "ok":
+        return
+    _startup_maintained = True
+    try:
+        _put_back_albums()
+        _startup_cleanup()
+    finally:
+        lock.release()
+        job_mgr.end_library_operation(token)
+    token = job_mgr.begin_library_operation("Startup maintenance")
+    if token is None:
+        return
+    try:
+        _prune_caches()
+    finally:
+        job_mgr.end_library_operation(token)
+
+
 def _shutdown_web_mutations() -> None:
     """Quiesce every Web writer before releasing the process run lock."""
     job_mgr.stop_worker()
@@ -122,9 +186,16 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
 
 
 async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
-    """Retry lock acquisition and saved-job restoration while Web is active."""
+    """Retry lock acquisition and saved-job restoration while Web is active,
+    and run the start-up clean-up once they succeed."""
     while True:
         await asyncio.sleep(delay)
+        if not _startup_maintained and not runtime._SHUTTING_DOWN:
+            await asyncio.get_running_loop().run_in_executor(
+                None, _late_startup_maintenance)
+        elif _put_back_pending and not runtime._SHUTTING_DOWN:
+            await asyncio.get_running_loop().run_in_executor(
+                None, _put_back_albums_left_in_backups)
         with runtime._auto_check_lock:
             if runtime._SHUTTING_DOWN:
                 return
@@ -177,6 +248,8 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
             "Lock acquired; durable queue startup state: %s.",
             result.status.value,
         )
+        await asyncio.get_running_loop().run_in_executor(
+            None, _put_back_albums_left_in_backups)
 
 
 def _restore_jobs_once() -> bool:
@@ -227,6 +300,8 @@ def _watch_stop_signal(loop) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global _startup_maintained
+    _startup_maintained = False
     raise_open_file_limit()
     runtime._SHUTTING_DOWN = False
     runtime._STOP_SIGNALLED.clear()
@@ -357,41 +432,16 @@ async def _lifespan(_app: FastAPI):
             _log.error("STARTUP: critical volumes not usable: %s. Write "
                        "endpoints will return 503 until the mounts are "
                        "fixed.", problems)
-        # Heavy, throttled maintenance: prune_missing() stats every cached file
-        # (100k+ on a NAS library), so run it in the background instead of blocking
-        # the app from serving its first request.
-        async def _bg_prune_flac_cache():
-            try:
-                n_pruned = await asyncio.get_running_loop().run_in_executor(
-                    None, flac_cache.prune_missing)
-                if n_pruned:
-                    _log.info("Pruned %d stale tag-cache entries.", n_pruned)
-            except Exception as e:
-                _log.debug("flac-cache prune error: %s", e)
-            try:
-                repair_cache.prune_expired()
-            except Exception as e:
-                _log.debug("repair-cache prune error: %s", e)
         maintenance_task = None
         if runtime._run_lock_intact():
             _restore_jobs_once()
         run_startup_maintenance = _has_startup_write_authority()
         if run_startup_maintenance:
-            # The CLI runs these too. A browsing-only Web process must leave them
-            # alone because the CLI or another Web process can own the library.
-            try:
-                n = backup_mod.cleanup_old_upgrade_backups()
-                if n:
-                    _log.info(
-                        "Cleaned up %s at startup.",
-                        plural(n, "stale upgrade backup"),
-                    )
-            except Exception as e:
-                _log.debug("upgrade-backup cleanup error at startup: %s", e)
-            try:
-                lyrics_mode._prune_lyric_state_orphans()
-            except Exception as e:
-                _log.debug("lyric-state prune error at startup: %s", e)
+            # A browsing-only Web process must leave these alone because the
+            # CLI or another Web process can own the library; it runs them
+            # once it holds the library instead.
+            _put_back_albums_left_in_backups()
+            _startup_cleanup()
         job_mgr.configure_staging_entry_guard(queue_recovery._staging_entry_allowed)
         job_mgr.configure_held_release(lambda: not write_gate._web_writes_paused())
         job_mgr.start_worker()
@@ -400,10 +450,15 @@ async def _lifespan(_app: FastAPI):
                 "Startup maintenance")
             if maintenance_token is None:
                 raise RuntimeError("Web workers stopped during startup")
+            _startup_maintained = True
 
+            # Heavy, throttled maintenance: prune_missing() stats every cached
+            # file (100k+ on a NAS library), so run it in the background
+            # instead of blocking the app from serving its first request.
             async def _registered_cache_prune():
                 try:
-                    await _bg_prune_flac_cache()
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, _prune_caches)
                 finally:
                     job_mgr.end_library_operation(maintenance_token)
 
@@ -439,7 +494,7 @@ async def _lifespan(_app: FastAPI):
                     await loop.run_in_executor(None, new_release_checks._maybe_auto_check_new_releases)
                 except Exception as e:
                     _log.warning("background new-release tick failed: %s", e)
-                if not run_startup_maintenance:
+                if not _startup_maintained:
                     continue
                 # Retention is a promise made in the diagnostics list ("cleared
                 # automatically after N days"), and a container that is never
@@ -467,6 +522,56 @@ async def _lifespan(_app: FastAPI):
     finally:
         await _finish_web_lifespan(
             ticker, lock_retry_task, maintenance_task, token_probe_task)
+
+
+def _put_back_albums_left_in_backups() -> None:
+    """Restore the albums a hard stop left in their whole-album backups.
+
+    Takes the same gate and steps as Restore in Diagnostics, so it runs only
+    with exact write authority and while nothing works in the library, and
+    it restores only into a place that is still empty. While the library is
+    busy it stays pending, and the lock retry loop tries again.
+    """
+    global _put_back_pending
+    try:
+        state, operation_token, lock = (
+            write_gate._begin_direct_library_operation("Backup restore"))
+        if state != "ok":
+            _put_back_pending = True
+            return
+        try:
+            _put_back_albums()
+        finally:
+            lock.release()
+            job_mgr.end_library_operation(operation_token)
+    except Exception:
+        _log.exception("couldn't put back albums left in their backups")
+
+
+def _put_back_albums() -> None:
+    """The put-back itself, for a caller already holding the library."""
+    global _put_back_pending
+    _put_back_pending = False
+    try:
+        for path, origin in backup_mod.albums_left_in_backups():
+            backup = backup_mod.album_backup_to_put_back(path, origin)
+            if backup is None:
+                continue
+            plan = job_mgr.prepare_recovery_resolution(
+                str(backup.path), backup.receipt)
+            if plan is None or not backup_mod.restore_upgrade_backup(
+                    backup, origin, replace_partial=False):
+                continue
+            runtime.note_restored_albums([origin])
+            _log.warning(
+                "Put back %s, which an interrupted upgrade or repair had "
+                "moved to %s.", origin, path)
+            if not job_mgr.resolve_recovery_resolution(plan):
+                _log.warning(
+                    "The saved recovery status of %s could not be "
+                    "updated.", origin)
+    except Exception:
+        _log.exception("couldn't put back albums left in their backups")
 
 
 def _sweep_upgrade_backups():

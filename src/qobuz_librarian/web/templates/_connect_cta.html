@@ -4,9 +4,16 @@
   <div class="ql-connect-layout">
     <div class="ql-connect-copy">
       <h2 class="ql-connect-title">Reconnect Qobuz</h2>
-      <p class="ql-connect-text">Your saved token was rejected.</p>
+      <p class="ql-connect-text">{{ qobuz_check_result or "Your saved token was rejected." }}</p>
     </div>
-    <a href="/settings#qobuz" class="ql-btn ql-btn-primary ql-connect-action">Open Settings</a>
+    <div class="ql-connect-action flex flex-wrap gap-2">
+      <a href="/settings#qobuz" class="ql-btn ql-btn-primary flex-1 sm:flex-none">Open Settings</a>
+      <form action="/qobuz/check" method="post" class="flex-1 sm:flex-none" data-busy-submit>
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="return_to" value="{{ request.url.path }}">
+        <button type="submit" class="ql-btn ql-btn-secondary w-full">Check again</button>
+      </form>
+    </div>
   </div>
   {% else %}
   <div class="ql-connect-layout">

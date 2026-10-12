@@ -93,12 +93,24 @@ def request_is_https(request) -> bool:
     return request.url.scheme == "https"
 
 
-_STALE_MESSAGE = ("The form's security token did not match. "
-                  "Reload the page and try again.")
+_STALE_MESSAGE = ("The form's security token did not match, so nothing was "
+                  "changed. Open the page again, then try once more.")
+
+
+def _referring_page(request) -> str:
+    """The path of the page on this site the stale form was sent from, or ""."""
+    referer = urllib.parse.urlsplit(request.headers.get("referer", ""))
+    if (referer.netloc != request.url.netloc
+            or not referer.path.startswith("/")
+            or referer.path.startswith("//")):
+        return ""
+    return referer.path + (f"?{referer.query}" if referer.query else "")
 
 
 def _stale_page_response(request, token):
-    """A refusal the user can act on, carrying a fresh token so the retry works."""
+    """A refusal the user can act on, carrying a fresh token so the retry works.
+    Reloading would send the same stale form again, so the page links to a
+    fresh copy of the one it came from."""
     from starlette.responses import HTMLResponse
     if request.headers.get("HX-Request"):
         # htmx swallows a non-2xx body, and the app's toast host reads this
@@ -107,8 +119,10 @@ def _stale_page_response(request, token):
                             headers={"HX-Refresh": "true"})
     else:
         from qobuz_librarian.web import rendering
-        resp = rendering.render_error_page(request, 403, "That page went stale",
-                                 _STALE_MESSAGE)
+        back = _referring_page(request)
+        resp = rendering.render_error_page(
+            request, 403, "That page went stale", _STALE_MESSAGE,
+            action={"href": back, "label": "Open the page again"} if back else None)
     _set_csrf_cookie(request, resp, token)
     return resp
 

@@ -555,6 +555,7 @@ def _any_active_job() -> bool:
     except ImportError:
         return False
     return any(j.status != job_mgr.JobStatus.AWAITING_REVIEW
+               and not job_mgr.is_held(j)
                for j in job_mgr.registry.pending_and_running())
 
 

@@ -1339,7 +1339,12 @@ async def job_retry(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return _land(error="That job is no longer in History.")
-    if ((job.status != job_mgr.JobStatus.FAILED and not job.tracks_missing)
+    retried_as = (job.execute_args or {}).get("retried_as")
+    if retried_as:
+        return _land(started=str(retried_as))
+    if ((job.status not in (job_mgr.JobStatus.FAILED,
+                            job_mgr.JobStatus.CANCELED)
+         and not job.tracks_missing)
             or not job.album_id
             or (job.execute_args or {}).get("retry_disabled") == "terminal"):
         return _land(error="Nothing to retry for that job.")
@@ -1803,7 +1808,14 @@ async def job_retry(request: Request, job_id: str):
                 if submit(new_job, run) is None:
                     return refusals._job_admission_response(request)
                 # The retry is the answer to the failure, so the old row stops
-                # holding the Queue warning dot.
+                # offering Retry and holding the Queue warning dot.
+                if job_persistence.mark_retried(job.id, new_job.id):
+                    with job._lock:
+                        job.execute_args = {
+                            **(job.execute_args or {}),
+                            "retry_disabled": "retried",
+                            "retried_as": new_job.id,
+                        }
                 attention = job.attention
                 if attention and attention != "recovery" and (
                     job_persistence.acknowledge_attention(job.id, attention)

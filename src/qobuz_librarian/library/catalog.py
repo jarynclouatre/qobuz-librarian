@@ -1312,7 +1312,8 @@ def _count_audio_files_in(d):
     n = 0
     try:
         for f in iter_tree_no_symlinks(d):
-            if f.is_file() and f.suffix.lower() in config.AUDIO_EXTS:
+            if (f.suffix.lower() in config.AUDIO_EXTS
+                    and not f.name.startswith(".") and f.is_file()):
                 n += 1
     except OSError:
         pass

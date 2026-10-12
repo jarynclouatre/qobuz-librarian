@@ -1189,6 +1189,46 @@ def test_execute_consolidation_refuses_a_same_name_replacement(
     assert not (tmp_path / "backups").exists()
 
 
+def test_consolidation_backup_expires_only_while_the_primary_keeps_its_tracks(
+        tmp_path, monkeypatch):
+    # The duplicate folder a consolidation empties never matches its backup
+    # again, so the age sweep kept every consolidation backup forever.
+    _need_audio_tools()
+    import qobuz_librarian.config as cfg
+    import qobuz_librarian.library.backup as bk
+
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    primary = tmp_path / "Primary"
+    sibling = tmp_path / "Album Deluxe"
+    overlap = []
+    for name in ("01 - One.flac", "02 - Two.flac"):
+        _real_flac(primary / name)
+        _real_flac(sibling / f"A{name}")
+        overlap.append(({"path": str(sibling / f"A{name}")},
+                        {"path": str(primary / name)}))
+    summary = {"dir": sibling, "overlap": overlap, "unique": []}
+    primary_seal, sibling_seal, binding = _bind_consolidation_summary(
+        summary, tmp_path, monkeypatch)
+    try:
+        removed, n_failed = execute_consolidation(summary)
+    finally:
+        binding.close()
+        sibling_seal.close()
+        primary_seal.close()
+    assert len(removed) == 2 and n_failed == 0
+
+    [backup] = (tmp_path / "backups").iterdir()
+    assert bk.cleanup_old_upgrade_backups(retention_days=1, force=True) == 0
+    aged = backup.with_name("20200101_000000_" + backup.name.split("_", 3)[-1])
+    backup.rename(aged)
+    (primary / "02 - Two.flac").rename(tmp_path / "away.flac")
+    assert bk.cleanup_old_upgrade_backups(retention_days=1, force=True) == 0
+    assert (aged / "A02 - Two.flac").exists()
+    (tmp_path / "away.flac").rename(primary / "02 - Two.flac")
+    assert bk.cleanup_old_upgrade_backups(retention_days=1, force=True) == 1
+    assert not aged.exists()
+
+
 def test_consolidate_albums_is_a_noop_under_dry_run(monkeypatch):
     from argparse import Namespace
 

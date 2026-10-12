@@ -1,0 +1,17 @@
+{% if qobuz_hold and qobuz_hold.waiting %}
+{% set _n = qobuz_hold.waiting %}
+<div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4" role="status">
+  {% set _rejected = qobuz_hold.reason == 'rejected' %}
+  <span class="min-w-0 flex-1 break-words text-sm"><strong>{{ qobuz_check_result or ("Qobuz rejected the saved token." if _rejected else "Qobuz couldn't be reached.") }}</strong> {{ _n }} {{ 'download waits' if _n == 1 else 'downloads wait' }} until Qobuz {{ 'accepts the token' if _rejected else 'answers' }}.</span>
+  <div class="flex flex-wrap gap-3">
+    <form action="/qobuz/check" method="post" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="return_to" value="{{ request.url.path }}">
+      <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm">Check again</button>
+    </form>
+    {% if qobuz_hold.reason == 'rejected' %}
+    <a href="/settings#qobuz" class="ql-btn ql-btn-secondary ql-btn-sm">Open Settings</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}

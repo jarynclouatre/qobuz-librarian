@@ -7,7 +7,7 @@ from pathlib import Path
 from qobuz_librarian import completion, redaction, run_lock
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import auth as api_auth
-from qobuz_librarian.api.auth import CredentialChanged, QobuzAccess
+from qobuz_librarian.api.auth import CredentialChanged
 from qobuz_librarian.library import catalog, post_import_relocation
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.post_import_relocation import PostImportRelocationAttention
@@ -444,8 +444,7 @@ def _make_single_track_run(album, track, token):
         active = None
         active_token = token
         if getattr(token, "credential_generation", ""):
-            active = qobuz_access._authorize_qobuz_live(
-                QobuzAccess.DOWNLOAD_ACTION,
+            active = qobuz_access._authorize_download_start(
                 expected_generation=expected_generation,
             )
             active_token = active.token

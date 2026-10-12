@@ -124,6 +124,42 @@ def test_cancel_approved_review_preserves_picks_after_reload(
             for c in reviews[0].candidates] == expected
 
 
+def test_a_library_download_stopped_by_a_restart_returns_as_interrupted(
+        monkeypatch, tmp_path):
+    """A Library download the app stops comes back as interrupted, not
+    failed or cancelled, keeping its log and stop time and flagging the picks
+    it returned to the review for the Library page."""
+    from qobuz_librarian.web import job_runs
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+
+    job = Job(title=jm.RUN_TITLES["library"], kind="scan",
+              execute_kind="library", status=JobStatus.RUNNING)
+    assert _REAL_ADMIT(job) is True
+    job.push_line("Stopped early. 0 albums downloaded, 2 albums not started. "
+                  "2 retry choices returned to Library, selected for retry.")
+    job.stopping_for_restart = True
+    job.cancel_requested = True
+    job.status = JobStatus.CANCELED
+    jm._finish_task_phase(job)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    hooks = []
+    monkeypatch.setattr(jm, "_start_post_job_hook", hooks.append)
+    jm.restore_jobs({"library": job_runs._resume_album_download})
+    restored = jm.registry.get(job.id)
+    assert restored.status is JobStatus.CANCELED
+    assert restored.interrupted_by_restart
+    assert [hook["status"] for hook in hooks] == ["interrupted"]
+    assert restored.attention == "interrupted"
+    assert restored.log_lines == job.log_lines
+    assert restored.finished_at is not None
+
+
 def test_a_provider_error_never_reaches_the_stored_job_record(
         monkeypatch, tmp_path):
     """A Qobuz call carries the account email and the auth token in its query

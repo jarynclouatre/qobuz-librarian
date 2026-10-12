@@ -2512,6 +2512,13 @@ _SET_ASIDE_SENTINEL = ".ql_set_aside_replacement"
 # a state the user asked for. It inverts the default: age alone reaps it.
 _REAP_AFTER_RETENTION_SENTINEL = ".ql_reap_after_retention"
 
+# Added to the backup a consolidation moves a duplicate folder's tracks into.
+# Its origin is the duplicate folder, which no longer holds them, so the
+# content proof can never pass there. The marker names the album kept in its
+# place and the track standing in for each file, and the age sweep proves
+# against those instead.
+_CONSOLIDATED_SENTINEL = ".ql_consolidated"
+
 # Whole-album copies are sealed before their public source is retired.  The
 # immutable receipt therefore starts incomplete and this receipt-bound marker
 # is the only persisted transition to a caller-visible complete result.
@@ -2553,6 +2560,7 @@ _SIDECARS = (
     _UNVERIFIED_UPGRADE_SENTINEL,
     _SET_ASIDE_SENTINEL,
     _REAP_AFTER_RETENTION_SENTINEL,
+    _CONSOLIDATED_SENTINEL,
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
     _COMPANION_CARRY_INTENT_SENTINEL,
@@ -2568,6 +2576,7 @@ _OPTIONAL_RECEIPT_MARKERS = (
     _PARTIAL_RESTORE_SENTINEL,
     _UNVERIFIED_UPGRADE_SENTINEL,
     _SET_ASIDE_SENTINEL,
+    _CONSOLIDATED_SENTINEL,
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
     _COMPANION_CARRY_INTENT_SENTINEL,
@@ -6080,7 +6089,9 @@ def awaiting_retention(path: Path) -> bool:
 
     Inside the retention window, unpinned, and every file it holds back at its
     origin at least as large: an upgrade's own backup looks like this for its
-    whole window. The sweep's proof decides it later; this reads metadata only.
+    whole window. A consolidation's backup qualifies while the album it kept
+    still holds the track standing in for each file. The sweep's proof decides
+    it later; this reads metadata only.
     """
     m = re.match(r"^(\d{8}_\d{6})_", path.name)
     if m is None or backup_keep_markers_present(path):
@@ -6091,6 +6102,15 @@ def awaiting_retention(path: Path) -> bool:
         return False
     if made < time.time() - cfg.UPGRADE_BACKUP_RETENTION_DAYS * 86400:
         return False
+    marker = path / _CONSOLIDATED_SENTINEL
+    if marker.is_file():
+        try:
+            named = _consolidation_kept(
+                json.loads(marker.read_text(encoding="utf-8"))["note"])
+            return named is not None and all(
+                (named[0] / track).is_file() for track in named[1].values())
+        except (OSError, TypeError, ValueError, KeyError):
+            return False
     origin = _read_backup_origin(path)
     entries = _list_tree(path)
     if origin is None or entries is None:
@@ -9195,13 +9215,15 @@ def restore_incomplete_upgrade_backup(
 
 
 def restore_upgrade_backup(
-        backup, original_path: Path, *, expected_owner=None) -> bool:
+        backup, original_path: Path, *, expected_owner=None,
+        replace_partial=True) -> bool:
     """Move a carried complete whole-album upgrade backup to its origin.
 
     If a partial download left a sparse album dir at original_path,
     automatically replace it with the backup (the backup is the only intact
-    copy). File-subset gap-fill and downsample receipts are refused. Returns
-    True on success.
+    copy), unless ``replace_partial`` is False, which restores only into an
+    empty place. File-subset gap-fill and downsample receipts are refused.
+    Returns True on success.
 
     Compares backup vs partial on TOTAL BYTES, not file count: a partial
     download might have written the single largest track first (1 huge
@@ -9302,6 +9324,11 @@ def restore_upgrade_backup(
         except FileNotFoundError:
             original_fd = None
         if original_fd is not None:
+            if not replace_partial:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {original_public} exists again; the backup stays "
+                    f"at {backup_public}."))
+                return False
             if _reserved_backup_entry_present(original_fd):
                 raise OSError(
                     "partial album contains a reserved backup metadata name")
@@ -9681,6 +9708,85 @@ def is_set_aside_replacement(path) -> bool:
     return (Path(path) / _SET_ASIDE_SENTINEL).is_file()
 
 
+def albums_left_in_backups():
+    """(backup, album folder) for each whole-album backup whose folder is
+    missing from the library, oldest first.
+
+    A hard stop during an upgrade, a forced re-download or a whole-album
+    repair leaves the album here with nothing in its place. Downloads an
+    upgrade set aside are left out, and so is an album whose parent folder
+    is gone too, which is how an unmounted library reads. Metadata only.
+    """
+    found = []
+    try:
+        entries = sorted(cfg.UPGRADE_BACKUP_DIR.iterdir())
+    except FileNotFoundError:
+        return found
+    for entry in entries:
+        if (
+            not re.match(r"^\d{8}_\d{6}_", entry.name)
+            or not (entry / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file()
+            or is_set_aside_replacement(entry)
+        ):
+            continue
+        origin = _read_backup_origin(entry)
+        if (
+            origin is not None
+            and not os.path.lexists(origin)
+            and origin.parent.is_dir()
+        ):
+            found.append((entry, origin))
+    return found
+
+
+def _album_parents_unchanged(receipt) -> bool:
+    """Whether every folder from the music root down to the album's parent
+    is the one the backup was taken from. A restart can renumber the device
+    and mount, so the inode and its birth time are compared."""
+    def incarnations(generations):
+        return [(value[2], value[4], value[5]) for value in generations]
+
+    try:
+        recorded = receipt["source_receipt"]["path_generations"][:-1]
+        parent = Path(receipt["origin"]).parent
+    except (KeyError, TypeError):
+        return False
+    opened = _open_rooted_directory(cfg.MUSIC_ROOT, parent, allow_root=True)
+    if opened is None:
+        return False
+    descriptors = opened[-1]
+    try:
+        return incarnations(_path_directory_generations(descriptors)) == (
+            incarnations(recorded))
+    except (OSError, TypeError, ValueError, IndexError):
+        return False
+    finally:
+        _close_descriptors(descriptors)
+
+
+def album_backup_to_put_back(path, origin):
+    """The backup an album listed by albums_left_in_backups can be restored
+    from without asking, or None.
+
+    It must be complete, unpinned and owned by no saved download, and the
+    album's folder must still be missing beneath the same parent folders.
+    Anything else stays for the user in Diagnostics.
+    """
+    if backup_keep_markers_present(path) or os.path.lexists(origin):
+        return None
+    candidate = load_backup_result(path)
+    if (
+        candidate is None
+        or not candidate.complete
+        or candidate.receipt["kind"] != "upgrade"
+        or candidate.receipt["origin"] != os.fspath(origin)
+        or not _backup_owner_authorized(candidate, None)
+        or not _album_parents_unchanged(candidate.receipt)
+    ):
+        return None
+    return candidate
+
+
 def _audio_duration_seconds(path: Path):
     """Read media duration without consulting the public-path metadata cache."""
     try:
@@ -9773,13 +9879,16 @@ def _classify_backup_contents(
         audio_replacement=False,
         allow_smaller_audio=False,
         match_recordings=False,
+        renamed=None,
         budget=None,
 ):
     """Compare payloads; retention permits verified replacement audio.
 
     ``match_recordings`` lets a backed-up track whose name is gone from the
     album be matched to the album track with its ISRC, for a refill that the
-    import filed under a different name."""
+    import filed under a different name. ``renamed`` maps each backed-up
+    file to the album track that stands in for it; a file it leaves out is
+    missing."""
     try:
         entries = _list_tree(backup_view)
         if entries is None:
@@ -9798,8 +9907,12 @@ def _classify_backup_contents(
         for source in files:
             relative = source.relative_to(backup_view)
             destination = replacement_view / relative
+            if renamed is not None:
+                track = renamed.get(relative.as_posix())
+                destination = replacement_view / track if track else None
             if (
-                not destination.is_file()
+                destination is not None
+                and not destination.is_file()
                 and match_recordings
                 and source.suffix.lower() in cfg.AUDIO_EXTS
             ):
@@ -9924,6 +10037,75 @@ def _dispose_retention_candidate(
                 allow_smaller_audio=allow_smaller_audio,
                 match_recordings=match_recordings,
             )
+        ),
+    )
+
+
+def _consolidation_kept(note):
+    """(album, {backed-up file: album track}) from a consolidation marker
+    note, or None."""
+    try:
+        value = json.loads(note)
+        album = Path(value["album"])
+        kept = value["kept"]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if (
+        not album.is_absolute()
+        or not isinstance(kept, dict)
+        or not kept
+        or len(set(kept.values())) != len(kept)
+        or not all(
+            _receipt_path_key_valid(name) and _receipt_path_key_valid(track)
+            for name, track in kept.items())
+    ):
+        return None
+    return album, kept
+
+
+def mark_consolidated(backup, album, kept) -> bool:
+    """Name the album a consolidation kept and, for each file in its backup,
+    the track there that stands in for it, so the age sweep can clear it."""
+    return _write_receipt_marker(
+        backup,
+        _CONSOLIDATED_SENTINEL,
+        json.dumps({"album": os.fspath(album), "kept": kept}, sort_keys=True),
+    )
+
+
+def _dispose_consolidation_backup(candidate) -> bool:
+    """Dispose a consolidation's backup once the album it kept still holds,
+    for every file, a decode-clean track standing in for it at least as long.
+    """
+    opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, candidate.path)
+    if opened is None:
+        return False
+    try:
+        note = _receipt_marker_note(
+            opened[-1][-1], _CONSOLIDATED_SENTINEL, candidate.receipt)
+    except OSError:
+        return False
+    finally:
+        _close_descriptors(opened[-1])
+    named = _consolidation_kept(note)
+    if named is None:
+        return False
+    album, kept = named
+    album_receipt = capture_album_source_receipt(album)
+    if album_receipt is None:
+        return False
+    return dispose_backup(
+        candidate,
+        replacement_path=album,
+        expected_replacement_receipt=album_receipt,
+        replacement_validator=lambda album_view, backup_view: (
+            _classify_backup_contents(
+                album_view,
+                backup_view,
+                audio_replacement=True,
+                allow_smaller_audio=True,
+                renamed=kept,
+            ).removable
         ),
     )
 
@@ -10144,6 +10326,22 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  Keeping undo backup {entry.name!r}: safe "
                         "disposal could not be completed."))
+                continue
+            if (
+                (entry / _CONSOLIDATED_SENTINEL).is_file()
+                and not backup_keep_markers_present(entry)
+            ):
+                candidate = load_backup_result(entry)
+                if (
+                    candidate is not None
+                    and _dispose_consolidation_backup(candidate)
+                ):
+                    n_removed += 1
+                else:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  Keeping consolidation backup {entry.name!r}: "
+                        "the album it kept could not be shown to hold a "
+                        "track for each of its files."))
                 continue
             candidate = load_backup_result(entry)
             if candidate is None:

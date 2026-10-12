@@ -413,6 +413,30 @@ def test_upgrade_carries_hand_added_tags_to_the_replacement(
     assert not proc._track_annotations_preserved(backup.path, album_dir)
 
 
+def test_upgrade_files_the_albums_own_cover_instead_of_qobuzs(
+        monkeypatch, tmp_path):
+    # Qobuz's cover.jpg replaced a scanned one, and the old album then stayed
+    # in its backup for good because their covers differed.
+    from qobuz_librarian.library import backup as backup_mod
+
+    album_dir = tmp_path / "music" / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01 Song.flac").write_bytes(b"audio")
+    (album_dir / "cover.jpg").write_bytes(b"my scan")
+    monkeypatch.setattr(proc.cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(proc.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    backup = backup_mod.backup_album_dir(album_dir)
+    staged = tmp_path / "staging" / "Artist - Album"
+    staged.mkdir(parents=True)
+    (staged / "cover.jpg").write_bytes(b"qobuz art")
+
+    proc._keep_own_cover(backup, [staged])
+
+    assert (staged / "cover.jpg").read_bytes() == b"my scan"
+    assert sorted(p.name for p in staged.iterdir()) == ["cover.jpg"]
+    assert (backup.path / "cover.jpg").read_bytes() == b"my scan"
+
+
 def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path):
     import json
     import os

@@ -180,7 +180,7 @@
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
         {% set _qw = queue_wait if queue_wait is defined else none %}
-        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused_for %}Waiting until {% if _qw.paused_for.album %}“{{ _qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if _qw.paused_for.job_id %} <a href="/jobs/{{ _qw.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
+        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused_for %}Waiting until {% if _qw.paused_for.album %}“{{ _qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.{% if _qw.paused_for.job_id %} <a href="/jobs/{{ _qw.paused_for.job_id }}" class="ql-inline-link">Open that download</a>{% endif %}{% elif _qw and _qw.for_qobuz %}Waiting for Qobuz. <a href="/queue" class="ql-inline-link">Open Queue</a>{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
         {% if s in ('scanning', 'running') %}<span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>{% endif %}
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
@@ -301,7 +301,7 @@
     </div>
     {% endif %}
     {% if job.error %}
-    <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing else 'ql-notice-error' }} ql-job-error">
+    <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing or job.interrupted_by_restart else 'ql-notice-error' }} ql-job-error">
       <span>{{ job.error | strip_log_pointer(job.log_lines) }}</span>
       {% if recovery_holder_job_id %}
       <a href="/jobs/{{ recovery_holder_job_id }}" class="ql-btn ql-btn-secondary ql-btn-sm">Open that download</a>
@@ -327,7 +327,7 @@
     {% endif %}
     <div class="ql-job-actions">
       {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-      {% if (s == 'failed' or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
+      {% if (s in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
       {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -338,6 +338,8 @@
         <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if retry_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry</button>
         {% if retry_paused %}{% include "_writes_paused_reason.html" %}{% endif %}
       </form>
+      {% elif job.execute_args.get('retried_as') %}
+      <a href="/jobs/{{ job.execute_args.retried_as }}" class="ql-btn ql-btn-secondary ql-btn-sm">Open the retry</a>
       {% endif %}
       {% if recovery_retry and s == 'failed' %}
       <form action="/jobs/{{ job.id }}/give-up" method="post"

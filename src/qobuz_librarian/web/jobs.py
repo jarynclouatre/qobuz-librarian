@@ -30,6 +30,7 @@ from typing import Callable, Optional
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import download_result, redaction
+from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import (
     AuthLost,
     CredentialChanged,
@@ -47,7 +48,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
-from qobuz_librarian.library import generation_state, library_scan_state, scan_checkpoint
+from qobuz_librarian.library import library_scan_state, scan_checkpoint
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
@@ -97,6 +98,13 @@ def cancel_is_protected(job) -> bool:
 def _current_job_cancel_requested() -> bool:
     j = getattr(_TLS, "current_job", None)
     return bool(j and j.cancel_requested)
+
+
+def _current_scan_cancel_requested() -> bool:
+    """A crawl only reads, so its Qobuz calls can stop as soon as it is
+    cancelled; a download's calls run to their end."""
+    j = getattr(_TLS, "current_job", None)
+    return bool(j and j.cancel_requested and j.status is JobStatus.SCANNING)
 
 
 def current_job_id() -> str | None:
@@ -190,6 +198,7 @@ def _propagate_job_to_thread(target):
 
 
 rip_module.set_cancel_check(_current_job_cancel_requested)
+api_client.set_stop_check(_current_scan_cancel_requested)
 # Carry the running job onto subprocess-reader helper threads (rip + beets) so
 # their live-output log lines reach the right job instead of being dropped by
 # JobLogHandler's per-thread routing.
@@ -235,9 +244,6 @@ JOB_ADMISSION_ERROR = (
 JOB_FINAL_SAVE_ERROR = (
     "The work finished, but the app couldn't save the final job result. "
     "Check the data volume before retrying or clearing this job."
-)
-LIBRARY_SCAN_AUTO_RESUMES = (
-    "It resumes from where it left off the next time the Search page opens."
 )
 
 # Distinguishes an intact review whose last eligible tick disappeared from a
@@ -394,7 +400,7 @@ class Job:
     @property
     def interrupted_by_restart(self) -> bool:
         return job_persistence.interrupted_by_restart(
-            self.status.value, self.summary)
+            self.status.value, self.summary, self.error)
 
     @property
     def display_title(self) -> str:
@@ -988,10 +994,17 @@ _staging_entry_guard: Callable[[Optional[Job]], bool] | None = None
 _held_downloads_lock = threading.Lock()
 _held_downloads: list[tuple[Job, Callable]] = []
 _held_release_check: Callable[[], bool] | None = None
+# Set while downloads wait because Qobuz rejected the token ("rejected") or
+# could not be reached ("unreachable").
+_qobuz_hold: dict | None = None
 
 
 class StagingRecoveryBlocked(RuntimeError):
     """The staging mutex was reached after durable recovery became active."""
+
+
+class WaitForQobuz(Exception):
+    """A download found Qobuz unavailable before it touched anything."""
 
 
 def configure_staging_entry_guard(
@@ -1143,6 +1156,7 @@ def _mark_final_save_failure(job: Job) -> None:
 def _finish_task_phase(job: Job) -> None:
     """Durably close one worker phase after its final status is known."""
     if job.stopping_for_restart and job.status is JobStatus.CANCELED:
+        job_persistence.record_stop(job)
         job.end_stream()
         return
     if job.status in TERMINAL and job.finished_at is None:
@@ -1171,7 +1185,8 @@ def _finish_task_phase(job: Job) -> None:
         # that exists only in memory.  A restart will recover the older
         # durable row; the live page must be at least as cautious.
         _mark_final_save_failure(job)
-    if job.status in TERMINAL:
+    if job.status in TERMINAL or (
+            job.status is JobStatus.AWAITING_REVIEW and job.phase == "scan"):
         _start_post_job_hook_for_job(job)
     job.end_stream()
 
@@ -1198,6 +1213,23 @@ def _run_task(job: Job, fn):
             # "Done" would hide that a cancel was asked for and ignored.
             job.attention = job.attention or "cancel_late"
     except BaseException as e:  # noqa: BLE001 - the worker must stay durable
+        if isinstance(e, WaitForQobuz):
+            if job.cancel_requested and not job.stopping_for_restart:
+                job.status = JobStatus.CANCELED
+                return
+            if _wait_for_qobuz(job, fn, e.__cause__):
+                return
+            e = e.__cause__
+        if job.cancel_requested and isinstance(e, QobuzUnavailable):
+            # Stopped while waiting on Qobuz, which a cancel cuts short.
+            job.status = JobStatus.CANCELED
+            return
+        if isinstance(e, StagingRecoveryBlocked) and job.album_id:
+            if job.cancel_requested and not job.stopping_for_restart:
+                job.status = JobStatus.CANCELED
+                return
+            if _wait_for_recovery(job, fn):
+                return
         # SystemExit and other fatal boundaries must surface as failed jobs,
         # not escape after the still-RUNNING state was persisted.
         raw = str(e) or e.__class__.__name__
@@ -1207,6 +1239,8 @@ def _run_task(job: Job, fn):
         job.status = JobStatus.FAILED
         job.error = _friendly_job_error(e, cleaned)
         job.push_line(f"[ERROR] {cleaned}")
+        if job.album_id and isinstance(e, (AuthLost, QobuzUnavailable)):
+            _start_qobuz_hold(e)
     finally:
         _TLS.current_job = None
         log.removeHandler(handler)
@@ -1258,7 +1292,7 @@ def _run_post_job_hook(payload: dict) -> None:
 
 def _build_post_job_hook_payload(
     *, event_id, status, title, edition="", artist="", error=None,
-    finished_at=None, tracks_missing=0,
+    finished_at=None, tracks_missing=0, kind="", summary="", review_items=0,
 ):
     return {
         "id": event_id,
@@ -1270,20 +1304,43 @@ def _build_post_job_hook_payload(
         "error": error,
         "tracks_missing": tracks_missing,
         "finished_at": finished_at,
+        "kind": kind,
+        "summary": summary,
+        "review_items": review_items,
     }
 
 
+def _review_items(job) -> int:
+    """How many items a parked review lists, leaving out Library picks whose
+    release type is switched off."""
+    if job.execute_kind != "library":
+        return len(job.candidates)
+    from qobuz_librarian.web import flows
+    shown = flows.review_tab_filter("missing")
+    return sum(1 for c in job.candidates
+               if flows.is_gap_candidate(c) or shown(c))
+
+
 def _post_job_hook_payload(job):
-    return _build_post_job_hook_payload(
-        event_id=job.id,
-        status=job.status.value,
-        title=job.title,
-        edition=job.edition,
-        artist=job.artist,
-        error=job.error,
-        finished_at=job.finished_at,
-        tracks_missing=job.tracks_missing,
-    )
+    """The hook's report of a job: finished, parked for review, or cut short
+    by a restart, which reads ``interrupted`` so it is not taken for a
+    cancel."""
+    with job._lock:
+        review = job.status is JobStatus.AWAITING_REVIEW
+        return _build_post_job_hook_payload(
+            event_id=job.id,
+            status=("interrupted" if job.interrupted_by_restart
+                    else job.status.value),
+            title=job.title,
+            edition=job.edition,
+            artist=job.artist,
+            error=job.error,
+            finished_at=time.time() if review else job.finished_at,
+            tracks_missing=job.tracks_missing,
+            kind=job.execute_kind or "download",
+            summary=job.summary,
+            review_items=_review_items(job) if review else 0,
+        )
 
 
 def _start_post_job_hook_for_job(job):
@@ -1402,6 +1459,10 @@ def _worker_loop(work_queue: "queue.Queue"):
         # Sole worker thread. Catching BaseException ensures one
         # crashed job can't take down the whole queue.
         try:
+            if (work_queue is _download_queue
+                    and job.status is JobStatus.PENDING
+                    and _hold_for_qobuz(job, fn)):
+                continue
             canceled_pending = False
             with settings_admission_guard():
                 try:
@@ -1561,11 +1622,114 @@ def submit_held(job: Job, fn) -> Optional[Job]:
     return job
 
 
+def qobuz_hold() -> dict | None:
+    """Why downloads wait for Qobuz and how many do, or None."""
+    with _held_downloads_lock:
+        if _qobuz_hold is None:
+            return None
+        waiting = sum(1 for job, _run in _held_downloads
+                      if job.status is JobStatus.PENDING)
+        return {**_qobuz_hold, "waiting": waiting}
+
+
+def is_held(job: Job) -> bool:
+    """Whether a download sits with the held ones, waiting for Qobuz or for
+    a paused library, rather than in the work queue."""
+    with _held_downloads_lock:
+        return any(held is job for held, _run in _held_downloads)
+
+
+def waiting_for_qobuz(job: Job) -> bool:
+    with _held_downloads_lock:
+        return (_qobuz_hold is not None
+                and job.status is JobStatus.PENDING
+                and any(held is job for held, _run in _held_downloads))
+
+
+def release_qobuz_hold() -> None:
+    """Let the downloads held for Qobuz take their turn again."""
+    global _qobuz_hold
+    with _held_downloads_lock:
+        _qobuz_hold = None
+
+
+def _start_qobuz_hold(exc) -> None:
+    global _qobuz_hold
+    with _held_downloads_lock:
+        _qobuz_hold = {
+            "reason": "rejected" if isinstance(exc, AuthLost) else "unreachable",
+        }
+
+
+def _hold_in_order(job: Job, run) -> None:
+    """Add a download to the held ones in the order downloads were queued.
+    The caller holds ``_held_downloads_lock``."""
+    at = next((n for n, (held, _run) in enumerate(_held_downloads)
+               if held.created_at > job.created_at), len(_held_downloads))
+    _held_downloads.insert(at, (job, run))
+
+
+def _hold_for_qobuz(job: Job, fn) -> bool:
+    """Set a download aside while Qobuz is unavailable.
+
+    It is rebuilt from its saved album so it runs with whatever credentials
+    are saved when its turn comes. A download resuming an interrupted one
+    keeps its exact run and is never held.
+    """
+    if _qobuz_hold is None or not job.album_id or cancel_is_protected(job):
+        return False
+    from qobuz_librarian.web import job_runs
+    run = job_runs._requeued_download_run(job) or fn
+    with _held_downloads_lock:
+        if _qobuz_hold is None:
+            return False
+        _hold_in_order(job, run)
+    return True
+
+
+def _back_to_waiting(job: Job) -> None:
+    with job._lock:
+        job.status = JobStatus.PENDING
+        job.started_at = None
+
+
+def _wait_for_qobuz(job: Job, fn, exc) -> bool:
+    """Return a download that never began to the queue, behind the hold every
+    later download waits on too. False when it must fail instead."""
+    _start_qobuz_hold(exc)
+    if not _hold_for_qobuz(job, fn):
+        return False
+    _back_to_waiting(job)
+    job.push_line(f"Waiting for Qobuz: {qobuz_action_error_message(exc)}")
+    return True
+
+
+def _wait_for_recovery(job: Job, fn) -> bool:
+    """Return a download that reached the staging door while another
+    download's interrupted recovery holds the library to the held downloads,
+    which start once that recovery is settled."""
+    if cancel_is_protected(job):
+        return False
+    _back_to_waiting(job)
+    with _held_downloads_lock:
+        _hold_in_order(job, fn)
+    return True
+
+
 def _release_held_downloads() -> None:
     with _held_downloads_lock:
         if not _held_downloads:
             return
         check = _held_release_check
+        qobuz_held = _qobuz_hold is not None
+    if qobuz_held:
+        from qobuz_librarian.web import qobuz_access
+        try:
+            qobuz_access._recheck_token_if_due()
+        except Exception as exc:
+            log.warning("couldn't ask Qobuz again for held downloads: %s", exc)
+        if _qobuz_hold is not None:
+            return
     try:
         if check is None or not check():
             return
@@ -2255,8 +2419,45 @@ def restore_jobs(
             and (run := requeue(job)) is not None
         ):
             requeued.append((job, run))
+        elif status == JobStatus.SCANNING or (
+            status == JobStatus.PENDING
+            and job.kind == "scan"
+            and not pending_review
+            and not job.recoveries
+        ):
+            job.status = JobStatus.CANCELED
+            job.summary = _interrupted_scan_summary(job)
+            job.finished_at = (job.finished_at
+                               or job_persistence.previous_write_at()
+                               or job.created_at)
+            interrupted += 1
+            _persist_restored_transition(job, previous_status)
+        elif (
+            status == JobStatus.RUNNING
+            and job.execute_kind in ("library", "new_releases")
+            and job.title == RUN_TITLES[job.execute_kind]
+        ):
+            # Stopping folded the albums it had not finished back into the
+            # review and logged what it did last.
+            job.status = JobStatus.CANCELED
+            restart = job_persistence.RESTART_INTERRUPTED + " "
+            stopped = next((line for line in reversed(job.log_lines)
+                            if line.startswith("Stopped early. ")), "")
+            if stopped:
+                job.summary = restart + stopped.removeprefix("Stopped early. ")
+                if job.execute_kind == "library":
+                    job.attention = "interrupted"
+            else:
+                job.summary = restart + "The download did not finish."
+            job.finished_at = job.finished_at or time.time()
+            interrupted += 1
+            _persist_restored_transition(job, previous_status)
         elif status in (JobStatus.PENDING, JobStatus.RUNNING) and not pending_review:
             job.status = JobStatus.FAILED
+            if job.execute_kind in ("upgrade", "downsample", "repair"):
+                # A run keeps its review's job, and with it the review's
+                # summary, which no longer describes this run.
+                job.summary = ""
             # Only an album download / single-track download carries an
             # album_id, and only those get a Retry button on the job + history
             # pages.
@@ -2276,57 +2477,18 @@ def restore_jobs(
                 job.error = restart + "Start it again from the Lyrics page."
             elif job.execute_kind == "migration":
                 job.error = restart + "Start it again from the Migrate page."
-            elif (job.execute_kind == "library"
-                    and job.title == RUN_TITLES["library"]):
-                job.error = ("Interrupted by a restart before the download "
-                             "finished.")
             elif job.execute_kind == "library":
                 job.error = restart + "Start the scan again from the Library page."
-            elif (job.execute_kind == "new_releases"
-                    and job.title == RUN_TITLES["new_releases"]):
-                job.error = ("Interrupted by a restart before its downloads "
-                             "finished.")
             elif job.execute_kind == "downsample":
                 job.error = restart + "Start it again from Downsample."
+            elif job.execute_kind == "upgrade":
+                job.error = restart + "Start it again from Upgrade."
             else:
                 job.error = restart + "Run it again to retry."
             if job.recoveries:
                 job.error = (restart + "The original files were kept; check "
                              "them before retrying.")
-            job.finished_at = time.time()
-            interrupted += 1
-            _persist_restored_transition(job, previous_status)
-        elif status == JobStatus.SCANNING:
-            job.status = JobStatus.CANCELED
-            restart = job_persistence.RESTART_INTERRUPTED + " "
-            # A library scan resumes from its checkpoint: by itself when the
-            # Search page opens, if AUTO_LIBRARY_SCAN is on and the baseline
-            # is incomplete (the test the auto-resume makes), and from the
-            # notice there otherwise. The whole-library repair sweep also
-            # checkpoints but only picks up when its scan is started again;
-            # every other kind restarts.
-            if job.execute_kind == "library":
-                if scan_checkpoint.pending() is None:
-                    job.summary = (restart + "Start the scan again from the "
-                                   "Library page.")
-                elif (cfg.AUTO_LIBRARY_SCAN
-                        and not generation_state.baseline_complete()):
-                    job.summary = restart + LIBRARY_SCAN_AUTO_RESUMES
-                else:
-                    job.summary = (restart + "Resume it from the notice on "
-                                   "the Search page.")
-            elif job.execute_kind == "repair":
-                if scan_checkpoint.load("repair") is None:
-                    job.summary = (restart + "Start the scan again from the "
-                                   "Repair page.")
-                else:
-                    job.summary = (restart + "Start the repair scan again and "
-                                   "it continues from where it left off.")
-            elif job.execute_kind == "downsample":
-                job.summary = restart + "Start it again from Downsample."
-            else:
-                job.summary = restart + "Run the scan again to retry."
-            job.finished_at = job_persistence.previous_write_at() or job.created_at
+            job.finished_at = job.finished_at or time.time()
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.AWAITING_REVIEW or pending_review:
@@ -2422,6 +2584,26 @@ def restore_jobs(
             plural(len(requeued), "queued download"),
             plural(interrupted, "interrupted job"),
         )
+
+
+def _interrupted_scan_summary(job: Job) -> str:
+    """What a scan cut short by a restart says it left behind. A library or
+    whole-library repair scan keeps its progress in a checkpoint; every other
+    kind starts again."""
+    restart = job_persistence.RESTART_INTERRUPTED + " "
+    if job.execute_kind == "library":
+        if scan_checkpoint.pending() is None:
+            return restart + "Start the scan again from the Library page."
+        return (restart + "The next Library scan continues from where it "
+                "stopped.")
+    if job.execute_kind == "repair":
+        if scan_checkpoint.load("repair") is None:
+            return restart + "Start the scan again from the Repair page."
+        return (restart + "Start the repair scan again and it continues "
+                "from where it left off.")
+    if job.execute_kind == "downsample":
+        return restart + "Start it again from Downsample."
+    return restart + "Run the scan again to retry."
 
 
 def load_historical_job(job_id: str) -> Optional[Job]:
@@ -2539,10 +2721,12 @@ def request_cancel(job: Job) -> bool:
             # leaving neither a durable cancel nor runnable work.
             previous_finished_at = job.finished_at
             previous_cancel_requested = job.cancel_requested
+            previous_summary = job.summary
             canceled_at = time.time()
             job.cancel_requested = True
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
+            job.summary = job.summary or "Cancelled before it started."
             if (
                 not job_persistence._persist_locked(job)
                 and job._durability_required
@@ -2550,6 +2734,7 @@ def request_cancel(job: Job) -> bool:
                 job.status = JobStatus.PENDING
                 job.cancel_requested = previous_cancel_requested
                 job.finished_at = previous_finished_at
+                job.summary = previous_summary
                 return False
         else:
             job.cancel_requested = True

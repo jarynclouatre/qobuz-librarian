@@ -191,14 +191,23 @@ def test_copy_mode_leaves_originals_untouched(tmp_path):
 
 def test_in_place_mode_moves_only_after_verified_copy(tmp_path):
     plan = _placed_plan(tmp_path, n=2)
-    for entry in plan.placed:
-        entry.source.with_suffix(".lrc").write_text(entry.source.name)
-    plan = m.build_plan(
-        [(entry.source, entry.meta, entry.source_of_truth) for entry in plan.placed],
-        plan.dest_root,
-    )
+    album = tmp_path / "src" / "Album"
+    (album / "Scans").mkdir(parents=True)
+    (album / "Scans" / "back.jpg").write_bytes(b"scan")
+    (album / "readme.txt").write_text("notes")
+    items = []
+    for entry, folder in zip(plan.placed, (album, tmp_path / "src" / "Disc")):
+        folder.mkdir(exist_ok=True)
+        source = entry.source.rename(folder / entry.source.name)
+        source.with_suffix(".lrc").write_text(source.name)
+        items.append((source, entry.meta, entry.source_of_truth))
+    plan = m.build_plan(items, plan.dest_root)
     res = m.execute_plan(plan, in_place=True)
     assert res.copied == 2 and res.companions == 2
+    # The copied lyrics stay in both, but only these never reached the new
+    # library.
+    assert res.left_in_source == [
+        ("Album", ["Scans/", "readme.txt"]), ("Disc", [])]
     for entry in plan.placed:
         assert not entry.source.exists()
         destination = plan.dest_root / entry.dest_rel

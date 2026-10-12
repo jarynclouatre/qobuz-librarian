@@ -3521,6 +3521,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     if item.get("exact_edition"):
                         _prepare_staging_tags(album_dirs, album_title=edition_album_title(album))
                     prepared = _run_pre_import_hooks_for_dirs(album_dirs, args)
+                    if item.get("backup_path") is not None:
+                        from qobuz_librarian.modes.process import (
+                            _keep_own_cover,
+                        )
+
+                        _keep_own_cover(item["backup_path"], album_dirs)
                     sigs, resampled_n = prepared
                     item["resampled_n"] = resampled_n
                     item.update(_pre_import_outcome_fields(prepared))

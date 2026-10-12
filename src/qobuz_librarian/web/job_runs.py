@@ -5,7 +5,12 @@ from pathlib import Path
 from qobuz_librarian import download_result
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.api import search as qobuz_search
-from qobuz_librarian.api.auth import CredentialChanged, QobuzAccess
+from qobuz_librarian.api.auth import (
+    AuthLost,
+    CredentialChanged,
+    QobuzAccess,
+    QobuzUnavailable,
+)
 from qobuz_librarian.library import candidate_premise, catalog
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.modes import process as process_mode
@@ -124,8 +129,7 @@ def _make_download_run(
         active = None
         active_token = token
         if getattr(token, "credential_generation", ""):
-            active = qobuz_access._authorize_qobuz_live(
-                QobuzAccess.DOWNLOAD_ACTION,
+            active = qobuz_access._authorize_download_start(
                 expected_generation=expected_generation,
             )
             active_token = active.token
@@ -406,8 +410,11 @@ def _requeued_download_run(job):
     treat_as_new = bool(args.get("new_edition"))
 
     def run(j):
-        token = qobuz_access._authorize_qobuz_live(QobuzAccess.DOWNLOAD_ACTION).token
-        album = qobuz_search.get_album(album_id, token)
+        token = qobuz_access._authorize_download_start().token
+        try:
+            album = qobuz_search.get_album(album_id, token)
+        except (AuthLost, QobuzUnavailable) as exc:
+            raise job_mgr.WaitForQobuz() from exc
         if not track_id:
             return _make_download_run(album, token, treat_as_new=treat_as_new)(j)
         track = next(

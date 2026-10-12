@@ -53,6 +53,8 @@
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if qw and qw.paused_for -%}
       Waiting until {% if qw.paused_for.album %}“{{ qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.
+      {%- elif qw and qw.for_qobuz -%}
+      Waiting for Qobuz.
       {%- elif qw -%}
       Behind {{ qw.position }} job{{ 's' if qw.position != 1 }}.
       {%- else -%}
@@ -115,6 +117,7 @@
 {% endif %}
 
 {% include "_writes_paused_notice.html" %}
+{% include "_qobuz_hold_notice.html" %}
 
 {# The queue is work in flight; parked reviews live on their own pages.
    `pending` still carries them, so the empty state gates on the in-flight

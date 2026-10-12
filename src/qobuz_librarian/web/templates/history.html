@@ -45,8 +45,10 @@
         <span class="ql-status-chip is-warning">Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing</span>
       {% elif job.status == 'done' %}
         <span class="ql-status-chip is-success">Done</span>
+      {% elif job.interrupted_by_restart %}
+        <span class="ql-status-chip is-neutral">Interrupted</span>
       {% elif job.status == 'canceled' %}
-        <span class="ql-status-chip is-neutral">{{ 'Interrupted' if job.interrupted_by_restart else 'Cancelled' }}</span>
+        <span class="ql-status-chip is-neutral">Cancelled</span>
       {% elif job.status == 'awaiting_review' %}
         <span class="ql-status-chip is-info">Needs review</span>
       {% elif job.status == 'pending' %}
@@ -86,7 +88,7 @@
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
       <div class="ql-activity-actions">
         {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-        {% if (job.status == 'failed' or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
+        {% if (job.status in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
         {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -118,7 +120,7 @@
 <section class="ql-activity-section" aria-labelledby="history-jobs-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-jobs-heading">Jobs</h2>
-    <p class="ql-section-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}</p>
+    <p class="ql-section-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}{% if jobs %} · <a href="#history-downloads" class="ql-inline-link">Skip to downloads</a>{% endif %}</p>
   </header>
   <div class="ql-activity-list">
     {% for job in bulk_jobs %}
@@ -138,7 +140,7 @@
       </div>
       {{ job_side(job) }}
       {% if job.summary and job.summary != job.error %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
-      {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta ql-row-meta--error ql-row-reason">{{ reason }}</p>{% endif %}
+      {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta {{ 'ql-row-meta--warning' if job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>{% endif %}
     </article>
     {% endfor %}
   </div>
@@ -161,7 +163,7 @@
 {% endif %}
 
 {% if jobs %}
-<section class="ql-activity-section" aria-labelledby="history-downloads-heading">
+<section class="ql-activity-section ql-anchor-target" id="history-downloads" aria-labelledby="history-downloads-heading">
   <header class="ql-activity-section-header">
     <h2 id="history-downloads-heading">Downloads</h2>
     <p class="ql-section-meta">{{ total }}{% if attention_only and total > jobs|length %} · showing {{ jobs|length }}; open again for the rest{% elif pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
@@ -178,7 +180,9 @@
       {{ job_side(job) }}
       {% if job.error %}
       {% set reason = job.error | strip_log_pointer(none) %}
-      <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
+      <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing or job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
+      {% elif job.status == 'canceled' and job.summary %}
+      <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>
       {% endif %}
     </article>
     {% endfor %}

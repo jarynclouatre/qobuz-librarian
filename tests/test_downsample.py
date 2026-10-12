@@ -204,6 +204,18 @@ def test_downsample_never_sweeps_a_glob_matching_user_file(
     assert user_file.read_bytes() == b"user-owned audio"
 
 
+def test_an_interrupted_downsample_temp_is_not_read_as_a_track(tmp_path, tagged_flac):
+    from qobuz_librarian.library import catalog, scanner
+
+    album = tmp_path / "Artist" / "Album (2001)"
+    tagged_flac(album / "01 - Song.flac", TITLE="Song", TRACKNUMBER="1")
+    tagged_flac(album / f"{de._TMP_PREFIX}{'0' * 32}.flac", TITLE="Song", TRACKNUMBER="1")
+    scanner.clear_scan_caches()
+
+    assert [t["title"] for t in scanner.read_album_dir(album)] == ["Song"]
+    assert catalog._count_audio_files_in(album) == 1
+
+
 def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
         tmp_path, monkeypatch):
     from qobuz_librarian import config as cfg

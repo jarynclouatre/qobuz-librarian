@@ -38,6 +38,7 @@ from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
+    diagnostics,
     download_admission,
     download_outcomes,
     flows,
@@ -113,7 +114,30 @@ def _unreadable_recheck_pending():
         and time.monotonic() - _unreadable_checked_at
             >= _UNREADABLE_RECHECK_SECONDS
         and unreadable_artists_mod.load()
+        and not _auto_scan_backing_off()
     )
+
+
+# A scan started automatically that then fails holds off the next automatic
+# start on the same schedule as a failed live check, instead of starting
+# again on every Search visit.
+_auto_scan = {"job": None, "until": 0.0, "delay": 0.0}
+
+
+def _auto_scan_backing_off():
+    """Whether the last automatic scan failed recently enough to wait."""
+    job = _auto_scan["job"]
+    if job is not None and job.status in job_mgr.TERMINAL:
+        _auto_scan["job"] = None
+        if job.status is job_mgr.JobStatus.FAILED:
+            delay = min(max(_auto_scan["delay"] * 2,
+                            new_release_checks._AUTO_START_RETRY_FIRST),
+                        new_release_checks._AUTO_START_RETRY_MAX)
+            _auto_scan.update(
+                until=(job.finished_at or time.time()) + delay, delay=delay)
+        else:
+            _auto_scan.update(until=0.0, delay=0.0)
+    return time.time() < _auto_scan["until"]
 
 
 def _library_scan_resume_due():
@@ -125,23 +149,41 @@ def _library_scan_resume_due():
         and qobuz_access._qobuz_ready()
         and not generation_state.baseline_complete()
         and scan_checkpoint.pending() is not None
+        and not _auto_scan_backing_off()
     )
 
 
 def _start_due_jobs_in_background():
     """Run the dashboard's automatic starts off the request. Each begins with a
-    live Qobuz check, which must never hold up the page."""
+    live Qobuz check, which must never hold up the page. A token Qobuz
+    rejected is asked about again every few minutes, so Search comes back by
+    itself once it is accepted.
+
+    Returns whether an interrupted library scan is resuming, so the page that
+    started it does not also offer to resume it.
+    """
+    if (qobuz_access._token_valid_for() is False
+            and qobuz_access._token_recheck_due()):
+        try:
+            threading.Thread(target=qobuz_access._recheck_token_if_due,
+                             name="token-recheck", daemon=True).start()
+        except RuntimeError:
+            pass
     try:
-        due = (_library_scan_resume_due() or _unreadable_recheck_pending()
+        resuming = _library_scan_resume_due()
+        due = (resuming or _unreadable_recheck_pending()
                or new_release_checks._new_release_check_due())
     except OSError as e:
         _log.warning(
             "automatic start from the dashboard skipped: %s", e)
-        return
+        return False
     if not due:
-        return
+        return False
+    resuming = resuming and not any(
+        j.status != job_mgr.JobStatus.AWAITING_REVIEW
+        for j in job_mgr.registry.pending_and_running())
     if not _auto_start_busy.acquire(blocking=False):
-        return
+        return resuming
 
     def run():
         try:
@@ -158,6 +200,8 @@ def _start_due_jobs_in_background():
                          daemon=True).start()
     except RuntimeError:
         _auto_start_busy.release()
+        return False
+    return resuming
 
 
 def _maybe_resume_library_scan():
@@ -191,11 +235,11 @@ def _maybe_resume_library_scan():
                for j in job_mgr.registry.pending_and_running()):
             return
         if readable_again:
-            scans._start_library_scan(credentials)
+            _auto_scan["job"] = scans._start_library_scan(credentials)
             return
         cp = scan_checkpoint.pending()
         if cp is not None:
-            scans._start_library_scan(
+            _auto_scan["job"] = scans._start_library_scan(
                 credentials,
                 partial_only=(cp["kind"] == "partial"),
             )
@@ -214,7 +258,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         # These read state files, so they run here (off the event loop)
         # alongside the other disk work; any job they start is submitted from
         # a background thread.
-        _start_due_jobs_in_background()
+        resuming = _start_due_jobs_in_background()
         scan_state = scans._library_scan_state()
         library_generation = scans._truthful_library_generation()
         return {
@@ -228,11 +272,13 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # seeded the new-release baseline.
             "baseline_complete": generation_state.baseline_complete(
                 library_generation),
-            "setup_scanning": scans._active_library_scan() is not None,
+            "setup_scanning": (resuming
+                               or scans._active_library_scan() is not None),
             "library_scan_state": scan_state,
             # An interrupted gap-scan, surfaced on the dashboard the way
             # /library already does, gated on no scan running.
-            "library_resume": scans._library_resume_offer(library_generation),
+            "library_resume": (None if resuming else
+                               scans._library_resume_offer(library_generation)),
             # A fresh install has no credentials; the page says so up front.
             # Filesystem-only.
             "creds_ok": qobuz_access._creds_ok(),
@@ -243,6 +289,10 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # Stores that couldn't be read, kept aside while the run fell back
             # to defaults.
             "corrupt_stores": state_file.corrupt_store_details(),
+            "restored_albums": [
+                diagnostics._album_name_from_path(path)
+                for path in runtime.take_restored_albums()
+            ],
         }
 
     loop = asyncio.get_running_loop()

@@ -69,3 +69,22 @@ def test_queued_action_rejects_changed_credentials_before_network(monkeypatch):
             )
 
     session.assert_not_called()
+
+
+def test_a_stop_ends_a_qobuz_call_without_its_retries(monkeypatch):
+    """A cancelled or shutting-down crawl must not sit through the retries of
+    a Qobuz call that hangs; Docker kills the app after 60 seconds."""
+    from qobuz_librarian.api import client
+
+    stopped = []
+    monkeypatch.setattr(client, "_STOP_CHECK", lambda: bool(stopped))
+
+    def hang(*_args, **_kwargs):
+        stopped.append(True)
+        raise requests.Timeout("read timed out")
+
+    with patch("qobuz_librarian.api.client._get_session") as sess:
+        sess.return_value.get.side_effect = hang
+        with pytest.raises(QobuzUnavailable):
+            qobuz_get("artist/get", {}, "tok")
+    assert sess.return_value.get.call_count == 1

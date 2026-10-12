@@ -16,10 +16,12 @@ def _queue_wait(job):
     how many run before it (the one holding the worker + any earlier-queued).
     A job waiting behind an interrupted download instead carries
     ``paused_for``, because "starts automatically" is not true of it: nothing
-    moves until that album is retried or given up.
+    moves until that album is retried or given up. One held because Qobuz
+    rejected the token or could not be reached carries ``for_qobuz``.
 
-    Returns {"ahead_title", "lane", "position", "paused_for"} or None when
-    nothing's ahead, i.e. it's about to start, so there's nothing to explain."""
+    Returns {"ahead_title", "lane", "position", "paused_for", "for_qobuz"} or
+    None when nothing's ahead, i.e. it's about to start, so there's nothing to
+    explain."""
     if job.status != job_mgr.JobStatus.PENDING:
         return None
     holder = None
@@ -38,13 +40,15 @@ def _queue_wait(job):
             "album": queue_recovery._startup_recovery_album_label(),
             "job_id": queue_recovery._startup_recovery_web_job_id(),
         }
-    if holder is None and ahead == 0 and paused_for is None:
+    for_qobuz = job_mgr.waiting_for_qobuz(job)
+    if holder is None and ahead == 0 and paused_for is None and not for_qobuz:
         return None
     return {
         "ahead_title": holder.title if holder else "",
         "lane": job.kind,
         "position": ahead + (1 if holder else 0),
         "paused_for": paused_for,
+        "for_qobuz": for_qobuz,
     }
 
 

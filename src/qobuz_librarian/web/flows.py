@@ -1886,13 +1886,20 @@ def _scan_library_impl(
             try:
                 (name, artist_name, gaps, artist_id, catalog_ids,
                  owned_ids) = fut.result()
-            except (AuthLost, QobuzUnavailable):
+            except (AuthLost, QobuzUnavailable) as e:
                 # A lost token or an unreachable API isn't a per-artist
                 # hiccup, so cancel the rest and fail the scan rather than
                 # silently report a partial library as the full picture.
                 for f in futures:
                     f.cancel()
                 checkpoint.flush()
+                if isinstance(e, QobuzUnavailable):
+                    name = futures[fut].name
+                    log.info(f"    {name}: {e}")
+                    raise QobuzUnavailable(
+                        f"Qobuz didn't answer for {name}, so the scan "
+                        "stopped there. The next scan picks up where it "
+                        "left off.") from e
                 raise
             except Exception as e:
                 # A per-artist failure (not auth/outage) is left unscanned so a
@@ -4145,7 +4152,8 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
     try:
         with job_mgr.staging_lock():
             result = process_mode.process_album(full, build_args(), allow_force=False,
-                                   already_confirmed=True, token=token) or {}
+                                   already_confirmed=True, token=token,
+                                   cover_backup=backup) or {}
     except Exception as exc:
         if backup:
             if backup_mod.restore_upgrade_backup(backup, album_dir):
@@ -5242,13 +5250,22 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     if pruned:
         parts.append(f"cleared {plural(pruned, 'empty source folder')}")
     left = getattr(result, "left_in_source", ())
-    if left:
+    left_out = [(folder, names) for folder, names in left if names]
+    copies_only = len(left) - len(left_out)
+    if left_out:
         parts.append(
-            f"kept {plural(len(left), 'source folder')} with files still in "
-            f"{'it' if len(left) == 1 else 'them'} (cover art and sidecars "
-            "are copied, not moved)")
-        for folder in left[:50]:
-            job.push_line(f"kept in the source: {folder}")
+            f"{plural(len(left_out), 'source folder')} still "
+            f"{'holds' if len(left_out) == 1 else 'hold'} files the new "
+            "library doesn't have, listed in the activity log")
+        for folder, names in left_out[:50]:
+            shown = ", ".join(names[:20]) + (
+                f" and {len(names) - 20} more" if len(names) > 20 else "")
+            job.push_line(f"not carried, still in {folder}: {shown}")
+    if copies_only:
+        parts.append(
+            f"{plural(copies_only, 'source folder')} still "
+            f"{'holds' if copies_only == 1 else 'hold'} only cover art and "
+            "sidecars, which were copied")
     if result.cancelled:
         parts.append("the destination may contain a partial migration")
     if recoveries:

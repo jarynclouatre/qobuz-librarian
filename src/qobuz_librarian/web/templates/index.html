@@ -29,6 +29,22 @@
     {% endif %}
 
     {% include "_writes_paused_notice.html" %}
+    {% include "_qobuz_hold_notice.html" %}
+
+    {% if restored_albums %}
+    <div class="ql-notice ql-notice-info flex items-start gap-3 p-4" role="status">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
+           viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <span class="min-w-0 flex-1 break-words text-sm">
+        <strong>Put back {{ restored_albums | length }} album{{ 's' if restored_albums | length != 1 }}
+          an interrupted upgrade or repair had moved aside:</strong>
+        {% for album in restored_albums %}{{ album }}{{ '; ' if not loop.last else '.' }}{% endfor %}
+      </span>
+    </div>
+    {% endif %}
 
     {% if lyric_retry_count %}
     <div class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
@@ -196,10 +212,17 @@
       {% elif creds_token_valid == False %}
       <div class="ql-panel-header">
         <h2>Reconnect Qobuz</h2>
-        <p>Your saved token was rejected.</p>
+        <p>{{ qobuz_check_result or "Your saved token was rejected." }}</p>
       </div>
       <div class="ql-panel-actions">
-        <a href="/settings#qobuz" class="ql-btn ql-btn-primary">Open Settings</a>
+        <div class="flex flex-wrap gap-2">
+          <a href="/settings#qobuz" class="ql-btn ql-btn-primary">Open Settings</a>
+          <form action="/qobuz/check" method="post" data-busy-submit>
+            <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+            <input type="hidden" name="return_to" value="/">
+            <button type="submit" class="ql-btn ql-btn-secondary">Check again</button>
+          </form>
+        </div>
       </div>
       {% else %}
       <form action="/search" method="post"
@@ -340,10 +363,11 @@
         </div>
         {% endfor %}
         {% if queued_jobs %}
-        {% set _wait = namespace(paused=none) %}
+        {% set _wait = namespace(paused=none, qobuz=false) %}
         {% for qj in queued_jobs %}
         {% set qw = (queue_waits or {}).get(qj.id) %}
         {% if qw and qw.paused_for and not _wait.paused %}{% set _wait.paused = qw.paused_for %}{% endif %}
+        {% if qw and qw.for_qobuz %}{% set _wait.qobuz = true %}{% endif %}
         {% endfor %}
         {% set _first_wait = (queue_waits or {}).get(queued_jobs[0].id) %}
         <div class="ql-active-row">
@@ -351,6 +375,8 @@
             <p class="ql-row-title">{{ queued_jobs | length }} job{{ 's' if queued_jobs|length != 1 }} queued</p>
             {% if _wait.paused %}
             <p class="ql-row-meta">Waiting until {% if _wait.paused.album %}“{{ _wait.paused.album }}”{% else %}the interrupted download{% endif %} is retried or given up.</p>
+            {% elif _wait.qobuz %}
+            <p class="ql-row-meta">Waiting for Qobuz.</p>
             {% elif queued_jobs | length == 1 %}
             <p class="ql-row-meta">{% if _first_wait %}Behind {{ _first_wait.position }} job{{ 's' if _first_wait.position != 1 }}.{% else %}Next.{% endif %}</p>
             {% endif %}

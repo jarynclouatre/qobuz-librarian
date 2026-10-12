@@ -28,6 +28,10 @@ _STOP_SIGNALLED = threading.Event()
 # authority.
 _JOBS_RESTORED = False
 _JOBS_RESTORE_LOCK = threading.Lock()
+# Album folders put back from their backups when the lock was taken, kept
+# until the Search page has said so once.
+_RESTORED_ALBUMS = []
+_RESTORED_ALBUMS_LOCK = threading.Lock()
 
 
 def run_lock_handle():
@@ -68,6 +72,18 @@ def set_lock_unenforceable(on: bool) -> None:
 
 def shutting_down() -> bool:
     return _SHUTTING_DOWN
+
+
+def note_restored_albums(paths) -> None:
+    with _RESTORED_ALBUMS_LOCK:
+        _RESTORED_ALBUMS.extend(paths)
+
+
+def take_restored_albums() -> list:
+    with _RESTORED_ALBUMS_LOCK:
+        taken = list(_RESTORED_ALBUMS)
+        _RESTORED_ALBUMS.clear()
+    return taken
 
 
 def _run_lock_intact() -> bool:

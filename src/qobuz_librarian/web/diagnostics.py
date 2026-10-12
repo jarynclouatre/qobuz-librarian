@@ -374,6 +374,7 @@ def _diagnostics():
     })
 
     stranded = []
+    left_in_backups = []
     stranded_error = False
     if cfg.UPGRADE_BACKUP_DIR.exists():
         try:
@@ -381,6 +382,7 @@ def _diagnostics():
                 if entry.is_dir() and (entry.suffix == ".partial"
                                        or entry.name == ".restore_trash"):
                     stranded.append(entry)
+            left_in_backups = backup_mod.albums_left_in_backups()
         except OSError as exc:
             stranded_error = True
             _log.warning(
@@ -391,10 +393,19 @@ def _diagnostics():
             "ok": False,
             "detail": "Could not inspect this folder; its status is unknown.",
         })
-    elif stranded:
+    elif stranded or left_in_backups:
+        found = []
+        if left_in_backups:
+            n = len(left_in_backups)
+            found.append(
+                f"{plural(n, 'album')} {'is' if n == 1 else 'are'} in the "
+                "backup folder and missing from the library. Restore "
+                f"{'it' if n == 1 else 'them'} below")
+        if stranded:
+            found.append(f"{len(stranded)} found in "
+                         f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed")
         checks.append({"label": "Unfinished upgrade backups", "ok": False,
-                       "detail": f"{len(stranded)} found in "
-                                 f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed"})
+                       "detail": ". ".join(found)})
     else:
         checks.append({"label": "Unfinished upgrade backups", "ok": True,
                        "detail": "none"})

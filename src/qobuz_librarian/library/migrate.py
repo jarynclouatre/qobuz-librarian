@@ -161,8 +161,10 @@ class ExecResult:
     # Empty source directories removed through their preview-sealed identities
     # once every track of their source folder has left.
     pruned: int = 0
-    # In-place runs: source folders every track left that still hold files
-    # (cover art and sidecars are copied, not moved), as relative paths.
+    # In-place runs: source folders every track left that still hold files,
+    # as (relative path, names of what did not reach the destination). Cover
+    # art and sidecars are copied, not moved, so a folder holding only those
+    # names nothing.
     left_in_source: list = field(default_factory=list)
     cancelled: bool = False
     interrupted: bool = False
@@ -4580,9 +4582,13 @@ def _prune_retired_source_parents(binding, receipts, *, recoveries=None,
     return removed
 
 
-def _source_folders_left(binding, chains) -> list:
+def _source_folders_left(binding, chains, carried) -> list:
     """The finished source folders, of ``{folder: sealed parent chain}``, that
-    still hold anything, as relative paths."""
+    still hold anything, as (relative path, names left out) pairs.
+
+    ``carried`` holds the source paths of the cover art and sidecars that
+    reached the destination; every other name is left out, with a slash
+    after a folder's."""
     left = []
     for folder, chain in sorted(chains.items()):
         if not chain:
@@ -4592,8 +4598,17 @@ def _source_folders_left(binding, chains) -> list:
         except OSError:
             continue
         try:
-            if os.listdir(descriptors[-1]):
-                left.append(os.path.join(*folder))
+            names = sorted(os.listdir(descriptors[-1]))
+            if names:
+                left_out = []
+                for name in names:
+                    if binding.path.joinpath(*folder, name) in carried:
+                        continue
+                    value = os.stat(
+                        name, dir_fd=descriptors[-1], follow_symlinks=False)
+                    left_out.append(
+                        name + "/" if stat.S_ISDIR(value.st_mode) else name)
+                left.append((os.path.join(*folder), left_out))
         except OSError:
             continue
         finally:
@@ -5051,7 +5066,9 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
         return _source_folders_left(
             source_root,
             {folder: chain for folder, chain in folder_chains.items()
-             if not waiting[folder]})
+             if not waiting[folder]},
+            {source for source, _destination, status, _reason
+             in result.companion_outcomes if status in (COPIED, SKIPPED)})
 
     source_root = destination_root = None
     try:

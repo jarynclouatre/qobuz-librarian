@@ -1,6 +1,8 @@
 """Core album processing: detect gaps, prompt, download, import, consolidate."""
 import math
 import os
+import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from qobuz_librarian.download import (
 )
 from qobuz_librarian.download_result import incomplete_track_counts, tracks_missing
 from qobuz_librarian.integrations.beets import (
+    _ART_EXTS,
     _prepare_staging_tags,
     beets_import_paths,
     capture_beets_album_entries,
@@ -645,6 +648,53 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
     return dest, updated, left
 
 
+def _keep_own_cover(backup, staged_dirs):
+    """Give the download the album's own cover art where both have one.
+
+    A staged image with a different image at the same place in the backup
+    takes the backup's bytes, so the import files the user's cover instead of
+    Qobuz's and the backup's proof finds it unchanged.
+    """
+    kept = 0
+    for staged in staged_dirs:
+        staged = Path(staged)
+        try:
+            images = sorted(
+                path for path in staged.rglob("*")
+                if path.suffix.lower() in _ART_EXTS
+                and not path.is_symlink() and path.is_file())
+        except OSError:
+            continue
+        for image in images:
+            own = Path(backup) / image.relative_to(staged)
+            temporary = None
+            try:
+                if own.is_symlink() or not own.is_file():
+                    continue
+                data = own.read_bytes()
+                if data == image.read_bytes():
+                    continue
+                descriptor, temporary = tempfile.mkstemp(
+                    dir=image.parent, prefix=".ql-own-cover-")
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                    os.fchmod(handle.fileno(),
+                              stat.S_IMODE(image.stat().st_mode))
+                os.replace(temporary, image)
+                temporary = None
+                kept += 1
+            except OSError as e:
+                vlog(f"couldn't stage your own {image.name}: {e}")
+            finally:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+    if kept:
+        log.info(fmt(C.GRAY, "  ⤷  Kept your own cover art for the album."))
+
+
 def _keep_backup_for_companions(backup_path, left):
     """Pin a backup that holds the only copy of companions it could not carry.
 
@@ -762,7 +812,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                   token=None, quality=None, treat_as_new=False,
                   exact_edition=False,
                   expected_album_receipt=None,
-                  expected_gap_fill_receipts=None):
+                  expected_gap_fill_receipts=None,
+                  cover_backup=None):
     """End-to-end processing for one Qobuz album: detect → prompt → download →
     cleanup → import → consolidate.
 
@@ -773,6 +824,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                     artist mode so a single forgetful run doesn't wipe every
                     album by an artist.
       label         optional prefix for status output (e.g. "[3/12]")
+      cover_backup  a whole-album backup the caller took first, whose cover
+                    art the download keeps
 
     Track-by-track downloading is a queue-only contract: this path always
     downloads the whole album in one rip invocation and delegates per-track
@@ -1558,6 +1611,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                     relocate_disc_album_artwork(_staged)
                 except Exception as _ae:
                     vlog(f"artwork relocation raised: {_ae}")
+            own_cover = (
+                upgrade_backup_path if auto_upgrade_active else cover_backup)
+            if own_cover is not None:
+                _keep_own_cover(own_cover, staged_dirs_for_import or [])
             # A brand-new album (no folder found on disk) lands in a fresh
             # directory, so it can't split an existing beets album into
             # duplicate rows, so skip the full-library de-dup scan for it.

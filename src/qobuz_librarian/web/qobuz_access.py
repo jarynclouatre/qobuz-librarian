@@ -1,6 +1,7 @@
 """The saved Qobuz credentials, the token check and the bounded Qobuz calls."""
 import asyncio
 import threading
+import time
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import redaction
@@ -34,6 +35,13 @@ _AUTH_LOSS_NOTIFIED_GENERATIONS: set[str] = set()
 _CREDENTIAL_LOCK = threading.RLock()
 
 
+# The saved token is asked about again at most this often while Qobuz has
+# rejected it or downloads wait for Qobuz to answer.
+_RECHECK_INTERVAL = 300.0
+_rechecked_at = float("-inf")
+_recheck_lock = threading.Lock()
+
+
 def set_token_state(valid: bool | None, generation: str | None) -> None:
     global _TOKEN_VALID, _TOKEN_GENERATION
     _TOKEN_VALID = valid
@@ -58,6 +66,18 @@ def _authorize_qobuz_live(access: QobuzAccess, *, expected_generation=""):
         expected_generation=expected_generation,
         auth_valid=_token_valid_for(),
     )
+
+
+def _authorize_download_start(*, expected_generation=""):
+    """The live check a queued download makes before it touches anything. A
+    rejected token or an unreachable Qobuz makes it wait rather than fail."""
+    try:
+        return _authorize_qobuz_live(
+            QobuzAccess.DOWNLOAD_ACTION,
+            expected_generation=expected_generation,
+        )
+    except (AuthLost, QobuzUnavailable) as exc:
+        raise job_mgr.WaitForQobuz() from exc
 
 
 async def _authorize_qobuz_for_web(access: QobuzAccess, *,
@@ -179,6 +199,8 @@ def _on_auth_state(evidence: AuthEvidence) -> None:
         }
         _TOKEN_VALID = valid
         _TOKEN_GENERATION = evidence.generation
+        if evidence.outcome is AuthOutcome.ACCEPTED:
+            job_mgr.release_qobuz_hold()
         if (not valid and evidence.generation
                 not in _AUTH_LOSS_NOTIFIED_GENERATIONS):
             _AUTH_LOSS_NOTIFIED_GENERATIONS.add(evidence.generation)
@@ -209,6 +231,43 @@ def _qobuz_ready() -> bool:
     return _qobuz_access(QobuzAccess.CATALOGUE_ACTION).allowed
 
 
+def _check_saved_token():
+    """Ask Qobuz whether the saved token works and publish a clear answer.
+
+    Returns the verdict, or None with no token saved. TEMPORARY means Qobuz
+    could not be reached.
+    """
+    global _rechecked_at
+    credentials = _credentials_snapshot()
+    if not credentials.configured:
+        return None
+    _rechecked_at = time.monotonic()
+    verdict = api_client.call_within(
+        cfg.WEB_TEST_AUTH_TIMEOUT, _classify_token, credentials.token)
+    if verdict in {
+        AuthOutcome.ACCEPTED,
+        AuthOutcome.REJECTED,
+        AuthOutcome.ENTITLEMENT,
+    }:
+        _on_auth_state(AuthEvidence(credentials.generation, verdict))
+    return verdict
+
+
+def _token_recheck_due() -> bool:
+    return time.monotonic() - _rechecked_at >= _RECHECK_INTERVAL
+
+
+def _recheck_token_if_due():
+    """Check the saved token again unless that was done in the last few
+    minutes."""
+    global _rechecked_at
+    with _recheck_lock:
+        if not _token_recheck_due():
+            return
+        _rechecked_at = time.monotonic()
+    _check_saved_token()
+
+
 async def _probe_token():
     """One-shot startup check that the saved token still authenticates.
 
@@ -216,25 +275,13 @@ async def _probe_token():
     inconclusive (no token saved, or the probe couldn't reach Qobuz), so
     the dashboard treats it as "don't nag yet."
     """
-    credentials = _credentials_snapshot()
-    if not credentials.configured:
-        return
     try:
-        verdict = await asyncio.wait_for(
-            asyncio.get_running_loop().run_in_executor(
-                None, lambda: api_client.call_within(cfg.WEB_TEST_AUTH_TIMEOUT,
-                                          _classify_token,
-                                          credentials.token)),
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, _check_saved_token),
             timeout=cfg.WEB_TEST_AUTH_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        verdict = AuthOutcome.TEMPORARY
-    if verdict in {
-        AuthOutcome.ACCEPTED,
-        AuthOutcome.REJECTED,
-        AuthOutcome.ENTITLEMENT,
-    }:
-        _on_auth_state(AuthEvidence(credentials.generation, verdict))
+        pass
 
 
 def _get_token():

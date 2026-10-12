@@ -192,7 +192,10 @@ def read_album_dir(album_dir: Path, walk_errors=None):
     try:
         for f in iter_tree_no_symlinks(album_dir, errors=walk_errors):
             try:
-                if f.suffix.lower() in _exts and _is_type(f, stat.S_ISREG):
+                # A dot name is hidden: a Downsample temp or a macOS "._"
+                # resource file, never a track.
+                if (f.suffix.lower() in _exts and not f.name.startswith(".")
+                        and _is_type(f, stat.S_ISREG)):
                     audio_files.append(f)
             except OSError as e:
                 if walk_errors is None:

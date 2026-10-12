@@ -294,6 +294,12 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         qobuz_access._token_valid_for(credentials) is False,
     )
     context.setdefault("health_lock_busy", bool(runtime._LOCK_BUSY_PID))
+    context.setdefault("qobuz_hold", job_mgr.qobuz_hold())
+    # What Check again found, shown where the button was pressed.
+    context.setdefault(
+        "qobuz_check_result",
+        _notice_text(request.query_params.get("qobuz_check")),
+    )
     context.setdefault("upgrade_available", runtime._upgrade_available())
     context.setdefault("discover_available", runtime._discover_available())
     if review_badge_ack:
@@ -395,7 +401,7 @@ def _notice_text(key) -> str:
     return held[1]
 
 
-def render_error_page(request, code, title, msg):
+def render_error_page(request, code, title, msg, action=None):
     """Render the app's styled error page from routes or middleware.
 
     A visitor with no session gets the sign-in shell instead: the app shell
@@ -414,7 +420,8 @@ def render_error_page(request, code, title, msg):
                                 else "Back to sign in")},
             status_code=code)
     return _tr(request, "error.html",
-               {"code": code, "title": title, "msg": msg}, status_code=code)
+               {"code": code, "title": title, "msg": msg, "action": action},
+               status_code=code)
 
 
 # Cover files, in the order the app trusts them. beets writes cover.jpg for

@@ -1053,6 +1053,7 @@ class _ConsolidationBinding:
     sibling: _AlbumSeal
     files: tuple[_HeldFile, ...]
     database: _BeetsItemSeal
+    kept: dict | None = None
     used: bool = False
 
     @property
@@ -1076,20 +1077,28 @@ class _ConsolidationBinding:
 def _bind_summary(summary, primary, sibling):
     files = []
     seen = set()
-    for track, _primary_track in summary["overlap"]:
+    # Which primary track stands in for each sibling file, so the backup
+    # can expire once the primary still holds them.
+    kept = {}
+    for track, primary_track in summary["overlap"]:
         raw_path = track.get("path")
         held = sibling.held_file(raw_path) if raw_path else None
         if held is None or held.metadata is None or held.relative in seen:
             raise OSError("overlap no longer maps to one reviewed audio file")
         seen.add(held.relative)
         files.append(held)
+        standing_in = primary.held_file(primary_track.get("path") or "")
+        if kept is not None and standing_in is not None:
+            kept["/".join(held.relative)] = "/".join(standing_in.relative)
+        else:
+            kept = None
     if not files:
         return summary
     anchors_match = lambda: primary.matches() and sibling.matches()
     database = _capture_beets_items(
         [item.path for item in files], anchors_match)
     summary["_binding"] = _ConsolidationBinding(
-        primary, sibling, tuple(files), database)
+        primary, sibling, tuple(files), database, kept)
     return summary
 
 
@@ -1278,9 +1287,9 @@ def execute_consolidation(summary):
     Consolidation is the one destructive mode whose duplicate match can rest on a
     title+disc+(track)+duration-within-2s heuristic when neither side carries an
     ISRC/MBID, so a mistaken match would otherwise unlink a genuinely different
-    recording with no way back. Routing removals through the gap-fill backup dir
-    lets the retention sweep recover them, matching every other destructive
-    mode's keep-a-backup stance."""
+    recording with no way back. The backup keeps them restorable for the
+    retention window; the age sweep then clears it only while the primary
+    still holds a decode-clean track at least as long for each of them."""
     binding = summary.get("_binding")
     attempted = len(summary.get("overlap") or ())
     if not isinstance(binding, _ConsolidationBinding) or binding.used:
@@ -1333,7 +1342,12 @@ def execute_consolidation(summary):
     if binding.database.tracked:
         log.info(fmt(C.GRAY, "    ⤷  Updated the beets library."))
     if backup_result is not None:
-        log.info(fmt(C.GRAY, f"    ⤷  Backup folder: {backup_result.path}"))
+        expires = binding.kept is not None and backup_mod.mark_consolidated(
+            backup_result, binding.primary.path, binding.kept)
+        log.info(fmt(C.GRAY, f"    ⤷  Backup folder: {backup_result.path}"
+                     + (f" (cleared after "
+                        f"{plural(config.UPGRADE_BACKUP_RETENTION_DAYS, 'day')})"
+                        if expires else "")))
     scanner.clear_scan_caches()
     binding.sibling.remove_empty_directories(binding.files)
     for path in removed:

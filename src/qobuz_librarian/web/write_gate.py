@@ -38,9 +38,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
         action = {"href": "/settings#mode", "label": "Open Settings"}
     elif runtime._LOCK_BUSY_PID is not None:
         reason = "Another Qobuz Librarian run is using the library."
-        msg = ("Another Qobuz Librarian run is active. Downloads and scans are "
-               "paused. Stop the other run first, then restart Qobuz "
-               "Librarian.")
+        msg = ("Another Qobuz Librarian run is using the library, so downloads "
+               "and scans here are paused until it ends.")
     elif (unwritable := storage._unwritable_volumes()):
         reason = "A folder Qobuz Librarian must write to is read-only."
         action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}

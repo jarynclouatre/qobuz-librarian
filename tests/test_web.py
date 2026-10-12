@@ -125,9 +125,13 @@ def test_staging_lock_serialises_lane_album_work():
     assert second_inside.wait(timeout=5)
 
 
-def test_scan_job_parks_for_review_then_executes():
+def test_scan_job_parks_for_review_then_executes(monkeypatch):
     jm.start_worker()
     executed = {}
+    hooks = []
+    monkeypatch.setattr(
+        jm, "_start_post_job_hook",
+        lambda payload: payload["id"] == job.id and hooks.append(payload))
 
     def scan(j):
         j.add_candidate("album", "Album A", "Artist", payload={"id": 1})
@@ -140,9 +144,15 @@ def test_scan_job_parks_for_review_then_executes():
     jm.submit_scan(job, scan, execute)
     assert _wait_for(lambda: job.status == jm.JobStatus.AWAITING_REVIEW)
     assert len(job.candidates) == 2
+    # Results waiting for review are reported, not only finished jobs.
+    assert _wait_for(lambda: hooks)
+    assert (hooks[0]["status"], hooks[0]["review_items"]) == (
+        "awaiting_review", 2)
     assert jm.approve(job, ["c1"])
     assert _wait_for(lambda: job.status == jm.JobStatus.DONE)
     assert executed["ids"] == [2]
+    assert _wait_for(lambda: len(hooks) == 2)
+    assert hooks[1]["status"] == "done"
 
 
 def test_post_job_hook_delivers_json_to_an_inert_command(tmp_path, monkeypatch):
@@ -1312,6 +1322,124 @@ def test_auth_failure_before_any_import_reparks_the_review():
         _remove_job(job)
 
 
+def test_failed_automatic_scan_resume_is_not_restarted_on_the_next_visit(
+    monkeypatch,
+):
+    """An unfinished first Library scan that fails when Search resumes it
+    waits before the next automatic resume instead of starting on every
+    visit."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import generation_state, scan_checkpoint
+    from qobuz_librarian.web import (
+        new_release_checks,
+        qobuz_access,
+        routes_search,
+        scans,
+        write_gate,
+    )
+
+    monkeypatch.setattr(routes_search, "_auto_scan",
+                        {"job": None, "until": 0.0, "delay": 0.0})
+    monkeypatch.setattr(cfg, "AUTO_LIBRARY_SCAN", True)
+    monkeypatch.setattr(write_gate, "_web_writes_paused", lambda: False)
+    monkeypatch.setattr(qobuz_access, "_qobuz_ready", lambda: True)
+    monkeypatch.setattr(generation_state, "baseline_complete", lambda *_a: False)
+    monkeypatch.setattr(scan_checkpoint, "pending",
+                        lambda: {"kind": "missing", "done": 3})
+    monkeypatch.setattr(new_release_checks, "_auto_start_credentials", object)
+    started = []
+
+    def failing_scan(_credentials, partial_only=False):
+        job = jm.Job(title="Library scan", status=jm.JobStatus.FAILED,
+                     finished_at=time.time())
+        started.append(job)
+        return job
+
+    monkeypatch.setattr(scans, "_start_library_scan", failing_scan)
+    routes_search._maybe_resume_library_scan()
+    routes_search._maybe_resume_library_scan()
+    assert len(started) == 1
+
+    # The refresh a folder readable again starts waits out the same failure.
+    from qobuz_librarian.library import unreadable_artists
+    monkeypatch.setattr(generation_state, "baseline_complete", lambda *_a: True)
+    monkeypatch.setattr(unreadable_artists, "load", lambda: ["Artist"])
+    monkeypatch.setattr(unreadable_artists, "readable_again", lambda _l: True)
+    monkeypatch.setattr(routes_search, "_unreadable_checked_at", -1e9)
+    routes_search._maybe_resume_library_scan()
+    assert len(started) == 1
+
+
+def test_rejected_token_holds_the_download_queue_until_qobuz_answers(
+    monkeypatch,
+):
+    """A token Qobuz rejects before a download starts holds that download and
+    every one queued behind it, instead of failing each on its own."""
+    from qobuz_librarian.api.auth import AuthLost
+    from qobuz_librarian.web import job_runs, qobuz_access
+
+    ran = []
+    monkeypatch.setattr(jm, "_held_downloads", [])
+    monkeypatch.setattr(jm, "_qobuz_hold", None)
+    monkeypatch.setattr(jm, "_held_release_check", lambda: True)
+    monkeypatch.setattr(qobuz_access, "_recheck_token_if_due", lambda: None)
+    monkeypatch.setattr(
+        job_runs, "_requeued_download_run",
+        lambda job: lambda j: ran.append(j.id))
+
+    def rejected(_job):
+        raise jm.WaitForQobuz() from AuthLost("rejected")
+
+    first = jm.Job(title="A", album_id="a1")
+    second = jm.Job(title="B", album_id="b1")
+    try:
+        jm.start_worker()
+        jm.submit(first, rejected)
+        jm.submit(second, rejected)
+        assert _wait_for(lambda: (jm.qobuz_hold() or {}).get("waiting") == 2)
+        assert first.status is second.status is jm.JobStatus.PENDING
+        assert not ran
+        from qobuz_librarian.web import settings_store
+        assert not settings_store._any_active_job()
+
+        jm.release_qobuz_hold()
+        assert _wait_for(lambda: ran == [first.id, second.id])
+    finally:
+        _remove_job(first)
+        _remove_job(second)
+
+
+def test_downloads_wait_out_a_recovery_pause_in_queue_order(monkeypatch):
+    """Downloads that reach staging while another download's interrupted
+    recovery pauses the library wait for it to settle instead of each
+    failing."""
+    blocked = [True]
+    ran = []
+    monkeypatch.setattr(jm, "_held_downloads", [])
+    monkeypatch.setattr(jm, "_held_release_check", lambda: not blocked[0])
+    monkeypatch.setattr(jm, "_staging_entry_guard", lambda _job: not blocked[0])
+
+    def run(job):
+        with jm.staging_lock():
+            ran.append(job.id)
+
+    first = jm.Job(title="A", album_id="a1")
+    second = jm.Job(title="B", album_id="b1")
+    try:
+        jm.start_worker()
+        jm.submit(first, run)
+        jm.submit(second, run)
+        assert _wait_for(lambda: [job for job, _run in jm._held_downloads]
+                         == [first, second])
+        assert first.status is second.status is jm.JobStatus.PENDING
+
+        blocked[0] = False
+        assert _wait_for(lambda: ran == [first.id, second.id])
+    finally:
+        _remove_job(first)
+        _remove_job(second)
+
+
 def test_a_split_review_that_cannot_be_put_back_fails_without_hanging(
     monkeypatch,
 ):
@@ -2074,7 +2202,9 @@ def test_library_review_rebuilds_from_saved_state_when_no_live_job(
     """With the baseline complete but no live library job (swept cancel,
     discarded scan job, corrupt restart row), the Missing Albums / Gap Fill
     review must rebuild from saved scan state, never a finished status with
-    no tabs. Retiring the review (discard / worked-through) blocks the rebuild."""
+    no tabs. Retiring the review (discard / worked-through) blocks the rebuild.
+    While the terminal holds the library the review is reported as waiting,
+    not complete."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import library_scan_state
     from qobuz_librarian.web import routes_library, write_gate
@@ -2110,6 +2240,7 @@ def test_library_review_rebuilds_from_saved_state_when_no_live_job(
     )
     job = None
     try:
+        assert routes_library._saved_review_waiting()
         job = routes_library._review_job_from_library_state()
         assert job is not None
         assert job.execute_kind == "library"
@@ -2121,6 +2252,7 @@ def test_library_review_rebuilds_from_saved_state_when_no_live_job(
         job = None
         library_scan_state.mark_review_retired(now=time.time() + 60)
         assert routes_library._review_job_from_library_state() is None
+        assert not routes_library._saved_review_waiting()
     finally:
         if job is not None:
             _remove_job(job)
@@ -2741,6 +2873,56 @@ def test_restore_backup_moves_the_files_home(client, tmp_path, monkeypatch):
         (origin / "01 - Song.flac").write_bytes(b"changed")
         assert client.post("/backups/discard", data={"backup": kept.name}).status_code == 200
         assert (kept.path / "01 - Song.flac").read_bytes() == b"data"
+    finally:
+        _remove_job(job)
+
+
+def test_taking_the_lock_puts_back_an_album_a_hard_stop_left_in_its_backup(
+        client, tmp_path, monkeypatch):
+    # A hard stop between an upgrade's or repair's backup and its import
+    # left the folder missing, with nothing but a Diagnostics row to say so.
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import backup as backup_mod
+    from qobuz_librarian.web import job_persistence, lifespan, runtime
+
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    origin = tmp_path / "music" / "Artist" / "Album (2020)"
+    origin.mkdir(parents=True)
+    (origin / "01 - Song.flac").write_bytes(b"data")
+    carried = backup_mod.backup_album_dir(origin)
+    other = tmp_path / "music" / "Artist" / "Other (2021)"
+    other.mkdir()
+    (other / "01 - Song.flac").write_bytes(b"old")
+    kept = backup_mod.backup_album_dir(other)
+    other.mkdir()
+    (other / "01 - Song.flac").write_bytes(b"new")
+    job = jm.Job(title="Repair needing recovery")
+    job.execute_kind = "repair"
+    job.status = jm.JobStatus.FAILED
+    job.finished_at = time.time()
+    job.attention = "recovery"
+    job.recoveries = [_repair_recovery_record(carried.path, carried.receipt)]
+    jm.registry.add(job)
+    try:
+        busy = jm.staging_lock()
+        busy.acquire()
+        try:
+            lifespan._put_back_albums_left_in_backups()
+        finally:
+            busy.release()
+        assert not origin.exists() and lifespan._put_back_pending
+        lifespan._put_back_albums_left_in_backups()
+        assert not lifespan._put_back_pending
+        assert (origin / "01 - Song.flac").read_bytes() == b"data"
+        assert not carried.exists()
+        assert job_persistence.load_one(job.id)["recoveries"] == []
+        assert runtime.take_restored_albums() == [origin]
+        assert (kept.path / "01 - Song.flac").read_bytes() == b"old"
+        assert (other / "01 - Song.flac").read_bytes() == b"new"
     finally:
         _remove_job(job)
 
