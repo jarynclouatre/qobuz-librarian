@@ -175,7 +175,7 @@ def _close_artists(results, query):
     return [a for _score, a in close]
 
 
-def pick_best_artist(results, query):
+def pick_best_artist(results, query, token=None, fetch_titles=None):
     """The artist search result that is really `query`, or None.
 
     Qobuz lists the canonical artist ('The Beatles') next to bare-name twins
@@ -183,9 +183,19 @@ def pick_best_artist(results, query):
     match favours the twin - it has no 'The ' to cost it similarity - so compare
     with the leading article stripped and, among equally close names, take the
     one with the deepest catalog: the real artist's, not the twin's.
+
+    When several artists are that close, `fetch_titles` is called for album
+    titles known to be by `query`, keyed with owned_title_key, and the artist
+    whose catalog lists the most of them wins.
     """
     close = _close_artists(results, query)
-    return close[0] if close else None
+    if not close:
+        return None
+    if len(close) > 1 and fetch_titles is not None:
+        titles = fetch_titles()
+        if titles:
+            return _artist_holding_titles(close, titles, token)
+    return close[0]
 
 
 def _titles_listed(artist_id, token, owned_titles):

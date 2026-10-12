@@ -14,9 +14,11 @@ from qobuz_librarian.api.auth import (
     token_credential_generation,
 )
 from qobuz_librarian.api.lastfm import (
+    LastfmError,
     LastfmKeyRejected,
     LastfmRateLimited,
     LastfmUnavailable,
+    get_artist_top_albums,
     get_artist_top_tags,
     get_similar_artists,
     get_tag_top_albums,
@@ -30,6 +32,7 @@ from qobuz_librarian.api.search import (
 from qobuz_librarian.library import catalog
 from qobuz_librarian.library.discovery import (
     cached_artist_resolutions,
+    owned_title_key,
     pick_best_artist,
 )
 from qobuz_librarian.library.scanner import (
@@ -52,6 +55,7 @@ _TAG_CHIPS      = 8
 GENRE_CARDS     = 24
 _GENRE_FETCH    = 100
 _SEED_CHIPS     = 3
+_NAMESAKE_TITLES = 10
 # Last.fm having one bad minute shouldn't lose a build that is most of the way
 # through; three refusals in a row is an outage, not a blip. A build that has
 # never once reached Last.fm stops at the first refusal instead: there is no
@@ -83,6 +87,7 @@ class Library:
         self.raws = raws
         self.seeds = seeds
         self.signature = signature
+        self._owned_names = {}
 
     def __len__(self):
         return len(self.seeds)
@@ -91,8 +96,16 @@ class Library:
         """Whether `name` is an artist already in the library.
 
         The comparison is generous so spelling variants are not suggested as
-        new artists.
+        new artists. It is also slow, a fuzzy match against every owned
+        artist, so each answer is kept: a build asks about the same names
+        every time it re-ranks.
         """
+        known = self._owned_names.get(name)
+        if known is None:
+            known = self._owned_names[name] = self._matches_owned(name)
+        return known
+
+    def _matches_owned(self, name: str) -> bool:
         key = normalize(name)
         if not key:
             # A pure CJK or emoji name normalizes to nothing, and comparing
@@ -125,7 +138,9 @@ def read_library() -> Library:
     canonical Qobuz name a past scan resolved it to. Last.fm is asked about the
     canonical one, which is spelled the way Last.fm spells it, while exclusion
     checks both, so a folder called 'Beatles, The' still recognises its own
-    artist coming back as a suggestion.
+    artist coming back as a suggestion. Seeds come most albums first, so the
+    suggestions a build shows early already come from the artists the
+    library holds most of.
     """
     resolutions = cached_artist_resolutions()
     keys, raws, seeds, albums = set(), [], [], []
@@ -160,7 +175,7 @@ def read_library() -> Library:
                 folder, "; ".join(map(str, walk_errors)))
             unreadable_names.add(folder)
             continue
-        seeds.append(canonical or folder)
+        seeds.append((len(artist_albums), canonical or folder))
         albums.extend(
             f"{folder.casefold()}/{album.name.casefold()}"
             for album in artist_albums
@@ -173,6 +188,7 @@ def read_library() -> Library:
     signature_parts.update(f"album:{album}" for album in albums)
     signature = hashlib.sha1(
         "\n".join(sorted(signature_parts)).encode("utf-8")).hexdigest()
+    seeds = [seed for _count, seed in sorted(seeds, key=lambda pair: -pair[0])]
     return Library(keys, raws, seeds, signature)
 
 
@@ -204,19 +220,21 @@ def rank_candidates(accumulated: dict, owned: Library,
 
     `accumulated` maps a suggested name to the owned artists that named it and
     how strongly. Ties break on how many owned artists agreed, then on name, so
-    the same library always produces the same order.
+    the same library always produces the same order. Ownership is only checked
+    down the order until `limit` are found, since a big library gathers tens of
+    thousands of names.
     """
+    ordered = sorted(
+        ((round(acc["score"], 4), name, acc) for name, acc in accumulated.items()),
+        key=lambda c: (-c[0], -len(c[2]["seeds"]), c[1].lower()))
     ranked = []
-    for name, acc in accumulated.items():
+    for score, name, acc in ordered:
+        if len(ranked) >= limit:
+            break
         if owned.owns(name):
             continue
-        ranked.append({
-            "name": name,
-            "score": round(acc["score"], 4),
-            "seeds": acc["seeds"],
-        })
-    ranked.sort(key=lambda c: (-c["score"], -len(c["seeds"]), c["name"].lower()))
-    return ranked[:limit]
+        ranked.append({"name": name, "score": score, "seeds": acc["seeds"]})
+    return ranked
 
 
 def _seed_names(candidate: dict) -> list[str]:
@@ -263,6 +281,8 @@ def resolve_artist(name: str, token) -> dict | None:
         return hit
     try:
         results = search_artists(name, token, limit=cfg.ARTIST_LOOKUP_LIMIT)
+        best = pick_best_artist(results, name, token,
+                                lambda: _lastfm_album_titles(name))
     except (AuthLost, QobuzUnavailable):
         raise
     except QobuzError as e:
@@ -270,13 +290,31 @@ def resolve_artist(name: str, token) -> dict | None:
         # write a miss the next build would trust.
         vlog(f"discover: artist search failed for {name!r}: {e}")
         return None
-    best = pick_best_artist(results, name)
+    except LastfmKeyRejected:
+        raise
+    except LastfmError as e:
+        # A refused or throttled title lookup costs this name its card, not
+        # the whole build.
+        vlog(f"discover: no album titles to tell apart {name!r}: {e}")
+        return None
     if not best or not best.get("id"):
         cache.put_resolution_miss(key)
         return None
     payload = {"id": str(best.get("id")), "name": best.get("name") or name}
     cache.put_resolution(key, payload)
     return payload
+
+
+def _lastfm_album_titles(name: str) -> set[str]:
+    """The albums Last.fm knows `name` for, keyed the way album folders are,
+    so a name several Qobuz artists share ('Sleep') goes to the one that made
+    them."""
+    key = cache.top_albums_key(normalize(name) or name)
+    rows = cache.get_lastfm(key, cache.ALBUMS_TTL)
+    if rows is None:
+        rows = get_artist_top_albums(name, limit=_NAMESAKE_TITLES)
+        cache.put_lastfm(key, rows)
+    return {owned_title_key(row.get("title")) for row in rows} - {""}
 
 
 def artist_albums(
@@ -399,24 +437,21 @@ def _text_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, na, nb).ratio()
 
 
-def _artist_card(candidate: dict, token, *, prefer_hires: bool) -> dict | None:
-    """One suggestion, ready to render: who, why, and what can be downloaded.
+def _qobuz_artist(name: str, token, *, prefer_hires: bool) -> dict | None:
+    """The Qobuz side of a suggestion: who it is and what can be downloaded.
     None when Qobuz has nothing to offer for the name, so the card never
     appears with a download button that leads nowhere."""
-    artist = resolve_artist(candidate["name"], token)
+    artist = resolve_artist(name, token)
     if not artist:
         return None
     albums = artist_albums(
         artist["id"], artist["name"], token, prefer_hires=prefer_hires)
     if not albums:
         return None
-    cover = next((a["cover"] for a in albums if a["cover"]), "")
     return {
         "name": artist["name"],
         "artist_id": artist["id"],
-        "seeds": _seed_names(candidate),
-        "score": candidate.get("score", 0.0),
-        "cover": cover,
+        "cover": next((a["cover"] for a in albums if a["cover"]), ""),
         "albums": albums,
     }
 
@@ -428,22 +463,33 @@ def _artist_cards(
     *,
     prefer_hires: bool,
     progress=None,
+    found: dict | None = None,
 ) -> list[dict]:
     """Work down the ranking until `want` cards are filled. Names Qobuz can't
     serve are skipped and the next candidate promoted, bounded so a run of
     unresolvable names can't turn one build into hundreds of searches.
 
     `progress` is called with (checked, cards) after each candidate, so a build
-    that has this as its only slow phase can still show it moving.
+    that has this as its only slow phase can still show it moving. `found`
+    keeps what Qobuz had for each name, so a build that re-ranks as it goes
+    only looks up the names new to the top.
     """
+    found = {} if found is None else found
     cards, attempts = [], 0
     for candidate in ranked:
         if len(cards) >= want or attempts >= want * 3:
             break
         attempts += 1
-        card = _artist_card(candidate, token, prefer_hires=prefer_hires)
-        if card:
-            cards.append(card)
+        name = candidate["name"]
+        if name not in found:
+            # Only a card is kept: a name that failed for a moment is tried
+            # again, and a real miss is answered from the resolution cache.
+            card = _qobuz_artist(name, token, prefer_hires=prefer_hires)
+            if card:
+                found[name] = card
+        if name in found:
+            cards.append(dict(found[name], seeds=_seed_names(candidate),
+                              score=candidate.get("score", 0.0)))
         if progress is not None:
             progress(attempts, list(cards))
     return cards
@@ -575,6 +621,7 @@ def _similar_worker(
     feed_signature: str,
 ) -> None:
     accumulated: dict[str, dict] = {}
+    found: dict[str, dict | None] = {}
     total = len(owned)
     _publish(kind, total=total)
     consecutive_failures = 0
@@ -613,6 +660,7 @@ def _similar_worker(
                     token,
                     _PARTIAL_CARDS,
                     prefer_hires=prefer_hires,
+                    found=found,
                 ),
             )
     ranked = rank_candidates(accumulated, owned)
@@ -625,10 +673,10 @@ def _similar_worker(
     shown = (build_status(kind) or {}).get("items") or []
     _publish(kind, stage="catalogue", checked=0, total=_FEED_CARDS)
 
-    def catalogue_progress(_attempts, found):
+    def catalogue_progress(_attempts, cards):
         # The partial cards were resolved through Qobuz too, so counting them
         # keeps the number and the list saying the same thing.
-        listed = found if len(found) >= len(shown) else shown
+        listed = cards if len(cards) >= len(shown) else shown
         _publish(kind, checked=len(listed), items=listed)
 
     cards = _artist_cards(
@@ -637,6 +685,7 @@ def _similar_worker(
         _FEED_CARDS,
         prefer_hires=prefer_hires,
         progress=catalogue_progress,
+        found=found,
     )
     cache.put_feed(kind, cards, feed_signature)
     _publish(kind, phase="ready", items=cards, checked=len(cards),
@@ -667,9 +716,14 @@ def ensure_similar_feed(token) -> dict:
 def _tags_worker(kind: str, token, owned: Library) -> None:
     """The tags that describe the library, from a sample of its artists. A
     sample rather than all of them: the chips only need the shape of the
-    collection, and every artist asked is another request."""
+    collection, and every artist asked is another request. Picking by a hash
+    of the name spreads the sample over the whole library, and an artist
+    added later rarely changes it, so a rebuild finds its answers cached."""
     del token
-    sample = sorted(owned.seeds, key=str.lower)[:_TAG_SAMPLE]
+    sample = sorted(
+        owned.seeds,
+        key=lambda seed: hashlib.sha1(seed.encode("utf-8")).digest(),
+    )[:_TAG_SAMPLE]
     weights: dict[str, float] = {}
     labels: dict[str, str] = {}
     _publish(kind, total=len(sample))

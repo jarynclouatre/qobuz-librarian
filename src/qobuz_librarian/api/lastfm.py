@@ -277,6 +277,14 @@ def get_artist_top_tags(name: str) -> list[dict]:
     return out
 
 
+def get_artist_top_albums(name: str, *, limit: int = 10) -> list[dict]:
+    """`name`'s most-played albums, most-played first."""
+    if not str(name or "").strip():
+        return []
+    body = lastfm_get("artist.getTopAlbums", {"artist": name, "limit": limit})
+    return _albums(body, "topalbums")
+
+
 def get_tag_top_albums(tag: str, *, page: int = 1,
                        limit: int = 50) -> list[dict]:
     """Albums tagged `tag`, most-tagged first."""

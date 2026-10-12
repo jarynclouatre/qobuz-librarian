@@ -10,6 +10,7 @@ from qobuz_librarian.ui_cli.logging import vlog
 # How long each kind of row stays usable.
 SIMILAR_TTL    = 14 * 86400
 TAGS_TTL       = 14 * 86400
+ALBUMS_TTL     = 14 * 86400
 RESOLUTION_TTL = 30 * 86400
 FEED_TTL       = 7 * 86400
 # Favourites are the user's own list and change the moment they star something
@@ -48,8 +49,12 @@ def tag_albums_key(tag: str, page: int) -> str:
     return f"tagalbums:{tag}:{page}"
 
 
+def top_albums_key(artist_key: str) -> str:
+    return f"topalbums:{artist_key}"
+
+
 def artist_resolution_key(artist_key: str) -> str:
-    return f"artist:{artist_key}"
+    return f"artist-pick:{artist_key}"
 
 
 def album_resolution_key(artist_key: str, title_key: str) -> str:
