@@ -215,6 +215,11 @@ def _capture_file_identities(paths, context_tracks):
     return {str(Path(path)): _file_track_identity(path, context_tracks) for path in paths}
 
 
+def _output_tail(out, length):
+    """The end of rip's output without Rich's column padding."""
+    return " ".join(out.split())[-length:]
+
+
 def _cool_down(last_out):
     """Pause before the next rip, longer when Qobuz throttled the last one."""
     seconds = cfg.DELAY_BETWEEN
@@ -407,6 +412,17 @@ def retire_download_staging_after_import(result, *, recovery_checkpoint=None):
         return retained is not None and discard_group(retained)
     retained = retain_staging_run(run, label="completed-import", on_intent=recovery_checkpoint)
     return retained is not None and discard_group(retained, expected_owner=run.owner)
+
+
+def retire_failed_download_staging(result):
+    """Clear the run of a download that imported nothing.
+
+    Usually nothing arrived and the run holds at most cover art. Audio that
+    is still there is kept for review as a failed download.
+    """
+    return retire_download_staging_after_import(result) or retain_download_staging(
+        result, label="failed"
+    )
 
 
 def discard_download_staging(result, *, recovery_checkpoint=None):
@@ -769,12 +785,12 @@ def staged_album_dirs(root):
     return sorted(album_dirs)
 
 
-def disc_names_overwrite(album):
-    """True when streamrip would save two of this album's tracks under one
-    name: two discs each hold a track with the same number and title, and
-    its config turns off the Disc N folders that keep them apart."""
+def _disc_twins(tracks):
+    """True when two discs each hold a track with the same number and title,
+    which streamrip saves under one name unless Disc N folders keep them
+    apart."""
     seen = {}
-    for track in (album.get("tracks") or {}).get("items") or ():
+    for track in tracks:
         key = (
             track.get("track_number"),
             (track.get("title") or "").strip().casefold(),
@@ -782,8 +798,31 @@ def disc_names_overwrite(album):
         )
         disc = track.get("media_number") or 1
         if seen.setdefault(key, disc) != disc:
-            return streamrip_disc_folders_off()
+            return True
     return False
+
+
+def disc_names_overwrite(album):
+    """True when streamrip would save two of this album's tracks under one
+    name because its config turns off the Disc N folders."""
+    return (
+        _disc_twins((album.get("tracks") or {}).get("items") or ())
+        and streamrip_disc_folders_off()
+    )
+
+
+def _into_disc_folder(receipt, track):
+    """Move a track-URL rip into the Disc N folder an album rip would use."""
+    path = Path(receipt)
+    target = path.parent / f"Disc {_positive_int(track.get('media_number')) or 1}" / path.name
+    if target.exists():
+        return receipt
+    try:
+        target.parent.mkdir(exist_ok=True)
+        os.rename(path, target)
+    except OSError:
+        return receipt
+    return capture_file(target)
 
 
 def downloads_whole_album(n_present, n_missing, n_total):
@@ -890,6 +929,26 @@ def run_album_download(
     else:
         download_full_album = downloads_whole_album(
             len(present), len(missing), n_tracks_total)
+    # A track URL never gets a Disc N folder, so the second of two twins
+    # would overwrite the first.
+    disc_folders = not download_full_album and _disc_twins(missing)
+
+    def _rip_track(track):
+        before = snapshot_staging()
+        rc, out = _rip(
+            f"https://play.qobuz.com/track/{track.get('id')}",
+            timeout=cfg.RIP_TIMEOUT,
+            quality=quality,
+        )
+        audio = [f for f in _run_files_since(before) if f.suffix.lower() in cfg.AUDIO_EXTS]
+        if disc_folders:
+            audio = [moved for f in audio if (moved := _into_disc_folder(f, track))]
+        return rc, out, audio
+
+    def _sort_audio(paths):
+        if recovery_owner is None:
+            return cleanup_lossy(paths)
+        return cleanup_lossy(paths, owner=recovery_owner, on_intent=recovery_checkpoint)
 
     album_id = album.get("id")
     t_start = time.time()
@@ -899,6 +958,9 @@ def run_album_download(
     # identity: two requested tracks can share one across discs or versions.
     failed_track_objs = []
     rip_identities = {}
+    verified = []
+    lossy = []
+    broken = []
     last_out = ""
     full_album_rc = None
     rate_limited = False
@@ -1058,7 +1120,7 @@ def run_album_download(
             # Cancelling also ends rip with a non-zero exit, which is not a failure.
             if not is_cancel_requested():
                 log.info(fmt(C.RED, f"  ✗  rip exit {rc}; last 300 chars:"))
-                log.info(fmt(C.GRAY, "  " + out[-300:].replace("\n", "\n  ")))
+                log.info(fmt(C.GRAY, "  " + _output_tail(out, 300)))
         elif n_errors:
             log.info(
                 fmt(
@@ -1074,7 +1136,6 @@ def run_album_download(
         for i, t in enumerate(missing, 1):
             if is_cancel_requested():
                 break
-            tid = t.get("id")
             # Show the version + track number so an EP of same-titled remixes
             # doesn't render as N identical lines that look like a dup-download.
             ttl = t.get("title") or "?"
@@ -1088,13 +1149,7 @@ def run_album_download(
                 + f"  {fmt(C.WHITE, truncate(tnum_prefix + ttl, 60))}"
             )
             report_progress("Downloading", i, len(missing), ttl)
-            track_snapshot = snapshot_staging()
-            rc, out = _rip(
-                f"https://play.qobuz.com/track/{tid}", timeout=cfg.RIP_TIMEOUT, quality=quality
-            )
-            track_audio = [
-                f for f in _run_files_since(track_snapshot) if f.suffix.lower() in cfg.AUDIO_EXTS
-            ]
+            rc, out, track_audio = _rip_track(t)
             rip_identities.update(_single_track_rip_identities(track_audio, t, qobuz_tracks))
             if detect_auth_lost(out):
                 raise AuthLost("rip output contained auth-lost markers")
@@ -1102,7 +1157,14 @@ def run_album_download(
                 raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
             rate_limited = rate_limited or detect_rate_limited(out)
             if rc == 0 and track_audio:
-                log.info(fmt(C.GREEN, "    ✓ ok"))
+                track_kept, track_lossy, track_broken = _sort_audio(track_audio)
+                verified.extend(track_kept)
+                lossy.extend(track_lossy)
+                broken.extend(track_broken)
+                if track_lossy:
+                    log.info(fmt(C.YELLOW, "    ⚠ lossy, set aside"))
+                elif not track_broken:
+                    log.info(fmt(C.GREEN, "    ✓ ok"))
             elif is_cancel_requested():
                 # rip exited because we asked it to stop, not a real failure.
                 break
@@ -1110,7 +1172,7 @@ def run_album_download(
                 # streamrip logs a refused track and still exits 0.
                 failed_track_objs.append(t)
                 log.info(fmt(C.RED, "    ✗ no file arrived"))
-                log.info(fmt(C.GRAY, "      " + out[-200:].replace("\n", " ")))
+                log.info(fmt(C.GRAY, "      " + _output_tail(out, 200)))
             else:
                 failed_track_objs.append(t)
                 if "KeyError: 'body'" in out:
@@ -1123,7 +1185,7 @@ def run_album_download(
                     )
                 else:
                     log.info(fmt(C.RED, f"    ✗ rip exit {rc}"))
-                    log.info(fmt(C.GRAY, "      " + out[-200:].replace("\n", " ")))
+                    log.info(fmt(C.GRAY, "      " + _output_tail(out, 200)))
             # Qobuz throttles sustained per-track pulls; when the last rip shows
             # throttle signals, pause longer before the next so we stop pounding
             # the limit.
@@ -1138,14 +1200,10 @@ def run_album_download(
     # disc/track identity first. A title alone is not safe for same-title twins.
     file_identities = _capture_file_identities(audio_new, qobuz_tracks)
     file_identities.update(rip_identities)
-    if recovery_owner is None:
-        kept, lossy, broken = cleanup_lossy(audio_new)
-    else:
-        kept, lossy, broken = cleanup_lossy(
-            audio_new,
-            owner=recovery_owner,
-            on_intent=recovery_checkpoint,
-        )
+    kept, late_lossy, late_broken = _sort_audio([f for f in audio_new if f not in verified])
+    kept = [f for f in audio_new if f in verified] + kept
+    lossy += late_lossy
+    broken += late_broken
     n_ok = len(kept)
     attempted_tracks = qobuz_tracks if download_full_album else missing
     retried_clean_targets = set()
@@ -1179,30 +1237,15 @@ def run_album_download(
                 _cool_down(last_out)
                 if is_cancel_requested():
                     break
-                retry_snapshot = snapshot_staging()
-                rc, out = _rip(
-                    f"https://play.qobuz.com/track/{tid}", timeout=cfg.RIP_TIMEOUT, quality=quality
-                )
+                rc, out, retry_audio = _rip_track(t)
                 if detect_auth_lost(out):
                     raise AuthLost("rip output contained auth-lost markers")
                 if detect_disk_full(out):
                     raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
                 rate_limited = rate_limited or detect_rate_limited(out)
                 last_out = out
-                retry_audio = [
-                    f
-                    for f in _run_files_since(retry_snapshot)
-                    if f.suffix.lower() in cfg.AUDIO_EXTS
-                ]
                 retry_identities = _single_track_rip_identities(retry_audio, t, qobuz_tracks)
-                if recovery_owner is None:
-                    retry_kept, retry_lossy, retry_broken = cleanup_lossy(retry_audio)
-                else:
-                    retry_kept, retry_lossy, retry_broken = cleanup_lossy(
-                        retry_audio,
-                        owner=recovery_owner,
-                        on_intent=recovery_checkpoint,
-                    )
+                retry_kept, retry_lossy, retry_broken = _sort_audio(retry_audio)
                 # A second reject of the same track is surplus to the first.
                 resolved_rejects.extend(retry_lossy + retry_broken)
                 matches = _pair_files_to_tracks(retry_kept, [t], retry_identities, qobuz_tracks)
@@ -1272,30 +1315,15 @@ def run_album_download(
                 _cool_down(last_out)
                 if is_cancel_requested():
                     break
-                hard_snapshot = snapshot_staging()
-                rc, out = _rip(
-                    f"https://play.qobuz.com/track/{t['id']}",
-                    timeout=cfg.RIP_TIMEOUT,
-                    quality=quality,
-                )
+                rc, out, hard_audio = _rip_track(t)
                 if detect_auth_lost(out):
                     raise AuthLost("rip output contained auth-lost markers")
                 if detect_disk_full(out):
                     raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
                 rate_limited = rate_limited or detect_rate_limited(out)
                 last_out = out
-                hard_audio = [
-                    f for f in _run_files_since(hard_snapshot) if f.suffix.lower() in cfg.AUDIO_EXTS
-                ]
                 hard_identities = _single_track_rip_identities(hard_audio, t, qobuz_tracks)
-                if recovery_owner is None:
-                    hard_kept, hard_lossy, hard_broken = cleanup_lossy(hard_audio)
-                else:
-                    hard_kept, hard_lossy, hard_broken = cleanup_lossy(
-                        hard_audio,
-                        owner=recovery_owner,
-                        on_intent=recovery_checkpoint,
-                    )
+                hard_kept, hard_lossy, hard_broken = _sort_audio(hard_audio)
                 matches = _pair_files_to_tracks(hard_kept, [t], hard_identities, qobuz_tracks)
                 if matches:
                     kept.append(matches[0][0])
@@ -1304,14 +1332,18 @@ def run_album_download(
                     recovered += 1
                     continue
                 # Preserve an exact reject from the hard retry in the right
-                # summary bucket. Unexpected or ambiguous files prove nothing.
+                # summary bucket. Unexpected or ambiguous files prove nothing
+                # and are retired with the other surplus rejects.
                 reject_matches = _pair_files_to_tracks(
                     hard_lossy + hard_broken, [t], hard_identities, qobuz_tracks
                 )
-                if reject_matches:
-                    rejected_path = reject_matches[0][0]
+                rejected_path = reject_matches[0][0] if reject_matches else None
+                if rejected_path is not None:
                     (lossy if rejected_path in hard_lossy else broken).append(rejected_path)
                     file_identities.update(hard_identities)
+                resolved_rejects.extend(
+                    path for path in hard_lossy + hard_broken if path is not rejected_path
+                )
             if recovered:
                 n_ok = len(kept)
                 log.info(fmt(C.GREEN, f"  ✓  Retry recovered {recovered} failed download(s)"))
@@ -1323,11 +1355,12 @@ def run_album_download(
     clean_target_ids = {id(track) for _, track in clean_pairs}
     clean_paths = {Path(path) for path, _ in clean_pairs}
     unmatched_clean = [path for path in kept if Path(path) not in clean_paths]
-    rejected_target_ids = {
-        id(track)
-        for _, track in _pair_files_to_tracks(
-            lossy_tracks, attempted_tracks, file_identities, qobuz_tracks
-        )
+    rejected_pairs = _pair_files_to_tracks(
+        lossy_tracks, attempted_tracks, file_identities, qobuz_tracks
+    )
+    rejected_target_ids = {id(track) for _, track in rejected_pairs} - clean_target_ids
+    broken_target_ids = {
+        id(track) for path, track in rejected_pairs if path in broken
     } - clean_target_ids
     expected_target_ids = {id(track) for track in attempted_tracks}
     missing_target_ids = expected_target_ids - clean_target_ids - rejected_target_ids
@@ -1381,7 +1414,7 @@ def run_album_download(
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  {len(broken)} track(s) arrived incomplete and were "
+                f"  ⚠  {len(broken)} track(s) arrived damaged and were "
                 f"discarded ({why}):",
             )
         )
@@ -1427,6 +1460,7 @@ def run_album_download(
             "n_ok": n_ok,
             "n_fail": n_fail,
             "n_lossy": n_lossy,
+            "n_broken": len(broken_target_ids),
             "failed_tracks": failed_tracks,
             "lossy_tracks": lossy_track_labels,
             "broken_tracks": broken_track_labels,

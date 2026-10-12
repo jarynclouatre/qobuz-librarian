@@ -329,6 +329,41 @@ def test_partial_retention_moves_only_the_recorded_download_run(
     )
 
 
+def test_download_where_nothing_arrives_leaves_no_run_behind(monkeypatch, tmp_path):
+    # The art-only run used to stay in staging, and the next start parked it
+    # as an interrupted download that every later job warned about.
+    from pathlib import Path
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import download
+    from qobuz_librarian.integrations import staging as staging_tx
+
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+
+    def rip(url, staging_dir=None, **_k):
+        cover = Path(staging_dir) / "Band" / "Gone (2001)" / "cover.jpg"
+        cover.parent.mkdir(parents=True, exist_ok=True)
+        cover.write_bytes(b"art")
+        return 0, "ERROR Track not available for stream"
+
+    monkeypatch.setattr(download, "rip_url", rip)
+    monkeypatch.setattr(download.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(proc, "is_lossless_album", lambda _a: True)
+    monkeypatch.setattr(proc, "find_existing_tracks", lambda _a: ([], None))
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
+    tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in (1, 2)]
+    album = {"id": "gone", "title": "Gone", "artist": {"name": "Band"},
+             "tracks": {"items": tracks}}
+
+    result = proc.process_album(album, _args(), token="tok", already_confirmed=True)
+
+    assert (result["n_ok"], result["imported"]) == (0, False)
+    assert [p.name for p in cfg.STAGING_DIR.iterdir() if p.name != cfg.BEETS_RETRY_DIR] == []
+    assert staging_tx.inspect_retry_groups() == []
+
+
 def test_upgrade_carries_hand_added_tags_to_the_replacement(
         monkeypatch, tmp_path, tagged_flac):
     from mutagen.flac import FLAC, Picture

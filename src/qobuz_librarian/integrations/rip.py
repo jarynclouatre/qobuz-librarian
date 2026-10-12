@@ -13,9 +13,6 @@ from qobuz_librarian.integrations.staging import (
     StagedFile,
     StagingSnapshot,
     capture_file,
-    inspect_retry_groups,
-    list_file_groups,
-    list_groups,
     quarantine_file,
     reconcile_legacy_file_groups,
 )
@@ -276,6 +273,9 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
             encoding="utf-8",
             errors="replace",
             start_new_session=True,
+            # Rich wraps a pipe at 80 columns, splitting a log line mid-word
+            # around its file:line column.
+            env={**os.environ, "COLUMNS": "400"},
         )
     except FileNotFoundError:
         return 127, "rip: command not found"
@@ -531,32 +531,4 @@ def cleanup_staging_residue():
     reconciled = reconcile_legacy_file_groups()
     if reconciled:
         vlog(f"recorded {reconciled} legacy rejected staging file(s) for recovery")
-    unresolved = list_file_groups()
-    if unresolved:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  {len(unresolved)} staging file(s) from earlier downloads "
-            "are still held. Settings > Diagnostics lists them and can clear "
-            f"them; on disk they are in {cfg.BEETS_RETRY_DIR}."))
-    interrupted = list_groups(kind="interrupted")
-    if interrupted:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  {len(interrupted)} earlier download(s) were interrupted "
-            "and are still held. Settings > Diagnostics lists them and can "
-            f"clear them; on disk they are in {cfg.BEETS_RETRY_DIR}."))
-    inspections = inspect_retry_groups()
-    hidden = [
-        inspection for inspection in inspections
-        if inspection.status in {"incomplete", "malformed", "blocked"}
-    ]
-    if hidden:
-        counts = {
-            status: sum(item.status == status for item in hidden)
-            for status in ("incomplete", "malformed", "blocked")
-        }
-        summary = ", ".join(
-            f"{count} {status}" for status, count in counts.items() if count)
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  {len(hidden)} staging recovery group(s) need attention "
-            f"({summary}) in {cfg.BEETS_RETRY_DIR}."))
-    # Inspection is visibility, not cleanup. No residue is deleted here.
     return 0

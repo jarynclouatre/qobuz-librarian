@@ -170,10 +170,11 @@ def _undeliverable_album_error(r, album=None):
 
 
 def _mark_download_attention(job, result):
-    """Mark a job failed when download details still need attention."""
+    """Record what a finished download left that still needs attention."""
     retryable, lossy_only = download_result.incomplete_track_counts(result)
     status, kind = download_result.download_job_outcome(result)
     job.status = job_mgr.JobStatus(status)
+    job.tracks_missing = download_result.tracks_missing(result)
     if kind == "backup":
         job.attention = "backup"
         if not isinstance(job.execute_args, dict):
@@ -242,9 +243,14 @@ def _mark_download_attention(job, result):
         return
     job.attention = "partial"
     if retryable:
+        damaged = result.get("n_broken", 0)
+        causes = []
+        if damaged:
+            causes.append(f"{plural(damaged, 'track')} arrived damaged")
+        if retryable > damaged:
+            causes.append(f"{plural(retryable - damaged, 'track')} did not arrive")
         job.error = (
-            f"{plural(retryable, 'track')} "
-            f"{'is' if retryable == 1 else 'are'} still missing. "
+            f"{' and '.join(causes)}. "
             f"Retry fetches {'it' if retryable == 1 else 'them'}."
         )
         if lossy_only:

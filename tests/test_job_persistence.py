@@ -161,3 +161,40 @@ def test_a_provider_error_never_reaches_the_stored_job_record(
         observer.close()
     assert "NOT-A-REAL-TOKEN-0000" not in "".join(stored)
     assert "nobody@example.test" not in "".join(stored)
+
+
+def test_album_imported_with_a_track_missing_stays_retryable_once_seen(
+        monkeypatch, tmp_path):
+    # Houses Of The Holy imported all but The Rain Song, which arrived damaged
+    # twice. The job was saved as failed, and opening it cleared the only
+    # marker that said a track was still missing.
+    from qobuz_librarian.web import download_outcomes
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    job = Job(title="Houses Of The Holy", album_id="hoth")
+    download_outcomes._mark_download_attention(job, {
+        "result": "partial", "imported": True,
+        "n_ok": 13, "n_fail": 0, "n_lossy": 1, "n_broken": 1,
+    })
+    job.finished_at = 2.0
+    assert _REAL_ADMIT(job) is True
+    observer = sqlite3.connect(cfg.DATA_DIR / "jobs.db")
+    try:
+        # Saved by an earlier version, before the count was recorded.
+        observer.execute(
+            "INSERT INTO jobs (id, title, album_id, status, attention, error, "
+            "finished_at) VALUES ('oes', 'On Every Street', 'oes', 'failed', "
+            "'partial', '1 track is still missing. Retry fetches it.', 1.0)")
+        observer.commit()
+    finally:
+        observer.close()
+
+    for job_id in (job.id, "oes"):
+        assert job_persistence.acknowledge_attention(job_id, "partial")
+    rows = {row["id"]: row for row in job_persistence.history_page(10, 0)}
+    assert (rows[job.id]["status"], rows[job.id]["tracks_missing"]) == ("done", 1)
+    assert (rows["oes"]["status"], rows["oes"]["tracks_missing"]) == ("failed", 1)

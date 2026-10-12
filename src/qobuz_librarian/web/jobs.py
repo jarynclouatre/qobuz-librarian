@@ -333,6 +333,9 @@ class Job:
     # stayed under the quality target after the automatic retry.
     attention: str = ""
     quality_shortfall: dict = field(default_factory=dict)
+    # Tracks a download that imported still lacks. It outlives the attention
+    # marker, which clears once the user has seen the job.
+    tracks_missing: int = 0
     # Exact retained recovery files.
     recoveries: list = field(default_factory=list)
     # The verb the review screen's submit button uses. Most jobs download what
@@ -1255,7 +1258,7 @@ def _run_post_job_hook(payload: dict) -> None:
 
 def _build_post_job_hook_payload(
     *, event_id, status, title, edition="", artist="", error=None,
-    finished_at=None,
+    finished_at=None, tracks_missing=0,
 ):
     return {
         "id": event_id,
@@ -1265,6 +1268,7 @@ def _build_post_job_hook_payload(
         "display_title": release_title(title, edition),
         "artist": artist,
         "error": error,
+        "tracks_missing": tracks_missing,
         "finished_at": finished_at,
     }
 
@@ -1278,6 +1282,7 @@ def _post_job_hook_payload(job):
         artist=job.artist,
         error=job.error,
         finished_at=job.finished_at,
+        tracks_missing=job.tracks_missing,
     )
 
 
@@ -1599,6 +1604,7 @@ def resubmit_failed(job: Job, fn) -> bool:
                 "summary": job.summary,
                 "attention": job.attention,
                 "quality_shortfall": dict(job.quality_shortfall),
+                "tracks_missing": job.tracks_missing,
                 "cancel_requested": job.cancel_requested,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
@@ -1616,6 +1622,7 @@ def resubmit_failed(job: Job, fn) -> bool:
             job.summary = ""
             job.attention = ""
             job.quality_shortfall = {}
+            job.tracks_missing = 0
             job.cancel_requested = False
             job.started_at = None
             job.finished_at = None
@@ -2160,6 +2167,7 @@ def restore_jobs(
             single=row.get("single") or {},
             attention=row.get("attention") or "",
             quality_shortfall=row.get("quality_shortfall") or {},
+            tracks_missing=row.get("tracks_missing") or 0,
             recoveries=row.get("recoveries") or [],
             log_lines=list(row.get("log_lines") or []),
             created_at=(
@@ -2454,6 +2462,7 @@ def load_historical_job(job_id: str) -> Optional[Job]:
         single=row.get("single") or {},
         attention=row.get("attention") or "",
         quality_shortfall=row.get("quality_shortfall") or {},
+        tracks_missing=row.get("tracks_missing") or 0,
         recoveries=row.get("recoveries") or [],
         log_lines=list(row.get("log_lines") or []),
         created_at=(

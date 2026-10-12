@@ -15,6 +15,7 @@ from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import collection_snapshot
+from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import job_labels, storage, write_gate
@@ -60,18 +61,6 @@ def _beets_runtime_diagnostic() -> tuple[str | None, str]:
 # What each kind of kept staging group is, in the user's terms. The keys are
 # the manifest kinds written by the download, import and recovery paths.
 _STAGING_LEFTOVER_KINDS = {
-    "rejected": (
-        "Lossy track set aside",
-        "Qobuz served this track in a lossy format, so it was kept out of "
-        "your library. It stays here in case a later attempt finds the "
-        "lossless version.",
-    ),
-    "legacy-rejected": (
-        "Lossy track set aside",
-        "Qobuz served this track in a lossy format, so it was kept out of "
-        "your library. It stays here in case a later attempt finds the "
-        "lossless version.",
-    ),
     "untagged": (
         "Untagged file set aside",
         "This file arrived without an album or artist tag, so it could not "
@@ -97,6 +86,43 @@ _STAGING_LEFTOVER_KINDS = {
         "already fetched is thrown away.",
     ),
 }
+
+
+# A failed download keeps its audio under the stopped-download kind; the
+# group's name carries the label it was kept with.
+_FAILED_RUN = (
+    "Files from a failed download",
+    "A download failed and its files were kept so nothing already fetched is "
+    "thrown away.",
+)
+
+
+# A download sets aside a FLAC that won't decode and any lossy file under one
+# kind; the file's own extension tells them apart. No later download reads
+# either back.
+_REJECTED_KINDS = ("rejected", "legacy-rejected")
+_DAMAGED_LEFTOVER = (
+    "Damaged download",
+    "This FLAC did not decode cleanly, so it was kept out of your library. "
+    "Nothing uses this copy; a retry downloads the track again.",
+)
+_LOSSY_LEFTOVER = (
+    "Lossy download",
+    "Qobuz served this track in a lossy format, so it was kept out of your "
+    "library. Nothing uses this copy.",
+)
+
+
+def _reject_nothing_uses(inspection, saved_operations):
+    """A set-aside reject no saved download will settle, so it can go."""
+    if inspection.kind not in _REJECTED_KINDS or inspection.file_group is None:
+        return False
+    if inspection.owner is None:
+        return True
+    return (
+        saved_operations is not None
+        and inspection.owner["operation_id"] not in saved_operations
+    )
 
 
 def _album_name_from_path(path):
@@ -139,15 +165,24 @@ def _staging_leftovers():
     unseen. Read-only: removing one is always a deliberate click.
     """
     leftovers = []
+    saved_operations = startup_recovery.saved_queue_operation_ids()
     for inspection in staging_mod.inspect_retry_groups():
         kind = inspection.kind or "unresolved"
         label, reason = _STAGING_LEFTOVER_KINDS.get(
             kind, _STAGING_LEFTOVER_KINDS["unresolved"])
+        if kind == "interrupted" and inspection.path.name.endswith("-failed"):
+            label, reason = _FAILED_RUN
         what = ""
         held = inspection.file_group or inspection.planned_file
         if held is not None:
             source = held.original or held.retained
             what = _staging_display_name(source)
+            if kind in _REJECTED_KINDS:
+                label, reason = (
+                    _DAMAGED_LEFTOVER
+                    if held.retained.path.suffix.lower() == ".flac"
+                    else _LOSSY_LEFTOVER
+                )
         elif inspection.planned_trees and not any(
                 tree.files or any(rel for rel, _identity in tree.directories)
                 for tree in inspection.planned_trees):
@@ -158,7 +193,15 @@ def _staging_leftovers():
                 _staging_tree_contents(tree)
                 for tree in inspection.planned_trees
             )
-        if inspection.status == "ready" and inspection.owner is None:
+            if kind == "interrupted" and not any(
+                    Path(rel).suffix.lower() in cfg.AUDIO_EXTS
+                    for tree in inspection.planned_trees
+                    for rel, _identity in tree.files):
+                label = "Download folder with no tracks"
+                reason = "It holds no audio, only files such as cover art."
+        if (
+            inspection.status == "ready" and inspection.owner is None
+        ) or _reject_nothing_uses(inspection, saved_operations):
             removable, note = True, ""
         elif inspection.owner is not None:
             removable = False

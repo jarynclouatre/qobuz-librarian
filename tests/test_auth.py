@@ -34,9 +34,13 @@ def test_detect_auth_lost_only_fires_on_http_401():
     # But an actual 401 Unauthorized error line still fires.
     assert detect_auth_lost(
         "HTTPError: 401 Client Error: Unauthorized for url") is True
-    # Streamrip exhausting its retries reads as throttling; one retry does not.
-    assert detect_rate_limited("Persistent error downloading track 'X', skipping") is True
-    assert detect_rate_limited("Error downloading track 'X', retrying") is False
+    # Streamrip giving up on a track is throttling only when Qobuz said so.
+    assert detect_rate_limited(
+        "Persistent error downloading track 'X', skipping: file said 4 bytes, "
+        "read 0 bytes") is False
+    assert detect_rate_limited(
+        "Persistent error downloading track 'X', skipping: 429, "
+        "message='Too Many Requests'") is True
 
 
 def test_load_qobuz_token_happy_and_error_paths(tmp_path):

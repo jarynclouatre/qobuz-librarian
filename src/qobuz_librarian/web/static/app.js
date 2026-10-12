@@ -2405,6 +2405,7 @@
       stopElapsed();
       document.title = baseTitle;
       if (window.qlDismissSupersededFlashes) window.qlDismissSupersededFlashes();
+      if (window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
       finishJob();
     }
 

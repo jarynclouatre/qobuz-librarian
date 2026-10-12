@@ -116,9 +116,9 @@
 
 {% include "_writes_paused_notice.html" %}
 
-{# The queue is work in flight; parked reviews live on their own pages and in
-   History. `pending` still carries them, so the empty state gates on the
-   in-flight lists or a review-only registry would render a blank page. #}
+{# The queue is work in flight; parked reviews live on their own pages.
+   `pending` still carries them, so the empty state gates on the in-flight
+   lists or a review-only registry would render a blank page. #}
 {% set active_jobs = (pending | selectattr('status.value', 'equalto', 'running') | list) + (pending | selectattr('status.value', 'equalto', 'scanning') | list) %}
 {% set waiting_jobs = pending | selectattr('status.value', 'equalto', 'pending') | list %}
 {% if active_jobs or waiting_jobs %}

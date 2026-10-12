@@ -183,7 +183,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 ## Notifications
 
-`POST_JOB_HOOK` runs a command of your choice every time a background job finishes: downloads, scans, repairs, all of it. The job's final state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `finished_at`), and `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint. The command runs inside the container, which bundles `curl` and Python for exactly this. A command that cannot start, times out, or exits nonzero is recorded in the application log without exposing the command or its stderr.
+`POST_JOB_HOOK` runs a command of your choice every time a background job finishes: downloads, scans, repairs, all of it. The job's final state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `tracks_missing`, `finished_at`); an album that imported with tracks still missing finishes as `done` with `tracks_missing` above 0, and `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint. The command runs inside the container, which bundles `curl` and Python for exactly this. A command that cannot start, times out, or exits nonzero is recorded in the application log without exposing the command or its stderr.
 
 The hook must not run `beet` or otherwise edit its database while Qobuz Librarian is running.
 

@@ -23,6 +23,7 @@
     </div>
     <span id="job-status-badge" class="ql-status-chip ql-job-status
       {%- if job.status.value == 'done' and _attention == 'cancel_late' %} is-warning
+      {%- elif job.tracks_missing %} is-warning
       {%- elif job.status.value == 'done' %} is-success
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
@@ -299,7 +300,7 @@
     </div>
     {% endif %}
     {% if job.error %}
-    <div class="ql-notice ql-notice-error ql-job-error">
+    <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing else 'ql-notice-error' }} ql-job-error">
       <span>{{ job.error | strip_log_pointer(job.log_lines) }}</span>
       {% if recovery_holder_job_id %}
       <a href="/jobs/{{ recovery_holder_job_id }}" class="ql-btn ql-btn-secondary ql-btn-sm">Open that download</a>
@@ -325,7 +326,7 @@
     {% endif %}
     <div class="ql-job-actions">
       {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-      {% if s == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
+      {% if (s == 'failed' or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
       {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

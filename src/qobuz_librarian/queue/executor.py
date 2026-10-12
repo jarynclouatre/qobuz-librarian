@@ -26,6 +26,7 @@ from qobuz_librarian.download import (
     retain_download_staging,
     retire_download_staging_after_import,
     retire_empty_download_staging,
+    retire_failed_download_staging,
     run_album_download,
     staged_track_bindings,
     validated_staged_album_dirs,
@@ -3414,13 +3415,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             continue
 
         summary_n_ok = item.get("n_ok", 0)
-        summary_n_fail = item.get("n_fail", 0)
+        summary_n_missing = sum(incomplete_track_counts(item))
         summary_elapsed = int(item.get("elapsed", 0))
-        if summary_n_ok and not summary_n_fail:
+        if summary_n_ok and not summary_n_missing:
             log.info(fmt(C.GREEN, f"    ✓ {summary_n_ok} track(s) · {summary_elapsed}s"))
         elif summary_n_ok:
             log.info(fmt(C.YELLOW,
-                f"    ⚠ {summary_n_ok} ok · {summary_n_fail} failed · {summary_elapsed}s"))
+                f"    ⚠ {summary_n_ok} ok · {summary_n_missing} missing · {summary_elapsed}s"))
         else:
             log.info(fmt(C.RED, f"    ✗ download failed · {summary_elapsed}s"))
 
@@ -3462,7 +3463,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                             item["rate_limited"] = True
                         if retry_kept:
                             retire_empty_download_staging(item)
-                            for key in ("n_ok", "n_fail", "n_lossy",
+                            for key in ("n_ok", "n_fail", "n_lossy", "n_broken",
                                         "failed_tracks", "lossy_tracks",
                                         "broken_tracks", "elapsed",
                                         "gap_fill_backup_path", "_staging_run",
@@ -3644,6 +3645,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 f"  --no-import: skipping beets. Files in {cfg.STAGING_DIR}/"))
         elif summary_n_ok == 0:
             log.info(fmt(C.GRAY, "  Skipping beets: nothing landed."))
+            retire_failed_download_staging(item)
 
         # Drop a finished item from the persisted queue BEFORE resolving its
         # backup. If the process dies between the two, the worst case is an

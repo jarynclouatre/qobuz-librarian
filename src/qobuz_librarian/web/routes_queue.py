@@ -12,6 +12,7 @@ from qobuz_librarian.web import (
     queue_recovery,
     refusals,
     rendering,
+    review_pages,
 )
 from qobuz_librarian.web import jobs as job_mgr
 
@@ -121,6 +122,11 @@ async def queue_history(
         for r in rows:
             ts = r.get("finished_at") or r.get("created_at")
             r["when"], r["when_exact"] = job_labels._when_label(ts)
+            if r.get("status") == "awaiting_review":
+                # A parked review's count changes as it is worked; its own
+                # page has the live one.
+                r["summary"] = review_pages.review_summary_without_count(
+                    r.get("execute_kind"), r.get("summary"))
         return rows
 
     def _load_page(page, bulk_page):

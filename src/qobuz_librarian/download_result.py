@@ -3,15 +3,15 @@
 
 def incomplete_track_counts(result):
     """Return retryable and lossy-only missing-track counts."""
-    n_failed = result.get("n_fail", 0)
-    n_rejected = result.get("n_lossy", 0)
     n_broken = result.get("n_broken")
     if n_broken is None:
-        n_broken = min(len(result.get("broken_tracks") or []), n_rejected)
+        # Results saved before damaged tracks were counted on their own.
+        n_broken = min(len(result.get("broken_tracks") or []),
+                       result.get("n_lossy", 0))
     n_lossy_only = result.get("n_lossy_only")
     if n_lossy_only is None:
-        n_lossy_only = max(n_rejected - n_broken, 0)
-    return n_failed + n_broken, n_lossy_only
+        n_lossy_only = max(result.get("n_lossy", 0) - n_broken, 0)
+    return result.get("n_fail", 0) + n_broken, n_lossy_only
 
 
 def download_attention_kind(result):
@@ -45,9 +45,40 @@ def download_attention_kind(result):
     return ""
 
 
+def failure_cause(result):
+    """Why a download that added nothing failed, as a short clause."""
+    if result.get("rate_limited"):
+        return "Qobuz rate-limited the download"
+    if result.get("result") in ("incomplete", "partial"):
+        return "Qobuz couldn't deliver every track"
+    if result.get("n_ok"):
+        return "the import failed"
+    retryable, lossy_only = incomplete_track_counts(result)
+    if lossy_only and not retryable:
+        return "Qobuz only had lossy files"
+    if result.get("n_broken") and not result.get("n_fail"):
+        return "the tracks arrived damaged"
+    if retryable:
+        return "no track arrived"
+    return ""
+
+
+def tracks_missing(result):
+    """How many tracks an album that imported still lacks."""
+    if (
+        result.get("result") != "partial"
+        or not result.get("imported")
+        or download_attention_kind(result) not in ("partial", "lossy")
+    ):
+        return 0
+    return sum(incomplete_track_counts(result))
+
+
 def download_job_outcome(result):
     """The status ("done" or "failed") and attention a download earns."""
     kind = download_attention_kind(result)
+    if tracks_missing(result):
+        return "done", kind
     if kind == "backup" or (result.get("result") == "partial" and result.get("imported")):
         return "failed", kind
     benign = {"already_complete", "skipped_already_higher_quality",

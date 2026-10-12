@@ -1324,7 +1324,8 @@ async def job_retry(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
     if not job:
         return _land(error="That job is no longer in History.")
-    if (job.status != job_mgr.JobStatus.FAILED or not job.album_id
+    if ((job.status != job_mgr.JobStatus.FAILED and not job.tracks_missing)
+            or not job.album_id
             or (job.execute_args or {}).get("retry_disabled") == "terminal"):
         return _land(error="Nothing to retry for that job.")
     if job.execute_args_unreadable:

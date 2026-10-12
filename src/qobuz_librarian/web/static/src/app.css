@@ -2805,16 +2805,13 @@ details.ql-mobile-drawer[open]::before {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-/* One line of the reason on the row; the job page carries the sentence. It
-   sits on its own grid row under the name rather than inside it, so a phone
-   can give it the width of the card. */
-.ql-history-row .ql-row-meta--error {
-  -webkit-line-clamp: 1;
-}
 .ql-history-row {
   row-gap: 0.3rem;
 }
+/* The reason sits on its own grid row under the name rather than inside it,
+   so a phone can give it the width of the card, and it reads in full. */
 .ql-history-row .ql-row-reason {
+  display: block;
   grid-column: 2;
   margin-top: 0;
 }
@@ -2824,6 +2821,9 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-row-meta--error {
   color: color-mix(in oklab, var(--ql-danger) 84%, var(--ql-text));
+}
+.ql-row-meta--warning {
+  color: color-mix(in oklab, var(--ql-warning) 84%, var(--ql-text));
 }
 .ql-activity-pagination {
   display: flex;
@@ -2848,6 +2848,7 @@ details.ql-mobile-drawer[open]::before {
 @media (min-width: 640px) {
   .ql-empty-actions {
     flex-direction: row;
+    justify-content: center;
   }
 }
 @media (max-width: 519.98px) {

@@ -273,6 +273,22 @@ def decode_log_lines(value) -> tuple[list[str], bool]:
     return lines, False
 
 
+# A download that imported with tracks missing was saved as failed before
+# tracks_missing was recorded; its message still opens with the count.
+_SAVED_MISSING_RE = re.compile(
+    r"(\d+) tracks? (?:is|are) (?:still missing|only available lossy)")
+
+
+def _tracks_missing(value, status, error) -> int:
+    if type(value) is int and value > 0:
+        return value
+    match = (
+        _SAVED_MISSING_RE.match(error)
+        if status == "failed" and isinstance(error, str) else None
+    )
+    return int(match.group(1)) if match else 0
+
+
 def _decode_timestamp(value) -> float | None:
     if (
         type(value) not in (int, float)
@@ -386,7 +402,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     recoveries    TEXT NOT NULL DEFAULT '[]',
     log_lines     TEXT NOT NULL DEFAULT '[]',
     quality_shortfall TEXT NOT NULL DEFAULT '{}',
-    edition       TEXT NOT NULL DEFAULT ''
+    edition       TEXT NOT NULL DEFAULT '',
+    tracks_missing INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -489,6 +506,8 @@ def init() -> None:
                 ("log_lines", "TEXT NOT NULL DEFAULT '[]'"),
                 ("quality_shortfall", "TEXT NOT NULL DEFAULT '{}'"),
                 ("edition", "TEXT NOT NULL DEFAULT ''"),
+                # How many tracks an imported album still lacks.
+                ("tracks_missing", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in cols:
                     conn.execute(
@@ -539,8 +558,8 @@ _PERSIST_SQL = (
     "(id, title, artist, album_id, kind, status, phase, candidates, "
     " error, summary, review_verb, execute_kind, execute_args, "
     " created_at, finished_at, single, attention, recoveries, log_lines, "
-    " quality_shortfall, edition) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " quality_shortfall, edition, tracks_missing) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 _CURRENT_JOB_SINGLE = object()
 # jobs.py imports this module, so the names live here rather than reaching
@@ -605,14 +624,16 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
         log_json,
         quality_shortfall_json,
         str(getattr(job, "edition", "") or "").strip(),
+        int(getattr(job, "tracks_missing", 0) or 0),
     )
 
 
 _TERMINAL_DOWNLOAD_SQL = (
     "INSERT INTO jobs "
     "(id, title, artist, album_id, kind, status, summary, created_at, "
-    " finished_at, edition, attention, quality_shortfall, execute_args) "
-    "VALUES (?,?,?,?,'download',?,?,?,?,?,?,?,?)"
+    " finished_at, edition, attention, quality_shortfall, execute_args, "
+    " tracks_missing) "
+    "VALUES (?,?,?,?,'download',?,?,?,?,?,?,?,?,?)"
 )
 
 
@@ -653,6 +674,7 @@ def record_terminal_download(
             started_at, finished_at, str(edition or "").strip(),
             attention, json.dumps(shortfall),
             json.dumps({"retry_disabled": "terminal"}),
+            download_result.tracks_missing(result),
         )
         for _ in range(3):
             try:
@@ -1614,7 +1636,8 @@ def load_one(job_id: str) -> Optional[dict]:
                 "SELECT id, title, artist, album_id, kind, status, phase, "
                 "candidates, error, summary, review_verb, execute_kind, "
                 "execute_args, created_at, finished_at, single, attention, "
-                "recoveries, log_lines, quality_shortfall, edition "
+                "recoveries, log_lines, quality_shortfall, edition, "
+                "tracks_missing "
                 "FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
@@ -1650,6 +1673,7 @@ def load_one(job_id: str) -> Optional[dict]:
         "log_lines_unreadable": log_lines_unreadable,
         "quality_shortfall": quality_shortfall,
         "edition": row[20] or "",
+        "tracks_missing": _tracks_missing(row[21], row[5], row[8]),
     }
 
 
@@ -1710,9 +1734,14 @@ def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
 
 _TERMINAL_SQL = "status IN ({})".format(
     ", ".join(f"'{name}'" for name in _TERMINAL_STATUSES))
-# The History view also lists parked reviews (with an Open link back to their
-# surface), but clearing and pruning must never touch them.
-_HISTORY_SQL = "status IN ('done', 'failed', 'canceled', 'awaiting_review')"
+# Parked reviews belong to their own pages. New-release, restore and
+# migration reviews have no other page to return to, so History lists them
+# with a link there. Clearing and pruning must never touch them.
+_HISTORY_SQL = (
+    "(status IN ('done', 'failed', 'canceled') OR "
+    "(status = 'awaiting_review' AND execute_kind IN "
+    "('new_releases', 'collection_restore', 'migration')))"
+)
 
 # A scan cut short by a restart is saved as cancelled, and only the opening
 # of its summary tells it apart from one the user stopped.
@@ -1794,7 +1823,8 @@ def history_page(limit: int, offset: int,
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
                 "execute_kind, execute_args, created_at, finished_at, "
-                "attention, recoveries, edition, single, quality_shortfall "
+                "attention, recoveries, edition, single, quality_shortfall, "
+                "tracks_missing "
                 "FROM jobs "
                 f"WHERE {_HISTORY_SQL} {clause}"
                 "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC "
@@ -1821,6 +1851,7 @@ def history_page(limit: int, offset: int,
             "attention": row[11] or "", "recoveries": recoveries,
             "edition": row[13] or "",
             "quality_shortfall": _decode_object(row[15])[0],
+            "tracks_missing": _tracks_missing(row[16], row[4], row[5]),
             "recovery_unreadable": recovery_unreadable,
             "single_unreadable": single_unreadable,
         })
@@ -2020,7 +2051,7 @@ def load_all() -> list[dict]:
             "THEN candidates END, "
             "error, summary, review_verb, execute_kind, "
             "execute_args, created_at, finished_at, single, attention, "
-            "recoveries, log_lines, quality_shortfall, edition "
+            "recoveries, log_lines, quality_shortfall, edition, tracks_missing "
             "FROM jobs ORDER BY created_at",
             REVIEW_PICK_KINDS,
         ).fetchall()
@@ -2052,6 +2083,7 @@ def load_all() -> list[dict]:
                 "log_lines_json": r[18],
                 "quality_shortfall": quality_shortfall,
                 "edition": r[20] or "",
+                "tracks_missing": _tracks_missing(r[21], r[5], r[8]),
             })
         except (ValueError, TypeError) as e:
             _log.info("skipping unreadable jobs.db row %s: %s", r[0], e)

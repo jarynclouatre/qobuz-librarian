@@ -391,6 +391,14 @@ def unclaimed_staging_run_names():
     return _unclaimed_staging_run_names(_sorted_journals(loads))
 
 
+def saved_queue_operation_ids():
+    """Every saved queue's operation ID, or None when a queue cannot be read."""
+    loads = queue_state.list_queue_journals()
+    if any(loaded.status is queue_state.QueueLoadStatus.BLOCKED for loaded in loads):
+        return None
+    return {journal.operation_id for journal in _sorted_journals(loads)}
+
+
 def _retain_unclaimed_staging_runs(authority, names) -> bool:
     """Park run roots no journal claims; the terminal lane leaves them behind.
 

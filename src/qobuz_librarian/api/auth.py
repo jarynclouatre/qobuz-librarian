@@ -556,15 +556,14 @@ def detect_auth_lost(rip_output):
 
 def detect_rate_limited(rip_output):
     """Heuristic: did Qobuz throttle this rip? Only fires on explicit
-    rate-limit signals or persistent network-skips; isolated 'retrying'
-    lines are normal streamrip behaviour and don't count."""
+    rate-limit signals. streamrip giving up on a track after its retries is
+    usually a truncated stream, and names a 429 when that was the cause."""
     o = rip_output.lower()
     return any(s in o for s in (
         "http 429",
         "too many requests",
         "rate limit",
         "ratelimit",
-        "persistent error downloading",  # streamrip exhausted its retries
     ))
 
 

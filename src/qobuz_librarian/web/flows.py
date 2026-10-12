@@ -19,6 +19,7 @@ from qobuz_librarian.api.auth import AuthLost, QobuzAccess, QobuzUnavailable, lo
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import (
     download_attention_kind,
+    failure_cause,
     incomplete_track_counts,
 )
 from qobuz_librarian.integrations import beets as beets_mod
@@ -2427,6 +2428,7 @@ def execute_albums(job, chosen, token):
     processed = 0
     # Picks that didn't land (never fetched, errored, or came back empty).
     failed_cands = []
+    failure_causes = []
     cancelled_cand = None
     # Fold-back recovery is kind-scoped: this function executes both library
     # and new-release batches, and their picks must never cross into each
@@ -2638,6 +2640,7 @@ def execute_albums(job, chosen, token):
         else:
             failed += 1
             failed_cands.append(cand)
+            failure_causes.append(failure_cause(result or {}))
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
     if job.cancel_requested:
@@ -2804,9 +2807,10 @@ def execute_albums(job, chosen, token):
             reason = f" Qobuz couldn't be reached for {fetch_failed} of them."
         else:
             reason = ""
+        causes = "; ".join(dict.fromkeys(cause for cause in failure_causes if cause))
         failure_message = (
-            f"{failed} of {plural(len(chosen), 'album')} didn't finish."
-            f"{reason} {outcome}"
+            f"{failed} of {plural(len(chosen), 'album')} didn't finish"
+            f"{': ' + causes if causes else ''}.{reason} {outcome}"
         )
         job.error = " ".join(part for part in (job.error, failure_message) if part)
     if review_save_failed:

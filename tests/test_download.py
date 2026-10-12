@@ -133,8 +133,8 @@ def test_untagged_broken_track_on_deluxe_twin_disc_is_retried(monkeypatch, tmp_p
         rips.append(url)
         return (0, "")
 
-    deltas = iter([[broken], [broken], [recovered]])
-    cleans = iter([([], [], [broken]), ([recovered], [], [])])
+    deltas = iter([[broken], [], [recovered]])
+    cleans = iter([([], [], [broken]), ([], [], []), ([recovered], [], [])])
     _patch(monkeypatch, rip=rip,
            added=lambda _s: next(deltas, []),
            cleanup=lambda _f: next(cleans, ([], [], [])))
@@ -145,6 +145,39 @@ def test_untagged_broken_track_on_deluxe_twin_disc_is_retried(monkeypatch, tmp_p
 
     assert rips == ["https://play.qobuz.com/track/101"] * 2
     assert (r["n_ok"], r["n_fail"]) == (1, 0)
+
+
+def test_track_by_track_twins_on_two_discs_keep_their_own_files(monkeypatch, tmp_path):
+    # Both discs open with "Intro". A track URL has no Disc N folder, so the
+    # second rip wrote over the first, and disc 2's audio was filed as disc 1.
+    from qobuz_librarian.integrations.rip import snapshot_staging
+
+    tracks = [
+        {"id": 1, "title": "Intro", "media_number": 1, "track_number": 1},
+        {"id": 2, "title": "Song", "media_number": 1, "track_number": 2},
+        {"id": 3, "title": "Intro", "media_number": 2, "track_number": 1},
+    ]
+
+    def rip(url, staging_dir=None, **_k):
+        target = Path(staging_dir) / "Artist" / "Album" / "01. Intro.flac"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(url.rsplit("/", 1)[1].encode())
+        return 0, ""
+
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
+    monkeypatch.setattr(dl, "rip_url", rip)
+    monkeypatch.setattr(dl, "cleanup_lossy", lambda f: (list(f), [], []))
+    monkeypatch.setattr(dl, "read_audio_meta", lambda _p: {})
+    monkeypatch.setattr(dl.time, "sleep", lambda _s: None)
+
+    r = dl.run_album_download(album=_album(tracks), missing=[tracks[0], tracks[2]],
+                              present=[tracks[1]], album_dir=None,
+                              snapshot=snapshot_staging())
+
+    filed = {b["slot"]: Path(b["path"]).read_bytes() for b in r["_staged_track_bindings"]}
+    assert filed == {"qobuz:1": b"1", "qobuz:3": b"3"}
+    assert (r["n_ok"], r["n_fail"]) == (2, 0)
 
 
 def test_track_rip_that_exits_cleanly_without_a_file_is_retried(monkeypatch, tmp_path):
@@ -181,8 +214,8 @@ def test_throttled_last_track_cools_down_before_its_retry(monkeypatch, tmp_path)
         events.append("rip")
         return (0, "HTTP 429")
 
-    deltas = iter([[first], [first], [second]])
-    cleans = iter([([], [], [first]), ([], [], [second])])
+    deltas = iter([[first], [], [second]])
+    cleans = iter([([], [], [first]), ([], [], []), ([], [], [second])])
     discarded = []
     _patch(monkeypatch, rip=rip,
            added=lambda _s: next(deltas, []),

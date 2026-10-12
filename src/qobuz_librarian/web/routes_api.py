@@ -216,7 +216,7 @@ async def job_review_stream(request: Request, job_id: str):
 
 
 def _job_row(*, job_id, status, title, edition, artist, album_id, summary,
-             error, quality_shortfall, created_at, finished_at):
+             error, quality_shortfall, tracks_missing, created_at, finished_at):
     """A job as the API returns it, with the same keys whether it is live or
     read back from History."""
     return {
@@ -230,6 +230,7 @@ def _job_row(*, job_id, status, title, edition, artist, album_id, summary,
         "summary": summary,
         "error": error,
         "quality_shortfall": quality_shortfall,
+        "tracks_missing": tracks_missing,
         "created_at": created_at,
         "finished_at": finished_at,
     }
@@ -241,6 +242,7 @@ def _job_to_dict(job, *, log_tail: int = 50):
         edition=job.edition, artist=job.artist, album_id=job.album_id,
         summary=job.summary, error=job.error,
         quality_shortfall=job.quality_shortfall,
+        tracks_missing=job.tracks_missing,
         created_at=job.created_at, finished_at=job.finished_at)
     if log_tail:
         out["log_lines"] = job.log_lines[-log_tail:]
@@ -355,6 +357,7 @@ async def jobs_list(status: str = "", limit: int = 50):
                 album_id=row["album_id"], summary=row["summary"],
                 error=row["error"],
                 quality_shortfall=row["quality_shortfall"],
+                tracks_missing=row["tracks_missing"],
                 created_at=row["created_at"], finished_at=row["finished_at"]))
             seen.add(row["id"])
             if len(matching) >= cap:

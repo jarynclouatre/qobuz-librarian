@@ -29,14 +29,21 @@
 {% include "_writes_paused_notice.html" %}
 
 {% if attention_only and (bulk_jobs or jobs) %}
+{% set held = namespace(recovery=false, catalog=false) %}
+{% for job in bulk_jobs + jobs %}
+  {% if job.recoveries or job.recovery_unreadable or job.attention == 'recovery' %}{% set held.recovery = true %}{% endif %}
+  {% if job.attention == 'catalog' %}{% set held.catalog = true %}{% endif %}
+{% endfor %}
 <div class="ql-notice ql-notice-warning">
-  <span>Showing unresolved History items. Recovery and Catalogue cleanup stay until resolved. <a href="/queue/history">Show all history</a>.</span>
+  <span>Showing unresolved History items.{% if held.recovery and held.catalog %} Recovery and Catalogue cleanup stay until resolved.{% elif held.recovery %} Recovery stays until resolved.{% elif held.catalog %} Catalogue cleanup stays until resolved.{% endif %} <a href="/queue/history">Show all history</a>.</span>
 </div>
 {% endif %}
 
 {% macro job_side(job) -%}
     <div class="ql-activity-side">
-      {% if job.status == 'done' %}
+      {% if job.tracks_missing %}
+        <span class="ql-status-chip is-warning">Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing</span>
+      {% elif job.status == 'done' %}
         <span class="ql-status-chip is-success">Done</span>
       {% elif job.status == 'canceled' %}
         <span class="ql-status-chip is-neutral">{{ 'Interrupted' if job.interrupted_by_restart else 'Cancelled' }}</span>
@@ -59,9 +66,9 @@
         <span class="ql-status-chip is-warning" title="The saved single-track recovery details could not be read.">Actions unavailable</span>
       {% elif job.attention == 'recovery' %}
         <span class="ql-status-chip is-warning" title="The saved download recovery must be settled before retrying.">Recovery attention</span>
-      {% elif job.attention == 'partial' %}
+      {% elif job.attention == 'partial' and not job.tracks_missing %}
         <span class="ql-status-chip is-warning" title="This album is missing tracks; open it for details.">Incomplete</span>
-      {% elif job.attention == 'lossy' %}
+      {% elif job.attention == 'lossy' and not job.tracks_missing %}
         <span class="ql-status-chip is-warning" title="Qobuz does not have every track in lossless quality.">Lossless unavailable</span>
       {% elif job.attention == 'backup' %}
         <span class="ql-status-chip is-warning" title="A retained safety backup needs review under Settings and Diagnostics.">Backup retained</span>
@@ -79,7 +86,7 @@
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
       <div class="ql-activity-actions">
         {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
-        {% if job.status == 'failed' and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
+        {% if (job.status == 'failed' or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and (job.attention != 'recovery' or recovery_retry) and not job.recoveries and not job.recovery_unreadable %}
         {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -131,7 +138,7 @@
       </div>
       {{ job_side(job) }}
       {% if job.summary and job.summary != job.error %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
-      {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta ql-row-meta--error ql-row-reason" title="{{ reason }}">{{ reason }}</p>{% endif %}
+      {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta ql-row-meta--error ql-row-reason">{{ reason }}</p>{% endif %}
     </article>
     {% endfor %}
   </div>
@@ -171,7 +178,7 @@
       {{ job_side(job) }}
       {% if job.error %}
       {% set reason = job.error | strip_log_pointer(none) %}
-      <p class="ql-row-meta ql-row-meta--error ql-row-reason" title="{{ reason }}">{{ reason }}</p>
+      <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
       {% endif %}
     </article>
     {% endfor %}

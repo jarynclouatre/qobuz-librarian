@@ -1492,6 +1492,22 @@ def _check_staging_occupied():
         pass
 
 
+def _note_held_staging():
+    """Point once, at the end of the run, at what staging recovery holds."""
+    if _RUN_LEASE is None or _RUN_LEASE.intact() is not True:
+        return
+    from qobuz_librarian.integrations.staging import inspect_retry_groups
+
+    held = len(inspect_retry_groups())
+    if held:
+        log.info(fmt(C.GRAY, wrap(
+            f"{plural(held, 'item')} from earlier downloads "
+            f"{'is' if held == 1 else 'are'} held in "
+            f"{cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR}. Settings > Diagnostics "
+            "in the web app lists them.",
+            indent="  ", hanging="  ")))
+
+
 def _maybe_drop_privileges():
     """Re-exec under gosu to PUID/PGID when started as root. The entrypoint drops
     PID 1 to PUID/PGID, but Docker exec commands bypass the entrypoint.
@@ -1580,6 +1596,7 @@ def _entry():
         from qobuz_librarian.library.discovery import flush_resolve_cache
         flush_resolve_cache()
         _check_staging_occupied()
+        _note_held_staging()
 
 
 if __name__ == "__main__":

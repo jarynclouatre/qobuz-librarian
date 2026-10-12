@@ -21,6 +21,7 @@ from qobuz_librarian.library import (
 )
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.quality import decision as quality_decision
+from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
     collection_restore,
@@ -586,7 +587,13 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
             f"they are. The row below offers to delete {html.escape(location)} "
             "without checking it.")
         inspection = staging_mod.inspect_retry_group(target)
-        if inspection.status != "ready" or inspection.owner is not None:
+        if diagnostics._reject_nothing_uses(
+                inspection, startup_recovery.saved_queue_operation_ids()):
+            removed = staging_mod.discard_file_group(
+                inspection.file_group, expected_owner=inspection.owner)
+            note = (_diagnostics_result_notice("success", "Removed the kept file.")
+                    if removed else stuck)
+        elif inspection.status != "ready" or inspection.owner is not None:
             note = _diagnostics_result_notice(
                 "error", "These files changed since the app set them aside, "
                 "so they were left untouched.")
