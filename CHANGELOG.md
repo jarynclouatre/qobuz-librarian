@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.3.4] - 2026-10-11
+
+Downloads retry tracks that arrive missing or damaged, Search stops calling owned tracks missing on albums with several versions, and unchanged settings keep following Compose.
+
+- Downloads retry a track that arrives damaged or not at all, including on deluxe editions that repeat a title on another disc, so an album no longer finishes without it.
+- Retries wait out the usual pause, and the longer cooldown after a rate-limited track or quality re-download. Stop ends the wait at once. A damaged track that cannot be placed is counted once in the download summary.
+- Library scans compare the full track title, version included, so a live take or alternate mix is not taken for the album track.
+- Search counts tracks as owned on albums that mix versions: bonus tracks with their own version, titles whose version word is part of the song name, and discs another release numbers differently.
+- Clearing leftover staging files from the terminal leaves hi-res files alone when Downsample is off.
+- Saving Settings without changes no longer pins the lyric providers set in Compose.
+- Search keeps the search box and tab in step with the results after an artist link or Search results, and Back returns a desktop results list to where it was.
+- Library Expand all matches the open artists after a tab change or Back.
+
 ## [1.3.3] - 2026-10-09
 
 Search recognises owned deluxe and remastered editions, Downsample includes compilations, and Settings keeps edits when a save needs correcting.
