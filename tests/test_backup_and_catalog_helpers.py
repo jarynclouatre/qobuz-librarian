@@ -150,8 +150,8 @@ def test_whole_album_backup_breaks_hardlinks_and_reads_each_file_once(
         tmp_path, monkeypatch):
     """A backup of hardlinked tracks gets its own inode per file, and one
     upgrade read the replaced album about forty times between its backup and
-    the backup's removal. Each proof now reads a file once, under its writer
-    lease."""
+    the backup's removal. A file is read once, under its writer lease, and
+    later proofs reuse that digest while its inode is unchanged."""
     import qobuz_librarian.library.backup as bk
 
     music = tmp_path / "music"
@@ -189,6 +189,7 @@ def test_whole_album_backup_breaks_hardlinks_and_reads_each_file_once(
         return sorted(inode for inode in reads if inode in audio)
 
     monkeypatch.setattr(bk, "_read_file_digest_fd", counted)
+    monkeypatch.setattr(bk, "_SETTLED_NS", 0)
 
     result = bk.backup_album_dir(album)
     assert result is not None and result.complete
@@ -202,8 +203,8 @@ def test_whole_album_backup_breaks_hardlinks_and_reads_each_file_once(
         result, replacement_path=album, expected_replacement_receipt=receipt,
         replacement_validator=lambda _replacement, _backup: True)
     assert not result.path.exists()
-    # The new tracks once for their receipt, then each side once for disposal.
-    assert len(track_reads()) == 8 and set(track_reads()) == audio
+    # The new tracks once for their receipt; disposal reads neither side.
+    assert track_reads() == sorted(audio)
 
 
 def test_gap_fill_restore_puts_back_the_backup_over_a_partial_or_corrupt_track(

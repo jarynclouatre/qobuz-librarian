@@ -262,7 +262,13 @@ def test_artists_cut_at_the_result_cap_are_checked_again(tmp_path, monkeypatch):
 
 def test_a_scan_stopped_for_a_restart_keeps_its_progress(tmp_path, monkeypatch):
     # Stopping the app winds a scan down the way a cancel does, but a cancel
-    # throws its progress away. After a restart the scan has to resume.
+    # throws its progress away. After a restart the scan has to resume, with
+    # the albums it had found listed once, also from an older checkpoint that
+    # lists them a second time outside the artists.
+    import json
+    import shutil
+    import threading
+
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import (
         discovery,
@@ -285,16 +291,27 @@ def test_a_scan_stopped_for_a_restart_keeps_its_progress(tmp_path, monkeypatch):
     ):
         monkeypatch.setattr(cfg, setting, tmp_path / f"{setting}.json")
     job = jm.Job(title="baseline")
+    one_found = threading.Event()
+    asked = []
 
     def scan_artist(artist, *_a, **_k):
-        job.stopping_for_restart = True
-        job.cancel_requested = True
+        asked.append(artist.name)
+        if job.title == "baseline" and artist.name == "Two":
+            one_found.wait(5)
+            job.stopping_for_restart = True
+            job.cancel_requested = True
         gap = discovery.AlbumGap(
             qobuz_album={"id": artist.name, "title": "Missing album"},
             on_disk_dir=None,
         )
         return artist.name, artist.name, [gap], artist.name, [artist.name], {}, set()
 
+    def progress(*a, **k):
+        jm.Job.push_progress(job, *a, **k)
+        if "hit" in k:
+            one_found.set()
+
+    monkeypatch.setattr(job, "push_progress", progress)
     monkeypatch.setattr(flows, "_scan_library_artist", scan_artist)
     monkeypatch.setattr(
         downsample_state, "refresh_for_artists",
@@ -305,6 +322,24 @@ def test_a_scan_stopped_for_a_restart_keeps_its_progress(tmp_path, monkeypatch):
 
     assert scan_checkpoint.load("missing") is not None
     assert generation_state.load()["latest_attempt"]["status"] == "running"
+    stopped = tmp_path / "stopped"
+    shutil.copytree(tmp_path, stopped, ignore=shutil.ignore_patterns("music"))
+    checkpoint = json.loads(cfg.SCAN_CHECKPOINT_FILE.read_text())["missing"]
+    assert checkpoint["scanned"] == ["One"]
+    assert "candidates" not in checkpoint
+    old_format = {**checkpoint, "candidates": [
+        c for entry in checkpoint["artists"].values() for c in entry["candidates"]]}
+    for checkpoint in (None, old_format):
+        if checkpoint is not None:
+            for kept in stopped.iterdir():
+                shutil.copy(kept, tmp_path / kept.name)
+            cfg.SCAN_CHECKPOINT_FILE.write_text(json.dumps({"missing": checkpoint}))
+        job = jm.Job(title="refresh")
+        asked.clear()
+        flows.scan_library(job, "")
+
+        assert asked == ["Two"]
+        assert sorted(c["artist"] for c in job.candidates) == ["One", "Two"]
 
 
 @pytest.mark.parametrize("scan_name,kind", [("scan_library", "missing"),
@@ -366,7 +401,7 @@ def test_a_slow_checkpoint_write_is_not_repeated_after_every_artist(monkeypatch)
     monkeypatch.setattr(scan_checkpoint, "save", slow_save)
     writer = scan_checkpoint.Writer("missing")
     for _ in range(20):
-        writer.save(set(), [], {})
+        writer.save(set(), {})
         clock[0] += 1.0
 
     assert len(writes) == 1
@@ -380,7 +415,7 @@ def test_a_waiting_scan_is_shown_without_reading_its_checkpoint(
     from qobuz_librarian.library import scan_checkpoint
 
     monkeypatch.setattr(cfg, "SCAN_CHECKPOINT_FILE", tmp_path / "checkpoint.json")
-    scan_checkpoint.save("missing", {"A", "B"}, [], {})
+    scan_checkpoint.save("missing", {"A", "B"}, {})
     monkeypatch.setattr(scan_checkpoint, "_read",
                         lambda: pytest.fail("the checkpoint was read"))
 

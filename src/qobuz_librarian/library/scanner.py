@@ -353,13 +353,21 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
         walk_errors.append(f"{config.MUSIC_ROOT}: {e}")
         log.info(f"  ⚠  Couldn't list MUSIC_ROOT: {e}.")
         return []
+    try:
+        staging = config.STAGING_DIR.stat()
+    except OSError:
+        staging = None
     for d in entries:
         try:
-            if not _is_type(d, stat.S_ISDIR):
+            try:
+                st = d.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if not stat.S_ISDIR(st.st_mode):
                 continue
             if is_library_system_folder(d.name):  # .Trash, lost+found, etc.
                 continue
-            if d.resolve() == config.STAGING_DIR.resolve():
+            if staging is not None and os.path.samestat(st, staging):
                 continue
             has_audio = _has_audio_anywhere(d, walk_errors=walk_errors)
             if has_audio is None:

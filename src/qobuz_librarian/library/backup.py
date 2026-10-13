@@ -25,7 +25,7 @@ from qobuz_librarian.dirfd import same_directory as _same_directory
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.interrupts import run_sigint_deferred
-from qobuz_librarian.library import scanner
+from qobuz_librarian.library import scanner, sqlite_atomic
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
 from qobuz_librarian.recovery import (
     decode_recovery_json,
@@ -2132,18 +2132,33 @@ def _run_backup_sigint_deferred(callback):
 # intact and the inode's size and times are unchanged, reading it again
 # would only return the same digest.
 _HELD_DIGESTS = {}
+# Digests of files whose ctime was already older than the filesystem's
+# timestamp granularity when they were read under a lease. A later write,
+# or a new file on the reused inode number, moves the ctime, so these stay
+# good after the lease is gone while the size and times match. A ctime on a
+# whole second may come from a filesystem that keeps only seconds. Only
+# local Linux filesystems keep a ctime no one can set: FAT and exFAT keep
+# none on disk, and FUSE and network mounts report whatever they are given.
+_SETTLED_DIGESTS = {}
+_SETTLED_DIGESTS_LIMIT = 16384
+_SETTLED_NS = 50_000_000
+_SETTLED_WHOLE_SECOND_NS = 2_000_000_000
 
 
 def _file_digest_fd(descriptor):
     value = os.fstat(descriptor)
     times = (int(value.st_size), int(value.st_mtime_ns), int(value.st_ctime_ns))
-    for held in _HELD_DIGESTS.get((int(value.st_dev), int(value.st_ino)), ()):
+    key = (int(value.st_dev), int(value.st_ino))
+    for held in _HELD_DIGESTS.get(key, ()):
         if held["times"] == times and held["lease"].intact():
             return held["sha256"]
+    settled = _SETTLED_DIGESTS.get(key)
+    if settled is not None and settled[0] == times:
+        return settled[1]
     return _read_file_digest_fd(descriptor)
 
 
-def _remember_held_digest(snapshot, lease):
+def _remember_held_digest(snapshot, lease, read_ns, descriptor):
     _type, device, inode = snapshot["identity"]
     entry = {
         "lease": lease,
@@ -2152,7 +2167,22 @@ def _remember_held_digest(snapshot, lease):
         "sha256": snapshot["sha256"],
     }
     _HELD_DIGESTS.setdefault((device, inode), []).append(entry)
+    changed = snapshot["changed_ns"]
+    settle = (_SETTLED_WHOLE_SECOND_NS if changed % 1_000_000_000 == 0
+              else _SETTLED_NS)
+    if changed < read_ns - settle and _keeps_own_ctime(descriptor):
+        if len(_SETTLED_DIGESTS) >= _SETTLED_DIGESTS_LIMIT:
+            _SETTLED_DIGESTS.clear()
+        _SETTLED_DIGESTS[(device, inode)] = (entry["times"], entry["sha256"])
     return (device, inode), entry
+
+
+def _keeps_own_ctime(descriptor) -> bool:
+    try:
+        return (sqlite_atomic._filesystem_magic(descriptor)
+                in sqlite_atomic._LOCAL_FILESYSTEM_MAGIC)
+    except OSError:
+        return False
 
 
 def _forget_held_digest(remembered) -> None:
@@ -2170,7 +2200,8 @@ def _hold_snapshot_files(root_fd, snapshot, held):
     """Hold and writer-exclude every exact regular file in a snapshot.
 
     Each file is read once, after its lease is held, and that digest serves
-    every later check while the lease stays intact. A snapshot taken with
+    every later check while the lease stays intact, or for a settled file
+    while its size and times are unchanged. A snapshot taken with
     ``digests=False`` is matched on everything but the digest.
     """
     if type(held) is not dict or held:
@@ -2208,11 +2239,13 @@ def _hold_snapshot_files(root_fd, snapshot, held):
             if lease is None or not lease.intact():
                 raise OSError(
                     "snapshotted file has an active or uncertain writer")
+            read_ns = time.time_ns()
             current = _snapshot_file(item["parent_fd"], relative[-1])
             if (current if "sha256" in expected
                     else _fidelity_without(current, "sha256")) != expected:
                 raise OSError("snapshotted file changed before exclusion")
-            item["digest"] = _remember_held_digest(current, lease)
+            item["digest"] = _remember_held_digest(
+                current, lease, read_ns, item["descriptor"])
         current = _exact_tree_snapshot(root_fd)
         if (current if current is None or _tree_has_digests(snapshot)
                 else _tree_identity(current)) != snapshot:

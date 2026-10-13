@@ -222,73 +222,83 @@ def store_stamp():
     return (_writes, version)
 
 
+# One row per cached file under MUSIC_ROOT: its tier, split at 48 kHz (the
+# rate Downsample works above), and the bytes a downsample would free. The
+# resampler targets the integer-ratio family: 88.2/176.4 land on 44.1,
+# everything else on 48. SQLite does the walk, so a page asking for the
+# census is not held up by tens of thousands of rows coming back one at a
+# time.
+_CENSUS_ROWS = """
+WITH docs AS (
+    SELECT rowid AS seq, substr(path, length(:root) + 1) AS rest,
+           CASE WHEN json_valid(payload) THEN payload END AS doc
+    FROM files
+    WHERE substr(path, 1, length(:root)) = :root
+), meta AS (
+    SELECT seq, rest,
+           max(coalesce(CAST(json_extract(doc, '$.bits') AS INTEGER), 0), 0) AS bits,
+           max(coalesce(CAST(json_extract(doc, '$.sample_rate') AS INTEGER), 0), 0) AS sr,
+           max(coalesce(CAST(json_extract(doc, '$.size') AS INTEGER), 0), 0) AS size
+    FROM docs
+    WHERE json_type(doc) = 'object'
+      AND NOT coalesce(json_extract(doc, '$.__neg__'), 0)
+), tiered AS (
+    SELECT seq, rest, sr, size,
+           CASE WHEN bits = 0 OR sr = 0 THEN 'unknown'
+                WHEN sr > 96000 THEN 'hires192'
+                WHEN sr > 48000 THEN 'hires96'
+                WHEN bits <= 16 THEN 'cd'
+                ELSE 'hires48' END AS tier,
+           CASE WHEN sr % 44100 = 0 THEN 44100 ELSE 48000 END AS target
+    FROM meta
+), rows AS (
+    SELECT seq, rest, size, tier,
+           CASE WHEN tier IN ('hires48', 'hires96', 'hires192') AND sr > target
+                THEN CAST(size * (1 - CAST(target AS REAL) / sr) AS INTEGER)
+                ELSE 0 END AS reclaim
+    FROM tiered
+)
+"""
+
+
 def census():
     """Aggregate the cached tag rows under MUSIC_ROOT into a quality census:
     per-tier track counts and bytes, hi-res bytes per artist, and a rough
     downsample-reclaim figure. Reads only rows the scanner already stored,
-    so it costs one table
-    walk and no file I/O; rows from before the cache carried sizes count
-    toward their tier but not the byte totals. Returns None when the cache is
-    off or holds nothing."""
+    so it costs two table walks inside SQLite and no file I/O; rows from
+    before the cache carried sizes count toward their tier but not the byte
+    totals. Returns None when the cache is off or holds nothing."""
     if not _db.ensure():
         return None
     flush_pending()
     tiers = {"cd": [0, 0], "hires48": [0, 0], "hires96": [0, 0],
              "hires192": [0, 0], "unknown": [0, 0]}
-    artists: dict = {}
-    reclaim = 0
-    music_root = str(cfg.MUSIC_ROOT).rstrip("/") + "/"
+    # Rows land for every file whose tags were read, which includes staging
+    # runs and upgrade backups. Only the library counts as what's on disk;
+    # without this a download or an upgrade inflates the census by its own
+    # working copies.
+    params = {"root": str(cfg.MUSIC_ROOT).rstrip("/") + "/"}
     try:
-        rows = _db.conn().execute("SELECT path, payload FROM files").fetchall()
+        conn = _db.conn()
+        totals = conn.execute(
+            _CENSUS_ROWS + "SELECT tier, count(*), sum(size), sum(reclaim) "
+            "FROM rows GROUP BY tier", params).fetchall()
+        top = conn.execute(
+            _CENSUS_ROWS + "SELECT CASE WHEN instr(rest, '/') "
+            "THEN substr(rest, 1, instr(rest, '/') - 1) ELSE rest END AS artist, "
+            "sum(size) AS bytes, min(seq) AS first FROM rows "
+            "WHERE tier IN ('hires48', 'hires96', 'hires192') "
+            "GROUP BY artist HAVING artist != '' "
+            "ORDER BY bytes DESC, first LIMIT 5",
+            params).fetchall()
     except sqlite3.Error as e:
         vlog(f"flac cache census read failed: {e}")
         _db.handle_db_error(e)
         return None
-    def nonnegative_int(value):
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError, OverflowError):
-            return 0
-        return max(parsed, 0)
-
-    for path, payload in rows:
-        # Rows land for every file whose tags were read, which includes staging
-        # runs and upgrade backups. Only the library counts as what's on disk;
-        # without this a download or an upgrade inflates the census by its own
-        # working copies.
-        if not isinstance(path, str) or not path.startswith(music_root):
-            continue
-        try:
-            meta = json.loads(payload)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(meta, dict) or meta.get("__neg__"):
-            continue
-        bits = nonnegative_int(meta.get("bits"))
-        sr = nonnegative_int(meta.get("sample_rate"))
-        size = nonnegative_int(meta.get("size"))
-        # Split at 48 kHz, the rate Downsample works above.
-        if not bits or not sr:
-            tier = "unknown"
-        elif sr > 96000:
-            tier = "hires192"
-        elif sr > 48000:
-            tier = "hires96"
-        elif bits <= 16:
-            tier = "cd"
-        else:
-            tier = "hires48"
-        tiers[tier][0] += 1
-        tiers[tier][1] += size
-        if tier in ("hires48", "hires96", "hires192"):
-            # The integer-ratio family the resampler targets: 88.2/176.4 land
-            # on 44.1, everything else on 48.
-            target = 44100 if sr % 44100 == 0 else 48000
-            if sr > target:
-                reclaim += int(size * (1 - target / sr))
-            artist = path[len(music_root):].split("/", 1)[0]
-            if artist:
-                artists[artist] = artists.get(artist, 0) + size
+    reclaim = 0
+    for tier, n, size, freed in totals:
+        tiers[tier] = [n, size]
+        reclaim += freed
     total_n = sum(v[0] for v in tiers.values())
     if not total_n:
         return None
@@ -296,7 +306,7 @@ def census():
         "tiers": tiers,
         "total_tracks": total_n,
         "total_bytes": sum(v[1] for v in tiers.values()),
-        "top_hires_artists": sorted(artists.items(), key=lambda kv: -kv[1])[:5],
+        "top_hires_artists": [(artist, size) for artist, size, _first in top],
         "reclaim_bytes": reclaim,
     }
 

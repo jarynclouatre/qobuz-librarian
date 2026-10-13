@@ -31,9 +31,11 @@ _KINDS = ("missing", "partial")
 # A crash can lose this interval's worth of completed artists, plus any
 # artists still being scanned. Normal exits flush the remaining progress.
 CHECKPOINT_INTERVAL_SECONDS = 5.0
-# A slow write waits this many times its own length before the next, so on a
-# large library writing the checkpoint stays a small part of the scan.
+# A slow write waits this many times its own length before the next, and a
+# large checkpoint a second for every megabyte it holds, so on a large library
+# writing the checkpoint stays a small part of the scan and of the disk's time.
 CHECKPOINT_WRITE_SPACING = 20
+CHECKPOINT_BYTES_PER_SECOND = 1_000_000
 
 # save/clear are read-modify-write of the shared file; serialise them so two
 # scan kinds progressing in parallel can't clobber each other's entry.
@@ -53,12 +55,33 @@ def _read() -> dict:
     return data if data is not None else {}
 
 
-def _write(data) -> bool:
+def _chunks(data, artists):
+    """``data`` as JSON, the artists of each kind in ``artists`` encoded one
+    at a time: the C encoder is quick, but holds up every other thread for as
+    long as one call takes."""
+    yield "{"
+    for i, (kind, entry) in enumerate(data.items()):
+        yield f"{', ' if i else ''}{json.dumps(kind)}: "
+        if kind not in artists:
+            yield from json.JSONEncoder().iterencode(entry)
+            continue
+        yield "{"
+        for key, value in entry.items():
+            yield f"{json.dumps(key)}: {json.dumps(value)}, "
+        yield '"artists": {'
+        for j, (name, artist) in enumerate(artists[kind].items()):
+            yield (f"{', ' if j else ''}{json.dumps(name)}: "
+                   f"{json.dumps(candidate_premise.compact_artist(artist))}")
+        yield "}}"
+    yield "}"
+
+
+def _write(data, artists=None) -> bool:
     global _sole_entry
     _sole_entry = None
     try:
-        identity = state_file.write_json(
-            cfg.SCAN_CHECKPOINT_FILE, data, indent=None)
+        identity = state_file.write_chunks(
+            cfg.SCAN_CHECKPOINT_FILE, _chunks(data, artists or {}))
         if len(data) == 1:
             (kind,) = data
             _sole_entry = (str(cfg.SCAN_CHECKPOINT_FILE), identity, kind)
@@ -123,10 +146,11 @@ def _progress() -> dict:
 def load(kind) -> dict | None:
     """This kind's checkpoint, or None.
 
-    Shape: ``{"scanned": [folder_name, ...], "candidates": [candidate_dict, ...],
-    "seen": {artist_id: [album_id, ...]}, "artists": {folder_name: snapshot},
-    "meta": {...}, "passes": {name: result}}``. ``artists``, ``meta`` and
-    ``passes`` are optional for older checkpoints.
+    Shape: ``{"scanned": [folder_name, ...], "seen": {artist_id: [album_id,
+    ...]}, "artists": {folder_name: snapshot}, "meta": {...}, "passes": {name:
+    result}}``, the albums found kept in each artist's snapshot.
+    ``artists``, ``meta`` and ``passes`` are optional for older checkpoints,
+    and older ones also list the albums found under ``candidates``.
     """
     cp = _read().get(kind)
     if not isinstance(cp, dict):
@@ -175,8 +199,7 @@ def _artist_premise(candidate, artists):
     return entry.get("_premise") if isinstance(entry, dict) else None
 
 
-def save(kind, scanned, candidates, seen, artists=None, meta=None,
-         passes=None) -> bool:
+def save(kind, scanned, seen, artists=None, meta=None, passes=None) -> bool:
     with _lock:
         path = str(cfg.SCAN_CHECKPOINT_FILE)
         if _sole_entry is not None and _sole_entry == (
@@ -184,23 +207,14 @@ def save(kind, scanned, candidates, seen, artists=None, meta=None,
             data = {}
         else:
             data = _read()
-        artists = {
-            name: candidate_premise.compact_artist(entry)
-            for name, entry in (artists or {}).items()
-        }
         data[kind] = {
             "scanned": sorted(scanned),
-            "candidates": [
-                candidate_premise.compact_candidate(candidate, _artist_premise(candidate, artists))
-                for candidate in candidates
-            ],
             "seen": seen,
-            "artists": artists,
             "meta": meta or {},
             "passes": passes or {},
             "ts": time.time(),
         }
-        return _write(data)
+        return _write(data, {kind: artists or {}})
 
 
 class Writer(AbstractContextManager):
@@ -214,9 +228,9 @@ class Writer(AbstractContextManager):
         self._last_write = None
         self._interval = CHECKPOINT_INTERVAL_SECONDS
 
-    def save(self, scanned, candidates, seen, artists=None, meta=None) -> bool:
+    def save(self, scanned, seen, artists=None, meta=None) -> bool:
         # Keep the single writer's live containers, without copying receipts.
-        self._latest = (scanned, candidates, seen, artists, meta)
+        self._latest = (scanned, seen, artists, meta)
         self._pending = True
         if (self._last_write is None
                 or time.monotonic() - self._last_write >= self._interval):
@@ -239,9 +253,11 @@ class Writer(AbstractContextManager):
         # Timed from the end of the write: from its start, a write as long as
         # the interval was followed by the next one straight away.
         self._last_write = time.monotonic()
+        identity = state_file.file_identity(cfg.SCAN_CHECKPOINT_FILE)
         self._interval = max(
             CHECKPOINT_INTERVAL_SECONDS,
-            CHECKPOINT_WRITE_SPACING * (self._last_write - started))
+            CHECKPOINT_WRITE_SPACING * (self._last_write - started),
+            (identity[2] if identity else 0) / CHECKPOINT_BYTES_PER_SECOND)
         if saved is not False:
             self._pending = False
         return saved

@@ -1845,7 +1845,7 @@ def _scan_library_impl(
     if not resuming and not cheap_refresh:
         # A refresh needs no starting checkpoint: interrupted before it
         # saves progress, the next one reuses the saved scan again.
-        checkpoint.save(scanned, [], baseline_seen)
+        checkpoint.save(scanned, baseline_seen)
     # The two refreshes and the fingerprint pass below run before the main
     # artist loop, and on a first scan of a large library each takes real
     # minutes, without progress ticks the job sits on "Waiting for output"
@@ -1941,36 +1941,33 @@ def _scan_library_impl(
     previous_artists = (previous_scan.get("artists") or {}) if cheap_refresh else {}
     state_artists: dict[str, dict] = {}
     if resuming:
+        # Older checkpoints also list every album found outside the artists.
         restored_by_artist: dict[str, list[dict]] = {}
         for c in cp["candidates"]:
             artist_key = (c.get("payload") or {}).get("_artist_dir") or c.get("artist")
-            if artist_key not in scanned:
+            restored_by_artist.setdefault(artist_key, []).append(c)
+        for name, saved in checkpoint_artists.items():
+            if name not in scanned:
                 continue
-            if hidden_mod.is_hidden(hidden_mod.SCOPE_MISSING,
-                                    c.get("artist"), c.get("title"), hidden,
-                                    year=(c.get("payload") or {}).get("year")):
+            candidates = (list(saved.get("candidates") or [])
+                          or restored_by_artist.get(name, []))
+            dropped = 0
+            for c in candidates:
+                if _spec_dismissed(c, hidden):
+                    continue
+                listed = _listed(c)
+                if _readd_candidate(job, c, listed=listed) is None:
+                    dropped += 1
+                elif listed:
+                    total += 1
+            if dropped:
+                left_out[name] = dropped
                 continue
-            listed = _listed(c)
-            if _readd_candidate(job, c, listed=listed) is None:
-                left_out[artist_key] = left_out.get(artist_key, 0) + 1
-                continue
-            if listed:
-                total += 1
-            if artist_key:
-                restored_by_artist.setdefault(artist_key, []).append(c)
-        for name in scanned:
-            saved = checkpoint_artists.get(name)
-            if not isinstance(saved, dict) or name in left_out:
-                continue
-            catalog_ids = saved.get("catalog_ids")
-            if catalog_ids is None:
-                continue
-            candidates = list(saved.get("candidates") or [])
             state_artists[name] = {
                 "fingerprint": saved.get("fingerprint") or fingerprints.get(name, ""),
-                "candidates": candidates or restored_by_artist.get(name, []),
+                "candidates": candidates,
                 "artist_id": saved.get("artist_id") or "",
-                "catalog_ids": list(catalog_ids or []),
+                "catalog_ids": list(saved["catalog_ids"]),
             }
         recheck = len(artists) - len(scanned)
         log.info(
@@ -2039,7 +2036,7 @@ def _scan_library_impl(
         # Before any artist is checked, so an interrupted refresh resumes
         # without asking Qobuz about the artists it reused. With nothing to
         # check there is nothing to resume.
-        checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
+        checkpoint.save(scanned, baseline_seen, state_artists)
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # Resolve/scan artists in parallel (each worker has its own HTTP session),
     # but collect results and write candidates on this one thread so the
@@ -2135,7 +2132,7 @@ def _scan_library_impl(
                 # A full scan's count holds missing albums and gaps together.
                 tail = "with Gap Fill candidates" if partial_only else "to review"
                 log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
-            checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
+            checkpoint.save(scanned, baseline_seen, state_artists)
     # Reached here only without an AuthLost/outage abort (that re-raises out
     # above, leaving the checkpoint for resume and not seeding the baseline).
     # job.candidates now holds everything this scan offers for these artists.
@@ -2304,12 +2301,12 @@ def _scan_library_impl(
         elif catalog_complete and scan_state_save_failed:
             # Keep a complete resumable copy when the main review could not be
             # saved.
-            checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
+            checkpoint.save(scanned, baseline_seen, state_artists)
         elif catalog_complete and partial_only:
             checkpoint.clear()
         elif (scanned or job.candidates or baseline_seen
                 or unreadable_artists):
-            checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
+            checkpoint.save(scanned, baseline_seen, state_artists)
     if job.cancel_requested:
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
                        if total else "Stopped before anything turned up.")
@@ -4091,7 +4088,6 @@ def _scan_repairs_impl(job, token, checkpoint):
     def save_checkpoint(*, force=False):
         saved = checkpoint.save(
             scanned,
-            [],
             {},
             artists=repair_bundles,
             meta={

@@ -153,8 +153,30 @@ def _music_root_problem():
     return ""
 
 
+# The last folder check, keyed on the music folder's own listing.
+_last_folder_check = None
+
+
 def _library_scan_state():
-    """Whether a whole-library scan has something valid to scan."""
+    """Whether a whole-library scan has something valid to scan. While a
+    Library scan reads every folder anyway, pages reuse the last check until
+    an artist folder is added, removed or renamed."""
+    global _last_folder_check
+    try:
+        st = Path(cfg.MUSIC_ROOT).stat()
+        key = (str(cfg.MUSIC_ROOT), st.st_dev, st.st_ino, st.st_mtime_ns)
+    except OSError:
+        key = None
+    last = _last_folder_check
+    if (key is not None and last is not None and last[0] == key
+            and _active_library_scan() is not None):
+        return last[1]
+    state = _check_library_folders()
+    _last_folder_check = (key, state)
+    return state
+
+
+def _check_library_folders():
     root = Path(cfg.MUSIC_ROOT)
     problem = _music_root_problem()
     if problem:

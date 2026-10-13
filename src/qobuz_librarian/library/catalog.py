@@ -115,16 +115,34 @@ def _is_migration_candidate(folder_name, qartist):
     return _has_separator_match(folder_name, qartist, _MIGRATION_SEPS)
 
 
+# Lookups over the cached MUSIC_ROOT listing, kept while that listing is the
+# current one: one artist's thousand albums ask the same questions thousands
+# of times.
+_root_lookups: tuple = (None, {})
+
+
+def _root_dirs_matching(key, match):
+    """MUSIC_ROOT children for which ``match(name)`` holds, remembered under
+    ``key`` for as long as the cached listing stands."""
+    global _root_lookups
+    root_dirs = _list_artist_subdirs_cached(config.MUSIC_ROOT)
+    listing, found = _root_lookups
+    if listing is not root_dirs:
+        found = {}
+        _root_lookups = (root_dirs, found)
+    dirs = found.get(key)
+    if dirs is None:
+        dirs = found[key] = [d for d in root_dirs if match(d.name)]
+    return list(dirs)
+
+
 def _find_multi_artist_dirs(qartist):
     """Return MUSIC_ROOT children whose name is 'qartist<sep><other>'.
     Uses the scan cache so artist-mode runs don't re-iterdir."""
     if not qartist or not config.MUSIC_ROOT.exists():
         return []
-    matches = []
-    for d in _list_artist_subdirs_cached(config.MUSIC_ROOT):
-        if _is_multi_artist_subset(d.name, qartist):
-            matches.append(d)
-    return matches
+    return _root_dirs_matching(
+        ("multi", qartist), lambda name: _is_multi_artist_subset(name, qartist))
 
 
 # ── Path utilities ────────────────────────────────────────────────────────────
@@ -326,9 +344,10 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
     # those, so also take any artist folder whose ASCII-folded name matches.
     artist_norms = {normalize(av) for av in artist_variants if normalize(av)}
     if artist_norms and config.MUSIC_ROOT.exists():
-        for d in _list_artist_subdirs_cached(config.MUSIC_ROOT):
-            if normalize(d.name) in artist_norms:
-                _push(d)
+        for d in _root_dirs_matching(
+                ("folded", frozenset(artist_norms)),
+                lambda name: normalize(name) in artist_norms):
+            _push(d)
 
     global_best, global_best_score = None, 0.0
     norm_title = normalize(strip_album_decorations(title))

@@ -193,19 +193,17 @@ def _review_artist_groups(job, query="", tab="", artist=None):
     Missing Albums / Gap Fill split. ``artist`` keeps that artist's group
     alone, without copying the rest of the review. Returns a list of (artist,
     items) pairs."""
-    with job._lock:
-        cands = [c.copy() for c in job.candidates
-                 if artist is None or (c.get("artist") or "") == artist]
     q = (query or "").strip().lower()
     in_tab = flows.review_tab_filter(tab)
+    # Copy only the rows the page can show: on a large review most are not.
+    with job._lock:
+        cands = [c.copy() for c in job.candidates
+                 if (artist is None or (c.get("artist") or "") == artist)
+                 and in_tab(c)
+                 and (not q or flows.candidate_matches_query(c, q))]
     groups: dict = {}
     for c in cands:
-        if not in_tab(c):
-            continue
-        artist = c.get("artist") or ""
-        if q and not flows.candidate_matches_query(c, q):
-            continue
-        groups.setdefault(artist, []).append(c)
+        groups.setdefault(c.get("artist") or "", []).append(c)
     ordered = []
     for artist in sorted(groups, key=_artist_sort_key):
         items = sorted(groups[artist], key=lambda c: c.get("seq", 0))

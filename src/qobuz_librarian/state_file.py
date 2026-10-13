@@ -123,7 +123,14 @@ def file_identity(path):
 
 
 def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
-    """Atomically replace the store at `path` with `data` as JSON.
+    """Atomically replace the store at `path` with `data` as JSON."""
+    return write_chunks(path, json.JSONEncoder(
+        ensure_ascii=ensure_ascii, indent=indent,
+        separators=separators).iterencode(data))
+
+
+def write_chunks(path, chunks):
+    """Atomically replace the store at `path` with the text in `chunks`.
 
     A unique temp file in the store's own directory, fsynced before the
     rename: a fixed ".tmp" name lets two processes clobber each other's
@@ -137,8 +144,8 @@ def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
                                suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=indent, ensure_ascii=ensure_ascii,
-                      separators=separators)
+            for chunk in chunks:
+                f.write(chunk)
             f.flush()
             os.fsync(f.fileno())
             identity = _identity(os.fstat(f.fileno()))

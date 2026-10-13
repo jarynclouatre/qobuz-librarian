@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import threading
 from contextlib import asynccontextmanager
 
@@ -304,6 +305,10 @@ async def _lifespan(_app: FastAPI):
     global _startup_maintained
     _startup_maintained = False
     raise_open_file_limit()
+    # A scan keeps several threads busy. Passing the interpreter between
+    # threads every millisecond rather than every five keeps pages and
+    # their files answering while one runs.
+    sys.setswitchinterval(0.001)
     runtime._SHUTTING_DOWN = False
     runtime._STOP_SIGNALLED.clear()
     _watch_stop_signal(asyncio.get_running_loop())
