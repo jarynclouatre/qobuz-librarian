@@ -4,12 +4,16 @@ The engine behind the import-time lyric hook and the library lyrics pass:
 writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
 
   • Asks LRCLIB first for the exact track at its length, when Lrclib is a
-    provider.
+    provider, and takes its search hits only at that length or under the
+    track's own title and artist.
   • Tries synced lyrics from each provider; rejects results whose timing
     doesn't fit the track length, held closer for live and remixed cuts.
   • Falls back to plain lyrics across the providers; only writes plain
     lyrics when the track has no existing lyrics at all.
-  • Replaces only lyrics it wrote itself, as recorded in the state file.
+  • Drops the headings, credits, section labels and page trailers lyric
+    sites add around the words.
+  • Replaces only lyrics it wrote itself, as recorded in the state file. A
+    re-check fetches those again, and removes them when nothing matches.
   • Per-run circuit breaker disables a provider after several consecutive
     connection-style failures.
   • State file tracks per-file status so subsequent passes only re-check
@@ -98,6 +102,9 @@ _OUTCOME_LABELS = {
     "skipped-instrumental": "skipped (instrumental)",
     "removed-instrumental": "removed lyrics (instrumental)",
     "dry:removed-instrumental": "would remove lyrics (instrumental)",
+    "removed-unfit": "removed lyrics (no match found)",
+    "dry:removed-unfit": "would remove lyrics (no match found)",
+    "kept-unrecorded": "kept lyrics this app has no record of writing",
 }
 
 
@@ -135,6 +142,10 @@ LRC_CUT_GAP        = 60     # last timestamp within this many seconds of the end
 LRC_CUT_GAP_SHARE  = 0.3    # …or within this share of the track
 
 LRCLIB_GET_URL = "https://lrclib.net/api/get"
+LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
+# A search hit this close to the track's length is taken as this recording.
+# One of another length counts only under the track's own title and artist.
+LRCLIB_SEARCH_GRACE = 3
 
 # Provider circuit breaker. With ≥8 workers transient errors compound quickly,
 # so the threshold is bumped from 3 to give providers more rope before being
@@ -1329,8 +1340,8 @@ def write_sidecar(
     recognises the sidecar before any provider fetch, while this final check
     stops a plain result from overwriting a hand-synced .lrc. ``replaces``,
     when given, is the only non-blank text an existing sidecar may hold for it
-    to be replaced. Return True when a sidecar was written and False when the
-    existing file was kept."""
+    to be replaced, synced or not. Return True when a sidecar was written and
+    False when the existing file was kept."""
     path = Path(path)
     target = path.with_suffix(".lrc")
     if isinstance(creation_out, dict):
@@ -1376,8 +1387,8 @@ def write_sidecar(
                 chunks.append(chunk)
             old = b"".join(chunks).decode("utf-8", errors="replace")
             if old.strip() and (
-                (classify(old) == "synced" and classify(content) != "synced")
-                or (replaces is not None and old != replaces)
+                old != replaces if replaces is not None
+                else classify(old) == "synced" and classify(content) != "synced"
             ):
                 if (
                     not _guard_passes(track_guard)
@@ -1544,56 +1555,41 @@ def write_output(
         sidecar_replaces=None):
     """Persist lyrics per fmt: 'embed' (FLAC tag), 'sidecar' (.lrc), 'both'.
 
-    ``sidecar_replaces`` is passed to write_sidecar as ``replaces``."""
+    ``sidecar_replaces`` is passed to write_sidecar as ``replaces``. The
+    sidecar is written first, and one it keeps raises before the tag
+    changes."""
     fmt = _normalise_lyrics_format(fmt)
     if not binding.exact_track_is_named():
         raise OSError(f"{path.name}: track changed before lyric write")
 
-    final_identity = binding.identity
-    replacement_fd = None
-    if fmt in ("embed", "both"):
-        change = {}
-        write_lyrics(
-            f,
+    if fmt in ("sidecar", "both") and not write_sidecar(
+            path,
             content,
-            path=path,
-            identity_change_out=change,
             parent_fd=binding.parent_fd,
             parent_guard=binding.chain_is_named,
-            expected_identity=binding.identity,
-        )
-        if (
-            change.get("path") != os.path.abspath(os.fspath(path))
-            or change.get("before") != binding.identity
-            or not _valid_regular_identity(change.get("after"))
-        ):
-            raise OSError(f"{path.name}: tag replacement wasn't proven")
-        final_identity = change["after"]
+            track_guard=binding.exact_track_is_named,
+            replaces=sidecar_replaces):
+        raise OSError(f"{path.with_suffix('.lrc').name}: existing lyrics kept")
 
-    try:
-        if fmt in ("sidecar", "both"):
-            if final_identity == binding.identity:
-                guarded_fd = binding.track_fd
-            else:
-                replacement_fd = binding.open_named_track(final_identity)
-                guarded_fd = replacement_fd
-
-            def track_guard():
-                return binding.exact_track_is_named(
-                    guarded_fd, final_identity)
-
-            write_sidecar(
-                path,
-                content,
-                parent_fd=binding.parent_fd,
-                parent_guard=binding.chain_is_named,
-                track_guard=track_guard,
-                replaces=sidecar_replaces,
-            )
-    finally:
-        if replacement_fd is not None:
-            os.close(replacement_fd)
-    return final_identity
+    if fmt == "sidecar":
+        return binding.identity
+    change = {}
+    write_lyrics(
+        f,
+        content,
+        path=path,
+        identity_change_out=change,
+        parent_fd=binding.parent_fd,
+        parent_guard=binding.chain_is_named,
+        expected_identity=binding.identity,
+    )
+    if (
+        change.get("path") != os.path.abspath(os.fspath(path))
+        or change.get("before") != binding.identity
+        or not _valid_regular_identity(change.get("after"))
+    ):
+        raise OSError(f"{path.name}: tag replacement wasn't proven")
+    return change["after"]
 
 
 # Title suffixes that confuse provider matching. Strip Spotify-style
@@ -1720,6 +1716,62 @@ def fallback_queries(f) -> list[str]:
             if query != build_query(f)][:MAX_FALLBACK_QUERIES]
 
 
+# Lines lyric sites add that nobody sings: a "<title> Lyrics" heading or
+# credits above the words, section headings, and the page's trailers. A
+# label in brackets or ending in its colon is a heading. Other labels, bare or
+# with only a name or a parenthesis after the colon, are headings only in
+# lyrics that use them for two sections or more, so a sung "Breakdown" or
+# "Chorus: Oh Oh Oh" stays a lyric.
+_LRC_LINE_RE = re.compile(r"((?:\s*\[\d{1,2}:\d{2}(?:\.\d{1,3})?\])*)\s*(.*?)\s*")
+_SECTION = (r"(?i:intro|outro|verse|chorus|pre-chorus|post-chorus|hook|bridge|"
+            r"refrain|interlude|breakdown)(?:\s+(?i:\d+|one|two|three|four|five|six))?")
+_CREDIT = r"[A-Z0-9][\w.'&$-]*(?:\s*[,&]?\s+[A-Z0-9][\w.'&$-]*){0,3}"
+_HEADING_RE = re.compile(rf"\[\s*{_SECTION}\b[^\[\]]*\]")
+_SECTION_LABEL_RE = re.compile(
+    rf"\(\s*{_SECTION}\s*\)|{_SECTION}\s*:?|{_SECTION}\s*:\s*(?:\(.*\)|{_CREDIT})")
+_SECTION_NAME_RE = re.compile(rf"\(?\s*({_SECTION})")
+_HEADER_RE = re.compile(
+    r"\d+\s+Contributors?|(?:作词|作曲|编曲|制作人|词|曲|(?i:lyricist|lyrics by|"
+    r"written by|composer|composed by|music by|arranger|arranged by|producer|"
+    r"produced by))\s*[:：]")
+_PAGE_RE = re.compile(
+    r"(?:See .*? LiveGet tickets as low as \$\d+)?(?:You might also like)?(?=\S|$)")
+_EMBED_RE = re.compile(r"(?:^|(?<=\S))\d*Embed$")
+
+
+def clean_lyrics(text: str, title: str) -> str:
+    """``text`` without the lines lyric sites add around the words."""
+    heading = {_words(title) + " lyrics", _song_key(title) + " lyrics"}
+    lines = text.splitlines()
+    bodies = [_LRC_LINE_RE.fullmatch(line).group(2) for line in lines]
+    last = max((i for i, body in enumerate(bodies) if body), default=-1)
+    sections = {" ".join(_SECTION_NAME_RE.match(body).group(1).casefold().split())
+                for body in bodies if _SECTION_LABEL_RE.fullmatch(body)}
+    headed = len(sections) > 1
+    kept = []
+    head = True
+    for i, line in enumerate(lines):
+        stamps, body = _LRC_LINE_RE.fullmatch(line).groups()
+        words = _PAGE_RE.sub("", body, count=1)
+        if i == last:
+            words = _EMBED_RE.sub("", words)
+        if (words != body and not words
+                or head and (_words(words) in heading or _HEADER_RE.match(words))
+                or _HEADING_RE.fullmatch(words)
+                or _SECTION_LABEL_RE.fullmatch(words)
+                and (headed or words.endswith(":"))):
+            continue
+        head = head and not words
+        kept.append(line if words == body else f"{stamps}{words}")
+    if len(kept) == len(lines) and all(a is b for a, b in zip(kept, lines)):
+        return text
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept)
+
+
 def lrc_max_seconds(text: str) -> Optional[float]:
     matches = LRC_TS_RE.findall(text)
     if not matches:
@@ -1751,6 +1803,14 @@ def lrc_duration_sane(lyrics: str, track_seconds: float, *,
     if last < track_seconds * LRC_MIN_COVERAGE and gap > LRC_GAP_GRACE:
         return False, f"LRC ends at {last:.0f}s, track is {track_seconds:.0f}s"
     return True, ""
+
+
+def _same_words(first: str, second: str) -> bool:
+    """Whether two lyrics share most of their words, timed or not. Versions
+    of one song share nearly all of them; two songs rarely half."""
+    first, second = ({*re.findall(r"\w+", LRC_TS_RE.sub("", text).casefold())}
+                     for text in (first, second))
+    return len(first & second) >= 0.8 * max(len(first), len(second), 1)
 
 
 def usable_providers(names) -> list[str]:
@@ -1819,7 +1879,7 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
     one.
     """
     if _is_provider_dead(prov, log):
-        return None, False
+        return None, True
     result, error, chatter = _bounded_provider_search(
         query, prov, **kwargs
     )
@@ -1883,71 +1943,127 @@ def lrclib_signature(f, duration: float) -> Optional[dict]:
     return fields if all(fields.values()) else None
 
 
-def _lrclib_exact(signature: dict, log: logging.Logger) -> tuple[Optional[dict], bool]:
-    """LRCLIB's record for this title, artist and album at this length (it
-    allows two seconds either way). Returns (record, failed_hard) like
-    _query_provider; a 404 is a clean miss."""
+def _lrclib_get(url: str, params: dict, log: logging.Logger, what: str):
+    """LRCLIB's JSON answer, or None on a clean miss. Returns (answer,
+    failed_hard) like _query_provider."""
     try:
         response = _lrclib_session().get(
-            LRCLIB_GET_URL, params=signature,
-            timeout=cfg.LYRICS_PROVIDER_TIMEOUT)
+            url, params=params, timeout=cfg.LYRICS_PROVIDER_TIMEOUT)
     except requests.RequestException as e:
-        _provider_failed("Lrclib", log, f"exact lookup: {e}")
+        _provider_failed("Lrclib", log, f"{what}: {e}")
         return None, True
     if response.status_code == 429 or response.status_code >= 500:
-        _provider_failed("Lrclib", log, f"exact lookup: HTTP {response.status_code}")
+        _provider_failed("Lrclib", log, f"{what}: HTTP {response.status_code}")
         return None, True
     _provider_answered("Lrclib")
     if response.status_code != 200:
         return None, False
     try:
-        record = response.json()
+        return response.json(), False
     except ValueError:
         return None, False
-    return (record if isinstance(record, dict) else None), False
+
+
+def _lrclib_exact(signature: dict, log: logging.Logger) -> tuple[Optional[dict], bool]:
+    """LRCLIB's record for this title, artist and album at this length (it
+    allows two seconds either way). A 404 is a clean miss."""
+    record, failed = _lrclib_get(LRCLIB_GET_URL, signature, log, "exact lookup")
+    return (record if isinstance(record, dict) else None), failed
+
+
+def _words(text: str) -> str:
+    return " ".join(re.findall(r"\w+", (text or "").casefold()))
+
+
+def _song_key(title: str) -> str:
+    return _words(re.sub(r"\s*[\(\[][^()\[\]]*[\)\]]|\s+-\s+.*$", "", title or ""))
+
+
+def credited_names(*credits: str) -> frozenset[str]:
+    names = {_words(part) for credit in credits
+             for part in (credit, *_CREDIT_SPLIT_RE.split(credit or ""))}
+    return frozenset(names - {""})
+
+
+def _lrclib_search(query: str, duration: float, song: tuple[str, frozenset],
+                   log: logging.Logger) -> tuple[list[dict], bool]:
+    """LRCLIB's search hits that can be this recording, those at its length
+    first, then those under its title and artist. syncedlyrics would take the
+    closest name at any length."""
+    records, failed = _lrclib_get(LRCLIB_SEARCH_URL, {"q": query}, log, "search")
+    if not isinstance(records, list):
+        return [], failed
+    title, artists = song
+    timed, named = [], []
+    for record in records:
+        if not isinstance(record, dict) or record.get("instrumental"):
+            continue
+        length = record.get("duration")
+        if (duration and isinstance(length, (int, float))
+                and abs(length - duration) <= LRCLIB_SEARCH_GRACE):
+            timed.append(record)
+        elif (_song_key(record.get("trackName")) == _song_key(title)
+              and credited_names(record.get("artistName") or "") & artists):
+            named.append(record)
+    return timed + named, failed
 
 
 def search_lyrics(
     queries: list[str], providers: list[str], duration: float,
     log: logging.Logger, skip_plain: bool = False, *,
     exact: Optional[dict] = None, other_cut: bool = False,
+    song: tuple[str, frozenset] = ("", frozenset()),
 ) -> tuple[Optional[str], Optional[str], str, int, int]:
     """
     With Lrclib among the providers, its exact lookup by ``exact`` (see
     lrclib_signature) comes first: it matches the track's length, so its
     timing is this cut's. Each query then runs only when every provider
     missed the ones before it; ``other_cut`` holds synced results to the
-    track's length.
+    track's length. Lrclib's search hits are held to the track's length, or
+    to its title and artist in ``song``.
     Returns (lyrics, provider_name, kind, providers_tried, failed_hard) where
-    kind is 'synced' or 'plain' and providers_tried counts queries actually
-    attempted (skipping providers already disabled by the circuit breaker).
-    failed_hard counts the attempts that never got an answer (raised, or a
-    connection-style error). The caller uses providers_tried==0 and
+    kind is 'synced', 'plain', or 'instrumental' when LRCLIB's exact record
+    says the track has no words, and providers_tried counts the lookups due,
+    made or skipped. failed_hard counts those that never got an answer:
+    the provider raised, hit a connection-style error, or was skipped as
+    disabled by the circuit breaker. The caller uses
     failed_hard==providers_tried to distinguish 'no provider has it' from 'no
     provider was reachable', so an outage doesn't poison state.
     """
     tried = 0
     hard = 0
     exact_plain = None
-    if exact and "Lrclib" in providers and not _is_provider_dead("Lrclib", log):
+    if exact and "Lrclib" in providers:
         tried += 1
-        record, failed = _lrclib_exact(exact, log)
+        if _is_provider_dead("Lrclib", log):
+            record, failed = None, True
+        else:
+            record, failed = _lrclib_exact(exact, log)
         hard += failed
         if record is not None:
             if record.get("instrumental"):
-                return None, None, "", tried, hard
+                return None, "Lrclib", "instrumental", tried, hard
             synced = record.get("syncedLyrics") or ""
             if SYNCED_RE.search(synced) and lrc_duration_sane(synced, duration)[0]:
                 return synced, "Lrclib", "synced", tried, hard
             exact_plain = (record.get("plainLyrics") or "").strip() or None
     for query in queries:
+        lrclib_hits = []
         for prov in providers:
-            if _is_provider_dead(prov, log):
-                continue
             tried += 1
-            result, failed = _query_provider(query, prov, log, synced_only=True)
+            if _is_provider_dead(prov, log):
+                hard += 1
+                continue
+            if prov == "Lrclib":
+                lrclib_hits, failed = _lrclib_search(query, duration, song, log)
+                results = [hit.get("syncedLyrics") for hit in lrclib_hits]
+            else:
+                result, failed = _query_provider(query, prov, log, synced_only=True)
+                results = [result]
             hard += failed
-            if result and SYNCED_RE.search(result):
+            for result in results:
+                if not result or not SYNCED_RE.search(result):
+                    continue
                 ok, reason = lrc_duration_sane(
                     result, duration, other_cut=other_cut)
                 if not ok:
@@ -1959,11 +2075,13 @@ def search_lyrics(
         if exact_plain:
             return exact_plain, "Lrclib", "plain", tried, hard
         for prov in providers:
-            if _is_provider_dead(prov, log):
-                continue
-            tried += 1
-            result, failed = _query_provider(query, prov, log, plain_only=True)
-            hard += failed
+            if prov == "Lrclib":
+                result = next((hit.get("plainLyrics") for hit in lrclib_hits
+                               if (hit.get("plainLyrics") or "").strip()), None)
+            else:
+                tried += 1
+                result, failed = _query_provider(query, prov, log, plain_only=True)
+                hard += failed
             if result and result.strip():
                 return result, prov, "plain", tried, hard
     return None, None, "", tried, hard
@@ -2093,12 +2211,14 @@ def _remove_written_sidecar(path: Path, binding: _BoundTrack, expected: str) -> 
         os.close(descriptor)
 
 
-def _settle_instrumental(
+def _remove_written(
         path: Path, f, st: TrackState, state: dict[str, TrackState], key: str,
         binding: _BoundTrack, representations: dict, ours: dict,
-        dry_run: bool, log: logging.Logger, commit) -> str:
-    """Words on an instrumental belong to another take. Remove the ones this
-    app wrote; lyrics from anywhere else stay, and the result says so."""
+        dry_run: bool, log: logging.Logger, commit, *,
+        reason: str = "instrumental") -> str:
+    """Remove the lyrics this app wrote from an instrumental, or from a track
+    a re-check found no lyrics for (``reason`` "unfit"). Lyrics from anywhere
+    else stay, and the result says so."""
     removed = [name for name in ("embed", "sidecar") if ours[name]]
     kept = {name: value for name, value in representations.items()
             if classify(value) != "none" and name not in removed}
@@ -2125,7 +2245,7 @@ def _settle_instrumental(
                 if left:
                     kept["embed"] = left[0]
         except Exception as e:
-            log.error("couldn't remove lyrics from instrumental: %s - %s", path, e)
+            log.error("couldn't remove lyrics: %s - %s", path, e)
             st.status = "error"
             commit(state, key, st)
             return "write-error"
@@ -2136,12 +2256,13 @@ def _settle_instrumental(
         st.representations = _representation_state(kept)
         commit(state, key, st)
         return f"already-{st.status}"
-    st.status = "skipped"
-    st.source = "instrumental"
+    st.status, st.source = (
+        ("skipped", "instrumental") if reason == "instrumental"
+        else ("not_found", ""))
     st.representations = ""
     commit(state, key, st)
     if removed:
-        return "dry:removed-instrumental" if dry_run else "removed-instrumental"
+        return f"{'dry:' if dry_run else ''}removed-{reason}"
     return "skipped-instrumental"
 
 
@@ -2152,6 +2273,7 @@ def process_file(
     synced_only: bool = False,
     skip_existing_plain: bool = False,
     lyrics_format: str = "embed",
+    rescan: bool = False,
 ) -> str:
     try:
         binding = _BoundTrack(path, owned_root)
@@ -2177,6 +2299,7 @@ def process_file(
             synced_only=synced_only,
             skip_existing_plain=skip_existing_plain,
             lyrics_format=lyrics_format,
+            rescan=rescan,
         )
 
 
@@ -2187,6 +2310,7 @@ def _process_bound_file(
     synced_only: bool = False,
     skip_existing_plain: bool = False,
     lyrics_format: str = "embed",
+    rescan: bool = False,
 ) -> str:
     key = str(path)
     st = replace(state[key]) if key in state else TrackState()
@@ -2284,10 +2408,27 @@ def _process_bound_file(
             else unchanged_since_fetch and bool(tagged) and len(tagged) == 1
             and sidecar.strip() == tagged[0].strip()),
     }
-    if instrumental:
-        return _settle_instrumental(
+    # A re-check judges the lyrics this app wrote again, as if the track had
+    # none. Lyrics it has no record of writing are kept, and counted apart.
+    rejudge = rescan and bool(present) and all(ours[name] for name in present)
+    unrecorded = rescan and bool(present) and not rejudge
+
+    def kept(outcome):
+        if unrecorded and outcome.startswith(("already-", "kept-existing")):
+            return "kept-unrecorded"
+        return outcome
+
+    def remove_written(reason):
+        return kept(_remove_written(
             path, f, st, state, key, binding, representations, ours,
-            dry_run, log, commit)
+            dry_run, log, commit, reason=reason))
+
+    if instrumental:
+        return remove_written("instrumental")
+    if rejudge:
+        existing = None
+        existing_kind = "none"
+        write_format = _representation_state(present.union(required))
 
     representation_kinds = {
         name: classify(value) for name, value in representations.items()
@@ -2296,7 +2437,8 @@ def _process_bound_file(
         (name for name, kind in representation_kinds.items() if kind == "plain"),
         None)
     mismatched_both = (
-        requested_format == "both"
+        not rejudge
+        and requested_format == "both"
         and not missing
         and set(representation_kinds.values()) == {"plain", "synced"}
         and ours[stale_plain]
@@ -2333,7 +2475,7 @@ def _process_bound_file(
             st.representations = _representation_state(present)
             st.last_seen = time.time()
             commit(state, key, st)
-            return "already-synced"
+            return kept("already-synced")
 
         if (
             not missing
@@ -2346,7 +2488,7 @@ def _process_bound_file(
             st.representations = _representation_state(present)
             st.last_seen = time.time()
             commit(state, key, st)
-            return "already-plain"
+            return kept("already-plain")
 
         if existing_kind == "plain":
             # Fill missing copies, but replace only lyrics this app wrote.
@@ -2357,7 +2499,7 @@ def _process_bound_file(
                 st.representations = _representation_state(present)
                 st.last_seen = time.time()
                 commit(state, key, st)
-                return "already-plain"
+                return kept("already-plain")
             write_format = (
                 "both" if len(upgradable) == 2 else upgradable[0])
             if ours["embed"] and not st.written:
@@ -2377,30 +2519,54 @@ def _process_bound_file(
         # applies when the caller asked for synced-only.
         skip_plain = synced_only or existing_kind == "plain"
         title = (f.tags.get("title") or [""])[0]
+        artists = credited_names(*f.tags.get("artist", ()),
+                                 *f.tags.get("albumartist", ()))
         lyrics, source, kind, providers_tried, failed_hard = search_lyrics(
             [query, *fallback_queries(f)], providers, duration, log,
             skip_plain=skip_plain, exact=lrclib_signature(f, duration),
-            other_cut=is_other_cut(title),
+            other_cut=is_other_cut(title), song=(title, artists),
         )
         st.last_seen = time.time()
+        if lyrics:
+            lyrics = clean_lyrics(lyrics, title) or None
+        if rejudge and failed_hard:
+            # A provider that did not answer may have had better lyrics, or
+            # the exact track's.
+            lyrics = None
+        timed = _best_existing_lyrics(*representations.values())
+        if (rejudge and lyrics and kind == "plain" and classify(timed) == "synced"
+                and lrc_duration_sane(timed, duration, other_cut=is_other_cut(title))[0]
+                and _same_words(timed, lyrics)):
+            # Providers do not offer timing every time they are asked; the
+            # same words with timing that fits the track stay.
+            lyrics, source, kind = clean_lyrics(timed, title), st.source, "synced"
 
+        if kind == "instrumental":
+            return remove_written("instrumental")
         if not lyrics:
             st.representations = _representation_state(present)
-            if providers_tried == 0 or failed_hard == providers_tried:
-                # Either the circuit breaker had killed every provider before
-                # this file's turn, or every attempt this file made died on a
-                # connection-style failure. Neither is a verdict about the
-                # track - "not found" here would suppress it for
-                # RECHECK_AFTER_DAYS. Keep it immediately retryable.
+            if failed_hard == providers_tried or rejudge and failed_hard:
+                # No provider answered for this file, whether disabled by the
+                # circuit breaker or failing on the connection. That is no
+                # verdict about the track - "not found" here would suppress it
+                # for RECHECK_AFTER_DAYS. Keep it immediately retryable. A
+                # re-check removes nothing while any provider went unheard.
                 st.status = "transient"
                 st.source = "providers-unavailable"
                 commit(state, key, st)
                 return "providers-unavailable"
+            if rejudge and not synced_only:
+                return remove_written("unfit")
+            if rejudge:
+                # Plain lyrics were not searched for.
+                st.status = classify(_best_existing_lyrics(*representations.values()))
+                commit(state, key, st)
+                return f"already-{st.status}"
             if existing_kind == "plain":
                 st.status = "plain"
                 st.source = "kept-existing"
                 commit(state, key, st)
-                return "kept-existing-plain"
+                return kept("kept-existing-plain")
             st.status = "not_found"
             st.source = ""
             commit(state, key, st)
@@ -2415,7 +2581,15 @@ def _process_bound_file(
             st.source = "kept-existing"
             st.representations = _representation_state(present)
             commit(state, key, st)
-            return "kept-existing-plain"
+            return kept("kept-existing-plain")
+        if rejudge and all(representations[name] == lyrics
+                           for name in present.union(required)):
+            st.status = kind
+            st.source = source
+            st.written = _lyrics_digest(lyrics)
+            st.representations = _representation_state(present)
+            commit(state, key, st)
+            return f"already-{kind}"
 
     if dry_run:
         st.status = kind
@@ -2444,7 +2618,7 @@ def _process_bound_file(
 
     st.status = kind
     st.source = source
-    if source != "existing-representation":
+    if rejudge or source != "existing-representation":
         st.written = _lyrics_digest(lyrics)
     if not _valid_regular_identity(final_identity):
         log.error("write completed without an exact file identity: %s", path)
@@ -2525,6 +2699,7 @@ def fetch_for_paths(
                 synced_only=synced_only,
                 skip_existing_plain=skip_existing_plain,
                 lyrics_format=lyrics_format,
+                rescan=rescan,
             )
         except Exception as e:
             log.exception("unexpected error on %s: %s", fp, e)

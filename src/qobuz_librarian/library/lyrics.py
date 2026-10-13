@@ -181,6 +181,8 @@ def summarize_lyrics_result(result):
         "instrumental": count("skipped-instrumental"),
         "cleared_instrumental": count(
             "removed-instrumental", "dry:removed-instrumental"),
+        "cleared_unfit": count("removed-unfit", "dry:removed-unfit"),
+        "unrecorded": count("kept-unrecorded"),
         "policy_skipped": count("skipped"),
         "unsafe": count("unsafe-path"),
         "unavailable": count("providers-unavailable"),
@@ -190,7 +192,8 @@ def summarize_lyrics_result(result):
         summary[key]
         for key in (
             "wrote", "already", "not_found", "missing_tags", "too_long",
-            "instrumental", "cleared_instrumental", "policy_skipped",
+            "instrumental", "cleared_instrumental", "cleared_unfit",
+            "unrecorded", "policy_skipped",
             "unsafe", "unavailable", "errors",
         )
     )

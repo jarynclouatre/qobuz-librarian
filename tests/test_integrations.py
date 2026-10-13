@@ -171,8 +171,11 @@ def test_lyric_writes_are_atomic_and_stay_inside_the_owned_root(tmp_path, monkey
 def test_lyrics_pass_replaces_only_lyrics_it_wrote(
         tmp_path, monkeypatch, tagged_flac):
     """Lyrics already in a file are left alone, with a synced-only pass
-    writing its own sidecar beside them, and a recheck removes from
-    instrumentals, backing tracks included, only the lyrics it wrote itself."""
+    writing its own sidecar beside them. A recheck fetches the lyrics it
+    wrote again, replacing them, removing them when nothing matches, or
+    keeping their timing when only their words come back, and removes them
+    from instrumentals, backing tracks included. Its own synced sidecar is
+    replaced with plain lyrics like the tag."""
     from mutagen import flac
 
     from qobuz_librarian.integrations import lyric_fetch
@@ -227,16 +230,40 @@ def test_lyrics_pass_replaces_only_lyrics_it_wrote(
     # Written before backing tracks counted as instrumentals.
     detect = lyric_fetch.is_instrumental
     monkeypatch.setattr(lyric_fetch, "is_instrumental", lambda _title: False)
-    lyric_fetch.fetch_for_paths([fetched], **options)
+    wrong = tagged_flac(album / "03.flac", title="Song", artist="Artist")
+    poem = tagged_flac(album / "04.flac", title="Prayer Meeting", artist="Artist")
+    timed = tagged_flac(album / "05.flac", seconds=60, title="Timed", artist="Artist")
+    lyric_fetch.fetch_for_paths([fetched, wrong, poem, timed], **options)
     assert flac.FLAC(fetched)["lyrics"] == ["[00:00.50]vocal take"]
     monkeypatch.setattr(lyric_fetch, "is_instrumental", detect)
+    monkeypatch.setattr(
+        lyric_fetch, "search_lyrics",
+        lambda queries, *_args, **_kwargs: {
+            "Song Artist": ("[00:00.50]this song", "Lrclib", "synced", 1, 0),
+            "Timed Artist": ("vocal take", "NetEase", "plain", 1, 0),
+        }.get(queries[0], (None, None, "", 1, 0)))
 
-    counts = lyric_fetch.fetch_for_paths([fetched, typed], **options)
+    counts = lyric_fetch.fetch_for_paths(
+        [fetched, typed, wrong, poem, timed], **options)
 
-    assert counts == {"removed-instrumental": 1, "already-plain": 1}
+    assert counts == {"removed-instrumental": 1, "kept-unrecorded": 1,
+                      "wrote-synced": 1, "removed-unfit": 1, "already-synced": 1}
     assert "lyrics" not in flac.FLAC(fetched)
     assert flac.FLAC(typed)["lyrics"] == ["words typed in by hand"]
+    assert flac.FLAC(wrong)["lyrics"] == ["[00:00.50]this song"]
+    assert "lyrics" not in flac.FLAC(poem)
+    assert flac.FLAC(timed)["lyrics"] == ["[00:00.50]vocal take"]
     assert lyric_fetch.load_state(tmp_path / "recheck-state.json")[str(typed)].status == "plain"
+
+    lyric_fetch.fetch_for_paths([wrong], **{**options, "lyrics_format": "sidecar"})
+    monkeypatch.setattr(
+        lyric_fetch, "search_lyrics",
+        lambda *_args, **_kwargs: ("other words", "NetEase", "plain", 1, 0))
+    for _ in range(2):
+        counts = lyric_fetch.fetch_for_paths([wrong], **{**options, "lyrics_format": "both"})
+        assert wrong.with_suffix(".lrc").read_text() == "other words"
+        assert flac.FLAC(wrong)["lyrics"] == ["other words"]
+    assert counts == {"already-plain": 1}
 
 
 def test_synced_lyrics_must_fit_the_length_of_this_cut(
@@ -253,31 +280,84 @@ def test_synced_lyrics_must_fit_the_length_of_this_cut(
                          artist="Humble Pie", album="Performance")
     jam = tagged_flac(album / "02.flac", seconds=1007, artist="Humble Pie",
                       title="Rollin' Stone (Live At Fillmore East)", album="Performance")
+    prayer = tagged_flac(tmp_path / "Charles Mingus" / "Blues & Roots" / "01.flac",
+                         seconds=345, title="Wednesday Night Prayer Meeting",
+                         artist="Charles Mingus", album="Blues & Roots")
     asked = []
+    hits = {
+        "Rollin' Stone (Live At Fillmore East) Humble Pie": [{
+            "trackName": "Rollin' Stone", "artistName": "Humble Pie",
+            "duration": 250,
+            "plainLyrics": "Rollin' Stone Lyrics\n[Verse 1: Steve Marriott]\n"
+                           "studio words\nChorus: Oh Oh Oh\nYou might also like\n3Embed",
+            "syncedLyrics": "[00:20.00]studio take\n[04:00.00]end"}],
+        "Wednesday Night Prayer Meeting Charles Mingus": [{
+            "trackName": "Intro to Wednesday Night Prayer Meeting",
+            "artistName": "Mingus Big Band", "duration": 22,
+            "plainLyrics": "a spoken poem",
+            "syncedLyrics": "[00:01.00]a spoken poem"}],
+    }
 
     def get(_url, params, timeout):
         asked.append(params)
-        if params["track_name"] == "Four Day Creep":
+        if params.get("track_name") == "Four Day Creep":
             return SimpleNamespace(status_code=200, json=lambda: {
                 "syncedLyrics": "[00:12.00]exact take\n[03:30.00]end",
                 "plainLyrics": "exact take"})
+        if "q" in params:
+            return SimpleNamespace(status_code=200,
+                                   json=lambda: hits.get(params["q"], []))
         return SimpleNamespace(status_code=404, json=lambda: {})
-
-    def search(_query, providers, synced_only=False, plain_only=False):
-        return "[00:20.00]studio take\n[04:10.00]end" if synced_only else "studio words"
 
     monkeypatch.setattr(lyric_fetch, "_lrclib_session",
                         lambda: SimpleNamespace(get=get))
-    monkeypatch.setattr(lyric_fetch, "syncedlyrics", SimpleNamespace(search=search))
+    monkeypatch.setattr(lyric_fetch, "syncedlyrics",
+                        SimpleNamespace(search=lambda *_args, **_kwargs: None))
 
-    lyric_fetch.fetch_for_paths([studio, jam], owned_root=tmp_path,
+    lyric_fetch.fetch_for_paths([studio, jam, prayer], owned_root=tmp_path,
                                 state_path=tmp_path / "state.json", workers=1)
 
     assert asked[0] == {"track_name": "Four Day Creep", "artist_name": "Humble Pie",
                         "album_name": "Performance", "duration": 227}
     assert flac.FLAC(studio)["lyrics"] == ["[00:12.00]exact take\n[03:30.00]end"]
-    # Studio timing on a 17-minute jam: the words without it.
-    assert flac.FLAC(jam)["lyrics"] == ["studio words"]
+    # Studio timing on a 17-minute jam: the words without it, or the site's
+    # heading, label and trailers.
+    assert flac.FLAC(jam)["lyrics"] == ["studio words\nChorus: Oh Oh Oh"]
+    # A same-named intro by another band is not this recording.
+    assert "lyrics" not in flac.FLAC(prayer)
+
+
+def test_a_recheck_keeps_the_apps_lyrics_while_a_provider_is_disabled(
+        tmp_path, monkeypatch, tagged_flac):
+    from types import SimpleNamespace
+
+    from mutagen import flac
+
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    monkeypatch.setattr(lyric_fetch, "syncedlyrics",
+                        SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    words = "[00:10.00]timed words\n[03:10.00]end"
+    status = [200]
+    monkeypatch.setattr(lyric_fetch, "_lrclib_session", lambda: SimpleNamespace(
+        get=lambda _url, params, timeout: SimpleNamespace(
+            status_code=status[0],
+            json=lambda: [] if "q" in params else {"syncedLyrics": words})))
+    tracks = [tagged_flac(tmp_path / "Artist" / "Album" / f"{n}.flac", seconds=200,
+                          title=f"Song {n}", artist="Artist", album="Album")
+              for n in range(6)]
+    options = dict(owned_root=tmp_path, state_path=tmp_path / "state.json",
+                   providers=["Lrclib", "NetEase"], workers=1)
+    lyric_fetch.fetch_for_paths(tracks, **options)
+
+    # LRCLIB is rate-limited until the circuit breaker disables it, so
+    # only NetEase is left to answer for the later tracks.
+    status[0] = 429
+    counts = lyric_fetch.fetch_for_paths(tracks, rescan=True, **options)
+
+    assert counts == {"providers-unavailable": 6}
+    assert all(flac.FLAC(track)["lyrics"] == [words] for track in tracks)
 
 
 def _import_with_lyric_hook(tagged_flac):

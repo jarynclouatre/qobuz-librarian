@@ -5148,6 +5148,12 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         (counts["cleared_instrumental"],
          "lyrics removed from "
          f"{plural(counts['cleared_instrumental'], 'instrumental track')}"),
+        (counts["cleared_unfit"],
+         "lyrics removed from "
+         f"{plural(counts['cleared_unfit'], 'track')} with no match"),
+        (counts["unrecorded"],
+         f"{plural(counts['unrecorded'], 'track')} kept lyrics this app has "
+         "no record of writing"),
         (counts["policy_skipped"],
          f"{plural(counts['policy_skipped'], 'track')} skipped by policy"),
         (counts["unsafe"],

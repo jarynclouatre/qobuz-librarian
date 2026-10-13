@@ -55,7 +55,7 @@ def run_library_lyrics_mode(args):
         f"  Writing {(cfg.LYRICS_FORMAT or 'embed').lower()} lyrics via {providers}."))
     if args.lyrics_rescan:
         log.info(fmt(C.GRAY,
-            "  --lyrics-rescan: re-checking every track, ignoring saved state."))
+            "  Re-checking every track, including ones already checked."))
     if args.lyrics_synced_only:
         log.info(fmt(C.GRAY,
             "  --lyrics-synced-only: only timed (synced) lyrics will be written."))
@@ -171,6 +171,15 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW,
             f"     {'Would remove' if dry_run else 'Removed'} lyrics this app "
             f"wrote from {plural(summary['cleared_instrumental'], 'instrumental track')}."))
+    if summary["cleared_unfit"]:
+        log.info(fmt(C.YELLOW,
+            f"     {'Would remove' if dry_run else 'Removed'} lyrics this app "
+            f"wrote from {plural(summary['cleared_unfit'], 'track')} with no "
+            "matching lyrics."))
+    if summary["unrecorded"]:
+        log.info(fmt(C.GRAY,
+            f"     {plural(summary['unrecorded'], 'track')} kept lyrics this "
+            "app has no record of writing."))
     if summary["policy_skipped"]:
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['policy_skipped'], 'track')} skipped by "
