@@ -77,7 +77,11 @@ async def login_submit(request: Request, username: str = Form(""),
             refusal = rendering._lockout_notice(ip, username) or (
                 "Sign-in checks are busy. Try again shortly."
             )
-            return _login_again(refusal, username.strip(), next_path)
+            return rendering.templates.TemplateResponse(
+                request=request, name="login.html",
+                context={"error": refusal, "username": username.strip(),
+                         "next_path": next_path},
+                status_code=429)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
@@ -89,6 +93,8 @@ async def login_submit(request: Request, username: str = Form(""),
         if reserved_attempt:
             web_auth.cancel_login_attempt(ip, username)
         raise
+    if not generation:
+        _log.warning("Failed sign-in from %s.", getattr(request.client, "host", ip))
     if reserved_attempt:
         web_auth.finish_login_attempt(ip, username, success=bool(generation))
     if not generation:

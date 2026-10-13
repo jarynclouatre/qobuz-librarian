@@ -567,7 +567,8 @@ def _missing_tool_hint(tool: str, install_hint: str) -> str:
 
 def check_rip():
     try:
-        r = subprocess.run(["rip", "--version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["rip", "--version"], capture_output=True, text=True, timeout=10,
+                           env=cfg.child_env())
         if r.returncode != 0:
             # rip is on PATH (no FileNotFoundError) but exited nonzero; it is
             # installed and broken, not missing.

@@ -55,8 +55,10 @@ fi
 #   check_for_updates=false: streamrip is pinned into the image, so its
 #     "a new version is available" notice can't be acted on; turning it off
 #     also drops a PyPI request from every download.
+# This runs as root, so Python starts isolated and without site-packages:
+# nothing the app user can write is imported.
 reconcile_streamrip() {
-    python3 - "$STREAMRIP_DIR/config.toml" <<'PY'
+    python3 -I -S - "$STREAMRIP_DIR/config.toml" <<'PY'
 import os
 import re
 import stat

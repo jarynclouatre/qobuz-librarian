@@ -155,6 +155,20 @@ def _resolve_secret(key: str) -> str:
         return ""
 
 
+_SECRET_ENV = frozenset(
+    name + suffix
+    for name in ("QOBUZ_USER_AUTH_TOKEN", "LASTFM_API_KEY", "WEB_AUTH_PASSWORD")
+    for suffix in ("", "_FILE")
+)
+
+
+def child_env() -> dict[str, str]:
+    """The environment for a tool or hook the app starts: os.environ without
+    the secrets the app reads from it or the paths of the files holding
+    them. rip reads its login from the streamrip config instead."""
+    return {k: v for k, v in os.environ.items() if k not in _SECRET_ENV}
+
+
 # Auth: direct env-var override (no streamrip config file needed)
 # Set these in compose.yaml or the Settings page writes them to the config file.
 # QOBUZ_USER_AUTH_TOKEN_FILE points at a file holding the token instead (Docker

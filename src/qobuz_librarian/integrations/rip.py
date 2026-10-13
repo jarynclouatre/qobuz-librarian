@@ -108,7 +108,7 @@ def flac_audio_ok(path, *, descriptor=None):
         proc = subprocess.run(
             ["flac", "-t", "-s", command_path],
             capture_output=True, timeout=300, stdin=subprocess.DEVNULL,
-            **run_kwargs)
+            env=cfg.child_env(), **run_kwargs)
     except subprocess.TimeoutExpired:
         return False
     except (FileNotFoundError, OSError):
@@ -275,7 +275,7 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
             start_new_session=True,
             # Rich wraps a pipe at 80 columns, splitting a log line mid-word
             # around its file:line column.
-            env={**os.environ, "COLUMNS": "400"},
+            env={**cfg.child_env(), "COLUMNS": "400"},
         )
     except FileNotFoundError:
         return 127, "rip: command not found"

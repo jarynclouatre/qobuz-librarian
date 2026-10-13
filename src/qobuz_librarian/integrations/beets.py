@@ -4721,7 +4721,7 @@ def _configured_beets_plugins(runtime=None, folder=None):
     if runtime is None or not _beets_runtime_matches(runtime):
         return None
     config_dir = os.path.abspath(os.fspath(cfg.BEETS_CONFIG_DIR))
-    environment = {**os.environ, "BEETSDIR": config_dir}
+    environment = {**cfg.child_env(), "BEETSDIR": config_dir}
     for variable in _OWNERSHIP_ENV_KEYS:
         environment.pop(variable, None)
     try:
@@ -6818,7 +6818,7 @@ def _beets_direct_guarded(
     seen_albums = [0]
 
     config_dir = os.path.abspath(os.fspath(cfg.BEETS_CONFIG_DIR))
-    beet_env = {**os.environ, "BEETSDIR": config_dir}
+    beet_env = {**cfg.child_env(), "BEETSDIR": config_dir}
     for variable in _OWNERSHIP_ENV_KEYS:
         beet_env.pop(variable, None)
     popen_options = {}
@@ -8553,7 +8553,7 @@ def _remove_beets_rows(matches, warn):
         warn("a supported Beets runtime could not be found")
         return ForgetBeetsEntriesResult(False)
     config_dir = os.path.abspath(os.fspath(cfg.BEETS_CONFIG_DIR))
-    beet_env = {**os.environ, "BEETSDIR": config_dir}
+    beet_env = {**cfg.child_env(), "BEETSDIR": config_dir}
     for variable in _OWNERSHIP_ENV_KEYS:
         beet_env.pop(variable, None)
     base = [

@@ -155,7 +155,8 @@ def test_scan_job_parks_for_review_then_executes(monkeypatch):
     assert hooks[1]["status"] == "done"
 
 
-def test_post_job_hook_delivers_json_to_an_inert_command(tmp_path, monkeypatch):
+def test_post_job_hook_gets_the_job_json_but_not_the_app_secrets(
+        tmp_path, monkeypatch):
     sink = tmp_path / "hook.json"
     payload = {
         "id": "local-hook-check",
@@ -163,13 +164,21 @@ def test_post_job_hook_delivers_json_to_an_inert_command(tmp_path, monkeypatch):
         "title": "Album",
     }
     monkeypatch.setenv("HOOK_SINK", str(sink))
-    monkeypatch.setenv("POST_JOB_HOOK", 'tee "$HOOK_SINK"')
+    monkeypatch.setenv("WEB_AUTH_PASSWORD", "seeded web password")
+    monkeypatch.setenv("QOBUZ_USER_AUTH_TOKEN_FILE", "/run/secrets/qobuz_token")
+    monkeypatch.setenv("LASTFM_API_KEY", "lastfm key")
+    monkeypatch.setenv(
+        "POST_JOB_HOOK", 'tee "$HOOK_SINK"; env | cut -d= -f1 > "$HOOK_SINK.env"')
 
     jm._run_post_job_hook(payload)
 
     assert sink.read_text() == (
         '{"id": "local-hook-check", "status": "done", "title": "Album"}'
     )
+    names = set((tmp_path / "hook.json.env").read_text().split())
+    assert "HOOK_SINK" in names
+    assert not names & {
+        "WEB_AUTH_PASSWORD", "QOBUZ_USER_AUTH_TOKEN_FILE", "LASTFM_API_KEY"}
 
 
 def test_per_artist_rescan_supersedes_only_that_artists_parked_review(
@@ -2633,6 +2642,64 @@ def test_a_signed_in_browser_is_never_locked_out(monkeypatch, tmp_path):
         assert c.get("/", follow_redirects=False).status_code == 200
 
 
+def _client_ip(host, port, forwarded=""):
+    from starlette.requests import Request
+
+    from qobuz_librarian.web import auth as web_auth
+
+    headers = [(b"x-forwarded-for", forwarded.encode())] if forwarded else []
+    return web_auth.client_ip(
+        Request({"type": "http", "client": (host, port), "headers": headers}))
+
+
+def test_a_device_on_the_home_ipv6_network_cannot_lock_out_another(monkeypatch):
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(web_auth, "_login_failures", {})
+    monkeypatch.setattr(web_auth, "_user_failures", {})
+    monkeypatch.setattr(web_auth, "_login_pending", {})
+    monkeypatch.setattr(web_auth, "_user_paused_until", {})
+
+    guest = _client_ip("2a02:8070:1:2::bad", 51000)
+    for _ in range(web_auth._LOGIN_MAX):
+        assert web_auth.begin_login_attempt(guest, "admin")
+        web_auth.finish_login_attempt(guest, "admin", success=False)
+    owner = _client_ip("2a02:8070:1:2:aaaa:bbbb:cccc:dddd", 51001)
+    assert web_auth.begin_login_attempt(owner, "admin")
+    web_auth.cancel_login_attempt(owner, "admin")
+
+    # From the internet, through a trusted proxy (uvicorn has already put the
+    # forwarded client in place, with no port), a /64 is one subscriber, so
+    # moving to a fresh address in it buys no more guesses.
+    for host in range(1, web_auth._LOGIN_MAX + 1):
+        hop = f"2a02:8070:9:9::{host}"
+        hop_ip = _client_ip(hop, 0, hop)
+        assert web_auth.begin_login_attempt(hop_ip, "someone")
+        web_auth.finish_login_attempt(hop_ip, "someone", success=False)
+    fresh = "2a02:8070:9:9::99"
+    assert not web_auth.begin_login_attempt(_client_ip(fresh, 0, fresh), "someone")
+
+
+def test_a_forged_forwarded_header_does_not_get_a_visitor_named_as_the_proxy(
+        monkeypatch, caplog):
+    import logging
+
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(web_auth, "_forwarding_peers", {})
+    monkeypatch.setattr(web_auth, "_warned_proxy_peers", {})
+    caplog.set_level(logging.WARNING, logger="qobuz_librarian")
+
+    for _ in range(web_auth._PROXY_CLIENTS_TO_WARN + 1):
+        _client_ip("192.168.1.50", 50000, "203.0.113.9")
+    assert not caplog.records
+
+    for host in range(web_auth._PROXY_CLIENTS_TO_WARN + 1):
+        _client_ip("172.18.0.1", 40000, f"198.51.100.{host}")
+    assert len(caplog.records) == 1
+    assert "172.18.0.1" in caplog.records[0].getMessage()
+
+
 def _mutation_paths(app):
     """Concrete inert paths for every unsafe route in the live route table."""
     return sorted(
@@ -2730,19 +2797,45 @@ def test_a_password_set_in_settings_survives_a_restart(monkeypatch, tmp_path):
     assert (tmp_path / "auth.json.corrupt").read_text(encoding="utf-8") == "{"
 
 
-def test_login_rejects_wrong_password(monkeypatch, tmp_path):
+def test_login_rejects_wrong_password(monkeypatch, tmp_path, caplog):
+    import logging
+
+    from qobuz_librarian.web import auth as web_auth
+
+    monkeypatch.setattr(web_auth, "_login_failures", {})
+    monkeypatch.setattr(web_auth, "_user_failures", {})
+    monkeypatch.setattr(web_auth, "_login_pending", {})
+    monkeypatch.setattr(web_auth, "_user_paused_until", {})
+    caplog.set_level(logging.WARNING, logger="qobuz_librarian")
+
     with _enable_auth(monkeypatch, tmp_path) as c:
         c.get("/login")
         tok = c.cookies.get("ql_csrf")
-        r = c.post("/login",
-                   data={"username": "admin", "password": "nope",
-                         "_csrf_token": tok},
-                   headers={"X-CSRF-Token": tok}, follow_redirects=False)
-        assert r.status_code == 303
-        assert r.headers["location"].startswith("/login?error=")
-        assert "ql_session" not in r.cookies
+        for _ in range(web_auth._LOGIN_MAX):
+            r = c.post("/login",
+                       data={"username": "admin", "password": "nope",
+                             "_csrf_token": tok},
+                       headers={"X-CSRF-Token": tok}, follow_redirects=False)
+            assert r.status_code == 303
+            assert r.headers["location"].startswith("/login?error=")
+            assert "ql_session" not in r.cookies
         # Still locked out afterwards.
         assert c.get("/", follow_redirects=False).status_code == 303
+
+        # Locked out now: even the right password is refused, on a login
+        # page that can still be used once the wait is over.
+        r = c.post("/login",
+                   data={"username": "admin", "password": "hunter2hunter2!",
+                         "_csrf_token": tok},
+                   headers={"X-CSRF-Token": tok}, follow_redirects=False)
+        assert r.status_code == 429
+        assert 'action="/login"' in r.text
+        assert "ql_session" not in r.cookies
+
+    warnings = [record.getMessage() for record in caplog.records
+                if record.levelno == logging.WARNING]
+    assert len(warnings) == web_auth._LOGIN_MAX + 1
+    assert all("127.0.0.1" in message for message in warnings)
 
 
 def test_login_next_cannot_leave_the_app(monkeypatch, tmp_path):

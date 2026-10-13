@@ -669,14 +669,20 @@ def _prune_failures(now: float) -> None:
         del _user_paused_until[k]
 
 
-def _address_key(ip: str) -> str:
-    """The throttle bucket for an address. IPv6 counts per /64, the block one
-    subscriber is given, so hopping between its addresses buys no guesses."""
+def _address_key(ip: str, proxied: bool) -> str:
+    """The throttle bucket for a client. A public IPv6 address that arrives
+    through a trusted proxy counts per /64, the block one subscriber is given,
+    so hopping between its addresses buys no guesses. A direct peer counts per
+    address: the devices on a home network share one /64, and a guest's wrong
+    guesses must not lock out the owner."""
+    if not proxied:
+        return ip
     try:
         address = ipaddress.ip_address(ip)
     except ValueError:
         return ip
-    if address.version == 6 and address.ipv4_mapped is None:
+    if (address.version == 6 and address.is_global
+            and address.ipv4_mapped is None):
         return str(ipaddress.ip_network(f"{address}/64", strict=False))
     return ip
 
@@ -689,43 +695,60 @@ def _norm_user(username: str) -> str:
     return (username or "").strip().casefold()
 
 
-# Peers already named by the warning below, oldest first. Bounded by dropping
-# the oldest, so no run of strangers can use up the warning for good.
+# Untrusted peers that sent X-Forwarded-For, with the clients each named, and
+# the peers already named by the warning below, oldest first. Both are bounded
+# by dropping the oldest, so no run of strangers can use up the warning for good.
+_forwarding_peers: dict[str, set[str]] = {}
 _warned_proxy_peers: dict[str, None] = {}
 _MAX_WARNED_PROXY_PEERS = 64
+_PROXY_CLIENTS_TO_WARN = 3
 
 
 def client_ip(request) -> str:
-    """The address the login throttle counts against.
+    """The address the login throttle counts against: the client's own, or
+    its /64 for a public IPv6 client behind a trusted proxy.
 
     uvicorn resolves this from X-Forwarded-For already, but only for proxies
     FORWARDED_ALLOW_IPS names, and its default (127.0.0.1) never matches a
     proxy on a Docker network. Left unset, every visitor arrives as the proxy
     and the per-address throttle becomes one bucket for the whole deployment,
-    so one visitor's wrong guesses can affect everyone behind it. Say so once
-    per peer, naming it for the operator to verify rather than silently sharing
-    one throttle bucket.
+    so one visitor's wrong guesses can affect everyone behind it. Any visitor
+    can send the header too, so a peer is named for the operator to check only
+    once it has forwarded for several different clients.
     """
     client = request.client
     peer = (client.host if client else "") or ""
     port = getattr(client, "port", None) if client else None
     forms = {peer, f"[{peer}]", f"{peer}:{port}", f"[{peer}]:{port}"}
-    chain = {p.strip() for p in
-             request.headers.get("x-forwarded-for", "").split(",") if p.strip()}
+    forwarded = [p.strip() for p in
+                 request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
     # A resolved address is one of the forwarded entries, possibly with the
     # port the entry carried; the raw peer is not, because a proxy appends the
     # client it saw rather than itself. Only then is this the socket peer.
-    if chain and peer and not (chain & forms) and peer not in _warned_proxy_peers:
-        _warned_proxy_peers[peer] = None
-        if len(_warned_proxy_peers) > _MAX_WARNED_PROXY_PEERS:
-            del _warned_proxy_peers[next(iter(_warned_proxy_peers))]
-        log.warning(
-            "Sign-ins are arriving through a proxy at %s whose forwarded "
-            "address isn't trusted, so the failed-login limit counts every "
-            "visitor as one. If %s is your reverse proxy, set "
-            "FORWARDED_ALLOW_IPS=%s in .env and restart; never trust an "
-            "address that belongs to a visitor.", peer, peer, peer)
-    return peer or "unknown"
+    if (forwarded and peer and not (set(forwarded) & forms)
+            and peer not in _warned_proxy_peers):
+        _note_untrusted_forwarder(peer, forwarded[-1])
+    if not peer:
+        return "unknown"
+    return _address_key(peer, via_trusted_proxy(request))
+
+
+def _note_untrusted_forwarder(peer: str, client: str) -> None:
+    clients = _forwarding_peers.setdefault(peer, set())
+    if len(_forwarding_peers) > _MAX_WARNED_PROXY_PEERS:
+        del _forwarding_peers[next(iter(_forwarding_peers))]
+    clients.add(client)
+    if len(clients) < _PROXY_CLIENTS_TO_WARN:
+        return
+    del _forwarding_peers[peer]
+    _warned_proxy_peers[peer] = None
+    if len(_warned_proxy_peers) > _MAX_WARNED_PROXY_PEERS:
+        del _warned_proxy_peers[next(iter(_warned_proxy_peers))]
+    log.warning(
+        "%s forwarded requests for %d different clients but is not a trusted "
+        "proxy, so the failed-login limit counts them as one. Add it to "
+        "FORWARDED_ALLOW_IPS only if it is your reverse proxy.",
+        peer, len(clients))
 
 
 def via_trusted_proxy(request) -> bool:
@@ -813,25 +836,24 @@ def begin_login_attempt(ip: str, username: str = "") -> bool:
     Every successful reservation must be finished or cancelled.
     """
     now = time.monotonic()
-    key = _address_key(ip)
     uname = _norm_user(username)
     with _login_lock:
         _prune_failures(now)
         if sum(_login_pending.values()) >= _MAX_CONCURRENT_LOGIN_CHECKS:
             return False
-        times = _login_failures.get(key, [])
+        times = _login_failures.get(ip, [])
         if not _has_attempt_slot(
-                times, _login_pending.get(key, 0), _LOGIN_MAX, now):
+                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
             return False
         if times and _user_paused(uname, now):
             return False
         room, victim = _reservation_victim(
-            _login_failures, _login_pending, key, _MAX_TRACKED_IPS)
+            _login_failures, _login_pending, ip, _MAX_TRACKED_IPS)
         if not room:
             return False
         if victim is not None:
             _login_failures.pop(victim, None)
-        _login_pending[key] = _login_pending.get(key, 0) + 1
+        _login_pending[ip] = _login_pending.get(ip, 0) + 1
         return True
 
 
@@ -847,23 +869,31 @@ def _release_login_attempt(key: str) -> None:
 def finish_login_attempt(ip: str, username: str = "", *, success: bool) -> None:
     """Finish a reserved check, recording failure or clearing old failures."""
     now = time.monotonic()
-    key = _address_key(ip)
     uname = _norm_user(username)
     with _login_lock:
-        _release_login_attempt(key)
+        _release_login_attempt(ip)
         if success:
-            _login_failures.pop(key, None)
+            _login_failures.pop(ip, None)
             if uname:
                 _user_failures.pop(uname, None)
                 _user_paused_until.pop(uname, None)
             return
-        _record_login_failure(key, uname, now)
+        address_locked, user_paused = _record_login_failure(ip, uname, now)
+    if address_locked:
+        log.warning(
+            "Sign-ins from %s are refused for %d minutes after %d failed "
+            "attempts.", ip, _LOGIN_LOCKOUT // 60, address_locked)
+    if user_paused:
+        log.warning(
+            "Sign-ins for the username tried from %s are paused for %d "
+            "seconds at addresses that have failed, after %d failures from "
+            "any address.", ip, _USER_PAUSE, _USER_LOGIN_MAX)
 
 
 def cancel_login_attempt(ip: str, username: str = "") -> None:
     """Release a check that did not reach a password verdict."""
     with _login_lock:
-        _release_login_attempt(_address_key(ip))
+        _release_login_attempt(ip)
 
 
 def login_lockout_remaining(ip: str, username: str = "") -> int:
@@ -875,16 +905,15 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
     the message that says "wait an hour" is wrong for all but the first second.
     """
     now = time.monotonic()
-    key = _address_key(ip)
     uname = _norm_user(username)
     with _login_lock:
         waits = []
-        times = [t for t in _login_failures.get(key, [])
+        times = [t for t in _login_failures.get(ip, [])
                  if now - t < _LOGIN_WINDOW]
         if _locked(times, _LOGIN_MAX, now):
             waits.append(_LOGIN_LOCKOUT - (now - max(times)))
         elif not _has_attempt_slot(
-                times, _login_pending.get(key, 0), _LOGIN_MAX, now):
+                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
             waits.append(1)
         if times and _user_paused(uname, now):
             waits.append(_user_paused_until[uname] - now)
@@ -893,15 +922,19 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
     return max(1, int(max(waits))) if waits else 0
 
 
-def _record_login_failure(key: str, uname: str, now: float) -> None:
-    """Record one failure. Caller holds _login_lock."""
+def _record_login_failure(key: str, uname: str, now: float) -> tuple[int, bool]:
+    """Record one failure. Returns the address's failure count when this one
+    locks it (0 otherwise) and whether it paused the username. Caller holds
+    _login_lock."""
     _prune_failures(now)
     if key not in _login_failures and len(_login_failures) >= _MAX_TRACKED_IPS:
         del _login_failures[min(_login_failures,
                                 key=lambda k: min(_login_failures[k]))]
-    _login_failures.setdefault(key, []).append(now)
+    address_times = _login_failures.setdefault(key, [])
+    address_times.append(now)
+    address_locked = len(address_times) if len(address_times) >= _LOGIN_MAX else 0
     if not uname or _user_paused(uname, now):
-        return
+        return address_locked, False
     if (uname not in _user_failures
             and len(_user_failures) >= _MAX_TRACKED_USERS):
         del _user_failures[min(_user_failures,
@@ -911,6 +944,8 @@ def _record_login_failure(key: str, uname: str, now: float) -> None:
     if len(times) >= _USER_LOGIN_MAX:
         _user_paused_until[uname] = now + _USER_PAUSE
         del _user_failures[uname]
+        return address_locked, True
+    return address_locked, False
 
 
 def clear_login_failures(ip: str, username: str = "") -> None:
@@ -918,7 +953,7 @@ def clear_login_failures(ip: str, username: str = "") -> None:
     earlier typo run doesn't leave the next session one slip from a lockout."""
     uname = _norm_user(username)
     with _login_lock:
-        _login_failures.pop(_address_key(ip), None)
+        _login_failures.pop(ip, None)
         if uname:
             _user_failures.pop(uname, None)
             _user_paused_until.pop(uname, None)

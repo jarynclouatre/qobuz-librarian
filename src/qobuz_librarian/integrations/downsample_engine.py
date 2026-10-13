@@ -102,6 +102,7 @@ def _soxr_available():
              "-f", "lavfi", "-i", "anullsrc=r=96000:cl=stereo",
              "-af", _SOXR_FILTER, "-ar", "48000", "-t", "0.05", "-f", "null", "-"],
             capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+            env=cfg.child_env(),
         )
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -161,7 +162,7 @@ def read_local_bit_depth(path: Path, *, pass_fds=()) -> int:
         completed = subprocess.run(
             ["metaflac", "--show-bps", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds))
+            pass_fds=tuple(pass_fds), env=cfg.child_env())
         if completed.returncode != 0:
             return 0
         out = completed.stdout.strip()
@@ -210,7 +211,7 @@ def read_sample_rate(path: Path, *, pass_fds=()) -> int:
         completed = subprocess.run(
             ["metaflac", "--show-sample-rate", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds))
+            pass_fds=tuple(pass_fds), env=cfg.child_env())
         if completed.returncode != 0:
             return 0
         out = completed.stdout.strip()
@@ -255,7 +256,7 @@ def read_total_samples(path: Path, *, pass_fds=()) -> int:
         completed = subprocess.run(
             ["metaflac", "--show-total-samples", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds))
+            pass_fds=tuple(pass_fds), env=cfg.child_env())
         if completed.returncode != 0:
             return 0
         out = completed.stdout.strip()
@@ -322,7 +323,7 @@ def _decode_ok(path, *, pass_fds=()):
         r = subprocess.run(["flac", "-t", "-s", str(path)],
                            capture_output=True, timeout=300,
                            stdin=subprocess.DEVNULL,
-                           pass_fds=tuple(pass_fds))
+                           pass_fds=tuple(pass_fds), env=cfg.child_env())
     except (OSError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0
@@ -348,7 +349,7 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
              "-map", "0:a", "-af", f"{af_filter},astats=metadata=1:reset=0",
              "-ar", str(rate), "-c:a", "pcm_f32le", "-f", "null", "-"],
             capture_output=True, timeout=600, stdin=subprocess.DEVNULL,
-            pass_fds=tuple(pass_fds))
+            pass_fds=tuple(pass_fds), env=cfg.child_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
@@ -384,7 +385,7 @@ def _write_seektable(target_fd: int) -> bool:
             ["metaflac", f"--add-seekpoint={_SEEKPOINT_SECONDS}s",
              f"/proc/self/fd/{target_fd}"],
             capture_output=True, timeout=120, stdin=subprocess.DEVNULL,
-            pass_fds=(target_fd,))
+            pass_fds=(target_fd,), env=cfg.child_env())
     except (OSError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0
@@ -800,6 +801,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             # encode. Generous even for a long 24/192 file on slow hardware.
             timeout=600,
             pass_fds=(binding.track_fd, temp_fd),
+            env=cfg.child_env(),
         )
         carry_error = _copy_source_metadata(binding.track_fd, temp_fd)
         if carry_error is not None:

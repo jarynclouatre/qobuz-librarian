@@ -101,23 +101,29 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN groupadd -g 1000 appuser \
  && useradd -u 1000 -g 1000 -m -s /bin/bash appuser
 
-COPY --from=builder --chown=appuser:appuser /opt/venv /opt/venv
+# The venv, source and seed files are root-owned so the app user cannot
+# change code that root runs (the entrypoint, the health check, `docker
+# exec`).
+COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 
 # Source kept at /app/src so the editable install from the builder resolves.
-COPY --chown=appuser:appuser pyproject.toml ./
-COPY --chown=appuser:appuser src/ ./src/
+COPY pyproject.toml ./
+COPY src/ ./src/
 
 # Tailwind CSS bundle built in the builder stage.
-COPY --from=builder --chown=appuser:appuser \
+COPY --from=builder \
      /app/src/qobuz_librarian/web/static/dist/ \
      /app/src/qobuz_librarian/web/static/dist/
+# Bytecode is compiled here because the app cannot write __pycache__ under
+# /app/src. Hash-checked, so it stays valid whatever the build does to mtimes.
+RUN python -m compileall -q --invalidation-mode checked-hash /app/src
 
 # Default config templates (entrypoint seeds them into /config).
-COPY --chown=appuser:appuser docker/beets-default.yaml /app/docker/beets-default.yaml
-COPY --chown=appuser:appuser docker/beets-chroma.yaml /app/docker/beets-chroma.yaml
-COPY --chown=appuser:appuser docker/streamrip-default.toml /app/docker/streamrip-default.toml
+COPY docker/beets-default.yaml /app/docker/beets-default.yaml
+COPY docker/beets-chroma.yaml /app/docker/beets-chroma.yaml
+COPY docker/streamrip-default.toml /app/docker/streamrip-default.toml
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
@@ -137,8 +143,11 @@ ENV BEETSDIR=/config/beets
 # 0.0.0.0 is a bind address, not a destination, so coerce it to 127.0.0.1
 # (uvicorn binds to all interfaces in that case, loopback included). A
 # user who pins WEB_HOST to a specific interface gets that hostname back.
+# The check runs as root, so it uses curl rather than the app's Python.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,os; h=os.environ.get('WEB_HOST','0.0.0.0'); h='127.0.0.1' if h=='0.0.0.0' else h; urllib.request.urlopen('http://'+h+':'+os.environ.get('WEB_PORT','8666')+'/readyz', timeout=4)" || exit 1
+    CMD h="${WEB_HOST:-0.0.0.0}"; [ "$h" != 0.0.0.0 ] || h=127.0.0.1; \
+        curl -q -fsS -o /dev/null --noproxy '*' --max-time 4 \
+            "http://$h:${WEB_PORT:-8666}/readyz" || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["web"]

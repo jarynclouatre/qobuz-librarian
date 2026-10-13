@@ -2061,6 +2061,7 @@ def fingerprint_identify(path: Path, min_score: float = ACOUSTID_MIN_SCORE,
              "-of", "default=noprint_wrappers=1:nokey=1", source],
             capture_output=True, text=True,
             stdin=subprocess.DEVNULL, timeout=60, pass_fds=pass_fds,
+            env=config.child_env(),
         )
         # ffprobe also opens cover/video decoders, which the whitelist rejects.
         duration = (float(probe.stdout.strip()) if probe.returncode == 0
@@ -2080,6 +2081,7 @@ def fingerprint_identify(path: Path, min_score: float = ACOUSTID_MIN_SCORE,
             stdin=subprocess.DEVNULL,
             timeout=60,
             pass_fds=pass_fds,
+            env=config.child_env(),
         )
         fp = completed.stdout.strip()
         if not fp:

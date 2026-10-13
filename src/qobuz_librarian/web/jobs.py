@@ -1266,6 +1266,7 @@ def _run_post_job_hook(payload: dict) -> None:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=cfg.child_env(),
             # Own process group, so the timeout can kill a hook's whole
             # pipeline. Killing just the shell leaves its children running.
             start_new_session=True,

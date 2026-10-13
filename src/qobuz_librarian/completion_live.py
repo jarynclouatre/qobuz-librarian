@@ -176,6 +176,7 @@ def _metaflac_value(descriptor, option):
             text=True,
             timeout=10,
             pass_fds=(descriptor,),
+            env=cfg.child_env(),
         )
         value = result.stdout.strip()
         if result.returncode != 0 or not value.isascii() or not value.isdecimal():
