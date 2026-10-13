@@ -20,6 +20,34 @@ def test_flac_cache_hits_when_unchanged_and_invalidates_on_change(tmp_path, monk
         flac_cache._reset_for_tests()
 
 
+def test_cache_prune_keeps_rows_under_an_unreadable_folder(tmp_path, monkeypatch):
+    import os
+
+    import qobuz_librarian.config as cfg
+    from qobuz_librarian.library import flac_cache
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "FLAC_CACHE_ENABLED", True)
+    flac_cache._reset_for_tests()
+    kept = tmp_path / "music" / "Locked" / "Album" / "01.flac"
+    moved = tmp_path / "music" / "Moved" / "Album" / "01.flac"
+    for f in (kept, moved):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"abc")
+        flac_cache.put(f, {"title": "T"})
+    flac_cache.flush_pending()
+    moved.unlink()
+    os.chmod(kept.parents[1], 0)
+    try:
+        assert flac_cache.prune_missing(force=True) == 1
+    finally:
+        os.chmod(kept.parents[1], 0o755)
+    try:
+        assert flac_cache.get(kept) == {"title": "T"}
+    finally:
+        flac_cache._reset_for_tests()
+
+
 def test_transient_read_error_is_a_walk_error_not_untagged(monkeypatch, tmp_path):
     """An unreadable track must not shrink the census used for backup deletion."""
     import os

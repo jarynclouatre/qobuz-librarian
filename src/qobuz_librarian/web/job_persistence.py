@@ -569,11 +569,21 @@ _TERMINAL_STATUSES = ("done", "failed", "canceled")
 
 def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
     """Serialise one job while its lock is held, or return None."""
+    snapshot = _job_snapshot(job, single=single)
+    return None if snapshot is None else _encode_snapshot(job, snapshot)
+
+
+def _job_snapshot(job, *, single=_CURRENT_JOB_SINGLE):
+    """What one saved row needs, taken while ``job._lock`` is held.
+
+    A review can hold a hundred thousand candidates, so they are kept as the
+    list and each row's tick, the one field changed on a row in place, and
+    encoded by _encode_snapshot, which does not need the lock.
+    """
     if job._retired:
         return None
+    job._persist_serial += 1
     try:
-        candidates_json = json.dumps(
-            _compact_candidates(job.candidates or []), default=str)
         execute_args_json = json.dumps(job.execute_args or {}, default=str)
         single_value = job.single if single is _CURRENT_JOB_SINGLE else single
         single_json = json.dumps(single_value or {}, default=str)
@@ -605,12 +615,13 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
     except (TypeError, ValueError) as e:
         _note_write_failure(f"serialize {job.id}", e)
         return None
-    return (
+    rows = list(job.candidates or [])
+    return job._persist_serial, rows, [row.get("selected") for row in rows], (
         job.id, job.title or "", job.artist or "",
         job.album_id or "", job.kind or "download",
         job.status.value if hasattr(job.status, "value") else str(job.status),
         job.phase or "",
-        candidates_json,
+        None,
         job.error,
         job.summary or "",
         job.review_verb or "Download",
@@ -626,6 +637,67 @@ def _job_values(job, *, single=_CURRENT_JOB_SINGLE):
         str(getattr(job, "edition", "") or "").strip(),
         int(getattr(job, "tracks_missing", 0) or 0),
     )
+
+
+def _json_list(items, chunk=500):
+    """json.dumps of a list, a slice at a time. One call over a large review
+    holds the interpreter for the whole encode, and the web app with it."""
+    return "[" + ", ".join(
+        json.dumps(items[i:i + chunk], default=str)[1:-1]
+        for i in range(0, len(items), chunk)) + "]"
+
+
+def _encode_snapshot(job, snapshot):
+    """The row values for a _job_snapshot, or None."""
+    _serial, rows, ticks, values = snapshot
+    rows = [row if row.get("selected") == tick else {**row, "selected": tick}
+            for row, tick in zip(rows, ticks)]
+    try:
+        compact = _compact_candidates(rows)
+        if isinstance(compact, dict):
+            head = json.dumps({key: value for key, value in compact.items()
+                               if key != "rows"}, default=str)
+            candidates_json = (head[:-1] + ', "rows": '
+                               + _json_list(compact["rows"]) + "}")
+        else:
+            candidates_json = _json_list(compact)
+    except (TypeError, ValueError) as e:
+        _note_write_failure(f"serialize {job.id}", e)
+        return None
+    return values[:7] + (candidates_json,) + values[8:]
+
+
+def _write_snapshot(job, snapshot) -> bool:
+    """Encode and save a _job_snapshot without holding the job lock.
+
+    A snapshot taken after this one wins, so this one is then not written; a
+    job retired meanwhile, its row merged or deleted, is not written back.
+    """
+    values = _encode_snapshot(job, snapshot)
+    if values is None:
+        return False
+    with job._lock:
+        _lock.acquire()
+        superseded = job._persist_serial != snapshot[0]
+        retired = job._retired
+    try:
+        if retired:
+            return False
+        if superseded:
+            return True
+        conn = _get_conn()
+        if conn is None:
+            return False
+        try:
+            conn.execute(_PERSIST_SQL, values)
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            _rollback_failed_write(conn)
+            _note_write_failure(f"persist {job.id}", e)
+            return False
+    finally:
+        _lock.release()
 
 
 _TERMINAL_DOWNLOAD_SQL = (
@@ -721,22 +793,28 @@ def _persist_locked(job, *, admission=False) -> bool:
 
 def persist(job) -> bool:
     """Write the job's current state to disk. Return whether it reached disk."""
-    # Keep the job lock through both the preservation decision and the
-    # database commit.
     with job._lock:
         if getattr(job, "_preserve_persisted_single", False) is True:
+            # Keep the job lock through both the preservation decision and
+            # the database commit.
             return _persist_preserving_single_locked(job)
-        return _persist_locked(job)
+        snapshot = _job_snapshot(job)
+    return snapshot is not None and _write_snapshot(job, snapshot)
 
 
 def persist_review_mutation(job, mutation) -> tuple[bool, object]:
-    """Save one candidate-list mutation or restore its exact prior state."""
+    """Save one candidate-list mutation or restore its exact prior state.
+
+    Mutations replace rows rather than edit them, so the prior list is kept
+    without copying each row. The save runs once the review's locks are
+    released, so ticks are not held up while a large review is written.
+    """
     with job._review_action_lock, job._lock:
         if job._retired:
             return False, None
         had_saved_signature = hasattr(job, "_saved_review_signature")
         previous = (
-            copy.deepcopy(job.candidates),
+            list(job.candidates),
             job._cand_seq,
             job._candidate_cap_noted,
             copy.deepcopy(job.execute_args),
@@ -776,10 +854,15 @@ def persist_review_mutation(job, mutation) -> tuple[bool, object]:
         )
         if current == previous:
             return True, result
-        if _persist_locked(job):
-            return True, result
-        _restore()
-        return False, result
+        snapshot = _job_snapshot(job)
+        changed = job.candidates
+    if snapshot is not None and _write_snapshot(job, snapshot):
+        return True, result
+    with job._review_action_lock, job._lock:
+        # A later change already built on this one keeps its own result.
+        if job.candidates is changed:
+            _restore()
+    return False, result
 
 
 def acknowledge_attention(job_id: str, expected_attention: str) -> bool:

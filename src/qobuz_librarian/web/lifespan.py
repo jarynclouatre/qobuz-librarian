@@ -108,6 +108,7 @@ def _late_startup_maintenance() -> None:
 def _shutdown_web_mutations() -> None:
     """Quiesce every Web writer before releasing the process run lock."""
     job_mgr.stop_worker()
+    job_mgr.flush_pending_saves()
     job_mgr.configure_staging_entry_guard(None)
     job_mgr.configure_held_release(None)
     if runtime._RUN_LOCK_HANDLE is not None:

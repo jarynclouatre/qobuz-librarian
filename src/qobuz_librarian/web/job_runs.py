@@ -44,12 +44,13 @@ def _review_download_token(job):
 
 
 def _run_review_with_live_download(job, chosen, execute):
-    """Recheck both local receipts and the bound credential at worker start."""
-    candidate_premise.validate_all(chosen)
+    """Recheck the bound credential, then the local receipts, at worker start."""
     token = _review_download_token(job)
-    # The live request above can take long enough for a local edit to land.
-    # Repeat the exact receipt check before the flow reaches its first backup.
-    candidate_premise.validate_all(chosen)
+    # The live request can take long enough for a local edit to land, so the
+    # files are checked after it. A Cancel during the check reaches execute,
+    # which stops before its first pick and returns them all to the review.
+    candidate_premise.validate_all(
+        chosen, cancelled=lambda: job.cancel_requested)
     return execute(job, chosen, token)
 
 
@@ -85,7 +86,8 @@ def _job_downsample_keep_originals(job):
 
 def _resume_downsample(job, _args):
     def execute(j, chosen):
-        candidate_premise.validate_all(chosen)
+        candidate_premise.validate_all(
+            chosen, cancelled=lambda: j.cancel_requested)
         return flows.execute_downsamples(
             j,
             chosen,

@@ -359,6 +359,9 @@ class Job:
     # A finished Library scan's artist folders and whether it looked at Gap
     # Fill alone, so its fold can drop what it no longer offers for them.
     scan_coverage: tuple | None = field(default=None, repr=False)
+    # A finished Library scan's artist folders whose finds the review had no
+    # room for, with how many each lost.
+    scan_left_out: dict = field(default_factory=dict, repr=False)
     # True only while beets is putting an album into the library. That runs to
     # its own end, so a cancel arriving now cannot stop it.
     importing: bool = False
@@ -377,8 +380,14 @@ class Job:
     )
     # Monotonic candidate counter.
     _cand_seq: int = field(default=0, repr=False)
+    # Counts the snapshots taken for saving, so an older one is not written
+    # over a newer one.
+    _persist_serial: int = field(default=0, repr=False)
     # Set once a scan hits JOB_CANDIDATE_CAP and stops listing further finds.
     _candidate_cap_noted: bool = field(default=False, repr=False)
+    # Rows added under release types the review does not list, which the cap
+    # leaves out of its count.
+    _unlisted_rows: int = field(default=0, repr=False)
     # Set by the execute flows the moment the first album/track lands on disk.
     _imported_any: bool = field(default=False, repr=False)
     # How many artists a library scan couldn't check (per-artist errors).
@@ -624,15 +633,18 @@ class Job:
     CANDIDATE_CAP = cfg.JOB_CANDIDATE_CAP
 
     def add_candidate(self, kind, title, artist="", detail="", payload=None,
-                      selected=True):
+                      selected=True, listed=True):
         # Locked: a live scan appends from the worker thread while the request
         # thread may be reading/dropping candidates via the review screen.
         capped = False
         cid = None
         with self._lock:
             # Bound the in-memory (and persisted) candidate list so a runaway
-            # whole-library scan can't exhaust memory.
-            if len(self.candidates) >= self.CANDIDATE_CAP:
+            # whole-library scan can't exhaust memory. Only the rows the review
+            # lists count: switched-off release types are kept for their
+            # switches without taking a listed album's place.
+            if (listed and len(self.candidates) - self._unlisted_rows
+                    >= self.CANDIDATE_CAP):
                 capped = not self._candidate_cap_noted
                 self._candidate_cap_noted = True
                 if isinstance(self.execute_args, dict):
@@ -650,6 +662,8 @@ class Job:
                     "selected": selected,
                 })
                 cid = f"c{seq}"
+                if not listed:
+                    self._unlisted_rows += 1
         if capped:  # log once, outside the lock (push_line takes it itself)
             self.push_line(
                 f"Reached the {self.CANDIDATE_CAP:,}-result cap. Further "
@@ -727,23 +741,22 @@ class Job:
             cands = list(self.candidates)
         selected = [c for c in cands if c.get("selected")]
         artists = {c.get("artist") for c in cands}
-
-        def estimate(candidate):
-            try:
-                value = int(
-                    (candidate.get("payload") or {}).get("est_saving") or 0
-                )
-            except (TypeError, ValueError, OverflowError):
-                return 0
-            return max(0, value)
-
-        reclaimable = sum(estimate(candidate) for candidate in selected)
+        reclaimable = sum(est_saving(candidate) for candidate in selected)
         return {
             "total": len(cands),
             "artists": len(artists),
             "selected": len(selected),
             "reclaimable": reclaimable,
         }
+
+
+def est_saving(candidate) -> int:
+    """The space a downsample candidate frees, in bytes."""
+    try:
+        value = int((candidate.get("payload") or {}).get("est_saving") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, value)
 
 
 class JobRegistry:
@@ -948,32 +961,56 @@ def active_library_operations() -> list[str]:
 
 # Review ticks save the whole candidate list, and on a big library that list
 # runs to tens of megabytes. Written per checkbox, each tap waited on a
-# multi-hundred-ms serialize+write.
+# multi-hundred-ms serialize+write. A save that took a while waits this many
+# times as long before the next, so a run of ticks is not answered behind one
+# save after another.
 _PERSIST_DELAY = 1.5
+_PERSIST_SPACING = 10
 _persist_timers: dict[str, threading.Timer] = {}
+_persist_delays: dict[str, float] = {}
 _persist_timers_lock = threading.Lock()
 
 
-def persist_soon(job) -> None:
-    def _flush():
-        with _persist_timers_lock:
-            _persist_timers.pop(job.id, None)
-        # A job pruned or dismissed while the timer ran must not be written
-        # back; restore would resurrect a review the user already discarded.
-        if registry.get(job.id) is not job:
+def _flush_soon(job) -> None:
+    with _persist_timers_lock:
+        if _persist_timers.pop(job.id, None) is None:
             return
-        if not job_persistence.persist(job):
-            # The request already returned before this background write ran.
-            # Tell every open copy of the review that its latest tick is only
-            # in memory and may disappear on a restart.
-            job.notify_review_changed("save_failed")
+    # A job pruned or dismissed while the timer ran must not be written
+    # back; restore would resurrect a review the user already discarded.
+    if registry.get(job.id) is not job:
+        return
+    started = time.monotonic()
+    saved = job_persistence.persist(job)
+    with _persist_timers_lock:
+        _persist_delays[job.id] = max(
+            _PERSIST_DELAY, _PERSIST_SPACING * (time.monotonic() - started))
+    if not saved:
+        # The request already returned before this background write ran.
+        # Tell every open copy of the review that its latest tick is only
+        # in memory and may disappear on a restart.
+        job.notify_review_changed("save_failed")
+
+
+def persist_soon(job) -> None:
     with _persist_timers_lock:
         if job.id in _persist_timers:
             return
-        t = threading.Timer(_PERSIST_DELAY, _flush)
+        t = threading.Timer(
+            _persist_delays.get(job.id, _PERSIST_DELAY), _flush_soon, (job,))
         t.daemon = True
         _persist_timers[job.id] = t
         t.start()
+
+
+def flush_pending_saves() -> None:
+    """Save every review whose ticks are still waiting for their save."""
+    with _persist_timers_lock:
+        waiting = list(_persist_timers.values())
+    for timer in waiting:
+        timer.cancel()
+        _flush_soon(*timer.args)
+
+
 # Two worker lanes so a quick single-album download isn't stuck behind a scan
 # whose execute phase is downloading 30 albums.
 _download_worker_thread: Optional[threading.Thread] = None

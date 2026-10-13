@@ -58,6 +58,13 @@ def test_a_shared_name_goes_to_the_artist_whose_albums_lastfm_knows(monkeypatch)
     assert rec.resolve_artist("Sleep", "token")["id"] == "2"
 
 
+def test_a_namesake_tag_does_not_lose_the_name_to_a_near_spelling():
+    # Qobuz files the hard-rock band as 'Tesla (Band)', next to a 'Teslah'.
+    found = [{"id": 1, "name": "Teslah", "albums_count": 42},
+             {"id": 2, "name": "Tesla (Band)", "albums_count": 226}]
+    assert discovery.pick_best_artist(found, "Tesla")["id"] == 2
+
+
 def test_genre_chips_read_artists_from_across_the_library(monkeypatch):
     names = sorted(f"{letter} Band {n}" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                    for n in range(20))

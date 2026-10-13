@@ -10,6 +10,7 @@ from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.library import (
     collection_snapshot,
     generation_state,
+    missing_types,
     scan_checkpoint,
     scanner,
 )
@@ -293,27 +294,40 @@ def _fold_into_parked_library_review(job):
         return
     # Use the counts from the locked mutation itself. Complete ownership is
     # reconciled at approval, when exact edition tracks can be compared safely.
-    added, updated = folded
+    added, updated, removed, held_back, fold_left_out, notes = folded
+    # The review keeps these lines only while it waits; the refresh's own log
+    # is stored when it finishes, so History still has them after a restart.
+    for line in notes:
+        job.push_line(line)
+    held = sum(held_back.values())
+    listed = added - held
     # Open review pages re-fetch on this nudge; without it the fold is
     # invisible until a manual reload (and "Refreshing…" never resolves).
     parked.notify_review_changed()
-    if added or (updated and parked.candidates):
+    if listed or ((updated or removed) and parked.candidates):
         # Fresh reviewable results landed in the parked review, so light the
         # Library dot again until the user opens it.
         review_badges.mark_ready("library")
     with job._lock:
         job.candidates = []
     bits = []
-    if added:
-        bits.append(f"Added {plural(added, 'new find')} to the open "
+    under = missing_types.named(held_back) if held else ""
+    if listed and held:
+        bits.append(f"Added {plural(listed, 'new find')} to the open Library "
+                    f"review, and {held} more under {under}.")
+    elif listed:
+        bits.append(f"Added {plural(listed, 'new find')} to the open "
                     "Library review.")
-    if updated and not parked.candidates:
+    elif held:
+        bits.append(f"Added {plural(held, 'new find')} to the open Library "
+                    f"review under {under}.")
+    if not parked.candidates:
         bits.append("Nothing left to review.")
-    elif updated:
-        bits.append(
-            f"Updated {plural(updated, 'changed item')} in the open Library "
-            "review."
-        )
+    elif updated or removed:
+        changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
+            ("updated", updated), ("removed", removed)) if n]
+        bits.append(f"{' and '.join(changes).capitalize()} in the open "
+                    "Library review.")
     unchecked = job.unchecked_artists
     if not bits:
         if unchecked:
@@ -327,9 +341,11 @@ def _fold_into_parked_library_review(job):
         bits.append(f"{plural(len(left_out), 'artist folder')} couldn't be "
                     "read and "
                     f"{'was' if len(left_out) == 1 else 'were'} left out.")
-    if job.candidate_cap_hit or parked.candidate_cap_hit:
-        bits.append("The scan hit the result cap, so some finds are not "
-                    "listed.")
+    no_room = dict(job.scan_left_out)
+    for folder, n in fold_left_out.items():
+        no_room[folder] = no_room.get(folder, 0) + n
+    if no_room:
+        bits.append(flows.left_out_note(no_room, parked.CANDIDATE_CAP))
     job.summary = " ".join(bits)
     job.push_line(job.summary)
     job.status = job_mgr.JobStatus.DONE

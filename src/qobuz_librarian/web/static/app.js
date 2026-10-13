@@ -2562,6 +2562,12 @@
         : { total: c.missing_total, selected: c.missing_selected };
     }
 
+    // A ticked album stays listed whatever its release type, so unticking one
+    // whose switch is off takes it off the list.
+    function listMayHaveChanged(c) {
+      if (c && c.missing_total !== lastCounts.missing_total) refreshNeeded = true;
+    }
+
     function reviewPageCounts(box) {
       if (!box || box.dataset.reviewTotal === undefined) return null;
       var c = {
@@ -2854,6 +2860,7 @@
           pendingChoices.delete(cb.value);
           cb.checked = on;
           if (det) delete det.dataset.selectionOverride;
+          listMayHaveChanged(c);
           if (c) applyCounts(scopedCounts(c, requestTab, requestQuery, requestGeneration));
           updateHideLabels();
           updateArtistChecks();
@@ -2918,6 +2925,7 @@
           var current = requestTab === curTab() &&
                         requestQuery === curQuery() &&
                         requestGeneration === loadGen;
+          listMayHaveChanged(c);
           applyCounts(scopedCounts(c, requestTab, requestQuery, requestGeneration));
           warnPersistFailed(c);
           var accepted = new Set(c.accepted_cids || []);

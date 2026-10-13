@@ -15,6 +15,8 @@ LIVE = "live"
 COMPILATION = "compilation"
 EP = "epSingle"
 OPTIONAL = (LIVE, COMPILATION, EP)
+# What the Library review's switches call them.
+LABELS = {LIVE: "Live", COMPILATION: "Compilations", EP: "EPs & singles"}
 _lock = threading.Lock()
 
 
@@ -56,3 +58,10 @@ def shown(release_type, included) -> bool:
     with the types in ``included`` switched on. A release whose type could
     not be read always is."""
     return release_type in (None, ALBUM) or release_type in included
+
+
+def named(types) -> str:
+    """The switches for ``types`` in one phrase, such as "Live, Compilations
+    or EPs & singles"."""
+    labels = [LABELS[t] for t in OPTIONAL if t in types]
+    return ", ".join(labels[:-1]) + (" or " if len(labels) > 1 else "") + labels[-1]

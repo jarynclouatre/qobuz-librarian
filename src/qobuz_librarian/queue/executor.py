@@ -66,6 +66,7 @@ from qobuz_librarian.library.backup import (
     backup_album_dir,
     backup_files_preserved,
     capture_album_source_receipt,
+    capture_album_tree_identity,
     carry_backup_companions,
     dispose_backup,
     pin_unverified_upgrade_backup,
@@ -146,7 +147,7 @@ class PreImportHooksResult:
 def _seal_queue_item_siblings(item):
     receipts = []
     for sibling in item.get("siblings_to_delete", []):
-        receipt = capture_album_source_receipt(sibling)
+        receipt = capture_album_tree_identity(sibling)
         receipts.append(receipt)
         if receipt is None:
             log.info(fmt(

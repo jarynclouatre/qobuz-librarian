@@ -69,10 +69,13 @@ from qobuz_librarian.ui_cli.logging import log, vlog
 
 # ── Artist resolution (the shared matcher) ──────────────────────────────────────
 
-# Folder name → matched Qobuz artist, cached to disk. Version 1 picks were
-# made without looking at the folders, so they load as unchecked and are
-# confirmed against the folders the next time the artist is scanned.
-_RESOLVE_CACHE_VERSION = 2
+# Folder name → matched Qobuz artist, cached to disk. Picks made without
+# looking at the folders are listed as unchecked and confirmed against the
+# folders the next time the artist is scanned; a file without that list
+# predates it, so all its picks load as unchecked. The file stays at version
+# 1, which older versions still read, ignoring the list. Version 2 files hold
+# the same list.
+_RESOLVE_CACHE_VERSION = 1
 _resolve_cache = None
 _resolve_unchecked = set()
 _resolve_cache_dirty = False
@@ -101,7 +104,7 @@ def _load_resolve_cache() -> dict:
                                      .read_text(encoding="utf-8"))
                     if (
                         isinstance(raw, dict)
-                        and raw.get("version") in (1, _RESOLVE_CACHE_VERSION)
+                        and raw.get("version") in (_RESOLVE_CACHE_VERSION, 2)
                         and isinstance(raw.get("entries"), dict)
                     ):
                         for query, hit in raw["entries"].items():
@@ -120,11 +123,11 @@ def _load_resolve_cache() -> dict:
                             ):
                                 continue
                             loaded[str(query)] = [artist_id, artist_name]
-                        if raw["version"] == 1:
-                            _resolve_unchecked.update(loaded)
-                        elif isinstance(raw.get("unchecked"), list):
+                        if isinstance(raw.get("unchecked"), list):
                             _resolve_unchecked.update(
                                 q for q in raw["unchecked"] if q in loaded)
+                        else:
+                            _resolve_unchecked.update(loaded)
                 except (OSError, ValueError):
                     pass
                 _resolve_cache = loaded
@@ -177,15 +180,25 @@ def flush_resolve_cache():
                 pass
 
 
+# The tag Qobuz adds to tell namesakes apart: 'Tesla (Band)'.
+_NAMESAKE_TAG_RE = re.compile(r"\s+\([^()]+\)$")
+
+
 def _close_artists(results, query):
     """The search results whose name is close enough to be `query`, best first:
-    closest name, then deepest catalog."""
+    closest name, then deepest catalog. A namesake tag is left out of the
+    comparison, so 'Tesla (Band)' matches 'Tesla' better than 'Teslah' does,
+    but ranks after a name that matches as written."""
     q = strip_leading_article(query)
-    scored = [(similarity(strip_leading_article(a.get("name", "")), q), a)
-              for a in results]
-    close = [(score, a) for score, a in scored if score >= cfg.ARTIST_NAME_THRESH]
-    close.sort(key=lambda x: (x[0], x[1].get("albums_count") or 0), reverse=True)
-    return [a for _score, a in close]
+    scored = []
+    for a in results:
+        name = strip_leading_article(a.get("name", ""))
+        as_written = similarity(name, q)
+        score = max(as_written, similarity(_NAMESAKE_TAG_RE.sub("", name), q))
+        scored.append((score, as_written, a.get("albums_count") or 0, a))
+    close = [s for s in scored if s[0] >= cfg.ARTIST_NAME_THRESH]
+    close.sort(key=lambda s: s[:3], reverse=True)
+    return [a for *_rank, a in close]
 
 
 def pick_best_artist(results, query, token=None, fetch_titles=None):
@@ -249,7 +262,9 @@ def resolve_artist(query, token, owned_titles=None):
     re-scan skips the search call. flush_resolve_cache() persists new matches.
     ``owned_titles`` (owned_album_titles of the artist's folders) settles a
     name shared by several Qobuz artists in favour of the one whose catalog
-    holds those albums, and confirms a cached pick made before that check.
+    holds those albums, and confirms a cached pick made before that check. A
+    cached pick that misses some of them keeps its place unless another
+    artist's catalog holds more, whether or not the search still returns it.
     """
     global _resolve_cache_dirty
     cache = _load_resolve_cache()
@@ -276,6 +291,10 @@ def resolve_artist(query, token, owned_titles=None):
         if hit is not None:
             return hit[0], hit[1]
         return None, None
+    if hit is not None:
+        if all(str(a.get("id")) != str(hit[0]) for a in close):
+            close.append({"id": hit[0], "name": hit[1]})
+        close.sort(key=lambda a: str(a.get("id")) != str(hit[0]))
     best = close[0]
     if owned_titles and len(close) > 1:
         best = _artist_holding_titles(close, owned_titles, token)
@@ -419,6 +438,7 @@ class DiscoveryResult:
     skipped: list = field(default_factory=list)       # {dir, reason, qobuz_title, ...}
     unmatched_dirs: list = field(default_factory=list)  # folders no Qobuz album matched
     catalog: list = field(default_factory=list)       # the fetched catalog (callers may reuse)
+    on_disk: set = field(default_factory=set)         # catalog ids found in a folder
     # The catalog fetch was a transient SHORT page (a partial 200), NOT a
     # legitimate cap - so it's not the whole discography.
     catalog_incomplete: bool = False
@@ -700,7 +720,7 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                            handled_ids=frozenset(), resolved_dirs=frozenset(),
                            owned_titles=None, token=None, quick=False,
                            single_store=None, include_hidden=False,
-                           release_types=None):
+                           release_types=None, on_disk=None):
     """Catalog albums the owned-album pass didn't account for: fully-missing
     releases, plus a collaboration filed under another artist's folder that
     still has track gaps. Shared by the CLI missing-albums step and the web
@@ -720,7 +740,14 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
     include_hidden=True still consults ``hidden`` for the collecting/singles
     rules but returns dismissed albums as gaps, so a caller that saves a
     snapshot can record the whole truth and filter when it displays.
+
+    ``on_disk`` collects the ids of the albums left out because a folder
+    holds them.
     """
+    def held(album):
+        if on_disk is not None and album.get("id") is not None:
+            on_disk.add(str(album["id"]))
+
     owned_titles = owned_titles or {}
     handled_id_keys = {
         str(album_id) for album_id in handled_ids if album_id is not None
@@ -754,6 +781,7 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             continue
         existing, album_dir = find_existing_tracks(album)
         if album_dir is not None and str(album_dir) in resolved_dirs:
+            held(album)
             continue
         if existing and quick:
             # New-release check: a catalog entry that resolves to a folder the
@@ -774,9 +802,13 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                 if key in fill_keys and missing and present:
                     gaps.append(AlbumGap(album, album_dir,
                                          list(missing), list(present)))
+                held(album)
                 continue
         # Not resolved, or resolved to a wrong folder.
-        if key not in types or _owned_by_name(owned_titles, album, artist_name):
+        if _owned_by_name(owned_titles, album, artist_name):
+            held(album)
+            continue
+        if key not in types:
             continue
         gaps.append(AlbumGap(album, None, release_type=types[key]))
     return gaps
@@ -855,6 +887,7 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
         classify_owned_match(result, m, hidden, single_store, artist_name,
                              handled_ids, resolved_dirs,
                              include_hidden=include_hidden)
+    result.on_disk.update(str(album_id) for album_id in handled_ids)
 
     # Skip the catalog walk for an artist you own only downloaded singles by - they
     # aren't one you're collecting, so their back catalogue shouldn't surface.
@@ -871,7 +904,7 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
             artist_name, catalog, opts, hidden=hidden, handled_ids=handled_ids,
             resolved_dirs=resolved_dirs, owned_titles=owned_titles, token=token,
             single_store=single_store, include_hidden=include_hidden,
-            release_types=release_types))
+            release_types=release_types, on_disk=result.on_disk))
 
     vlog(f"  discovery({artist_name!r}): {len(result.partials)} partial, "
          f"{len(result.fully_missing)} fully-missing, "

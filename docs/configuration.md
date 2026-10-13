@@ -223,7 +223,7 @@ The hook also fires once if the saved Qobuz token stops being accepted (`status`
 
 ## What the app does on its own
 
-On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`) rather than starting it for you. Once a full scan has finished, new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on a background timer while nothing else is running, so they keep to the interval even when nobody has the app open. Both park a review list; nothing is downloaded until you act on it.
+On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`) rather than starting it for you. Once a full scan has finished, new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on a background timer while nothing else is running, the first one an interval after that scan, so they keep to the interval even when nobody has the app open. Both park a review list; nothing is downloaded until you act on it.
 
 - **Library gap-fill** adds missing albums or missing tracks after review. Existing tracks stay untouched; partial albums download only their missing tracks.
 - **After a download**, it re-checks the new album's track lengths against Qobuz and flags **Repair** if one is short. Read-only (a clean truncation can still decode).

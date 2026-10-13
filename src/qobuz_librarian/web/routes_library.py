@@ -114,6 +114,7 @@ def _review_job_from_library_state():
             ),
         }
         job._execute_fn = job_runs._resume_album_download(job, job.execute_args)
+        in_missing = flows.review_tab_filter("missing")
         for spec in specs:
             job.add_candidate(
                 kind=spec.get("kind", "album"),
@@ -122,6 +123,7 @@ def _review_job_from_library_state():
                 detail=spec.get("detail") or "",
                 payload=spec.get("payload") or {},
                 selected=False,
+                listed=flows.is_gap_candidate(spec) or in_missing(spec),
             )
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
         job.summary = (flows.library_review_summary(job.candidates)

@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.dirfd import digest_fd as _file_digest_fd
+from qobuz_librarian.dirfd import digest_fd as _read_file_digest_fd
 from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
 from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
 from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
@@ -1075,26 +1075,27 @@ def _gap_fill_receipt_relative(value):
     return tuple(relative.parts)
 
 
-def _normalise_gap_fill_expected_receipts(receipts):
+def _normalise_gap_fill_expected_receipts(receipts, *, allow_identity=False):
+    """Check per-file receipts; ``allow_identity`` also takes them without sha256."""
     if not isinstance(receipts, dict) or not receipts:
         raise OSError("gap-fill expected receipts are missing")
+    identity_fields = _GAP_FILL_RECEIPT_FIELDS - {"sha256"}
     normalised = {}
     for raw_relative, raw_receipt in receipts.items():
         parts = _gap_fill_receipt_relative(raw_relative)
         if (
             not isinstance(raw_receipt, dict)
-            or set(raw_receipt) != _GAP_FILL_RECEIPT_FIELDS
+            or not (
+                set(raw_receipt) == _GAP_FILL_RECEIPT_FIELDS
+                or allow_identity and set(raw_receipt) == identity_fields
+            )
             or any(
                 type(raw_receipt[field]) is not int
-                for field in _GAP_FILL_RECEIPT_FIELDS - {"sha256"}
+                for field in identity_fields
             )
             or raw_receipt["type"] != stat.S_IFREG
-            or not isinstance(raw_receipt["sha256"], str)
-            or len(raw_receipt["sha256"]) != 64
-            or any(
-                char not in "0123456789abcdef"
-                for char in raw_receipt["sha256"]
-            )
+            or "sha256" in raw_receipt
+            and not _receipt_digest_valid(raw_receipt["sha256"])
         ):
             raise OSError("gap-fill expected receipt is malformed")
         relative = "/".join(parts)
@@ -1173,16 +1174,19 @@ def _path_directory_generations(descriptors):
 
 def _album_source_receipt_from_opened(public, music_root, parts, descriptors):
     album_fd = descriptors[-1]
-    snapshot = _exact_tree_snapshot(album_fd)
-    fidelity = _tree_fidelity_snapshot(album_fd)
-    if snapshot is None or fidelity is None:
+    identity = _exact_tree_snapshot(album_fd, digests=False)
+    if identity is None:
         return None
     held = None
     try:
+        held = {}
+        _hold_snapshot_files(album_fd, identity, held)
+        snapshot = _exact_tree_snapshot(album_fd)
+        fidelity = _tree_fidelity_snapshot(album_fd)
+        if snapshot is None or fidelity is None:
+            return None
         generations = _tree_directory_generations(album_fd, snapshot)
         path_generations = _path_directory_generations(descriptors)
-        held = {}
-        _hold_snapshot_files(album_fd, snapshot, held)
         if (
             not _backup_source_is_public(music_root, parts, descriptors)
             or _exact_tree_snapshot(album_fd) != snapshot
@@ -1205,6 +1209,52 @@ def _album_source_receipt_from_opened(public, music_root, parts, descriptors):
     finally:
         if held is not None:
             _release_held_snapshot_files(held)
+
+
+def capture_album_tree_identity(album_dir):
+    """Seal a folder by its names, sizes, times, inodes and directories.
+
+    No file is opened or read. Any write to a file moves its ctime, which
+    user space cannot set, so a later capture that compares equal proves the
+    folder is unchanged. Moving or deleting files still needs the exact
+    receipt from capture_album_source_receipt.
+    """
+    opened = _open_backup_source(Path(album_dir))
+    if opened is None:
+        return None
+    public, music_root, parts, descriptors = opened
+    try:
+        tree = _exact_tree_snapshot(descriptors[-1], digests=False)
+        if tree is None or any(
+                PurePosixPath(relative).name in _SIDECARS
+                for relative in (*tree["directories"], *tree["files"])):
+            return None
+        receipt = {
+            "version": 1,
+            "origin": os.fspath(public),
+            "tree": tree,
+            "directory_generations": _tree_directory_generations(
+                descriptors[-1], tree),
+            "path_generations": _path_directory_generations(descriptors),
+        }
+        if not _backup_source_is_public(music_root, parts, descriptors):
+            return None
+        return receipt
+    except (OSError, TypeError, ValueError):
+        return None
+    finally:
+        _close_descriptors(descriptors)
+
+
+def _album_tree_identity(receipt):
+    """The part of an exact source receipt that capture_album_tree_identity seals."""
+    return {
+        "version": receipt["version"],
+        "origin": receipt["origin"],
+        "tree": _tree_identity(receipt["tree"]),
+        "directory_generations": receipt["directory_generations"],
+        "path_generations": receipt["path_generations"],
+    }
 
 
 def capture_music_root_identity():
@@ -1888,8 +1938,39 @@ def _snapshot_file(directory_fd, name):
         os.close(descriptor)
 
 
-def _exact_tree_snapshot(root_fd, *, ignore_root_names=()):
-    """Describe every exact regular file and directory below a held root."""
+def _file_identity(value):
+    return {
+        "identity": list(_entry_identity(value)),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "changed_ns": int(value.st_ctime_ns),
+    }
+
+
+def _tree_has_digests(snapshot) -> bool:
+    return all("sha256" in value for value in snapshot["files"].values())
+
+
+def _tree_identity(snapshot):
+    """A snapshot without its content digests, as ``digests=False`` takes it."""
+    return {
+        **snapshot,
+        "files": {
+            relative: _fidelity_without(value, "sha256")
+            for relative, value in snapshot["files"].items()
+        },
+    }
+
+
+def _exact_tree_snapshot(root_fd, *, ignore_root_names=(), digests=True,
+                         sealed=None):
+    """Describe every exact regular file and directory below a held root.
+
+    ``digests=False`` reads no file: each one is described by its inode,
+    size, mtime and ctime alone. A file whose inode, size and times still
+    equal its entry in the ``sealed`` snapshot keeps that entry's digest
+    unread, since any write would have moved its ctime.
+    """
     ignored = set(ignore_root_names)
     snapshot = {
         "root_identity": list(_entry_identity(os.fstat(root_fd))),
@@ -1933,9 +2014,18 @@ def _exact_tree_snapshot(root_fd, *, ignore_root_names=()):
                     if child_fd is not None:
                         os.close(child_fd)
             elif stat.S_ISREG(value.st_mode):
+                identity = _file_identity(value)
+                known = (sealed or {}).get("files", {}).get(key)
                 try:
-                    snapshot["files"][key] = _snapshot_file(
-                        directory_fd, name)
+                    if not digests:
+                        snapshot["files"][key] = identity
+                    elif (type(known) is dict and "sha256" in known
+                            and _fidelity_without(known, "sha256") == identity):
+                        snapshot["files"][key] = {
+                            **identity, "sha256": known["sha256"]}
+                    else:
+                        snapshot["files"][key] = _snapshot_file(
+                            directory_fd, name)
                 except OSError:
                     return False
             else:
@@ -2037,8 +2127,52 @@ def _run_backup_sigint_deferred(callback):
         callback, detail="interrupt-safe snapshot access is unavailable")
 
 
+# Digests read while this process holds the file's inode under a writer
+# lease. No writer can open the file until that lease breaks, so while it is
+# intact and the inode's size and times are unchanged, reading it again
+# would only return the same digest.
+_HELD_DIGESTS = {}
+
+
+def _file_digest_fd(descriptor):
+    value = os.fstat(descriptor)
+    times = (int(value.st_size), int(value.st_mtime_ns), int(value.st_ctime_ns))
+    for held in _HELD_DIGESTS.get((int(value.st_dev), int(value.st_ino)), ()):
+        if held["times"] == times and held["lease"].intact():
+            return held["sha256"]
+    return _read_file_digest_fd(descriptor)
+
+
+def _remember_held_digest(snapshot, lease):
+    _type, device, inode = snapshot["identity"]
+    entry = {
+        "lease": lease,
+        "times": (snapshot["size"], snapshot["mtime_ns"],
+                  snapshot["changed_ns"]),
+        "sha256": snapshot["sha256"],
+    }
+    _HELD_DIGESTS.setdefault((device, inode), []).append(entry)
+    return (device, inode), entry
+
+
+def _forget_held_digest(remembered) -> None:
+    if remembered is None:
+        return
+    key, entry = remembered
+    entries = _HELD_DIGESTS.get(key, [])
+    if entry in entries:
+        entries.remove(entry)
+    if not entries:
+        _HELD_DIGESTS.pop(key, None)
+
+
 def _hold_snapshot_files(root_fd, snapshot, held):
-    """Hold and writer-exclude every exact regular file in a snapshot."""
+    """Hold and writer-exclude every exact regular file in a snapshot.
+
+    Each file is read once, after its lease is held, and that digest serves
+    every later check while the lease stays intact. A snapshot taken with
+    ``digests=False`` is matched on everything but the digest.
+    """
     if type(held) is not dict or held:
         raise ValueError("snapshot file owner must be an empty dictionary")
     try:
@@ -2074,9 +2208,14 @@ def _hold_snapshot_files(root_fd, snapshot, held):
             if lease is None or not lease.intact():
                 raise OSError(
                     "snapshotted file has an active or uncertain writer")
-            if _snapshot_file(item["parent_fd"], relative[-1]) != expected:
+            current = _snapshot_file(item["parent_fd"], relative[-1])
+            if (current if "sha256" in expected
+                    else _fidelity_without(current, "sha256")) != expected:
                 raise OSError("snapshotted file changed before exclusion")
-        if _exact_tree_snapshot(root_fd) != snapshot:
+            item["digest"] = _remember_held_digest(current, lease)
+        current = _exact_tree_snapshot(root_fd)
+        if (current if current is None or _tree_has_digests(snapshot)
+                else _tree_identity(current)) != snapshot:
             raise OSError("tree changed while writer exclusions were acquired")
         return held
     except BaseException as exc:
@@ -2111,6 +2250,7 @@ def _release_held_snapshot_files_uninterruptibly(held) -> None:
         item["publication"] = None
         lease = item.get("lease")
         item["lease"] = None
+        _forget_held_digest(item.pop("digest", None))
         descriptor = item.get("descriptor")
         item["descriptor"] = None
         parents = item.get("parents")
@@ -2412,11 +2552,8 @@ def _tree_stats(d: Path):
 def _file_digest(path: Path) -> str:
     """sha256 hex of a file's bytes, read in chunks so a large FLAC isn't loaded
     into memory all at once."""
-    h = hashlib.sha256()
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return _file_digest_fd(fh.fileno())
 
 
 _XATTR_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP,
@@ -2705,22 +2842,22 @@ def _receipt_digest_valid(value) -> bool:
     )
 
 
-def _receipt_file_snapshot_schema_valid(value) -> bool:
+def _receipt_file_snapshot_schema_valid(value, *, digests=True) -> bool:
+    fields = {"identity", "size", "mtime_ns", "changed_ns"}
     return (
         type(value) is dict
-        and set(value) == {
-            "identity", "size", "mtime_ns", "changed_ns", "sha256"}
+        and set(value) == (fields | {"sha256"} if digests else fields)
         and _receipt_identity_schema_valid(
             value["identity"], stat.S_IFREG)
         and type(value["size"]) is int
         and value["size"] >= 0
         and type(value["mtime_ns"]) is int
         and type(value["changed_ns"]) is int
-        and _receipt_digest_valid(value["sha256"])
+        and (not digests or _receipt_digest_valid(value["sha256"]))
     )
 
 
-def _tree_snapshot_schema_valid(value) -> bool:
+def _tree_snapshot_schema_valid(value, *, digests=True) -> bool:
     if (
         type(value) is not dict
         or set(value) != {"root_identity", "directories", "files"}
@@ -2742,7 +2879,7 @@ def _tree_snapshot_schema_valid(value) -> bool:
         )
         and all(
             _receipt_path_key_valid(relative)
-            and _receipt_file_snapshot_schema_valid(snapshot)
+            and _receipt_file_snapshot_schema_valid(snapshot, digests=digests)
             for relative, snapshot in files.items()
         )
     ):
@@ -2826,23 +2963,21 @@ def _directory_generation_schema_valid(value) -> bool:
     )
 
 
-def _source_receipt_nested_schema_valid(receipt, origin=None) -> bool:
+def _album_tree_identity_schema_valid(receipt, origin=None, *,
+                                     digests=False) -> bool:
+    fields = {
+        "version", "origin", "tree", "directory_generations",
+        "path_generations",
+    }
     if (
         type(receipt) is not dict
-        or set(receipt) != {
-            "version", "origin", "tree", "fidelity",
-            "directory_generations", "path_generations",
-        }
+        or set(receipt) != (fields | {"fidelity"} if digests else fields)
         or type(receipt["version"]) is not int
         or receipt["version"] != 1
         or type(receipt["origin"]) is not str
         or not receipt["origin"]
         or "\x00" in receipt["origin"]
-        or not _tree_snapshot_schema_valid(receipt["tree"])
-        or type(receipt["fidelity"]) is not dict
-        or set(receipt["fidelity"]) != {"directories", "files"}
-        or type(receipt["fidelity"]["directories"]) is not dict
-        or type(receipt["fidelity"]["files"]) is not dict
+        or not _tree_snapshot_schema_valid(receipt["tree"], digests=digests)
         or type(receipt["directory_generations"]) is not dict
         or type(receipt["path_generations"]) is not list
         or not receipt["path_generations"]
@@ -2855,24 +2990,10 @@ def _source_receipt_nested_schema_valid(receipt, origin=None) -> bool:
         return False
 
     tree = receipt["tree"]
-    fidelity = receipt["fidelity"]
     generations = receipt["directory_generations"]
     directory_keys = set(tree["directories"]) | {""}
-    file_keys = set(tree["files"])
     if (
-        set(fidelity["directories"]) != directory_keys
-        or set(fidelity["files"]) != file_keys
-        or set(generations) != directory_keys
-        or not all(
-            _receipt_path_key_valid(relative, allow_root=True)
-            and _directory_fidelity_schema_valid(value)
-            for relative, value in fidelity["directories"].items()
-        )
-        or not all(
-            _receipt_path_key_valid(relative)
-            and _file_fidelity_schema_valid(value)
-            for relative, value in fidelity["files"].items()
-        )
+        set(generations) != directory_keys
         or not all(
             _receipt_path_key_valid(relative, allow_root=True)
             and _directory_generation_schema_valid(value)
@@ -2892,6 +3013,38 @@ def _source_receipt_nested_schema_valid(receipt, origin=None) -> bool:
         )
         if generations[relative][:3] != identity:
             return False
+    return receipt["path_generations"][-1] == generations[""]
+
+
+def _source_receipt_nested_schema_valid(receipt, origin=None) -> bool:
+    if (
+        not _album_tree_identity_schema_valid(receipt, origin, digests=True)
+        or type(receipt["fidelity"]) is not dict
+        or set(receipt["fidelity"]) != {"directories", "files"}
+        or type(receipt["fidelity"]["directories"]) is not dict
+        or type(receipt["fidelity"]["files"]) is not dict
+    ):
+        return False
+
+    tree = receipt["tree"]
+    fidelity = receipt["fidelity"]
+    directory_keys = set(tree["directories"]) | {""}
+    file_keys = set(tree["files"])
+    if (
+        set(fidelity["directories"]) != directory_keys
+        or set(fidelity["files"]) != file_keys
+        or not all(
+            _receipt_path_key_valid(relative, allow_root=True)
+            and _directory_fidelity_schema_valid(value)
+            for relative, value in fidelity["directories"].items()
+        )
+        or not all(
+            _receipt_path_key_valid(relative)
+            and _file_fidelity_schema_valid(value)
+            for relative, value in fidelity["files"].items()
+        )
+    ):
+        return False
     for relative in file_keys:
         snapshot = tree["files"][relative]
         metadata = fidelity["files"][relative]
@@ -2901,7 +3054,7 @@ def _source_receipt_nested_schema_valid(receipt, origin=None) -> bool:
             or metadata["sha256"] != snapshot["sha256"]
         ):
             return False
-    return receipt["path_generations"][-1] == generations[""]
+    return True
 
 
 def _backup_receipt_schema_valid(receipt) -> bool:
@@ -2989,6 +3142,7 @@ def _read_backup_receipt(directory_fd):
             directory_fd,
             ignore_root_names=(
                 _RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS),
+            sealed=receipt["tree"],
         )
         reopened = dict(
             receipt, tree=current, receipt_identity=list(_entry_identity(value)))
@@ -3076,6 +3230,14 @@ def load_backup_result(path, *, expected_owner=None):
 def canonical_album_source_receipt(value, *, expected_origin=None):
     """Return one closed-schema album receipt, or ``None`` when malformed."""
     if not _source_receipt_nested_schema_valid(value, expected_origin):
+        return None
+    canonical = _canonical_receipt(value)
+    return canonical if canonical == value else None
+
+
+def canonical_album_tree_identity(value, *, expected_origin=None):
+    """Return one closed-schema folder identity, or ``None`` when malformed."""
+    if not _album_tree_identity_schema_valid(value, expected_origin):
         return None
     canonical = _canonical_receipt(value)
     return canonical if canonical == value else None
@@ -3951,6 +4113,11 @@ def _hold_album_proof(path, expected_receipt):
     held = None
     try:
         root_fd = descriptors[-1]
+        identity = _exact_tree_snapshot(root_fd, digests=False)
+        if identity is None:
+            raise OSError("replacement tree could not be read")
+        held = {}
+        _hold_snapshot_files(root_fd, identity, held)
         snapshot = _exact_tree_snapshot(root_fd)
         fidelity = _tree_fidelity_snapshot(root_fd)
         if snapshot is None or fidelity is None:
@@ -3966,8 +4133,6 @@ def _hold_album_proof(path, expected_receipt):
         }
         if current != expected:
             raise OSError("replacement receipt no longer matches")
-        held = {}
-        _hold_snapshot_files(root_fd, snapshot, held)
         proof = {
             "public": public,
             "music_root": music_root,
@@ -4565,7 +4730,7 @@ def dispose_backup(
 
         receipt = backup.receipt
         snapshot = _receipt_disposal_snapshot(directory_fd, receipt)
-        if snapshot is None or _exact_tree_snapshot(directory_fd) != snapshot:
+        if snapshot is None:
             return False
         quarantine_name = _library_backup_disposal_quarantine_name(
             receipt, expected_owner)
@@ -5184,10 +5349,7 @@ def _prepare_companion_ready(backup, replacement_path, intent):
 
         backup_snapshot = _receipt_disposal_snapshot(
             backup_fd, backup.receipt)
-        if (
-            backup_snapshot is None
-            or _exact_tree_snapshot(backup_fd) != backup_snapshot
-        ):
+        if backup_snapshot is None:
             return None
         held_backup = {}
         _hold_snapshot_files(backup_fd, backup_snapshot, held_backup)
@@ -5510,10 +5672,7 @@ def _resume_companion_carry(backup, replacement_path,
 
         backup_snapshot = _receipt_disposal_snapshot(
             backup_fd, backup.receipt)
-        if (
-            backup_snapshot is None
-            or _exact_tree_snapshot(backup_fd) != backup_snapshot
-        ):
+        if backup_snapshot is None:
             return None
         held_backup = {}
         _hold_snapshot_files(backup_fd, backup_snapshot, held_backup)
@@ -5561,7 +5720,7 @@ def _resume_companion_carry(backup, replacement_path,
             unit["prepared"]["relative"]
             for unit in units if unit["location"] == "public"
         }
-        album_snapshot = _exact_tree_snapshot(album_fd)
+        album_snapshot = _exact_tree_snapshot(album_fd, digests=False)
         if album_snapshot is None:
             return None
         held_album = {}
@@ -5755,10 +5914,7 @@ def carry_backup_companions(
                 return None
             backup_snapshot = _receipt_disposal_snapshot(
                 backup_fd, backup.receipt)
-            if (
-                backup_snapshot is None
-                or _exact_tree_snapshot(backup_fd) != backup_snapshot
-            ):
+            if backup_snapshot is None:
                 return None
             held_backup = {}
             _hold_snapshot_files(backup_fd, backup_snapshot, held_backup)
@@ -6446,8 +6602,21 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 f"  ✗  Refusing to back up {public}: it contains a reserved "
                 "backup metadata name."))
             return None
-        source_snapshot = _exact_tree_snapshot(source_fd)
-        source_fidelity = _tree_fidelity_snapshot(source_fd)
+        source_snapshot = _exact_tree_snapshot(source_fd, digests=False)
+        if source_snapshot is not None:
+            try:
+                held_source_files = {}
+                _hold_snapshot_files(
+                    source_fd, source_snapshot, held_source_files)
+            except OSError as exc:
+                log.info(fmt(
+                    C.RED,
+                    f"  ✗  Couldn't exclude writers from {public} ({exc}); "
+                    "leaving it in place."))
+                return None
+            source_snapshot = _exact_tree_snapshot(source_fd)
+        source_fidelity = (
+            _tree_fidelity_snapshot(source_fd) if source_snapshot else None)
         try:
             source_generations = _tree_directory_generations(
                 source_fd, source_snapshot) if source_snapshot else None
@@ -6474,21 +6643,15 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             "directory_generations": source_generations,
             "path_generations": source_path_generations,
         }
-        if expected_receipt is not None and expected_receipt != current_source_receipt:
+        if (
+            expected_receipt is not None
+            and expected_receipt != current_source_receipt
+            and expected_receipt != _album_tree_identity(current_source_receipt)
+        ):
             log.info(fmt(
                 C.RED,
                 f"  ✗  {public} changed after it was selected; leaving "
                 "the current tree untouched."))
-            return None
-        try:
-            held_source_files = {}
-            _hold_snapshot_files(
-                source_fd, source_snapshot, held_source_files)
-        except OSError as exc:
-            log.info(fmt(
-                C.RED,
-                f"  ✗  Couldn't exclude writers from {public} ({exc}); "
-                "leaving it in place."))
             return None
         try:
             source_still_sealed = (
@@ -6799,6 +6962,15 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             partial_fd = _open_backup_directory(
                 partial_name, dir_fd=backup_root_fd)
             held_partial = _held_directory_path(partial_fd)
+            copied_identity = _exact_tree_snapshot(partial_fd, digests=False)
+            if copied_identity is None:
+                raise OSError("backup copy could not be snapshotted")
+            held_committed_payload = {}
+            _hold_snapshot_files(
+                partial_fd,
+                copied_identity,
+                held_committed_payload,
+            )
             copied_fidelity = _tree_fidelity_snapshot(partial_fd)
             if (
                 _tree_digest(held_partial) != src_digest
@@ -6813,12 +6985,6 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             committed_payload_snapshot = _exact_tree_snapshot(partial_fd)
             if committed_payload_snapshot is None:
                 raise OSError("backup copy could not be snapshotted")
-            held_committed_payload = {}
-            _hold_snapshot_files(
-                partial_fd,
-                committed_payload_snapshot,
-                held_committed_payload,
-            )
             if not _fsync_exact_tree(
                     partial_fd,
                     committed_payload_snapshot,
@@ -7227,7 +7393,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
     if expected_receipts is not None:
         try:
             expected = _normalise_gap_fill_expected_receipts(
-                expected_receipts)
+                expected_receipts, allow_identity=True)
         except OSError as exc:
             log.info(fmt(
                 C.RED,
@@ -7406,13 +7572,20 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                     source_parent_fd, parts[-1])
                 digest = _file_digest_fd(source_fd)
                 receipt = _gap_fill_file_receipt(source_fd, digest)
-                if expected is not None and expected.get(relative_text) != receipt:
+                if expected is not None and (
+                    relative_text not in expected
+                    or expected[relative_text] != {
+                        field: receipt[field]
+                        for field in expected[relative_text]
+                    }
+                ):
                     raise OSError("verified source receipt changed")
                 # A file the app user doesn't own can't carry a write lease.
-                # With a sealed receipt pinning its exact content the copy
-                # route below still moves it safely - every gate re-hashes
-                # against the receipt, and the copy the app makes is its own,
-                # so the rest of the transaction holds ordinary leases.
+                # With a sealed receipt pinning the reviewed inode, size and
+                # ctime the copy route below still moves it safely - every
+                # gate re-hashes against the digest taken here, and the copy
+                # the app makes is its own, so the rest of the transaction
+                # holds ordinary leases.
                 source_lease = acquire_inode_write_exclusion(source_fd)
                 if source_lease is not None and not source_lease.intact():
                     raise OSError("source has an active or uncertain writer")

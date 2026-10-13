@@ -154,6 +154,18 @@ def flush_pending() -> None:
 atexit.register(flush_pending)
 
 
+def _gone(path) -> bool:
+    """Only a path that no longer exists counts as gone: a file under a
+    folder that can't be read right now keeps its row."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def prune_missing(force: bool = False) -> int:
     """Drop rows whose file is gone, keeping the db proportional to the library.
 
@@ -179,7 +191,7 @@ def prune_missing(force: bool = False) -> int:
     try:
         conn = _db.conn()
         gone = [(p,) for (p,) in conn.execute("SELECT path FROM files")
-                if not os.path.exists(p)]
+                if _gone(p)]
         if gone:
             conn.executemany("DELETE FROM files WHERE path = ?", gone)
             conn.commit()

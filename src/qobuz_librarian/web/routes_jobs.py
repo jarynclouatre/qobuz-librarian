@@ -371,7 +371,7 @@ async def job_approve(request: Request, job_id: str):
                         "job": job, "page": "downsample",
                         "picked": len(selected_candidate_snapshot),
                         "picked_albums":
-                            _named_albums(selected_candidate_snapshot),
+                            flows.named_albums(selected_candidate_snapshot),
                         "downsample_originals_choice": current_choice,
                         "review_selection_token": selection_token,
                         "backup_retention_days":
@@ -683,7 +683,7 @@ async def job_approve(request: Request, job_id: str):
         )
     running_q = ""
     if already_downloading:
-        names = _named_albums(already_downloading)
+        names = flows.named_albums(already_downloading)
         running_q = "&error=" + rendering._notice_key(
             f"{names} {'is' if len(already_downloading) == 1 else 'are'} "
             "already downloading, so "
@@ -699,7 +699,7 @@ async def job_approve(request: Request, job_id: str):
     local_stale = len(stale_premise_candidate_ids)
     local_stale_q = ""
     if local_stale and approved:
-        skipped_names = _named_albums([
+        skipped_names = flows.named_albums([
             c for c in selected_candidate_snapshot
             if c.get("cid") in stale_premise_candidate_ids
         ])
@@ -786,30 +786,6 @@ def _all_stale_message_for(job, counts):
     return _all_candidates_stale_message(job.execute_kind, counts)
 
 
-def _album_label(candidate):
-    """One album named the way the review names it."""
-    artist = (candidate.get("artist") or "").strip()
-    title = (candidate.get("title") or "?").strip()
-    return f"{artist} · {title}" if artist else title
-
-
-def _named_albums(candidates, limit=3):
-    """Up to ``limit`` album names, with a count standing in for the rest.
-
-    A message about particular albums has to say which ones. A bare number
-    leaves the user reading a review of hundreds looking for the one that
-    moved.
-    """
-    names = [_album_label(c) for c in candidates]
-    if not names:
-        return ""
-    if len(names) == 1:
-        return names[0]
-    if len(names) <= limit:
-        return ", ".join(names[:-1]) + " and " + names[-1]
-    return f"{', '.join(names[:limit])} and {len(names) - limit} more"
-
-
 def _review_origin(request) -> str:
     """The requesting tab's self-assigned id, for review-changed fan-outs."""
     raw = request.headers.get("X-QL-Origin", "")
@@ -829,40 +805,26 @@ def _get_reviewable_job(job_id):
 def _selection_payload(job, *, persist_failed=False):
     """JSON the selection/hide endpoints return so every open tab can refresh
     its counts from the server instead of recounting a partial DOM."""
-    with job._lock:
-        c = job.selection_counts()
-        payload = {
-            "selection_tokens": {
-                tab: review_pages._selection_token(job, tab)
-                for tab in (("", "missing", "gaps") if job.execute_kind == "library" else ("",))
-            },
-            "selected": c["selected"],
-            "total": c["total"],
-            "artists": c["artists"],
-            "reclaimable": c["reclaimable"],
-            "reclaimable_label": format_size(c["reclaimable"]) if c["reclaimable"] else "",
-        }
-        if persist_failed:
-            payload["persist_failed"] = True
-        if job.execute_kind == "library":
-            totals = review_pages._review_tab_totals(job)
-            payload["missing_total"] = totals["missing"]
-            payload["gap_total"] = totals["gaps"]
-            payload["missing_selected"] = totals["missing_selected"]
-            payload["gap_selected"] = totals["gaps_selected"]
-            payload["missing_types_on"] = totals["included"]
-        return payload
+    payload = review_pages._selection_tallies(job)
+    payload["reclaimable_label"] = (format_size(payload["reclaimable"])
+                                    if payload["reclaimable"] else "")
+    if persist_failed:
+        payload["persist_failed"] = True
+    return payload
 
 
 def _filtered_selection_payload(job, query, tab):
     """Counts for selection controls scoped to the active filter."""
-    groups = review_pages._review_artist_groups(job, query, tab)
-    total = sum(len(rows) for _artist, rows in groups)
-    rest = review_pages._filtered_rest_of(groups)
+    q = (query or "").strip().lower()
+    in_tab = flows.review_tab_filter(tab)
+    with job._lock:
+        shown = [bool(c.get("selected")) for c in job.candidates
+                 if in_tab(c) and (not q or flows.candidate_matches_query(c, q))]
+    selected = sum(shown)
     return {
-        "filtered_total": total,
-        "filtered_selected": total - rest,
-        "filtered_rest": rest,
+        "filtered_total": len(shown),
+        "filtered_selected": selected,
+        "filtered_rest": len(shown) - selected,
     }
 
 
@@ -896,7 +858,21 @@ async def job_select(request: Request, job_id: str):
     form = await request.form()
     cid = (form.get("cid") or "").strip()
     on = (form.get("checked") or "").strip().lower() in ("1", "true", "on", "yes")
-    changed = job.set_selected(cid, on)
+    q = (form.get("q") or "").strip()
+    tab = (form.get("tab") or "").strip()
+
+    # Off the request loop: every count is a pass over the whole review.
+    def _tick():
+        changed = job.set_selected(cid, on)
+        if changed is None:
+            return None, None
+        payload = _selection_payload(job)
+        if q:
+            payload.update(_filtered_selection_payload(job, q, tab))
+        return changed, payload
+
+    loop = asyncio.get_running_loop()
+    changed, payload = await loop.run_in_executor(None, _tick)
     if changed is None:
         return JSONResponse(
             {"error": "review is no longer awaiting selection"},
@@ -907,11 +883,6 @@ async def job_select(request: Request, job_id: str):
         # the tap must not wait for (or even schedule) a full serialize+write.
         job_mgr.persist_soon(job)
         job.notify_review_changed(_review_origin(request))
-    payload = _selection_payload(job)
-    q = (form.get("q") or "").strip()
-    if q:
-        payload.update(_filtered_selection_payload(
-            job, q, (form.get("tab") or "").strip()))
     return JSONResponse(payload)
 
 
@@ -934,19 +905,32 @@ async def job_select_all(request: Request, job_id: str):
     artist = (form.get("artist") or "").strip()
     page_artists = set(form.getlist("artist")[:review_pages.REVIEW_PAGE_ARTISTS])
     tab_scoped = (job.execute_kind == "library" and tab in ("missing", "gaps"))
-    if (scope == "artist" or (scope == "page" and page_artists)
-            or (cids is None and (tab_scoped or q))):
-        in_tab = flows.review_tab_filter(tab if tab_scoped else "")
-        with job._lock:
-            cids = [c["cid"] for c in job.candidates
-                    if (scope != "artist" or (c.get("artist") or "") == artist)
-                    and (scope != "page"
-                         or not page_artists
-                         or (c.get("artist") or "") in page_artists)
-                    and in_tab(c)
-                    and (not q or flows.candidate_matches_query(c, q))]
+
+    # Off the request loop, like the save: both pass over the whole review.
+    def _choose():
+        chosen = cids
+        if (scope == "artist" or (scope == "page" and page_artists)
+                or (cids is None and (tab_scoped or q))):
+            in_tab = flows.review_tab_filter(tab if tab_scoped else "")
+            with job._lock:
+                chosen = [c["cid"] for c in job.candidates
+                          if (scope != "artist" or (c.get("artist") or "") == artist)
+                          and (scope != "page"
+                               or not page_artists
+                               or (c.get("artist") or "") in page_artists)
+                          and in_tab(c)
+                          and (not q or flows.candidate_matches_query(c, q))]
+        return _set_all_selected_with_membership(job, on, chosen)
+
+    def _counts():
+        payload = _selection_payload(job, persist_failed=persist_failed)
+        if q:
+            payload.update(_filtered_selection_payload(job, q, tab))
+        return payload
+
     persist_failed = False
-    changed, accepted_cids = _set_all_selected_with_membership(job, on, cids)
+    loop = asyncio.get_running_loop()
+    changed, accepted_cids = await loop.run_in_executor(None, _choose)
     if changed is None:
         return JSONResponse(
             {"error": "review is no longer awaiting selection"},
@@ -955,7 +939,6 @@ async def job_select_all(request: Request, job_id: str):
     if changed:
         # Unlike a single tap, a bulk choice is one infrequent operation whose
         # success needs to mean its complete result is durable.
-        loop = asyncio.get_running_loop()
         saved = await loop.run_in_executor(
             None, lambda: job_persistence.persist(job))
         if job._retired:
@@ -965,10 +948,8 @@ async def job_select_all(request: Request, job_id: str):
             )
         persist_failed = not saved
         job.notify_review_changed(_review_origin(request))
-    payload = _selection_payload(job, persist_failed=persist_failed)
+    payload = await loop.run_in_executor(None, _counts)
     payload["accepted_cids"] = accepted_cids
-    if q:
-        payload.update(_filtered_selection_payload(job, q, tab))
     return JSONResponse(payload)
 
 
@@ -993,7 +974,8 @@ async def job_missing_types(request: Request, job_id: str):
             {"error": "The switch could not be saved. Check the data folder."},
             status_code=503)
     job.notify_review_changed(_review_origin(request))
-    return JSONResponse(_selection_payload(job))
+    return JSONResponse(
+        await loop.run_in_executor(None, lambda: _selection_payload(job)))
 
 
 @router.get("/jobs/{job_id}/review-group-items", response_class=HTMLResponse)
@@ -1005,7 +987,8 @@ async def job_review_group_items(request: Request, job_id: str,
         return HTMLResponse("", status_code=404)
     if job.execute_kind != "library" or tab not in ("missing", "gaps"):
         tab = ""
-    groups = review_pages._review_artist_groups(job, query=q, tab=tab)
+    groups = review_pages._review_artist_groups(
+        job, query=q, tab=tab, artist=artist)
     items = next((rows for name, rows in groups if name == artist), [])
     return rendering._tr(request, "_review_group_items.html", {
         "job": job, "items": items, "review_tab": tab,
@@ -1079,12 +1062,36 @@ async def job_hide(request: Request, job_id: str):
         # Selection is server-backed, so hide keeps this artist's ticked albums
         # and drops the rest, with no form keep-set, which under pagination would
         # only carry the visible page and clobber other pages' selections.
-        try:
+        scope = review_pages._hide_scope(job.execute_kind)
+
+        def _dismiss():
             with saved_reviews._SAVED_REVIEW_LOCK:
-                n = flows.dismiss_albums(job, artist,
-                                         scope=review_pages._hide_scope(job.execute_kind),
-                                         tab=tab,
-                                         query=q)
+                n = flows.dismiss_albums(
+                    job, [artist], scope=scope, tab=tab, query=q)
+            if n is None or n is False:
+                return n, None, [], {}
+            # Dismissing the last album completes the review, so drop
+            # AWAITING_REVIEW the dashboard "new releases" banner clears and
+            # this page stops showing an empty "awaiting review".
+            finalized = job_mgr.finalize_review_if_empty(job)
+            if finalized is not False:
+                return n, finalized, [], {}
+            # Re-render what the filter shows, not the whole artist, so the
+            # group that swaps in matches the list the user is looking at.
+            groups = review_pages._review_artist_groups(
+                job, query=q, tab=tab, artist=artist)
+            remaining = next((rows for name, rows in groups if name == artist), [])
+            # Counts include pages that have not been loaded.
+            counts = _selection_payload(job)
+            counts["hidden_total"] = hidden_mod.count(scope)
+            if q:
+                counts.update(_filtered_selection_payload(job, q, tab))
+            return n, finalized, remaining, counts
+
+        loop = asyncio.get_running_loop()
+        try:
+            n, finalized, remaining, counts = await loop.run_in_executor(
+                None, _dismiss)
         except OSError as e:
             # Nothing changed server-side; the non-2xx keeps htmx from
             # swapping the rows away and the error toast reads this body.
@@ -1105,10 +1112,6 @@ async def job_hide(request: Request, job_id: str):
             # Keep other open tabs in sync; the originator already gets the
             # swapped group + fresh counts from this response.
             job.notify_review_changed(_review_origin(request))
-        # Dismissing the last album completes the review, so drop AWAITING_REVIEW
-        # the dashboard "new releases" banner clears and this page stops showing an
-        # empty "awaiting review". HX-Refresh reloads to the finished view.
-        finalized = job_mgr.finalize_review_if_empty(job)
         if finalized is None:
             return HTMLResponse(
                 "The dismissal was saved, but the finished review could not "
@@ -1116,11 +1119,8 @@ async def job_hide(request: Request, job_id: str):
                 status_code=503,
             )
         if finalized:
+            # HX-Refresh reloads to the finished view.
             return HTMLResponse("", headers={"HX-Refresh": "true"})
-        # Re-render what the filter shows, not the whole artist, so the group
-        # that swaps in matches the list the user is looking at.
-        groups = review_pages._review_artist_groups(job, query=q, tab=tab)
-        remaining = next((rows for name, rows in groups if name == artist), [])
         if remaining:
             resp = rendering._tr(request, "_review_group.html",
                        {"job": job, "artist": artist, "items": remaining,
@@ -1128,12 +1128,6 @@ async def job_hide(request: Request, job_id: str):
                         "review_query": q})
         else:
             resp = HTMLResponse("")  # whole artist hidden, outerHTML drops it
-        # Counts include pages that have not been loaded.
-        counts = _selection_payload(job)
-        counts["hidden_total"] = hidden_mod.count(
-            review_pages._hide_scope(job.execute_kind))
-        if q:
-            counts.update(_filtered_selection_payload(job, q, tab))
         resp.headers["HX-Trigger-After-Swap"] = json.dumps(
             {"qlHidden": {"n": n, "counts": counts}})
         return resp
@@ -1162,85 +1156,55 @@ async def job_dismiss_rest(request: Request, job_id: str):
     # what-you-see-is-what-you-act-on rule as select-all.
     q = (form.get("q") or "").strip().lower()
     in_tab = flows.review_tab_filter(tab)
-    with job._lock:
-        artists, seen = [], set()
-        for c in job.candidates:
-            if c.get("selected"):
-                continue
-            if not in_tab(c):
-                continue
-            if q and not flows.candidate_matches_query(c, q):
-                continue
-            name = c.get("artist") or ""
-            if name not in seen:
-                seen.add(name)
-                artists.append(name)
 
-    # Offload: this can touch the whole review (a hidden-store write per artist
-    # plus a persist), which would block the event loop and stall every SSE
-    # stream for a large scan.
-    loop = asyncio.get_running_loop()
-    done = {"n": 0, "stale": False, "save_failed": False}
-
+    # Offload: this can touch the whole review (a hidden-store write and a
+    # persist), which would block the event loop and stall every SSE stream
+    # for a large scan.
     def _dismiss_all():
-        with saved_reviews._SAVED_REVIEW_LOCK, job._review_action_lock:
-            for a in artists:
-                hidden = flows.dismiss_albums(
-                    job,
-                    a,
-                    scope=scope,
-                    tab=tab,
-                    query=q,
-                )
-                if hidden is None:
-                    done["stale"] = True
-                    break
-                if hidden is False:
-                    done["save_failed"] = True
-                    break
-                done["n"] += hidden
+        with job._lock:
+            artists = {c.get("artist") or "" for c in job.candidates
+                       if not c.get("selected") and in_tab(c)
+                       and (not q or flows.candidate_matches_query(c, q))}
+        with saved_reviews._SAVED_REVIEW_LOCK:
+            hidden = flows.dismiss_albums(
+                job, artists, scope=scope, tab=tab, query=q)
+        if hidden is None or hidden is False:
+            return hidden, {}
+        payload = _selection_payload(job)
+        payload["hidden"] = hidden
+        payload["hidden_total"] = hidden_mod.count(scope)
+        if q:
+            payload.update(_filtered_selection_payload(job, q, tab))
+        finalized = job_mgr.finalize_review_if_empty(job)
+        payload["review_done"] = finalized is True
+        if finalized is None:
+            payload["finalize_failed"] = True
+        return hidden, payload
 
+    loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(None, _dismiss_all)
-        hidden_count = done["n"]
+        hidden_count, payload = await loop.run_in_executor(None, _dismiss_all)
     except OSError as e:
-        # Mid-batch store failure: the artists already hidden stay hidden, the
-        # rest are untouched, so report the failure instead of a count.
-        if done["n"]:
-            job.notify_review_changed()
-        return JSONResponse({"error": str(e), "hidden": done["n"]},
-                            status_code=500)
-    if done["stale"]:
-        if done["n"]:
-            job.notify_review_changed()
+        # The store write failed before anything left the review.
+        return JSONResponse({"error": str(e), "hidden": 0}, status_code=500)
+    if hidden_count is None:
         return JSONResponse(
             {
                 "error": "That review changed before dismissal completed.",
-                "hidden": done["n"],
+                "hidden": 0,
             },
             status_code=409,
         )
-    if done["save_failed"]:
-        if done["n"]:
-            job.notify_review_changed()
+    if hidden_count is False:
         return JSONResponse(
             {
                 "error": "The Library review could not be saved.",
-                "hidden": done["n"],
+                "hidden": 0,
             },
             status_code=503,
         )
     if hidden_count:
         job.notify_review_changed(_review_origin(request))
-    payload = _selection_payload(job)
-    payload["hidden"] = hidden_count
-    payload["hidden_total"] = hidden_mod.count(scope)
-    if q:
-        payload.update(_filtered_selection_payload(job, q, tab))
-    finalized = job_mgr.finalize_review_if_empty(job)
-    payload["review_done"] = finalized is True
-    if finalized is None:
-        payload["finalize_failed"] = True
     return JSONResponse(payload)
 
 

@@ -79,7 +79,7 @@ def test_queue_item_round_trip_preserves_exact_local_premise(
     assert restored["_source_premise"] == item["_source_premise"]
     assert restored["_source_premise"]["path"] == str(album_dir)
     assert restored["_gap_fill_receipts"] == item["_gap_fill_receipts"]
-    assert restored["_gap_fill_receipts"]["01.flac"]["sha256"]
+    assert restored["_gap_fill_receipts"]["01.flac"]["inode"] == source.stat().st_ino
     # Runtime accounting is per-run state and resets on restore.
     assert restored["n_ok"] == 0 and restored["imported"] is False
     # An older saved item without that proof is refused.
@@ -87,6 +87,18 @@ def test_queue_item_round_trip_preserves_exact_local_premise(
     planned.pop("source_premise")
     with pytest.raises(ValueError):
         _deserialize_queue_item(planned)
+    # A queue saved with the earlier hashed receipt still loads, so its
+    # recovery can run, but it is never trusted to start new work.
+    from qobuz_librarian.library import backup, candidate_premise
+    planned = _serialize_queue_item(item)
+    planned["source_premise"] = {
+        **planned["source_premise"], "version": 1,
+        "receipt": backup.capture_album_source_receipt(album_dir)}
+    restored = _deserialize_queue_item(planned)
+    assert restored["_gap_fill_receipts"]["01.flac"]["sha256"]
+    with pytest.raises(candidate_premise.CandidateStale) as stale:
+        candidate_premise.validate_premise(restored["_source_premise"])
+    assert stale.value.cause == "older"
 
 
 def test_executor_refuses_changed_queued_album_before_download(

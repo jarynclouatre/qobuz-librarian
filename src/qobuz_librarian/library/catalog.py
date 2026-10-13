@@ -1234,6 +1234,20 @@ def filter_short_releases(catalog_pairs, min_tracks=None):
     return kept
 
 
+def edition_group_key(album):
+    """The key dedup_album_versions groups an album's editions by: its title
+    without edition labels or a leading article, and its year. None for an
+    album without a title."""
+    bare = strip_leading_article(strip_album_decorations(album.get("title") or ""))
+    # Pure-CJK / emoji titles normalize to '' (ASCII-fold drops them); fall
+    # back to the raw title so they aren't silently dropped from the missing
+    # list. Only a genuinely empty title is skipped.
+    key_title = normalize(bare) or bare.strip().casefold()
+    if not key_title:
+        return None
+    return key_title, album_year_int(album)
+
+
 def dedup_album_versions(albums, prefer_hires=False):
     """Collapse multiple editions of the same album into one canonical entry.
 
@@ -1253,15 +1267,9 @@ def dedup_album_versions(albums, prefer_hires=False):
     """
     groups = {}
     for a in albums:
-        bare = strip_leading_article(strip_album_decorations(a.get("title") or ""))
-        # Pure-CJK / emoji titles normalize to '' (ASCII-fold drops them);
-        # fall back to the raw title so they aren't silently dropped from the
-        # missing list. Only a genuinely empty title is skipped.
-        key_title = normalize(bare) or bare.strip().casefold()
-        if not key_title:
+        key = edition_group_key(a)
+        if key is None:
             continue
-        # Include year in the group key.
-        key = (key_title, album_year_int(a))
         groups.setdefault(key, []).append(a)
 
     representatives = []

@@ -1154,7 +1154,7 @@ def test_upgrade_saved_review_respects_hidden_candidates(
     from qobuz_librarian.web import jobs as job_mgr
 
     monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+    monkeypatch.setattr(job_persistence, "_write_snapshot", lambda *_a: True)
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(qobuz_access, "_read_creds",
                         lambda: {"auth_token": "dummy", "user_id": "dummy"})
@@ -1886,8 +1886,9 @@ def test_library_approve_checks_choices_and_splits_off_other_tab(client, monkeyp
 def test_library_switches_decide_what_missing_albums_selects_and_downloads(
         client, monkeypatch, tmp_path):
     # Live releases sit in the saved review behind their switch. Select all,
-    # the tab count and Download selected must all leave them out while the
-    # switch is off, even ticked, and keep them parked for later.
+    # the tab count and Download selected leave the unticked ones out while
+    # the switch is off and keep them parked for later. A ticked one stays
+    # listed and downloads.
     from qobuz_librarian.web import qobuz_access
     monkeypatch.setattr("qobuz_librarian.config.MISSING_TYPES_FILE",
                         tmp_path / "types.json")
@@ -1910,6 +1911,7 @@ def test_library_switches_decide_what_missing_albums_selects_and_downloads(
     for title, payload in (
             ("Darkness", {"album_id": "dark", "release_type": "album"}),
             ("Live 1975-85", {"album_id": "live", "release_type": "live"}),
+            ("Hammersmith Odeon", {"album_id": "odeon", "release_type": "live"}),
             ("Nebraska", {"album_id": "nebraska"})):
         job.add_candidate(kind="album", title=title, artist="Bruce Springsteen",
                           payload=payload, selected=False)
@@ -1920,23 +1922,24 @@ def test_library_switches_decide_what_missing_albums_selects_and_downloads(
         assert (r["missing_total"], r["missing_selected"]) == (2, 2)
         r = client.post(f"/jobs/{job.id}/missing-types",
                         data={"type": "live", "on": "1"}).json()
-        assert (r["missing_total"], r["missing_selected"]) == (3, 2)
-        client.post(f"/jobs/{job.id}/select-all",
-                    data={"on": "1", "scope": "all", "tab": "missing"})
+        assert (r["missing_total"], r["missing_selected"]) == (4, 2)
+        client.post(f"/jobs/{job.id}/select",
+                    data={"cid": job.candidates[1]["cid"], "checked": "1"})
         r = client.post(f"/jobs/{job.id}/missing-types",
                         data={"type": "live", "on": "0"}).json()
-        assert (r["missing_total"], r["missing_selected"]) == (2, 2)
+        assert (r["missing_total"], r["missing_selected"]) == (3, 3)
 
         client.post(f"/jobs/{job.id}/approve",
                     data={"tab": "missing",
                           "selection_token": r["selection_tokens"]["missing"]},
                     follow_redirects=False)
-        assert sorted(c["title"] for c in job.candidates) == ["Darkness", "Nebraska"]
+        assert sorted(c["title"] for c in job.candidates) == [
+            "Darkness", "Live 1975-85", "Nebraska"]
         split = next(j for j in jm.registry.all()
                      if j is not job and j.execute_kind == "library"
                      and j.status == jm.JobStatus.AWAITING_REVIEW)
         assert [(c["title"], c["selected"]) for c in split.candidates] == [
-            ("Live 1975-85", True)]
+            ("Hammersmith Odeon", False)]
     finally:
         _remove_job(job)
         if split is not None:
@@ -1988,7 +1991,12 @@ def test_library_dismiss_rest_hides_everything_unselected(client, monkeypatch, t
     from qobuz_librarian.web import job_persistence
 
     monkeypatch.setattr("qobuz_librarian.config.HIDDEN_FILE", tmp_path / "h.json")
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+    # One save for the whole action: saved per artist, a large review took
+    # minutes to dismiss.
+    saves = []
+    monkeypatch.setattr(job_persistence, "_write_snapshot",
+                        lambda *_a: saves.append(1) or True)
+    monkeypatch.setattr(jm, "persist_soon", lambda _job: None)
 
     job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
     job.execute_kind = "library"
@@ -2004,8 +2012,10 @@ def test_library_dismiss_rest_hides_everything_unselected(client, monkeypatch, t
         r = client.post(f"/jobs/{job.id}/select", data={"cid": keep, "checked": "1"})
         assert r.status_code == 200
 
+        saves.clear()
         r = client.post(f"/jobs/{job.id}/dismiss-rest")
         assert r.status_code == 200
+        assert len(saves) == 1
         body = r.json()
         assert body["hidden"] == 3
         assert body["total"] == 1
@@ -2479,7 +2489,7 @@ def test_upgrade_auth_loss_after_first_success_reparks_unstarted(
     from qobuz_librarian.web import flows, job_persistence
 
     _allow_legacy_candidate_execution(monkeypatch)
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+    monkeypatch.setattr(job_persistence, "_write_snapshot", lambda *_a: True)
     monkeypatch.setattr(flows.cfg, "ARTIST_API_DELAY", 0)
     monkeypatch.setattr(flows, "clear_scan_caches", lambda: None)
     monkeypatch.setattr(flows, "_refresh_after_local_album_change",
@@ -2541,7 +2551,7 @@ def test_upgrade_auth_loss_after_first_success_reparks_unstarted(
 
 def test_bulk_cancel_pending_never_touches_parked_reviews(client, monkeypatch):
     """Bulk cancellation leaves reviews and protected recovery untouched."""
-    monkeypatch.setattr(jm.job_persistence, "_persist_locked", lambda _job: True)
+    monkeypatch.setattr(jm.job_persistence, "_write_snapshot", lambda *_a: True)
     review = jm.Job(title="Library scan")
     review.execute_kind = "library"
     review.status = jm.JobStatus.AWAITING_REVIEW
@@ -3102,7 +3112,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         "mark_ready",
         lambda surface: badge_calls.append(surface),
     )
-    monkeypatch.setattr(job_persistence, "_persist_locked", lambda _job: True)
+    monkeypatch.setattr(job_persistence, "_write_snapshot", lambda *_a: True)
 
     parked = jm.Job(title="Library scan")
     parked.execute_kind = "library"
@@ -3111,7 +3121,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         title="Dummy",
         artist="Portishead",
         detail="1994 · 16-bit/44.1 kHz · 11 tracks",
-        payload={"album_id": "al1"},
+        payload={"album_id": "al1", "is_new": True},
         selected=False,
     )
     parked.add_candidate(
@@ -3138,12 +3148,22 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         payload={"album_id": "al1"},
         selected=False,
     )
+    # Third came back from Dismissed after the last scan, which therefore
+    # did not record it.
+    scan.add_candidate(
+        kind="album",
+        title="Third",
+        artist="Portishead",
+        detail="2008 · 24-bit/44.1 kHz · 10 tracks",
+        payload={"album_id": "al2", "is_new": True},
+        selected=False,
+    )
     scan.add_candidate(
         kind="album",
         title="Roseland NYC Live",
         artist="Portishead",
         detail="1998 · 16-bit/44.1 kHz · 11 tracks",
-        payload={"album_id": "al3"},
+        payload={"album_id": "al3", "release_type": "live"},
         selected=False,
     )
     jm.registry.add(scan)
@@ -3151,6 +3171,11 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
     try:
         scans._fold_into_parked_library_review(scan)
 
+        # Dummy only lost its "new" badge, Third was already listed and the
+        # live album sits behind its switch, so the review lists nothing new.
+        assert [bool(c["payload"].get("is_new")) for c in parked.candidates] == [
+            False, False, False]
+        assert badge_calls == []
         assert scan.status == jm.JobStatus.DONE
         assert scan.candidates == []
         ids = [c["payload"]["album_id"] for c in parked.candidates]
@@ -3206,8 +3231,10 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         assert parked.execute_args["_library_review_generation"] == 124.0
         assert badge_calls == ["library"]
 
-        # A finished scan that derived Portishead again settles the rows it
-        # no longer offers there; another artist's rows are left alone.
+        # A finished scan that derived Portishead again settles the unticked
+        # rows it no longer offers there and the ticked ones it found on disk.
+        # It keeps the other ticked ones, sealed with the folder as it read it
+        # so the pick still downloads; another artist's rows are left alone.
         parked.add_candidate(
             kind="album",
             title="Mezzanine",
@@ -3215,6 +3242,23 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
             detail="1998 · 16-bit/44.1 kHz · 11 tracks",
             payload={"album_id": "ma1"},
             selected=False,
+        )
+        parked.add_candidate(
+            kind="album",
+            title="Glory Times",
+            artist="Portishead",
+            detail="1995 · 16-bit/44.1 kHz · 4 tracks",
+            payload={"album_id": "al4", "_artist_dir_path": "/music/Portishead",
+                     "_premise": {"seal": "old"}},
+            selected=True,
+        )
+        parked.add_candidate(
+            kind="album",
+            title="Roseland NYC Live (Remastered)",
+            artist="Portishead",
+            detail="1998 · 24-bit/96 kHz · 11 tracks",
+            payload={"album_id": "al5"},
+            selected=True,
         )
         rescan = jm.Job(title="Library scan")
         rescan.execute_kind = "library"
@@ -3224,17 +3268,21 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
             title="Dummy",
             artist="Portishead",
             detail="1994 · 16-bit/44.1 kHz · 11 tracks",
-            payload={"album_id": "al1"},
+            payload={"album_id": "al1", "_artist_dir_path": "/music/Portishead",
+                     "_premise": {"seal": "fresh"}},
             selected=False,
         )
-        rescan.scan_coverage = (frozenset({"Portishead"}), False)
+        rescan.scan_coverage = (frozenset({"Portishead"}), False,
+                                frozenset({"al5"}))
         jm.registry.add(rescan)
 
         scans._fold_into_parked_library_review(rescan)
 
-        assert [c["payload"]["album_id"] for c in parked.candidates] == [
-            "al1", "ma1"]
-        assert parked.candidates[0]["selected"] is True
+        assert [(c["payload"]["album_id"], c["selected"])
+                for c in parked.candidates] == [
+            ("al1", True), ("gap1", True), ("ma1", False), ("al4", True)]
+        assert parked.candidates[-1]["payload"]["_premise"] == {"seal": "fresh"}
+        assert rescan.log_lines[:-1] == parked.log_lines[-3:]
     finally:
         _remove_job(parked)
         _remove_job(scan)

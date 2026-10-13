@@ -14,6 +14,7 @@ of the repair scan rather than the dashboard, so ``pending()`` leaves it out. A
 clean finish or a deliberate cancel clears that kind's entry; a kind's presence
 means "an unfinished scan of that kind is waiting to resume."
 """
+import json
 import threading
 import time
 from contextlib import AbstractContextManager
@@ -30,6 +31,9 @@ _KINDS = ("missing", "partial")
 # A crash can lose this interval's worth of completed artists, plus any
 # artists still being scanned. Normal exits flush the remaining progress.
 CHECKPOINT_INTERVAL_SECONDS = 5.0
+# A slow write waits this many times its own length before the next, so on a
+# large library writing the checkpoint stays a small part of the scan.
+CHECKPOINT_WRITE_SPACING = 20
 
 # save/clear are read-modify-write of the shared file; serialise them so two
 # scan kinds progressing in parallel can't clobber each other's entry.
@@ -58,13 +62,62 @@ def _write(data) -> bool:
         if len(data) == 1:
             (kind,) = data
             _sole_entry = (str(cfg.SCAN_CHECKPOINT_FILE), identity, kind)
-        return True
     except OSError as e:
         # Surface (verbose) rather than fail completely silent. On a full or
         # read-only data volume an hours-long scan would otherwise save no
         # resumable checkpoint with zero signal.
         cli_logging.vlog(f"scan checkpoint write failed ({e}); resume won't be available")
         return False
+    _write_progress(identity, data)
+    return True
+
+
+def _progress_path():
+    return cfg.SCAN_CHECKPOINT_FILE.with_suffix(".progress.json")
+
+
+def _done_by_kind(data):
+    done = {}
+    for kind, entry in data.items():
+        if isinstance(entry, dict):
+            scanned = entry.get("scanned")
+            done[kind] = len(scanned) if isinstance(scanned, list) else 0
+    return done
+
+
+def _write_progress(identity, data):
+    """Note each kind's scanned count beside the checkpoint, for the pages
+    that show no more than that. One left behind by a failed write names an
+    older checkpoint and is not used."""
+    try:
+        state_file.write_json(_progress_path(), {
+            "checkpoint": list(identity),
+            "done": _done_by_kind(data),
+        }, indent=None)
+    except OSError:
+        pass
+
+
+def _progress() -> dict:
+    """Each waiting kind's scanned count, without reading the checkpoint when
+    the note beside it still describes it."""
+    identity = state_file.file_identity(cfg.SCAN_CHECKPOINT_FILE)
+    if identity is None:
+        return {}
+    try:
+        note = json.loads(_progress_path().read_text(encoding="utf-8"))
+        if (note.get("checkpoint") == list(identity)
+                and isinstance(note.get("done"), dict)):
+            return note["done"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    with _lock:
+        identity = state_file.file_identity(cfg.SCAN_CHECKPOINT_FILE)
+        if identity is None:
+            return {}
+        data = _read()
+        _write_progress(identity, data)
+    return _done_by_kind(data)
 
 
 def load(kind) -> dict | None:
@@ -159,13 +212,14 @@ class Writer(AbstractContextManager):
         self._latest = None
         self._pending = False
         self._last_write = None
+        self._interval = CHECKPOINT_INTERVAL_SECONDS
 
     def save(self, scanned, candidates, seen, artists=None, meta=None) -> bool:
         # Keep the single writer's live containers, without copying receipts.
         self._latest = (scanned, candidates, seen, artists, meta)
         self._pending = True
         if (self._last_write is None
-                or time.monotonic() - self._last_write >= CHECKPOINT_INTERVAL_SECONDS):
+                or time.monotonic() - self._last_write >= self._interval):
             return self.flush()
         return True
 
@@ -180,8 +234,14 @@ class Writer(AbstractContextManager):
     def flush(self) -> bool:
         if not self._pending:
             return True
-        self._last_write = time.monotonic()
+        started = time.monotonic()
         saved = save(self.kind, *self._latest, passes=self.passes)
+        # Timed from the end of the write: from its start, a write as long as
+        # the interval was followed by the next one straight away.
+        self._last_write = time.monotonic()
+        self._interval = max(
+            CHECKPOINT_INTERVAL_SECONDS,
+            CHECKPOINT_WRITE_SPACING * (self._last_write - started))
         if saved is not False:
             self._pending = False
         return saved
@@ -213,20 +273,24 @@ def clear(kind) -> bool:
             return _write(data)
         try:
             cfg.SCAN_CHECKPOINT_FILE.unlink()
-            return True
         except FileNotFoundError:
-            return True
+            pass
         except OSError as e:
             cli_logging.vlog(f"scan checkpoint clear failed ({e}); stale resume data remains")
             return False
+        try:
+            _progress_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+        return True
 
 
 def pending() -> dict | None:
     """A summary of any unfinished scan for the dashboard, or None. Missing
     takes precedence (it's the kind the first-run auto-scan runs). Returns
     ``{"kind", "done"}`` where done is how many artists are already scanned."""
+    done = _progress()
     for kind in _KINDS:
-        cp = load(kind)
-        if cp is not None:
-            return {"kind": kind, "done": len(cp.get("scanned", []))}
+        if kind in done:
+            return {"kind": kind, "done": done[kind]}
     return None

@@ -2,7 +2,11 @@
 
 A review may sit for weeks before it changes an album. Its saved tree receipt
 lets the app notice files that changed in the meantime. Older rows without a
-valid receipt must be refreshed.
+valid receipt, or with one from an earlier version, must be refreshed.
+
+The receipt records names, sizes, times, inodes and directory incarnations
+and reads no file, so checking a whole artist folder costs one walk of it.
+The backup code hashes what it moves at the moment it moves it.
 """
 
 from __future__ import annotations
@@ -17,11 +21,12 @@ from qobuz_librarian.library.backup import (
     _open_backup_source,
     _path_directory_generations,
     canonical_album_source_receipt,
-    capture_album_source_receipt,
+    canonical_album_tree_identity,
+    capture_album_tree_identity,
     capture_music_root_identity,
 )
 
-PREMISE_VERSION = 1
+PREMISE_VERSION = 2
 _KINDS = {
     "missing",
     "gap-fill",
@@ -46,16 +51,21 @@ class StaleCandidateIds(set):
         self.counts = {"changed": 0, "unreadable": 0, "older": 0}
 
 
-def _canonical_receipt(value, *, origin: str):
-    """JSON-detach receipt tuples, then require backup.py's closed schema."""
+def _canonical_receipt(value, *, origin: str, version: int = PREMISE_VERSION):
+    """JSON-detach receipt tuples, then require backup.py's closed schema.
+
+    Version 1 premises held the exact hashed receipt. They still load, so a
+    saved queue or recovery record can be read, but validation refuses them.
+    """
     try:
         detached = json.loads(json.dumps(value, sort_keys=True))
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    return canonical_album_source_receipt(
-        detached,
-        expected_origin=origin,
+    canonical = (
+        canonical_album_source_receipt if version == 1
+        else canonical_album_tree_identity
     )
+    return canonical(detached, expected_origin=origin)
 
 
 def canonical_premise(value) -> dict | None:
@@ -64,18 +74,19 @@ def canonical_premise(value) -> dict | None:
         type(value) is not dict
         or set(value) != {"version", "kind", "path", "receipt"}
         or type(value.get("version")) is not int
-        or value["version"] != PREMISE_VERSION
+        or value["version"] not in (1, PREMISE_VERSION)
         or value.get("kind") not in _KINDS
         or type(value.get("path")) is not str
         or not os.path.isabs(value["path"])
         or os.path.abspath(value["path"]) != value["path"]
     ):
         return None
-    receipt = _canonical_receipt(value.get("receipt"), origin=value["path"])
+    receipt = _canonical_receipt(
+        value.get("receipt"), origin=value["path"], version=value["version"])
     if receipt is None:
         return None
     return {
-        "version": PREMISE_VERSION,
+        "version": value["version"],
         "kind": value["kind"],
         "path": value["path"],
         "receipt": receipt,
@@ -90,7 +101,7 @@ def capture(kind: str, path) -> dict | None:
         requested = os.path.abspath(os.fspath(Path(path)))
     except (OSError, TypeError, ValueError):
         return None
-    receipt = capture_album_source_receipt(Path(requested))
+    receipt = capture_album_tree_identity(Path(requested))
     if receipt is None:
         return None
     origin = receipt.get("origin") if isinstance(receipt, dict) else None
@@ -136,8 +147,8 @@ def _normalised_generation_evidence(receipt: dict):
 
 
 def durable_receipts_match(saved: dict, current: dict) -> bool:
-    """Compare exact durable trees while allowing mount-ID renumbering."""
-    stable_fields = ("version", "origin", "tree", "fidelity")
+    """Compare durable folder identities while allowing mount-ID renumbering."""
+    stable_fields = ("version", "origin", "tree")
     try:
         return (
             all(saved[field] == current[field] for field in stable_fields)
@@ -358,7 +369,7 @@ def canonical(candidate: dict) -> dict | None:
 def validate_premise(value) -> dict:
     """Check a queued or direct action against the current files."""
     premise = canonical_premise(value)
-    if premise is None:
+    if premise is None or premise["version"] != PREMISE_VERSION:
         raise CandidateStale(
             "This queued action is too old to verify against the current "
             "files. Refresh or rescan before changing music files.",
@@ -377,7 +388,7 @@ def validate_premise(value) -> dict:
 
 
 def gap_fill_receipts(value) -> dict | None:
-    """Derive exact per-file backup receipts from one canonical tree seal."""
+    """Derive per-file backup receipts from one canonical tree seal."""
     premise = canonical_premise(value)
     if premise is None:
         return None
@@ -393,8 +404,9 @@ def gap_fill_receipts(value) -> dict | None:
                 "size": snapshot["size"],
                 "mtime_ns": snapshot["mtime_ns"],
                 "ctime_ns": snapshot["changed_ns"],
-                "sha256": snapshot["sha256"],
             }
+            if "sha256" in snapshot:
+                receipts[relative]["sha256"] = snapshot["sha256"]
         return receipts
     except (KeyError, TypeError, ValueError):
         return None
@@ -406,10 +418,10 @@ def validate(candidate: dict, *, missing_premises=None) -> dict:
     if absent is not None:
         return _validate_absent(absent)
     premise = canonical(candidate)
-    if premise is None:
+    if premise is None or premise["version"] != PREMISE_VERSION:
         raise CandidateStale(
-            "This saved review predates local file receipts. Refresh it before "
-            "changing music files.",
+            "This saved review is too old to check against the current files. "
+            "Refresh it before changing music files.",
             cause="older",
         )
     if premise["kind"] == "missing" and missing_premises is not None:
@@ -444,10 +456,10 @@ def validate_container(candidate: dict) -> dict:
     if absent is not None:
         return _validate_absent(absent)
     premise = canonical(candidate)
-    if premise is None:
+    if premise is None or premise["version"] != PREMISE_VERSION:
         raise CandidateStale(
-            "This saved review predates local file receipts. Refresh it before "
-            "changing music files.",
+            "This saved review is too old to check against the current files. "
+            "Refresh it before changing music files.",
             cause="older",
         )
     if premise["kind"] != "missing":
@@ -483,14 +495,25 @@ def validate_container(candidate: dict) -> dict:
     return premise
 
 
-def validate_all(candidates) -> None:
+def validate_all(candidates, *, cancelled=None) -> bool:
     """Check every row against its files as they are right now.
 
-    Unshared on purpose: this runs immediately before the flow writes, and
-    a shared capture would take every row after the first on trust.
+    Rows naming the same folder with the same saved receipt pass or fail
+    together, so they share one check: an artist with many picks is walked
+    once. Returns False when ``cancelled`` stopped it between rows.
     """
+    checked = {}
     for candidate in candidates:
-        validate(candidate)
+        if cancelled is not None and cancelled():
+            return False
+        payload = candidate.get("payload") or {}
+        saved = [payload.get("_premise"), payload.get(ABSENT_CONTAINER_KEY)]
+        seen = checked.setdefault(
+            (expected_kind(candidate), expected_path(candidate)), [])
+        if saved not in seen:
+            validate(candidate)
+            seen.append(saved)
+    return True
 
 
 def stale_candidate_ids(candidates, *, share_artist_captures=False) -> StaleCandidateIds:

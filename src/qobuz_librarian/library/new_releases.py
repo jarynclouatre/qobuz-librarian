@@ -168,10 +168,14 @@ def is_baseline_complete() -> bool:
     )
 
 
-def seed_baseline(seen, *, generation=None, revision=None) -> bool:
+def seed_baseline(seen, *, generation=None, revision=None,
+                  checked_at=None) -> bool:
     """Record the per-artist catalog snapshot from a cleanly-completed library
     scan and mark the baseline ready. The scan already fetched every discography,
-    so this captures "what exists now" for free; the daily check diffs against it."""
+    so this captures "what exists now" for free; the daily check diffs against it.
+    ``checked_at`` stamps the run time when the scan read every artist's
+    catalogue, so the next check waits its interval instead of starting
+    straight after."""
     with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
         state = load()
         target_generation = (
@@ -193,6 +197,8 @@ def seed_baseline(seen, *, generation=None, revision=None) -> bool:
         # Stamp the cap this snapshot was taken at, so a later limit bump triggers
         # a re-baseline instead of surfacing the newly-visible back-slice as "new".
         state["baseline_limit"] = int(cfg.ARTIST_CATALOG_LIMIT)
+        if checked_at is not None:
+            state["last_run"] = float(checked_at)
         if not save(state):
             return False
         return generation_state.mark_output_current(

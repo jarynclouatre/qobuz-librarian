@@ -23,10 +23,7 @@
 
 {% if not review_groups and (review_query or review_counts.total) %}
 {% set _off = review_tab_counts.switched_off if review_tab else 0 %}
-{% if _off %}
-{% set _under = review_tab_counts.switched_off_under %}
-{% set _under_text = (_under[:-1] | join(', ')) ~ (' or ' if _under | length > 1 else '') ~ _under[-1] %}
-{% endif %}
+{% set _under_text = review_tab_counts.switched_off_under if review_tab else '' %}
 <p class="ql-review-page-empty">
   {% if review_query %}No artists or albums match your filter.{% elif review_tab == 'gaps' %}No albums to fill.{% if _off and not review_tab_counts.missing %} Missing Albums has {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% elif review_tab == 'missing' %}No missing albums to review.{% if _off %} {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% else %}Nothing on this page.{% endif %}
 </p>

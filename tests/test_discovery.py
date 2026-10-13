@@ -151,6 +151,8 @@ def test_fully_missing_album_is_a_gap_with_no_dir(monkeypatch, tmp_path, beatles
     assert "Revolver" not in _titles(res.gaps)
     assert [c["dir"].name for c in res.complete] == ["Revolver (1966)"]
     assert not res.unmatched_dirs
+    # A refresh drops a ticked pick the scan found on disk.
+    assert res.on_disk == {"a1"}
 
 
 def test_deluxe_edition_gap_measured_against_the_owned_edition(monkeypatch, tmp_path, beatles_search):
@@ -270,6 +272,31 @@ def test_saved_artist_pick_moves_to_the_namesake_whose_catalog_holds_the_folders
     saved = json.loads(cache_file.read_text())
     assert saved["entries"]["The Clash"][0] == "band"
     assert saved["unchecked"] == []
+    # Older versions read only version 1 and would drop every pick.
+    assert saved["version"] == 1
+
+
+def test_saved_artist_pick_stays_when_the_search_offers_only_a_lesser_match(
+        monkeypatch, tmp_path):
+    # An older version saved the band, whose catalog lists one of the two
+    # folders. The search no longer returns the band, only a near-name that
+    # lists neither.
+    catalogs = {"band": [{"title": "White Noise and Black Metal"}],
+                "other": [{"title": "Hood Anthems"}]}
+    monkeypatch.setattr(discovery, "search_artists", lambda query, token, limit: [
+        {"id": "other", "name": "M. Craft", "albums_count": 59}])
+    monkeypatch.setattr(discovery, "get_artist_albums",
+                        lambda artist_id, token, limit=None: (catalogs[artist_id], None))
+    cache_file = tmp_path / "resolve.json"
+    cache_file.write_text(json.dumps(
+        {"version": 1, "entries": {"Craft": ["band", "Craft"]}}))
+    monkeypatch.setattr(cfg, "ARTIST_RESOLVE_CACHE_FILE", cache_file)
+    monkeypatch.setattr(discovery, "_resolve_cache", None)
+    monkeypatch.setattr(discovery, "_resolve_unchecked", set())
+    owned = discovery.owned_album_titles(
+        [tmp_path / "White Noise and Black Metal (2018)", tmp_path / "Fuck the Universe (2004)"])
+
+    assert discovery.resolve_artist("Craft", "tok", owned) == ("band", "Craft")
 
 
 def test_missing_albums_are_what_qobuz_files_as_the_artists_albums(
@@ -326,6 +353,7 @@ def test_zero_overlap_match_is_skipped_as_false_match(monkeypatch, tmp_path, bea
     assert any(s["reason"] == "false_match" for s in res.skipped)
     assert [(g.qobuz_album["id"], len(g.missing)) for g in res.gaps] == [("a1", 9)]
     assert res.gaps[0].on_disk_dir == tmp_path / "The Beatles" / "Help (1965)"
+    assert res.on_disk == {"a1"}
 
 
 def test_transient_api_error_aborts_the_scan_instead_of_burying_a_folder(

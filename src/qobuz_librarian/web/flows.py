@@ -32,6 +32,7 @@ from qobuz_librarian.library import (
     catalog,
     collection_snapshot,
     downsample_state,
+    flac_cache,
     generation_state,
     library_scan_state,
     lyrics,
@@ -392,7 +393,7 @@ def _album_candidate_spec(
     }
 
 
-def _add_candidate_spec(job, spec):
+def _add_candidate_spec(job, spec, listed=True):
     return job.add_candidate(
         kind=spec.get("kind", "album"),
         title=spec.get("title") or "?",
@@ -400,6 +401,7 @@ def _add_candidate_spec(job, spec):
         detail=spec.get("detail") or "",
         payload=spec.get("payload") or {},
         selected=bool(spec.get("selected")),
+        listed=listed,
     )
 
 
@@ -425,9 +427,9 @@ def _read_without_release_types(candidates):
                for c in candidates)
 
 
-def _readd_candidate(job, c):
+def _readd_candidate(job, c, listed=True):
     """Re-add a candidate restored from a scan checkpoint, with a fresh cid."""
-    _add_candidate_spec(job, c)
+    return _add_candidate_spec(job, c, listed=listed)
 
 
 def _cap_note(job) -> str:
@@ -439,6 +441,22 @@ def _cap_note(job) -> str:
     return (f" Showing the first {len(job.candidates):,}; the scan hit the "
             f"{job.CANDIDATE_CAP:,} result cap. Work through or dismiss some "
             "results, then refresh to see the rest.")
+
+
+def left_out_note(left_out, cap) -> str:
+    """Name the artist folders whose finds the review had no room for, so a
+    summary never implies more is listed than was kept. Empty when nothing
+    was left out."""
+    if not left_out:
+        return ""
+    names = ", ".join(sorted(left_out, key=str.casefold)[:5])
+    more = f" (+{len(left_out) - 5} more)" if len(left_out) > 5 else ""
+    finds = sum(left_out.values())
+    return (f"The review lists at most {cap:,} albums, so {finds:,} "
+            f"{'find' if finds == 1 else 'finds'} from "
+            f"{plural(len(left_out), 'artist folder')} "
+            f"{'is' if finds == 1 else 'are'} not listed: {names}{more}. "
+            "Work through or dismiss some, then refresh to list them.")
 
 
 def _gap_candidate_spec(
@@ -531,16 +549,18 @@ def is_gap_candidate(c):
 
 def review_tab_filter(tab, included=None):
     """Which candidates a library review lists on ``tab``: Gap Fill, or the
-    missing albums whose release type is switched on (``included``, else the
-    saved switches). Any other tab lists everything."""
+    missing albums that are ticked or whose release type is switched on
+    (``included``, else the saved switches). Any other tab lists
+    everything."""
     if tab == "gaps":
         return is_gap_candidate
     if tab != "missing":
         return lambda c: True
     if included is None:
         included = missing_types.load()
-    return lambda c: not is_gap_candidate(c) and missing_types.shown(
-        (c.get("payload") or {}).get("release_type"), included)
+    return lambda c: not is_gap_candidate(c) and (
+        bool(c.get("selected")) or missing_types.shown(
+            (c.get("payload") or {}).get("release_type"), included))
 
 
 def library_review_summary(candidates):
@@ -579,6 +599,30 @@ def split_review_summary(execute_kind, candidates):
     return ""
 
 
+def _album_label(candidate):
+    """One album named the way the review names it."""
+    artist = (candidate.get("artist") or "").strip()
+    title = (candidate.get("title") or "?").strip()
+    return f"{artist} · {title}" if artist else title
+
+
+def named_albums(candidates, limit=3):
+    """Up to ``limit`` album names, with a count standing in for the rest.
+
+    A message about particular albums has to say which ones. A bare number
+    leaves the user reading a review of hundreds looking for the one that
+    moved.
+    """
+    names = [_album_label(c) for c in candidates]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) <= limit:
+        return ", ".join(names[:-1]) + " and " + names[-1]
+    return f"{', '.join(names[:limit])} and {len(names) - limit} more"
+
+
 def fold_key(c):
     """A candidate's merge identity: Qobuz album id, falling back to
     artist+title for keyless carry-overs. Shared by the fold and its caller's
@@ -601,13 +645,17 @@ def _fold_row(c):
 
 
 def _row_shows_change(fresh, old):
-    """Whether a refreshed row differs in more than the file evidence it
-    carries, which every scan seals again."""
-    def visible(row):
-        payload = {key: value for key, value in row["payload"].items()
-                   if key not in ("_premise", "_gap_fill_receipts")}
-        return {**row, "payload": payload}
-    return visible(fresh) != visible(old)
+    """Whether a refreshed row reads differently in the review. The file
+    evidence every scan seals again, the "new" badge, which only says when
+    the row was found, and the payload's other bookkeeping are not changes
+    a user can see."""
+    def shown(row):
+        payload = row["payload"]
+        return (row["kind"], row["title"], row["artist"], row["detail"],
+                payload.get("version"), payload.get("release_type"),
+                bool(payload.get("gap_fill")), payload.get("cover"),
+                payload.get("verified_truncated"))
+    return shown(fresh) != shown(old)
 
 
 def _scan_would_offer(c, coverage):
@@ -632,12 +680,18 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     never changed. A same-key row found by the refresh takes its fresh title,
     detail, class, and payload while keeping the review row's cid, sequence,
     and user tick. Absence is evidence only inside ``coverage``, the artists a
-    finished scan derived again and whether it looked at Gap Fill alone: a row
-    there that the scan no longer offers is removed. Candidates the user
-    dismissed while the refresh ran are checked
-    against a fresh hidden snapshot so the fold can't resurrect them. Returns
-    (added, updated), False when the changed review could not be saved, or None
-    when the review stopped being parked mid-refresh (approved/discarded)."""
+    finished scan derived again, whether it looked at Gap Fill alone and the
+    Qobuz ids it found on disk: a row there that the scan no longer offers is
+    removed when it is unticked or on disk, and a ticked one otherwise stays.
+    Candidates the user dismissed while the refresh ran are checked against a
+    fresh hidden snapshot so the fold can't resurrect them. Returns
+    (added, updated, removed, held_back, left_out, notes), False when the
+    changed review could not be saved, or None when the review stopped being
+    parked mid-refresh (approved/discarded). ``updated`` and ``removed`` count
+    the rows the review lists that changed or left; ``held_back`` maps release
+    types to the added rows their Missing Albums switches keep out of the
+    list; ``left_out`` maps artist folders to the listed rows the review had
+    no room for; ``notes`` are the lines the fold added to the review's log."""
     _key = fold_key
     def _fold():
         if parked.status != job_mgr.JobStatus.AWAITING_REVIEW:
@@ -645,36 +699,95 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         # Load while the review-action lock is held. A dismissal that finishes
         # while this fold waits must be visible before any candidate is added.
         hidden = hidden_mod.load()
+        library = parked.execute_kind == "library"
+        included = missing_types.load()
+        in_missing = review_tab_filter("missing" if library else "", included)
+
+        def listed(c):
+            return is_gap_candidate(c) or in_missing(c)
+
+        def switched_on(c):
+            return is_gap_candidate(c) or missing_types.shown(
+                (c.get("payload") or {}).get("release_type"), included)
+
         fresh_by_key = {}
         for c in cands:
             fresh_by_key.setdefault(_key(c), c)
         covered = None
+        on_disk = frozenset()
         if coverage is not None:
             covered = ({name.casefold() for name in coverage[0]}, coverage[1])
+            on_disk = coverage[2]
         updated = 0
         removed = 0
+        # A ticked row stays whatever the refresh makes of it, unless the
+        # scan found the album on disk. The log names the ticked ones that
+        # left, says once which ones it no longer offers (then marks them)
+        # and how many moved under a switch that is off. A kept missing album
+        # takes the seal of its artist folder as the refresh read it, so its
+        # pick is not refused for a change the refresh has already looked at.
+        in_library = []
+        unoffered = []
+        moved = {}
+        seals = {}
+        for c in cands:
+            payload = c.get("payload") or {}
+            if (candidate_premise.expected_kind(c) == "missing"
+                    and payload.get("_premise")):
+                seals.setdefault(payload.get("_artist_dir_path"),
+                                 payload["_premise"])
         keep = []
         for c in parked.candidates:
             key = _key(c)
             fresh = fresh_by_key.get(key)
             if fresh is None and covered and _scan_would_offer(c, covered):
-                removed += 1
+                album_id = str((c.get("payload") or {}).get("album_id") or "")
+                if not c.get("selected") or album_id in on_disk:
+                    if listed(c):
+                        removed += 1
+                    if c.get("selected"):
+                        in_library.append(c)
+                    continue
+                payload = dict(c.get("payload") or {})
+                path = payload.get("_artist_dir_path")
+                if path and candidate_premise.expected_kind(c) == "missing":
+                    if path not in seals:
+                        seals[path] = candidate_premise.capture("missing", path)
+                    if seals[path] is not None:
+                        payload["_premise"] = seals[path]
+                if not payload.get("_unoffered"):
+                    payload["_unoffered"] = True
+                    unoffered.append(c)
+                keep.append({**c, "payload": payload})
                 continue
             if fresh is None or _fold_row(fresh) == _fold_row(c):
                 keep.append(c)
                 continue
             replacement = _fold_row(fresh)
+            if not (c.get("payload") or {}).get("is_new"):
+                # Already in the review, so not a new find.
+                replacement["payload"] = {
+                    key: value for key, value in replacement["payload"].items()
+                    if key != "is_new"}
             replacement.update({
                 "cid": c.get("cid"),
                 "seq": c.get("seq"),
                 "selected": bool(c.get("selected")),
             })
             keep.append(replacement)
-            if _row_shows_change(_fold_row(fresh), _fold_row(c)):
+            if (library and replacement["selected"] and switched_on(c)
+                    and not switched_on(fresh)):
+                release_type = (fresh.get("payload") or {}).get("release_type")
+                moved[release_type] = moved.get(release_type, 0) + 1
+            if (_row_shows_change(_fold_row(fresh), _fold_row(c))
+                    and (listed(fresh) or listed(c))):
                 updated += 1
         parked.candidates = keep
         seen = {_key(c) for c in keep}
+        listed_rows = sum(1 for c in keep if listed(c))
         added = 0
+        held_back = {}
+        left_out = {}
         for c in cands:
             key = _key(c)
             if key in seen:
@@ -685,10 +798,13 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                     year=(c.get("payload") or {}).get("year")):
                 continue
             seen.add(key)
-            if len(parked.candidates) >= parked.CANDIDATE_CAP:
+            if listed(c) and listed_rows >= parked.CANDIDATE_CAP:
                 parked._candidate_cap_noted = True
                 if isinstance(parked.execute_args, dict):
                     parked.execute_args["_candidate_cap_hit"] = True
+                folder = str((c.get("payload") or {}).get("_artist_dir")
+                             or c.get("artist") or "")
+                left_out[folder] = left_out.get(folder, 0) + 1
                 continue
             seq = parked._cand_seq
             parked._cand_seq += 1
@@ -702,23 +818,57 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 "selected": bool(c.get("selected")),
             })
             added += 1
+            if listed(c):
+                listed_rows += 1
+            else:
+                release_type = (c.get("payload") or {}).get("release_type")
+                held_back[release_type] = held_back.get(release_type, 0) + 1
         if review_generation is not None:
             parked.execute_args = {
                 **(parked.execute_args or {}),
                 "_library_review_generation": int(review_generation),
             }
-        if coverage is not None and (added or updated or removed):
-            # The log above still carries the counts of the scan that built
-            # this review, so say what the refresh changed.
-            changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
-                ("added", added), ("updated", updated), ("removed", removed))
-                if n]
-            # Saved with this change; the review's lock is already held.
-            parked.log_lines.append(
-                "A later refresh " + ", ".join(changes[:-1])
-                + (" and " if len(changes) > 1 else "") + changes[-1] + ".")
-            parked._trim_log_lines_locked()
-        return added, updated + removed
+        held = sum(held_back.values())
+        notes = []
+        changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
+            ("added", added - held), ("updated", updated), ("removed", removed))
+            if n]
+        if coverage is not None and (changes or held):
+            # Say what the refresh changed in the list the review shows.
+            line = "A later refresh "
+            if changes:
+                line += (", ".join(changes[:-1])
+                         + (" and " if len(changes) > 1 else "")
+                         + changes[-1] + ".")
+                if held:
+                    line += (f" {held} more {'is' if held == 1 else 'are'} "
+                             f"under {missing_types.named(held_back)}.")
+            else:
+                line += (f"added {plural(held, 'album')} under "
+                         f"{missing_types.named(held_back)}.")
+            notes.append(line)
+        if in_library:
+            n = len(in_library)
+            notes.append(
+                f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
+                f"now in the library and left the review: "
+                f"{named_albums(in_library)}.")
+        if unoffered:
+            n = len(unoffered)
+            notes.append(
+                f"The refresh no longer offers {plural(n, 'ticked album')}, "
+                f"which {'stays' if n == 1 else 'stay'} ticked: "
+                f"{named_albums(unoffered)}.")
+        if moved:
+            n = sum(moved.values())
+            notes.append(
+                f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
+                f"now under {missing_types.named(moved)} and "
+                f"{'stays' if n == 1 else 'stay'} listed while ticked.")
+        # Saved with this change; the review's lock is already held.
+        parked.log_lines.extend(notes)
+        parked._trim_log_lines_locked()
+        return added, updated, removed, held_back, left_out, notes
 
     with job_mgr._library_review_state_guard(parked), parked._review_action_lock:
         saved, result = job_persistence.persist_review_mutation(parked, _fold)
@@ -1247,11 +1397,13 @@ def _save_scan_seen(mode, fingerprints):
         pass
 
 
-def _flag_new_since_last_scan(job, mode):
+def _flag_new_since_last_scan(job, mode, found=()):
     """Badge candidates whose album wasn't surfaced by the previous walk, then
-    record this walk's set for next time. First-ever run badges nothing (no
-    baseline to diff). Skipped on a cancelled scan so a partial run can't
-    poison the baseline."""
+    record this walk's set for next time. ``found`` adds what the walk found
+    beyond its candidates, such as dismissed albums, so one brought back
+    later is not new. First-ever run badges nothing (no baseline to diff).
+    Skipped on a cancelled scan so a partial run can't poison the
+    baseline."""
     # Snapshot under the lock, the scan worker appends candidates to this
     # list and we walk it twice here, which without a snapshot is not safe
     # against a same-instant append. `dismiss_albums` uses the same pattern.
@@ -1264,6 +1416,10 @@ def _flag_new_since_last_scan(job, mode):
         if fp:
             seen_now.add(fp)
             fps[c["cid"]] = fp
+    for c in found:
+        fp = hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
+        if fp:
+            seen_now.add(fp)
     prev = _load_scan_seen(mode)
     if prev is not None:
         for c in candidates:
@@ -1273,25 +1429,13 @@ def _flag_new_since_last_scan(job, mode):
     _save_scan_seen(mode, seen_now)
 
 
-def dismiss_albums(job, artist, scope=hidden_mod.SCOPE_MISSING, tab="",
+def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
                    query=""):
-    """Apply one hide action only while its review remains live."""
-    with job._review_action_lock:
-        return _dismiss_albums_locked(
-            job,
-            artist,
-            scope=scope,
-            tab=tab,
-            query=query,
-        )
-
-
-def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
-                           tab="", query=""):
-    """Hide ``artist``'s albums that aren't currently selected, in ``scope``.
+    """Hide the albums of ``artists`` that aren't currently selected, in
+    ``scope``, as one action with one save.
 
     Selection is server-backed (saved as the user ticks), so "hide the rest"
-    means: of this artist's candidates, hide the ones whose saved `selected`
+    means: of these artists' candidates, hide the ones whose saved `selected`
     flag is off and keep the ticked ones. Other artists' candidates and their
     selections are never touched, critical now that pagination means most of
     them aren't even on the page that triggered the hide.
@@ -1304,18 +1448,17 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
 
     The hidden albums are recorded in the durable store so future bulk walks of
     that scope skip them, then dropped from this job's review list. Returns the
-    number hidden, or False when the matching review snapshot could not be
-    saved.
+    number hidden, False when the matching review snapshot could not be saved,
+    or None once the review has left review.
     """
+    artists = set(artists)
     in_tab = review_tab_filter(tab)
+    live = (job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)
     # Snapshot + mutate under the lock in one go: a live scan appends candidates
     # from the worker thread, so reading job.candidates and replacing it in
     # separate steps could drop a concurrently-added album.
-    with job._lock:
-        if job.status not in (
-            job_mgr.JobStatus.AWAITING_REVIEW,
-            job_mgr.JobStatus.SCANNING,
-        ):
+    with job._review_action_lock, job._lock:
+        if job.status not in live:
             return None
         # The store's key deliberately ignores parentheticals so editions of one
         # album stay dismissed together, but that also collapses genuinely
@@ -1325,14 +1468,12 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
         # album wins: its twin is left in the review rather than dismissed into
         # a key that cannot tell them apart, so nothing the user kept disappears
         # and the count that leaves matches the count recorded.
-        kept = set()
-        for c in job.candidates:
-            if c.get("artist") == artist and c.get("selected"):
-                fp = hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
-                if fp:
-                    kept.add(fp)
-        to_hide = [c for c in job.candidates
-                   if c.get("artist") == artist and not c.get("selected")
+        mine = [c for c in job.candidates if c.get("artist") in artists]
+        kept = {hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
+                for c in mine if c.get("selected")}
+        kept.discard(None)
+        to_hide = [c for c in mine
+                   if not c.get("selected")
                    and in_tab(c)
                    and (not query or candidate_matches_query(c, query))
                    and hidden_mod.album_fingerprint(
@@ -1342,8 +1483,8 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
         specs = [(c.get("artist"), c.get("title"),
                   (c.get("payload") or {}).get("year")) for c in to_hide]
         gap_flags = [is_gap_candidate(c) for c in to_hide]
-    # Record the dismissals durably FIRST, outside the lock (disk I/O mustn't
-    # stall the scan thread's next add_candidate).
+    # Record the dismissals durably FIRST, outside the locks: neither the scan
+    # thread's next add_candidate nor a tick waits on this write.
     hidden_before = hidden_mod.load()
     new_specs = [
         spec for spec in specs
@@ -1353,6 +1494,8 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
     drop = {c["cid"] for c in to_hide}
 
     def _drop():
+        if job.status not in live:
+            return None
         # Re-read the ticks under the lock: a selection saved while the store
         # write above ran was promised "keep the ticked ones", so it wins,
         # dropping the stale snapshot's ids wholesale would dismiss an album
@@ -1360,16 +1503,16 @@ def _dismiss_albums_locked(job, artist, scope=hidden_mod.SCOPE_MISSING,
         ticked_meanwhile = [c for c in job.candidates
                             if c["cid"] in drop and c.get("selected")]
         keep = {c["cid"] for c in ticked_meanwhile}
-        # Only this artist's unselected candidates leave; every other
+        # Only these artists' unselected candidates leave; every other
         # candidate (and its saved selection) is preserved untouched.
         job.candidates = [c for c in job.candidates
                           if c["cid"] not in drop or c["cid"] in keep]
         return ticked_meanwhile
 
     saved, ticked_meanwhile = job_persistence.persist_review_mutation(job, _drop)
-    if not saved:
+    if not saved or ticked_meanwhile is None:
         hidden_mod.restore_rows(scope, new_specs)
-        return False
+        return False if not saved else None
     if ticked_meanwhile:
         # Their dismissals were already written durably, take them back out,
         # or the next bulk walk skips albums that are visibly ticked here.
@@ -1397,7 +1540,10 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
 
     Dismissed albums come back too. The caller keeps them out of the review but
     saves them in the snapshot, so dismissing costs no rescan and Restore has a
-    record to bring back."""
+    record to bring back.
+
+    The last item is every catalogue id the scan counts as on disk: each
+    album it found in a folder and the editions it groups with them."""
     result = find_missing_for_artist(
         artist_dir.name, token=token,
         opts=DiscoveryOpts(prefer_hires=cfg.PREFER_HIRES),
@@ -1424,8 +1570,14 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
         album = gap.qobuz_album or {}
         if gap.on_disk_dir is not None and album.get("id") is not None:
             owned_ids[Path(gap.on_disk_dir).name] = str(album["id"])
+    held = {catalog.edition_group_key(a) for a in result.catalog
+            if str(a.get("id")) in result.on_disk}
+    held.discard(None)
+    on_disk = set(result.on_disk) | {
+        str(a["id"]) for a in result.catalog
+        if a.get("id") is not None and catalog.edition_group_key(a) in held}
     return (artist_dir.name, result.artist_name, result.gaps, artist_id,
-            catalog_ids, owned_ids)
+            catalog_ids, owned_ids, on_disk)
 
 
 # Seconds between live-status refreshes during the whole-library repair sweep
@@ -1448,8 +1600,8 @@ def _repair_checkpoint_signature():
 
 
 def _capture_repair_artist_proof(artist_dir):
-    """Hash the exact artist tree used by a resumable Repair result."""
-    return backup_mod.capture_album_source_receipt(Path(artist_dir))
+    """Seal the artist tree used by a resumable Repair result."""
+    return backup_mod.capture_album_tree_identity(Path(artist_dir))
 
 
 def _repair_checkpoint_bundle(name, agg, proof):
@@ -1494,7 +1646,7 @@ def _validated_repair_checkpoint_bundle(artist_dir, value):
         or value["counts"]["failed_albums"]
     ):
         return None
-    proof = backup_mod.canonical_album_source_receipt(
+    proof = backup_mod.canonical_album_tree_identity(
         value.get("proof"),
         expected_origin=str(Path(artist_dir).absolute()),
     )
@@ -1519,7 +1671,7 @@ def _validated_repair_checkpoint_bundle(artist_dir, value):
             except (OSError, TypeError, ValueError):
                 return None
         candidates.append(spec)
-    current = backup_mod.canonical_album_source_receipt(
+    current = backup_mod.canonical_album_tree_identity(
         _capture_repair_artist_proof(artist_dir),
         expected_origin=str(Path(artist_dir).absolute()),
     )
@@ -1652,8 +1804,11 @@ def _scan_library_impl(
     else:
         scanned = set()
         baseline_seen = {}
-        checkpoint.save(scanned, [], baseline_seen)
     total = 0
+    # Artist folders whose finds the review had no room for, with how many
+    # each lost. They are not saved as scanned, so a later refresh checks
+    # them again.
+    left_out = {}
     # Snapshot the dismissed-album memory before restoring the checkpoint so
     # albums the user dismissed since the interruption are not re-added, and
     # so the parallel workers below see the same consistent view.
@@ -1687,6 +1842,10 @@ def _scan_library_impl(
         # hold them in memory for its whole run for nothing.
         previous_scan = library_scan_state.kind_state(kind)
         cheap_refresh = _reusable(previous_scan)
+    if not resuming and not cheap_refresh:
+        # A refresh needs no starting checkpoint: interrupted before it
+        # saves progress, the next one reuses the saved scan again.
+        checkpoint.save(scanned, [], baseline_seen)
     # The two refreshes and the fingerprint pass below run before the main
     # artist loop, and on a first scan of a large library each takes real
     # minutes, without progress ticks the job sits on "Waiting for output"
@@ -1791,14 +1950,17 @@ def _scan_library_impl(
                                     c.get("artist"), c.get("title"), hidden,
                                     year=(c.get("payload") or {}).get("year")):
                 continue
-            _readd_candidate(job, c)
-            if _listed(c):
+            listed = _listed(c)
+            if _readd_candidate(job, c, listed=listed) is None:
+                left_out[artist_key] = left_out.get(artist_key, 0) + 1
+                continue
+            if listed:
                 total += 1
             if artist_key:
                 restored_by_artist.setdefault(artist_key, []).append(c)
         for name in scanned:
             saved = checkpoint_artists.get(name)
-            if not isinstance(saved, dict):
+            if not isinstance(saved, dict) or name in left_out:
                 continue
             catalog_ids = saved.get("catalog_ids")
             if catalog_ids is None:
@@ -1827,6 +1989,7 @@ def _scan_library_impl(
     # the snapshot carries their ids forward from the last one.
     owned_qobuz = {}
     snapshot_artist_ids = {}
+    on_disk_ids = set()
     for artist_dir in artists:
         if artist_dir.name in scanned:
             continue
@@ -1840,30 +2003,42 @@ def _scan_library_impl(
             and not _read_without_release_types(saved.get("candidates") or [])
         ):
             candidates = list(saved.get("candidates") or [])
-            visible = [c for c in candidates if not _spec_dismissed(c, hidden)]
-            for c in visible:
-                _readd_candidate(job, c)
-            visible = [c for c in visible if _listed(c)]
-            total += len(visible)
+            shown = dropped = 0
+            for c in candidates:
+                if _spec_dismissed(c, hidden):
+                    continue
+                listed = _listed(c)
+                if _readd_candidate(job, c, listed=listed) is None:
+                    dropped += 1
+                elif listed:
+                    shown += 1
+            total += shown
             scanned.add(artist_dir.name)
             done += 1
             reused += 1
             if saved.get("artist_id"):
                 baseline_seen[str(saved["artist_id"])] = list(saved_catalog_ids or [])
-            state_artists[artist_dir.name] = {
-                "fingerprint": fingerprints.get(artist_dir.name, ""),
-                "candidates": candidates,
-                "artist_id": saved.get("artist_id") or "",
-                "catalog_ids": list(saved_catalog_ids or []),
-            }
-            hit = ({"artist": artist_dir.name, "albums": len(visible)}
-                   if visible else None)
+            if dropped:
+                left_out[artist_dir.name] = dropped
+            else:
+                state_artists[artist_dir.name] = {
+                    "fingerprint": fingerprints.get(artist_dir.name, ""),
+                    "candidates": candidates,
+                    "artist_id": saved.get("artist_id") or "",
+                    "catalog_ids": list(saved_catalog_ids or []),
+                }
+            hit = ({"artist": artist_dir.name, "albums": shown}
+                   if shown else None)
             job.push_progress(_step(_finding), done, n, artist_dir.name,
                               found=total, hit=hit, unit="artist")
         else:
             todo.append(artist_dir)
     if reused:
         log.info(f"  Reused {plural(reused, 'unchanged artist')} from the saved scan.")
+    if reused and todo:
+        # Before any artist is checked, so an interrupted refresh resumes
+        # without asking Qobuz about the artists it reused. With nothing to
+        # check there is nothing to resume.
         checkpoint.save(scanned, job.candidates, baseline_seen, state_artists)
     workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
     # Resolve/scan artists in parallel (each worker has its own HTTP session),
@@ -1885,7 +2060,7 @@ def _scan_library_impl(
             done += 1
             try:
                 (name, artist_name, gaps, artist_id, catalog_ids,
-                 owned_ids) = fut.result()
+                 owned_ids, on_disk) = fut.result()
             except (AuthLost, QobuzUnavailable) as e:
                 # A lost token or an unreachable API isn't a per-artist
                 # hiccup, so cancel the rest and fail the scan rather than
@@ -1913,6 +2088,7 @@ def _scan_library_impl(
                                   found=total, unit="artist")
                 continue
             scanned.add(name)
+            on_disk_ids.update(on_disk)
             if owned_ids:
                 owned_qobuz[name] = owned_ids
             if artist_id:
@@ -1920,7 +2096,7 @@ def _scan_library_impl(
             if artist_id and catalog_ids is not None:
                 baseline_seen[artist_id] = catalog_ids
             artist_candidates = []
-            shown = 0
+            shown = dropped = 0
             for gap in gaps:
                 # Library is a discovery list, leave candidates unticked so a
                 # single click can't queue hundreds nobody reviewed.
@@ -1932,12 +2108,17 @@ def _scan_library_impl(
                     # Restore brings back from.
                     artist_candidates.append(spec)
                     continue
-                if _add_candidate_spec(job, spec) is not None:
-                    artist_candidates.append(spec)
-                    if _listed(spec):
-                        total += 1
-                        shown += 1
-            if catalog_ids is not None:
+                listed = _listed(spec)
+                if _add_candidate_spec(job, spec, listed=listed) is None:
+                    dropped += 1
+                    continue
+                artist_candidates.append(spec)
+                if listed:
+                    total += 1
+                    shown += 1
+            if catalog_ids is not None and dropped:
+                left_out[name] = dropped
+            elif catalog_ids is not None:
                 state_artists[name] = {
                     "fingerprint": fingerprints.get(name, ""),
                     "candidates": artist_candidates,
@@ -1958,7 +2139,11 @@ def _scan_library_impl(
     # Reached here only without an AuthLost/outage abort (that re-raises out
     # above, leaving the checkpoint for resume and not seeding the baseline).
     # job.candidates now holds everything this scan offers for these artists.
-    job.scan_coverage = (frozenset(scanned), partial_only)
+    # A left-out artist's rows are missing from this scan for want of room,
+    # which says nothing about what it offers.
+    job.scan_coverage = (frozenset(scanned - set(left_out)), partial_only,
+                         frozenset(on_disk_ids))
+    job.scan_left_out = dict(left_out)
     checkpoint.flush()
     flush_resolve_cache()
     baseline_save_failed = False
@@ -1989,7 +2174,7 @@ def _scan_library_impl(
         readable_names = {ad.name for ad in artists} - unreadable_artists
         catalog_complete = (
             bool(readable_names)
-            and readable_names <= set(state_artists)
+            and readable_names <= set(state_artists) | set(left_out)
             and readable_names <= scanned
             and scan_errors - discovery_errors - read_errors == 0
         )
@@ -2093,13 +2278,20 @@ def _scan_library_impl(
             scan_generation = int(publication["generation"])
             if not scan_state_save_failed and not cheap_refresh:
                 _record_last_scan()
-            _flag_new_since_last_scan(job, kind)
+            # What's on disk counts the tag cache's rows, so drop the rows of
+            # files moved or deleted outside the app since they were read.
+            flac_cache.prune_missing(force=True)
+            _flag_new_since_last_scan(job, kind, found=[
+                c for entry in state_artists.values()
+                for c in entry.get("candidates") or []])
             # The crawl reached every artist cleanly, establish the new-release
-            # baseline from the catalog snapshot (only the first time; the daily
-            # check keeps it fresh after), and clear this kind's checkpoint.
+            # baseline from the catalog snapshot and clear this kind's
+            # checkpoint. A crawl that read every catalogue counts as the last
+            # new-release check; a refresh reuses most of them.
             baseline_save_failed = not new_releases_mod.seed_baseline(
                 baseline_seen,
                 generation=scan_generation,
+                checked_at=None if cheap_refresh else time.time(),
             )
             if not checkpoint.clear():
                 job.push_line(
@@ -2121,17 +2313,18 @@ def _scan_library_impl(
     if job.cancel_requested:
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
                        if total else "Stopped before anything turned up.")
+    elif total:
+        job.summary = library_review_summary(job.candidates) + "."
+        if left_out:
+            job.summary += " " + left_out_note(left_out, job.CANDIDATE_CAP)
     elif partial_only:
-        job.summary = (library_review_summary(job.candidates) + "." + _cap_note(job)
-                       if total else "No owned albums are missing tracks.")
+        job.summary = "No owned albums are missing tracks."
     else:
-        job.summary = (library_review_summary(job.candidates) + "." + _cap_note(job)
-                       if total else
-                       "No missing albums found for artists in your library.")
+        job.summary = "No missing albums found for artists in your library."
     # Artists that errored or came back with a short catalog page aren't in
     # state_artists; the checkpoint stays for them and the last-scan stamp is
     # withheld.
-    unchecked = len(artists) - len(state_artists) + discovery_errors
+    unchecked = len(artists) - len(state_artists) - len(left_out) + discovery_errors
     if not job.cancel_requested and not partial_only and publication is not None:
         unreadable_artists_mod.record(unreadable_artists)
     if (not job.cancel_requested and publication is not None

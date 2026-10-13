@@ -109,6 +109,49 @@ def test_whole_album_backup_breaks_source_hardlinks(tmp_path, monkeypatch):
     assert backed_first.stat().st_nlink == backed_second.stat().st_nlink == 1
 
 
+def test_upgrade_backup_and_its_disposal_read_each_file_once(tmp_path, monkeypatch):
+    # Every check used to hash the album again, so one upgrade read the
+    # replaced album about forty times between its backup and the backup's
+    # removal. Each proof now reads a file once, under its writer lease.
+    import qobuz_librarian.library.backup as bk
+
+    music = tmp_path / "music"
+    album = music / "Artist" / "Album"
+    album.mkdir(parents=True)
+    tracks = ("01.flac", "02.flac")
+    for name in tracks:
+        (album / name).write_bytes(name.encode() * 1000)
+    monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(bk.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    audio = {(album / name).stat().st_ino for name in tracks}
+    reads = []
+    real_read = bk._read_file_digest_fd
+
+    def counted(descriptor):
+        reads.append(os.fstat(descriptor).st_ino)
+        return real_read(descriptor)
+
+    def track_reads():
+        return sorted(inode for inode in reads if inode in audio)
+
+    monkeypatch.setattr(bk, "_read_file_digest_fd", counted)
+
+    result = bk.backup_album_dir(album)
+    assert result is not None and result.complete
+    assert track_reads() == sorted(audio)
+    album.mkdir()
+    for name in tracks:
+        (album / name).write_bytes(b"new " + name.encode() * 2000)
+    audio |= {(album / name).stat().st_ino for name in tracks}
+    receipt = bk.capture_album_source_receipt(album)
+    assert bk.dispose_backup(
+        result, replacement_path=album, expected_replacement_receipt=receipt,
+        replacement_validator=lambda _replacement, _backup: True)
+    assert not result.path.exists()
+    # The new tracks once for their receipt, then each side once for disposal.
+    assert len(track_reads()) == 8 and set(track_reads()) == audio
+
+
 def test_backup_album_dir_moves_and_refuses_symlinks(tmp_path, monkeypatch):
     monkeypatch.setattr("qobuz_librarian.config.UPGRADE_BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setattr("qobuz_librarian.config.MUSIC_ROOT", tmp_path)

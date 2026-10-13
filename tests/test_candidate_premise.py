@@ -36,6 +36,15 @@ def test_album_candidate_receipt_accepts_unchanged_and_rejects_changed_bytes(
 
     assert validate(candidate) == premise
 
+    # A new cover outdates the receipt, so it must also bring the artist back
+    # into the next refresh, which is what rebuilds the receipt.
+    from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
+    before = artist_fingerprint(album.parent)
+    (album / "cover.jpg").write_bytes(b"the user's own scan")
+    assert artist_fingerprint(album.parent) != before
+    with pytest.raises(CandidateStale):
+        validate(candidate)
+
     track.write_bytes(b"different audio bytes")
     with pytest.raises(CandidateStale) as stale:
         validate(candidate)
@@ -109,10 +118,17 @@ def test_candidate_receipt_survives_mount_namespace_renumbering(
 
 
 def test_missing_candidate_binds_the_reviewed_artist_tree(tmp_path, monkeypatch):
+    import qobuz_librarian.library.backup as backup
     import qobuz_librarian.library.candidate_premise as candidate_premise
 
     root, album, _track = _music_album(tmp_path, monkeypatch)
     artist = album.parent
+
+    # Sealing and checking a whole artist folder reads none of its files.
+    def unread(_descriptor):
+        raise AssertionError("a review check read a file")
+
+    monkeypatch.setattr(backup, "_file_digest_fd", unread)
     premise = capture("missing", artist)
     candidate = {
         "kind": "album",
@@ -208,3 +224,51 @@ def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeyp
     assert not admitted
     assert job.status == jobs.JobStatus.AWAITING_REVIEW
     assert job.candidates == original
+
+
+def test_download_run_checks_each_artist_once_and_stops_on_cancel(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from qobuz_librarian.library import candidate_premise
+    from qobuz_librarian.web import job_runs
+
+    root, album, _track = _music_album(tmp_path, monkeypatch)
+    other = root / "Other" / "Album"
+    other.mkdir(parents=True)
+    (other / "01.flac").write_bytes(b"other audio")
+    picks = []
+    for artist in (album.parent, album.parent, album.parent, other.parent):
+        premise = capture("missing", artist)
+        picks.append({"kind": "album", "payload": {
+            "album_id": str(len(picks)), "_artist_dir_path": str(artist),
+            "_premise": premise}})
+    job = SimpleNamespace(cancel_requested=False)
+    captures = []
+    real_capture = candidate_premise.capture
+
+    def counted(kind, path):
+        captures.append(path)
+        return real_capture(kind, path)
+
+    ran = []
+    monkeypatch.setattr(candidate_premise, "capture", counted)
+    monkeypatch.setattr(job_runs, "_review_download_token", lambda _job: "tok")
+    job_runs._run_review_with_live_download(
+        job, picks, lambda _job, chosen, token: ran.append(len(chosen)))
+    assert captures == [str(album.parent), str(other.parent)]
+    assert ran == [4]
+
+    # A Cancel or a restart during the check stops it at the next pick and
+    # still hands every pick back through the flow's own cancel path.
+    captures.clear()
+
+    def cancel_after_first(kind, path):
+        job.cancel_requested = True
+        return counted(kind, path)
+
+    monkeypatch.setattr(candidate_premise, "capture", cancel_after_first)
+    job_runs._run_review_with_live_download(
+        job, picks, lambda _job, chosen, token: ran.append(len(chosen)))
+    assert captures == [str(album.parent)]
+    assert ran == [4, 4]
