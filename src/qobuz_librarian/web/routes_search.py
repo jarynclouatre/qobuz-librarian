@@ -7,7 +7,7 @@ import threading
 import time
 import urllib.parse
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from qobuz_librarian import cli, state_file
@@ -25,6 +25,7 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations import lyrics as lyrics_mode
+from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     catalog,
     collection_snapshot,
@@ -80,6 +81,18 @@ def _staging_album_count() -> int:
         )
     except OSError:
         return 0
+
+
+def _albums_in_backups() -> list:
+    """Albums missing from the library whose files are in the backup folder,
+    by name. Only meaningful while nothing is working in the library."""
+    try:
+        return [
+            diagnostics._album_name_from_path(origin)
+            for _path, origin in backup_mod.albums_left_in_backups()
+        ]
+    except OSError:
+        return []
 
 
 @router.head("/")
@@ -286,6 +299,9 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             "lyric_retry_count":
                 len(lyrics_mode.load_lyric_retry()) if cfg.LYRIC_RETRY_FILE.exists() else 0,
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
+            "albums_in_backups": (
+                [] if active_jobs or not runtime._run_lock_intact()
+                else _albums_in_backups()),
             # Stores that couldn't be read, kept aside while the run fell back
             # to defaults.
             "corrupt_stores": state_file.corrupt_store_details(),
@@ -344,6 +360,10 @@ async def lyric_retry(request: Request):
 
 
 _SEARCH_SNAPSHOT_RESULT_LIMIT = 150
+
+# An artist with more albums than this lists them a batch at a time.
+_ARTIST_ALBUMS_AT_ONCE = 100
+_ARTIST_ALBUM_BATCH = 50
 
 # Seconds Search waits for its Owned marks, which can need an album's exact
 # track list after the folder check, before it renders the results with the
@@ -759,7 +779,8 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 "folder": res.get("folder", ""),
                 "ownership_unknown": res["ownership_unknown"],
             })
-        for g, raws in zip(album_groups, group_raws):
+        for index, (g, raws) in enumerate(zip(album_groups, group_raws)):
+            g["index"] = index
             eds = g["editions"]
             # The row shows a complete copy you own, so the rest read as
             # "other versions". Otherwise it shows the original release,
@@ -799,6 +820,51 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 g["other_want"] = best["want_tracks"]
                 g["other_folder"] = best["folder"]
     return results, album_groups
+
+
+def _in_library(group):
+    """Whether any version of a record has files in the library."""
+    return any(e["owned"] or e["folder"] for e in group["editions"])
+
+
+def _album_batch(groups, start, through=()):
+    """The records an artist's batch starting at ``start`` lists, and the
+    next batch's start, count and how many records are left after this one.
+
+    The first batch also lists every record with a copy in the library, so
+    later batches leave those out. ``through`` names album ids the batch has
+    to reach, such as picks kept from before a reload."""
+    end = start + _ARTIST_ALBUM_BATCH
+    wanted = {str(album_id) for album_id in through}
+    if wanted:
+        last = max((i for i, g in enumerate(groups[start:], start)
+                    if any(str(e["id"]) in wanted for e in g["editions"])),
+                   default=-1)
+        while end <= last:
+            end += _ARTIST_ALBUM_BATCH
+    if start:
+        batch = [g for g in groups[start:end] if not _in_library(g)]
+    else:
+        batch = [g for g in groups if g["index"] < end or _in_library(g)]
+    left = sum(1 for g in groups[end:] if not _in_library(g))
+    following = sum(1 for g in groups[end:end + _ARTIST_ALBUM_BATCH]
+                    if not _in_library(g))
+    more = ({"start": end, "count": following, "left": left,
+             "total": len(groups)} if left else None)
+    return batch, more
+
+
+def _search_error(exc, query):
+    """What Search says about a request that raised ``exc``."""
+    if isinstance(exc, NoCredsError):
+        return "No Qobuz credentials set. Visit Settings."
+    if isinstance(exc, AuthLost):
+        return "Token is expired or invalid. Update it in Settings."
+    if isinstance(exc, QobuzUnavailable):
+        return str(exc)
+    if not isinstance(exc, QobuzError):
+        _log.exception("search failed for %r", query)
+    return "Search failed. Try again."
 
 
 @router.post("/search", response_class=HTMLResponse)
@@ -863,18 +929,13 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             elif kind == "album" or selected_artist:
                 results, album_groups = await _album_results(
                     raw, query, token, queued_albums, scanning_albums)
-        except NoCredsError:
-            error = "No Qobuz credentials set. Visit Settings."
-        except AuthLost:
-            error = "Token is expired or invalid. Update it in Settings."
-        except QobuzUnavailable as exc:
-            error = str(exc)
-        except QobuzError:
-            error = "Search failed. Try again."
-        except Exception:
-            _log.exception(
-                "search failed for %r", query)
-            error = "Search failed. Try again."
+        except Exception as exc:
+            error = _search_error(exc, query)
+    album_total = len(album_groups)
+    album_more = None
+    if selected_artist and album_total > _ARTIST_ALBUMS_AT_ONCE:
+        album_groups, album_more = _album_batch(album_groups, 0)
+        album_more["url"] = _album_batch_url(artist_id, artist_name, query)
     creds_ok = qobuz_access._creds_ok()
     search_state = f"{kind}|{query}"
     if artist_id:
@@ -882,21 +943,24 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     if kind == "album" and album_id:
         search_state += f"|album:{album_id}"
     search_result_count = len(results) if results else len(artist_results)
+    if album_more:
+        search_result_count = sum(len(g["editions"]) for g in album_groups)
     search_count = (len(album_groups) if kind == "album" else
                     len(artist_results) if kind == "artist" else len(results))
     search_count_label = plural(search_count, kind)
     if kind == "album":
         search_count_label += " on Qobuz"
-    defer_search_views = search_result_count > _SEARCH_SNAPSHOT_RESULT_LIMIT
+    search_cacheable = search_result_count <= _SEARCH_SNAPSHOT_RESULT_LIMIT
     ctx = {"q": query, "results": results, "album_groups": album_groups,
+           "album_total": album_total, "album_more": album_more,
            "artist_results": artist_results, "selected_artist": selected_artist,
            "error": error, "kind": kind,
            "search_count_label": search_count_label,
            "artist_only_count": artist_only_count,
            "artist_only_label": plural(artist_only_count, "album"),
            "search_state": search_state,
-           "search_cacheable": not defer_search_views,
-           "defer_search_views": defer_search_views,
+           "search_cacheable": search_cacheable,
+           "defer_search_views": not search_cacheable or album_more is not None,
            "creds_ok": creds_ok, "qobuz_ready": qobuz_access._qobuz_ready(), "page": "search"}
     if rendering._is_htmx(request):
         resp = rendering._tr(request, "_search_results.html", ctx)
@@ -914,6 +978,46 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             resp.headers["HX-Push-Url"] = "/?" + urllib.parse.urlencode(params)
         return resp
     return RedirectResponse(url="/", status_code=303)
+
+
+def _album_batch_url(artist_id, artist_name, query):
+    return "/search/artist-albums?" + urllib.parse.urlencode(
+        {"artist_id": artist_id, "artist_name": artist_name, "q": query})
+
+
+@router.get("/search/artist-albums", response_class=HTMLResponse)
+async def search_artist_albums(request: Request, artist_id: str = "",
+                               artist_name: str = "", q: str = "",
+                               start: int = 0,
+                               through: list[str] = Query(default=[])):
+    """The next batch of a long artist list, rows for both views."""
+    artist_id = artist_id.strip()[:64]
+    artist_name = artist_name.strip()[:200]
+    query = q.strip()[:200]
+    if not artist_id or start <= 0:
+        return HTMLResponse("")
+    album_groups = []
+    album_more = None
+    try:
+        token = qobuz_access._get_token()
+        raw, selected_artist, error = await _fetch_artist_albums(
+            artist_id, artist_name, query, token)
+        if not error:
+            queued_albums, _queued_tracks, scanning_albums = (
+                download_admission._active_search_downloads())
+            _results, album_groups = await _album_results(
+                raw, query, token, queued_albums, scanning_albums)
+    except Exception as exc:
+        error = _search_error(exc, query)
+    if error:
+        return HTMLResponse(rendering._ql_notice_html("error", html.escape(error)))
+    album_groups, album_more = _album_batch(album_groups, start, through)
+    if album_more:
+        album_more["url"] = _album_batch_url(artist_id, artist_name, query)
+    return rendering._tr(request, "_search_results.html", {
+        "album_batch": True, "album_groups": album_groups,
+        "album_more": album_more, "selected_artist": selected_artist,
+        "q": query, "page": "search"})
 
 
 def _track_length(seconds):
@@ -934,12 +1038,18 @@ def _album_tracklist(album_id, token):
         # marks are the only thing lost.
         _log.exception(
             "tracklist ownership check failed for album %r", album_id)
-    return [{"n": t.get("track_number") or i,
-             "disc": t.get("media_number") or 1,
-             "title": t.get("title") or "?",
-             "length": _track_length(t.get("duration")),
-             "owned": str(t.get("id")) in present_ids}
-            for i, t in enumerate(items, 1)]
+    tracks = []
+    for i, t in enumerate(items, 1):
+        title = t.get("title") or "?"
+        version = (t.get("version") or "").strip()
+        tracks.append({
+            "n": t.get("track_number") or i,
+            "disc": t.get("media_number") or 1,
+            "title": title,
+            "version": "" if version.casefold() in title.casefold() else version,
+            "length": _track_length(t.get("duration")),
+            "owned": str(t.get("id")) in present_ids})
+    return tracks
 
 
 @router.get("/search/album-tracks", response_class=HTMLResponse)
@@ -974,6 +1084,8 @@ async def search_album_tracks(request: Request, album_id: str = ""):
         error = "Qobuz could not list these tracks. Try again."
     return rendering._tr(request, "_search_tracklist.html", {
         "tracks": tracks,
+        "partly_owned": any(t["owned"] for t in tracks)
+        and not all(t["owned"] for t in tracks),
         "multi_disc": len({t["disc"] for t in tracks}) > 1,
         "error": error,
         "page": "search"})

@@ -8,9 +8,9 @@
   {% set ns.disc = t.disc %}
   <p class="ql-track-disc">Disc {{ t.disc }}</p>
   {% endif %}
-  <p class="ql-track-line{% if t.owned %} is-owned{% endif %}">
+  <p class="ql-track-line{% if t.owned %} is-owned{% elif partly_owned %} is-missing{% endif %}">
     <span class="ql-track-n">{{ t.n }}</span>
-    <span class="ql-track-name">{{ t.title }}</span>
+    <span class="ql-track-name">{{ t.title }}{% if t.version %} <span class="ql-track-version">({{ t.version }})</span>{% endif %}{% if partly_owned and not t.owned %}<span class="sr-only"> (missing)</span>{% endif %}</span>
     <span class="ql-track-time">{{ t.length }}</span>
   </p>
   {% else %}

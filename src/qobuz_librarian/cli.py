@@ -1346,6 +1346,16 @@ def main():
                 log.info(fmt(C.YELLOW,
                     f"  ⟲  Put back {origin}, which an interrupted "
                     "upgrade or repair had moved aside."))
+            left = backup_mod.albums_left_in_backups()
+            if left:
+                log.info(fmt(C.YELLOW, wrap(
+                    f"{plural(len(left), 'album')} "
+                    f"{'is' if len(left) == 1 else 'are'} in the backup "
+                    "folder and missing from the library: "
+                    + "; ".join(str(origin) for _path, origin in left)
+                    + f". Restore {'it' if len(left) == 1 else 'them'} in "
+                    "Settings > Diagnostics in the web app.",
+                    indent="  ", hanging="  ")))
         except Exception as e:
             vlog(f"album put-back error: {e}")
         # Sweep upgrade-backup dir of anything older than retention window.

@@ -1673,8 +1673,14 @@
       }
       function reconcileSelection() {
         Object.keys(selected).forEach(function (key) {
-          if (!actionableFormForKey(key)) delete selected[key];
+          if (!actionableFormForKey(key) && !inUnloadedBatch(key)) delete selected[key];
         });
+      }
+      // A pick kept from before a reload can sit in a batch not loaded yet.
+      function inUnloadedBatch(key) {
+        return !!root.querySelector("[data-search-more]")
+          && !Array.prototype.some.call(root.querySelectorAll("[data-search-item]"),
+            function (item) { return item.dataset.searchKey === key; });
       }
       function syncBoxes() {
         reconcileSelection();
@@ -1719,6 +1725,9 @@
             return !el.closest("[data-version-panel]")
               && !(on && el.dataset.owned === "1");
           }).length : 0;
+        // Batches not loaded yet hold no album already in the library.
+        var more = root.querySelector("[data-search-more]");
+        if (more) shown += parseInt(more.dataset.searchMoreLeft || "0", 10);
         if (meta) {
           if (on) {
             meta.textContent = shown + " album" + (shown === 1 ? "" : "s")
@@ -1777,6 +1786,65 @@
         initCoverFallbacks();
         try { localStorage.setItem("ql-search-view", name); } catch (e) {}
       }
+      // A long artist list comes a batch at a time. Each batch carries rows
+      // for both views, and a parked view takes its rows into its template.
+      var moreRequest = null;
+      function loadMoreAlbums(through) {
+        var more = root.querySelector("[data-search-more]");
+        var button = more && more.querySelector("[data-search-more-url]");
+        if (!button) return Promise.resolve(false);
+        if (moreRequest) return moreRequest;
+        var url = button.dataset.searchMoreUrl;
+        (through || []).forEach(function (id) {
+          url += "&through=" + encodeURIComponent(id);
+        });
+        button.disabled = true;
+        moreRequest = sessionFetch(url)
+          .then(function (r) { return r.ok ? r.text() : ""; })
+          .then(function (text) {
+            var reply = document.createElement("template");
+            reply.innerHTML = text;
+            var batches = reply.content.querySelectorAll("template[data-search-batch]");
+            if (!batches.length) {
+              button.disabled = false;
+              showToast(reply.content.textContent.trim()
+                || "Couldn't load more albums. Try again.", "error");
+              return false;
+            }
+            batches.forEach(function (batch) {
+              var panel = root.querySelector(
+                '[data-search-view-panel="' + batch.dataset.searchBatch + '"]');
+              if (!panel) return;
+              var parked = panel.querySelector("template[data-search-view-template]");
+              var host = parked && parked.content.childNodes.length ? parked.content : panel;
+              var target = batch.dataset.searchBatch === "table"
+                ? host.querySelector(".ql-table-body") : host;
+              if (target) target.appendChild(batch.content);
+            });
+            var next = reply.content.querySelector("[data-search-more]");
+            if (next) more.replaceWith(next);
+            else more.remove();
+            root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
+              if (!panel.classList.contains("hidden") && window.htmx) window.htmx.process(panel);
+            });
+            initCoverFallbacks();
+            syncBoxes();
+            applyOwnedFilterCount();
+            return true;
+          })
+          .catch(function (why) {
+            button.disabled = false;
+            if (why !== "navigation") {
+              showToast("Couldn't load more albums. Check your connection.", "error");
+            }
+            return false;
+          })
+          .then(function (loaded) {
+            moreRequest = null;
+            return loaded;
+          });
+        return moreRequest;
+      }
       function savedSearchView() {
         try { return localStorage.getItem("ql-search-view") || "table"; } catch (e) { return "table"; }
       }
@@ -1817,6 +1885,11 @@
           root.classList.toggle("is-filtering-owned", next);
           applyOwnedFilterCount();
           syncBoxes();
+          return;
+        }
+        if (evt.target.closest("[data-search-more-url]")) {
+          evt.preventDefault();
+          loadMoreAlbums();
           return;
         }
         if (clearButton && evt.target.closest("[data-search-clear-selection]")) {
@@ -1989,9 +2062,24 @@
           if (queued && window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
         });
       }
+      // A snapshot saved mid-load keeps the button it disabled.
+      var moreButton = root.querySelector("[data-search-more-url]");
+      if (moreButton) moreButton.disabled = false;
       setView(savedSearchView());
       syncBoxes();
       applyOwnedFilterCount();
+      var unloadedPicks = Object.keys(selected).filter(inUnloadedBatch);
+      if (unloadedPicks.length) {
+        loadMoreAlbums(unloadedPicks.map(function (key) {
+          return key.replace(/^album-/, "");
+        })).then(function (loaded) {
+          if (!loaded) return;
+          unloadedPicks.forEach(function (key) {
+            if (!actionableFormForKey(key)) delete selected[key];
+          });
+          syncBoxes();
+        });
+      }
       root.addEventListener("qlSearchAvailabilityChanged", function () {
         if (searchSnapshotsInvalidated) {
           var current = loadSelection();

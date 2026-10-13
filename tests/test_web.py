@@ -832,6 +832,65 @@ def test_album_search_marks_each_edition_by_what_the_library_holds(
     assert 'data-search-key="album-crystal-castles-iii"' not in response.text
 
 
+def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
+        client, monkeypatch, tmp_path, tagged_flac):
+    """An artist with hundreds of albums lists them a batch at a time. An
+    album the library holds far down the catalogue is in the first batch, the
+    batch that reaches it leaves it out, and a pick kept from before a reload
+    pulls in every batch up to it."""
+    import html
+    import re
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.api import search
+    from qobuz_librarian.library import scanner
+    from qobuz_librarian.web import qobuz_access
+
+    albums = [{"id": f"rec-{n}", "title": f"Record {n}",
+               "artist": {"name": "The Testers"},
+               "release_date_original": "2001-01-01", "tracks_count": 1,
+               "maximum_bit_depth": 16,
+               "tracks": {"items": [{"id": f"song-{n}", "title": f"Song {n}",
+                                     "isrc": f"QZTST01{n:05d}"}]}}
+              for n in range(130)]
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    tagged_flac(tmp_path / "The Testers" / "Record 120 (2001)" / "song.flac",
+                TITLE="Song 120", ALBUM="Record 120", ARTIST="The Testers",
+                ISRC="QZTST0100120")
+    scanner.clear_scan_caches()
+    monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
+    monkeypatch.setattr(search, "get_artist_albums",
+                        lambda *_a, **_kw: (albums, len(albums)))
+    monkeypatch.setattr(search, "get_album",
+                        lambda album_id, _token: albums[int(album_id[4:])])
+
+    def listed(response):
+        return set(re.findall(r'data-search-key="album-(rec-\d+)"', response.text))
+
+    def next_batch(response):
+        found = re.search(r'data-search-more-url="([^"]+)"', response.text)
+        return html.unescape(found.group(1)) if found else None
+
+    def records(numbers):
+        return {f"rec-{n}" for n in numbers if n != 120}
+
+    headers = {"HX-Request": "true"}
+    first = client.post("/search", data={
+        "q": "The Testers", "kind": "artist", "artist_id": "7",
+        "artist_name": "The Testers"}, headers=headers)
+    assert listed(first) == records(range(50)) | {"rec-120"}
+    assert 'data-search-key="album-rec-120" data-owned="1"' in first.text
+
+    second = client.get(next_batch(first), headers=headers)
+    assert listed(second) == records(range(50, 100))
+    last = client.get(next_batch(second), headers=headers)
+    assert listed(last) == records(range(100, 130))
+    assert next_batch(last) is None
+
+    through = client.get(next_batch(first) + "&through=rec-104", headers=headers)
+    assert listed(through) == records(range(50, 130))
+
+
 def test_settings_saves_wait_for_running_jobs_and_never_drop_another_change(
         tmp_path, monkeypatch):
     """An in-flight job must not see cfg.* flip mid-run. Two saves at once

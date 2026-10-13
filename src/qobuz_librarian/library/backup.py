@@ -6408,6 +6408,8 @@ def list_retained_backups():
                 origin = _read_backup_origin(origin_root)
                 if origin is None and manifest is not None:
                     origin = Path(manifest["receipt"]["origin"])
+                elif origin is None:
+                    origin = _intended_origin(entry)
                 result = (
                     BackupClassification("retained", "interrupted")
                     if entry.name.startswith(".ql-dispose-backup-")
@@ -10150,9 +10152,11 @@ def albums_left_in_backups():
     missing from the library, oldest first.
 
     A hard stop during an upgrade, a forced re-download or a whole-album
-    repair leaves the album here with nothing in its place. Downloads an
-    upgrade set aside are left out, and so is an album whose parent folder
-    is gone too, which is how an unmounted library reads. Metadata only.
+    repair leaves the album here with nothing in its place, and so does a
+    backup the start-up put-back could not finish. Downloads an upgrade set
+    aside and file-by-file backups are left out, and so is an album whose
+    parent folder is gone too, which is how an unmounted library reads.
+    Metadata only.
     """
     found = []
     try:
@@ -10162,11 +10166,17 @@ def albums_left_in_backups():
     for entry in entries:
         if (
             not re.match(r"^\d{8}_\d{6}_", entry.name)
-            or not (entry / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file()
+            or not entry.is_dir()
+            or (
+                not (entry / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file()
+                and re.match(
+                    r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|downsample)_",
+                    entry.name)
+            )
             or is_set_aside_replacement(entry)
         ):
             continue
-        origin = _read_backup_origin(entry)
+        origin = _read_backup_origin(entry) or _intended_origin(entry)
         if (
             origin is not None
             and not os.path.lexists(origin)
@@ -10174,6 +10184,18 @@ def albums_left_in_backups():
         ):
             found.append((entry, origin))
     return found
+
+
+def _intended_origin(path):
+    try:
+        root_fd = _open_backup_directory(path.parent)
+    except OSError:
+        return None
+    try:
+        intent = _read_backup_intent(root_fd, _BACKUP_INTENT_PREFIX + path.name)
+    finally:
+        os.close(root_fd)
+    return None if intent is None else Path(intent[1]["origin"])
 
 
 def _incarnations(generations):

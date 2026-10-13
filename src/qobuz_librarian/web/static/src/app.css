@@ -1462,22 +1462,22 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-track-name {
   min-width: 0;
-  overflow: hidden;
   color: var(--ql-text-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .ql-grid-tile .ql-track-line {
   grid-template-columns: 1.35rem minmax(0, 1fr) auto;
   align-items: start;
   gap: 0.45rem;
 }
-.ql-grid-tile .ql-track-name {
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
 .ql-track-line.is-owned {
   opacity: 0.5;
+}
+.ql-track-line.is-missing .ql-track-name {
+  color: var(--ql-warning);
+}
+.ql-track-version {
+  color: var(--ql-text-3);
 }
 .ql-track-disc {
   margin: 0.45rem 0 0.1rem;
