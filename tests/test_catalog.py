@@ -15,8 +15,11 @@ from qobuz_librarian.library.catalog import (
 )
 
 
-def test_automatic_multi_artist_migration_is_fail_closed(
+def test_multi_artist_migration_is_fail_closed_and_keeps_a_band_name_whole(
         tmp_path, monkeypatch):
+    """An unattended multi-artist folder migration moves nothing and drops a
+    stale ownership capture, and a band name with a comma in it is not split
+    into artists."""
     music_root = tmp_path / "music"
     source = music_root / "Artist, Other" / "Album"
     destination = music_root / "Artist" / "Album"
@@ -43,13 +46,8 @@ def test_automatic_multi_artist_migration_is_fail_closed(
     assert destination_track.read_bytes() == b"destination"
     assert capture == {}
 
-
-def test_multi_artist_migration_keeps_a_band_name_whole(tmp_path, monkeypatch):
-    music_root = tmp_path / "music"
     source = music_root / "Earth, Wind & Fire, The Emotions" / "Boogie Wonderland"
     source.mkdir(parents=True)
-    monkeypatch.setattr(config, "MUSIC_ROOT", music_root)
-
     assert catalog.multi_artist_migration_destination(
         {"artist": {"name": "Earth, Wind & Fire"}}, source,
     ) == music_root / "Earth, Wind & Fire" / "Boogie Wonderland"
@@ -71,7 +69,12 @@ def _qalbum(title, year, bd=16, sr=44.1, tc=10):
             "tracks_count": tc}
 
 
-def test_compute_missing_disc_and_edition_handling():
+def test_track_matching_by_disc_edition_title_and_isrc():
+    """Discs, remasters and recording versions decide what is missing, and a
+    rip that tags both discs as disc 1 is still complete. Non-Latin titles
+    match on their text, not an empty normalization. The title fallback
+    cannot hand one ISRC twin's file to another track. Bonus tracks on disk
+    are flagged as extras before an upgrade."""
     qobuz = [_qt("Intro", disc=1), _qt("Theme", disc=1),
              _qt("Intro", disc=2), _qt("Theme", disc=2)]
     owned = [_et("Intro", disc=1), _et("Theme", disc=1),
@@ -94,8 +97,6 @@ def test_compute_missing_disc_and_edition_handling():
     m, p = compute_missing(qobuz, [_et(t["title"]) for t in qobuz])
     assert not m and len(p) == 4
 
-
-def test_non_latin_titles_match_on_text_not_empty_normalization():
     _, p = compute_missing([_qt("東京")], [_et("東京")])
     assert len(p) == 1
     m, p = compute_missing([_qt("東京")], [_et("大阪")])
@@ -103,8 +104,22 @@ def test_non_latin_titles_match_on_text_not_empty_normalization():
     extras = find_extras_in_existing([_qt("東京")], [_et("大阪")])
     assert [t["title"] for t in extras] == ["大阪"]
 
+    qobuz = [
+        {"title": "Song", "media_number": 1, "isrc": "USAAA0000001"},
+        {"title": "Song", "media_number": 1, "isrc": "USBBB0000002"},
+    ]
+    on_disk = [
+        {"title": "Song", "discnumber": 1, "isrc": "USAAA0000001"},
+        {"title": "Song", "discnumber": 1, "isrc": "USAAA0000001"},
+    ]
+    missing, present = compute_missing(qobuz, on_disk)
+    assert [t["isrc"] for t in missing] == ["USBBB0000002"]
+    assert len(present) == 1
 
-def test_find_extras_flags_bonus_tracks_for_upgrade_safety():
+    other_edition = [{"title": "Song", "discnumber": 1, "isrc": "GBZZZ9999999"}]
+    missing, _ = compute_missing([qobuz[0]], other_edition)
+    assert not missing
+
     extras = find_extras_in_existing(
         [_qt("Time")], [_et("Time"), _et("Time (Bonus Track)")])
     assert len(extras) == 1 and "Bonus" in extras[0]["title"]
@@ -115,7 +130,12 @@ def test_find_extras_flags_bonus_tracks_for_upgrade_safety():
     assert [t["title"] for t in extras] == ["Bonus"]
 
 
-def test_dedup_album_versions_collapses_editions_but_keeps_distinct_years():
+def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
+    """Editions of one album collapse to one, preferring hi-res but never a
+    smaller "Bonus Content" companion, while distinct years and non-Latin
+    titles stay apart. Owning an album hides its editions and reissues, but
+    not a sequel whose title contains its name, and owning a live album does
+    not hide the studio one."""
     pairs = [_qalbum("Abbey Road", 1969), _qalbum("Abbey Road (Remaster)", 1969)]
     assert len(dedup_album_versions(pairs)) == 1
     pairs = [_qalbum("Grateful Dead", 1967), _qalbum("The Grateful Dead", 1967)]
@@ -134,8 +154,6 @@ def test_dedup_album_versions_collapses_editions_but_keeps_distinct_years():
     [(picked, _)] = dedup_album_versions([bonus, album], prefer_hires=True)
     assert picked is album
 
-
-def test_filter_owned_albums_doesnt_swallow_sequels_or_distinct_years():
     pairs = [({"title": "Reload", "release_date_original": "1997"}, 1),
              ({"title": "Album (Deluxe Edition)", "release_date_original": "2010"}, 1)]
     result = filter_owned_albums(pairs, {"load": [1996], "album": [2010]})
@@ -150,7 +168,6 @@ def test_filter_owned_albums_doesnt_swallow_sequels_or_distinct_years():
     pairs = [({"title": "Wasting Light", "release_date_original": "2011"}, 1)]
     assert [a["title"] for a, _ in
             filter_owned_albums(pairs, {"wastinglightlive": [2019]})] == ["Wasting Light"]
-
 
 
 def test_split_album_merge_rules(tmp_path):
@@ -175,27 +192,64 @@ def test_split_album_merge_rules(tmp_path):
     assert _is_split_album_merge(art / "Live (2010)", art / "Live (2011)", "Bonobo") is False
 
 
+def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged_flac):
+    """A live release is not matched to the studio folder it is named after, a
+    single is found in the EP folder holding its recording, and the same mix
+    in two folders keeps the destination that was selected."""
+    from qobuz_librarian.library import scanner
 
-def test_find_album_dir_does_not_match_a_live_release_to_the_studio_folder(tmp_path, monkeypatch):
-    from qobuz_librarian.library.scanner import clear_scan_caches
-    monkeypatch.setattr(config, "MUSIC_ROOT", tmp_path)
+    root = tmp_path / "live"
+    root.mkdir()
+    monkeypatch.setattr(config, "MUSIC_ROOT", root)
     missing = {
         "id": "M",
         "artist": {"name": "Absent Artist"},
         "title": "Absent Album",
     }
     assert find_album_dir_filesystem(missing) is None
-    (tmp_path / "Bonobo" / "The North Borders (2013)").mkdir(parents=True)
-    clear_scan_caches()
+    (root / "Bonobo" / "The North Borders (2013)").mkdir(parents=True)
+    scanner.clear_scan_caches()
     live = {"id": "L", "artist": {"name": "Bonobo"},
             "title": "The North Borders Tour. - Live.",
             "release_date_original": "2014-01-01"}
     assert find_album_dir_filesystem(live) is None
-    clear_scan_caches()
+    scanner.clear_scan_caches()
     studio = {"id": "S", "artist": {"name": "Bonobo"},
               "title": "The North Borders", "release_date_original": "2013-01-01"}
     assert find_album_dir_filesystem(studio).name == "The North Borders (2013)"
-    clear_scan_caches()
+    scanner.clear_scan_caches()
+
+    root = tmp_path / "single"
+    monkeypatch.setattr(config, "MUSIC_ROOT", root)
+    artist = root / "Matisyahu"
+    tagged_flac(artist / "Youth (2006)" / "01.flac", TITLE="Youth", ISRC="USSM10600001")
+    tagged_flac(artist / "Youth EP (2009)" / "01.flac", TITLE="Youth (Single Edit)",
+                ISRC="USSM10900002")
+    tagged_flac(artist / "We (2014)" / "01.flac", TITLE="We", ISRC="USSM11400001")
+    tagged_flac(artist / "Weep (2015)" / "01.flac", TITLE="We", ISRC="USSM11400002")
+    scanner.clear_scan_caches()
+
+    def owned_in(title, isrc, year):
+        single = {"title": title, "artist": {"name": "Matisyahu"},
+                  "release_date_original": f"{year}-06-02",
+                  "tracks": {"items": [{"id": isrc, "title": title, "isrc": isrc}]}}
+        return [folder.name for _, folder, _, present in catalog._edition_matches(single)
+                if present]
+
+    assert owned_in("Youth", "USSM10900002", 2009) == ["Youth EP (2009)"]
+    assert owned_in("We", "USSM11400002", 2014) == []
+
+    root = tmp_path / "mix"
+    monkeypatch.setattr(config, "MUSIC_ROOT", root)
+    folders = [root / "Artist" / name for name in ("Album (1965)", "Album (2026 Mix) (1965)")]
+    for folder in folders:
+        tagged_flac(folder / "01.flac", TITLE="Song (2026 Mix)",
+                    ALBUM="Album (2026 Mix)", ARTIST="Artist", TRACKNUMBER="1")
+    scanner.clear_scan_caches()
+    signatures = catalog.track_signatures_for_album_dirs([folders[1]])
+    assert catalog.find_album_dir_by_track_signatures(signatures) is None
+    assert catalog.find_album_dir_by_track_signatures(
+        signatures, expected_dir=folders[1]) == folders[1]
 
 
 def test_folder_holds_all_tracks_matches_identity_not_count(tmp_path):
@@ -213,24 +267,6 @@ def test_folder_holds_all_tracks_matches_identity_not_count(tmp_path):
 
     assert folder_holds_all_tracks(folder, []) is False
     assert folder_holds_all_tracks(tmp_path / "gone", expected) is False
-
-
-def test_title_fallback_cannot_hand_an_isrc_twin_to_another_track():
-    qobuz = [
-        {"title": "Song", "media_number": 1, "isrc": "USAAA0000001"},
-        {"title": "Song", "media_number": 1, "isrc": "USBBB0000002"},
-    ]
-    on_disk = [
-        {"title": "Song", "discnumber": 1, "isrc": "USAAA0000001"},
-        {"title": "Song", "discnumber": 1, "isrc": "USAAA0000001"},
-    ]
-    missing, present = compute_missing(qobuz, on_disk)
-    assert [t["isrc"] for t in missing] == ["USBBB0000002"]
-    assert len(present) == 1
-
-    other_edition = [{"title": "Song", "discnumber": 1, "isrc": "GBZZZ9999999"}]
-    missing, _ = compute_missing([qobuz[0]], other_edition)
-    assert not missing
 
 
 def test_edition_ownership_keeps_recording_versions(tmp_path):
@@ -308,47 +344,6 @@ def test_edition_ownership_keeps_recording_versions(tmp_path):
         {**old_track, "isrc": "", "version": "Album Version (Explicit)"}]}}
     assert not catalog.edition_missing(explicit, [
         {**original, "title": "Song (Album Version (Explicit))"}], plain_folder)[0]
-
-
-def test_a_single_is_found_in_its_ep_folder(tmp_path, monkeypatch, tagged_flac):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import scanner
-
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
-    artist = tmp_path / "Matisyahu"
-    tagged_flac(artist / "Youth (2006)" / "01.flac", TITLE="Youth", ISRC="USSM10600001")
-    tagged_flac(artist / "Youth EP (2009)" / "01.flac", TITLE="Youth (Single Edit)",
-                ISRC="USSM10900002")
-    tagged_flac(artist / "We (2014)" / "01.flac", TITLE="We", ISRC="USSM11400001")
-    tagged_flac(artist / "Weep (2015)" / "01.flac", TITLE="We", ISRC="USSM11400002")
-    scanner.clear_scan_caches()
-
-    def owned_in(title, isrc, year):
-        single = {"title": title, "artist": {"name": "Matisyahu"},
-                  "release_date_original": f"{year}-06-02",
-                  "tracks": {"items": [{"id": isrc, "title": title, "isrc": isrc}]}}
-        return [folder.name for _, folder, _, present in catalog._edition_matches(single)
-                if present]
-
-    assert owned_in("Youth", "USSM10900002", 2009) == ["Youth EP (2009)"]
-    assert owned_in("We", "USSM11400002", 2014) == []
-
-
-def test_same_mix_in_two_folders_keeps_the_selected_destination(
-        tmp_path, monkeypatch, tagged_flac):
-    from qobuz_librarian import config as cfg
-    from qobuz_librarian.library import scanner
-
-    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
-    folders = [tmp_path / "Artist" / name for name in ("Album (1965)", "Album (2026 Mix) (1965)")]
-    for folder in folders:
-        tagged_flac(folder / "01.flac", TITLE="Song (2026 Mix)",
-                    ALBUM="Album (2026 Mix)", ARTIST="Artist", TRACKNUMBER="1")
-    scanner.clear_scan_caches()
-    signatures = catalog.track_signatures_for_album_dirs([folders[1]])
-    assert catalog.find_album_dir_by_track_signatures(signatures) is None
-    assert catalog.find_album_dir_by_track_signatures(
-        signatures, expected_dir=folders[1]) == folders[1]
 
 
 def test_publishing_a_migration_directory_never_closes_a_reused_number(

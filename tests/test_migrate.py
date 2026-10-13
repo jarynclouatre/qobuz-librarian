@@ -36,10 +36,13 @@ def test_normalize_tags_parses_slashed_track_and_disc_and_year():
     assert meta["year"] == 2008
 
 
-# ── destination path ──────────────────────────────────────────────────────────
+# ── placement ─────────────────────────────────────────────────────────────────
 
-def test_destination_matches_beets_layout(tmp_path):
-    source = tmp_path / "source"
+def test_plan_places_tracks_in_the_beets_layout_and_never_guesses(tmp_path):
+    """Tracks land at Artist/Album (Year)/NN - Title, tracks of one album
+    tagged with different years stay in one folder, and a track missing its
+    artist or album is left unplaceable rather than guessed."""
+    source = tmp_path / "layout"
     source.mkdir()
     track = source / "x.flac"
     track.write_bytes(b"audio")
@@ -49,9 +52,7 @@ def test_destination_matches_beets_layout(tmp_path):
     )
     assert plan.placed[0].dest_rel == Path("Artist/Album (2017)/04 - Hey.flac")
 
-
-def test_tracks_tagged_with_different_years_stay_in_one_album_folder(tmp_path):
-    source = tmp_path / "source" / "Album"
+    source = tmp_path / "years" / "Album"
     source.mkdir(parents=True)
     items = []
     for number, year in enumerate((1999, 2005, 2005), 1):
@@ -63,11 +64,7 @@ def test_tracks_tagged_with_different_years_stay_in_one_album_folder(tmp_path):
     assert {e.dest_rel.parent for e in plan.placed} == {
         Path("Artist/Album (2005)")}
 
-
-# ── classification ─────────────────────────────────────────────────────────────
-
-def test_missing_artist_or_album_is_unplaceable_not_guessed(tmp_path):
-    source = tmp_path / "source"
+    source = tmp_path / "untagged"
     source.mkdir()
     first = source / "a.flac"
     second = source / "b.flac"
@@ -83,7 +80,10 @@ def test_missing_artist_or_album_is_unplaceable_not_guessed(tmp_path):
 
 # ── AcoustID match selection ──────────────────────────────────────────────────
 
-def test_acoustid_rejects_low_confidence_and_ambiguous_matches():
+def test_acoustid_places_a_track_only_on_a_confident_unambiguous_match():
+    """Low-confidence and ambiguous matches are rejected. A confident lookup
+    prefers the Album release group over a Single and takes its earliest
+    year, which makes the track placeable."""
     assert m.choose_acoustid_match([{"score": 0.5, "artist": "A"}]) is None
     assert m.choose_acoustid_match([
         {"score": 0.95, "artist": "Oasis"},
@@ -91,6 +91,19 @@ def test_acoustid_rejects_low_confidence_and_ambiguous_matches():
     ]) is None
     chosen = m.choose_acoustid_match([{"score": 0.97, "artist": "Oasis", "title": "T"}])
     assert chosen["artist"] == "Oasis"
+
+    resp = {"results": [{"score": 0.98, "recordings": [{
+        "title": "Kong", "artists": [{"name": "Bonobo"}],
+        "releasegroups": [
+            {"type": "Single", "title": "Kong", "releases": [{"date": {"year": 2009}}]},
+            {"type": "Album", "title": "Black Sands", "artists": [{"name": "Bonobo"}],
+             "releases": [{"date": {"year": 2011}}, {"date": {"year": 2010}}]},
+        ]}]}]}
+    meta = m.identify_from_lookup(resp, 0.9, "stem", ".flac")
+    assert meta["album"] == "Black Sands"
+    assert meta["year"] == 2010
+    assert meta["albumartist"] == "Bonobo"
+    assert m.is_placeable(meta)
 
 
 def test_fingerprinting_keeps_full_duration_and_rejects_disguised_playlists(
@@ -137,7 +150,6 @@ def test_fingerprinting_keeps_full_duration_and_rejects_disguised_playlists(
     assert len(lookups) == 1
 
 
-
 def _placed_plan(tmp_path, n=1, *, existing_destination_root=False,
                  existing_destination_parents=False, companion_bytes=0):
     src_dir = tmp_path / "src"
@@ -157,8 +169,12 @@ def _placed_plan(tmp_path, n=1, *, existing_destination_root=False,
     return m.build_plan(items, destination)
 
 
-def test_copy_mode_leaves_originals_untouched(tmp_path):
-    plan = _placed_plan(tmp_path)
+def test_copy_keeps_originals_and_in_place_moves_only_after_a_verified_copy(tmp_path):
+    """Copy mode leaves the originals and carries their mode, xattrs, times
+    and lyrics. In-place mode moves only after a verified copy and names what
+    it left behind in each source folder."""
+    (tmp_path / "copy").mkdir()
+    plan = _placed_plan(tmp_path / "copy")
     src = plan.placed[0].source
     src.chmod(0o640)
     m.os.setxattr(src, "user.qobuz-migration-test", b"preserved")
@@ -186,17 +202,15 @@ def test_copy_mode_leaves_originals_untouched(tmp_path):
     assert src.with_suffix(".lrc").read_text() == lyrics
     assert not dst.with_name(dst.name + ".partial").exists()
 
-
-
-
-def test_in_place_mode_moves_only_after_verified_copy(tmp_path):
-    plan = _placed_plan(tmp_path, n=2)
-    album = tmp_path / "src" / "Album"
+    root = tmp_path / "move"
+    root.mkdir()
+    plan = _placed_plan(root, n=2)
+    album = root / "src" / "Album"
     (album / "Scans").mkdir(parents=True)
     (album / "Scans" / "back.jpg").write_bytes(b"scan")
     (album / "readme.txt").write_text("notes")
     items = []
-    for entry, folder in zip(plan.placed, (album, tmp_path / "src" / "Disc")):
+    for entry, folder in zip(plan.placed, (album, root / "src" / "Disc")):
         folder.mkdir(exist_ok=True)
         source = entry.source.rename(folder / entry.source.name)
         source.with_suffix(".lrc").write_text(source.name)
@@ -215,9 +229,18 @@ def test_in_place_mode_moves_only_after_verified_copy(tmp_path):
         assert destination.with_suffix(".lrc").read_text() == entry.source.name
 
 
-def test_execute_never_overwrites_a_destination_that_wins_publish_race(
+def test_execute_never_clobbers_a_destination_or_moves_a_changed_source(
         tmp_path, monkeypatch):
-    plan = _placed_plan(tmp_path, existing_destination_parents=True)
+    """A destination that wins the publish race is not overwritten, a source
+    replaced after the preview and a destination parent turned into a symlink
+    are refused, and an interrupt right after publishing keeps the exact
+    source, takes the published copy back and records the run as
+    cancelled."""
+    def case(name, **kwargs):
+        (tmp_path / name).mkdir()
+        return _placed_plan(tmp_path / name, **kwargs)
+
+    plan = case("race", existing_destination_parents=True)
     dst = plan.dest_root / plan.placed[0].dest_rel
     rename_noreplace = m._rename_noreplace_at
     raced = False
@@ -237,47 +260,36 @@ def test_execute_never_overwrites_a_destination_that_wins_publish_race(
         return rename_noreplace(
             source_fd, source_name, destination_fd, destination_name)
 
-    monkeypatch.setattr(m, "_rename_noreplace_at", publish_racer)
-    res = m.execute_plan(plan, in_place=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "_rename_noreplace_at", publish_racer)
+        res = m.execute_plan(plan, in_place=False)
     assert res.copied == 0 and res.skipped == 1
     assert dst.read_bytes() == b"precious"                # not clobbered
     assert plan.placed[0].source.exists()
 
-
-def test_execute_refuses_a_source_replacement_after_preview(tmp_path):
-    plan = _placed_plan(tmp_path)
+    plan = case("replaced")
     source = plan.placed[0].source
     reviewed = source.with_name("reviewed.flac")
     source.rename(reviewed)
     source.write_bytes(b"unrelated replacement")
-
     result = m.execute_plan(plan, in_place=True)
-
     destination = plan.dest_root / plan.placed[0].dest_rel
     assert result.failed == 1
     assert not destination.exists()
     assert source.read_bytes() == b"unrelated replacement"
     assert reviewed.read_bytes().startswith(b"audio-bytes-")
 
-
-def test_execute_refuses_a_destination_parent_symlink_after_preview(tmp_path):
-    plan = _placed_plan(tmp_path, existing_destination_root=True)
+    plan = case("symlinked", existing_destination_root=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     (plan.dest_root / "Artist").symlink_to(outside, target_is_directory=True)
-
     result = m.execute_plan(plan, in_place=False)
-
     assert result.failed == 1
     assert not list(outside.rglob("*.flac"))
     assert plan.placed[0].source.exists()
 
-
-def test_publish_interrupt_keeps_the_exact_source_and_reconciles_destination(
-        tmp_path, monkeypatch):
-    plan = _placed_plan(tmp_path, existing_destination_parents=True)
+    plan = case("interrupted", existing_destination_parents=True)
     destination = plan.dest_root / plan.placed[0].dest_rel
-    rename_noreplace = m._rename_noreplace_at
 
     def interrupt_after_publish(
             source_fd, source_name, destination_fd, destination_name):
@@ -333,16 +345,23 @@ def _sealed_web_choice(files, dest):
         "companion_receipts": plan.companion_receipts,
     }}]
 
-def test_execute_migration_copies_selected_and_keeps_originals(tmp_path):
+def test_web_migration_copies_the_review_and_holds_a_short_move_for_consent(
+        tmp_path, monkeypatch):
+    """The reviewed tracks are copied with the originals kept. An in-place
+    move into a destination known to be short on space is refused before any
+    file is touched, since running out mid-move would scatter the library,
+    unless the deliberate low-space override is passed, and a scan of such a
+    move asks for that acknowledgement in its review."""
+    from qobuz_librarian.library import migrate as engine
     from qobuz_librarian.web import flows
     from qobuz_librarian.web import jobs as jm
 
-    src = tmp_path / "src"
-    src.mkdir()
+    src = tmp_path / "copy" / "src"
+    src.mkdir(parents=True)
     f1, f2 = src / "x.flac", src / "y.flac"
     f1.write_bytes(b"one")
     f2.write_bytes(b"two")
-    dest = tmp_path / "dest"
+    dest = tmp_path / "copy" / "dest"
     chosen = _sealed_web_choice((f1, f2), dest)
     job = jm.Job(title="mig")
     flows.execute_migration(job, chosen, str(dest), in_place=False)
@@ -352,22 +371,11 @@ def test_execute_migration_copies_selected_and_keeps_originals(tmp_path):
     assert job.status is not jm.JobStatus.FAILED and not job.error
     assert list(dest.glob("migration-results-*.csv"))
 
-
-
-
-def test_execute_migration_blocks_low_space_in_place_move(tmp_path, monkeypatch):
-    # An in-place move into a destination that's known to be short on space must
-    # be refused before any file is touched; running out mid-move would scatter
-    # the library unless the user passes the deliberate low-space override.
-    from qobuz_librarian.library import migrate as engine
-    from qobuz_librarian.web import flows
-    from qobuz_librarian.web import jobs as jm
-
-    src = tmp_path / "src"
-    src.mkdir()
+    src = tmp_path / "move" / "src"
+    src.mkdir(parents=True)
     f1 = src / "x.flac"
     f1.write_bytes(b"one")
-    dest = tmp_path / "dest"
+    dest = tmp_path / "move" / "dest"
     chosen = _sealed_web_choice((f1,), dest)
     destination = dest / chosen[0]["payload"]["entries"][0][1]
     monkeypatch.setattr(
@@ -381,29 +389,17 @@ def test_execute_migration_blocks_low_space_in_place_move(tmp_path, monkeypatch)
     assert not destination.exists()
     assert f1.exists()                                   # nothing was moved
 
-    # The explicit override lets the same short move through.
     job2 = jm.Job(title="mig2")
     flows.execute_migration(job2, chosen, str(dest), in_place=True, src=src,
                             allow_low_space=True)
     assert not job2.error
     assert destination.exists()
 
-
-def test_scan_migration_requires_a_review_ack_for_a_short_in_place_move(
-        tmp_path, monkeypatch):
-    from qobuz_librarian.library import migrate as engine
-    from qobuz_librarian.web import flows
-    from qobuz_librarian.web import jobs as jm
-
-    plan = _placed_plan(tmp_path)
+    (tmp_path / "scan").mkdir()
+    plan = _placed_plan(tmp_path / "scan")
     monkeypatch.setattr(engine, "collect_items", lambda *_args, **_kwargs: ["item"])
     monkeypatch.setattr(engine, "build_plan", lambda _items, _dest: plan)
     monkeypatch.setattr(engine, "verified_resume_entries", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        engine,
-        "space_estimate",
-        lambda _plan, in_place, resume_entries=None: (10_000, 10),
-    )
     job = jm.Job(title="migration")
     job.execute_args = {"allow_low_space": False}
 
@@ -415,33 +411,49 @@ def test_scan_migration_requires_a_review_ack_for_a_short_in_place_move(
     assert job.execute_args["requires_low_space_override"] is True
 
 
-def test_fingerprint_lookup_resolves_album_year_and_is_placeable():
-    resp = {"results": [{"score": 0.98, "recordings": [{
-        "title": "Kong", "artists": [{"name": "Bonobo"}],
-        "releasegroups": [
-            {"type": "Single", "title": "Kong", "releases": [{"date": {"year": 2009}}]},
-            {"type": "Album", "title": "Black Sands", "artists": [{"name": "Bonobo"}],
-             "releases": [{"date": {"year": 2011}}, {"date": {"year": 2010}}]},
-        ]}]}]}
-    meta = m.identify_from_lookup(resp, 0.9, "stem", ".flac")
-    assert meta["album"] == "Black Sands"      # Album type preferred over Single
-    assert meta["year"] == 2010                # earliest release year
-    assert meta["albumartist"] == "Bonobo"
-    assert m.is_placeable(meta)                # the whole point: now placeable
-
-
-def test_run_migrate_gates_on_insufficient_destination_space(tmp_path, monkeypatch):
-    # Short on space: an unattended (--yes) run must refuse outright (a partial
-    # in-place move scatters the library), and an interactive run needs a typed
-    # override, not the casual confirm that could be answered with a stray "y".
+def test_terminal_migration_gates_a_short_move_and_leaves_a_dry_run_untouched(
+        tmp_path, monkeypatch):
+    """Short on space, an unattended (--yes) run refuses outright, since a
+    partial in-place move scatters the library, and an interactive run needs
+    a typed override rather than a stray "y". A dry run, twice over, leaves
+    the destination as it was."""
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from qobuz_librarian.modes import migrate as migrate_mode
 
-    src = tmp_path / "src"
-    dest = tmp_path / "dest"
-    src.mkdir()
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    track = source / "track.flac"
+    track.write_bytes(b"audio-bytes")
+    existing = destination / "keep.txt"
+    existing.write_text("unchanged", encoding="utf-8")
+    monkeypatch.setattr(migrate_mode, "HAVE_MUTAGEN", True)
+    monkeypatch.setattr(
+        migrate_mode.engine,
+        "collect_items",
+        lambda *_args, **_kwargs: [(track, _meta(title="Song 0", track=1), "tags")],
+    )
+    args = SimpleNamespace(
+        migrate_src=str(source),
+        migrate_dest=str(destination),
+        dry_run=True,
+        yes=False,
+        verbose=False,
+        in_place=False,
+        acoustid=False,
+    )
+
+    assert migrate_mode.run_migrate_mode(args) == 0
+    assert migrate_mode.run_migrate_mode(args) == 0
+    assert list(destination.iterdir()) == [existing]
+    assert existing.read_text(encoding="utf-8") == "unchanged"
+
+    src = tmp_path / "short" / "src"
+    dest = tmp_path / "short" / "dest"
+    src.mkdir(parents=True)
     dest.mkdir()
     plan = SimpleNamespace(
         placed=[SimpleNamespace(source=src / "a.flac",
@@ -507,41 +519,6 @@ def test_run_migrate_gates_on_insufficient_destination_space(tmp_path, monkeypat
     assert executed == [1]
 
 
-def test_migrate_dry_run_leaves_destination_untouched(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    from qobuz_librarian.modes import migrate as migrate_mode
-
-    source = tmp_path / "source"
-    destination = tmp_path / "destination"
-    source.mkdir()
-    destination.mkdir()
-    track = source / "track.flac"
-    track.write_bytes(b"audio-bytes")
-    existing = destination / "keep.txt"
-    existing.write_text("unchanged", encoding="utf-8")
-    monkeypatch.setattr(migrate_mode, "HAVE_MUTAGEN", True)
-    monkeypatch.setattr(
-        migrate_mode.engine,
-        "collect_items",
-        lambda *_args, **_kwargs: [(track, _meta(title="Song 0", track=1), "tags")],
-    )
-    args = SimpleNamespace(
-        migrate_src=str(source),
-        migrate_dest=str(destination),
-        dry_run=True,
-        yes=False,
-        verbose=False,
-        in_place=False,
-        acoustid=False,
-    )
-
-    assert migrate_mode.run_migrate_mode(args) == 0
-    assert migrate_mode.run_migrate_mode(args) == 0
-    assert list(destination.iterdir()) == [existing]
-    assert existing.read_text(encoding="utf-8") == "unchanged"
-
-
 # ── statx directory-incarnation proof ────────────────────────────────────────
 
 def _statx_result(mask):
@@ -557,9 +534,10 @@ def _statx_result(mask):
     return value
 
 
-def test_directory_identity_proves_filesystem_without_atime(monkeypatch):
-    # ZFS with atime=off reports every field the proof reads but clears
-    # STATX_ATIME; the incarnation proof must still succeed.
+def test_directory_identity_needs_a_mount_id_but_not_atime(monkeypatch):
+    """ZFS with atime=off reports every field the proof reads but clears
+    STATX_ATIME, and the incarnation proof must still succeed; without a
+    mount id it must not."""
     mask = (m._STATX_BASIC_STATS & ~0x0020) | m._STATX_BTIME | m._STATX_MNT_ID
     monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
     identity = m._statx_directory_identity(3, b"", 0)
@@ -567,11 +545,9 @@ def test_directory_identity_proves_filesystem_without_atime(monkeypatch):
     assert identity[4] == 1780678551    # birth time
     assert identity[6] == 9583          # mount id
 
-
-
-
-def test_directory_identity_rejects_missing_mount_id(monkeypatch):
     mask = m._STATX_BASIC_STATS | m._STATX_BTIME  # no STATX_MNT_ID
     monkeypatch.setattr(m, "_statx_probe", lambda *a: _statx_result(mask))
     with pytest.raises(OSError):
         m._statx_directory_identity(3, b"", 0)
+
+
