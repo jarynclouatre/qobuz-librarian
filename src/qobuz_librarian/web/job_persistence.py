@@ -222,7 +222,7 @@ def _expand_candidates(value):
 
 
 def _decode_candidates(value, status) -> tuple[list[dict], bool]:
-    if status not in ("awaiting_review", "pending"):
+    if status not in ("awaiting_review", "pending", "running"):
         return [], False
     try:
         candidates = _expand_candidates(json.loads(value or "[]"))
@@ -2185,9 +2185,10 @@ def load_all() -> list[dict]:
             raise RuntimeError("saved jobs are unavailable")
         rows = conn.execute(
             "SELECT id, title, artist, album_id, kind, status, phase, "
-            # A finished job never reopens its rows, so its text is not read back.
-            "CASE WHEN status='awaiting_review' OR (status='pending' "
-            f"AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
+            # A finished job never reopens its rows, so its text is not read
+            # back. A run cut short returns its picks to the review.
+            "CASE WHEN status='awaiting_review' OR (status IN "
+            f"('pending', 'running') AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
             "THEN candidates END, "
             "error, summary, review_verb, execute_kind, "
             "execute_args, created_at, finished_at, single, attention, "

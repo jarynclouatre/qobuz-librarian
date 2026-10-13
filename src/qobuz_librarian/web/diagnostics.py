@@ -255,7 +255,8 @@ def _diagnostics():
         return total
 
     def _dir_check(label, path, *, want_writable, skip_names=(),
-                   unit=("entry", "entries"), show_size=False):
+                   unit=("entry", "entries"), show_size=False,
+                   dirs_only=False):
         # The Library paths section above already resolves the same folders to
         # the host path Docker exposes them at; naming this one by its
         # container path made the two sections disagree about what to call
@@ -277,7 +278,9 @@ def _diagnostics():
                            "On a NAS, set PUID/PGID in .env to your media-share owner"})
             return
         try:
-            n = sum(1 for entry in p.iterdir() if entry.name not in skip_names)
+            n = sum(1 for entry in p.iterdir()
+                    if entry.name not in skip_names
+                    and (not dirs_only or entry.is_dir()))
         except OSError as e:
             checks.append({"label": label, "ok": False,
                            "detail": f"{display} unreadable: {e}"})
@@ -344,7 +347,8 @@ def _diagnostics():
     # needing review) each cover one problem subset; this is the total the
     # folder is actually holding.
     _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
-               show_size=True, unit=("kept backup", "kept backups"))
+               show_size=True, unit=("kept backup", "kept backups"),
+               dirs_only=True)
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))

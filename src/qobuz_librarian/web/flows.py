@@ -1054,6 +1054,11 @@ def _park_library_failures(failed_cands, execute_kind="library",
         job = job_mgr.Job(title="Restore from backup",
                           execute_kind="collection_restore",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
+    elif execute_kind == "downsample":
+        job = job_mgr.Job(title="Albums to downsample", kind="scan",
+                          execute_kind="downsample",
+                          status=job_mgr.JobStatus.AWAITING_REVIEW,
+                          review_verb="Downsample")
     else:
         job = job_mgr.Job(title="Library scan", kind="scan",
                           execute_kind="library",
@@ -1070,6 +1075,10 @@ def _park_library_failures(failed_cands, execute_kind="library",
     elif execute_kind == "repair":
         job._execute_fn = lambda j, chosen: execute_repairs(
             j, chosen, fresh_download_token())
+    elif execute_kind == "downsample":
+        job._execute_fn = lambda j, chosen: execute_downsamples(
+            j, chosen, keep_originals=(j.execute_args or {}).get(
+                "keep_originals"))
     else:
         job._execute_fn = lambda j, chosen: execute_albums(
             j, chosen, fresh_download_token())
@@ -1097,6 +1106,9 @@ def _park_library_failures(failed_cands, execute_kind="library",
     elif execute_kind == "collection_restore":
         job.summary = (f"{n:,} album{'s' if n != 1 else ''} from the backup "
                        "didn't download last time. Ticked and ready to retry.")
+    elif execute_kind == "downsample":
+        job.summary = (f"{n:,} album{'s' if n != 1 else ''} didn't downsample "
+                       "last time. Ticked and ready to retry.")
     else:
         job.summary = (f"{n:,} album{'s' if n != 1 else ''} didn't download "
                        "last time. Ticked and ready to retry.")
@@ -1150,6 +1162,121 @@ def _return_qobuz_review_picks(picks, execute_kind, execute_args=None):
             execute_args=execute_args,
         ) is not False
     return True
+
+
+def return_interrupted_picks(job):
+    """Put the ticked albums of a run the app stopped mid-way back in its
+    review, ticked. Any of them may already be done, so one whose files no
+    longer match the review is left out, and so is its saved results row,
+    as the review would only refuse it. A missing album is not left out
+    for a change the run made itself, a download into its artist folder."""
+    with job._lock:
+        picks = [c for c in job.candidates if c.get("selected")]
+    written = [Path(p) for p in
+               (job.execute_args or {}).get(_WRITTEN_INTO) or ()]
+
+    def changed_by_this_run(c):
+        if candidate_premise.expected_kind(c) != "missing":
+            return False
+        folder = candidate_premise.expected_path(c)
+        if not folder or not any(p.is_relative_to(folder) for p in written):
+            return False
+        try:
+            candidate_premise.validate_container(c)
+        except CandidateStale:
+            return False
+        return True
+
+    seals = {}
+    left_out = []
+    unfinished = []
+    for c in picks:
+        if (candidate_premise.changed_on_disk(c, seals)
+                and not changed_by_this_run(c)):
+            left_out.append(c)
+        else:
+            unfinished.append(c)
+    surface = job.execute_kind
+    remove = {
+        "upgrade": lambda p: upgrade_state.remove_album_dir(p.get("album_dir")),
+        "downsample": lambda p: downsample_state.remove_album_dir(
+            p.get("album_dir")),
+        "library": lambda p: library_scan_state.remove_album(p.get("album_id")),
+    }.get(surface)
+    if (left_out and remove is not None
+            and generation_state.output_is_current(surface)
+            and not all([remove(c.get("payload") or {}) for c in left_out])):
+        generation_state.mark_output_status(
+            surface, "stale",
+            reason="An album changed before a restart, and these saved "
+                   "results could not be updated.")
+    if left_out:
+        n = len(left_out)
+        job.push_line(f"{plural(n, 'ticked album')} changed on disk and left "
+                      f"the review: {named_albums(left_out)}.")
+    if unfinished:
+        if surface == "library":
+            saved = _return_library_picks(unfinished)
+        elif surface == "new_releases":
+            saved = _return_new_release_picks(unfinished)
+        else:
+            saved = _return_qobuz_review_picks(
+                unfinished, surface, execute_args=job.execute_args)
+        if saved is False:
+            job.push_line(
+                "Retry choices could not be saved back to their review. "
+                "Check the data folder, then refresh before retrying.")
+        else:
+            job.push_line(f"{plural(len(unfinished), 'album')} returned to "
+                          "the review, selected for retry.")
+    job_persistence.persist(job)
+
+
+def reseal_put_back_album(backup_receipt):
+    """Seal again the rows and saved results over an album a restore put back
+    byte for byte, so the new inodes of a copy do not make Start refuse it,
+    including the pick of a run still going that will return it for retry.
+    Reads file details only."""
+    captures = {}
+
+    def fresh_seal(value):
+        return candidate_premise.resealed_after_put_back(
+            value, backup_receipt, captures)
+
+    def resealed(c):
+        payload = c.get("payload") or {}
+        fresh = fresh_seal(payload.get("_premise"))
+        if fresh is None:
+            return None
+        payload = {**payload, "_premise": fresh}
+        if "_gap_fill_receipts" in payload:
+            payload["_gap_fill_receipts"] = (
+                candidate_premise.gap_fill_receipts(fresh))
+        return {**c, "payload": payload}
+
+    upgrade_state.reseal(fresh_seal)
+    downsample_state.reseal(fresh_seal)
+    for job in job_mgr.registry.pending_and_running():
+        with job._lock:
+            rows = list(job.candidates)
+        if not any(fresh_seal((c.get("payload") or {}).get("_premise"))
+                   for c in rows):
+            continue
+        if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
+            with job._lock:
+                for c in job.candidates:
+                    fresh = resealed(c)
+                    if fresh is not None:
+                        c["payload"] = fresh["payload"]
+            # A hard stop returns the run's picks from what is saved.
+            job_persistence.persist(job)
+            continue
+
+        def _reseal(job=job):
+            job.candidates = [resealed(c) or c for c in job.candidates]
+
+        with job_mgr._library_review_state_guard(job):
+            job_persistence.persist_review_mutation(job, _reseal)
 
 
 def _partial_gap_fill_spec(full_album, artist_name, n_missing, *,
@@ -2662,12 +2789,40 @@ def _note_staging_wait(job, phase, current, total):
                           f"waiting for {holder} to finish…", unit="album")
 
 
+_WRITTEN_INTO = "_written_into"
+
+
+def _note_written_into(job, cand):
+    """Save the folder a pick is about to write into before it does, so a
+    hard stop can tell the run's own changes from someone else's."""
+    folder = candidate_premise.expected_path(cand)
+    with job._lock:
+        written = (job.execute_args or {}).get(_WRITTEN_INTO) or []
+        if not folder or folder in written:
+            return
+        job.execute_args = {**(job.execute_args or {}),
+                            _WRITTEN_INTO: [*written, folder]}
+    job_persistence.persist(job)
+
+
+def _settle_pick(job, cand):
+    """Untick a pick the run has imported, so a hard stop does not put it
+    back in the review."""
+    with job._lock:
+        cand["selected"] = False
+    job_persistence.persist(job)
+
+
 def execute_albums(job, chosen, token):
     """Download each selected album via the normal process_album path."""
     # The web worker runs jobs back-to-back; a directory listing cached by
     # a previous job would otherwise be reused even though folders may
     # have moved since.
     clear_scan_caches()
+    with job._lock:
+        job.execute_args = {key: value
+                            for key, value in (job.execute_args or {}).items()
+                            if key != _WRITTEN_INTO}
     args = build_args()
     _benign = {"already_complete", "skipped_already_higher_quality", "dry_run",
                "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras",
@@ -2819,6 +2974,7 @@ def execute_albums(job, chosen, token):
                         )
                 else:
                     premise = candidate_premise.validate(cand)
+                _note_written_into(job, cand)
                 result = process_mode.process_album(full, args, allow_force=False,
                                        already_confirmed=True, token=token,
                                        exact_edition=exact_edition,
@@ -2856,8 +3012,10 @@ def execute_albums(job, chosen, token):
             # owns the next decision.
             attention_counts["backup"] += 1
             job._imported_any = True
+            _settle_pick(job, cand)
         elif result and result.get("imported") and result.get("n_ok", 0) > 0:
             job._imported_any = True
+            _settle_pick(job, cand)
             _refresh_after_local_album_change(
                 full,
                 result,
@@ -5497,3 +5655,6 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         # all durable. Close under the cancellation lock so a Stop arriving at
         # this final boundary cannot relabel the completed migration.
         _close_completed_job(job)
+
+
+backup_mod.on_restored = reseal_put_back_album

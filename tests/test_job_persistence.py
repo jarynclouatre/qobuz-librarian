@@ -160,6 +160,175 @@ def test_a_library_download_stopped_by_a_restart_returns_as_interrupted(
     assert restored.finished_at is not None
 
 
+def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
+        monkeypatch, tmp_path):
+    """An album upgraded just before the app was killed came back to the
+    Upgrade review after the restart, where it could only be refused, and so
+    did one put back from a backup on another filesystem, whose copied files
+    have new inodes, at start-up or during the run. A put-back by the
+    terminal before the app started left its pick out altogether. Picks
+    whose files still match return ticked, the ones the app put back sealed
+    again; the changed one leaves the review and the saved results."""
+    from qobuz_librarian.library import backup as backup_mod
+    from qobuz_librarian.library import candidate_premise, generation_state
+    from qobuz_librarian.quality import upgrade_state
+    from qobuz_librarian.web import flows, job_runs, lifespan
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(backup_mod, "_same_filesystem", lambda _a, _b: False)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "UPGRADE_STATE_FILE", tmp_path / "upgrade.json")
+    monkeypatch.setattr(cfg, "LIBRARY_GENERATION_STATE_FILE",
+                        tmp_path / "generation.json")
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+
+    specs = []
+    for title in ("Upgraded", "Not started", "Put back during the run",
+                  "Put back by the terminal"):
+        album = cfg.MUSIC_ROOT / "Artist" / title
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"16-bit")
+        specs.append({"title": title, "artist": "Artist", "detail": "",
+                      "payload": {"album_id": title, "album_dir": str(album),
+                                  "_premise": candidate_premise.capture(
+                                      "upgrade", album)}})
+    revision = generation_state.reserve_revision()
+    assert upgrade_state._write_state({
+        **upgrade_state._store.empty_state(), "complete": True,
+        "revision": revision, "candidates": specs})
+    assert generation_state.mark_output_current(
+        "upgrade", generation=0, revision=revision)
+    run = Job(title=jm.RUN_TITLES["upgrade"], kind="scan",
+              execute_kind="upgrade", status=JobStatus.RUNNING)
+    for spec in specs:
+        run.add_candidate("upgrade", spec["title"], "Artist",
+                          payload=spec["payload"], selected=True)
+    assert _REAL_ADMIT(run) is True
+    (cfg.MUSIC_ROOT / "Artist" / "Upgraded" / "01.flac").write_bytes(b"24-bit")
+    backup = backup_mod.backup_album_dir(
+        cfg.MUSIC_ROOT / "Artist" / "Not started",
+        expected_receipt=specs[1]["payload"]["_premise"]["receipt"])
+    assert backup.complete
+    jm.registry.add(run)
+    during = cfg.MUSIC_ROOT / "Artist" / "Put back during the run"
+    assert backup_mod.restore_upgrade_backup(
+        backup_mod.backup_album_dir(during), during)
+    terminal = cfg.MUSIC_ROOT / "Artist" / "Put back by the terminal"
+    with monkeypatch.context() as patch:
+        patch.setattr(backup_mod, "on_restored", None)
+        assert backup_mod.restore_upgrade_backup(
+            backup_mod.backup_album_dir(terminal), terminal)
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs(job_runs._RESUME_EXECUTE,
+                    return_picks=flows.return_interrupted_picks)
+    lifespan._put_back_albums()
+    review, = jm.registry.awaiting_review()
+    assert [(c["title"], c["selected"]) for c in review.candidates] == [
+        ("Not started", True), ("Put back during the run", True),
+        ("Put back by the terminal", True)]
+    for c in review.candidates[:2]:
+        candidate_premise.validate(c)
+    assert [c["title"] for c in upgrade_state.load()["candidates"]] == [
+        "Not started", "Put back during the run", "Put back by the terminal"]
+    assert jm.registry.get(run.id).status is JobStatus.FAILED
+
+
+def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(
+        monkeypatch, tmp_path):
+    """A missing album is sealed over its whole artist folder, so after the
+    app was killed mid-run every ticked album by an artist the run had
+    already downloaded for was taken for changed on disk and lost from the
+    review and the saved Library results. Those come back; the downloaded
+    one does not, and one whose folder changed outside the run still leaves."""
+    from qobuz_librarian.library import (
+        candidate_premise,
+        generation_state,
+        library_scan_state,
+    )
+    from qobuz_librarian.modes import process as process_mod
+    from qobuz_librarian.web import flows, job_runs
+
+    class HardStop(BaseException):
+        pass
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "ARTIST_API_DELAY", 0)
+    monkeypatch.setattr(cfg, "LIBRARY_GENERATION_STATE_FILE",
+                        tmp_path / "generation.json")
+    monkeypatch.setattr(cfg, "LIBRARY_SCAN_STATE_FILE", tmp_path / "library.json")
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+
+    artists = {}
+    picks = []
+    for artist, albums in (("Artist", ("A", "B", "C")), ("Other", ("D",))):
+        folder = cfg.MUSIC_ROOT / artist
+        (folder / "Owned").mkdir(parents=True)
+        (folder / "Owned" / "01.flac").write_bytes(b"x")
+        premise = candidate_premise.capture("missing", folder)
+        rows = [{"artist": artist, "title": album,
+                 "payload": {"album_id": album, "_artist_dir_path": str(folder),
+                             "_premise": premise}} for album in albums]
+        artists[artist] = {"fingerprint": "f", "candidates": rows,
+                           "artist_id": artist, "catalog_ids": list(albums)}
+        picks += rows
+    generation = generation_state.commit_catalog_generation(
+        generation_state.begin_attempt())["generation"]
+    assert library_scan_state.save_kind(
+        "missing", artists=artists, complete=True, generation=generation,
+        revision=generation_state.reserve_revision())
+    run = Job(title=jm.RUN_TITLES["library"], kind="scan",
+              execute_kind="library", status=JobStatus.RUNNING)
+    for row in picks:
+        run.add_candidate("album", row["title"], row["artist"],
+                          payload=row["payload"], selected=True)
+    assert _REAL_ADMIT(run) is True
+
+    def process_album(album, *_args, **_kwargs):
+        if album["id"] == "B":
+            raise HardStop
+        album_dir = cfg.MUSIC_ROOT / "Artist" / album["id"]
+        album_dir.mkdir()
+        (album_dir / "01.flac").write_bytes(b"y")
+        return {"imported": True, "n_ok": 1, "n_fail": 0,
+                "result": "downloaded", "dir": str(album_dir)}
+
+    monkeypatch.setattr(flows, "build_args", lambda: None)
+    monkeypatch.setattr(flows, "get_album", lambda album_id, _token: {
+        "id": album_id, "title": album_id})
+    monkeypatch.setattr(flows.catalog, "find_edition_tracks",
+                        lambda _album: (None, None, None, None))
+    monkeypatch.setattr(process_mod, "process_album", process_album)
+    monkeypatch.setattr(
+        flows, "_refresh_after_local_album_change",
+        lambda album, *_a, **_k: library_scan_state.remove_album(album["id"]))
+    monkeypatch.setattr(flows, "prune_library_review_candidates",
+                        lambda _album: 0)
+    with pytest.raises(HardStop):
+        flows.execute_albums(run, list(run.candidates), "token")
+    (cfg.MUSIC_ROOT / "Other" / "D").mkdir()
+    (cfg.MUSIC_ROOT / "Other" / "D" / "01.flac").write_bytes(b"z")
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs(job_runs._RESUME_EXECUTE,
+                    return_picks=flows.return_interrupted_picks)
+    review, = jm.registry.awaiting_review()
+    assert [(c["title"], c["selected"]) for c in review.candidates] == [
+        ("B", True), ("C", True)]
+    assert [c["payload"]["album_id"]
+            for entry in library_scan_state.kind_state("missing")[
+                "artists"].values()
+            for c in entry["candidates"]] == ["B", "C"]
+
+
 def test_a_provider_error_never_reaches_the_stored_job_record(
         monkeypatch, tmp_path):
     """A Qobuz call carries the account email and the auth token in its query

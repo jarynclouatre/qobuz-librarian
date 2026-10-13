@@ -171,6 +171,29 @@ def update_artist(
     return RefreshResult(filtered, [name], {}, True, {name: fingerprint})
 
 
+def remove_album_dir(album_dir) -> bool:
+    """Drop one exact album folder from the saved results without a scan."""
+    return _store.remove_album_dir(
+        album_dir,
+        load=load,
+        write_state=_write_state,
+        folder_of=lambda c: c.get("album_dir"),
+    )
+
+
+def reseal(resealed) -> bool:
+    """Replace each saved row's seal that ``resealed`` gives a fresh one for."""
+    def rewrite(rows):
+        out = []
+        for row in rows:
+            fresh = resealed(row.get("_premise"))
+            out.append(row if fresh is None else {**row, "_premise": fresh})
+        return out
+
+    return _store.rewrite_candidates(
+        rewrite, load=load, write_state=_write_state)
+
+
 def remove_artist(name: str):
     """Remove one artist from the saved downsample snapshot."""
     with _STATE_LOCK, state_file.store_lock(cfg.DOWNSAMPLE_STATE_FILE):

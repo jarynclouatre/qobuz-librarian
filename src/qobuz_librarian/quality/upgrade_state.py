@@ -161,49 +161,28 @@ def visible_candidates(state=None, hidden=None):
 
 
 def remove_album_dir(album_dir) -> bool:
-    """Suppress one exact locally-capped album without contacting Qobuz."""
-    def resolved(value):
-        try:
-            return str(Path(value).resolve(strict=False))
-        except (OSError, TypeError, ValueError):
-            return None
+    """Drop one exact album folder from the saved results without Qobuz."""
+    return _store.remove_album_dir(
+        album_dir,
+        load=load,
+        write_state=_write_state,
+        folder_of=lambda c: (c.get("payload") or {}).get("album_dir"),
+    )
 
-    target = resolved(album_dir)
-    if target is None:
-        return False
-    with _STATE_LOCK, state_file.store_lock(cfg.UPGRADE_STATE_FILE):
-        state = load()
-        generation = int(state.get("generation") or 0)
-        if generation != generation_state.current_generation():
-            return False
-        kept = [
-            candidate
-            for candidate in state.get("candidates") or []
-            if resolved((candidate.get("payload") or {}).get("album_dir"))
-            != target
-        ]
-        if len(kept) == len(state.get("candidates") or []):
-            return True
-        revision = generation_state.reserve_revision()
-        if revision is None:
-            return False
-        now = time.time()
-        state = {
-            **state,
-            "updated_at": now,
-            "revision": revision,
-            "candidates": kept,
-        }
-        if not _write_state(state):
-            return False
-        return generation_state.mark_output_current(
-            "upgrade",
-            generation=generation,
-            revision=revision,
-            complete=bool(state.get("complete")),
-            policy_signature=str(state.get("quality_signature") or ""),
-            preserve_noncurrent=True,
-        )
+
+def reseal(resealed) -> bool:
+    """Replace each saved row's seal that ``resealed`` gives a fresh one for."""
+    def rewrite(rows):
+        out = []
+        for row in rows:
+            payload = row.get("payload") or {}
+            fresh = resealed(payload.get("_premise"))
+            out.append(row if fresh is None
+                       else {**row, "payload": {**payload, "_premise": fresh}})
+        return out
+
+    return _store.rewrite_candidates(
+        rewrite, load=load, write_state=_write_state)
 
 
 def update_artist(

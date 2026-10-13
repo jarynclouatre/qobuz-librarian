@@ -2270,6 +2270,7 @@ def restore_jobs(
     durable_recovery_clear: bool = False,
     durable_recovery_job_id: str | None = None,
     requeue: Callable[[Job], Optional[Callable]] | None = None,
+    return_picks: Callable[[Job], None] | None = None,
 ) -> None:
     """Rehydrate the registry from the on-disk job table at app startup.
 
@@ -2290,7 +2291,8 @@ def restore_jobs(
         again") and saved back. The user sees them rather than them
         silently vanishing. The exception is a PENDING job ``requeue``
         returns a run function for: it never started, so it waits in the
-        queue again, in the order it was first queued.
+        queue again, in the order it was first queued. A review's run that
+        stopped without saving its stop hands its picks to ``return_picks``.
     """
     job_persistence.init()
     rows = job_persistence.load_all()
@@ -2302,6 +2304,7 @@ def restore_jobs(
     restored = []
     requeued = []
     pending_reviews = []
+    cut_short = []
     terminal_payloads = []
     pending_logs = {
         row["id"]: row["log_lines_json"]
@@ -2390,6 +2393,14 @@ def restore_jobs(
         if row.get("single_unreadable"):
             job._preserve_persisted_single = True
             job._single_undo_unavailable = True
+        if (status == JobStatus.RUNNING
+                and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
+                and job.finished_at is None
+                and not job.recoveries
+                and not job.execute_args_unreadable):
+            # A stop the app saw has already dealt with the picks and saved
+            # its stop time; a hard stop did neither.
+            cut_short.append(job)
         completion_acknowledged = False
         if job.album_id and not job.recoveries:
             completion_acknowledged = (
@@ -2607,6 +2618,11 @@ def restore_jobs(
                     "not be put back in the review. Run the scan again."
                 )
             job_persistence.persist(job)
+    for job in cut_short if return_picks is not None else ():
+        try:
+            return_picks(job)
+        except Exception:
+            log.exception("couldn't return the picks of job %s", job.id)
     # Behind the same pause as any download that arrives while the library is
     # paused, and in the order they were queued.
     requeued.sort(key=lambda pair: pair[0].created_at)

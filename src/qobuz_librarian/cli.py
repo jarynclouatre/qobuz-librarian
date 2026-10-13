@@ -1342,6 +1342,10 @@ def main():
                     log.info(fmt(C.YELLOW,
                         f"  ⟲  Put back {origin}, which an interrupted "
                         "upgrade or repair had moved aside."))
+            for origin in backup_mod.put_back_interrupted_backups():
+                log.info(fmt(C.YELLOW,
+                    f"  ⟲  Put back {origin}, which an interrupted "
+                    "upgrade or repair had moved aside."))
         except Exception as e:
             vlog(f"album put-back error: {e}")
         # Sweep upgrade-backup dir of anything older than retention window.

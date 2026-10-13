@@ -394,11 +394,12 @@ def test_cross_fs_restore_verifies_the_music_and_ignores_backup_sidecars(
         bkmod, backup, original, kind="upgrade")
     real_copy_tree = bkmod._copy_tree_manifest_at
 
-    def corrupt_staged_copy(source_fd, destination_fd, manifest):
-        copied = real_copy_tree(source_fd, destination_fd, manifest)
+    def corrupt_staged_copy(source_fd, destination_fd, manifest, held):
+        copied = real_copy_tree(source_fd, destination_fd, manifest, held)
         if copied:
             staged = bkmod._held_directory_path(destination_fd) / "track1.flac"
-            staged.write_bytes(b"corrupt")
+            staged.with_name("corrupt").write_bytes(b"corrupt")
+            os.replace(staged.with_name("corrupt"), staged)
         return copied
 
     monkeypatch.setattr(

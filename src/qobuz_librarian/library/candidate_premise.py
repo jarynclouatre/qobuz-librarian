@@ -17,6 +17,8 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library.backup import (
+    _SIDECARS,
+    _album_tree_identity,
     _close_descriptors,
     _open_backup_source,
     _path_directory_generations,
@@ -443,6 +445,84 @@ def validate(candidate: dict, *, missing_premises=None) -> dict:
             "review; nothing was changed."
         )
     return current
+
+
+def changed_on_disk(candidate: dict, missing_premises=None) -> bool:
+    """Whether this row's files changed since its review was built.
+
+    A folder that is not there is not taken for a change: an interrupted
+    upgrade or repair leaves the album in its backup until it is put back.
+    Nor is a row with no artist folder: its seal is only the music folder's
+    identity, which a library that is not mounted yet fails too. Nor is a
+    folder whose files keep their names, sizes and mtimes, as an album put
+    back from a copy on another filesystem does; its row keeps its seal, so
+    Start still asks for a refresh.
+    """
+    if _canonical_absent(candidate) is not None:
+        return False
+    path = expected_path(candidate)
+    if path and not os.path.lexists(path):
+        return False
+    try:
+        validate(candidate, missing_premises=missing_premises)
+    except CandidateStale as exc:
+        if exc.cause != "changed":
+            return False
+        premise = canonical(candidate)
+        current = ((missing_premises or {}).get(premise["path"])
+                   or capture(premise["kind"], premise["path"]))
+        return (current is None
+                or _names_sizes_times(current["receipt"]["tree"])
+                != _names_sizes_times(premise["receipt"]["tree"]))
+    return False
+
+
+def resealed_after_put_back(value, backup_receipt, captures):
+    """A fresh seal for a row sealed over an album as it was backed up, once
+    the put-back proved every file's bytes against the backup, or None.
+
+    A copy back from another filesystem gives every file a new inode, so the
+    old seal would refuse an album whose bytes are proven the same. A row
+    whose seal still holds, that was sealed over another version of the
+    folder, or whose folder no longer holds the restored files by name, size
+    and mtime, keeps its seal.
+    """
+    origin = backup_receipt.get("origin")
+    if type(value) is not dict or value.get("path") != origin:
+        return None
+    premise = canonical_premise(value)
+    if (premise is None or premise["version"] != PREMISE_VERSION
+            or premise["kind"] == "missing" or premise["path"] != origin):
+        return None
+    try:
+        source = backup_receipt["source_receipt"]
+        sealed = _canonical_receipt(_album_tree_identity(source), origin=origin)
+        backed_up = {
+            relative: value["sha256"]
+            for relative, value in backup_receipt["tree"]["files"].items()
+            if Path(relative).name not in _SIDECARS
+        }
+        source_digests = {relative: value["sha256"]
+                          for relative, value in source["tree"]["files"].items()}
+    except (KeyError, TypeError):
+        return None
+    if (sealed is None or backed_up != source_digests
+            or not durable_receipts_match(premise["receipt"], sealed)):
+        return None
+    kind = premise["kind"]
+    if kind not in captures:
+        captures[kind] = capture(kind, origin)
+    fresh = captures[kind]
+    if (fresh is None or _durable_premises_match(premise, fresh)
+            or _names_sizes_times(fresh["receipt"]["tree"])
+            != _names_sizes_times(source["tree"])):
+        return None
+    return fresh
+
+
+def _names_sizes_times(tree):
+    return {relative: (value["size"], value["mtime_ns"])
+            for relative, value in tree["files"].items()}
 
 
 def validate_container(candidate: dict) -> dict:

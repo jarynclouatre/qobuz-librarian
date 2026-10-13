@@ -9,7 +9,10 @@ one search + one approve endpoint, and a few genuinely tricky bits of logic.
 import asyncio
 import copy
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -2973,6 +2976,85 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
         assert (other / "01 - Song.flac").read_bytes() == b"new"
     finally:
         _remove_job(job)
+
+    # A hard stop can also land while the album is half way into its
+    # backup: renamed but not yet sealed, or copied to another filesystem
+    # with its folder part removed. Both come back on the next start, and
+    # the reviews of the one rebuilt from the copy are sealed again.
+    moved = root / "music" / "Artist" / "Moved (2022)"
+    copied = root / "music" / "Artist" / "Copied (2023)"
+    for album in (moved, copied):
+        album.mkdir()
+        (album / "01 - Song.flac").write_bytes(b"one")
+        (album / "02 - Song.flac").write_bytes(b"two")
+    script = """
+import os, sys
+from pathlib import Path
+from qobuz_librarian import config as cfg
+from qobuz_librarian.library import backup as backup_mod
+music, backups, album = sys.argv[1:]
+cfg.MUSIC_ROOT = Path(music)
+cfg.UPGRADE_BACKUP_DIR = Path(backups)
+if album.endswith("Moved (2022)"):
+    backup_mod._write_backup_origin_durable = lambda *_args: os._exit(91)
+elif album.endswith("Renamed (2024)"):
+    backup_mod._remove_put_back_sidecars = lambda *_args: os._exit(91)
+    path = next(path for path, origin in backup_mod.albums_left_in_backups()
+                if origin == Path(album))
+    backup_mod.restore_upgrade_backup(
+        backup_mod.load_backup_result(path), Path(album))
+    os._exit(92)
+else:
+    backup_mod._same_filesystem = lambda *_args: False
+    unlink = backup_mod._unlink_exact_at
+
+    def unlink_then_stop(*args):
+        unlink(*args)
+        os._exit(91)
+
+    backup_mod._unlink_exact_at = unlink_then_stop
+backup_mod.backup_album_dir(Path(album))
+os._exit(92)
+"""
+    child_home = str(tmp_path / "child")
+    for album in (moved, copied):
+        stopped = subprocess.run(
+            [sys.executable, "-c", script, str(root / "music"),
+             str(root / "backups"), str(album)],
+            env={**os.environ, "DATA_DIR": child_home, "HOME": child_home})
+        assert stopped.returncode == 91
+        assert not album.exists()
+    resealed = []
+    monkeypatch.setattr(backup_mod, "on_restored",
+                        lambda receipt: resealed.append(receipt["origin"]))
+    lifespan._put_back_albums_left_in_backups()
+    assert runtime.take_restored_albums() == [moved, copied]
+    assert resealed == [str(copied)]
+    for album in (moved, copied):
+        assert sorted(p.name for p in album.iterdir()) == [
+            "01 - Song.flac", "02 - Song.flac"]
+        assert (album / "02 - Song.flac").read_bytes() == b"two"
+    assert sorted(p.name for p in (root / "backups").iterdir()) == [
+        kept.name]
+    assert sorted(p.name for p in (root / "music" / "Artist").iterdir()) == [
+        "Album (2020)", "Copied (2023)", "Moved (2022)", "Other (2021)"]
+
+    # A hard stop after a restore renamed an album home but before it took
+    # the backup's own files out of it; the next start removes them.
+    renamed = root / "music" / "Artist" / "Renamed (2024)"
+    renamed.mkdir()
+    (renamed / "01 - Song.flac").write_bytes(b"one")
+    assert backup_mod.backup_album_dir(renamed).complete
+    stopped = subprocess.run(
+        [sys.executable, "-c", script, str(root / "music"),
+         str(root / "backups"), str(renamed)],
+        env={**os.environ, "DATA_DIR": child_home, "HOME": child_home})
+    assert stopped.returncode == 91
+    assert (renamed / backup_mod._RECEIPT_SIDECAR).exists()
+    lifespan._put_back_albums_left_in_backups()
+    assert sorted(p.name for p in renamed.iterdir()) == ["01 - Song.flac"]
+    assert sorted(p.name for p in (root / "backups").iterdir()) == [
+        kept.name]
 
 
 def test_refresh_folds_into_parked_library_review(monkeypatch):

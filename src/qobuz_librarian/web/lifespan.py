@@ -21,6 +21,7 @@ from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
     diagnostics,
+    flows,
     job_persistence,
     job_runs,
     new_release_checks,
@@ -271,6 +272,7 @@ def _restore_jobs_once() -> bool:
                 ),
                 durable_recovery_job_id=queue_recovery._startup_recovery_web_job_id(),
                 requeue=job_runs._requeued_download_run,
+                return_picks=flows.return_interrupted_picks,
             )
         except Exception as exc:
             _log.warning(
@@ -577,6 +579,11 @@ def _put_back_albums() -> None:
                 _log.warning(
                     "The saved recovery status of %s could not be "
                     "updated.", origin)
+        for origin in backup_mod.put_back_interrupted_backups():
+            runtime.note_restored_albums([origin])
+            _log.warning(
+                "Put back %s, which a hard stop had left part way into its "
+                "backup.", origin)
     except Exception:
         _log.exception("couldn't put back albums left in their backups")
 

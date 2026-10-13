@@ -1,6 +1,7 @@
 """Saved scan candidates and per-artist revisions."""
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from qobuz_librarian import state_file
 from qobuz_librarian.library import generation_state
@@ -262,6 +263,53 @@ class ArtistScanStore:
             data["quality_signature"] = quality_signature
         data["candidates"] = kept
         return data
+
+    def remove_album_dir(self, album_dir, *, load, write_state, folder_of):
+        """Drop the saved rows for one exact album folder without a scan."""
+        def resolved(value):
+            try:
+                return str(Path(value).resolve(strict=False))
+            except (OSError, TypeError, ValueError):
+                return None
+
+        target = resolved(album_dir)
+        if target is None:
+            return False
+        return self.rewrite_candidates(
+            lambda rows: [row for row in rows
+                          if resolved(folder_of(row)) != target],
+            load=load, write_state=write_state)
+
+    def rewrite_candidates(self, rewrite, *, load, write_state):
+        """Save ``rewrite(rows)`` as the current rows, when it changed any."""
+        with self.lock, state_file.store_lock(self.path()):
+            state = load()
+            generation = int(state.get("generation") or 0)
+            if generation != generation_state.current_generation():
+                return False
+            rows = list(state.get("candidates") or [])
+            kept = rewrite(rows)
+            if kept == rows:
+                return True
+            revision = generation_state.reserve_revision()
+            if revision is None:
+                return False
+            state = {
+                **state,
+                "updated_at": time.time(),
+                "revision": revision,
+                "candidates": kept,
+            }
+            if not write_state(state):
+                return False
+            return generation_state.mark_output_current(
+                self.surface,
+                generation=generation,
+                revision=revision,
+                complete=bool(state.get("complete")),
+                policy_signature=str(state.get("quality_signature") or ""),
+                preserve_noncurrent=True,
+            )
 
     def candidates_for_artist(self, state, name):
         return [
