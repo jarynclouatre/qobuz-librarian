@@ -985,13 +985,21 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
     # A crashed or failed terminal-mode download leaves a .qobuz-run-* with no
     # journal item behind it. Stopping on it with attention required would pause
     # every download with nothing in the app able to settle it, so the leftover
-    # is parked for review and the boot comes up clean.
+    # is parked for review and the boot comes up clean. A complete --no-import
+    # download stays where the manual beet import looks for it.
+    from qobuz_librarian import download
+    from qobuz_librarian.integrations.staging import create_staging_run
+
     monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
     run_dir = tmp_path / "staging" / f".qobuz-run-{'0' * 24}"
     run_dir.mkdir(parents=True)
     (run_dir / "cover.jpg").write_bytes(b"art")
+    unimported = create_staging_run()
+    (unimported.path / "Album").mkdir()
+    (unimported.path / "Album" / "01 Track.flac").write_bytes(b"audio")
+    kept = download.keep_unimported_download({"_staging_run": unimported.to_record()})
 
     authority = run_lock.acquire()
     try:
@@ -1001,6 +1009,8 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
 
     assert result.status is startup_recovery.StartupRecoveryStatus.CLEAR
     assert not run_dir.exists()
+    assert sorted((tmp_path / "staging").glob(".qobuz-run-*")) == [kept]
+    assert (kept / "Album" / "01 Track.flac").read_bytes() == b"audio"
     retained = sorted(
         (tmp_path / "staging" / cfg.BEETS_RETRY_DIR).glob(
             "*-abandoned-*/000-*/cover.jpg"

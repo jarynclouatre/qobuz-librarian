@@ -22,14 +22,18 @@ Every menu mode has a flag that jumps straight to it; `--help` lists them all. T
 # The artist walk over every artist, queueing as you go
 docker compose run --rm -it qobuz-librarian cli --library-walk
 
-# Fill missing tracks in albums you own
-docker compose run --rm -it qobuz-librarian cli --album-gaps
+# Gap Fill: fill missing tracks in albums you own (--album-gaps also works)
+docker compose run --rm -it qobuz-librarian cli --gap-fill
 
 # Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)
 docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
-A real Library walk or Album gaps run refreshes the collection backup after it
+The walks remember what you answered, yes or no, and leave it out next time:
+the Library walk those artists, saying how many, and Gap Fill those albums.
+`--reset-walk-seen` brings them all back.
+
+A real Library walk or Gap Fill run refreshes the collection backup after it
 scans every artist it set out to. A dry run, an interrupted walk, an artist it
 could not read, or anything left to retry leaves the current backup unchanged,
 so the snapshot always describes a walk that finished.
@@ -44,7 +48,7 @@ docker compose run --rm -it qobuz-librarian cli --settings
 
 ## Direct downloads
 
-Both confirm each album before anything downloads (download, queue, or skip), so keep `-it`. With no terminal attached, an album download stops at its confirmation without downloading anything, and the run exits with status 1.
+Both ask before anything downloads, so keep `-it`. An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N track(s)? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop), then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album and download the queue later. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)
@@ -64,6 +68,9 @@ docker compose run --rm -it qobuz-librarian cli --artist "Paysage d'Hiver"
 # Sweep every artist for quality upgrades, auto-confirming upgrades the scanner can classify safely
 docker compose run --rm qobuz-librarian cli --upgrade-walk --auto-safe
 
+# List every upgrade candidate without asking (changes nothing)
+docker compose run --rm qobuz-librarian cli --upgrade-walk --dry-run
+
 # Preview which hi-res library files would downsample to 44.1/48 kHz (changes nothing)
 docker compose run --rm qobuz-librarian cli --downsample-walk --dry-run
 
@@ -82,8 +89,42 @@ docker compose run --rm qobuz-librarian cli --help
 
 | Only in the terminal | Only in the web app |
 |---|---|
-| The Library walk and Album gaps walk, which ask as they go | The Library scan and the reviews it builds |
+| The Library walk and Gap Fill walk, which ask as they go | The Library scan and the reviews it builds |
 | Downloading without importing (`--no-import`) | New releases checks and Discover |
 | | Dismissing and bringing back albums |
 | | Putting downsampled originals back, and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |
+
+## Every flag
+
+`--help` prints the same list with the details.
+
+| Flag | What it does |
+|---|---|
+| *query* | Search for an album, or download one by Qobuz album URL |
+| `--artist NAME` | One artist: fill gaps, then offer albums you're missing |
+| `--library-walk` | Every artist in turn, queueing as you go (menu: Library walk) |
+| `--gap-fill`, `--album-gaps` | Fill missing tracks in every incomplete album you own (menu: Gap Fill) |
+| `--repair` | Re-download damaged (truncated) tracks you own |
+| `--upgrade-walk` | Review quality upgrades, artist by artist |
+| `--downsample-walk` | Bring files above 48 kHz down to 44.1 / 48 kHz in place |
+| `--lyrics-walk` | Fetch lyrics for tracks that are missing them |
+| `--migrate` | Reorganise an existing library into the Artist/Album layout (menu: Library migration) |
+| `--settings` | Set download quality, whether downsampling keeps the originals, and the behaviour toggles |
+| `--reset-walk-seen` | Forget which artists and albums the walks have answered, and exit |
+| `--no-catalog` | Skip the missing-albums step in Artist mode and the Library walk |
+| `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles` | List live releases, compilations, or EPs and singles among missing albums (default: the Library review's switches) |
+| `--[no-]prefer-hires` | Sort 24-bit and higher sample rate results first (default: the Prefer hi-res setting) |
+| `--dry-run` | Show the plan and change nothing |
+| `--force` | Download every track of the album again (album mode only) |
+| `--yes` | Answer yes to the confirmations; choices still ask |
+| `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |
+| `--no-import` | Download without importing; a complete download stays in staging for the `beet import` command `--help` prints |
+| `--no-upgrade` | Turn off quality upgrades for this run |
+| `--no-downsample` | Skip pre-import downsampling for this run |
+| `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |
+| `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
+| `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: check every track again; write only timed lyrics |
+| `--migrate-src PATH`, `--migrate-dest PATH`, `--in-place`, `--acoustid` | With `--migrate`: source, destination, move instead of copy, fingerprint untagged files (see [Existing libraries](existing-libraries.md)) |
+| `--verbose`, `--quiet` / `-q`, `--no-color` | More detail, warnings and errors only, no colours |
+| `--version`, `-h` / `--help` | Print the version or the help |

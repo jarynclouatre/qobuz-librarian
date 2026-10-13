@@ -11,6 +11,7 @@ from qobuz_librarian import run_lock
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
     download_staged_files,
+    keep_unimported_download,
     retain_download_staging,
     retire_download_staging_after_import,
     retire_empty_download_staging,
@@ -1597,6 +1598,8 @@ def process_album(album, args, *, allow_force=True, label=None,
 
         imported = False
         if args.no_import:
+            if n_ok > 0 and not n_fail and not n_lossy:
+                keep_unimported_download(download_result)
             log.info(fmt(C.YELLOW, f"\n  --no-import: skipping beets. Files remain in {cfg.STAGING_DIR}/"))
         elif n_ok == 0:
             log.info(fmt(C.YELLOW, "\n  Skipping beets import: nothing succeeded."))

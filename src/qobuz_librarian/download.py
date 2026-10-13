@@ -45,6 +45,7 @@ from qobuz_librarian.integrations.staging import (
     create_staging_run,
     discard_group,
     discard_quarantined_file,
+    keep_staging_run,
     retain_staging_run,
     staging_run_from_record,
 )
@@ -358,6 +359,21 @@ def retain_download_staging(result, *, label="interrupted", recovery_checkpoint=
         return False
     result["_staging_run_retained"] = True
     return True
+
+
+def keep_unimported_download(result):
+    """Leave a complete --no-import download where the manual import finds
+    it, out of reach of the next run's clean-up of abandoned downloads."""
+    if result.get("_staging_run_retained"):
+        return None
+    run = staging_run_from_record(result.get("_staging_run"))
+    if run is None:
+        return None
+    try:
+        return keep_staging_run(run)
+    except OSError as exc:
+        vlog(f"couldn't keep {run.path} for a manual import: {exc}")
+        return None
 
 
 def retire_empty_download_staging(result, *, recovery_checkpoint=None):

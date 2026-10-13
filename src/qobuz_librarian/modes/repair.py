@@ -64,7 +64,15 @@ from qobuz_librarian.queue.executor import (
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, EXIT_INTERRUPT, die, plural
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_AUTH,
+    EXIT_GENERAL,
+    EXIT_INTERRUPT,
+    auth_lost_msg,
+    die,
+    plural,
+    unreadable_artist,
+)
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import NO_ANSWER
 
@@ -1544,7 +1552,7 @@ def _prompt_library_album_for_repair(args, token):
         if r == "?":
             artists = list_library_artists(
                 on_artist_error=lambda path, error: log.warning(
-                    f"Unreadable artist {path.name}: {error}. Check permissions and retry."))
+                    unreadable_artist(path.name, error)))
             if not artists:
                 log.info(fmt(C.YELLOW, "  No artist directories found."))
                 continue
@@ -1987,7 +1995,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 pin_repair_recovery(
                     "repair backup kept, authentication was lost mid-refill")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Auth lost mid-refill, truncated originals preserved at:\n"
+                    f"  ⚠  Qobuz rejected the token mid-refill; truncated originals preserved at:\n"
                     f"     {backup_path}\n"
                     f"     Re-run Repair once your token is refreshed, or restore "
                     f"them by hand."))
@@ -2304,10 +2312,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         args.no_upgrade = saved_no_upgrade
 
 
-_REPAIR_AUTH_LOST = ("\n✗  Auth lost. Set QOBUZ_USER_AUTH_TOKEN, or open the "
-                     "Settings page in the web UI to update your token.\n")
-
-
 def _report_repair_recovery(backup, *, reason=""):
     """Tell an interactive caller exactly where retained originals remain."""
     if not isinstance(backup, BackupResult):
@@ -2526,7 +2530,7 @@ def _all_library_album_dirs(*, on_artist_error=None):
             if on_artist_error is not None:
                 on_artist_error(adir, error)
             else:
-                log.warning(f"Unreadable artist {adir.name}: {error}. Check permissions and retry.")
+                log.warning(unreadable_artist(adir.name, error))
     return pairs
 
 
@@ -2551,7 +2555,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                 artist_dir, album_dir = _prompt_library_album_for_repair(
                     args, token)
             except AuthLost:
-                die(fmt(C.RED, _REPAIR_AUTH_LOST), EXIT_AUTH)
+                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
 
             if artist_dir == NO_ANSWER:
                 return EXIT_GENERAL
@@ -2598,7 +2602,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                                 deep=True, quiet=True)
                         except AuthLost:
                             print()
-                            die(fmt(C.RED, _REPAIR_AUTH_LOST), EXIT_AUTH)
+                            die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
                         except QobuzUnavailable:
                             # Finish the progress line before the transient
                             # abort propagates to the clean EXIT_TRANSIENT stop.
@@ -2662,7 +2666,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     album_dir, artist_dir.name, args, token
                 )
             except AuthLost:
-                die(fmt(C.RED, _REPAIR_AUTH_LOST), EXIT_AUTH)
+                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
 
             if not loop:
                 needs_attention = status in {"attention", "failed", "recovery"}

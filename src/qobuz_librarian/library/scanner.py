@@ -375,7 +375,8 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
                 raise
             if walk_errors is not None:
                 walk_errors.append(f"{d}: {e}")
-            log.info(f"  ⚠  Couldn't read artist folder {d}: {e}.")
+            if on_artist_error is None:
+                log.info(f"  ⚠  Couldn't read artist folder {d}: {e}.")
             # Keep it anyway. This check stops at the first track it finds, so
             # whether it met the unreadable part before or after that track is
             # directory order, and dropping the artist on it made the same

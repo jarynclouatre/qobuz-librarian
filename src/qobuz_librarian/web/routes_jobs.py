@@ -234,10 +234,11 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
 
 @router.post("/jobs/{job_id}/approve")
 async def job_approve(request: Request, job_id: str):
-    busy = refusals._lock_busy_response(request)
+    job = job_mgr.registry.get(job_id)
+    downloads = queue_recovery._downloads_albums(job)
+    busy = refusals._lock_busy_response(request, downloads=downloads)
     if busy is not None:
         return busy
-    job = job_mgr.registry.get(job_id)
     if not job:
         return RedirectResponse(
             url="/queue?error=" + rendering._notice_key(
@@ -426,7 +427,8 @@ async def job_approve(request: Request, job_id: str):
             job._review_action_lock,
             missing_types._lock,
         ):
-            if write_gate._web_writes_paused():
+            if (write_gate._web_downloads_paused() if downloads
+                    else write_gate._web_writes_paused()):
                 return "paused"
             if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
                 return False
@@ -668,7 +670,7 @@ async def job_approve(request: Request, job_id: str):
             status_code=303,
         )
     if approved == "paused":
-        busy = refusals._lock_busy_response(request)
+        busy = refusals._lock_busy_response(request, downloads=downloads)
         if busy is not None:
             return busy
         return RedirectResponse(url=dest, status_code=303)
@@ -1429,6 +1431,10 @@ async def job_retry(request: Request, job_id: str):
             "download was started. Restart Qobuz Librarian.",
         )
     recovery_status = queue_recovery._recovery_status_value(recovery)
+    if queue_recovery._terminal_queue_waiting():
+        busy = refusals._lock_busy_response(request, downloads=True)
+        if busy is not None:
+            return busy
 
     completion_acknowledged = queue_recovery._durable_completion_status(job)
     if completion_acknowledged is None:

@@ -17,6 +17,7 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
     list_library_artists,
 )
+from qobuz_librarian.ui_cli.errors import unreadable_artist
 from qobuz_librarian.ui_cli.logging import log as _default_log
 from qobuz_librarian.ui_cli.logging import report_progress
 
@@ -37,7 +38,7 @@ def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
     """
     if on_artist_error is None:
         def on_artist_error(path, error):
-            _default_log.warning(f"Unreadable artist {path.name}: {error}. Check permissions and retry.")
+            _default_log.warning(unreadable_artist(path.name, error))
     artists = (artist_dirs if artist_dirs is not None else
                list_library_artists(on_artist_error=on_artist_error))
     for artist_dir in artists:
@@ -80,8 +81,11 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     unreadable = []
 
     def artist_read_failed(path, error):
+        # An unreadable folder is met again when its albums are listed.
+        if path.name in unreadable:
+            return
         unreadable.append(path.name)
-        log.warning(f"Unreadable artist {path.name}: {error}. Check permissions and retry.")
+        log.warning(unreadable_artist(path.name, error))
 
     items = list(iter_library_flacs(
         artist_dirs=artist_dirs, on_artist_error=artist_read_failed))

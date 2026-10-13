@@ -443,7 +443,8 @@ async def _lifespan(_app: FastAPI):
             _put_back_albums_left_in_backups()
             _startup_cleanup()
         job_mgr.configure_staging_entry_guard(queue_recovery._staging_entry_allowed)
-        job_mgr.configure_held_release(lambda: not write_gate._web_writes_paused())
+        job_mgr.configure_held_release(
+            lambda: not write_gate._web_downloads_paused())
         job_mgr.start_worker()
         if run_startup_maintenance:
             maintenance_token = job_mgr.begin_library_operation(

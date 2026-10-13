@@ -92,6 +92,7 @@ def _recovery_missing(recovery) -> bool:
 
 
 templates.env.globals["recovery_on_disk"] = _recovery_on_disk
+templates.env.globals["downloads_albums"] = queue_recovery._downloads_albums
 
 
 def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:
@@ -268,6 +269,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     # letting each gated control name the same guess. The full notice travels
     # with it: a greyed button explains itself in a title attribute, which a
     # phone never shows, so every page that greys something can say why.
+    held = None
     if context["writes_paused"]:
         paused = write_gate._writes_paused_notice()
         context.setdefault("writes_paused_notice", paused)
@@ -275,6 +277,18 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             "writes_paused_reason",
             paused["reason"] if paused else "Downloads and scans are paused.",
         )
+    else:
+        held = write_gate._terminal_queue_notice()
+        # Only downloads wait, so the tools that still run leave it out.
+        if held is not None and context.get("page") not in {
+                "lyrics", "downsample", "upgrade"}:
+            context.setdefault("writes_paused_notice", held)
+    context.setdefault("downloads_paused",
+                       context["writes_paused"] or held is not None)
+    context.setdefault(
+        "downloads_paused_reason",
+        held["reason"] if held else context.get("writes_paused_reason", ""),
+    )
     # Error/utility renders (e.g. the 404 page) don't name a nav section; an
     # explicit empty page just leaves every nav link inactive instead of
     # relying on Jinja's undefined-is-falsey behaviour.

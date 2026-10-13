@@ -1,5 +1,7 @@
 """Compatibility entry points and the CLI resume prompt for queue journals."""
 
+from datetime import datetime
+
 from qobuz_librarian import completion
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost
@@ -28,7 +30,8 @@ from qobuz_librarian.queue.journal import (
     transition_journal_item,
 )
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, fmt
+from qobuz_librarian.ui_cli.colors import C, fmt, wrap
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 
 __all__ = [
@@ -57,6 +60,22 @@ __all__ = [
     "save_queue_journal",
     "transition_journal_item",
 ]
+
+
+def _queue_heading(kind, items, mode, saved_at):
+    """The line that opens a resume prompt: what the queue came from, how
+    many albums it holds and when it was saved, in local time."""
+    source = {
+        "album_walk": "a Gap Fill walk",
+        "walk_queue": "a Library walk",
+        "album-now": "an album search",
+    }.get(mode or "", "an earlier run")
+    when = (datetime.fromisoformat(saved_at).astimezone().strftime(
+        "%Y-%m-%d %H:%M") if saved_at else "at an unknown time")
+    return fmt(C.BOLD + C.YELLOW, wrap(
+        f"{kind} download queue from {source}: "
+        f"{plural(len(items), 'album')}, saved {when}.",
+        indent="  ⚠  ", hanging="     "))
 
 
 def load_pending_queue():
@@ -192,29 +211,19 @@ def offer_resume_startup_recovery(args, token_source, recovery):
         recovery_bearing,
     ) = _load_startup_recovery_queue(recovery)
 
-    when = saved_at or "unknown time"
-    label_for_mode = {
-        "album_walk": "Album fill walk",
-        "walk_queue": "Walk + queue",
-        "album-now": "Album search",
-    }.get(mode, mode)
     queue_path = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
 
     print()
-    heading = "Interrupted" if recovery_bearing else "Pending"
-    log.info(fmt(
-        C.BOLD + C.YELLOW,
-        f"  ⚠  {heading} queue found: {len(items)} album(s) from {label_for_mode}",
-    ))
-    log.info(fmt(C.GRAY, f"     Saved: {when}"))
+    log.info(_queue_heading(
+        "Interrupted" if recovery_bearing else "Saved",
+        items, mode, saved_at))
     vlog(f"resume queue file: {queue_path}")
     if recovery_bearing:
         log.info(fmt(C.GRAY,
-            "     The exact interrupted album must finish recovery before "
-            "other work."))
+            "     The interrupted album has to finish before other work."))
     else:
         log.info(fmt(C.GRAY,
-            "     Resuming will download only what is in this saved queue."))
+            "     Resuming downloads only the albums in it."))
     print()
 
     while True:
@@ -274,7 +283,8 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                     "\n  ⚠  Resume interrupted; saved queue kept for next launch."))
             except AuthLost:
                 log.info(fmt(C.RED,
-                    "  ✗ Auth lost during resume; saved queue kept for next launch."))
+                    "  ✗ Qobuz rejected the token during the resume; the "
+                    "saved queue was kept for the next launch."))
                 raise
             except Exception as exc:
                 log.info(fmt(C.YELLOW,
@@ -312,26 +322,12 @@ def offer_resume_pending_queue(args, token_source):
     if not items:
         return False
 
-    # Pretty-print the saved_at timestamp without dragging in tz juggling.
-    when = saved_at or "unknown time"
-    label_for_mode = {
-        "album_walk": "Album fill walk",
-        "walk_queue": "Walk + queue",
-        "album-now": "Album search",
-    }.get(mode or "", mode or "previous run")
-
     print()
-    log.info(fmt(C.BOLD + C.YELLOW,
-        f"  ⚠  Pending queue found: {len(items)} album(s) from {label_for_mode}"))
-    log.info(fmt(C.GRAY, f"     Saved: {when}"))
+    log.info(_queue_heading("Saved", items, mode, saved_at))
     queue_path = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
     vlog(f"resume queue file: {queue_path}")
     log.info(fmt(C.GRAY,
-        "     This means a previous run accumulated download decisions but "
-        "didn't"))
-    log.info(fmt(C.GRAY,
-        "     finish flushing them. Resuming will download only what's "
-        "in the queue."))
+        "     Resuming downloads only the albums in it."))
     print()
 
     while True:
@@ -340,7 +336,7 @@ def offer_resume_pending_queue(args, token_source):
             return False
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN,
-                f"\n  ⟳  Resuming flush of {len(items)} album(s)…"))
+                f"\n  ⟳  Resuming {len(items)} saved album(s)…"))
             try:
                 token = token_source() if callable(token_source) else token_source
                 # Lazy import to avoid a circular dependency at module load:
@@ -377,7 +373,8 @@ def offer_resume_pending_queue(args, token_source):
                     "\n  ⚠  Resume interrupted; saved queue kept for next launch."))
             except AuthLost:
                 log.info(fmt(C.RED,
-                    "  ✗ Auth lost during resume; saved queue kept for next launch."))
+                    "  ✗ Qobuz rejected the token during the resume; the "
+                    "saved queue was kept for the next launch."))
                 raise
             except Exception as e:
                 log.info(fmt(C.YELLOW,

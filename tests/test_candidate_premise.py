@@ -196,7 +196,7 @@ def test_approval_refuses_files_changed_between_its_two_passes(tmp_path, monkeyp
         run_in_executor=run_in_executor))
     monkeypatch.setattr(candidate_premise, "capture", record)
     monkeypatch.setattr(qobuz_access, "_authorize_qobuz_for_web", authorize)
-    monkeypatch.setattr(refusals, "_lock_busy_response", lambda _r: None)
+    monkeypatch.setattr(refusals, "_lock_busy_response", lambda _r, **_k: None)
     monkeypatch.setattr(write_gate, "_web_writes_paused", lambda: False)
     monkeypatch.setattr(jobs.registry, "get", lambda _id: job)
     monkeypatch.setattr(flows, "owned_missing_candidate_ids", lambda *_a, **_k: set())

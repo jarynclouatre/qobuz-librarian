@@ -19,6 +19,7 @@ from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, term_width, truncate
+from qobuz_librarian.ui_cli.errors import unreadable_artist
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 
@@ -586,7 +587,7 @@ def prompt_artist_name():
         if name == "?":
             artists = scanner.list_library_artists(
                 on_artist_error=lambda path, error: log.warning(
-                    f"Unreadable artist {path.name}: {error}. Check permissions and retry."))
+                    unreadable_artist(path.name, error)))
             if not artists:
                 log.info(fmt(C.YELLOW, "  No artist directories found."))
                 continue

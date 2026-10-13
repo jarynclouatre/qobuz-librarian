@@ -34,17 +34,20 @@ def run_library_lyrics_mode(args):
     banner("Lyrics: fetch lyrics for tracks already in your library")
 
     if not HAVE_LYRICS:
-        # log.warning (not log.info) so an unattended `--quiet --lyrics-walk`
-        # cron run still surfaces the missing dep instead of looking like a
-        # silent success; die() with EXIT_CONFIG so the cron's exit-code
-        # check notices too.
-        log.warning(block(fmt(C.YELLOW,
-            "  ⚠  Lyric fetching isn't available; the syncedlyrics provider "
-            "library isn't installed.")))
-        log.warning(block(fmt(C.GRAY,
-            "     The bundled Docker image includes it; bare installs need "
-            "the [lyrics] extra (`pip install 'syncedlyrics>=1.0'` also works).")))
-        die("syncedlyrics not installed", EXIT_CONFIG)
+        # die() writes to stderr, so a `--quiet --lyrics-walk` cron run still
+        # shows it, and EXIT_CONFIG fails the cron's exit-code check.
+        fix = (
+            "   The image includes it, so rebuild it with "
+            "`docker compose build --no-cache`.\n"
+            if cfg.in_container() else
+            "   Add it to the environment Qobuz Librarian runs in:\n"
+            "     pipx inject qobuz-librarian 'syncedlyrics>=1.0'\n"
+            "   or, for a pip install:\n"
+            "     pip install 'syncedlyrics>=1.0'\n"
+        )
+        die(fmt(C.RED,
+            "\n✗  Lyric fetching needs syncedlyrics (the [lyrics] extra), "
+            "which isn't installed.\n" + fix), EXIT_CONFIG)
 
     providers = (", ".join(lyric_fetch.usable_providers(cfg.LYRICS_PROVIDERS))
                  or "no known provider (check LYRICS_PROVIDERS)")
@@ -62,14 +65,24 @@ def run_library_lyrics_mode(args):
     log.info(fmt(C.GRAY, "  Ctrl-C to stop; progress is saved.\n"))
 
     stop_requested = threading.Event()
+    announced = False
 
     def request_stop(signum, frame):
         if stop_requested.is_set():
             signal.default_int_handler(signum, frame)
         stop_requested.set()
-        log.warning(fmt(C.YELLOW,
-            "  Stopping after the current tracks finish. Press Ctrl-C again "
-            "if it won't stop."))
+
+    # The notice is logged here, not in the handler: Ctrl-C can land while
+    # the log is writing to its file, and logging again from inside that
+    # write fails.
+    def should_stop():
+        nonlocal announced
+        if stop_requested.is_set() and not announced:
+            announced = True
+            log.warning(fmt(C.YELLOW,
+                "  Stopping after the current tracks finish. Press Ctrl-C "
+                "again if it won't stop."))
+        return stop_requested.is_set()
 
     previous_handler = signal.signal(signal.SIGINT, request_stop)
     try:
@@ -77,7 +90,7 @@ def run_library_lyrics_mode(args):
             dry_run=args.dry_run,
             rescan=args.lyrics_rescan,
             synced_only=args.lyrics_synced_only,
-            should_stop=stop_requested.is_set,
+            should_stop=should_stop,
             log=log,
         )
     except KeyboardInterrupt:

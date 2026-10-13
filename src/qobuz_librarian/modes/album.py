@@ -197,14 +197,11 @@ def resolve_album_from_args(args, token):
                 EXIT_GENERAL)
         kind, qid = parsed
         if kind == "track":
-            from qobuz_librarian.cli import _compose_service_name
-            _svc = _compose_service_name()
             die(fmt(C.RED,
-                "✗  Track URL passed; Qobuz Librarian handles albums only.\n"
-                "   For a single track use the bundled streamrip:\n"
-                "     rip url <url>\n"
-                f"   (in Docker: docker compose run --rm {_svc} "
-                "rip url <url>)"),
+                "✗  Track URL passed; the terminal downloads albums only.\n"
+                "   Download a single track from Search in the web app (its "
+                "Track tab), or outside Docker with streamrip itself:\n"
+                "     rip url <url>"),
                 EXIT_GENERAL)
         log.info(fmt(C.GRAY, f"  ⟳  Fetching album {qid} …"))
         return get_album(qid, token)
@@ -326,9 +323,9 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                     already_confirmed=True,
                 )
             except AuthLost:
-                die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
+                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
     except AuthLost:
-        die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
+        die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
     except QobuzUnavailable as e:
         log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
     except QobuzError as e:
@@ -393,7 +390,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
             try:
                 album = resolve_album_from_args(args, token)
             except AuthLost:
-                die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
+                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
             except CatalogMiss as e:
                 (log.info if loop else log.warning)(
                     fmt(C.YELLOW, f"\n⚠  {e}\n")
@@ -447,7 +444,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 try:
                     result = _download_album_now(album, args, token)
                 except AuthLost:
-                    die(fmt(C.RED, auth_lost_msg("mid-album")), EXIT_AUTH)
+                    die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
 
             if not loop:
                 exit_code = _one_shot_exit_code(result)

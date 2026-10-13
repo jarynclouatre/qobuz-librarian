@@ -290,11 +290,15 @@ def _diagnostics():
     # started, and a pause is the most direct reason there is. It was the one
     # thing missing: every row could read OK while nothing could run at all.
     paused = write_gate._writes_paused_notice()
+    held = write_gate._terminal_queue_notice()
     if paused is not None:
         # The banner at the top of this same page already carries the whole
         # sentence; the row names the cause so the panel reads as a checklist.
         checks.append({"label": "Writes paused", "ok": False,
                        "detail": paused["reason"]})
+    elif held is not None:
+        checks.append({"label": "Downloads paused", "ok": False,
+                       "detail": held["reason"]})
     else:
         checks.append({"label": "Writes on", "ok": True,
                        "detail": "Not paused"})

@@ -52,8 +52,8 @@
         {% if not as_new_edition and ownership_unknown %}data-search-download-warning="unknown"{% endif %}
         data-search-download-form data-search-title="{{ display_title }}"
         data-search-artist="{{ artist }}"
-        data-search-writes-paused="{{ 1 if writes_paused else 0 }}"
-        data-search-writes-paused-reason="{{ writes_paused_reason }}"
+        data-search-writes-paused="{{ 1 if downloads_paused else 0 }}"
+        data-search-writes-paused-reason="{{ downloads_paused_reason }}"
         data-queue-button>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="album_id" value="{{ album_id }}">
@@ -64,7 +64,7 @@
     <button type="submit"
             class="{% if icon %}ql-icon-button ql-download-icon-button{% else %}ql-btn ql-btn-primary ql-btn-sm{% if small %} ql-btn-compact{% endif %}{% endif %}{% if queued %} is-queued is-disabled{% elif scanning %} is-scanning is-disabled{% endif %}"
             aria-label="{% if queued %}Queued: {% elif scanning %}In current scan: {% else %}Download {% endif %}{{ display_title }} by {{ artist }}"
-            {% if queued %}disabled aria-disabled="true" title="Queued"{% elif scanning %}disabled aria-disabled="true" title="In current scan"{% elif writes_paused %}disabled aria-disabled="true" title="{{ writes_paused_reason }}"{% else %}title="Download"{% endif %}>
+            {% if queued %}disabled aria-disabled="true" title="Queued"{% elif scanning %}disabled aria-disabled="true" title="In current scan"{% elif downloads_paused %}disabled aria-disabled="true" title="{{ downloads_paused_reason }}"{% else %}title="Download"{% endif %}>
       {% if icon %}{{ download_icon() }}{% elif queued %}Queued{% elif scanning %}In current scan{% else %}Download{% endif %}
     </button>
   </form>
@@ -201,7 +201,7 @@
       {{ search_tools(hide_owned=False) }}
     </div>
     {{ bulk_bar() }}
-    {% include "_writes_paused_reason.html" %}
+    {% with writes_paused=downloads_paused, writes_paused_reason=downloads_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">
       {% if defer_search_views %}<template data-search-view-template>{% endif %}
@@ -313,7 +313,7 @@
       {{ search_tools(hide_owned=True) }}
     </div>
     {{ bulk_bar() }}
-    {% include "_writes_paused_reason.html" %}
+    {% with writes_paused=downloads_paused, writes_paused_reason=downloads_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}
     <p class="ql-review-page-empty hidden" data-owned-empty>Every result here is already in your library. Turn off &ldquo;Hide owned&rdquo; to see them.</p>
 
     <div class="ql-results-panel ql-search-view-panel" data-search-view-panel="table">

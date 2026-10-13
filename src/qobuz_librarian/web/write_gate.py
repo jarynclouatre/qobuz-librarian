@@ -7,6 +7,7 @@ from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.queue.startup_recovery import (
     POST_IMPORT_RELOCATION_LOG_ENTRY,
 )
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import jobs as job_mgr
 from qobuz_librarian.web import queue_recovery, runtime, storage
@@ -14,9 +15,29 @@ from qobuz_librarian.web import queue_recovery, runtime, storage
 _log = logging.getLogger("qobuz_librarian")
 
 
+def _terminal_queue_notice():
+    """Why downloads wait for a queue the terminal saved, or None."""
+    waiting = queue_recovery._terminal_queue_waiting()
+    if not waiting:
+        return None
+    command = ("docker compose run --rm -it qobuz-librarian cli"
+               if cfg.in_container() else "qobuz-librarian")
+    return {
+        "reason": "A download queue saved in the terminal is waiting.",
+        "msg": (f"Downloads are paused: a queue of {plural(waiting, 'album')} "
+                "saved in the terminal is waiting. Switch to terminal mode "
+                f"in Settings, then run “{command}”; it offers to resume or "
+                "discard the queue."),
+        "action": {"href": "/settings#mode", "label": "Open Settings"},
+        "settle": None,
+        "give_up": None,
+    }
+
+
 def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                           queue_behind_job=None,
-                          log_details: bool = False):
+                          log_details: bool = False,
+                          downloads: bool = False):
     """Why downloads and scans are paused, in the user's words, or None.
 
     One source for both the 503 a blocked request gets and the notice the
@@ -24,7 +45,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
     ``log_details`` is for the request path only: the dashboard reads this on
     every load and must not write a log line each time. ``queue_behind_job``
     is the one job allowed past another download's recovery, to wait its turn
-    rather than be refused.
+    rather than be refused. ``downloads`` is for a request that downloads
+    albums, the only work a queue saved in the terminal holds.
     """
     queue_recovery._await_recovery_refresh()
     reason = ""
@@ -212,6 +234,8 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                        "verified safely. " + paused + "Settle it from the "
                        "interface it was started in; if it stays blocked, "
                        "check the application log.")
+    elif queue_recovery._terminal_queue_waiting():
+        return _terminal_queue_notice() if downloads else None
     elif (
         queue_recovery._startup_recovery_status_value() == "resume_required"
         and not queue_recovery._durable_resume_allowed(durable_resume_job_id or "")
@@ -253,7 +277,8 @@ def _retry_can_queue(job) -> bool:
         job = (job_mgr.registry.get(job["id"])
                or job_mgr.load_historical_job(job["id"]))
     return (
-        queue_recovery._recovery_pause_is_another_download(job)
+        not queue_recovery._terminal_queue_waiting()
+        and queue_recovery._recovery_pause_is_another_download(job)
         and _writes_paused_notice(queue_behind_job=job) is None
     )
 
@@ -275,11 +300,20 @@ def _web_writes_paused() -> bool:
         or not runtime._JOBS_RESTORED
         or runtime._LOCK_UNENFORCEABLE
         or not runtime._run_lock_intact()
-        or queue_recovery._startup_recovery_status_value() in {
-            "attention_required",
-            "resume_required",
-        }
+        or (
+            queue_recovery._startup_recovery_status_value() in {
+                "attention_required",
+                "resume_required",
+            }
+            and not queue_recovery._terminal_queue_waiting()
+        )
     )
+
+
+def _web_downloads_paused() -> bool:
+    """_web_writes_paused, or a queue the terminal saved holding downloads."""
+    return (_web_writes_paused()
+            or bool(queue_recovery._terminal_queue_waiting()))
 
 
 def _readiness_report() -> tuple[int, dict]:

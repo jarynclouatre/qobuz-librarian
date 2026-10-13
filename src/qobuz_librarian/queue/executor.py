@@ -23,6 +23,7 @@ from qobuz_librarian.completion import (
 from qobuz_librarian.download import (
     disc_names_overwrite,
     download_staged_files,
+    keep_unimported_download,
     retain_download_staging,
     retire_download_staging_after_import,
     retire_empty_download_staging,
@@ -2982,7 +2983,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             interrupted = True
         elif isinstance(exc, AuthLost):
             log.info(fmt(C.RED,
-                "\n    Auth lost. Stopping further downloads; "
+                "\n    Qobuz rejected the token. Stopping further downloads; "
                 "will restore upgrade backups and exit."))
             item["result"] = "auth_lost"
             auth_lost_exc = exc
@@ -3646,6 +3647,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                                     "returning the storage error.",
                                 ))
         elif args.no_import:
+            if summary_n_ok and not summary_n_missing:
+                keep_unimported_download(item)
             log.info(fmt(C.YELLOW,
                 f"  --no-import: skipping beets. Files in {cfg.STAGING_DIR}/"))
         elif summary_n_ok == 0:

@@ -955,7 +955,7 @@ def run_artist_mode(artist_name, args, token):
         if n_added:
             log.info(fmt(C.GREEN, f"\n  ✓  Added {n_added} new album(s) for {artist_name}.\n"))
         if step_two_attention:
-            clause = "retry the unfinished albums above"
+            clause = "the missing albums step stopped before it finished"
             log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
             return EXIT_GENERAL
         return _gap_fill_exit_code(counts)

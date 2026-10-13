@@ -72,6 +72,16 @@ def test_upgrade_walk_refuses_a_changed_saved_candidate(
         ),
     )
     monkeypatch.setattr(upgrade.time, "sleep", lambda *_args: None)
+
+    # A dry run lists every candidate without asking, so it runs unattended.
+    def no_terminal(_prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_terminal)
+    preview = SimpleNamespace(
+        yes=False, auto_safe=False, dry_run=True, consolidate=True)
+    assert upgrade.run_upgrade_walk_mode(preview, "token") == 0
+
     track.write_bytes(b"changed after the Library review")
 
     args = SimpleNamespace(
@@ -139,6 +149,46 @@ def test_album_gaps_does_not_remember_a_prompt_nobody_answered(
 
     assert not seen.exists()
     assert code == walk.EXIT_GENERAL
+
+
+def test_ctrl_c_in_a_library_walk_keeps_the_queue_without_asking(
+        monkeypatch, tmp_path):
+    """Ctrl-C at "Process queue now?" was followed by "Process them before
+    exiting? [Y/n]", so the next Enter started the downloads."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import walk
+
+    monkeypatch.setattr(cfg, "WALK_SEEN_FILE", tmp_path / "seen.txt")
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    monkeypatch.setattr(walk, "list_library_artists",
+                        lambda **_k: [tmp_path / "Artist"])
+    monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
+    monkeypatch.setattr(walk, "_flush_stdin", lambda: None)
+
+    def gap_fill(*_a, shared_queue, **_k):
+        shared_queue.append({"label": "Album"})
+        return [], set(), set(), {}, None, []
+
+    monkeypatch.setattr(walk, "run_artist_gap_fill", gap_fill)
+    monkeypatch.setattr(
+        walk, "_execute_download_queue",
+        lambda *_a, **_k: pytest.fail("a Ctrl-C started the downloads"))
+    saved = []
+    monkeypatch.setattr(walk, "save_pending_queue",
+                        lambda items, mode: saved.append(len(items)))
+    replies = iter(["", "y", ""])
+
+    def _input(prompt=""):
+        if "Process queue now" in prompt:
+            raise KeyboardInterrupt
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", _input)
+    args = SimpleNamespace(yes=False, dry_run=False, consolidate=False,
+                           no_catalog=True)
+
+    assert walk.run_walk_queued_mode(args, "tok") == walk.EXIT_INTERRUPT
+    assert saved
 
 
 def test_a_terminal_download_leaves_the_living_library_review(

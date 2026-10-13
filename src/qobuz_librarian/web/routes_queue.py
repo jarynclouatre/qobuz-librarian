@@ -197,7 +197,8 @@ async def queue_clear(request: Request):
     """Clear the History: drop finished/canceled/failed jobs from the registry
     and the full on-disk archive. In-flight jobs are untouched."""
     with queue_recovery._STARTUP_RECOVERY_LOCK:
-        if queue_recovery._startup_recovery_status_value() != "clear":
+        if (queue_recovery._startup_recovery_status_value() != "clear"
+                and not queue_recovery._terminal_queue_waiting()):
             return refusals._durable_recovery_response(
                 request,
                 "History cannot be cleared while an interrupted download still "

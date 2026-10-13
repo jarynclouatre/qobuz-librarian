@@ -29,6 +29,8 @@ _RENAME_NOREPLACE = 1
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_TREE_ENTRIES = 100_000
 _RUN_DIR_RE = re.compile(r"^\.qobuz-run-[0-9a-f]{24}$")
+_KEPT_RUN_SUFFIX = "-no-import"
+_KEPT_RUN_RE = re.compile(r"^\.qobuz-run-[0-9a-f]{24}-no-import$")
 _TREE_GROUP_KINDS = {"beets", "quality", "interrupted"}
 _FILE_GROUP_KINDS = {
     "rejected",
@@ -48,17 +50,26 @@ class StagingReferenceStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
-def isolated_staging_run_names() -> tuple[str, ...]:
-    """List private run-root names so restart admission can fail closed."""
+def _staging_names(pattern) -> tuple[str, ...]:
     staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
     try:
         descriptor = os.open(staging, _directory_flags())
     except FileNotFoundError:
         return ()
     try:
-        return tuple(sorted(name for name in os.listdir(descriptor) if _RUN_DIR_RE.fullmatch(name)))
+        return tuple(sorted(name for name in os.listdir(descriptor) if pattern.fullmatch(name)))
     finally:
         os.close(descriptor)
+
+
+def isolated_staging_run_names() -> tuple[str, ...]:
+    """List private run-root names so restart admission can fail closed."""
+    return _staging_names(_RUN_DIR_RE)
+
+
+def kept_staging_run_names() -> tuple[str, ...]:
+    """Run roots a finished --no-import download left for a manual import."""
+    return _staging_names(_KEPT_RUN_RE)
 
 
 def _identity(value):
@@ -820,6 +831,26 @@ def bind_unclaimed_staging_run(name):
     if receipt is None:
         return None
     return StagingRun(receipt.path, receipt.root_identity, None)
+
+
+def keep_staging_run(run):
+    """Rename one finished run so restart recovery leaves it in staging.
+
+    The new name still matches the .qobuz-run-* a manual beet import names.
+    Returns the new path, or None when the run is no longer the exact root
+    that was created.
+    """
+    current = capture_staging_run(run)
+    if current is None:
+        return None
+    kept = current.path.name + _KEPT_RUN_SUFFIX
+    staging_fd = os.open(current.path.parent, _directory_flags())
+    try:
+        _rename_noreplace(staging_fd, current.path.name, staging_fd, kept)
+        os.fsync(staging_fd)
+    finally:
+        os.close(staging_fd)
+    return current.path.with_name(kept)
 
 
 def capture_staging_run(run):

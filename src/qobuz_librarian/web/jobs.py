@@ -2477,7 +2477,7 @@ def restore_jobs(
             elif job.execute_kind == "lyrics":
                 job.error = restart + "Start it again from the Lyrics page."
             elif job.execute_kind == "migration":
-                job.error = restart + "Start it again from the Migrate page."
+                job.error = restart + "Start it again from the Library migration page."
             elif job.execute_kind == "library":
                 job.error = restart + "Start the scan again from the Library page."
             elif job.execute_kind == "downsample":

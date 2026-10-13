@@ -49,6 +49,7 @@ from qobuz_librarian.ui_cli.errors import (
     EXIT_INTERRUPT,
     EXIT_LOCK_BUSY,
     EXIT_TRANSIENT,
+    auth_lost_msg,
     die,
     plural,
 )
@@ -477,8 +478,10 @@ def acquire_run_lock():
         else:
             message += ("   Either:\n" if busy.holder == "web"
                         else "   If it is the web app, either:\n")
+            web_ui = (f"the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT})"
+                      if _in_container() else "the web UI")
             message += (
-                f"     1. In the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT}), open Settings → Mode\n"
+                f"     1. In {web_ui}, open Settings → Mode\n"
                 "        and switch to terminal mode, then re-run this command.\n"
             )
             if _in_container():
@@ -492,7 +495,8 @@ def acquire_run_lock():
                     "     2. Stop qobuz-librarian-web instead, re-run, then start it\n"
                     "        again.\n\n"
                 )
-        message += "   Only one writer can use /staging at a time.\n"
+        message += ("   Only one Qobuz Librarian run can change the library at a "
+                    "time.\n")
         die(fmt(C.RED, message),
             EXIT_LOCK_BUSY)
     if lease is not None and lease.intact() is True:
@@ -653,12 +657,14 @@ def require_music_root():
             "backup folder is readable. Refusing to proceed.\n"
         )
     elif _in_container():
-        problem = "\n✗  The /music mount is missing or inaccessible.\n"
-        fix = "   Check what your Compose file mounts at /music.\n"
+        problem = "\n✗  The /music mount is missing or can't be read.\n"
+        fix = ("   Set QL_MUSIC_DIR in .env to the host folder that holds your "
+               "artist folders, check that it exists, then run this again.\n")
     else:
-        problem = (f"\n✗  MUSIC_ROOT missing or inaccessible: "
-                   f"{cfg.MUSIC_ROOT}\n")
-        fix = "   Refusing to proceed.\n"
+        problem = (f"\n✗  The music folder {cfg.MUSIC_ROOT} is missing or "
+                   "can't be read.\n")
+        fix = ("   Set MUSIC_ROOT to the folder that holds your artist "
+               "folders, then run this again.\n")
     die(fmt(C.RED, problem + fix), EXIT_CONFIG)
 
 
@@ -849,9 +855,11 @@ def parse_args():
     modes.add_argument("--library-walk", action="store_true",
                    help="walk every artist: fill gaps, then offer albums you're "
                         "missing; queue as you go (same as menu Library walk).")
-    modes.add_argument("--album-gaps", action="store_true",
+    modes.add_argument("--gap-fill", "--album-gaps", dest="album_gaps",
+                   action="store_true",
                    help="fill missing tracks in every incomplete album you own; "
-                        "never suggests albums you don't have.")
+                        "never suggests albums you don't have (same as menu "
+                        "Gap Fill).")
     modes.add_argument("--repair", action="store_true",
                    help="re-download damaged (truncated) tracks you own. '*' at "
                         "the artist prompt sweeps the whole library.")
@@ -869,11 +877,12 @@ def parse_args():
                         "settings apply). Local; no Qobuz login needed.")
     modes.add_argument("--migrate", action="store_true",
                    help="one-time setup: reorganise an existing library into the "
-                        "Artist/Album layout (local-only; no Qobuz login needed)")
+                        "Artist/Album layout (same as menu Library migration; "
+                        "local-only; no Qobuz login needed)")
     modes.add_argument("--settings", action="store_true",
-                   help="set download quality, downsample policy and "
-                        "behaviour toggles from the terminal (same store "
-                        "the web Settings page saves to)")
+                   help="set download quality, whether downsampling keeps "
+                        "the originals, and behaviour toggles from the "
+                        "terminal (same store the web Settings page saves to)")
     modes.add_argument("--reset-walk-seen", action="store_true",
                    help="forget which artists and albums the walks have "
                         "already checked, and exit")
@@ -1014,7 +1023,7 @@ def parse_args():
         ("a query (album mode)", bool(args.query)),
         ("--artist", args.artist is not None),
         ("--library-walk", args.library_walk),
-        ("--album-gaps", args.album_gaps),
+        ("--gap-fill", args.album_gaps),
         ("--repair", args.repair),
         ("--upgrade-walk", args.upgrade_walk),
         ("--downsample-walk", args.downsample_walk),
@@ -1487,7 +1496,15 @@ def _check_staging_occupied():
     if _RUN_LEASE is None or _RUN_LEASE.intact() is not True:
         return
     from qobuz_librarian import download
+    from qobuz_librarian.integrations.staging import kept_staging_run_names
     from qobuz_librarian.queue.startup_recovery import unclaimed_staging_run_names
+
+    def album_dirs_in(roots):
+        return [
+            album_dir
+            for root in roots
+            for album_dir in download.staged_album_dirs(root)
+        ]
 
     try:
         if not cfg.STAGING_DIR.exists():
@@ -1496,24 +1513,23 @@ def _check_staging_occupied():
         unclaimed = unclaimed_staging_run_names()
         if unclaimed is None:
             return
-        roots = [cfg.STAGING_DIR / name for name in unclaimed] + [
-            d for d in sorted(cfg.STAGING_DIR.iterdir())
-            if d.is_dir() and not d.name.startswith(".")
-        ]
-        album_dirs = [
-            album_dir
-            for root in roots
-            for album_dir in download.staged_album_dirs(root)
-        ]
+        # The next run sets these aside as incomplete or interrupted.
+        unfinished = album_dirs_in(cfg.STAGING_DIR / name for name in unclaimed)
+        album_dirs = album_dirs_in(
+            [cfg.STAGING_DIR / name for name in kept_staging_run_names()] + [
+                d for d in sorted(cfg.STAGING_DIR.iterdir())
+                if d.is_dir() and not d.name.startswith(".")
+            ]) + unfinished
         if album_dirs:
             one = len(album_dirs) == 1
+            them = "it" if one else "them"
             location = " from the Compose host" if _in_container() else ""
             notice = wrap(
                 f"{plural(len(album_dirs), 'album folder')} in "
                 f"{cfg.STAGING_DIR} {'was' if one else 'were'} not imported. "
-                "The next run moves unimported downloads to "
-                f"{cfg.BEETS_RETRY_DIR}, so import {'it' if one else 'them'} "
-                f"first{location}:",
+                + (f"The next run moves incomplete downloads to "
+                   f"{cfg.BEETS_RETRY_DIR}, so import {them} first{location}:"
+                   if unfinished else f"Import {them}{location} with:"),
                 indent="  ⚠  ", hanging="     ")
             command = "\n".join(_wrap_shell_command(
                 _beets_recovery_command(album_dirs), text_width(),
@@ -1595,9 +1611,7 @@ def _entry():
         except KeyboardInterrupt:
             die(fmt(C.GRAY, "\n  Interrupted."), EXIT_INTERRUPT)
         except AuthLost:
-            die(fmt(C.RED,
-                "\n✗  Auth lost. Re-authenticate: Settings page in the web UI, "
-                "or set QOBUZ_USER_AUTH_TOKEN in your environment.\n"), EXIT_AUTH)
+            die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
         except QobuzUnavailable as e:
             die(fmt(C.YELLOW, f"\n⚠  {e}\n"), EXIT_TRANSIENT)
         except DownloaderNotReady:

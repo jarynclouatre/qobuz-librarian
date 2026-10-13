@@ -21,7 +21,9 @@ from qobuz_librarian.ui_cli.errors import (
     EXIT_CONFIG,
     EXIT_GENERAL,
     EXIT_INTERRUPT,
+    no_artist_folders,
     plural,
+    unreadable_artist,
 )
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
@@ -73,11 +75,11 @@ def run_downsample_walk_mode(args):
 
     def artist_read_failed(path, error):
         discovery_errors[path.name] = str(error)
-        log.warning(f"Unreadable artist {path.name}: {error}. Retry after checking permissions.")
+        log.warning(unreadable_artist(path.name, error))
 
     all_artists = list_library_artists(on_artist_error=artist_read_failed)
     if not all_artists:
-        log.info(fmt(C.YELLOW, "  ⚠  No artist directories found."))
+        log.info(block(fmt(C.YELLOW, f"  ⚠  {no_artist_folders()}")))
         return EXIT_GENERAL if discovery_errors else 0
 
     keep_originals = cfg.DOWNSAMPLE_KEEP_ORIGINALS == "keep"
@@ -105,7 +107,7 @@ def run_downsample_walk_mode(args):
         _scan_line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46)}…"
         if sys.stdout.isatty():
             print(f"\r{_scan_line:<80}", end="", flush=True)
-        if error is not None:
+        if error is not None and artist_dir.name not in discovery_errors:
             log.info("")
             log.info(fmt(C.YELLOW,
                 f"  Skipped {artist_dir.name}: {error}"))

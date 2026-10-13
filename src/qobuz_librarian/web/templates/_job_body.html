@@ -67,6 +67,8 @@
   {% set _review_thing = labels.discard_review_label(job) %}
   {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair', 'collection_restore') %}
   {% set _review_qobuz_blocked = _review_needs_qobuz and not qobuz_ready %}
+  {% set _review_paused = writes_paused or (downloads_paused and downloads_albums(job)) %}
+  {% set _review_paused_reason = writes_paused_reason if writes_paused else downloads_paused_reason %}
   {% if job.recoveries and job.execute_kind != 'migration' %}
   {% set kept = namespace(on_disk=false) %}
   {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
@@ -120,7 +122,7 @@
     {% endif %}
     <form id="review-form" action="/jobs/{{ job.id }}/approve" method="post"
           data-job-id="{{ job.id }}" data-review-kind="{{ job.execute_kind }}"
-          data-review-blocked="{{ '1' if _review_qobuz_blocked else '0' }}">
+          data-review-blocked="{{ '1' if _review_qobuz_blocked or _review_paused else '0' }}">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="selection_token" value="{{ review_selection_token }}">
       {% if job.execute_kind == 'downsample' %}<input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">{% endif %}
@@ -137,13 +139,13 @@
       </label>
       {% endif %}
       {% include "_review_candidates.html" %}
-      {% include "_writes_paused_reason.html" %}
+      {% with writes_paused=_review_paused, writes_paused_reason=_review_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}
       <div id="review-footer" class="ql-review-footer{% if review_counts.total and not _bar_total %} hidden{% endif %}">
         <div class="ql-review-footer-actions">
           <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary{% if not review_counts.total %} hidden{% endif %}"
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
-            {% if not _bar_selected or writes_paused or _review_qobuz_blocked %} disabled{% endif %}{% if writes_paused %} title="{{ writes_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
+            {% if not _bar_selected or _review_paused or _review_qobuz_blocked %} disabled{% endif %}{% if _review_paused %} title="{{ _review_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
             {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Each file is replaced only after its new copy verifies, and an album too damaged to patch is downloaded again in full. Your originals are set aside while that happens and removed once the replacement is proven good, so a repair cannot be undone. A replacement that cannot be verified keeps them, restorable from Settings."
@@ -328,15 +330,15 @@
     <div class="ql-job-actions">
       {% set recovery_retry = durable_recovery_control and durable_recovery_control.job_id == job.id %}
       {% if (s in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and (job.attention != 'recovery' or recovery_retry) %}
-      {% set retry_paused = writes_paused and not recovery_retry and not retry_can_queue(job) %}
+      {% set retry_paused = downloads_paused and not recovery_retry and not retry_can_queue(job) %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% if recovery_retry %}
         <input type="hidden" name="recovery_operation_id" value="{{ durable_recovery_control.operation_id }}">
         <input type="hidden" name="recovery_item_id" value="{{ durable_recovery_control.item_id }}">
         {% endif %}
-        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if retry_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry</button>
-        {% if retry_paused %}{% include "_writes_paused_reason.html" %}{% endif %}
+        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if retry_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% endif %}>Retry</button>
+        {% if retry_paused %}{% with writes_paused=downloads_paused, writes_paused_reason=downloads_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}{% endif %}
       </form>
       {% elif job.execute_args.get('retried_as') %}
       <a href="/jobs/{{ job.execute_args.retried_as }}" class="ql-btn ql-btn-secondary ql-btn-sm">Open the retry</a>

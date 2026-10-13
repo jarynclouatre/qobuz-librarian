@@ -2,6 +2,7 @@
 import errno
 import sys
 
+from qobuz_librarian import config as cfg
 from qobuz_librarian.ui_cli.colors import block
 
 # Exit-code contract for the CLI.
@@ -28,6 +29,23 @@ def plural(n: int, singular: str, plural_form: str | None = None) -> str:
     return f"{n} {word}"
 
 
+def no_artist_folders() -> str:
+    """Said when the music folder holds no artist folders."""
+    setting = ("QL_MUSIC_DIR in .env" if cfg.in_container()
+               else "MUSIC_ROOT")
+    return (f"No artist folders in {cfg.MUSIC_ROOT}. If your music is "
+            f"somewhere else, set {setting} to that folder.")
+
+
+def unreadable_artist(name, error) -> str:
+    """The one line for an artist folder that couldn't be read."""
+    if isinstance(error, OSError) and error.strerror:
+        error = error.strerror.lower()
+    return (f"Can't read the artist folder {name}: {error}. Check that the "
+            "user Qobuz Librarian runs as can read it (PUID and PGID in "
+            "Docker).")
+
+
 def oserr_hint(e: OSError) -> str:
     """Append a PUID/PGID hint when an OSError looks like a NAS perms issue."""
     if e.errno in (errno.EACCES, errno.EROFS):
@@ -38,7 +56,8 @@ def oserr_hint(e: OSError) -> str:
     return ""
 
 
-def auth_lost_msg(context: str = "mid-run") -> str:
+def auth_lost_msg() -> str:
     """Multi-line block for AuthLost catch-and-die sites in CLI modes."""
-    return (f"\n✗  Auth lost {context} - re-paste your token on Settings "
-            "or set QOBUZ_USER_AUTH_TOKEN.\n")
+    return ("\n✗  Qobuz rejected the token, so the run stopped.\n"
+            "   Paste a new token on the Settings page of the web app, or set "
+            "QOBUZ_USER_AUTH_TOKEN, then run this again.\n")

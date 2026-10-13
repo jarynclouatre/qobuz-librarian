@@ -17,14 +17,14 @@ _CHOICES = [
     ("3", "Library walk", Mode.WALK_QUEUE,
      "every artist, same as Artist; queue as you go and download after each "
      "artist or all at the end"),
-    ("4", "Album gaps", Mode.ALBUM_WALK,
+    ("4", "Gap Fill", Mode.ALBUM_WALK,
      "fill missing tracks in every incomplete album you own; "
      "never suggests albums you don't have"),
     ("5", "Repair", Mode.ALBUM_REPAIR,
      "re-download damaged (truncated) tracks you own"),
     ("6", "Upgrade", Mode.UPGRADE,
      "better-quality versions of albums you own"),
-    ("7", "Migrate", Mode.MIGRATE,
+    ("7", "Library migration", Mode.MIGRATE,
      "one-time setup: reorganise an existing library into the Artist/Album "
      "layout (copies by default, never touches originals)"),
     ("8", "Downsample", Mode.DOWNSAMPLE,

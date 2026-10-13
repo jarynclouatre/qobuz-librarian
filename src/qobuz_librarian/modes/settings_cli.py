@@ -13,6 +13,11 @@ from qobuz_librarian.web import settings_store
 
 _QUALITY_CHOICES = ["4", "3", "2"]
 
+# Only the web Library scan and New releases checks follow it.
+_WEB_ONLY = {"SUPPRESS_SINGLE_TRACK_GAPS"}
+_KEEP_LABEL = next(label for key, label, *_ in settings_store.TEXT_FIELDS
+                   if key == "DOWNSAMPLE_KEEP_ORIGINALS")
+
 
 def _pick_quality(current_value):
     labels = settings_store.ENUM_OPTION_LABELS["STREAMRIP_QUALITY"]
@@ -41,7 +46,7 @@ def _pick_downsample_policy(current_value):
         default_yes = True
         note = " (not chosen yet)"
     keep = confirm(
-        f"  Keep restorable backups when downsampling?{note}",
+        f"  {_KEEP_LABEL}?{note}",
         default_yes=default_yes, auto_yes=False, on_eof=None, quiet=True)
     if keep is None:
         return None
@@ -73,8 +78,10 @@ def _show_current(values):
         values.get("STREAMRIP_QUALITY"), "?")
     log.info(fmt(C.GRAY, f"    Download quality: {quality_label}"))
     policy = values.get("DOWNSAMPLE_KEEP_ORIGINALS") or "not chosen yet"
-    log.info(fmt(C.GRAY, f"    Downsample policy: {policy}"))
+    log.info(fmt(C.GRAY, f"    {_KEEP_LABEL}: {policy}"))
     for key, label, _ in settings_store.BEHAVIOR_FIELDS:
+        if key in _WEB_ONLY:
+            continue
         state = "on" if values.get(key) else "off"
         log.info(fmt(C.GRAY, f"    {label}: {state}"))
 
@@ -82,7 +89,7 @@ def _show_current(values):
 def run_settings_mode(args):
     """Set download quality, downsample policy and behaviour toggles from
     the terminal, saved the same way the web Settings page saves them."""
-    banner("Settings: quality, downsample policy, behaviour toggles")
+    banner("Settings: download quality, originals when downsampling, behaviour toggles")
     values = settings_store.current()
 
     if getattr(args, "dry_run", False):
@@ -109,6 +116,8 @@ def run_settings_mode(args):
     log.info(fmt(C.WHITE,
         "  Behaviour toggles (Enter keeps the current value, ? explains one):"))
     for key, label, help_text in settings_store.BEHAVIOR_FIELDS:
+        if key in _WEB_ONLY:
+            continue
         current_on = bool(values.get(key))
         answer = _pick_toggle(label, help_text, current_on)
         if answer is None:

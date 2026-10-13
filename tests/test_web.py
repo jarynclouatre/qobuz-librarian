@@ -951,9 +951,11 @@ def test_settings_retry_keeps_edits_and_custom_timer_values(client, tmp_path, mo
     store = tmp_path / "s.json"
     monkeypatch.setattr(ss, "SETTINGS_FILE", store)
     monkeypatch.setattr(ss, "_pending_apply", None)
-    monkeypatch.setattr(cfg, "NEW_RELEASE_CHECK_INTERVAL", 3600)
-    monkeypatch.setattr(cfg, "ARTIST_CATALOG_CACHE_TTL", 0)
-    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    for key, value in (("NEW_RELEASE_CHECK_INTERVAL", 3600),
+                       ("ARTIST_CATALOG_CACHE_TTL", 0),
+                       ("LYRICS_ENABLED", True)):
+        monkeypatch.setattr(cfg, key, value)
+        monkeypatch.setitem(ss._ENV_DEFAULTS, key, value)
 
     page = client.get("/settings")
     assert page.status_code == 200
@@ -988,6 +990,7 @@ def test_unchanged_lyric_providers_from_compose_are_not_pinned(tmp_path, monkeyp
     monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
     monkeypatch.setattr(ss, "_any_active_job", lambda: False)
     monkeypatch.setattr(cfg, "LYRICS_PROVIDERS", ["lrclib", "netease"])
+    monkeypatch.setitem(ss._ENV_DEFAULTS, "LYRICS_PROVIDERS", ["lrclib", "netease"])
     with ss._pending_lock:
         ss._pending_apply = None
 
@@ -995,7 +998,6 @@ def test_unchanged_lyric_providers_from_compose_are_not_pinned(tmp_path, monkeyp
     assert ok
     assert "LYRICS_PROVIDERS" not in (ss._read_settings() or {})
 
-    monkeypatch.setitem(ss._ENV_DEFAULTS, "LYRICS_PROVIDERS", ["lrclib", "netease"])
     (tmp_path / "s.json").write_text('{"LYRICS_PROVIDERS": "Lrclib,NetEase"}')
     ss.load()
     assert "LYRICS_PROVIDERS" not in (ss._read_settings() or {})
@@ -1039,6 +1041,32 @@ def test_concurrent_settings_saves_merge_without_losing_either_change(tmp_path, 
     }
     assert cfg.LYRICS_ENABLED is False
     assert cfg.PREFER_HIRES is False
+
+
+def test_a_web_settings_save_cannot_undo_a_terminal_change(tmp_path, monkeypatch):
+    """The terminal saved a new download quality while the web app stayed
+    open, and the next web Settings save put the old quality back."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import settings_store as ss
+
+    store = tmp_path / "s.json"
+    monkeypatch.setattr(ss, "SETTINGS_FILE", store)
+    monkeypatch.setattr(ss, "_any_active_job", lambda: False)
+    monkeypatch.setattr(ss, "_pending_apply", None)
+    monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
+    monkeypatch.setitem(ss._ENV_DEFAULTS, "STREAMRIP_QUALITY", 4)
+    shown = ss.current()
+    generation = ss.form_generation("behaviour", shown)
+
+    store.write_text(json.dumps({"STREAMRIP_QUALITY": "3"}))
+    posted = {key: shown[key] for key in ss.FORM_KEYS["behaviour"]}
+    posted["LYRICS_ENABLED"] = not shown["LYRICS_ENABLED"]
+    with pytest.raises(ss.SettingsChanged):
+        ss.save_from_form(posted, "behaviour", generation)
+
+    assert json.loads(store.read_text()) == {"STREAMRIP_QUALITY": "3"}
+    ss.refresh()
+    assert ss.current()["STREAMRIP_QUALITY"] == "3"
 
 
 # ── run-lock busy → destructive routes 503, read-only stay open ───────
@@ -1726,6 +1754,51 @@ def test_giving_up_a_download_that_staged_nothing_lifts_the_pause(
     finally:
         authority.close()
         _remove_job(job)
+
+
+def test_a_terminal_queue_that_never_started_holds_only_downloads(
+    client, monkeypatch, tmp_path,
+):
+    """A Library walk stopped with an album queued paused every web scan and
+    tool, while the terminal holds only its downloads for that queue."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import run_lock
+    from qobuz_librarian.queue import journal
+    from qobuz_librarian.queue.builder import _build_queue_item
+    from qobuz_librarian.web import queue_recovery, runtime, write_gate
+
+    monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
+    item = _build_queue_item(
+        album={"id": "42", "title": "Anvil Vapre"}, album_dir=None,
+        label="Anvil Vapre", missing=[], present=[],
+        upgrade_only=False, auto_upgrade=False,
+    )
+    journal.save_pending_queue([item], mode="walk_queue")
+
+    def _record(lease):
+        result = queue_recovery._recover_startup_queue(lease)
+        queue_recovery._STARTUP_RECOVERY_RESULT = result
+        return result
+
+    authority = run_lock.acquire()
+    monkeypatch.setattr(runtime, "_RUN_LOCK_HANDLE", authority)
+    monkeypatch.setattr(queue_recovery, "_record_startup_recovery", _record)
+    try:
+        _record(authority)
+        assert not write_gate._web_writes_paused()
+        assert write_gate._web_downloads_paused()
+        assert queue_recovery._staging_entry_allowed(
+            jm.Job(title="Lyrics scan", execute_kind="lyrics"))
+        assert not queue_recovery._staging_entry_allowed(
+            jm.Job(title="Anvil Vapre", album_id="7"))
+
+        r = client.post("/download", data={"album_id": "7"},
+                        follow_redirects=False)
+        assert r.status_code == 503
+    finally:
+        authority.close()
 
 
 # ── per-job cancel button on queue page ───────────────────────────────

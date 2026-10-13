@@ -47,6 +47,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        submitted_generation="",
                        status_code=200):
     creds = qobuz_access._read_creds()
+    settings_store.refresh()
     values = settings_store.current()
     generations = {
         name: settings_store.form_generation(name, values)

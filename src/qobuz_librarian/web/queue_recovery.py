@@ -145,6 +145,38 @@ def _recovery_status_value(result) -> str | None:
     return getattr(status, "value", None)
 
 
+# The queues a terminal walk or album search saves before it downloads.
+_TERMINAL_QUEUE_MODES = frozenset({"walk_queue", "album_walk", "album-now"})
+
+# Reviews whose approval downloads albums. The terminal holds its repairs for
+# a saved queue too.
+_DOWNLOAD_REVIEW_KINDS = frozenset(
+    {"library", "new_releases", "collection_restore", "repair"})
+
+
+def _terminal_queue_waiting() -> int:
+    """How many albums wait in a terminal queue that never started, or 0.
+
+    The terminal holds only its downloads for such a queue, so the web holds
+    only its own.
+    """
+    if _startup_recovery_status_value() != "resume_required":
+        return 0
+    items = getattr(_STARTUP_RECOVERY_RESULT, "items", ())
+    if items and all(
+        item.mode in _TERMINAL_QUEUE_MODES
+        and item.phase is queue_state.QueuePhase.PENDING
+        for item in items
+    ):
+        return len(items)
+    return 0
+
+
+def _downloads_albums(job) -> bool:
+    return job is not None and (
+        bool(job.album_id) or job.execute_kind in _DOWNLOAD_REVIEW_KINDS)
+
+
 def _startup_recovery_binding():
     """Load the one exact queue item behind the current recovery result."""
     if _startup_recovery_status_value() not in {
@@ -544,7 +576,10 @@ def _staging_entry_allowed(job) -> bool:
     status = _startup_recovery_status_value()
     return status == "clear" or (
         status == "resume_required"
-        and _durable_recovery_matches_job(job)
+        and (
+            _durable_recovery_matches_job(job)
+            or (_terminal_queue_waiting() and not _downloads_albums(job))
+        )
     )
 
 

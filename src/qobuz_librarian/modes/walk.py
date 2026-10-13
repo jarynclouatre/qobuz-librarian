@@ -24,7 +24,13 @@ from qobuz_librarian.queue.journal import QueueJournalBlocked
 from qobuz_librarian.queue.persistence import clear_pending_queue, save_pending_queue
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate, wrap
-from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, EXIT_INTERRUPT, plural
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_GENERAL,
+    EXIT_INTERRUPT,
+    no_artist_folders,
+    plural,
+    unreadable_artist,
+)
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 
@@ -196,8 +202,8 @@ def record_album_walk_seen(artist_name, album_name, seen=None):
         _atomic_append(
             cfg.ALBUM_WALK_SEEN_FILE,
             header_lines=[
-                "# Album fill walk decisions: albums you've answered "
-                "y/N for during the album fill walk.\n",
+                "# Gap Fill decisions: albums you've answered "
+                "y/N for during the Gap Fill walk.\n",
                 "# Format: Artist | Album, one per line.\n",
                 "# To revisit an album, delete its line below "
                 "(or delete this whole file).\n",
@@ -269,17 +275,18 @@ def _leftover_folder_note(label, names) -> str:
 def run_album_walk_mode(args, token):
     """Album fill walk: scan every album under every artist and
     prompt only on incomplete ones."""
-    banner("Album gaps: fill missing tracks in albums you already own")
+    banner("Gap Fill: fill missing tracks in albums you already own")
 
     discovery_errors = {}
 
     def artist_read_failed(path, error):
         discovery_errors[path.name] = str(error)
-        log.warning(f"Unreadable artist {path.name}: {error}. Retry after checking permissions.")
+        log.warning(unreadable_artist(path.name, error))
 
     all_artists = list_library_artists(on_artist_error=artist_read_failed)
     if not all_artists:
-        log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
+        log.info(fmt(C.YELLOW, wrap(no_artist_folders(), indent="  ⚠  ",
+                                    hanging="     ")))
         return EXIT_GENERAL if discovery_errors else 0
 
     vlog(f"  {plural(len(all_artists), 'artist')} in library.")
@@ -300,16 +307,17 @@ def run_album_walk_mode(args, token):
              f"{cfg.ALBUM_WALK_SEEN_FILE.name}.")
     log.info(fmt(C.GRAY,
         "  Per album: y=queue, enter/N=skip, d=download queue now, s=stop."))
-    log.info(fmt(C.GRAY,
-        "  Already-complete albums and previously-decided ones are skipped "
-        "silently."))
+    log.info(fmt(C.GRAY, wrap(
+        "Albums already complete or answered on earlier walks are skipped; "
+        "--reset-walk-seen brings the answered ones back.",
+        indent="  ", hanging="  ")))
     log.info(fmt(C.GRAY,
         "  --yes auto-y's anything not yet decided (useful for crash "
         "recovery)."))
     print()
 
     saved_consolidate = args.consolidate
-    _consolidation_disabled_notice(args, "Album gaps")
+    _consolidation_disabled_notice(args, "Gap Fill")
     args.consolidate = False
 
     shared_queue = []
@@ -513,11 +521,12 @@ def run_walk_queued_mode(args, token):
 
     def artist_read_failed(path, error):
         discovery_errors[path.name] = str(error)
-        log.warning(f"Unreadable artist {path.name}: {error}. Retry after checking permissions.")
+        log.warning(unreadable_artist(path.name, error))
 
     all_artists = list_library_artists(on_artist_error=artist_read_failed)
     if not all_artists:
-        log.info(fmt(C.YELLOW, "  ⚠  No artist directories found in library."))
+        log.info(fmt(C.YELLOW, wrap(no_artist_folders(), indent="  ⚠  ",
+                                    hanging="     ")))
         return EXIT_GENERAL if discovery_errors else 0
 
     # The web review's dismissals and this walk's own per-artist record are two
@@ -526,12 +535,15 @@ def run_walk_queued_mode(args, token):
     hidden = hidden_mod.load()
 
     seen = load_walk_seen()
-    if seen:
-        n_before = len(all_artists)
-        all_artists = [a for a in all_artists if normalize(a.name) not in seen]
-        n_hidden = n_before - len(all_artists)
-        if n_hidden:
-            vlog(f"  Hiding {n_hidden} previously-decided artist(s).")
+    n_before = len(all_artists)
+    all_artists = [a for a in all_artists if normalize(a.name) not in seen]
+    n_hidden = n_before - len(all_artists)
+    if n_hidden:
+        one = n_hidden == 1
+        log.info(fmt(C.GRAY, wrap(
+            f"{plural(n_hidden, 'artist')} answered on earlier walks "
+            f"{'is' if one else 'are'} left out; --reset-walk-seen brings "
+            f"{'it' if one else 'them'} back.", indent="  ", hanging="  ")))
     if not all_artists:
         if not discovery_errors:
             log.info(fmt(C.GREEN, "  ✓  All artists already decided."))
@@ -684,14 +696,8 @@ def run_walk_queued_mode(args, token):
                             decided = not step_two_attention
                             _save_now()
                     except KeyboardInterrupt:
-                        # Persist the in-memory queue now; the current artist's
-                        # approvals are in shared_queue but save_callback hadn't
-                        # fired for this in-progress artist yet.
-                        _save_queue(shared_queue)
                         log.info(fmt(C.GRAY,
                             "\n  Artist scan interrupted; stopping the walk."))
-                        if shared_queue:
-                            log.info(_kept_queue_note(shared_queue))
                         ctrl_c = True
                         interrupted = True
                         decided = False
@@ -721,11 +727,18 @@ def run_walk_queued_mode(args, token):
             if decided and not args.dry_run:
                 record_walk_seen(d.name, seen)
             i += 1
+    except KeyboardInterrupt:
+        print()
+        ctrl_c = True
+        interrupted = True
     finally:
         args.consolidate = saved_consolidate
-        if shared_queue and isinstance(sys.exc_info()[1], (AuthLost, QobuzUnavailable)):
-            # Unwinding on a lost token or an unreachable API: a flush would only
-            # fail again over the original error, so keep the queue for next launch.
+        if shared_queue and (
+            ctrl_c
+            or isinstance(sys.exc_info()[1], (AuthLost, QobuzUnavailable))
+        ):
+            # Ctrl-C means stop, and after a lost token or an unreachable API
+            # a flush would only fail again, so keep the queue without asking.
             _save_queue(shared_queue)
             log.info(_kept_queue_note(shared_queue))
         elif shared_queue:

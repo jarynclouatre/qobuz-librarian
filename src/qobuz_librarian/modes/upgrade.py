@@ -26,8 +26,14 @@ from qobuz_librarian.quality.decision import (
     load_capped,
     mark_album_capped,
 )
-from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate
-from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, EXIT_INTERRUPT, plural
+from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_GENERAL,
+    EXIT_INTERRUPT,
+    no_artist_folders,
+    plural,
+    unreadable_artist,
+)
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 from qobuz_librarian.web import review_badges
@@ -166,16 +172,20 @@ def run_upgrade_walk_mode(args, token):
         def artist_read_failed(artist_dir, error):
             if normalize(artist_dir.name) not in VA_NORMALIZED:
                 discovery_errors[artist_dir.name] = str(error)
+                log.warning(unreadable_artist(artist_dir.name, error))
 
         artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
                    if normalize(d.name) not in VA_NORMALIZED]
+        if not artists and not discovery_errors:
+            log.info(block(fmt(C.YELLOW, f"  ⚠  {no_artist_folders()}")))
+            return 0
         log.info(f"  Checking upgrade quality for {plural(len(artists), 'artist')}…")
 
         def on_artist(artist_dir, _candidates, error, done, total):
             if sys.stdout.isatty():
                 line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46)}…"
                 print(f"\r{line:<80}", end="", flush=True)
-            if error is not None:
+            if error is not None and artist_dir.name not in discovery_errors:
                 log.info("")
                 log.info(fmt(C.YELLOW, f"  Skipped {artist_dir.name}: {error}"))
 
@@ -254,6 +264,8 @@ def run_upgrade_walk_mode(args, token):
     n_attention_albums = 0
     n_gone_albums = 0
     n_stale_albums = 0
+    n_would_upgrade = 0
+    dry_run = getattr(args, "dry_run", False)
     no_answer = False
     n_attempted = 0
     interrupted = False
@@ -263,7 +275,7 @@ def run_upgrade_walk_mode(args, token):
         f"  {plural(len(saved), 'upgrade candidate')} across "
         f"{plural(n, 'artist')}."))
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
-    if not getattr(args, "dry_run", False):
+    if not dry_run:
         log.info(fmt(C.YELLOW,
             "  Your current copy is removed once the replacement verifies. "
             "This cannot be undone."))
@@ -273,7 +285,7 @@ def run_upgrade_walk_mode(args, token):
     auto_accept_all = False
     try:
         if (not args.yes and not getattr(args, "auto_safe", False)
-                and not getattr(args, "dry_run", False)):
+                and not dry_run):
             answer = confirm(
                 "\n  Auto-accept all upgrades and run unattended?",
                 default_yes=False, auto_yes=False, on_eof=None, quiet=True)
@@ -337,7 +349,7 @@ def run_upgrade_walk_mode(args, token):
                     continue
                 log.info(fmt(C.GREEN,
                     f"  ✓  --auto-safe: all {n_albums} candidate(s) high-confidence."))
-            else:
+            elif not dry_run:
                 _flush_stdin()
                 # on_eof=None so a closed stdin is distinguishable from a No:
                 # the walk would otherwise skip every artist and call that a
@@ -353,6 +365,9 @@ def run_upgrade_walk_mode(args, token):
                     log.info(fmt(C.GRAY, "  Skipped."))
                     log.info("")
                     continue
+            if dry_run:
+                n_would_upgrade += n_albums
+                continue
 
             for j, c in enumerate(candidates, 1):
                 payload = c.get("payload") or {}
@@ -460,9 +475,14 @@ def run_upgrade_walk_mode(args, token):
     if no_answer and not n_attempted and not interrupted:
         log.warning(fmt(C.YELLOW, "  No answer was given. Nothing changed."))
         return EXIT_GENERAL
-    log.info(fmt(C.GRAY,
-        f"     Reviewed {plural(n_reviewed, 'artist')}; upgraded tracks in "
-        f"{plural(n_upgraded_albums, 'album')}."))
+    if dry_run:
+        log.info(fmt(C.GRAY,
+            f"     Reviewed {plural(n_reviewed, 'artist')}; would upgrade "
+            f"{plural(n_would_upgrade, 'album')}."))
+    else:
+        log.info(fmt(C.GRAY,
+            f"     Reviewed {plural(n_reviewed, 'artist')}; upgraded tracks in "
+            f"{plural(n_upgraded_albums, 'album')}."))
     if n_gone:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_gone, 'candidate')} no longer in the library. "
@@ -505,7 +525,7 @@ def run_upgrade_walk_mode(args, token):
         clause = "no answer was given, so the walk stopped early"
     elif unsafe_artists:
         clause = f"{plural(len(unsafe_artists), 'artist')} skipped for manual review"
-    elif n_gone and not n_upgraded_albums:
+    elif n_gone and not (n_upgraded_albums or n_would_upgrade):
         clause = f"{plural(n_gone, 'candidate')} no longer in the library"
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted."))
@@ -513,7 +533,7 @@ def run_upgrade_walk_mode(args, token):
         log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_failed_attempts, 'error')}."))
     elif clause:
         log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
-    elif not n_upgraded_albums:
+    elif not (n_upgraded_albums or n_would_upgrade):
         log.info(fmt(C.GRAY, "  Nothing to do."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))

@@ -544,6 +544,39 @@ def reload_from_disk() -> None:
             _apply(effective)
 
 
+def refresh() -> None:
+    """Take up what another process saved to the settings file.
+
+    The terminal saves there while the web app stays open in terminal mode,
+    so the values this process holds can be older than the file. Settings
+    reads through here before it shows them, so a save from that page can't
+    put back what the terminal changed. A job already running keeps the
+    values it started with, as after a save here.
+    """
+    try:
+        with _save_lock, state_file.store_lock(SETTINGS_FILE):
+            _refresh_locked()
+    except OSError as exc:
+        log.warning("couldn't reread the settings file: %s", exc)
+
+
+def _refresh_locked() -> None:
+    data = _read_settings() or {}
+    _normalise(data)
+    effective = dict(_ENV_DEFAULTS)
+    effective.update(data)
+
+    from qobuz_librarian.web import jobs as job_mgr
+
+    global _pending_apply
+    with job_mgr.settings_admission_guard(), _pending_lock:
+        if _any_active_job():
+            _pending_apply = effective
+        else:
+            _pending_apply = None
+            _apply(effective)
+
+
 def _any_active_job() -> bool:
     """True if a job is genuinely in flight (pending/scanning/running). Parked
     reviews don't count: they sit for weeks by design, and deferring saves
@@ -604,6 +637,7 @@ def save(values: dict):
     # keep-originals choice while the web stays browsable in terminal mode),
     # so the thread lock alone can't serialise the read-merge-write.
     with _save_lock, state_file.store_lock(SETTINGS_FILE):
+        _refresh_locked()
         return _save_locked(values)
 
 
@@ -617,6 +651,7 @@ def save_from_form(values: dict, section: str, generation: str):
     if section not in FORM_KEYS:
         raise ValueError(f"unknown Settings section: {section}")
     with _save_lock, state_file.store_lock(SETTINGS_FILE):
+        _refresh_locked()
         baseline = current()
         actual = _form_generation(section, baseline)
         if not generation or not secrets.compare_digest(generation, actual):

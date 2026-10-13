@@ -983,7 +983,7 @@ async def search_album_tracks(request: Request, album_id: str = ""):
 async def queue_download(request: Request, album_id: str = Form(""),
                          as_new_edition: str = Form(""),
                          track_id: str = Form("")):
-    busy = refusals._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request, downloads=True)
     if busy is not None:
         return busy
     album_id = album_id.strip()
@@ -1122,7 +1122,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                         "duplicate",
                     )
                 return RedirectResponse(url=f"/jobs/{dup.id}", status_code=303)
-            busy = refusals._lock_busy_response(request)
+            busy = refusals._lock_busy_response(request, downloads=True)
             if busy is not None:
                 return busy
             if not qobuz_access._credential_generation_is_active(credentials.generation):

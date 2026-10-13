@@ -88,12 +88,13 @@ def _job_admission_response(request):
 
 
 def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
-                        queue_behind_job=None):
+                        queue_behind_job=None, downloads: bool = False):
     """Return a 503 response if web writes are paused, else None."""
     notice = write_gate._writes_paused_notice(
         durable_resume_job_id=durable_resume_job_id,
         queue_behind_job=queue_behind_job,
         log_details=True,
+        downloads=downloads,
     )
     if notice is None:
         return None
