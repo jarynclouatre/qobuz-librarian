@@ -23,6 +23,7 @@ from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
     album_quality_label,
     album_year,
+    bonus_versions,
     find_expanded_edition,
     find_extras_in_existing,
     match_dir_to_catalog,
@@ -403,6 +404,15 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             # Don't delete the picked album's siblings here: the sibling-group
             # prompt promised deletion "on successful fill", but this branch
             # did NO download (the folder was already complete).
+            continue
+
+        bonus = bonus_versions(missing, present)
+        if len(bonus) == len(missing) and not getattr(args, "include_bonus", False):
+            log.info(fmt(C.GREEN,
+                f"    ✓  All songs present; {plural(len(bonus), 'bonus version')} "
+                "not filled (--include-bonus)"))
+            results.append({"dir": ad, "result": "already_complete",
+                            "n_total": n_total, "n_bonus": len(bonus)})
             continue
 
         # Partial: offer to fill the gap, unless the web review already got a

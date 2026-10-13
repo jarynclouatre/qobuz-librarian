@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from qobuz_librarian import config
+from qobuz_librarian.api import album_cache
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.dirfd import named_entry_matches as _migration_named_entry_matches
@@ -352,6 +353,10 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
     global_best, global_best_score = None, 0.0
     norm_title = normalize(strip_album_decorations(title))
     edition_title = canonical_track_title(beets_sanitize(title))
+    # Folder names often leave out a bracketed "(Live)" or the version, so
+    # only the rest of the title has to agree with the folder name.
+    title_words = _other_release_words(_TRAILING_BRACKETS_RE.sub("", title))
+    release_words = _other_release_words(f"{title} {qobuz_album.get('version') or ''}")
     for artist_dir in search_dirs:
         vlog(f"scanning artist dir: {artist_dir}")
         subdirs = _list_artist_subdirs_cached(artist_dir)
@@ -384,11 +389,17 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
                 vlog(f"rejected {d.name}: score {score:.2f} but length "
                      f"coverage {coverage:.2f} < {config.FUZZY_DIR_MIN_COVERAGE}")
                 continue
+            folder_words = _other_release_words(d.name)
+            if (_numbers_differ(strip_album_decorations(d.name), stripped_title)
+                    or title_words - folder_words or folder_words - release_words):
+                vlog(f"rejected {d.name}: another numbered, live or remix release")
+                continue
             global_best, global_best_score = d, score
             vlog(f"fuzzy match: {d}  (score {score:.2f})")
     return global_best
 
 
+_TRAILING_BRACKETS_RE = re.compile(r"(?:\s*(?:\([^()]*\)|\[[^\[\]]*\]))+\s*$")
 _DISC_FOLDER_RE = re.compile(r"^(?:disc|cd)\s*\d+", re.IGNORECASE)
 
 
@@ -811,6 +822,140 @@ def held_by_other_versions(album, existing, folder, missing):
     return compute_missing(missing, spare)[1] if spare else []
 
 
+_LABEL_WORD_RE = re.compile(
+    r"(?:19|20)\d\d|remaster|remix|mix|mono|stereo|live|acoustic|instrumental|demo|"
+    r"take|session|edit(?!ion)|deluxe|expanded|anniversary|special|super|legacy|"
+    r"collector|bonus|reissue")
+_LABEL_FILLER_RE = re.compile(
+    r"version|edition|original|album|the|and|in|\d+(?:st|nd|rd|th)|ed|es|s")
+_EXPANDED_LABEL_RE = re.compile(r"deluxe|expanded|anniversary|bonus|special|super|collector|legacy")
+
+
+def _label_words(label):
+    """The edition words and years in a label, and the rest of it."""
+    words = set(_LABEL_WORD_RE.findall(label))
+    return words, _LABEL_FILLER_RE.sub("", _LABEL_WORD_RE.sub("", label))
+
+
+def _shows_edition_tracks(album, existing, pairs):
+    """Whether the files hold this release's track list rather than a
+    smaller edition's: all of its tracks by recording ID but at most one in
+    ten, and more of them than any smaller edition of the album in the
+    artist's cached catalogue has."""
+    tracks = (album.get("tracks") or {}).get("items") or []
+    held = sum(1 for i, j in pairs.items()
+               if _norm_isrc(tracks[i].get("isrc"))
+               and _norm_isrc(tracks[i].get("isrc")) == _norm_isrc(existing[j].get("isrc")))
+    if held == len(tracks):
+        return True
+    if len(tracks) - held > len(tracks) // 10:
+        return False
+    artist_id = (album.get("artist") or {}).get("id")
+    cached = album_cache.get_catalog(f"{artist_id}:{config.ARTIST_CATALOG_LIMIT}", math.inf)
+    title = (edition_group_key(album) or (None,))[0]
+    return not any(
+        isinstance(other, dict) and (edition_group_key(other) or (None,))[0] == title
+        and held <= (other.get("tracks_count") or 0) < len(tracks)
+        for other in (cached or {}).get("items") or [])
+
+
+def same_edition(album, existing, folder):
+    """Whether the files are this release rather than another mix or master
+    of it: some of its tracks pair with them as the same edition, none of
+    the rest is a song they hold as another version, and the labels a
+    download of it leaves are on the files or their folder too.
+
+    A download writes each track's version into its title and the release
+    title into the album tag, but Qobuz's album version only when the album
+    tag or folder names an edition, so that version is checked only then.
+    A deluxe, expanded or other edition label the files lack still counts
+    when they hold its track list (_shows_edition_tracks). Wording and word
+    order may differ: "Remastered" is the files' "2015 Remaster", but "2009
+    Remaster" is not their "Remastered"."""
+    tracks = (album.get("tracks") or {}).get("items") or []
+    pairs = _edition_pairs(album, existing, folder)
+    missing = [t for i, t in enumerate(tracks) if i not in pairs]
+    if not pairs or held_by_other_versions(album, existing, folder, missing):
+        return False
+    title_labels = _edition_title_parts(album.get("title"))[1]
+    album_labels = _edition_title_parts(_release_title(album), album.get("version") or "")[1]
+    wanted, known = set(title_labels), set(album_labels)
+    for index in pairs:
+        track = tracks[index]
+        labels = _edition_title_parts(_release_title(track), track.get("version") or "")[1]
+        wanted |= labels
+        known |= labels
+        if track.get("version"):
+            known.add(canonical_track_title(track["version"]))
+    files = [existing[i] for i in set(pairs.values())]
+    tagged = set(_edition_title_parts(folder.name, folder=True, known_versions=known)[1])
+    for local in files:
+        tagged |= _edition_title_parts(local.get("album"), known_versions=known)[1]
+    if tagged - title_labels:
+        wanted |= album_labels
+    held = set(tagged)
+    for local in files:
+        held |= _edition_title_parts(local.get("title"), known_versions=known)[1]
+    held_words, held_rests = set(), {""}
+    for label in held:
+        words, rest = _label_words(label)
+        held_words |= words
+        held_rests.add(rest)
+
+    def unheld(labels):
+        return [label for label in labels - held
+                if _label_words(label)[1] not in held_rests
+                or not _label_words(label)[0] <= held_words]
+
+    lacking = unheld(wanted)
+    if not all(_PACKAGING_LABEL_RE.fullmatch(label) for label in lacking):
+        return False
+    expanded = [label for label in unheld(album_labels) if _EXPANDED_LABEL_RE.search(label)]
+    return not (lacking or expanded) or _shows_edition_tracks(album, existing, pairs)
+
+
+_ALTERNATE_WORD_RE = re.compile(
+    r"mix|mono|stereo|live|acoustic|instrumental|demo|take|session|"
+    r"edit(?!ion)|version|alternat|outtake")
+# "Remastered Version", "2017 Mix", "Stereo Mix 2015": the same recording
+# mastered or mixed again, not another version of the song.
+_REMASTER_LABEL_RE = re.compile(
+    r"(?:(?:19|20)\d\d|digital|remaster(?:ed)?|master(?:ed)?|mono|stereo|new|"
+    r"mix(?:ed)?|version|edition)+")
+
+
+def _remaster_label(label):
+    return bool(_REMASTER_LABEL_RE.fullmatch(label)
+                and re.search(r"master|(?:19|20)\d\d|new", label))
+
+
+def bonus_versions(missing, present):
+    """The tracks in ``missing`` that are another version of a song in
+    ``present``: the same title once its version labels and the version
+    field are set aside, adding a mix, live, demo, edit, instrumental or
+    other version label the present copy lacks, such as "Footprints
+    (Remix)" beside "Footprints". A reprise, a remaster or a dated mix
+    such as "2017 Mix" alone is not."""
+    held = {}
+    for track in present:
+        base, labels = _edition_title_parts(_release_title(track))
+        held.setdefault(base, []).append(_recording_labels(labels))
+    bonus = []
+    for track in missing:
+        base, labels = _edition_title_parts(_release_title(track))
+        recording = _recording_labels(labels)
+        if recording in held.get(base, ()):
+            continue
+        for other in held.get(base, ()):
+            added = recording - other
+            if (added and any(_ALTERNATE_WORD_RE.search(label) and not _remaster_label(label)
+                              for label in added)
+                    and not any("reprise" in label for label in added)):
+                bonus.append(track)
+                break
+    return bonus
+
+
 def _edition_matches(album):
     folders = []
     for exact in (True, False):
@@ -855,14 +1000,43 @@ def owned_edition_track_ids(album):
     }
 
 
+def bears_album_title(album, folder):
+    """Whether a folder is named for the album once edition labels, the year
+    and a leading article are stripped, reading "&" as "and"."""
+    def bare(name):
+        name = strip_leading_article(strip_album_decorations(name or ""))
+        return canonical_track_title(re.sub(r"\s*&\s*", " and ", name))
+    return bare(folder.name) == bare(album.get("title"))
+
+
+def holds_recordings(tracks, existing):
+    """Whether the files hold every recording on a track list by ISRC, as a
+    box set holds the albums it collects."""
+    wanted = {_norm_isrc(track.get("isrc")) for track in tracks}
+    held = {_norm_isrc(track.get("isrc")) for track in existing}
+    return bool(wanted) and "" not in wanted and wanted <= held
+
+
+def find_album_folder(album):
+    """(files, folder) for the folder that holds the album or another
+    version of it, or ([], None). The folder the album's name finds counts
+    when it bears the album's title, when the album's songs make up most of
+    its files, or when it holds every recording on the album; a folder
+    holding another album, such as "Illmatic" for "Stillmatic", does not."""
+    existing, folder = find_existing_tracks(album)
+    if folder is None or bears_album_title(album, folder):
+        return existing, folder
+    tracks = (album.get("tracks") or {}).get("items") or []
+    if tracks and existing:
+        present = compute_missing(tracks, existing)[1]
+        if len(present) * 2 >= len(existing) or holds_recordings(tracks, existing):
+            return existing, folder
+    return [], None
+
+
 def other_version_dir(album):
-    """The folder of another version: the same title once edition labels and
-    the year are stripped."""
-    folder = find_album_dir_filesystem(album)
-    bare = canonical_track_title(strip_album_decorations(album.get("title") or ""))
-    if folder is not None and bare == canonical_track_title(strip_album_decorations(folder.name)):
-        return folder
-    return None
+    """The folder of the album or another version of it (find_album_folder)."""
+    return find_album_folder(album)[1]
 
 
 def _strict_recording_id(track, field):
@@ -1089,6 +1263,20 @@ def album_quality_label(album):
 # ── Catalog filtering ─────────────────────────────────────────────────────────
 _MIN_ALBUM_TRACKS = 4  # below this an edition is a stray single/EP, not the
                        # album - ignored when sizing the standard edition.
+# A normalized title ending in a number: "jubileumii", "greatesthitsvol3".
+_NUMBERED_KEY_RE = re.compile(r"(.*?)(?:part|pt|vol|volume|chapter|act|book)?(\d+|[ivx]+)")
+
+
+def _numbered_apart(key_a, key_b):
+    """Whether two normalized titles are the same name with different
+    numbers at the end, as 'Jubileum I' and 'Jubileum II' or 'Van Halen'
+    and 'Van Halen II' are (see _numbers_differ)."""
+    stems, numbers = [], []
+    for key in (key_a, key_b):
+        match = _NUMBERED_KEY_RE.fullmatch(key)
+        stems.append(match.group(1) if match else key)
+        numbers.append(match.group(2) if match else "")
+    return stems[0] == stems[1] and _numbers_differ(*numbers)
 
 
 def _standard_track_count(group):
@@ -1129,14 +1317,88 @@ def _is_plain_release(album):
             and not _is_decorated_edition(album))
 
 
+_DERIVATIVE_WORDS = r"(?:instrumentals?|karaoke|a\s?c{1,2}ap{1,2}ellas?)"
+_DERIVATIVE_RE = re.compile(
+    rf"\b(?:{_DERIVATIVE_WORDS}|tribute\s+(?:to|2)|(?:(?<=\w\s)|(?<=[(\[]))(?<!\band\s)tribute|"
+    r"cover versions?|backing tracks?|"
+    r"(?:made famous|originally performed|as performed) by|in the style of)\b",
+    re.IGNORECASE)
+# "Wolf + Instrumentals", "Papercuts: Instrumentals", "2001 Instrumental",
+# "Carnival (Instrumental)", "From Zero: A Cappellas + Instrumentals".
+_DERIVATIVE_TAIL_RE = re.compile(
+    rf"\s*(?:[(\[][^()\[\]]*\b{_DERIVATIVE_WORDS}\b[^()\[\]]*[)\]]"
+    rf"|(?:[-\u2013\u2014:+]\s*|\s)(?:the\s+)?{_DERIVATIVE_WORDS}"
+    rf"(?:\s*(?:\+|&|and)\s*{_DERIVATIVE_WORDS})?(?:\s+(?:version|edition))?)\s*$",
+    re.IGNORECASE)
+
+
+def is_derivative_release(album):
+    """Whether a release is made from an album rather than being it: an
+    instrumental, karaoke, a cappella, tribute or cover version, named so in
+    its title or on every one of its tracks. A summary without a track list
+    is read from the album cache, so no request is made."""
+    if _DERIVATIVE_RE.search(f"{album.get('title') or ''} {album.get('version') or ''}"):
+        return True
+    full = album if album.get("tracks") else (album_cache.get(album.get("id")) or {})
+    items = (full.get("tracks") or {}).get("items") or []
+    return bool(items) and all(_DERIVATIVE_RE.search(_release_title(t)) for t in items)
+
+
+def _artist_key(album):
+    return normalize((album.get("artist") or {}).get("name") or "")
+
+
+def _derivative_of(album):
+    """The edition_group_key title of the album an instrumental, karaoke or
+    a cappella release is named after, or None for a release not named as
+    one."""
+    title = strip_album_decorations(album.get("title") or "")
+    base = strip_album_decorations(_DERIVATIVE_TAIL_RE.sub("", title))
+    if base == title and not re.search(rf"\b{_DERIVATIVE_WORDS}\b",
+                                       album.get("version") or "", re.IGNORECASE):
+        return None
+    key = edition_group_key({"title": base})
+    return key[0] if key else None
+
+
+def _fold_derivatives(groups):
+    """Move an instrumental, karaoke or a cappella release whose group holds
+    no original into the group of the same artist's album it is named
+    after, the nearest year first. Such releases often come out later or
+    carry the label in the title, which keeps them apart by title and year."""
+    def has_original(group, artist):
+        return any(_artist_key(a) == artist and _derivative_of(a) is None for a in group)
+
+    for key, group in list(groups.items()):
+        for album in list(group):
+            base = _derivative_of(album)
+            artist = _artist_key(album)
+            if base is None or has_original(group, artist):
+                continue
+            targets = [k for k, other in groups.items()
+                       if k[0] == base and k != key and has_original(other, artist)]
+            if targets:
+                group.remove(album)
+                groups[min(targets, key=lambda k: abs(k[1] - key[1]))].append(album)
+        if not group:
+            del groups[key]
+
+
 def _best_edition(group, prefer_hires):
     """Representative edition for a group of same-album editions.
 
-    Both modes target the standard track count so a padded deluxe/anniversary
-    edition never wins on track count alone. prefer_hires then takes the best
+    An instrumental, karaoke or other derivative release never stands for
+    the album when the same artist's original is in the group. Both modes
+    target the standard track count so a padded deluxe/anniversary edition
+    never wins on track count alone. prefer_hires then takes the best
     resolution at that count; otherwise it takes the original (untagged)
     edition without chasing a remaster's higher resolution.
     """
+    if len(group) > 1:
+        derivative = {id(a): is_derivative_release(a) for a in group}
+        with_original = {_artist_key(a) for a in group if not derivative[id(a)]}
+        group = [a for a in group
+                 if not derivative[id(a)] or _artist_key(a) not in with_original]
     standard = _standard_track_count(group)
 
     def off_standard(a):
@@ -1216,7 +1478,7 @@ def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
             # The extra text on the longer title is what one release has and
             # the other doesn't.
             shorter, longer = sorted((key, owned), key=len)
-            if differs_by_album_variant(shorter, longer):
+            if differs_by_album_variant(shorter, longer) or _numbered_apart(key, owned):
                 continue
             if similarity(key, owned) < config.CONSOLIDATE_THRESH:
                 continue
@@ -1280,6 +1542,9 @@ def dedup_album_versions(albums, prefer_hires=False):
     The standard track count is the plain release's, or else the smallest
     real edition's, so a padded deluxe/anniversary release never wins on
     track count alone and a smaller companion never stands in for the album.
+    An instrumental or karaoke release (is_derivative_release) is not picked
+    over the same artist's original, and one named after an album by its
+    title joins that album's group whatever its year (_fold_derivatives).
 
     Returns list of (canonical_album, n_versions_in_group) tuples, sorted by
     canonical's release year ascending.
@@ -1290,6 +1555,7 @@ def dedup_album_versions(albums, prefer_hires=False):
         if key is None:
             continue
         groups.setdefault(key, []).append(a)
+    _fold_derivatives(groups)
 
     representatives = []
     for group in groups.values():
@@ -2475,16 +2741,56 @@ _DATED_REMIX_RE = re.compile(
     r"\b(?:(?:19|20)\d\d(?:\W+\w+){0,2}?\W+remix(?:ed)?"
     r"|remix(?:ed)?(?:\W+\w+){0,8}?\W+(?:19|20)\d\d)\b",
     re.IGNORECASE)
-_ROMAN_NUMERALS = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6,
-                   "vii": 7, "viii": 8, "ix": 9, "x": 10}
+_ROMAN_RE = re.compile(r"(x{0,3})(ix|iv|v?i{0,3})")
+_ROMAN_DIGITS = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6,
+                 "vii": 7, "viii": 8, "ix": 9}
+_NUMBER_WORDS = {word: n for n, word in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve "
+    "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+# The format a folder name records rather than the album's own numbers:
+# "[16-44.1]", "24bit 96kHz", "320kbps", "[2 CD]", "2xLP", "(2 Discs)".
+_FORMAT_TAG_RE = re.compile(
+    r"\b(?:16|20|24|32)(?:\s*-?\s*bits?\s*[-/_ ]?\s*|b?\s*[-/_ ]\s*)"
+    r"(?:44[.,]1|48|88[.,]2|96|176[.,]4|192|352[.,]8|384)(?:\s*k(?:hz)?)?\b"
+    r"|\b\d+(?:[.,]\d+)?\s*-?\s*(?:k?hz|kbps|bits?)\b"
+    r"|\b\d+\s*[-x\u00d7]?\s*(?:cds?|discs?|disks?|lps?)\b",
+    re.IGNORECASE)
+_THOUSANDS_RE = re.compile(r"(?<=\d)[,.](?=\d{3}(?!\d))")
+
+
+def _roman_value(word):
+    match = _ROMAN_RE.fullmatch(word)
+    if not match:
+        return None
+    return 10 * len(match.group(1)) + _ROMAN_DIGITS.get(match.group(2), 0)
 
 
 def _title_numbers(title):
-    """The numbers in an album title, roman numerals included, so 'Jubileum I'
-    and 'Jubileum II' or 'Vol. 1' and 'Vol. 2' read as different albums."""
-    words = re.findall(r"[^\W_]+", title.lower())
-    return ({int(w) for w in words if w.isdigit()}
-            | {_ROMAN_NUMERALS[w] for w in words if w in _ROMAN_NUMERALS})
+    """The numbers in an album title, roman numerals and number words
+    included, so 'Jubileum I' and 'Jubileum II' or 'Vol. 1' and 'Vol. Two'
+    read as different albums. A format tag such as '[24-96]' or '[2 CD]'
+    is not one of the title's numbers, and '10,000' is one number."""
+    title = _THOUSANDS_RE.sub("", _FORMAT_TAG_RE.sub(" ", title))
+    numbers = set()
+    for word in re.findall(r"[^\W_]+", title.lower()):
+        if word.isdigit():
+            numbers.add(int(word))
+        elif word in _NUMBER_WORDS:
+            numbers.add(_NUMBER_WORDS[word])
+        elif (value := _roman_value(word)) is not None:
+            numbers.add(value)
+    return numbers
+
+
+def _numbers_differ(a, b):
+    """Whether two album titles name different albums by their numbers:
+    'Bloodrock 2' and 'Bloodrock 3', or 'Van Halen' and 'Van Halen II'. A
+    number only one title has is the same album when it is a 1, as in
+    'Queen I', or a large one, as in 'Exodus 40' or 'Substance 1987'."""
+    numbers_a, numbers_b = _title_numbers(a), _title_numbers(b)
+    if numbers_a == numbers_b:
+        return False
+    return bool(numbers_a and numbers_b) or any(1 < n < 20 for n in numbers_a | numbers_b)
 
 
 def _other_release_words(text):
@@ -2698,7 +3004,9 @@ def find_qobuz_album_for_dir(album_dir: Path, artist_name: str, token,
 
 def find_expanded_edition(album, album_dir, existing, token, _args=None):
     """When a Qobuz edition produces extras that would block an upgrade, search
-    for alternate editions whose track count covers the local library.
+    for alternate editions whose track count covers the local library. Only
+    releases the files hold as the same edition (same_edition) count, not
+    another mix or master.
 
     Returns a list of (full_album_dict, new_extras_list) tuples for editions
     that don't make the extras-blocking-upgrade situation worse. Sorted: fewest
@@ -2779,7 +3087,7 @@ def find_expanded_edition(album, album_dir, existing, token, _args=None):
         except QobuzError:
             continue
         q_tracks = (full.get("tracks") or {}).get("items") or []
-        if not q_tracks:
+        if not q_tracks or not same_edition(full, existing, album_dir):
             continue
         new_extras = find_extras_in_existing(q_tracks, existing)
         # Keep candidates that are no worse than current on the extras axis.

@@ -112,7 +112,7 @@ def _download_album_now(
             auto_upgrade=False,
             exact_edition=True,
         )
-        other = catalog.find_album_dir_filesystem(album)
+        other = catalog.other_version_dir(album)
         separate = bool((missing or args.force) and other and album_dir is None)
         if not separate and plan_durable_new_album(candidate, args) is not None:
             if not already_confirmed:
@@ -280,7 +280,7 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
             if any(queued["album"].get("id") == album_id for queued in album_queue):
                 log.info(fmt(C.GRAY, "  (already in queue; skipping duplicate)"))
             else:
-                other = catalog.find_album_dir_filesystem(album)
+                other = catalog.other_version_dir(album)
                 separate = bool((missing or args.force) and other and album_dir is None)
                 tracks = (album.get("tracks") or {}).get("items") or []
                 candidate = _build_queue_item(

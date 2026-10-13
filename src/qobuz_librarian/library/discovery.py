@@ -44,6 +44,8 @@ from qobuz_librarian.library.catalog import (
     album_released_within,
     album_year,
     album_year_int,
+    bears_album_title,
+    bonus_versions,
     compute_missing,
     dedup_album_versions,
     filter_compilation_albums,
@@ -52,6 +54,7 @@ from qobuz_librarian.library.catalog import (
     find_album_dir_filesystem,
     find_existing_tracks,
     find_qobuz_album_for_dir,
+    holds_recordings,
     is_lossless_album,
 )
 from qobuz_librarian.library.scanner import (
@@ -427,6 +430,14 @@ class AlbumGap:
     def missing_count(self) -> int:
         return len(self.missing)
 
+    @property
+    def bonus_only(self) -> bool:
+        """Whether every missing track is another version of a song the
+        folder holds, which leaves the album complete."""
+        return (self.on_disk_dir is not None and bool(self.missing)
+                and len(bonus_versions(self.missing, self.present))
+                == len(self.missing))
+
 
 @dataclass
 class DiscoveryResult:
@@ -780,7 +791,8 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
         if not include_hidden and _is_hidden(hidden, artist_name, album):
             continue
         existing, album_dir = find_existing_tracks(album)
-        if album_dir is not None and str(album_dir) in resolved_dirs:
+        resolved = album_dir is not None and str(album_dir) in resolved_dirs
+        if resolved and bears_album_title(album, album_dir):
             held(album)
             continue
         if existing and quick:
@@ -790,16 +802,21 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             continue
         if existing:
             # Resolves to a folder the owned pass didn't walk (e.g. a
-            # collaboration filed under a second artist).
+            # collaboration filed under a second artist), or to an owned
+            # folder named for another title, which holds this album only if
+            # it holds its songs.
             album, tracks = _materialize_tracks(album, token)
             if not tracks:
+                if resolved:
+                    held(album)
                 continue
             missing, present = compute_missing(tracks, existing)
             # Resolution matched on folder-name similarity alone, so a
             # different but similarly-named album that merely shares a title
             # (an "Intro") can land here.
-            if len(present) * 2 >= len(existing):
-                if key in fill_keys and missing and present:
+            if (len(present) * 2 >= len(existing)
+                    or holds_recordings(tracks, existing)):
+                if key in fill_keys and missing and present and not resolved:
                     gaps.append(AlbumGap(album, album_dir,
                                          list(missing), list(present)))
                 held(album)

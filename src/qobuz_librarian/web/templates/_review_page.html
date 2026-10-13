@@ -25,7 +25,7 @@
 {% set _off = review_tab_counts.switched_off if review_tab else 0 %}
 {% set _under_text = review_tab_counts.switched_off_under if review_tab else '' %}
 <p class="ql-review-page-empty">
-  {% if review_query %}No artists or albums match your filter.{% elif review_tab == 'gaps' %}No albums to fill.{% if _off and not review_tab_counts.missing %} Missing Albums has {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% elif review_tab == 'missing' %}No missing albums to review.{% if _off %} {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% else %}Nothing on this page.{% endif %}
+  {% if review_query %}No artists or albums match your filter.{% elif review_tab == 'gaps' %}No albums to fill.{% if review_tab_counts.bonus_off %} {{ labels.format_count(review_tab_counts.bonus_off) }} more under {{ review_gap_switches[0][1] }}.{% endif %}{% if _off and not review_tab_counts.missing %} Missing Albums has {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% elif review_tab == 'missing' %}No missing albums to review.{% if _off %} {{ labels.format_count(_off) }} more under {{ _under_text }}.{% endif %}{% else %}Nothing on this page.{% endif %}
 </p>
 {% endif %}
 

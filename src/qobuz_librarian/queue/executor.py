@@ -87,6 +87,7 @@ from qobuz_librarian.library.catalog import (
     find_album_dir_by_track_signatures,
     find_album_dir_filesystem,
     folder_holds_all_tracks,
+    other_version_dir,
     prompt_and_migrate_multi_artist_folder,
     track_signatures_for_album_dirs,
 )
@@ -1000,7 +1001,7 @@ def _validate_queue_item_premise(item):
     album_dir = item.get("album_dir")
     if album_dir is None:
         clear_scan_caches()
-        if find_album_dir_filesystem(item["album"]) is not None:
+        if other_version_dir(item["album"]) is not None:
             raise CandidateStale(
                 "This album appeared locally after the download was queued. "
                 "Refresh or rescan; nothing was changed."

@@ -7,6 +7,7 @@ import pytest
 
 from qobuz_librarian.integrations.beets import ManagedCarrierRetirementOutcome
 from qobuz_librarian.queue import durable_runner, journal, startup_recovery
+from qobuz_librarian.web import flows
 
 
 class _StopAfterPolicyCapture(RuntimeError):
@@ -14,6 +15,7 @@ class _StopAfterPolicyCapture(RuntimeError):
 
 
 def test_new_durable_item_freezes_multi_artist_filing_policy(monkeypatch):
+    # A web download files a collaboration under its main artist by default.
     saved = SimpleNamespace(operation_id="a" * 64)
     saved_item = SimpleNamespace(
         item_id="b" * 64,
@@ -50,7 +52,7 @@ def test_new_durable_item_freezes_multi_artist_filing_policy(monkeypatch):
         durable_runner.execute_durable_new_album(
             [],
             {},
-            SimpleNamespace(migrate_multi_artist=True),
+            flows.build_args(),
             plan=object(),
             origin=object(),
             mode="test",

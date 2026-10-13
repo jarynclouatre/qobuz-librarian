@@ -43,7 +43,7 @@ out of library scans and import targets.
 | Variable | Default | Purpose |
 |---|---|---|
 | `STREAMRIP_QUALITY` | `4` | Download tier 2–4 (see [Download quality](#download-quality)) |
-| `PREFER_HIRES` | `true` | When a release has several versions, pick the hi-res master rather than the original edition |
+| `PREFER_HIRES` | `true` | When a release has several versions, pick the hi-res master rather than the original edition. Upgrade only offers the edition you have. |
 | `LYRICS_ENABLED` | `true` | Fetch lyrics on import |
 | `LYRICS_FORMAT` | `embed` | `embed` (FLAC tag), `sidecar` (.lrc), or `both` |
 | `LYRICS_PROVIDERS` | unset | Ordered comma list of `Lrclib`, `NetEase`, `Megalobiz`, `Musixmatch` and `Genius`; unset tries `Lrclib`, `NetEase` and `Musixmatch`, in that order. Other names are ignored with a warning at startup, and with none left no lyrics are fetched |
@@ -58,15 +58,15 @@ out of library scans and import targets.
 | `REPAIR_CACHE_ENABLED` | `true` | Cache the repair scan's Qobuz ISRC lookups (files are still decode-tested fresh every scan) |
 | `REPAIR_CACHE_TTL_DAYS` | `30` | How long a cached ISRC lookup is reused before re-verifying (`0` = keep until the db is deleted) |
 | `UPGRADE_SCAN_ENABLED` | `true` | Show Upgrade and include the quality-upgrade pass in Library scans (`false` hides Upgrade and skips that pass) |
-| `AUTO_UPGRADE_ENABLED` | `false` | Let an ordinary CLI download or gap-fill run also upgrade an album Qobuz can now serve better, after confirmation. Ordinary web downloads keep the selected edition; use the Upgrade page to review and approve web replacements. |
+| `AUTO_UPGRADE_ENABLED` | `false` | Let an ordinary CLI download or gap-fill run also upgrade an album Qobuz can now serve better in the same edition, after confirmation. Ordinary web downloads keep the selected edition; use the Upgrade page to review and approve web replacements. |
 | `DOWNSAMPLE_HIRES_ENABLED` | `false` | Downsample FLACs above 48 kHz as they download (see below) |
 | `UPGRADE_SINGLES_ENABLED` | `false` | Let the Upgrade walk re-rip tracks you pulled as singles |
-| `MIGRATE_MULTI_ARTIST` | `false` | Re-file `A, B/Album` under `A/Album` after import |
+| `MIGRATE_MULTI_ARTIST` | `true` | Re-file `A, B/Album` under `A/Album` after import, where `A` is the album's main artist on Qobuz |
 | `SUPPRESS_SINGLE_TRACK_GAPS` | `false` | Web Library scans and new-release checks don't offer the rest of an album you took tracks from with a Search **Track** download, and skip an artist whose only folders came from such downloads. Folders that hold one track for any other reason are scanned as usual, and the CLI walks ignore this setting |
 | `EXCLUDE_LIVE_ALBUMS` | `false` | Count a release whose title marks it live, on tour, a session or acoustic as a live release in Missing Albums even when Qobuz files it as an album or compilation, so it shows only with **Live** switched on; a studio album whose real title merely contains "Live" is never matched |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
-`MIGRATE_MULTI_ARTIST` affects new imports only. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.
+`MIGRATE_MULTI_ARTIST` affects new imports only, including a gap fill or upgrade of an album already in a combined folder. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.
 
 `DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved, originals replaced atomically). To downsample hi-res already in your library, use the on-demand **Downsample** mode instead.
 
@@ -230,4 +230,4 @@ On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`)
 - **Upgrade** and **Downsample** change files only when you start them. Upgrade backs up the original album and removes that backup only after replacement and catalogue checks pass. If verification fails, it restores the original where safe; otherwise the backup remains for review. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. An album still in its backup, or part way into it, because the app or a terminal run was stopped before the replacement was imported is put back the next time either one starts, provided its folder is still missing and the folders above it are the same ones. The Search page says so once, and names any album it could not put back while that album is still missing; Diagnostics lists them. Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`; you're asked to choose keep or delete on your first downsample), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends.
 - **Lyrics** writes tags or `.lrc` sidecars, not the audio.
 - **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation). The duplicate tracks it takes out wait in the backup area and are cleared after `UPGRADE_BACKUP_RETENTION_DAYS`, as long as the album kept in their place still holds a playable track at least as long for each.
-- **`MIGRATE_MULTI_ARTIST`** (off) re-files `A, B/Album` under `A/Album` after import.
+- **`MIGRATE_MULTI_ARTIST`** (on) re-files `A, B/Album` under `A/Album` after import.

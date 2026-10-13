@@ -1349,14 +1349,13 @@ def _build_post_job_hook_payload(
 
 
 def _review_items(job) -> int:
-    """How many items a parked review lists, leaving out Library picks whose
-    release type is switched off."""
+    """How many items a parked review lists, leaving out Library picks a
+    switch that is off holds back."""
     if job.execute_kind != "library":
         return len(job.candidates)
     from qobuz_librarian.web import flows
-    shown = flows.review_tab_filter("missing")
-    return sum(1 for c in job.candidates
-               if flows.is_gap_candidate(c) or shown(c))
+    shown = flows.review_listed()
+    return sum(1 for c in job.candidates if shown(c))
 
 
 def _post_job_hook_payload(job):

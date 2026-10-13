@@ -955,15 +955,16 @@ async def job_select_all(request: Request, job_id: str):
 
 @router.post("/jobs/{job_id}/missing-types")
 async def job_missing_types(request: Request, job_id: str):
-    """Switch a release type in or out of Missing Albums. The choice is saved
-    for every Library review and CLI run. Nothing is scanned again: the review
-    holds every type and lists what is switched on."""
+    """Switch a release type in or out of Missing Albums, or bonus versions
+    in or out of Gap Fill. The choice is saved for every Library review and
+    CLI run. Nothing is scanned again: the review holds every row and lists
+    what is switched on."""
     job = _get_reviewable_job(job_id)
     if not job or job.execute_kind != "library":
         return JSONResponse({"error": "not found"}, status_code=404)
     form = await request.form()
     release_type = (form.get("type") or "").strip()
-    if release_type not in missing_types.OPTIONAL:
+    if release_type not in missing_types.SWITCHES:
         return JSONResponse({"error": "unknown release type"}, status_code=400)
     on = (form.get("on") or "").strip().lower() in ("1", "true", "on", "yes")
     loop = asyncio.get_running_loop()

@@ -132,7 +132,7 @@ def test_track_matching_by_disc_edition_title_and_isrc():
 
 def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     """Editions of one album collapse to one, preferring hi-res but never a
-    smaller "Bonus Content" companion, while distinct years and non-Latin
+    smaller "Bonus Content" companion or an instrumental, while distinct years and non-Latin
     titles stay apart. Owning an album hides its editions and reissues, but
     not a sequel whose title contains its name, and owning a live album does
     not hide the studio one."""
@@ -153,6 +153,20 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     bonus = {**_qalbum("The Reminder", 2007, bd=24, sr=96, tc=9), "version": "Bonus Content"}
     [(picked, _)] = dedup_album_versions([bonus, album], prefer_hires=True)
     assert picked is album
+    # An instrumental release never stands for the album, even when only its
+    # tracks say so.
+    deluxe = _qalbum("Criminal Minded (Deluxe)", 1987, tc=26)
+    hot_club = {**_qalbum("Criminal Minded (Hot Club Version)", 1987),
+                "tracks": {"items": [{"title": "Poetry (Instrumental Version)"},
+                                     {"title": "South Bronx (Instrumental Version)"}]}}
+    [(picked, _)] = dedup_album_versions([hot_club, deluxe])
+    assert picked is deluxe
+    # Nor does one named so after the title or released a year later; an
+    # album with no original beside it stays.
+    albums = [_qalbum("Wolf + Instrumentals", 2013), _qalbum("Strictly Instrumental", 2015),
+              {**_qalbum("Wolf", 2014), "version": "Instrumental"}, _qalbum("Wolf", 2013)]
+    assert [(a["title"], a.get("version"), n) for a, n in dedup_album_versions(albums)] == [
+        ("Wolf", None, 3), ("Strictly Instrumental", None, 1)]
 
     pairs = [({"title": "Reload", "release_date_original": "1997"}, 1),
              ({"title": "Album (Deluxe Edition)", "release_date_original": "2010"}, 1)]
@@ -168,6 +182,10 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     pairs = [({"title": "Wasting Light", "release_date_original": "2011"}, 1)]
     assert [a["title"] for a, _ in
             filter_owned_albums(pairs, {"wastinglightlive": [2019]})] == ["Wasting Light"]
+
+    pairs = [({"title": "Van Halen II", "release_date_original": "1979"}, 1)]
+    assert [a["title"] for a, _ in
+            filter_owned_albums(pairs, {"vanhalen": [1978]})] == ["Van Halen II"]
 
 
 def test_split_album_merge_rules(tmp_path):
@@ -217,6 +235,20 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
     studio = {"id": "S", "artist": {"name": "Bonobo"},
               "title": "The North Borders", "release_date_original": "2013-01-01"}
     assert find_album_dir_filesystem(studio).name == "The North Borders (2013)"
+    (root / "Bloodrock" / "Bloodrock 2 (1970)").mkdir(parents=True)
+    scanner.clear_scan_caches()
+    sequel = {"id": "B", "artist": {"name": "Bloodrock"}, "title": "Bloodrock 3",
+              "release_date_original": "1971-01-01"}
+    assert find_album_dir_filesystem(sequel) is None
+    # A format tag or a thousands separator is not one of the title's numbers.
+    (root / "Pink Floyd" / "The Dark Side of the Moon [16-44.1]").mkdir(parents=True)
+    (root / "Tool" / "10000 Days").mkdir(parents=True)
+    scanner.clear_scan_caches()
+    for artist, title, folder in (
+            ("Pink Floyd", "The Dark Side of the Moon", "The Dark Side of the Moon [16-44.1]"),
+            ("Tool", "10,000 Days", "10000 Days")):
+        album = {"id": "F", "artist": {"name": artist}, "title": title}
+        assert find_album_dir_filesystem(album).name == folder
     scanner.clear_scan_caches()
 
     root = tmp_path / "single"
@@ -238,6 +270,23 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
 
     assert owned_in("Youth", "USSM10900002", 2009) == ["Youth EP (2009)"]
     assert owned_in("We", "USSM11400002", 2014) == []
+
+    # A folder the name finds is the album's only when it holds its songs.
+    for n in range(1, 6):
+        tagged_flac(root / "Nas" / "Illmatic (1994)" / f"0{n}.flac",
+                    TITLE=f"Illmatic {n}", ISRC=f"USSM19400{n:03d}")
+    scanner.clear_scan_caches()
+    stillmatic = {"id": "S2", "title": "Stillmatic", "artist": {"name": "Nas"},
+                  "release_date_original": "2001-12-18",
+                  "tracks": {"items": [{"id": "s1", "title": "Stillmatic",
+                                        "isrc": "USSM10100001"}]}}
+    assert find_album_dir_filesystem(stillmatic).name == "Illmatic (1994)"
+    assert catalog.find_album_folder(stillmatic) == ([], None)
+    box = {"id": "I2", "title": "Illmatic XX", "artist": {"name": "Nas"},
+           "release_date_original": "2014-04-15",
+           "tracks": {"items": [{"id": f"x{n}", "title": f"Track {n}",
+                                 "isrc": f"USSM19400{n:03d}"} for n in (1, 2)]}}
+    assert catalog.find_album_folder(box)[1].name == "Illmatic (1994)"
 
     root = tmp_path / "mix"
     monkeypatch.setattr(config, "MUSIC_ROOT", root)
@@ -269,7 +318,7 @@ def test_folder_holds_all_tracks_matches_identity_not_count(tmp_path):
     assert folder_holds_all_tracks(tmp_path / "gone", expected) is False
 
 
-def test_edition_ownership_keeps_recording_versions(tmp_path):
+def test_edition_ownership_keeps_recording_versions(tmp_path, monkeypatch):
     track = {"id": "new-mix", "title": "Song", "version": "2026 Mix", "isrc": "GBAAA0000001"}
     album = {"title": "Album", "version": "2026 Mix", "tracks": {"items": [track]}}
     plain_folder = tmp_path / "Album (1965)"
@@ -344,6 +393,35 @@ def test_edition_ownership_keeps_recording_versions(tmp_path):
         {**old_track, "isrc": "", "version": "Album Version (Explicit)"}]}}
     assert not catalog.edition_missing(explicit, [
         {**original, "title": "Song (Album Version (Explicit))"}], plain_folder)[0]
+    credited = {**old_album, "tracks": {"items": [
+        {**old_track, "version": "50 Cent / Get Rich Or Die Tryin"}]}}
+    assert catalog.same_edition(credited, [
+        {**same_recording, "title": "Song (50 Cent / Get Rich Or Die Tryin)"}], plain_folder)
+    bonus_track = {**old_track, "id": "bonus", "title": "Bonus", "isrc": "GBAAA0000011"}
+    whole = {**old_album, "version": "Deluxe Edition", "tracks": {"items": [old_track, bonus_track]}}
+    deluxe_files = [{**original, "isrc": old_track["isrc"]},
+                    {**original, "title": "Bonus", "isrc": bonus_track["isrc"]}]
+    monkeypatch.setattr(catalog.album_cache, "get_catalog",
+                        lambda *_args: {"items": [{"title": "Album", "tracks_count": 1}]})
+    deluxe_folder = tmp_path / "Album (Deluxe Edition)"
+    assert catalog.same_edition(whole, deluxe_files, deluxe_folder)
+    assert catalog.same_edition(whole, deluxe_files, plain_folder)
+    assert not catalog.same_edition(whole, deluxe_files[:1], plain_folder)
+    assert not catalog.same_edition(
+        {**whole, "version": "Deluxe Edition / 2023 Remaster"}, deluxe_files, deluxe_folder)
+
+    # Another version of a song the folder holds is a bonus; a song the
+    # folder lacks, a title that only starts the same, or the same song
+    # remastered or mixed again, is not.
+    held = [{"title": "Footprints"}, {"title": "Kraf Dinner", "version": "Album Version"}]
+    wanted = [{"title": "Footprints", "version": "Remix"},
+              {"title": "Kraf Dinner (Demo) (Album Version)"},
+              {"title": "Footprints Part 2"}, {"title": "Footprints"},
+              {"title": "Bonita Applebum (Remix)"},
+              {"title": "Footprints", "version": "Reprise / Remastered"},
+              {"title": "Footprints (Remastered Version)"},
+              {"title": "Footprints", "version": "Stereo Mix 2015"}]
+    assert catalog.bonus_versions(wanted, held) == wanted[:2]
 
 
 def test_publishing_a_migration_directory_never_closes_a_reused_number(

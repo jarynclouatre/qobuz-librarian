@@ -28,6 +28,7 @@ def _selection_tallies(job):
     from, in one pass: a tick on a large review is answered with these."""
     library = job.execute_kind == "library"
     included = missing_types.load() if library else ()
+    in_gaps = flows.review_tab_filter("gaps", included)
     in_missing = flows.review_tab_filter("missing", included)
     picked = {"": [], "missing": [], "gaps": []}
     artists = set()
@@ -37,7 +38,7 @@ def _selection_tallies(job):
         for c in job.candidates:
             artists.add(c.get("artist"))
             tab = ""
-            if library and flows.is_gap_candidate(c):
+            if library and in_gaps(c):
                 tab = "gaps"
                 gaps += 1
             elif library and in_missing(c):
@@ -100,6 +101,7 @@ def _review_context(job, page=1, query="", tab="", *, through=False, anchor=""):
             "review_selection_token": _selection_token(job, tab),
             "review_tab_counts": tab_counts,
             "review_type_switches": RELEASE_TYPE_SWITCHES,
+            "review_gap_switches": GAP_SWITCHES,
             "review_hidden_count": hidden_count,
             "review_counts": counts,
             "review_summary_line": _review_summary_line(job),
@@ -252,6 +254,7 @@ def _filtered_rest_of(groups):
 RELEASE_TYPE_SWITCHES = tuple(
     (release_type, missing_types.LABELS[release_type])
     for release_type in missing_types.OPTIONAL)
+GAP_SWITCHES = ((missing_types.BONUS, missing_types.LABELS[missing_types.BONUS]),)
 
 
 def _review_tab_totals(job):
@@ -260,20 +263,28 @@ def _review_tab_totals(job):
     truthful. Selected counts feed the tab-scoped bulk bar: what the user sees
     on the active tab is exactly what Download/Dismiss will act on. Missing
     Albums counts the ticked rows and the release types switched on, named
-    in ``included``; ``switched_off`` counts the rows the other switches hold
-    back and ``switched_off_under`` names those switches. ``typed`` says
-    whether any of its rows carries a type, which a review saved before types
-    were read does not."""
+    in ``included``, and Gap Fill the ticked rows and those the Bonus
+    versions switch lets through; ``switched_off`` counts the Missing
+    Albums rows the other switches hold back and ``switched_off_under``
+    names those switches, and ``bonus_off`` counts the Gap Fill rows held
+    back. ``typed`` says whether any Missing Albums row carries a type,
+    which a review saved before types were read does not, and ``bonus``
+    whether any Gap Fill row is missing only bonus versions."""
     included = missing_types.load()
+    in_gaps = flows.review_tab_filter("gaps", included)
     in_missing = flows.review_tab_filter("missing", included)
-    gaps = gaps_sel = missing = missing_sel = 0
+    gaps = gaps_sel = missing = missing_sel = bonus_off = 0
     held_back = {}
-    typed = False
+    typed = bonus = False
     with job._lock:
         for c in job.candidates:
             if flows.is_gap_candidate(c):
-                gaps += 1
-                gaps_sel += 1 if c.get("selected") else 0
+                bonus = bonus or bool((c.get("payload") or {}).get("bonus_only"))
+                if in_gaps(c):
+                    gaps += 1
+                    gaps_sel += 1 if c.get("selected") else 0
+                else:
+                    bonus_off += 1
                 continue
             release_type = (c.get("payload") or {}).get("release_type")
             typed = typed or bool(release_type)
@@ -284,7 +295,8 @@ def _review_tab_totals(job):
                 held_back[release_type] = held_back.get(release_type, 0) + 1
     return {"missing": missing, "gaps": gaps,
             "missing_selected": missing_sel, "gaps_selected": gaps_sel,
-            "included": sorted(included), "typed": typed,
+            "included": sorted(included), "typed": typed, "bonus": bonus,
             "switched_off": sum(held_back.values()),
             "switched_off_under": (missing_types.named(held_back)
-                                   if held_back else "")}
+                                   if held_back else ""),
+            "bonus_off": bonus_off}

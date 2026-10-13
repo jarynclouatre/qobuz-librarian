@@ -173,6 +173,10 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
     else:
         assert set(checkpoint["scanned"]) == set(readable_names)
 
+    if finished:
+        # A new-release check after the scan listed a release the refresh
+        # below does not fetch again.
+        new_releases.mark_run({"Readable": ["Readable", "Later"]})
     monkeypatch.setattr(scanner.os, "scandir", scandir)
     assert unreadable_artists.readable_again([blocked.name]) == [blocked.name]
     checked.clear()
@@ -186,6 +190,8 @@ def test_unreadable_artist_is_reported_and_retried(tmp_path, monkeypatch, readab
     }
     assert new_releases.is_baseline_complete()
     assert blocked.name in new_releases.load()["seen"]
+    if finished:
+        assert "Later" in new_releases.load()["seen"]["Readable"]
 
 
 def test_artists_cut_at_the_result_cap_are_checked_again(tmp_path, monkeypatch):

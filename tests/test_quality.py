@@ -100,3 +100,54 @@ def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatc
     )
 
     assert result == []
+
+
+def test_upgrade_scan_offers_only_the_edition_on_disk(tmp_path, monkeypatch):
+    # Upgrade offered a 2026 mix in place of a 2009 remaster because Prefer
+    # hi-res matched the folder to the highest-resolution edition, and a
+    # labelled remaster in place of an earlier master of its recordings.
+    from qobuz_librarian.library import catalog, discovery
+    from qobuz_librarian.quality import decision
+
+    album_dir = tmp_path / "The Beatles" / "Rubber Soul (1965)"
+    album_dir.mkdir(parents=True)
+    songs = ["Drive My Car", "Norwegian Wood", "Nowhere Man", "Girl"]
+    files = [{"title": f"{song} (Remastered)", "album": "Rubber Soul",
+              "isrc": f"GBAYE060147{i}", "bits": 16, "sample_rate": 44100,
+              "channels": 2, "tracknumber": i + 1}
+             for i, song in enumerate(songs)]
+
+    def release(album_id, version, track_version, isrc_prefix):
+        return {
+            "id": album_id, "title": "Rubber Soul", "version": version,
+            "artist": {"name": "The Beatles"}, "release_date_original": "1965-12-03",
+            "maximum_bit_depth": 24, "maximum_sampling_rate": 96.0,
+            "tracks_count": len(songs), "streamable": True,
+            "tracks": {"items": [
+                {"id": f"{album_id}-{i}", "title": song, "version": track_version,
+                 "isrc": f"{isrc_prefix}{i}", "track_number": i + 1}
+                for i, song in enumerate(songs)]},
+        }
+
+    new_mix = release("mix", "2026 Mix", "2026 Mix", "GBUM7260036")
+    remaster = release("remaster", "Remastered 2009", "Remastered", "GBAYE060147")
+    releases = {"mix": new_mix, "remaster": remaster}
+    listed = [new_mix, remaster]
+
+    monkeypatch.setattr(decision, "list_artist_album_dirs", lambda _d: [album_dir])
+    monkeypatch.setattr(discovery, "resolve_artist", lambda *a: ("26390", "The Beatles"))
+    monkeypatch.setattr(decision, "get_artist_albums", lambda *a, **k: (listed, len(listed)))
+    monkeypatch.setattr(decision, "get_album", lambda album_id, _token: releases[album_id])
+    monkeypatch.setattr(catalog, "find_qobuz_album_for_dir", lambda *a, **k: new_mix)
+    monkeypatch.setattr(catalog, "find_album_dir_filesystem", lambda *a, **k: album_dir)
+    monkeypatch.setattr(decision, "find_existing_tracks", lambda _album: (files, album_dir))
+    args = type("Args", (), {"prefer_hires": True, "no_upgrade": False})()
+
+    found = decision.scan_artist_for_upgrades(
+        "The Beatles", album_dir.parent, "tok", args, capped={})
+    assert [c["qobuz_album"]["id"] for c in found] == ["remaster"]
+
+    for local, song in zip(files, songs):
+        local["title"] = song
+    assert decision.scan_artist_for_upgrades(
+        "The Beatles", album_dir.parent, "tok", args, capped={}) == []

@@ -836,8 +836,9 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
         client, monkeypatch, tmp_path, tagged_flac):
     """An artist with hundreds of albums lists them a batch at a time. An
     album the library holds far down the catalogue is in the first batch, the
-    batch that reaches it leaves it out, and a pick kept from before a reload
-    pulls in every batch up to it."""
+    batch that reaches it leaves it out, one the first batch could not mark
+    comes with its own batch, and a pick kept from before a reload pulls in
+    every batch up to it."""
     import html
     import re
 
@@ -861,8 +862,14 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(search, "get_artist_albums",
                         lambda *_a, **_kw: (albums, len(albums)))
-    monkeypatch.setattr(search, "get_album",
-                        lambda album_id, _token: albums[int(album_id[4:])])
+    busy = []
+
+    def get_album(album_id, _token):
+        if busy:
+            raise search.QobuzError("busy")
+        return albums[int(album_id[4:])]
+
+    monkeypatch.setattr(search, "get_album", get_album)
 
     def listed(response):
         return set(re.findall(r'data-search-key="album-(rec-\d+)"', response.text))
@@ -889,6 +896,19 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
 
     through = client.get(next_batch(first) + "&through=rec-104", headers=headers)
     assert listed(through) == records(range(50, 130))
+
+    # The owned mark came back once the first batch had been shown without
+    # it, and the batches after it still list the album.
+    busy.append(True)
+    unmarked = client.post("/search", data={
+        "q": "The Testers", "kind": "artist", "artist_id": "7",
+        "artist_name": "The Testers"}, headers=headers)
+    busy.clear()
+    pages = [unmarked]
+    while next_batch(pages[-1]):
+        pages.append(client.get(next_batch(pages[-1]), headers=headers))
+    assert sorted(n for page in pages for n in listed(page)) == sorted(
+        f"rec-{n}" for n in range(130))
 
 
 def test_settings_saves_wait_for_running_jobs_and_never_drop_another_change(
@@ -1924,6 +1944,28 @@ def test_library_approve_downloads_the_checked_choices_and_parks_the_rest(
         _remove_job(job)
         if split is not None:
             _remove_job(split)
+
+    # An album missing only bonus versions joins Gap Fill with its switch on.
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    job._execute_fn = lambda j, chosen: None
+    job.add_candidate(kind="album", title="Rejuvenation", artist="Abstract Rude",
+                      payload={"album_id": "rej", "gap_fill": 1}, selected=False)
+    job.add_candidate(kind="album", title="Collide", artist="Beats Antique",
+                      payload={"album_id": "col", "gap_fill": 1, "bonus_only": True},
+                      selected=False)
+    try:
+        r = client.post(f"/jobs/{job.id}/select-all",
+                        data={"on": "1", "scope": "all", "tab": "gaps"}).json()
+        assert (r["gap_total"], r["gap_selected"]) == (1, 1)
+        r = client.post(f"/jobs/{job.id}/missing-types",
+                        data={"type": "bonusVersions", "on": "1"}).json()
+        assert (r["gap_total"], r["gap_selected"]) == (2, 1)
+        r = client.post(f"/jobs/{job.id}/missing-types",
+                        data={"type": "bonusVersions", "on": "0"}).json()
+        assert (r["gap_total"], r["gap_selected"]) == (1, 1)
+    finally:
+        _remove_job(job)
 
 
 def test_select_all_and_dismiss_rest_act_only_on_the_rows_in_scope(

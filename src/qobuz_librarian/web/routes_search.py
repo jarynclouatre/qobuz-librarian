@@ -683,9 +683,11 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                         continue
                     existing, matched_folder, missing, present = catalog.find_edition_tracks(exact_album)
                     if not existing:
-                        res["as_new_edition"] = True
-                        other = catalog.other_version_dir(exact_album)
-                        if other is not None:
+                        files, other = catalog.find_album_folder(exact_album)
+                        if other is not None and catalog.holds_recordings(qobuz_tracks, files):
+                            res["owned"] = True
+                        elif other is not None:
+                            res["as_new_edition"] = True
                             res["folder"] = str(other.relative_to(cfg.MUSIC_ROOT))
                         res["ownership_unknown"] = False
                         continue
@@ -693,7 +695,13 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                     held = catalog.held_by_other_versions(
                         exact_album, existing, matched_folder, missing)
                     gaps = [t for t in missing if not any(t is h for h in held)]
-                    if gaps:
+                    bonus = catalog.bonus_versions(gaps, present)
+                    if gaps and len(bonus) == len(gaps):
+                        # Only other versions of songs on disk are missing:
+                        # the album is complete.
+                        res["owned"] = True
+                        res["bonus_versions"] = len(bonus)
+                    elif gaps:
                         res["partial"] = True
                         res["folder"] = str(matched_folder.relative_to(cfg.MUSIC_ROOT))
                         res["have_tracks"] = len(qobuz_tracks) - len(gaps)
@@ -749,10 +757,6 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 group_raws.append(by_key[key][1])
             g, raws = by_key[key]
             raws.append(alb)
-            # A complete edition outranks a part-finished one: if any
-            # edition of this record is whole on disk, search must not
-            # offer a plain Download for the record at all.
-            g["owned"] = g["owned"] or res["owned"]
             if res.get("disk_year"):
                 g["disk_year"] = res["disk_year"]
             # Each edition keeps its own title and its own ownership
@@ -770,6 +774,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 "sample_rate": res["sample_rate"],
                 "cover": res["cover"],
                 "owned": bool(res["owned"]),
+                "bonus_versions": res.get("bonus_versions", 0),
                 "as_new_edition": res["as_new_edition"],
                 "queued": bool(res["queued"]),
                 "scanning": bool(res["scanning"]),
@@ -782,12 +787,20 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
         for index, (g, raws) in enumerate(zip(album_groups, group_raws)):
             g["index"] = index
             eds = g["editions"]
+            # A complete edition outranks a part-finished one: if any
+            # edition of this record is whole on disk, search must not
+            # offer a plain Download for the record at all. An
+            # instrumental or karaoke copy is not the record.
+            derivative = ([catalog.is_derivative_release(alb) for alb in raws]
+                          if len(raws) > 1 else [False])
+            owned = [i for i, e in enumerate(eds)
+                     if e["owned"] and (not derivative[i] or all(derivative))]
+            g["owned"] = bool(owned)
             # The row shows a complete copy you own, so the rest read as
             # "other versions". Otherwise it shows the original release,
             # not whichever deluxe or remaster Qobuz listed first; a
             # part-finished edition keeps its own "N of M" among the
             # versions.
-            owned = [i for i, e in enumerate(eds) if e["owned"]]
             if owned:
                 rep_i = owned[0]
                 if g.get("disk_year"):
@@ -804,7 +817,8 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
             for f in ("id", "title", "artist", "artist_id", "year", "tracks",
                       "quality", "hires", "lossy", "bit_depth",
                       "sample_rate", "cover", "version", "queued", "scanning",
-                      "as_new_edition", "folder", "ownership_unknown"):
+                      "as_new_edition", "folder", "ownership_unknown",
+                      "bonus_versions"):
                 g[f] = rep[f]
             g["partial"] = rep["partial"] and not g["owned"]
             g["have_tracks"] = rep["have_tracks"]
@@ -827,13 +841,15 @@ def _in_library(group):
     return any(e["owned"] or e["folder"] for e in group["editions"])
 
 
-def _album_batch(groups, start, through=()):
+def _album_batch(groups, start, through=(), shown=()):
     """The records an artist's batch starting at ``start`` lists, and the
     next batch's start, count and how many records are left after this one.
 
-    The first batch also lists every record with a copy in the library, so
-    later batches leave those out. ``through`` names album ids the batch has
-    to reach, such as picks kept from before a reload."""
+    The first batch also lists every record with a copy in the library, and
+    ``shown`` carries the positions of those later in the list, so a later
+    batch leaves them out whatever the library holds by then. ``through``
+    names album ids the batch has to reach, such as picks kept from before a
+    reload."""
     end = start + _ARTIST_ALBUM_BATCH
     wanted = {str(album_id) for album_id in through}
     if wanted:
@@ -843,14 +859,16 @@ def _album_batch(groups, start, through=()):
         while end <= last:
             end += _ARTIST_ALBUM_BATCH
     if start:
-        batch = [g for g in groups[start:end] if not _in_library(g)]
+        batch = [g for g in groups[start:end] if g["index"] not in shown]
     else:
         batch = [g for g in groups if g["index"] < end or _in_library(g)]
-    left = sum(1 for g in groups[end:] if not _in_library(g))
+        shown = {g["index"] for g in batch}
+    shown = {i for i in shown if i >= end}
+    left = sum(1 for g in groups[end:] if g["index"] not in shown)
     following = sum(1 for g in groups[end:end + _ARTIST_ALBUM_BATCH]
-                    if not _in_library(g))
+                    if g["index"] not in shown)
     more = ({"start": end, "count": following, "left": left,
-             "total": len(groups)} if left else None)
+             "total": len(groups), "shown": sorted(shown)} if left else None)
     return batch, more
 
 
@@ -935,7 +953,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     album_more = None
     if selected_artist and album_total > _ARTIST_ALBUMS_AT_ONCE:
         album_groups, album_more = _album_batch(album_groups, 0)
-        album_more["url"] = _album_batch_url(artist_id, artist_name, query)
+        album_more["url"] = _album_batch_url(
+            artist_id, artist_name, query, album_more["shown"])
     creds_ok = qobuz_access._creds_ok()
     search_state = f"{kind}|{query}"
     if artist_id:
@@ -980,15 +999,16 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     return RedirectResponse(url="/", status_code=303)
 
 
-def _album_batch_url(artist_id, artist_name, query):
+def _album_batch_url(artist_id, artist_name, query, shown):
     return "/search/artist-albums?" + urllib.parse.urlencode(
-        {"artist_id": artist_id, "artist_name": artist_name, "q": query})
+        {"artist_id": artist_id, "artist_name": artist_name, "q": query,
+         "shown": ",".join(map(str, shown))})
 
 
 @router.get("/search/artist-albums", response_class=HTMLResponse)
 async def search_artist_albums(request: Request, artist_id: str = "",
                                artist_name: str = "", q: str = "",
-                               start: int = 0,
+                               start: int = 0, shown: str = "",
                                through: list[str] = Query(default=[])):
     """The next batch of a long artist list, rows for both views."""
     artist_id = artist_id.strip()[:64]
@@ -1011,9 +1031,12 @@ async def search_artist_albums(request: Request, artist_id: str = "",
         error = _search_error(exc, query)
     if error:
         return HTMLResponse(rendering._ql_notice_html("error", html.escape(error)))
-    album_groups, album_more = _album_batch(album_groups, start, through)
+    album_groups, album_more = _album_batch(
+        album_groups, start, through,
+        {int(i) for i in shown.split(",") if i.isascii() and i.isdigit()})
     if album_more:
-        album_more["url"] = _album_batch_url(artist_id, artist_name, query)
+        album_more["url"] = _album_batch_url(
+            artist_id, artist_name, query, album_more["shown"])
     return rendering._tr(request, "_search_results.html", {
         "album_batch": True, "album_groups": album_groups,
         "album_more": album_more, "selected_artist": selected_artist,
@@ -1180,7 +1203,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
                 return RedirectResponse(
                     url="/queue?error=" + rendering._notice_key(msg),
                     status_code=303)
-            other = await loop.run_in_executor(None, catalog.find_album_dir_filesystem, album)
+            other = await loop.run_in_executor(None, catalog.other_version_dir, album)
             download_as_new_edition = bool(other and folder is None)
         title  = album.get("title") or "?"
         artist = (album.get("artist") or {}).get("name") or "?"

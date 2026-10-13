@@ -681,12 +681,14 @@ DOWNSAMPLE_KEEP_ORIGINALS = _env_downsample_choice()
 #   PREFER_HIRES         pick the hi-res master when an album has several versions
 #   CONSOLIDATE          after import, merge sibling/duplicate album folders
 #   MIGRATE_MULTI_ARTIST move "Primary, Other/<album>" into "Primary/<album>"
+# MIGRATE_MULTI_ARTIST defaults on: streamrip tags a collaboration with every
+# album artist joined, and no Qobuz artist answers to that folder name.
 # CONSOLIDATE defaults off: it moves/merges folders, which is opinionated for
 # someone else's library layout. It's CLI-only and prompts per folder anyway;
 # turn it on via env or CLI if you want it.
 PREFER_HIRES         = _env_bool("PREFER_HIRES",         True)
 CONSOLIDATE          = _env_bool("CONSOLIDATE",          False)
-MIGRATE_MULTI_ARTIST = _env_bool("MIGRATE_MULTI_ARTIST", False)
+MIGRATE_MULTI_ARTIST = _env_bool("MIGRATE_MULTI_ARTIST", True)
 
 # Count obvious live/tour/session/acoustic releases as live among missing
 # albums even where Qobuz files them as albums, so they show only with Live

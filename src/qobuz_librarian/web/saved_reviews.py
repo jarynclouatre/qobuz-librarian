@@ -61,9 +61,13 @@ def _upgrade_state_summary():
                 or saved_quality_signature != current_quality_signature
             )
         ),
-        # Which of the two staleness causes applies, so the page can name it
-        # instead of offering the user both and letting them guess.
-        "stale_cause": "quality" if complete else "library",
+        # Which staleness cause applies, so the page can name it
+        # instead of offering the user every one and letting them guess.
+        "stale_cause": (
+            "quality" if complete
+            else "update" if upgrade_state.saved_by_older_version()
+            else "library"
+        ),
         # Results are listed only once complete, and only then given an age.
         "updated": (job_labels._format_age(updated_at)
                     if complete and updated_at else None),

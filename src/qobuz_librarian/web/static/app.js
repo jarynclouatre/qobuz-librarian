@@ -3040,8 +3040,8 @@
         });
     }
 
-    // The switch only changes which saved rows Missing Albums lists, so the
-    // list reloads where the user stands once the choice is saved.
+    // The switch only changes which saved rows a tab lists, so the list
+    // reloads where the user stands once the choice is saved.
     function switchReleaseType(btn) {
       if (actionsBlocked()) return;
       var on = btn.getAttribute("aria-pressed") !== "true";
@@ -3418,8 +3418,9 @@
               });
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
-              var switches = cont.querySelector("[data-review-switches]");
-              if (switches) switches.classList.toggle("hidden", requestedTab !== "missing");
+              cont.querySelectorAll("[data-review-switches]").forEach(function (s) {
+                s.classList.toggle("hidden", s.getAttribute("data-review-switches") !== requestedTab);
+              });
             }
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;

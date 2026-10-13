@@ -62,7 +62,6 @@ from qobuz_librarian.library.catalog import (
     compute_missing,
     find_album_dir_by_track_signatures,
     find_album_dir_filesystem,
-    find_existing_tracks,
     find_expanded_edition,
     find_extras_in_existing,
     folder_holds_all_tracks,
@@ -859,7 +858,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     # leaves the user with their folder already wiped.
     if exact_edition:
         existing, album_dir, missing, present = catalog.find_edition_tracks(album)
-        other = catalog.find_album_dir_filesystem(album)
+        other = catalog.other_version_dir(album)
         mixed_folder = album_dir is not None and len(existing) > len(present)
         if use_force and mixed_folder:
             force_tracks = True
@@ -885,7 +884,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             existing = []
             missing, present = qobuz_tracks, []
     elif use_force:
-        _, album_dir = find_existing_tracks(album)
+        _, album_dir = catalog.find_album_folder(album)
         existing = []
         missing, present = qobuz_tracks, []
     elif treat_as_new:
@@ -895,7 +894,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         existing = []
         missing, present = qobuz_tracks, []
     else:
-        existing, album_dir = find_existing_tracks(album)
+        existing, album_dir = catalog.find_album_folder(album)
         vlog(f"hybrid detection: {len(existing)} existing track(s) total")
         missing, present = compute_missing(qobuz_tracks, existing)
 
@@ -1046,6 +1045,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                     return {"result": "skipped_has_extras",
                             "n_total": len(qobuz_tracks),
                             "n_extras": len(extras)}
+            elif not catalog.same_edition(album, existing, album_dir):
+                log.info(fmt(C.YELLOW,
+                    f"\n  ⚠  Not upgrading: the {target_label} copy on Qobuz is "
+                    f"another version ({catalog._release_title(album)})."))
             else:
                 # No extras, so auto-upgrade is safe.
                 _qcounts = {}
@@ -1282,7 +1285,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             return {"result": "stale_candidate"}
     elif reviewed_album_absent:
         clear_scan_caches()
-        if find_album_dir_filesystem(album) is not None:
+        if catalog.other_version_dir(album) is not None:
             log.info(fmt(
                 C.YELLOW,
                 "  ⚠  This album appeared locally after the download was "

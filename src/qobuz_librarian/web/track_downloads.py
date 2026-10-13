@@ -461,7 +461,7 @@ def _make_single_track_run(album, track, token):
             j.summary = f"You already have “{t_title}”. Nothing downloaded."
             return
         if album_dir is None:
-            existing, album_dir = catalog.find_existing_tracks(album)
+            existing, album_dir = catalog.find_album_folder(album)
         qi = queue_builder._build_queue_item(
             album=album, album_dir=album_dir,
             label=f"{artist}, {t_title}  [single]",

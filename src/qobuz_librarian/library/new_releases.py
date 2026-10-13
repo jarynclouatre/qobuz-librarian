@@ -41,10 +41,15 @@ def unresolved_note(names) -> str:
     if extra > 0:
         shown += f" and {extra:,} more"
     if len(names) == 1:
-        return (f"Qobuz has no artist for {shown}, so it was skipped. "
+        note = (f"Qobuz has no artist for {shown}, so it was skipped. "
                 "Rename the folder to the artist's name to include it.")
-    return (f"Qobuz has no artist for {shown}, so they were skipped. "
-            "Rename each folder to the artist's name to include them.")
+    else:
+        note = (f"Qobuz has no artist for {shown}, so they were skipped. "
+                "Rename each folder to the artist's name to include them.")
+    if not cfg.MIGRATE_MULTI_ARTIST and any(", " in n for n in names):
+        note += (" Turn on Migrate multi-artist folders in Settings to file "
+                 "new downloads under the album's main artist.")
+    return note
 
 
 def load() -> dict:
@@ -190,7 +195,13 @@ def seed_baseline(seen, *, generation=None, revision=None,
         )
         if target_revision is None:
             return False
-        state["seen"] = {str(k): list(v) for k, v in (seen or {}).items()}
+        # A refresh reuses catalogues read before later new-release checks,
+        # so keep the releases those checks already listed.
+        previous = state.get("seen") or {}
+        state["seen"] = {
+            str(k): sorted(set(v) | set(previous.get(str(k)) or []))
+            for k, v in (seen or {}).items()
+        }
         state["baseline_complete"] = True
         state["generation"] = target_generation
         state["revision"] = target_revision

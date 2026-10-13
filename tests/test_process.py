@@ -268,8 +268,8 @@ def test_direct_download_refuses_files_changed_after_confirmation(
 
     monkeypatch.setattr(proc, "is_lossless_album", lambda _album: True)
     monkeypatch.setattr(
-        proc,
-        "find_existing_tracks",
+        proc.catalog,
+        "find_album_folder",
         lambda _album: (existing, album_dir),
     )
     monkeypatch.setattr(
@@ -350,7 +350,7 @@ def test_download_where_nothing_arrives_leaves_no_run_behind(monkeypatch, tmp_pa
     monkeypatch.setattr(download, "rip_url", rip)
     monkeypatch.setattr(download.time, "sleep", lambda _s: None)
     monkeypatch.setattr(proc, "is_lossless_album", lambda _a: True)
-    monkeypatch.setattr(proc, "find_existing_tracks", lambda _a: ([], None))
+    monkeypatch.setattr(proc.catalog, "find_album_folder", lambda _a: ([], None))
     monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
     monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
     tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in (1, 2)]

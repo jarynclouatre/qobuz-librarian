@@ -14,7 +14,7 @@ from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.catalog import album_year
 from qobuz_librarian.quality import decision as quality_decision
 
-STATE_VERSION = 1
+STATE_VERSION = 3
 _STATE_LOCK = threading.Lock()
 
 
@@ -60,11 +60,16 @@ def _candidate_spec(artist_name: str, candidate: dict):
     premise = candidate_premise.capture("upgrade", album_dir) if album_dir else None
     if premise is not None:
         payload["_premise"] = premise
+    # The row names the release that replaces the files, as Search does.
+    target = candidate.get("target_quality_label", "?")
+    version = (album.get("version") or "").strip()
+    if version and version.casefold() not in title.casefold():
+        target = f"{version}, {target}"
     return {
         "title": title,
         "artist": artist_name,
         "detail": (f"{candidate.get('existing_quality_label', '?')} → "
-                   f"{candidate.get('target_quality_label', '?')}{part}"),
+                   f"{target}{part}"),
         "payload": payload,
     }
 
@@ -85,6 +90,14 @@ _store = artist_scan_store.ArtistScanStore(
 
 def load():
     return _store.load()
+
+
+def saved_by_older_version():
+    """Whether the saved results come from an earlier version of the app,
+    which could offer another mix or master as an upgrade."""
+    data = state_file.load_json_object(cfg.UPGRADE_STATE_FILE, _store.what, _store.lost)
+    version = (data or {}).get("version")
+    return isinstance(version, int) and version < STATE_VERSION
 
 
 def _write_state(data):

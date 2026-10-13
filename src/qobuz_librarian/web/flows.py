@@ -475,6 +475,8 @@ def _gap_candidate_spec(
     extra_payload = {"_artist_dir": artist_key} if artist_key else {}
     if gap.on_disk_dir is not None:
         extra_payload["album_dir"] = str(gap.on_disk_dir)
+        if gap.bonus_only:
+            extra_payload["bonus_only"] = True
         premise = candidate_premise.capture("gap-fill", gap.on_disk_dir)
         # The present tracks are Qobuz's, with no local path; the album seal
         # already holds every file the whole-album path would move aside.
@@ -548,26 +550,48 @@ def is_gap_candidate(c):
 
 
 def review_tab_filter(tab, included=None):
-    """Which candidates a library review lists on ``tab``: Gap Fill, or the
-    missing albums that are ticked or whose release type is switched on
-    (``included``, else the saved switches). Any other tab lists
+    """Which candidates a library review lists on ``tab``: the Gap Fill
+    rows, or the missing albums, that are ticked or that the switches in
+    ``included`` (else the saved switches) list. Any other tab lists
     everything."""
-    if tab == "gaps":
-        return is_gap_candidate
-    if tab != "missing":
+    if tab not in ("missing", "gaps"):
         return lambda c: True
     if included is None:
         included = missing_types.load()
+    if tab == "gaps":
+        return lambda c: is_gap_candidate(c) and (
+            bool(c.get("selected")) or missing_types.gap_shown(
+                (c.get("payload") or {}).get("bonus_only"), included))
     return lambda c: not is_gap_candidate(c) and (
         bool(c.get("selected")) or missing_types.shown(
             (c.get("payload") or {}).get("release_type"), included))
 
 
+def review_listed(included=None):
+    """Which candidates a library review lists on either tab."""
+    if included is None:
+        included = missing_types.load()
+    gaps = review_tab_filter("gaps", included)
+    missing = review_tab_filter("missing", included)
+    return lambda c: gaps(c) or missing(c)
+
+
+def switch_holding(c):
+    """The switch that decides whether a library review lists ``c``: Bonus
+    versions for a Gap Fill row, else its release type."""
+    payload = c.get("payload") or {}
+    if is_gap_candidate(c):
+        return missing_types.BONUS if payload.get("bonus_only") else None
+    return payload.get("release_type")
+
+
 def library_review_summary(candidates):
     """The parked library review's one-line summary, without the trailing
     period."""
-    gaps = sum(1 for c in candidates if is_gap_candidate(c))
-    shown = review_tab_filter("missing")
+    included = missing_types.load()
+    in_gaps = review_tab_filter("gaps", included)
+    shown = review_tab_filter("missing", included)
+    gaps = sum(1 for c in candidates if in_gaps(c))
     missing = sum(1 for c in candidates if shown(c))
     return (f"{missing + gaps:,} to review across Missing Albums "
             f"({missing:,}) and Gap Fill ({gaps:,})")
@@ -688,9 +712,9 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     (added, updated, removed, held_back, left_out, notes), False when the
     changed review could not be saved, or None when the review stopped being
     parked mid-refresh (approved/discarded). ``updated`` and ``removed`` count
-    the rows the review lists that changed or left; ``held_back`` maps release
-    types to the added rows their Missing Albums switches keep out of the
-    list; ``left_out`` maps artist folders to the listed rows the review had
+    the rows the review lists that changed or left; ``held_back`` maps the
+    switches (switch_holding) to the added rows they keep out of the list;
+    ``left_out`` maps artist folders to the listed rows the review had
     no room for; ``notes`` are the lines the fold added to the review's log."""
     _key = fold_key
     def _fold():
@@ -701,13 +725,14 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         hidden = hidden_mod.load()
         library = parked.execute_kind == "library"
         included = missing_types.load()
-        in_missing = review_tab_filter("missing" if library else "", included)
-
-        def listed(c):
-            return is_gap_candidate(c) or in_missing(c)
+        listed = (review_listed(included) if library
+                  else review_tab_filter(""))
 
         def switched_on(c):
-            return is_gap_candidate(c) or missing_types.shown(
+            if is_gap_candidate(c):
+                return missing_types.gap_shown(
+                    (c.get("payload") or {}).get("bonus_only"), included)
+            return missing_types.shown(
                 (c.get("payload") or {}).get("release_type"), included)
 
         fresh_by_key = {}
@@ -777,8 +802,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
             keep.append(replacement)
             if (library and replacement["selected"] and switched_on(c)
                     and not switched_on(fresh)):
-                release_type = (fresh.get("payload") or {}).get("release_type")
-                moved[release_type] = moved.get(release_type, 0) + 1
+                switch = switch_holding(fresh)
+                moved[switch] = moved.get(switch, 0) + 1
             if (_row_shows_change(_fold_row(fresh), _fold_row(c))
                     and (listed(fresh) or listed(c))):
                 updated += 1
@@ -821,8 +846,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
             if listed(c):
                 listed_rows += 1
             else:
-                release_type = (c.get("payload") or {}).get("release_type")
-                held_back[release_type] = held_back.get(release_type, 0) + 1
+                switch = switch_holding(c)
+                held_back[switch] = held_back.get(switch, 0) + 1
         if review_generation is not None:
             parked.execute_args = {
                 **(parked.execute_args or {}),
@@ -1285,7 +1310,7 @@ def _partial_gap_fill_spec(full_album, artist_name, n_missing, *,
         if exact_edition:
             _existing, album_dir, _missing, _present = catalog.find_edition_tracks(full_album)
         else:
-            album_dir = catalog.find_album_dir_filesystem(full_album)
+            album_dir = catalog.other_version_dir(full_album)
     if album_dir is None:
         return None
     album_dir = Path(album_dir)
@@ -1940,12 +1965,9 @@ def _scan_library_impl(
     # albums the user dismissed since the interruption are not re-added, and
     # so the parallel workers below see the same consistent view.
     hidden = hidden_mod.load()
-    # The review keeps every release type and lists what the Missing Albums
-    # switches pick; the running count follows the list.
-    missing_listed = review_tab_filter("missing")
-
-    def _listed(c):
-        return is_gap_candidate(c) or missing_listed(c)
+    # The review keeps every release type and bonus version and lists what
+    # the switches pick; the running count follows the list.
+    _listed = review_listed()
     quality_sig = library_scan_state.quality_signature()
     # Dismissing and restoring deliberately do NOT bar the cheap path. The
     # snapshot holds every candidate the last crawl found, dismissed or not, so

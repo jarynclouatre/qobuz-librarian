@@ -15,3 +15,5 @@ def test_beets_sanitize_matches_beets_on_disk_names():
     assert beets_sanitize("Artist.") == "Artist_"
     # A `[$year] $album` path template still matches the album title.
     assert strip_album_decorations("[1971] Hunky Dory") == "Hunky Dory"
+    assert strip_album_decorations(
+        "The Infamous - 25th Anniversary Expanded Edition") == "The Infamous"

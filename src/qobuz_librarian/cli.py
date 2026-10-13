@@ -908,6 +908,12 @@ def parse_args():
                    help="list EPs and singles among missing albums in "
                         "Artist mode and Library walk (default: the Library "
                         "review's EPs & singles switch)")
+    offers.add_argument("--include-bonus", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="offer to fill an album whose only missing tracks are "
+                        "other versions of songs it has (remixes, live takes, "
+                        "demos) in Artist mode, Library walk and Gap fill "
+                        "(default: the Library review's Bonus versions switch)")
     # Default comes from config (PREFER_HIRES, env/Settings overridable) so
     # CLI and web behave the same. --no-prefer-hires overrides per-run.
     offers.add_argument("--prefer-hires", dest="prefer_hires",
@@ -1005,6 +1011,12 @@ def parse_args():
                 and (args.query or other_run_mode)):
             p.error(f"--{flag.replace('_', '-')} only applies to artist mode "
                     "and --library-walk")
+    # --include-bonus only affects the gap-fill step those modes share.
+    if (args.include_bonus and not (args.artist or args.library_walk
+                                    or args.album_gaps)
+            and (args.query or other_run_mode)):
+        p.error("--include-bonus only applies to artist mode, --library-walk "
+                "and --gap-fill")
     # --no-catalog skips that same missing-albums step.
     if (args.no_catalog and not (args.artist or args.library_walk)
             and (args.query or other_run_mode)):
@@ -1062,6 +1074,8 @@ def parse_args():
                                ("include_singles", missing_types.EP)):
         if getattr(args, flag) is None:
             setattr(args, flag, release_type in switched_on)
+    if args.include_bonus is None:
+        args.include_bonus = missing_types.BONUS in switched_on
     return args
 
 

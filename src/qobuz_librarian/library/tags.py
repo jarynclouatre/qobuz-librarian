@@ -244,7 +244,7 @@ _LEADING_YEAR_RE   = re.compile(
 # Edition keywords to strip from album title suffixes.
 _EDITION_TAIL_KEYWORDS = (
     r"(?:\d{4}\s+)?(?:re)?master(?:ed)?(?:\s+edition)?|"
-    r"(?:\d{1,4}\w{0,2}\s+)?anniversary(?:\s+edition)?|"
+    r"(?:\d{1,4}\w{0,2}\s+)?anniversary(?:\s+(?:deluxe|expanded|special))?(?:\s+edition)?|"
     r"deluxe(?:\s+edition)?|"
     r"super\s+deluxe(?:\s+edition)?|"
     r"expanded(?:\s+edition)?|"

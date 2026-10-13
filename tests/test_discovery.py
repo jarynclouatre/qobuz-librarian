@@ -140,13 +140,17 @@ def test_fully_missing_album_is_a_gap_with_no_dir(monkeypatch, tmp_path, beatles
                    [_qt(f"r{i}", f"ISRCR{i}") for i in range(11)])
     missing = _album("a2", "Abbey Road", "The Beatles", 1969,
                      [_qt(f"a{i}", f"ISRCA{i}") for i in range(10)])
+    # Its name is close enough to find the Revolver folder, but that folder
+    # holds none of its songs.
+    namesake = _album("a3", "Evolver", "The Beatles", 1970,
+                      [_qt(f"e{i}", f"ISRCE{i}") for i in range(10)])
     res = _run(monkeypatch, tmp_path,
                layout={"The Beatles": {"Revolver (1966)":
                                        [_et(f"r{i}", f"ISRCR{i}") for i in range(11)]}},
-               catalog=[owned, missing], artists=beatles_search)
+               catalog=[owned, missing, namesake], artists=beatles_search)
 
     fully = [g for g in res.gaps if g.on_disk_dir is None]
-    assert _titles(fully) == ["Abbey Road"]
+    assert _titles(fully) == ["Abbey Road", "Evolver"]
     # The owned, complete album is not a gap and not unmatched.
     assert "Revolver" not in _titles(res.gaps)
     assert [c["dir"].name for c in res.complete] == ["Revolver (1966)"]

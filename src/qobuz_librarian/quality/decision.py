@@ -8,7 +8,7 @@ from pathlib import Path
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError
-from qobuz_librarian.api.search import get_artist_albums
+from qobuz_librarian.api.search import get_album, get_artist_albums
 from qobuz_librarian.library import catalog as catalog_mod
 from qobuz_librarian.library import discovery
 from qobuz_librarian.library import hidden as hidden_mod
@@ -409,6 +409,32 @@ def _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual):
 
 # ── Upgrade-candidate scan ────────────────────────────────────────────────────
 
+def _same_edition_upgrade(album, existing, folder, catalog, artist_name, token, capped):
+    """Another release of the artist's catalog for the folder that holds the
+    files' own edition at higher quality, when ``album`` is another mix or
+    master of them, or None."""
+    upgrades = ("all_lower", "mixed_below")
+    others = [
+        other for other in catalog_mod._catalog_candidates_for_dir(
+            folder, catalog, artist_name, prefer_hires=True)
+        if other.get("id") != album.get("id")
+        and not (capped and is_album_capped(other.get("id"), capped))
+        and compare_album_quality(existing, other)["classification"] in upgrades
+        and catalog_mod.find_album_dir_filesystem(other) == folder
+    ]
+    for other in others[:cfg.EDITION_SEARCH_API_BUDGET]:
+        try:
+            full = get_album(other["id"], token)
+        except QobuzError:
+            continue
+        tracks = (full.get("tracks") or {}).get("items") or []
+        if (tracks and catalog_mod.same_edition(full, existing, folder)
+                and not find_extras_in_existing(tracks, existing)
+                and compare_album_quality(existing, full)["classification"] in upgrades):
+            return full
+    return None
+
+
 def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
     """Silently scan all album dirs under artist_dir for quality upgrade candidates.
 
@@ -421,6 +447,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
 
     Only includes albums where:
       • Qobuz offers strictly higher quality (all_lower / mixed_below)
+      • Qobuz's copy is the edition on disk, not another mix or master
       • Existing tracks are present on disk
       • No bonus tracks would be lost (extras block wipe-and-replace)
       • --no-upgrade is not set
@@ -480,7 +507,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
         if not qobuz_tracks:
             continue
 
-        existing, _ = find_existing_tracks(qobuz_album)
+        existing, folder = find_existing_tracks(qobuz_album)
         if not existing:
             continue  # nothing on disk - not an upgrade scenario
 
@@ -541,6 +568,14 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
                     break
             if not swapped:
                 continue
+        elif not catalog_mod.same_edition(qobuz_album, existing, folder):
+            qobuz_album = _same_edition_upgrade(
+                qobuz_album, existing, folder, catalog, artist_name, token, capped)
+            if qobuz_album is None:
+                vlog(f"    {album_dir.name}: Qobuz's copy is another version")
+                continue
+            qobuz_tracks = qobuz_album["tracks"]["items"]
+            qual = compare_album_quality(existing, qobuz_album)
 
         # Build human-readable quality labels for the upgrade summary.
         qbits, qrate = qual["qobuz_quality"]

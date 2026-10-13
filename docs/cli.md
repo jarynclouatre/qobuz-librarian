@@ -114,6 +114,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--reset-walk-seen` | Forget which artists and albums the walks have answered, and exit |
 | `--no-catalog` | Skip the missing-albums step in Artist mode and the Library walk |
 | `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles` | List live releases, compilations, or EPs and singles among missing albums (default: the Library review's switches) |
+| `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap fill (default: the Library review's Bonus versions switch) |
 | `--[no-]prefer-hires` | Sort 24-bit and higher sample rate results first (default: the Prefer hi-res setting) |
 | `--dry-run` | Show the plan and change nothing |
 | `--force` | Download every track of the album again (album mode only) |

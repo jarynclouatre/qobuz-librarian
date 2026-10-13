@@ -163,7 +163,7 @@ def _make_download_run(
                     )
             elif not treat_as_new and catalog.is_lossless_album(album):
                 existing, album_dir, missing, present = catalog.find_edition_tracks(album)
-                other = catalog.find_album_dir_filesystem(album)
+                other = catalog.other_version_dir(album)
                 separate = bool(missing and other and album_dir is None)
                 candidate = queue_builder._build_queue_item(
                     album=album,

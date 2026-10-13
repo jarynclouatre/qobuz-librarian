@@ -35,10 +35,22 @@
   </nav>
   {% if review_tab_counts.typed %}
   <div class="ql-review-switches{% if review_tab != 'missing' %} hidden{% endif %}" role="group"
-       aria-label="Also list in Missing Albums" data-review-switches>
+       aria-label="Also list in Missing Albums" data-review-switches="missing">
     {% for release_type, label in review_type_switches %}
     <button type="button" class="ql-review-switch" data-review-switch="{{ release_type }}"
             aria-pressed="{{ 'true' if release_type in review_tab_counts.included else 'false' }}">
+      <span>{{ label }}</span>
+      <span class="ql-toggle-switch" aria-hidden="true"><i></i></span>
+    </button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if review_tab_counts.bonus %}
+  <div class="ql-review-switches{% if review_tab != 'gaps' %} hidden{% endif %}" role="group"
+       aria-label="Also list in Gap Fill" data-review-switches="gaps">
+    {% for switch, label in review_gap_switches %}
+    <button type="button" class="ql-review-switch" data-review-switch="{{ switch }}"
+            aria-pressed="{{ 'true' if switch in review_tab_counts.included else 'false' }}">
       <span>{{ label }}</span>
       <span class="ql-toggle-switch" aria-hidden="true"><i></i></span>
     </button>
