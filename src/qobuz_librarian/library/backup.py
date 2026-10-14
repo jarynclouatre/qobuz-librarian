@@ -10887,6 +10887,22 @@ def discard_redundant_backup(path) -> bool:
     )
 
 
+def discard_replaced_upgrade_backup(path) -> bool:
+    """Dispose one upgrade backup whose album holds a verified replacement
+    for every file it kept, because the user asked.
+
+    The upgrade's audio is new, so the byte-identical proof can never pass.
+    This applies the proof the retention sweep does, without the wait: each
+    kept file has a decode-clean track at its path, no shorter and no
+    smaller.
+    """
+    candidate = load_backup_result(Path(path))
+    if (candidate is None or not isinstance(candidate.receipt, dict)
+            or candidate.receipt.get("kind") != "upgrade"):
+        return False
+    return _dispose_retention_candidate(candidate)
+
+
 def album_tree_size(path):
     """(file count, byte total) for one album folder, or None if unreadable.
 

@@ -14,7 +14,6 @@ from qobuz_librarian.api.auth import (
     load_qobuz_token,
     qobuz_capability,
     read_qobuz_credentials,
-    sync_streamrip_creds_from_env,
     write_streamrip_creds,
 )
 
@@ -106,27 +105,70 @@ def test_credentials_separate_saved_reads_catalogue_and_download_access(
     ).allowed is True
 
 
-def test_sync_streamrip_creds_from_env_writes_and_stays_idempotent(tmp_path, monkeypatch):
+def test_downloads_run_on_a_copy_and_leave_the_users_config_as_it_is(
+        tmp_path, monkeypatch):
+    """Credentials from the environment were written into the user's own
+    streamrip config with the app's staging folder and database paths, and
+    album art rewrote its [artwork]. Each run now gets a private copy holding
+    what the app needs; the config stays byte for byte as it was, and the
+    app id a run fetches is kept for the next one."""
+    import os
+
+    import tomlkit
+
     from qobuz_librarian import config
+    from qobuz_librarian.api import auth
     cfg_path = tmp_path / "streamrip" / "config.toml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text(
+        '[downloads]\nfolder = "~/Downloads/rip"\ndisc_subdirectories = false\n'
+        '[qobuz]\nuse_auth_token = false\napp_id = ""\nsecrets = []\n'
+        '[database]\ndownloads_enabled = true\n'
+        'downloads_path = "/nowhere/downloads.db"\n'
+        '[artwork]\nembed = false\nsave_artwork = false\n'
+        '[misc]\nversion = "0.1"\n')
+    before = cfg_path.read_bytes()
     monkeypatch.setattr(config, "QOBUZ_USER_AUTH_TOKEN", "tok-abc")
     monkeypatch.setattr(config, "QOBUZ_USER_ID", "42")
     monkeypatch.setattr(config, "STREAMRIP_CONFIG", cfg_path)
     monkeypatch.setattr(config, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
 
-    assert sync_streamrip_creds_from_env() is True
-    data = tomllib.loads(cfg_path.read_text())
-    assert data["qobuz"]["password_or_token"] == "tok-abc"
-    assert data["qobuz"]["email_or_userid"] == "42"
-    assert data["qobuz"]["use_auth_token"] is True
-    # Streamrip 2.2 expects a [qobuz.secrets] table and a misc.version field.
-    assert "secrets" in data["qobuz"] and "version" in data["misc"]
-    # Second call is a no-op when nothing changed.
-    assert sync_streamrip_creds_from_env() is None
-    # A token rotation must rewrite the file.
-    monkeypatch.setattr(config, "QOBUZ_USER_AUTH_TOKEN", "tok-new")
-    assert sync_streamrip_creds_from_env() is True
-    assert tomllib.loads(cfg_path.read_text())["qobuz"]["password_or_token"] == "tok-new"
+    for artwork, embed in (("both", True), ("sidecar", False)):
+        monkeypatch.setattr(config, "ARTWORK", artwork)
+        with auth.streamrip_run_config() as run_path:
+            assert run_path.parent == tmp_path / "data" / "streamrip-runs"
+            assert os.stat(run_path).st_mode & 0o777 == 0o600
+            assert os.stat(run_path.parent).st_mode & 0o777 == 0o700
+            # A killed run's copy goes at the next start; a live one stays.
+            killed = [run_path.parent / ".streamrip-run-killed.toml",
+                      cfg_path.parent / ".streamrip-run-killed.toml"]
+            for leftover in killed:
+                leftover.write_text("[qobuz]\n")
+            auth.sweep_streamrip_run_copies()
+            assert run_path.exists() and not any(p.exists() for p in killed)
+            data = tomllib.loads(run_path.read_text())
+            assert data["artwork"]["embed"] is embed and data["artwork"]["save_artwork"] is True
+            assert (data["qobuz"]["password_or_token"], data["qobuz"]["email_or_userid"],
+                    data["qobuz"]["use_auth_token"]) == ("tok-abc", "42", True)
+            assert data["downloads"]["folder"] == str(tmp_path / "staging")
+            assert data["downloads"]["disc_subdirectories"] is True
+            assert data["database"]["downloads_enabled"] is False
+            assert data["database"]["downloads_path"] != "/nowhere/downloads.db"
+            doc = tomlkit.parse(run_path.read_text())
+            doc["qobuz"]["app_id"], doc["qobuz"]["secrets"] = "123", ["s"]
+            doc["misc"]["version"] = "2.2.0"
+            run_path.write_text(tomlkit.dumps(doc))
+        assert not run_path.exists()
+    with auth.streamrip_run_config() as run_path:
+        qobuz = tomllib.loads(run_path.read_text())["qobuz"]
+        assert (qobuz["app_id"], qobuz["secrets"]) == ("123", ["s"])
+    assert cfg_path.read_bytes() == before
+
+    # A credentials save on Settings still goes into the config.
+    assert write_streamrip_creds("42", "tok-saved") is True
+    qobuz = tomllib.loads(cfg_path.read_text())["qobuz"]
+    assert (qobuz["password_or_token"], qobuz["use_auth_token"]) == ("tok-saved", True)
 
 
 def test_failed_streamrip_credential_publish_keeps_the_prior_file(

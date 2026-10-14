@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import QobuzAccess
+from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
@@ -366,7 +367,7 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
         location, _is_host = storage._resolve_host_path(str(target))
         if backup_mod.discard_backup_unchecked(target):
             note = _diagnostics_result_notice(
-                "success", "Deleted the backup without checking it.")
+                "success", "Deleted the backup.")
         else:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
@@ -478,6 +479,18 @@ async def restore_backup(request: Request, backup: str = Form("")):
     return await _run_diagnostics_action(request, _restore_backup_sync, backup)
 
 
+def _discard_replaced_upgrade(carried) -> bool:
+    """Remove an upgrade backup the upgrade verifiably replaced, after
+    dropping the album's beets entries left behind by a failed catalogue
+    step, so it lists each track once."""
+    if carried.receipt.get("kind") != "upgrade":
+        return False
+    origin = carried.receipt.get("origin")
+    if origin and Path(origin).is_dir():
+        beets_mod.forget_replaced_beets_entries(folder=origin)
+    return backup_mod.discard_replaced_upgrade_backup(carried.path)
+
+
 def _discard_backup_sync(request: Request, backup: str) -> str:
     target = _backup_target(backup)
     if target is None:
@@ -498,13 +511,18 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "error", "The saved recovery records could not be checked, "
                 "so this backup was left untouched. Check that the data "
                 "volume is writable, then try again.")
-        elif backup_mod.discard_redundant_backup(target):
+        elif (
+            (identical := backup_mod.discard_redundant_backup(target))
+            or _discard_replaced_upgrade(carried)
+        ):
             dest = html.escape(storage._resolve_host_path(
                 str(carried.receipt.get("origin", "")))[0])
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", "Removed the backup. Every file it held is "
-                    f"verified present at {dest}.")
+                    f"verified present at {dest}." if identical else
+                    "Removed the backup. Every track it held has a verified "
+                    f"replacement at {dest}.")
             else:
                 note = _diagnostics_result_notice(
                     "error", "The backup was removed, but its saved recovery "
@@ -623,7 +641,7 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
         location, _is_host = storage._resolve_host_path(str(target))
         if staging_mod.discard_group_unchecked(target):
             note = _diagnostics_result_notice(
-                "success", "Deleted the files without checking them.")
+                "success", "Deleted the files.")
         else:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "

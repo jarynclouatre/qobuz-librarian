@@ -705,7 +705,7 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
 
     _need_audio_tools()
 
-    def stage(name, origin_booklet):
+    def stage(name, origin_booklet, kind="gap-fill"):
         root = tmp_path / name / "backups"
         backup = root / "kept"
         backup.mkdir(parents=True)
@@ -718,7 +718,7 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
         shutil.copyfile(backup / "01.flac", origin / "01.flac")
         (backup / "booklet.pdf").write_bytes(b"original booklet")
         (origin / "booklet.pdf").write_bytes(origin_booklet)
-        return backup, origin, _seal_test_backup(bk, backup, origin)
+        return backup, origin, _seal_test_backup(bk, backup, origin, kind=kind)
 
     backup, origin, candidate = stage("different", b"modified booklet")
     [(path, album, result)] = bk.list_retained_backups()
@@ -758,6 +758,25 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
     assert bk.discard_redundant_backup(backup) is True
     assert not backup.exists()
     assert (origin / "booklet.pdf").read_bytes() == b"original booklet"
+
+    # An upgrade's backup differs from the album by design; Remove is offered
+    # and goes once every track has a verified replacement. Another album
+    # backup whose tracks differ has no Remove, which would refuse it.
+    monkeypatch.setattr(bk, "_BACKUP_LISTING_READ_BYTES", 1 << 30)
+    backup, origin, _candidate = stage("refilled", b"original booklet")
+    _real_flac(origin / "01.flac", seconds=3)
+    [(path, album, result)] = bk.list_retained_backups()
+    assert (result.status, result.file) == ("retained", "01.flac")
+    assert 'hx-post="/backups/discard"' not in _render_backup_diagnostics([(path, album, result)])
+    assert bk.discard_replaced_upgrade_backup(backup) is False
+    backup, origin, _candidate = stage("upgraded", b"original booklet", kind="upgrade")
+    _real_flac(origin / "01.flac", seconds=3)
+    [(path, album, result)] = bk.list_retained_backups()
+    assert (result.status, result.file) == ("retained", "01.flac")
+    assert 'hx-post="/backups/discard"' in _render_backup_diagnostics([(path, album, result)])
+    assert bk.discard_redundant_backup(backup) is False
+    assert bk.discard_replaced_upgrade_backup(backup) is True
+    assert not backup.exists()
 
 
 def test_gap_fill_restore_keeps_the_backup_whenever_it_cannot_finish(

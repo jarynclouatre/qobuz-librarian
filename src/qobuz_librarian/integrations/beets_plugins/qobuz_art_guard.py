@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import stat
 import threading
@@ -10,8 +11,12 @@ import threading
 from beets import plugins
 from beets.plugins import BeetsPlugin
 
+from qobuz_librarian import config as cfg
 from qobuz_librarian import dirfd
 from qobuz_librarian.integrations.beets import (
+    _FILE_NAME_FUNCTION,
+    _MANAGED_OWNERSHIP_MODE,
+    _OWNERSHIP_MODE_ENV,
     _merge_chain_is_named,
     _merge_name_matches,
     _merge_name_missing,
@@ -26,6 +31,10 @@ from qobuz_librarian.integrations.beets import (
 _STATE_ATTRIBUTE = "_qobuz_librarian_art_guard"
 _MANIFEST_FD_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_FD"
 _NONCE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_NONCE"
+# The cover names the app reads besides those fetchart is configured with, and
+# the image types fetchart files.
+_COVER_NAMES = (b"cover", b"folder", b"front")
+_COVER_EXTENSIONS = (b".jpg", b".jpeg", b".png", b".webp")
 
 
 def _ownership_requested():
@@ -292,6 +301,25 @@ def _authorise_deferred_parent(state):
         return False
 
 
+def _authorise_album_folder(state):
+    """Allow the existing folder of the album this import adds tracks to,
+    once one of the imported tracks is held inside it."""
+    chain = state.get("chain")
+    parent_parts = state.get("parent_parts")
+    if (
+        state.get("album_folder") is not True
+        or not isinstance(chain, list)
+        or state.get("prefix_parts") != parent_parts
+        or len(chain) != len(parent_parts) + 1
+    ):
+        return False
+    state["parent_fd"] = chain[-1]
+    if not _parent_still_held(state) or not _task_item_is_in_parent(state):
+        return False
+    state["authorised"] = True
+    return True
+
+
 def _art_destination(root, task, candidate):
     items = list(task.imported_items())
     if not items or getattr(candidate, "path", None) is None:
@@ -340,6 +368,98 @@ def _same_art_path(left, right):
         )
     except (OSError, TypeError, ValueError):
         return False
+
+
+def _cover_images(directory_fd, fetchart):
+    """The image files in a directory that fetchart or the app takes for an
+    album cover, the most cover-like name first. A back cover is not one."""
+    names = list(dict.fromkeys([
+        os.fsencode(name)
+        for name in (*(getattr(fetchart, "cover_names", None) or ()), *_COVER_NAMES)
+    ]))
+    pattern = re.compile(
+        rb"(\b|_)(" + b"|".join(re.escape(name) for name in names) + rb")(\b|_)",
+        re.IGNORECASE,
+    )
+    found = []
+    for name in map(os.fsencode, os.listdir(directory_fd)):
+        stem, extension = os.path.splitext(name)
+        if (
+            name.startswith(b".")
+            or extension.lower() not in _COVER_EXTENSIONS
+            or not pattern.search(stem)
+            or re.search(rb"(\b|_)back(\b|_)", stem, re.IGNORECASE)
+        ):
+            continue
+        try:
+            entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(entry.st_mode):
+            found.append(name)
+    return sorted(found, key=lambda name: (
+        [index for index, cover in enumerate(names) if cover in name.lower()],
+        name,
+    ))
+
+
+def _subdirectories(directory_fd):
+    found = []
+    for name in map(os.fsencode, os.listdir(directory_fd)):
+        if name.startswith(b"."):
+            continue
+        try:
+            entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISDIR(entry.st_mode):
+            found.append(name)
+    return sorted(found)
+
+
+def _holds_tracks(directory_fd):
+    """True when a folder holds tracks itself, as a disc folder does and a
+    folder of scans does not."""
+    extensions = {os.fsencode(extension) for extension in cfg.AUDIO_EXTS}
+    for name in map(os.fsencode, os.listdir(directory_fd)):
+        if name.startswith(b".") or os.path.splitext(name)[1].lower() not in extensions:
+            continue
+        try:
+            entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(entry.st_mode):
+            return True
+    return False
+
+
+def _recorded_album_art(task, album_path):
+    """Covers in the album folder that beets records for other entries of the
+    album, oldest entry first, as parts relative to that folder."""
+    try:
+        from beets.dbcore.query import PathQuery
+
+        library = task.album.db
+        own_id = task.album.id
+        entries = {
+            item.album_id for item in library.items(PathQuery("path", album_path))
+            if item.album_id is not None and item.album_id != own_id
+        }
+        albums = sorted(
+            filter(None, map(library.get_album, entries)),
+            key=lambda album: (album.added, album.id),
+        )
+        found = []
+        for album in albums:
+            if not album.artpath:
+                continue
+            relative = os.path.relpath(os.fsencode(album.artpath), album_path)
+            parts = _ownership_relative_parts(os.fsdecode(relative))
+            if parts and len(parts) <= 2:
+                found.append(tuple(parts))
+        return found
+    except Exception:
+        return []
 
 
 def _album_store_rollback_is_proved(album, old_art):
@@ -717,11 +837,20 @@ def release_ownership_art(task):
         _remove_state(task)
 
 
+def _file_name(*parts):
+    """The last part of a path, for a template that files tracks beside an
+    album's others. A comma in the template splits it into parts."""
+    return ",".join(parts).rsplit("/", 1)[-1]
+
+
 class QobuzArtGuardPlugin(BeetsPlugin):
-    """Publish fetched art only into an exact directory this run created."""
+    """Publish fetched art only into an exact directory this run created,
+    or into the folder of the album the import adds tracks to."""
 
     def __init__(self):
         super().__init__()
+        self.config.add({"album_folder": ""})
+        self.template_funcs[_FILE_NAME_FUNCTION] = _file_name
         self._lock = threading.RLock()
         self.import_stages = [self._guard_art]
         self.register_listener("import_task_files", self._publish_art)
@@ -753,6 +882,20 @@ class QobuzArtGuardPlugin(BeetsPlugin):
                     "leaf": leaf,
                 })
                 setattr(task, _STATE_ATTRIBUTE, state)
+                if (
+                    state["ownership"]
+                    and os.environ.get(_OWNERSHIP_MODE_ENV)
+                    == _MANAGED_OWNERSHIP_MODE
+                ):
+                    return
+                album_folder = _ownership_relative_parts(
+                    self.config["album_folder"].as_str())
+                if album_folder and (
+                    tuple(parent_parts[:len(album_folder)])
+                    == tuple(album_folder)
+                ):
+                    state["album_parts"] = tuple(album_folder)
+                state["album_folder"] = "album_parts" in state
                 if state["ownership"]:
                     return
 
@@ -767,13 +910,122 @@ class QobuzArtGuardPlugin(BeetsPlugin):
             except (OSError, TypeError, ValueError):
                 return
 
+    def _use_album_cover(self, state):
+        """Record a cover the album already has, in its folder or one of its
+        disc folders, the folders below it that hold tracks, as its art. True
+        when it has one."""
+        album_parts = state["album_parts"]
+        album_path = os.path.join(state["root"], *album_parts)
+        chain, names = _hold_existing_prefix(state["root"], album_parts)
+        try:
+            if names != album_parts:
+                return False
+            album_fd = chain[-1]
+            candidates = _recorded_album_art(state["task"], album_path)
+            candidates += [(name,) for name in _cover_images(album_fd, state["fetchart"])]
+            for folder in _subdirectories(album_fd):
+                try:
+                    folder_fd = _open_exact_merge_dir(album_fd, folder)
+                except OSError:
+                    continue
+                try:
+                    if _holds_tracks(folder_fd):
+                        candidates += [
+                            (folder, name)
+                            for name in _cover_images(folder_fd, state["fetchart"])
+                        ]
+                finally:
+                    os.close(folder_fd)
+            for relative in candidates:
+                folder_fd = album_fd
+                try:
+                    if len(relative) == 2:
+                        folder_fd = _open_exact_merge_dir(album_fd, relative[0])
+                except OSError:
+                    continue
+                try:
+                    if self._use_existing_art(
+                        state,
+                        folder_fd,
+                        relative[-1],
+                        os.path.join(album_path, *relative),
+                        lambda: (
+                            _root_still_named(state, chain[0])
+                            and _merge_chain_is_named(chain, album_parts)
+                            and (
+                                len(relative) == 1
+                                or _merge_name_matches(
+                                    album_fd, relative[0], folder_fd)
+                            )
+                        ),
+                    ):
+                        return True
+                finally:
+                    if folder_fd != album_fd:
+                        os.close(folder_fd)
+            return False
+        finally:
+            _close_chain(chain)
+
+    def _use_existing_art(self, state, folder_fd, name, destination, named):
+        """Record a cover file already in the album's folder as its art. False
+        when that is not a cover file in place."""
+        task = state["task"]
+        old_art = getattr(task.album, "artpath", None)
+        if old_art:
+            return True
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            return False
+        descriptor = None
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=folder_fd,
+            )
+            if (
+                not stat.S_ISREG(os.fstat(descriptor).st_mode)
+                or not _merge_name_matches(
+                    folder_fd, name, descriptor, regular=True
+                )
+                or not named()
+                or not _parent_still_held(state)
+                or not _held_task_item_is_still_named(state)
+            ):
+                return False
+            task.album.artpath = destination
+            plugins.send("art_set", album=task.album)
+            try:
+                task.album.store()
+            except BaseException:
+                task.album.artpath = old_art
+                raise
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            self._log.warning(
+                "qobuz_art_guard: could not use the existing art for "
+                "{0.albumartist} - {0.album}: {1}",
+                task.album,
+                exc,
+            )
+            return False
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def _publish_candidate(self, state):
         if (
             state.get("authorised") is not True
             or not _parent_still_held(state)
-            or not _leaf_is_absent(state["parent_fd"], state["leaf"])
             or not _held_task_item_is_still_named(state)
         ):
+            return
+        if state.get("album_folder") is True and self._use_album_cover(state):
+            return
+        if not _leaf_is_absent(state["parent_fd"], state["leaf"]):
             return
         task = state["task"]
         candidate = state["candidate"]
@@ -906,13 +1158,23 @@ class QobuzArtGuardPlugin(BeetsPlugin):
             if state is None:
                 return
             try:
-                if state.get("ownership") is True:
+                if state.get("authorised") is True:
                     if not _hold_task_item_in_parent(
                         state, state.get("selected_item")
                     ):
                         return
-                else:
-                    _authorise_deferred_parent(state)
+                elif state.get("ownership") is True:
+                    if state.get("album_folder") is not True:
+                        return
+                    # The album's own folder, which this run did not create:
+                    # art filed there is the album's, which Undo leaves.
+                    state["ownership"] = False
+                    state["chain"], state["prefix_parts"] = (
+                        _hold_existing_prefix(
+                            state["root"], state["parent_parts"]))
+                    _authorise_album_folder(state)
+                elif not _authorise_deferred_parent(state):
+                    _authorise_album_folder(state)
                 self._publish_candidate(state)
             finally:
                 item_fd = state.pop("item_fd", None)

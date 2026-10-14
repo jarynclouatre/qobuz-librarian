@@ -7,8 +7,13 @@ here without needing to import anything back).
 detect_auth_lost() lives here because it parses rip subprocess output for
 auth signals - no API calls, no session needed.
 """
+import contextlib
+import fcntl
 import hashlib
+import json
+import os
 import re
+import threading
 import tomllib
 from dataclasses import dataclass
 from enum import StrEnum
@@ -297,6 +302,11 @@ def load_qobuz_token():
     return credentials.user_id, credentials.token
 
 
+# Every change the app makes to STREAMRIP_CONFIG reads, edits and replaces the
+# whole file; one at a time, so none undoes another.
+_STREAMRIP_CONFIG_LOCK = threading.Lock()
+
+
 def write_streamrip_creds(user_id, auth_token) -> bool:
     """Write Qobuz creds into the streamrip config at STREAMRIP_CONFIG.
 
@@ -304,12 +314,40 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     callers can surface a clear message instead of crashing. Parses with
     tomlkit so the seeded default's inline docs/ordering survive the
     round-trip. Atomic (tmp + os.replace) so a kill mid-write can't leave
-    a half-written config that breaks auth on next start.
-
-    Single source of truth: the web Settings handler and the env-var
-    sync below both go through here, so streamrip always sees the same
-    credential shape regardless of how the user provided them.
+    a half-written config that breaks auth on next start. Only a
+    credentials save on Settings writes it; downloads use a copy.
     """
+    with _STREAMRIP_CONFIG_LOCK:
+        return _write_streamrip_creds(user_id, auth_token)
+
+
+def _default_streamrip_doc():
+    """The bundled streamrip config, or the least of one when this install
+    ships none (e.g. a pipx install)."""
+    import tomlkit
+    _pkg_root = Path(__file__).resolve().parents[3]
+    for cand in (Path("/app/docker/streamrip-default.toml"),
+                 _pkg_root / "docker" / "streamrip-default.toml"):
+        if cand.exists():
+            try:
+                return tomlkit.parse(cand.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    doc = tomlkit.document()
+    import importlib.metadata as _im
+    try:
+        _srv = _im.version("streamrip")
+    except _im.PackageNotFoundError:
+        _srv = None
+    doc["misc"] = tomlkit.table()
+    if _srv:
+        doc["misc"]["version"] = _srv
+    doc["database"] = tomlkit.table()
+    doc["database"]["failed_downloads_enabled"] = True
+    return doc
+
+
+def _write_streamrip_creds(user_id, auth_token):
     import tomlkit
     try:
         config.STREAMRIP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
@@ -322,34 +360,7 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
         except Exception:
             doc = None
     if doc is None:
-        # Seed from the bundled streamrip-default.toml.
-        _pkg_root = Path(__file__).resolve().parents[3]
-        for cand in (Path("/app/docker/streamrip-default.toml"),
-                     _pkg_root / "docker" / "streamrip-default.toml"):
-            if cand.exists():
-                try:
-                    doc = tomlkit.parse(cand.read_text(encoding="utf-8"))
-                    break
-                except Exception:
-                    doc = None
-        if doc is None:
-            # No bundled default reachable (e.g. a pipx install).
-            doc = tomlkit.document()
-            import importlib.metadata as _im
-            try:
-                _srv = _im.version("streamrip")
-            except _im.PackageNotFoundError:
-                _srv = None
-            doc["misc"] = tomlkit.table()
-            if _srv:
-                doc["misc"]["version"] = _srv
-            doc["database"] = tomlkit.table()
-            # Keep streamrip's downloads db off - on it blocks re-downloading
-            # any track the user deleted by hand.
-            doc["database"]["downloads_enabled"] = False
-            doc["database"]["failed_downloads_enabled"] = True
-            # downloads_path / failed_downloads_path are set below,
-            # deployment-agnostic, for every branch.
+        doc = _default_streamrip_doc()
     if "qobuz" not in doc:
         doc["qobuz"] = tomlkit.table()
     doc["qobuz"]["email_or_userid"]   = user_id
@@ -357,30 +368,14 @@ def write_streamrip_creds(user_id, auth_token) -> bool:
     doc["qobuz"]["use_auth_token"]    = True
     # streamrip 2.2.0 REQUIRES the `secrets` key to exist (it's a required
     # field on QobuzConfig - deleting it makes the whole config fail to load).
-    doc["qobuz"]["app_id"] = ""
     if "secrets" not in doc["qobuz"]:
         doc["qobuz"]["secrets"] = tomlkit.array()
-    if "downloads" not in doc:
-        doc["downloads"] = tomlkit.table()
-    doc["downloads"]["folder"] = str(config.STAGING_DIR)
-    doc["downloads"]["disc_subdirectories"] = True
-    # The bundled default hardcodes the container's /config paths; point
-    # streamrip's databases at the actual config dir so a non-/config
-    # deployment (bare-metal, custom mount) doesn't hit
-    # "OperationalError: unable to open database file".
-    if "database" not in doc:
-        doc["database"] = tomlkit.table()
-    doc["database"]["downloads_path"] = str(
-        config.STREAMRIP_CONFIG.parent / "downloads.db")
-    doc["database"]["failed_downloads_path"] = str(
-        config.STREAMRIP_CONFIG.parent / "failed_downloads.db")
     return _save_streamrip_config(doc)
 
 
 def _save_streamrip_config(doc, *, mode=0o600) -> bool:
     """Replace the file the config path names, through any symlink. It holds
     the account token, so by default only its owner can read it."""
-    import os
     import tempfile
 
     import tomlkit
@@ -424,109 +419,207 @@ def _save_streamrip_config(doc, *, mode=0o600) -> bool:
     return True
 
 
-def streamrip_disc_folders_off() -> bool:
-    """True when streamrip's config turns off its Disc N folders."""
-    try:
-        with open(config.STREAMRIP_CONFIG, "rb") as f:
-            downloads = tomllib.load(f).get("downloads") or {}
-    except (OSError, ValueError):
-        return False
-    return downloads.get("disc_subdirectories") is False
+def _table(doc, name):
+    import tomlkit
+    if name not in doc:
+        doc[name] = tomlkit.table()
+    return doc[name]
 
 
-def enforce_streamrip_disc_folders() -> None:
-    """Turn streamrip's Disc N folders back on; without them, tracks that
-    share a number and title on different discs overwrite each other. The
-    file keeps its permissions, and a symlinked config stays a symlink."""
-    if not streamrip_disc_folders_off():
-        return
-    import os
-    import stat
+def _apply_run_settings(doc):
+    """Set in one run's copy what the app's downloads depend on, whatever the
+    config itself says: the credentials in use, the staging folder, Disc N
+    folders (without them, tracks that share a number and title on different
+    discs overwrite each other), each single in its own folder, no booklets,
+    no downloads database (it blocks downloading again a track removed by
+    hand), no update check, and [artwork] from ARTWORK. Tracks carry art only
+    when ARTWORK embeds it; the cover file is always saved, since the import
+    files it beside the tracks or embeds it."""
+    credentials = read_qobuz_credentials()
+    qobuz = _table(doc, "qobuz")
+    if credentials.configured:
+        qobuz["email_or_userid"] = credentials.user_id
+        qobuz["password_or_token"] = str(credentials.token)
+        qobuz["use_auth_token"] = True
+    if not (qobuz.get("app_id") and qobuz.get("secrets")):
+        fetched = _fetched_app_id()
+        if fetched is not None:
+            qobuz["app_id"], qobuz["secrets"] = fetched
+    for key, value in (("app_id", ""), ("secrets", [])):
+        if key not in qobuz:
+            qobuz[key] = value
+    qobuz["download_booklets"] = False
+    downloads = _table(doc, "downloads")
+    downloads["folder"] = str(config.STAGING_DIR)
+    downloads["disc_subdirectories"] = True
+    _table(doc, "filepaths")["add_singles_to_folder"] = True
+    database = _table(doc, "database")
+    database["downloads_enabled"] = False
+    for key, name in (("downloads_path", "downloads.db"),
+                      ("failed_downloads_path", "failed_downloads.db")):
+        path = str(database.get(key) or "")
+        if not path or not Path(path).expanduser().parent.is_dir():
+            database[key] = str(_streamrip_run_dir() / name)
+    _table(doc, "misc")["check_for_updates"] = False
+    artwork = _table(doc, "artwork")
+    artwork["embed"] = config.ARTWORK in ("embed", "both")
+    artwork["save_artwork"] = True
+
+
+_outdated_noted = False
+
+
+@contextlib.contextmanager
+def streamrip_run_config():
+    """Yield the config path for one `rip` run: a private copy of
+    STREAMRIP_CONFIG, or of the bundled default when there is none, with what
+    the app's downloads depend on set in it. The config itself is never
+    changed; the app id and secrets streamrip fetches on a run are kept in
+    the app's data folder for the next. Yields None when the copy can't be
+    written."""
+    global _outdated_noted
+    import tempfile
 
     import tomlkit
     try:
-        doc = tomlkit.parse(config.STREAMRIP_CONFIG.read_text(encoding="utf-8"))
-        doc["downloads"]["disc_subdirectories"] = True
-        mode = stat.S_IMODE(os.stat(config.STREAMRIP_CONFIG).st_mode)
-    except Exception:
+        if config.STREAMRIP_CONFIG.exists():
+            doc = tomlkit.parse(config.STREAMRIP_CONFIG.read_text(encoding="utf-8"))
+        else:
+            doc = _default_streamrip_doc()
+        version = (doc.get("misc") or {}).get("version")
+        _apply_run_settings(doc)
+        text = tomlkit.dumps(doc)
+        sent = tomllib.loads(text)["qobuz"]
+    except OSError:
+        yield None
         return
-    if _save_streamrip_config(doc, mode=mode):
-        log.info(fmt(
-            C.GRAY,
-            f"  Turned on disc_subdirectories in {config.STREAMRIP_CONFIG}."))
-
-
-def sync_streamrip_creds_from_env():
-    """If creds come from env vars, mirror them into the streamrip config. The
-    app authenticates its own Qobuz API calls straight from
-    QOBUZ_USER_AUTH_TOKEN, but downloads shell out to the bundled `rip` CLI,
-    which only reads its own config file. Without this, the documented env-var
-    setup path lets search/validation succeed while every download fails on
-    streamrip's interactive "Enter your Qobuz email:" prompt.
-    """
-    token = config.QOBUZ_USER_AUTH_TOKEN
-    env_user_id = config.QOBUZ_USER_ID or ""
-    existing_user_id = ""
-    existing_token = ""
-    existing_enabled = False
-    if config.STREAMRIP_CONFIG.exists():
+    except Exception:
+        # streamrip says what is wrong with a config it can't read.
+        yield config.STREAMRIP_CONFIG
+        return
+    copy = fd = None
+    try:
+        directory = _streamrip_run_dir()
+        fd, copy = tempfile.mkstemp(
+            dir=directory, prefix=_RUN_COPY_PREFIX, suffix=".toml")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data = text.encode("utf-8")
+        while data:
+            data = data[os.write(fd, data):]
+    except OSError:
+        if copy is not None:
+            Path(copy).unlink(missing_ok=True)
+        if fd is not None:
+            os.close(fd)
+        yield None
+        return
+    try:
+        yield Path(copy)
+    finally:
         try:
-            with open(config.STREAMRIP_CONFIG, "rb") as f:
-                existing = tomllib.load(f)
-            qz = existing.get("qobuz", {})
-            existing_user_id = str(qz.get("email_or_userid", "") or "")
-            existing_token = str(qz.get("password_or_token", "") or "")
-            existing_enabled = bool(qz.get("use_auth_token"))
-            if (token and existing_enabled
-                    and existing_token == token
-                    and existing_user_id
-                    and (not env_user_id or existing_user_id == env_user_id)):
-                return None  # already usable and in sync
-        except Exception:
-            pass  # unparseable/old → fall through and rewrite
+            with open(copy, "rb") as f:
+                ran = tomllib.load(f)
+        except (OSError, ValueError):
+            ran = {}
+        finally:
+            Path(copy).unlink(missing_ok=True)
+            os.close(fd)
+        qobuz = ran.get("qobuz") or {}
+        fetched = (qobuz.get("app_id"), qobuz.get("secrets"))
+        if all(fetched) and fetched != (sent["app_id"], sent["secrets"]):
+            _keep_fetched_app_id(*fetched)
+        updated = (ran.get("misc") or {}).get("version")
+        if updated and version and updated != version and not _outdated_noted:
+            _outdated_noted = True
+            log.info(fmt(
+                C.GRAY,
+                f"  {config.STREAMRIP_CONFIG} is from streamrip {version}; "
+                f"downloads use a copy updated to {updated}, and the file "
+                "itself is left as it is."))
 
-    if not token:
-        if not (env_user_id and existing_enabled and existing_token):
-            return None
-        if existing_user_id == env_user_id:
-            return None
-        return write_streamrip_creds(env_user_id, existing_token)
 
-    matching_user_id = existing_user_id if (
-        existing_enabled and existing_token == token
-    ) else ""
-    user_id = env_user_id or matching_user_id
-    if not user_id:
+_RUN_COPY_PREFIX = ".streamrip-run-"
+
+
+def _streamrip_run_dir():
+    """The app's own folder for the per-run copies, which hold the
+    credentials: under DATA_DIR, never beside the user's config."""
+    directory = Path(config.DATA_DIR) / "streamrip-runs"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def sweep_streamrip_run_copies():
+    """Delete the per-run config copies a killed run left behind.
+
+    A run holds a lock on its copy until it deletes it, so any copy that
+    can be locked and has been written belongs to no live run. Copies an
+    earlier version kept beside the user's config go the same way."""
+    for directory in (
+            Path(config.DATA_DIR) / "streamrip-runs",
+            Path(os.path.realpath(config.STREAMRIP_CONFIG)).parent):
+        try:
+            leftovers = sorted(directory.glob(f"{_RUN_COPY_PREFIX}*.toml"))
+        except OSError:
+            continue
+        for path in leftovers:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            except OSError:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if os.fstat(fd).st_size:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+
+
+_FETCHED_APP_ID = "qobuz-app-id.json"
+
+
+def _fetched_app_id():
+    try:
+        with open(_streamrip_run_dir() / _FETCHED_APP_ID, encoding="utf-8") as f:
+            saved = json.load(f)
+        app_id, secrets = str(saved["app_id"]), [str(s) for s in saved["secrets"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return (app_id, secrets) if app_id and secrets else None
+
+
+def _keep_fetched_app_id(app_id, secrets):
+    """Save the app id and secrets streamrip fetched on a run, which it would
+    have saved in its config, in the app's data folder instead."""
+    import tempfile
+    try:
+        directory = _streamrip_run_dir()
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".app-id.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"app_id": str(app_id),
+                           "secrets": [str(s) for s in secrets]}, f)
+            os.replace(tmp, directory / _FETCHED_APP_ID)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def check_env_credentials():
+    """Warn when the environment sets a token but no user id goes with it:
+    `rip` cannot authenticate from the token alone."""
+    credentials = read_qobuz_credentials()
+    if credentials.source == "env" and not credentials.user_id:
         log.warning(fmt(
             C.YELLOW,
             "  ⚠  QOBUZ_USER_AUTH_TOKEN is set but QOBUZ_USER_ID is not - "
             "downloads need both. Set QOBUZ_USER_ID (or save credentials on "
             "the Settings page); `rip` cannot authenticate from the token "
             "alone."))
-        return None
-    return write_streamrip_creds(user_id, token)
-
-
-def verify_streamrip_downloads_folder():
-    """Warn loudly if streamrip's downloads.folder doesn't match STAGING_DIR."""
-    if not config.STREAMRIP_CONFIG.exists():
-        return
-    try:
-        with open(config.STREAMRIP_CONFIG, "rb") as f:
-            cfg = tomllib.load(f)
-    except Exception:
-        return
-    sr_dl = (cfg.get("downloads") or {}).get("folder", "")
-    if not sr_dl:
-        return
-    try:
-        if Path(sr_dl).expanduser().resolve() != config.STAGING_DIR.resolve():
-            log.info(fmt(C.YELLOW, f"  ⚠  streamrip downloads.folder = {sr_dl}"))
-            log.info(fmt(C.YELLOW, f"     Qobuz Librarian expects:        {config.STAGING_DIR}"))
-            log.info(fmt(C.YELLOW,
-                "     Files will land elsewhere; cleanup/import will miss them."))
-    except OSError:
-        pass
 
 
 def detect_auth_lost(rip_output):

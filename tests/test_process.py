@@ -95,10 +95,10 @@ def test_partly_owned_edition_fills_a_folder_holding_another_version(
 
     music = tmp_path / "music"
     folder = music / "Slipknot" / "Slipknot (1999)"
-    owned = tagged_flac(folder / "01.flac", TITLE="Sic", ALBUM="Slipknot",
+    owned = tagged_flac(folder / "01.flac", TITLE="Sic", ALBUM="Slipknot", DATE="1999",
                         ISRC="USRR19900001", TRACKNUMBER="1")
     stray = tagged_flac(folder / "15.flac", TITLE="(sic) (Ulrich Wild Mix)", ALBUM="Slipknot",
-                        ISRC="USRR19900099", TRACKNUMBER="15")
+                        DATE="1999", ISRC="USRR19900099", TRACKNUMBER="15")
     before = {path: path.read_bytes() for path in (owned, stray)}
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
@@ -131,12 +131,17 @@ def test_partly_owned_edition_fills_a_folder_holding_another_version(
         assert kwargs["album_dir"] == folder
         assert [t["id"] for t in kwargs["missing"]] == ["eyeless"]
         tagged_flac(staged / "02.flac", TITLE="Eyeless", ALBUM="Slipknot (10th Anniversary Edition)",
-                    ARTIST="Slipknot", ALBUMARTIST="Slipknot", ISRC="USRR19900002", TRACKNUMBER="2")
+                    ARTIST="Slipknot", ALBUMARTIST="Slipknot", DATE="2009",
+                    ISRC="USRR19900002", TRACKNUMBER="2")
         kwargs["result"].update(n_ok=1, n_fail=0, n_lossy=0, failed_tracks=[],
                                 lossy_tracks=[], elapsed=0)
 
     def import_album(**kwargs):
+        from mutagen.flac import FLAC
         assert kwargs["album_dir"] == folder
+        # The fill joins the folder's album rather than listing apart.
+        assert FLAC(staged / "02.flac")["album"] == ["Slipknot"]
+        assert FLAC(staged / "02.flac")["date"] == ["1999"]
         (staged / "02.flac").rename(folder / "02.flac")
         scanner.clear_scan_caches()
         return True
@@ -219,6 +224,8 @@ def test_forced_edition_follows_beets_folder_rename(
 
     def import_album(**kwargs):
         assert not kwargs["album_dir"].exists()
+        # The fold must spare the replaced album until its entries retire.
+        assert kwargs["protected_paths"] == [folder]
         kwargs["album_dirs"][0].rename(replacement)
         return True
 

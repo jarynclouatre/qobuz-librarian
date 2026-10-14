@@ -150,7 +150,8 @@ non_studio_albums = false
 non_remaster = false
 
 [artwork]
-# Write the image to the audio file
+# Write the image to the audio file. Qobuz Librarian's downloads set this and
+# save_artwork from its Album art setting, without changing this file.
 embed = true
 # The size of the artwork to embed. Options: thumbnail, small, large, original.
 # "original" images can be up to 30MB, and may fail embedding. 

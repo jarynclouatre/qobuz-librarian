@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.api.auth import streamrip_run_config
 from qobuz_librarian.integrations.staging import (
     StagedFile,
     StagingSnapshot,
@@ -249,22 +250,32 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
     # The librarian does its own missing-track bookkeeping (it re-rips for
     # quality upgrades, truncation repair, and broken-FLAC retries), so
     # streamrip's downloads database - which silently skips any URL it has
-    # already logged, exiting 0 with no new file - must be off. The Docker
-    # entrypoint forces downloads_enabled=false in the config, but a
-    # bare-metal/CLI run can fall back to the user's own
-    # ~/.config/streamrip/config.toml where it defaults ON; --no-db (a global
-    # rip flag) makes every re-rip work regardless of the config.
+    # already logged, exiting 0 with no new file - must be off.
     cmd += ["--no-db"]
-    # streamrip does NOT honor a STREAMRIP_CONFIG env var; it looks at
-    # ~/.config/streamrip/config.toml unless --config-path is passed. The
-    # web Settings page writes credentials to cfg.STREAMRIP_CONFIG, so we
-    # must point rip at that file explicitly or the saved creds are ignored.
-    cmd += ["--config-path", str(cfg.STREAMRIP_CONFIG)]
     if staging_dir is not None:
         cmd += ["--folder", str(staging_dir)]
     if quality is not None:
         cmd += ["-q", str(quality)]
-    cmd += ["url", url]
+    # streamrip does NOT honor a STREAMRIP_CONFIG env var; it looks at
+    # ~/.config/streamrip/config.toml unless --config-path is passed. rip is
+    # pointed at a copy of cfg.STREAMRIP_CONFIG holding the credentials in
+    # use and the settings the app depends on, which it has no flags for.
+    with streamrip_run_config() as config_path:
+        if config_path is None:
+            message = (f"Couldn't write the streamrip config for this download "
+                       f"in {cfg.DATA_DIR}.")
+            log.info(fmt(C.RED, f"  ✗  {message}"))
+            return 1, message
+        return _run_rip(
+            [*cmd, "--config-path", str(config_path), "url", url],
+            timeout, live_output)
+
+
+# streamrip updating the run's copy of an older config; noted once instead.
+_CONFIG_UPDATE_LINES = ("Need to update config from", "Auto-updating config file")
+
+
+def _run_rip(cmd, timeout, live_output):
     try:
         proc = subprocess.Popen(
             cmd,
@@ -340,6 +351,8 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
                 continue
             if banner_lines_remaining > 0:
                 banner_lines_remaining -= 1
+                continue
+            if stripped.startswith(_CONFIG_UPDATE_LINES):
                 continue
             if not stripped or _rule_re.match(stripped) or _box_re.match(stripped):
                 if in_error: emit_error()

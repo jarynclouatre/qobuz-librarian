@@ -1,7 +1,7 @@
 """What a finished or failed download says about itself."""
 import asyncio
 
-from qobuz_librarian import download, download_result
+from qobuz_librarian import download_result
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.api.auth import (
     AuthLost,
@@ -145,15 +145,8 @@ def _summarize_download_result(r):
     return ", ".join(parts) + "."
 
 
-def _undeliverable_album_error(r, album=None):
+def _undeliverable_album_error(r):
     """Say how short the album came, and what the user can do about it."""
-    if album is not None and download.disc_names_overwrite(album):
-        return (
-            "Tracks that share a number and title on different discs "
-            "overwrote each other because disc_subdirectories is off in the "
-            "streamrip config, so nothing was added to your library. Turn it "
-            "on and try again."
-        )
     landed = r.get("n_ok", 0)
     short = (
         r.get("n_fail", 0) + r.get("n_broken", 0) + r.get("n_lossy_only", 0)

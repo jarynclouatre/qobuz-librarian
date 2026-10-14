@@ -1024,7 +1024,7 @@ def test_prepare_staging_tags_sets_aside_untagged_keeps_tagged(tmp_path, monkeyp
 # ── beets: import override pins non-destructive duplicate handling ─────────
 
 
-def _duplicate_album_fixture(tmp_path, *, conflicting_attribute=False):
+def _duplicate_album_fixture(tmp_path, *, conflicting_attribute=False, newer_art=False):
     import sqlite3
 
     music = tmp_path / "music" / "Artist" / "Album"
@@ -1060,8 +1060,8 @@ def _duplicate_album_fixture(tmp_path, *, conflicting_attribute=False):
         connection.executemany(
             "INSERT INTO albums VALUES (?, ?, ?, ?, ?, ?)",
             [
-                (10.0, "Album", "Artist", artpath, "opaque", 1),
-                (20.0, "Album", "Artist", None, "opaque", 2),
+                (10.0, "Album", "Artist", None if newer_art else artpath, "opaque", 1),
+                (20.0, "Album", "Artist", artpath if newer_art else None, "opaque", 2),
             ],
         )
         connection.executemany(
@@ -1180,6 +1180,56 @@ def test_duplicate_album_fold_preserves_files_and_all_nonstructural_data(tmp_pat
         for path in files
     ]
 
+    # Tracks added to an album land as a second entry carrying the art; the
+    # fold of that folder alone leaves one entry with it.
+    database, files = _duplicate_album_fixture(tmp_path / "filled", newer_art=True)
+    _configure_consolidation(monkeypatch, tmp_path / "filled", database)
+    beets._consolidate_duplicate_albums(folders=[tmp_path / "elsewhere"])
+    assert len(_duplicate_album_db_snapshot(database)[0][1]) == 2
+    beets._consolidate_duplicate_albums(folders=[files[0].parent])
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT id, artpath FROM albums").fetchall() == [
+            (1, os.fsencode(files[2]))
+        ]
+        assert connection.execute("SELECT DISTINCT album_id FROM items").fetchall() == [(1,)]
+    finally:
+        connection.close()
+
+    # A Repair refill is imported as a new entry at its original's path; the
+    # original's entry goes and leaves its flexible fields to the new one.
+    replaced = beets.beets_entry_ids([files[0]])
+    assert replaced == {11}
+    connection = sqlite3.connect(database)
+    connection.execute("INSERT INTO items VALUES (13, 1, ?, 'First', 303.0)",
+                       (os.fsencode(files[0]),))
+    connection.commit()
+    connection.close()
+    assert beets.forget_replaced_beets_entries(replaced) == 1
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT id FROM items ORDER BY id").fetchall() == [
+            (12,), (13,)]
+        assert connection.execute(
+            "SELECT entity_id, key, value FROM item_attributes ORDER BY entity_id"
+        ).fetchall() == [(12, "token", "two"), (13, "token", "one")]
+        # A fill imported at the path of a track removed by hand replaces the
+        # entry the removal left.
+        connection.execute("INSERT INTO items VALUES (14, 1, ?, 'Second', 404.0)",
+                           (os.fsencode(files[1]),))
+        connection.commit()
+    finally:
+        connection.close()
+    assert beets.forget_replaced_beets_entries(folder=tmp_path / "elsewhere") == 0
+    assert beets.forget_replaced_beets_entries(folder=files[0].parent) == 1
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT entity_id, key, value FROM item_attributes ORDER BY entity_id"
+        ).fetchall() == [(13, "token", "one"), (14, "token", "two")]
+    finally:
+        connection.close()
+
 
 def _load_art_guard_for_test(monkeypatch, loaded_plugins):
     import importlib.util
@@ -1190,10 +1240,20 @@ def _load_art_guard_for_test(monkeypatch, loaded_plugins):
         def warning(self, *_args, **_kwargs):
             pass
 
+    class FakeConfig(dict):
+        def add(self, defaults):
+            for key, value in defaults.items():
+                self.setdefault(key, value)
+
+        def __getitem__(self, key):
+            return types.SimpleNamespace(as_str=lambda: self.get(key))
+
     class FakeBeetsPlugin:
         def __init__(self):
             self.name = "qobuz_art_guard"
             self._log = FakeLog()
+            self.config = FakeConfig()
+            self.template_funcs = {}
 
         def register_listener(self, *_args, **_kwargs):
             pass
@@ -1295,7 +1355,7 @@ def _art_guard_task(root, staging, album_name):
     return task, selected, FetchArt(), destination_dir
 
 
-def test_art_guard_publishes_only_in_a_new_held_album_directory(tmp_path, monkeypatch):
+def test_art_guard_publishes_only_in_a_new_or_pinned_album_directory(tmp_path, monkeypatch):
     import gc
     import types
 
@@ -1320,6 +1380,41 @@ def test_art_guard_publishes_only_in_a_new_held_album_directory(tmp_path, monkey
     assert existing_cover.read_bytes() == b"user artwork"
     assert existing_task.album.artpath is None
     assert existing_fetchart.art_candidates == {}
+
+    # Tracks added to an album's own folder, by a fill or by a single-track
+    # download or Repair, take a cover the album already has under any cover
+    # name or in another disc folder, or file the download's when it has none:
+    # a back cover or a scan in a folder without tracks is not its cover.
+    for name, own, disc, ownership, other in (
+            ("Existing", "cover.jpg", None, False, None),
+            ("Own Png", "cover.png", None, False, None),
+            ("Two Discs", "Disc 1/folder.jpg", "Disc 2", False, "Disc 1/01.flac"),
+            ("No Cover", None, None, False, "Scans/Front Cover.jpg"),
+            ("Back Only", None, None, False, "Back Cover.jpg"),
+            ("Single", "Front.png", None, True, None),
+            ("Single No Cover", None, None, True, None)):
+        pinned_task, _, pinned_fetchart, pinned_dir = _art_guard_task(root, staging, name)
+        item_dir = pinned_dir / disc if disc else pinned_dir
+        item_dir.mkdir(parents=True, exist_ok=True)
+        pinned_task.item.destination = lambda d=item_dir: os.fsencode(d / "01.flac")
+        for path in filter(None, (own, other)):
+            (pinned_dir / path).parent.mkdir(exist_ok=True)
+            (pinned_dir / path).write_bytes(b"user artwork")
+        (item_dir / "01.flac").write_bytes(b"audio")
+        pinned_task.item.path = os.fsencode(item_dir / "01.flac")
+        loaded[:] = [pinned_fetchart]
+        with monkeypatch.context() as mp:
+            mp.setattr(module, "_ownership_requested", lambda o=ownership: o)
+            pinned = module.QobuzArtGuardPlugin()
+            pinned.config.update(album_folder=f"Artist/{name}")
+            pinned._guard_art(session, pinned_task)
+            pinned._publish_art(session, pinned_task)
+        art = pinned_dir / own if own else item_dir / "cover.jpg"
+        assert art.read_bytes() == (b"user artwork" if own else b"new artwork")
+        assert (item_dir / "cover.jpg").exists() == (own in (None, "cover.jpg"))
+        assert pinned_task.album.artpath == os.fsencode(art)
+        assert pinned_task.album.stored == 1
+        assert module.ownership_art_receipt(pinned_task) is None
 
     new_task, _, new_fetchart, new_dir = _art_guard_task(root, staging, "Brand New")
     loaded[:] = [new_fetchart]

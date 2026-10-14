@@ -116,6 +116,7 @@ def test_resample_preserves_embedded_jpeg_and_all_pictures(tmp_path, _need_ffmpe
         pic.type, pic.mime, pic.data = typ, "image/jpeg", data
         f.add_picture(pic)
     f["GENRE"] = ["Rock", "Pop"]
+    del f["ENCODER"]
     f.save()
 
     af, _ = detect_resampler_filter()
@@ -130,6 +131,7 @@ def test_resample_preserves_embedded_jpeg_and_all_pictures(tmp_path, _need_ffmpe
         assert pic.data[:2] == b"\xff\xd8"            # real JPEG SOI marker
     assert {(p.type, bytes(p.data)) for p in pics} == {(3, front), (4, back)}
     assert FLAC(str(src))["GENRE"] == ["Rock", "Pop"]   # not one "Rock;Pop"
+    assert "ENCODER" not in FLAC(str(src))             # no tag the file lacked
 
 
 def test_resample_keeps_truncated_source_untouched(tmp_path, _need_ffmpeg, _need_flac):

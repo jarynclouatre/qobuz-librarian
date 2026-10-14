@@ -84,8 +84,8 @@ _STAGING_LEFTOVER_KINDS = {
     ),
     "interrupted": (
         "Files from a stopped download",
-        "A download stopped part way and its files were kept so nothing "
-        "already fetched is thrown away.",
+        "A download stopped part way before these files were filed into "
+        "your library.",
     ),
 }
 
@@ -94,8 +94,7 @@ _STAGING_LEFTOVER_KINDS = {
 # group's name carries the label it was kept with.
 _FAILED_RUN = (
     "Files from a failed download",
-    "A download failed and its files were kept so nothing already fetched is "
-    "thrown away.",
+    "A download failed before these files were filed into your library.",
 )
 
 
@@ -125,6 +124,11 @@ def _reject_nothing_uses(inspection, saved_operations):
         saved_operations is not None
         and inspection.owner["operation_id"] not in saved_operations
     )
+
+
+def _upgrade_backup(path):
+    carried = backup_mod.load_backup_result(path)
+    return carried is not None and carried.receipt.get("kind") == "upgrade"
 
 
 def _album_name_from_path(path):
@@ -230,12 +234,13 @@ def _staging_leftovers():
                 _staging_tree_contents(tree)
                 for tree in inspection.planned_trees
             )
-            if kind == "interrupted" and not any(
-                    Path(rel).suffix.lower() in cfg.AUDIO_EXTS
-                    for tree in inspection.planned_trees
-                    for rel, _identity in tree.files):
+            audio = [identity[3] for tree in inspection.planned_trees
+                     for rel, identity in tree.files
+                     if Path(rel).suffix.lower() in cfg.AUDIO_EXTS]
+            if kind == "interrupted" and not any(audio):
                 label = "Download folder with no tracks"
-                reason = "It holds no audio, only files such as cover art."
+                reason = ("Its only tracks are empty files." if audio
+                          else "It holds no audio, only files such as cover art.")
         if (
             inspection.status == "ready" and inspection.owner is None
         ) or _reject_nothing_uses(inspection, saved_operations):
@@ -672,7 +677,21 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         icon = "OK" if classification.removable else "!"
         aria = "OK" if classification.removable else "Needs attention"
         where = dest if origin else "the album folder it came from"
-        if re.match(r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name):
+        by_file = re.match(
+            r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name)
+        # An upgrade's backup differs from the album by design; Remove checks
+        # the album holds a verified replacement for each track instead.
+        replaced = (
+            not by_file and origin
+            and classification.reason in {"different", "audio"}
+            and Path(classification.file).suffix.lower() in cfg.AUDIO_EXTS
+            and _upgrade_backup(path))
+        if replaced:
+            reason = html.escape(
+                f"The album now holds a different copy of {classification.file}. "
+                "Remove deletes this backup only once every track it holds "
+                "has a verified replacement there.")
+        if by_file:
             # These restore file by file and the backup wins each swap.
             restore_confirm = (
                 f"Put these files back in {where}? Any file of the same name "
@@ -684,16 +703,20 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 "what it holds.")
         # Remove proves every file back first, so it can only succeed where
         # the listing could not finish its own check.
+        proof = (
+            f"every track it holds has a verified replacement in {where}"
+            if replaced else
+            f"every file it holds is verified byte-for-byte back in {where}")
         remove_form = (
             f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
             f'data-confirm="Remove this backup? It is deleted only after '
-            f'every file it holds is verified byte-for-byte back in {where}." '
+            f'{proof}." '
             f'data-confirm-action="Remove" data-irreversible>Remove</button>'
             f'</form>'
-        ) if classification.status != "retained" else ""
+        ) if classification.status != "retained" or replaced else ""
         rows.append(
             f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'

@@ -242,10 +242,10 @@ BEETS_PLUGINS = [p.strip() for p in
                  if p.strip()]
 
 # Where fetched cover art ends up:
-#   sidecar = a cover image file in the album folder (beets `fetchart`, default)
+#   sidecar = a cover image file in the album folder (beets `fetchart`)
 #   embed   = embedded in the track tags only, no leftover file (`embedart`)
-#   both    = a cover file AND embedded art
-ARTWORK = _env_choice("ARTWORK", "sidecar", ("sidecar", "embed", "both"))
+#   both    = a cover file AND embedded art (default)
+ARTWORK = _env_choice("ARTWORK", "both", ("sidecar", "embed", "both"))
 
 # COMPOSE_FILE is only used by the legacy docker-exec beets fallback (when
 # `beet` isn't on PATH and a compose file exists. This is never the case in the

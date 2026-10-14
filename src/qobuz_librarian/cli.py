@@ -1246,16 +1246,11 @@ def main():
         if not args.no_import and not args.dry_run:
             check_beets()
         from qobuz_librarian.api.auth import (
-            enforce_streamrip_disc_folders,
-            sync_streamrip_creds_from_env,
-            verify_streamrip_downloads_folder,
+            check_env_credentials,
+            sweep_streamrip_run_copies,
         )
-        verify_streamrip_downloads_folder()
-        enforce_streamrip_disc_folders()
-        if sync_streamrip_creds_from_env() is False:
-            log.info(fmt(C.YELLOW,
-                "  ⚠  Couldn't write env credentials into the streamrip "
-                f"config ({cfg.STREAMRIP_CONFIG}); downloads may fail."))
+        sweep_streamrip_run_copies()
+        check_env_credentials()
         cap_depth, cap_rate = streamrip_quality_cap()
         vlog(
             f"streamrip quality cap: {cap_depth}-bit/"

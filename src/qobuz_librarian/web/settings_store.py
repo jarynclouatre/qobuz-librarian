@@ -56,8 +56,9 @@ TEXT_FIELDS = [
      "How lyrics are written when fetched.",
      "enum", ["embed", "sidecar", "both"], ""),
     ("ARTWORK", "Album art",
-     "Where cover art goes: a cover file in the album folder, embedded in the "
-     "track tags with no leftover file, or both.",
+     "Where the cover of a download goes: a cover file in the album folder "
+     "and none in the tracks, in each track with no cover file, or both. "
+     "Tracks already in the library keep theirs.",
      "enum", ["sidecar", "embed", "both"], ""),
     ("LYRICS_PROVIDERS", "Lyrics providers",
      "Providers to try in order, from Lrclib, NetEase, Megalobiz, Musixmatch "

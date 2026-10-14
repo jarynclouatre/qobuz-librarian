@@ -323,7 +323,7 @@ def _make_download_run(
             if r.get("rate_limited"):
                 j.error = "Qobuz rate-limited this download. Try again later."
             elif r.get("result") == "incomplete":
-                j.error = download_outcomes._undeliverable_album_error(r, album)
+                j.error = download_outcomes._undeliverable_album_error(r)
             elif r.get("n_fail"):
                 j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
             elif r.get("n_ok"):

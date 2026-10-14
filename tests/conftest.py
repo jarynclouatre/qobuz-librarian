@@ -99,9 +99,9 @@ def _isolate_data_dir():
     cfg.LOCK_FILE            = tmp_root / "qobuz_librarian.lock"
     # Isolate the Qobuz credential source too - load_qobuz_token reads from
     # STREAMRIP_CONFIG by default, and the dev's real ~/.config/streamrip/
-    # config.toml (which may carry a live token after sync_streamrip_creds_from_env
-    # ever ran) would otherwise make every "no creds → /settings" route test
-    # silently follow the happy path instead.
+    # config.toml (which may carry a live token) would otherwise make every
+    # "no creds → /settings" route test silently follow the happy path
+    # instead.
     cfg.STREAMRIP_CONFIG     = tmp_root / "streamrip" / "config.toml"
     cfg.QOBUZ_USER_AUTH_TOKEN = ""
     cfg.QOBUZ_USER_ID = ""

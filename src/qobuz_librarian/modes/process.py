@@ -28,6 +28,7 @@ from qobuz_librarian.integrations.beets import (
     _prepare_staging_tags,
     beets_import_paths,
     capture_beets_album_entries,
+    fill_album_tags,
     relocate_disc_album_artwork,
     retire_backup_beets_entries,
     retire_replaced_beets_entries,
@@ -1611,7 +1612,13 @@ def process_album(album, args, *, allow_force=True, label=None,
             if not staged_dirs_for_import:
                 staged_dirs_for_import = validated_staged_album_dirs(
                     download_result)
-            if exact_edition or treat_as_new:
+            fill_tags = (
+                fill_album_tags(album_dir)
+                if album_dir is not None and not treat_as_new
+                and not download_result.get("download_full_album") else None)
+            if fill_tags:
+                _prepare_staging_tags(staged_dirs_for_import, album_tags=fill_tags)
+            elif exact_edition or treat_as_new:
                 _prepare_staging_tags(staged_dirs_for_import,
                                       album_title=catalog.edition_album_title(
                                           album, separate=treat_as_new))
@@ -1647,10 +1654,14 @@ def process_album(album, args, *, allow_force=True, label=None,
             # A brand-new album (no folder found on disk) lands in a fresh
             # directory, so it can't split an existing beets album into
             # duplicate rows, so skip the full-library de-dup scan for it.
+            # Folding the new entry into the replaced one would change the
+            # rows the retire step below proves it is removing.
             imported = beets_import_paths(
                 consolidate=album_dir is not None and not exact_edition,
                 album_dirs=staged_dirs_for_import,
                 album_dir=album_dir,
+                protected_paths=(
+                    [album_dir] if replaced_beets_entries is not None else None),
             )
             if (
                 imported

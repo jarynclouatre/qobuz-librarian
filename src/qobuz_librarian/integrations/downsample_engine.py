@@ -585,7 +585,7 @@ def _copy_source_metadata(source_fd: int, target_fd: int):
     """Carry the source's comments, pictures and cue sheet onto the encode.
 
     Repeated keys, their capitalisation, and each picture's type and
-    description all survive; the encode keeps its own encoder tag. Cue sheet
+    description all survive, and the encoder tag ffmpeg wrote goes. Cue sheet
     offsets are counted in samples, so they are rescaled to the new rate.
     Returns None when it worked, or why it did not.
     """
@@ -595,12 +595,8 @@ def _copy_source_metadata(source_fd: int, target_fd: int):
         target = FLAC(f"/proc/self/fd/{target_fd}")
         if target.tags is None:
             target.add_tags()
-        carried = [(key, value) for key, value in (source.tags or [])
-                   if key.lower() != "encoder"]
-        kept = [(key, value) for key, value in target.tags
-                if key.lower() == "encoder"]
         target.tags.clear()
-        target.tags.extend(kept + carried)
+        target.tags.extend(list(source.tags or []))
         target.clear_pictures()
         for picture in source.pictures:
             target.add_picture(picture)

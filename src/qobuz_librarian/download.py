@@ -22,7 +22,6 @@ from qobuz_librarian.api.auth import (
     detect_auth_lost,
     detect_disk_full,
     detect_rate_limited,
-    streamrip_disc_folders_off,
 )
 from qobuz_librarian.completion import (
     DownloadCounts,
@@ -999,15 +998,6 @@ def _disc_twins(tracks):
     return False
 
 
-def disc_names_overwrite(album):
-    """True when streamrip would save two of this album's tracks under one
-    name because its config turns off the Disc N folders."""
-    return (
-        _disc_twins((album.get("tracks") or {}).get("items") or ())
-        and streamrip_disc_folders_off()
-    )
-
-
 def _into_disc_folder(receipt, track):
     """Move a track-URL rip into the Disc N folder an album rip would use."""
     path = Path(receipt)
@@ -1200,14 +1190,6 @@ def run_album_download(
                 f"(below the {cfg.MIN_FREE_STAGING_MB} MB MIN_FREE_STAGING_MB "
                 f"floor) - refusing to start the download.",
             )
-
-    if download_full_album and disc_names_overwrite(album):
-        log.info(fmt(
-            C.YELLOW,
-            f"  ⚠  disc_subdirectories is off in {cfg.STREAMRIP_CONFIG}, so "
-            "tracks that share a number and title on different discs will "
-            "overwrite each other.",
-        ))
 
     if download_full_album:
         url = f"https://play.qobuz.com/album/{album_id}"

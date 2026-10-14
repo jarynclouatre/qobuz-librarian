@@ -16,6 +16,10 @@ from qobuz_librarian import post_job_hook
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
+from qobuz_librarian.integrations.beets import (
+    beets_entry_ids,
+    forget_replaced_beets_entries,
+)
 from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.backup import (
     BackupResult,
@@ -209,6 +213,24 @@ def _backup_source_by_isrc(verified_truncated, album_dir, backup_path):
     for paths in out.values():
         paths.sort()
     return out
+
+
+def _refill_places(verified_truncated, album_dir):
+    """Each damaged track's path in ``album_dir`` without its extension, by
+    ISRC, so its refill takes its place. An ISRC two of them share, or one
+    that is not letters and digits, is left out."""
+    places = {}
+    for b in verified_truncated:
+        isrc = _norm_isrc(b.get("isrc"))
+        try:
+            rel = Path(b.get("path") or "").relative_to(album_dir)
+        except ValueError:
+            rel = None
+        places[isrc] = (
+            None if isrc in places or rel is None
+            or not (isrc.isascii() and isrc.isalnum())
+            else rel.with_suffix("").as_posix())
+    return {isrc: place for isrc, place in places.items() if place}
 
 
 def _retag_refills_in_staging(staged_dirs, source_by_isrc):
@@ -1748,6 +1770,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             force_track_by_track=True,
         )
         qi["_capture_import_ownership"] = True
+        qi["refill_places"] = _refill_places(verified_truncated, album_dir)
 
         landed_pre = (find_album_dir_filesystem(album)
                       if real_album_id is not None else None)
@@ -1799,6 +1822,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             token = api_client.authorize_bound_download(token)
 
         broken_paths = [b["path"] for b in verified_truncated]
+        replaced_entries = beets_entry_ids(broken_paths)
         backup_path = backup_gap_fill_files(
             broken_paths,
             album_dir,
@@ -2284,6 +2308,10 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "The refill did not complete and automatic "
                         "restoration was incomplete.",
                     )
+
+        # Beets took each refill in as a new entry at its original's path.
+        if back_in_place and replaced_entries:
+            forget_replaced_beets_entries(replaced_entries)
 
         # A verified refill is a repair whether or not the originals' backup
         # could also be retired; a kept backup rides along in "backup".

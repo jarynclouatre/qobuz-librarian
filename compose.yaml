@@ -180,7 +180,7 @@ services:
       # folders are scanned as usual; the CLI walks ignore this setting.
       SUPPRESS_SINGLE_TRACK_GAPS: "${SUPPRESS_SINGLE_TRACK_GAPS:-false}"
       # Cover art placement: sidecar (image beside tracks) | embed | both.
-      ARTWORK: "${ARTWORK:-sidecar}"
+      ARTWORK: "${ARTWORK:-both}"
       # ── New releases ──────────────────────────────────────────────────────
       # First launch offers a Library scan, which lists missing albums and gives
       # New releases its starting point (resuming if interrupted). "false"

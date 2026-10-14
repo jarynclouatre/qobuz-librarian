@@ -22,7 +22,6 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.download import (
     clear_attempts_after_import,
-    disc_names_overwrite,
     download_staged_files,
     keep_unimported_download,
     note_superseded_attempts,
@@ -44,6 +43,7 @@ from qobuz_librarian.integrations.beets import (
     _prepare_staging_tags,
     beets_import_albums,
     durable_import_possible,
+    fill_album_tags,
     prepare_managed_staging_tags,
     relocate_disc_album_artwork,
     retire_backup_beets_entries,
@@ -1160,7 +1160,8 @@ def _queue_outcome_needs_attention(item):
 
 
 def _import_album_with_retry(
-        album_dirs, *, ownership_out=None, source_receipts=None, album_dir=None):
+        album_dirs, *, ownership_out=None, source_receipts=None, album_dir=None,
+        places=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
     attempts, retrying only on idle-timeout (other failures aren't transient).
     Returns True on import success, False on permanent failure."""
@@ -1174,6 +1175,8 @@ def _import_album_with_retry(
                 tree_matches(receipt) for receipt in source_receipts):
             return False
         pin = {} if album_dir is None else {"album_dir": album_dir}
+        if places:
+            pin["places"] = places
         if ownership_out is None:
             kind = beets_import_albums(album_dirs, **pin)
             attempt_capture = None
@@ -3359,9 +3362,6 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 # of the queue carries on.
                 item["result"] = "incomplete"
                 log.info(fmt(C.YELLOW,
-                    "    ⚠  Tracks overwrote each other in the download; "
-                    "nothing was imported and the partial download was "
-                    "discarded." if disc_names_overwrite(album) else
                     "    ⚠  Qobuz didn't deliver every track; nothing was "
                     "imported and the partial download was discarded."))
                 results.append(_resolve_queue_item(
@@ -3547,7 +3547,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  repair retag step failed: {_e_rt}"))
                 try:
-                    if item.get("exact_edition"):
+                    fill_tags = (
+                        fill_album_tags(album_dir)
+                        if album_dir is not None
+                        and not item.get("download_full_album") else None)
+                    if fill_tags:
+                        _prepare_staging_tags(album_dirs, album_tags=fill_tags)
+                    elif item.get("exact_edition"):
                         _prepare_staging_tags(album_dirs, album_title=edition_album_title(album))
                     prepared = _run_pre_import_hooks_for_dirs(album_dirs, args)
                     if item.get("backup_path") is not None:
@@ -3590,7 +3596,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     )
                     pin = (
                         {} if item.get("album_dir") is None
-                        else {"album_dir": item["album_dir"]}
+                        else {"album_dir": item["album_dir"],
+                              "places": item.get("refill_places")}
                     )
                     if ownership_capture is None:
                         item_imported = _import_album_with_retry(

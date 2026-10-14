@@ -376,15 +376,8 @@ async def _lifespan(_app: FastAPI):
         cfg.validate_storage_roots()
     except ValueError as exc:
         raise RuntimeError(f"invalid storage paths: {exc}") from None
-    # If creds are provided via env vars, mirror them into the streamrip
-    # config now so web-triggered downloads don't fail on streamrip's
-    # interactive auth prompt (the env-var path doesn't otherwise reach
-    # streamrip's own config file).
-    if api_auth.sync_streamrip_creds_from_env() is False:
-        _log.warning("Couldn't write env credentials into the streamrip "
-                     "config; web downloads may fail until creds are set "
-                     "via the Settings page.")
-    api_auth.enforce_streamrip_disc_folders()
+    api_auth.check_env_credentials()
+    api_auth.sweep_streamrip_run_copies()
     # Acquire the shared run lock so separate CLI runs cannot overlap Web work.
     if os.environ.get("QL_CLI_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
         # Terminal-first deployment leaves the lock free for a CLI process.

@@ -926,9 +926,11 @@ def _prepare_staging_tags(
     allow_managed_rewrite=False,
     authority_check=None,
     album_title=None,
+    album_tags=None,
 ):
     """Set aside untagged FLACs and clean the survivors' path tags in a
     single pass, so each file is opened by mutagen once rather than twice.
+    ``album_tags`` (from fill_album_tags) overrides the album-level tags.
 
     Unreadable or untagged files move by exact identity to private staging
     recovery, never to an inferred public pathname. The rest get whitespace
@@ -1052,6 +1054,15 @@ def _prepare_staging_tags(
         if album_title and list(tags.get("album") or []) != [album_title]:
             tags["album"] = [album_title]
             changed = True
+        for key, value in (album_tags or {}).items():
+            if type(value) is int:
+                value = [str(max(value, _tag_number(tags.get("discnumber")) or 1))]
+            if value is None and key in tags:
+                del tags[key]
+                changed = True
+            elif value is not None and list(tags.get(key) or []) != value:
+                tags[key] = value
+                changed = True
         for key in ("album", "albumartist", "artist", "title"):
             vals = tags.get(key)
             if not vals:
@@ -1096,7 +1107,7 @@ def _prepare_staging_tags(
                 if authority_check is not None:
                     authority_check()
             except Exception as e:
-                if managed is not None or album_title is not None:
+                if managed is not None or album_title is not None or album_tags:
                     raise OSError("beets tag-clean rewrite failed") from e
                 vlog(f"couldn't rewrite cleaned tags on {f.name}: {e}")
         if managed is not None:
@@ -1156,6 +1167,91 @@ def _prepare_staging_tags(
         refreshed.sort(key=lambda record: order[record["slot"]])
         return tuple(refreshed)
     return moved
+
+
+def _tag_number(values):
+    """The leading number of a tag such as a disc number, "2" or "2/3"."""
+    try:
+        return int(str((values or [""])[0]).split("/")[0].strip())
+    except ValueError:
+        return None
+
+
+# The tags beets reads into an album's entry rather than a track's, by their
+# Vorbis comment names.
+_ALBUM_TAG_KEYS = (
+    "album", "albumartist", "albumartistsort", "date", "year", "originaldate",
+    "genre", "compilation", "label", "organization", "catalognumber",
+    "barcode", "upc", "releasecountry", "releasetype", "releasestatus",
+    "musicbrainz_albumid", "musicbrainz_albumartistid",
+    "musicbrainz_releasegroupid",
+)
+
+
+def tracks_sit_flat(album_dir):
+    """True when an album folder holds tracks itself rather than only in
+    disc folders below it."""
+    try:
+        return any(
+            entry.is_file() and Path(entry.name).suffix.lower() in cfg.AUDIO_EXTS
+            and not entry.name.startswith(".")
+            for entry in os.scandir(album_dir))
+    except OSError:
+        return False
+
+
+def fill_album_tags(album_dir):
+    """The album-level tags tracks added to ``album_dir`` need to join its
+    album: each tag in _ALBUM_TAG_KEYS its tracks share, as a list of values,
+    or None for one none of them carries, and their disc count.
+
+    A track fetched on its own carries its release's bare title, date and a
+    disc count of one, so beets would list it as another album. In an album
+    kept in disc folders the disc count is a number the track's own disc
+    raises, so beets files it into its disc folder; an album kept flat gives
+    the count its tracks share. None when the folder's tracks disagree on the
+    album or can't be read; an empty dict when it holds none.
+    """
+    if not HAVE_MUTAGEN:
+        return None
+    import mutagen
+
+    try:
+        tracks = sorted(
+            path for path in Path(album_dir).rglob("*")
+            if path.suffix.lower() in cfg.AUDIO_EXTS and path.is_file()
+            and not path.name.startswith("."))
+    except OSError:
+        return None
+    if not tracks:
+        return {}
+    values = {key: set() for key in _ALBUM_TAG_KEYS}
+    discs = set()
+    for path in tracks:
+        try:
+            parsed = mutagen.File(os.fspath(path), easy=True)
+        except Exception:
+            return None
+        tags = (parsed.tags if parsed is not None else None) or {}
+        for key in _ALBUM_TAG_KEYS:
+            values[key].add(tuple(str(value) for value in tags.get(key) or ()))
+        total = _tag_number(tags.get("disctotal") or tags.get("totaldiscs"))
+        if total is None and "/" in str((tags.get("discnumber") or [""])[0]):
+            total = _tag_number([str(tags["discnumber"][0]).split("/")[1]])
+        discs.add(total)
+    albums = values["album"]
+    if len(albums) != 1 or not "".join(next(iter(albums))).strip():
+        return None
+    found = {}
+    for key, seen in values.items():
+        if len(seen) == 1:
+            found[key] = list(seen.pop()) or None
+    if not tracks_sit_flat(album_dir):
+        found["disctotal"] = max(total or 1 for total in discs)
+    elif len(discs) == 1:
+        total = discs.pop()
+        found["disctotal"] = None if total is None else [str(total)]
+    return found
 
 
 def _staged_cover_picture(flac, pictures):
@@ -1218,6 +1314,9 @@ def prepare_managed_staging_tags(
 
 _OWNERSHIP_PLUGIN = "qobuz_ownership"
 _ART_GUARD_PLUGIN = "qobuz_art_guard"
+# The art guard's path template function that keeps only the file name of
+# what it wraps, dropping any disc folders.
+_FILE_NAME_FUNCTION = "qobuz_file_name"
 _OWNERSHIP_FD_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_FD"
 _OWNERSHIP_NONCE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_NONCE"
 _OWNERSHIP_SOURCE_ROOTS_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_SOURCE_ROOTS"
@@ -4942,6 +5041,12 @@ def _template_literal(text):
     return text.replace("$", "$$").replace("%", "$%").replace("}", "$}")
 
 
+def _isrc_query(isrc):
+    """A beets query for the track with this normalised ISRC, however its tag
+    writes it."""
+    return "isrc::(?i)^" + "-?".join(isrc) + "$"
+
+
 def _back_up_before_migrations(plugin_config, database_path):
     """Keep one copy of a database Beets is about to migrate.
 
@@ -5016,6 +5121,8 @@ def _build_import_override_yaml(
     ownership_enabled=False,
     album_folder=None,
     compilation=False,
+    flat=False,
+    places=None,
 ):
     """The beets config override the import runs with, as a YAML string. Forces
     the keys the import contract depends on: library/directory, non-
@@ -5023,8 +5130,10 @@ def _build_import_override_yaml(
     It lets everything else fall through to the user's config.yaml.
 
     ``album_folder`` is the library-relative folder of an album the import adds
-    tracks to, which every path template is pinned to. ``compilation`` files
-    the album as one.
+    tracks to, which every path template is pinned to; with ``flat`` the
+    tracks go in it beside its others, without the templates' disc folders.
+    ``places`` files the track with each ISRC at that path in the folder,
+    given without its extension. ``compilation`` files the album as one.
     """
     import re as _re
 
@@ -5087,9 +5196,18 @@ def _build_import_override_yaml(
         # templates name files. Beets only merges into an existing album when
         # it autotags, which this import doesn't.
         _paths = {
-            _name: f"{_template_literal(album_folder)}/{_template_tail(_template)}"
-            for _name, _template in _effective_path_templates(plugin_config).items()
+            _isrc_query(isrc): f"{_template_literal(album_folder)}/{_template_literal(place)}"
+            for isrc, place in (places or {}).items()
         }
+        for _name, _template in _effective_path_templates(plugin_config).items():
+            _tail = _template_tail(_template)
+            if flat:
+                _tail = f"%{_FILE_NAME_FUNCTION}{{{_tail}}}"
+            _paths[_name] = f"{_template_literal(album_folder)}/{_tail}"
+    if album_folder is not None:
+        override_yaml += (
+            f"{_ART_GUARD_PLUGIN}:\n  album_folder: {_yaml_sq(album_folder)}\n"
+        )
     if _paths:
         override_yaml += "paths:\n" + "".join(
             f"  {_yaml_sq(_name)}: {_yaml_sq(_template)}\n"
@@ -5160,12 +5278,14 @@ def _build_import_override_yaml(
 
 def _prepare_for_beets_run(
     roots=None, ownership_out=None, source_files_out=None, album_dir=None,
+    places=None,
 ):
     """Common setup shared by the whole-staging and per-album entry points:
     resolve Beets' own runtime, prep tags on the staged FLACs, and write the
     one-shot override yaml. Returns ``(override_path, cleanup_fn, runtime)``
     or three ``None`` values if a precondition failed. ``album_dir`` is an
-    existing album the staged tracks are added to."""
+    existing album the staged tracks are added to, ``places`` where in it
+    the tracks with these ISRCs go."""
     runtime = _resolve_beets_runtime()
     if runtime is None:
         log.info(fmt(C.RED, "  ✗  A supported Beets Python runtime could not be found."))
@@ -5260,6 +5380,8 @@ def _prepare_for_beets_run(
                     plugin_config,
                     ownership_enabled=ownership_enabled,
                     album_folder=album_folder,
+                    flat=album_folder is not None and tracks_sit_flat(album_dir),
+                    places=places if album_folder is not None else None,
                     compilation=_staged_compilation(
                         path
                         for root in (roots or [cfg.STAGING_DIR])
@@ -5738,12 +5860,14 @@ def relocate_disc_album_artwork(album_dir) -> bool:
 
 def beets_import_paths(
     consolidate=True, *, source_files_out=None, album_dirs=None, album_dir=None,
+    protected_paths=None,
 ):
     """Run beets on explicit staged albums and return a success bool.
 
     With no explicit list, legacy preflight recovery derives only public audio
     directories. Hidden per-rip roots and durable retry recovery are never
-    adopted by a whole-staging command.
+    adopted by a whole-staging command. The fold after the import leaves
+    ``protected_paths`` alone.
     """
     roots = [Path(directory) for directory in (album_dirs or [])]
     if album_dirs is None:
@@ -5775,12 +5899,20 @@ def beets_import_paths(
         intended_audio=intended_audio,
         beets_runtime=runtime,
     )
+    if ok and album_dir is not None and not _consolidation_path_is_protected(
+            album_dir, protected_paths):
+        forget_replaced_beets_entries(folder=album_dir)
     if ok and consolidate:
-        _consolidate_duplicate_albums()
+        _consolidate_duplicate_albums(protected_paths=protected_paths)
+    elif ok and album_dir is not None:
+        # Beets files tracks added to an album as an album of their own.
+        _consolidate_duplicate_albums(
+            protected_paths=protected_paths, folders=[album_dir])
     return ok
 
 
-def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None):
+def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
+                        places=None):
     """Run beets import scoped to ``album_dirs`` and return a tri-state code:
 
     - ``"ok"``: import succeeded.
@@ -5790,7 +5922,9 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None):
       silent skip). The executor won't retry these.
 
     Consolidation is left to the caller (run once per batch instead of per
-    album, since the duplicate-album fold is a library-wide pass).
+    album, since the duplicate-album fold is a library-wide pass), apart
+    from the folder of an album ``album_dir`` adds tracks to. ``places``
+    maps a track's ISRC to its path in that folder, without the extension.
     """
     if not album_dirs:
         return "ok"
@@ -5800,6 +5934,7 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None):
         ownership_out=ownership_out,
         source_files_out=prepared_sources,
         album_dir=album_dir,
+        places=places,
     )
     if cleanup is None:
         return "error"
@@ -5814,6 +5949,10 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None):
         intended_audio=intended_audio,
         beets_runtime=runtime,
     )
+    if ok and album_dir is not None:
+        forget_replaced_beets_entries(folder=album_dir)
+        # Beets files tracks added to an album as an album of their own.
+        _consolidate_duplicate_albums(folders=[album_dir])
     return "ok" if ok else kind
 
 
@@ -8173,9 +8312,10 @@ def _fold_duplicate_album_group(
     }
     if len(nonnull_art) > 1:
         return False
-    keeper_art = rows_by_id[keeper_id][artpath_index]
-    if nonnull_art and (type(keeper_art), keeper_art) not in nonnull_art:
-        return False
+    keeper_row = list(rows_by_id[keeper_id])
+    adopted_art = keeper_row[artpath_index] is None and nonnull_art
+    if adopted_art:
+        keeper_row[artpath_index] = next(iter(nonnull_art))[1]
 
     attributes, album_attribute_rows = _consolidation_album_attributes(
         connection, album_attribute_columns, album_ids
@@ -8230,6 +8370,13 @@ def _fold_duplicate_album_group(
     )
     if deleted_albums.rowcount != len(losing_ids):
         raise sqlite3.IntegrityError("duplicate album rows changed")
+    if adopted_art:
+        updated_art = connection.execute(
+            "UPDATE albums SET artpath = ? WHERE id = ?",
+            (keeper_row[artpath_index], keeper_id),
+        )
+        if updated_art.rowcount != 1:
+            raise sqlite3.IntegrityError("duplicate keeper art changed")
 
     current_items = _consolidation_rows_for_ids(connection, "items", item_columns, "id", item_ids)
     expected_items = []
@@ -8257,7 +8404,7 @@ def _fold_duplicate_album_group(
     )
     if len(current_albums) != 1 or _consolidation_row_key(
         current_albums[0]
-    ) != _consolidation_row_key(rows_by_id[keeper_id]):
+    ) != _consolidation_row_key(keeper_row):
         raise sqlite3.IntegrityError("duplicate keeper metadata changed")
     current_album_attributes = _consolidation_rows_for_ids(
         connection,
@@ -8278,13 +8425,15 @@ def _fold_duplicate_album_group(
     return True
 
 
-def _consolidate_duplicate_albums(protected_paths=None):
+def _consolidate_duplicate_albums(protected_paths=None, folders=None):
     """Fold provably identical album rows in one rollback-safe DB transaction.
 
     The fold updates only ``items.album_id`` and removes redundant album rows
     whose fixed fields and flexible metadata are already represented verbatim
-    by the oldest row. It never invokes the importer, plugins, tag writers, or
-    filesystem mutation APIs. Any uncertainty leaves the duplicates intact.
+    by the oldest row, which takes their art when it has none. It never
+    invokes the importer, plugins, tag writers, or filesystem mutation APIs.
+    Any uncertainty leaves the duplicates intact. ``folders`` limits the fold
+    to those album folders.
     """
     _warn_legacy_untracked_library_dirs()
     try:
@@ -8295,6 +8444,8 @@ def _consolidate_duplicate_albums(protected_paths=None):
         return
 
     protected = _consolidation_protected_paths(protected_paths)
+    if folders is not None:
+        folders = {str(_consolidation_absolute_path(folder)) for folder in folders}
     database_anchor = None
     transaction = None
     connection = None
@@ -8418,6 +8569,8 @@ def _consolidate_duplicate_albums(protected_paths=None):
             if len(ids) > 1 and not any(album_id in unsafe_albums for album_id in ids)
         ]
         for directory, ids in groups:
+            if folders is not None and directory not in folders:
+                continue
             if _consolidation_path_is_protected(directory, protected):
                 vlog(f"consolidation: keep ownership-protected folder {directory}")
                 continue
@@ -8458,13 +8611,14 @@ def _consolidate_duplicate_albums(protected_paths=None):
             _close_beets_database_anchor(database_anchor)
 
     if merged:
-        log.info(
-            fmt(
-                C.GRAY,
-                f"  ⤷  Merged duplicate beets entries for {merged} album "
-                f"folder{'s' if merged != 1 else ''}.",
+        if folders is None:
+            log.info(
+                fmt(
+                    C.GRAY,
+                    f"  ⤷  Merged duplicate beets entries for {merged} album "
+                    f"folder{'s' if merged != 1 else ''}.",
+                )
             )
-        )
         clear_scan_caches()
 
 
@@ -8545,6 +8699,150 @@ def forget_staged_beets_rows(paths):
         ))
 
     return _remove_beets_rows(matches, warn).complete
+
+
+def beets_entry_ids(paths):
+    """The ids of the beets entries for ``paths``, or None when the library
+    can't be read."""
+    try:
+        targets = frozenset(_catalogue_item_path(path) for path in paths)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    def inspect(connection):
+        found = set()
+        for item_id, raw_path in connection.execute("SELECT id, path FROM items"):
+            try:
+                if _catalogue_item_path(raw_path, allow_external=True) in targets:
+                    found.add(item_id)
+            except (OSError, TypeError, ValueError):
+                continue
+        return frozenset(found)
+
+    database_anchor = None
+    try:
+        database_anchor = _open_beets_database_anchor()
+        if database_anchor is None or database_anchor["descriptor"] is None:
+            return None
+        return inspect_sqlite_source(
+            database_anchor,
+            _beets_database_anchor_matches,
+            inspect,
+            connect=sqlite3.connect,
+            timeout=_beets_lock_wait(),
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        if database_anchor is not None:
+            _close_beets_database_anchor(database_anchor)
+
+
+def forget_replaced_beets_entries(item_ids=(), *, folder=None):
+    """Drop the beets entries ``item_ids`` of tracks replaced in place.
+
+    Each goes only when a newer entry has its path, the one the replacement
+    was imported as, which takes the flexible fields only the old entry had,
+    such as a rating. An album left with no tracks goes too, as `beet remove`
+    would. With ``folder``, every entry under it that a newer one shares a
+    path with goes: one file can't be two tracks. Returns how many entries
+    were dropped.
+    """
+    if folder is not None:
+        try:
+            folder = _catalogue_item_path(Path(folder) / "placeholder").parent
+        except (OSError, TypeError, ValueError):
+            return 0
+    elif not item_ids:
+        return 0
+    database_anchor = None
+    transaction = None
+    try:
+        database_anchor = _open_beets_database_anchor()
+        if database_anchor is None or database_anchor["descriptor"] is None:
+            return 0
+        transaction = AtomicSQLiteWrite(
+            database_anchor,
+            _beets_database_anchor_matches,
+            connect=sqlite3.connect,
+            timeout=_beets_lock_wait(),
+        )
+        connection = transaction.open()
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' LIMIT 1"
+        ).fetchone() is not None:
+            raise sqlite3.DatabaseError("custom database triggers")
+        by_path = {}
+        rows = connection.execute("SELECT id, path, album_id FROM items").fetchall()
+        for item_id, raw_path, _album_id in rows:
+            try:
+                path = _catalogue_item_path(raw_path, allow_external=True)
+            except (OSError, TypeError, ValueError):
+                continue
+            by_path.setdefault(path, []).append(item_id)
+        albums = {item_id: album_id for item_id, _path, album_id in rows}
+        dropped = 0
+        for path, ids in by_path.items():
+            newest = max(ids)
+            if folder is not None:
+                retiring = ids if folder in path.parents else ()
+            else:
+                retiring = () if newest in item_ids else item_ids
+            for old_id in ids:
+                if old_id not in retiring or old_id == newest:
+                    continue
+                kept = {
+                    key for (key,) in connection.execute(
+                        "SELECT key FROM item_attributes WHERE entity_id = ?",
+                        (newest,))
+                }
+                for key, value in connection.execute(
+                    "SELECT key, value FROM item_attributes WHERE entity_id = ?",
+                    (old_id,),
+                ).fetchall():
+                    if key not in kept:
+                        connection.execute(
+                            "INSERT INTO item_attributes (entity_id, key, value) "
+                            "VALUES (?, ?, ?)",
+                            (newest, key, value),
+                        )
+                connection.execute(
+                    "DELETE FROM item_attributes WHERE entity_id = ?", (old_id,))
+                if connection.execute(
+                    "DELETE FROM items WHERE id = ?", (old_id,)
+                ).rowcount != 1:
+                    raise sqlite3.IntegrityError("replaced entry changed")
+                album_id = albums.get(old_id)
+                if album_id is not None and connection.execute(
+                    "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
+                ).fetchone() is None:
+                    connection.execute(
+                        "DELETE FROM album_attributes WHERE entity_id = ?",
+                        (album_id,))
+                    connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+                dropped += 1
+        if not dropped:
+            connection.rollback()
+            return 0
+        transaction.commit_and_publish(
+            lambda: _beets_database_anchor_matches(database_anchor),
+            lambda current: current.execute("PRAGMA quick_check").fetchone() == ("ok",),
+        )
+    except Exception as exc:
+        log.info(fmt(
+            C.YELLOW,
+            f"  ⚠  Couldn't drop the beets entries of the replaced tracks "
+            f"({exc}); beets lists those tracks twice.",
+        ))
+        return 0
+    finally:
+        if transaction is not None:
+            transaction.close()
+        if database_anchor is not None:
+            _close_beets_database_anchor(database_anchor)
+    clear_scan_caches()
+    return dropped
 
 
 def _remove_beets_rows(matches, warn):
