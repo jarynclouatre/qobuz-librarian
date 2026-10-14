@@ -142,7 +142,7 @@ def _snapshot_flac_metadata(path):
     except Exception:
         return None
     return {
-        "tags": {k: list(v) for k, v in (f.tags or {}).items()},
+        "tags": list(f.tags or ()),
         "pictures": list(f.pictures),
     }
 
@@ -162,8 +162,7 @@ def _restore_flac_metadata(path, snap):
         f.add_tags()
     else:
         f.tags.clear()
-    for k, vals in snap["tags"].items():
-        f.tags[k] = vals
+    f.tags.extend(snap["tags"])
     # Only swap embedded art when the original actually had some. A truncated
     # original downloaded without art (or with less) must not strip the
     # freshly-downloaded refill's Qobuz cover, that would downgrade the result.

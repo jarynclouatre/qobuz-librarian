@@ -33,8 +33,7 @@ def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
     neither has to re-stat the file.
 
     ``artist_dirs=None`` walks every artist under MUSIC_ROOT (the whole-library
-    backfill). Pass a list to scope to one artist; the per-artist Lyrics tool
-    uses this to fill gaps for just one artist without re-walking everything.
+    backfill). Pass a list to walk only those artists.
     """
     if on_artist_error is None:
         def on_artist_error(path, error):
@@ -75,7 +74,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     resolved, and provider-unavailable tracks are re-tried on the next run.
 
     ``artist_dirs`` (default None = whole library) scopes the walk to those
-    artists only; the per-artist Lyrics tool passes the one resolved dir.
+    artists only.
     """
     log = log or _default_log
     unreadable = []

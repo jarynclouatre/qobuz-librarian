@@ -394,7 +394,8 @@ def test_upgrade_carries_hand_added_tags_to_the_replacement(
     assert backup is not None and backup.complete
     track(album_dir / "01 Song.flac", COMMENT="downloaded note",
           MY_TAG="downloaded", LYRICS="fetched lyrics",
-          UNSYNCEDLYRICS="fetched alias")
+          UNSYNCEDLYRICS="fetched alias",
+          **{proc.lyric_fetch.WRITTEN_MARK: proc.lyric_fetch._lyrics_digest("fetched lyrics")})
 
     assert not proc._track_annotations_preserved(backup.path, album_dir)
     proc._carry_non_audio_from_backup({"id": "x"}, album_dir, backup,
@@ -406,6 +407,7 @@ def test_upgrade_carries_hand_added_tags_to_the_replacement(
     assert replacement["MY_TAG"] == ["mine", "also mine"]
     assert replacement["LYRICS"] == ["my transcription"]
     assert "UNSYNCEDLYRICS" not in replacement
+    assert proc.lyric_fetch.WRITTEN_MARK not in replacement
     assert "REPLAYGAIN_TRACK_GAIN" not in replacement
     assert [p.data for p in replacement.pictures] == [b"back-cover"]
     replacement["UNSYNCEDLYRICS"] = ["downloaded alias"]

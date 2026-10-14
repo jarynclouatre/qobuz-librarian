@@ -40,6 +40,16 @@ def _isolate_collection_backups(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "collection-backups"))
 
 
+@pytest.fixture(autouse=True)
+def _unpaced_lyric_providers(monkeypatch):
+    from qobuz_librarian.integrations import lyric_fetch
+
+    monkeypatch.setattr(lyric_fetch, "PROVIDER_MIN_INTERVAL", {})
+    monkeypatch.setattr(lyric_fetch, "PROVIDER_PAUSE", 0.0)
+    for held in (lyric_fetch._provider_turns, lyric_fetch._provider_held):
+        held.clear()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_data_dir():
     """Point cfg.DATA_DIR and the files derived from it at a temp dir for

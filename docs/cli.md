@@ -128,7 +128,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |
 | `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
-| `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: check every track again, fetching lyrics this app wrote again and removing them when no lyrics match the track; write only timed lyrics |
+| `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: check every track again, fetching lyrics this app wrote again and removing them when no lyrics match the track, while lyrics it did not write stay as they are; write only timed lyrics |
 | `--migrate-src PATH`, `--migrate-dest PATH`, `--in-place`, `--acoustid` | With `--migrate`: source, destination, move instead of copy, fingerprint untagged files (see [Existing libraries](existing-libraries.md)) |
 | `--verbose`, `--quiet` / `-q`, `--no-color` | More detail, warnings and errors only, no colours |
 | `--version`, `-h` / `--help` | Print the version or the help |

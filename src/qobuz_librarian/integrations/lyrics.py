@@ -123,6 +123,8 @@ def _run_lyric_hook(album_dir):
         # *staging* dir before beets moves files: a .lrc written next to a
         # staging FLAC is orphaned the moment beets relocates+renames the
         # track (beets moves only the audio).
+        # A provider asking to be asked later is not waited for here, where
+        # the download waits too; those tracks are queued for a retry.
         counts = lyric_fetch.fetch_for_paths(
             flacs,
             owned_root=cfg.STAGING_DIR,
@@ -131,6 +133,7 @@ def _run_lyric_hook(album_dir):
             lyrics_format="embed",
             state_path=cfg.LYRIC_FETCH_STATE_FILE,
             progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
+            busy_patience=0,
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))
@@ -144,7 +147,7 @@ def _run_lyric_hook(album_dir):
             "already-synced", "already-plain", "kept-existing-plain"
         )
     )
-    # Files where every provider was unavailable when their turn came up. The
+    # Files where a provider was unavailable when their turn came up. The
     # fetcher tallies these under "providers-unavailable" and marks the file
     # status="transient" in its state file; we surface the count and queue them
     # for retry on next launch.
@@ -725,6 +728,14 @@ def _carry_written_lyric_state(album_dirs, owned_tracks=None):
         vlog(f"lyric state carry: update failed: {e}")
 
 
+def _load_lyric_records():
+    try:
+        return lyric_fetch.load_state(cfg.LYRIC_FETCH_STATE_FILE)
+    except Exception as e:
+        vlog(f"sidecar: lyric state load failed: {e}")
+        return {}
+
+
 def write_post_import_sidecars(
     album_dirs,
     *,
@@ -736,7 +747,10 @@ def write_post_import_sidecars(
     """Carry the lyric hook's records over to the imported FLACs, then write
     .lrc sidecars next to them when LYRICS_FORMAT
     requests them. Embedded tag is removed afterward for 'sidecar' mode,
-    kept for 'both'. Optional output lists receive exact identity changes and
+    kept for 'both'. Only tracks holding lyrics this app wrote get one, and
+    an existing .lrc is replaced only when the app wrote it too; other
+    tracks in the folders stay as they are. Optional output lists receive
+    exact identity changes and
     sidecars that this pass can prove it created, plus exact parent-directory
     identity transitions caused by those writes. ``owned_tracks`` contains
     sealed one-file import receipts; those leaves are excluded from album
@@ -749,10 +763,13 @@ def write_post_import_sidecars(
     # absent but mutagen is present.)
     if getattr(lyric_fetch, "FLAC", None) is None:
         return
-    _carry_written_lyric_state(album_dirs, owned_tracks)
     lyr_fmt = (cfg.LYRICS_FORMAT or "embed").strip().lower()
-    if lyr_fmt not in ("sidecar", "both"):
+    sidecars = lyr_fmt in ("sidecar", "both")
+    earlier = _load_lyric_records() if sidecars else {}
+    _carry_written_lyric_state(album_dirs, owned_tracks)
+    if not sidecars:
         return
+    records = _load_lyric_records()
     strip_tag = lyr_fmt == "sidecar"
     seen = set()
     written = 0
@@ -813,10 +830,21 @@ def write_post_import_sidecars(
             content = lyric_fetch.get_existing_lyrics(f)
             if not content or not content.strip():
                 continue
+            digest = lyric_fetch._lyrics_digest(content)
+            if digest not in (getattr(records.get(str(fp)), "written", ""),
+                              lyric_fetch.written_mark(f)):
+                continue
             if not _held_track_is_named(fp, parent_fd, track_fd, track_identity, parent_guard):
                 vlog(f"sidecar: track changed before write {fp}")
                 failed += 1
                 continue
+            own = {digest, getattr(earlier.get(str(fp)), "written", "")}
+            existing = lyric_fetch._read_bound_sidecar(
+                fp, parent_fd, parent_guard, track_guard)
+            replaces = (
+                existing
+                if existing is not None and lyric_fetch._lyrics_digest(existing) in own
+                else "")
             creation = {}
             sidecar_identity_receipt = {}
             sidecar_directory_mutation = {}
@@ -832,6 +860,7 @@ def write_post_import_sidecars(
                         parent_guard=parent_guard,
                         track_guard=track_guard,
                         sidecar_identity_out=sidecar_identity_receipt,
+                        replaces=replaces,
                     )
                 else:
                     sidecar_written = lyric_fetch.write_sidecar(
@@ -841,6 +870,7 @@ def write_post_import_sidecars(
                         parent_guard=parent_guard,
                         track_guard=track_guard,
                         sidecar_identity_out=sidecar_identity_receipt,
+                        replaces=replaces,
                     )
             except OSError as e:
                 sidecar_error = e
@@ -1020,7 +1050,7 @@ def write_post_import_sidecars(
         if written:
             actions.append(f"wrote {plural(written, '.lrc sidecar')}")
         if kept:
-            actions.append(f"kept {plural(kept, 'better existing .lrc sidecar')}")
+            actions.append(f"kept {plural(kept, 'existing .lrc sidecar')}")
         if failed:
             noun = "sidecar" if failed == 1 else "sidecars"
             actions.append(f"{failed} {noun} failed")

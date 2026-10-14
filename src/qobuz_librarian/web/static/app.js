@@ -945,6 +945,9 @@
     evt.preventDefault();
     evt.stopPropagation();
     var msg = el.getAttribute("data-confirm");
+    // A box that changes what the control does gives it another question.
+    var box = document.getElementById(el.getAttribute("data-confirm-checked") || "");
+    if (box && box.checked) msg = el.getAttribute("data-confirm-checked-text");
     if (msg.indexOf("{count}") !== -1 || msg.indexOf("{s}") !== -1) {
       var m = (el.textContent || "").match(/[\d,]+/);
       // {s} pluralises from the same live number as {count}; a plural rendered

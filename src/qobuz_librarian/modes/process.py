@@ -20,6 +20,7 @@ from qobuz_librarian.download import (
     validated_staged_album_dirs,
 )
 from qobuz_librarian.download_result import incomplete_track_counts, tracks_missing
+from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations.beets import (
     _ART_EXTS,
     _prepare_staging_tags,
@@ -498,12 +499,20 @@ _REPLACEMENT_OWNED_PREFIXES = (
 )
 
 
+_LYRIC_TAGS = frozenset({
+    "lyrics", "unsyncedlyrics", lyric_fetch.WRITTEN_MARK.lower(),
+})
+
+
 def _original_track_tags(source):
+    # The app's mark goes only with the lyrics it names.
+    lyrics = any(value.strip() for key, value in (source.tags or [])
+                 if key.lower() in {"lyrics", "unsyncedlyrics"})
     return [
         (key, value) for key, value in (source.tags or [])
         if key.lower() not in _REPLACEMENT_OWNED_TAGS
         and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
-        and (key.lower() not in {"lyrics", "unsyncedlyrics"} or value.strip())
+        and (key.lower() not in _LYRIC_TAGS or (lyrics and value.strip()))
     ]
 
 
@@ -536,7 +545,7 @@ def _track_annotations_preserved(backup_path, replacement_path):
             original = {}
             for key, value in _original_track_tags(source):
                 original.setdefault(key.lower(), []).append(value)
-            lyric_keys = {"lyrics", "unsyncedlyrics"}
+            lyric_keys = _LYRIC_TAGS
             if original.keys() & lyric_keys:
                 for key in lyric_keys:
                     original.setdefault(key, [])
@@ -561,8 +570,6 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
     """
     from mutagen.flac import FLAC
 
-    from qobuz_librarian.integrations import lyric_fetch
-
     new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
     old_tracks, old_degraded = _folder_tracks_checked(backup_path)
     if edition is not None:
@@ -572,6 +579,7 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
     if pairs is None:
         return False
     carried_to = 0
+    lyrics_copied = []
     for old, new in pairs:
         target_path = Path(new["path"])
         if (Path(old["path"]).suffix.lower() != ".flac"
@@ -582,7 +590,7 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
             target = FLAC(str(target_path))
             if target.tags is None:
                 target.add_tags()
-            lyric_keys = {"lyrics", "unsyncedlyrics"}
+            lyric_keys = _LYRIC_TAGS
             tags = _original_track_tags(source)
             pictures = _missing_track_pictures(source, target)
             if not tags and not pictures:
@@ -598,6 +606,9 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
             for picture in pictures:
                 target.add_picture(picture)
             lyric_fetch.save_flac_tags(target, target_path)
+            copied = [value for key, value in tags if key.lower() == "lyrics"]
+            if copied:
+                lyrics_copied.append((Path(old["path"]), target_path, copied[0]))
         except Exception as e:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Couldn't carry your own tags onto "
@@ -605,6 +616,10 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
                 "backup."))
             return False
         carried_to += 1
+    try:
+        lyric_fetch.carry_copied_lyrics(lyrics_copied, cfg.LYRIC_FETCH_STATE_FILE)
+    except Exception as e:
+        vlog(f"couldn't carry the lyric records onto the replacement: {e}")
     if carried_to:
         log.info(fmt(C.GRAY,
             f"  ⤷  Carried your own tags and pictures onto "
