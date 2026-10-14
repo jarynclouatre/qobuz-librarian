@@ -7,6 +7,7 @@ to avoid mid-job quality or config changes; disk write still happens immediately
 import hashlib
 import json
 import logging
+import os
 import secrets
 import threading
 from typing import Optional
@@ -64,7 +65,8 @@ TEXT_FIELDS = [
      "Musixmatch.",
      "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
     ("LASTFM_API_KEY", "Last.fm API key",
-     "Turns on the Discover tab.",
+     "Turns on the Discover tab, which suggests artists and albums like the "
+     "ones in your library.",
      "text", None, "32-character key"),
     ("COLLECTION_BACKUP_DIR", "Backup folder",
      "In Docker, a path inside the container: keep /collection_backups and "
@@ -351,8 +353,18 @@ def _restored_default_warning(key, value):
     """
     label = _FIELD_LABELS.get(key, key)
     restored = "the key it supplies" if key in SECRET_KEYS else value
+    variable = key
+    if key in SECRET_KEYS and not os.environ.get(key, "").strip():
+        variable = f"{key}_FILE"
     return (f"\u201c{label}\u201d comes from your Compose file, so clearing the "
-            f"box put {restored} back. Remove {key} there to stop using it.")
+            f"box put {restored} back. Remove {variable} there to stop using it.")
+
+
+def supplied_by_environment(key: str, values: dict) -> bool:
+    """Whether the value in effect is the one Compose supplies, with nothing
+    saved over it on this page."""
+    env = _ENV_DEFAULTS.get(key)
+    return bool(env) and values.get(key) == env
 
 
 def _dropped_warning(key, dropped):

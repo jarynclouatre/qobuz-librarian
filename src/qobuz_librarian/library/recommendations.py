@@ -18,6 +18,7 @@ from qobuz_librarian.api.lastfm import (
     LastfmKeyRejected,
     LastfmRateLimited,
     LastfmUnavailable,
+    api_key,
     get_artist_top_albums,
     get_artist_top_tags,
     get_similar_artists,
@@ -29,7 +30,7 @@ from qobuz_librarian.api.search import (
     search_albums,
     search_artists,
 )
-from qobuz_librarian.library import catalog
+from qobuz_librarian.library import catalog, discover_hidden
 from qobuz_librarian.library.discovery import (
     cached_artist_resolutions,
     owned_title_key,
@@ -64,7 +65,8 @@ _NAMESAKE_TITLES = 10
 _MAX_CONSECUTIVE_FAILURES = 3
 # How long a failed build is left alone before anything starts it again. Without
 # it, every reopened page relaunches a build against the same dead key or the
-# same unreachable service.
+# same unreachable service. A different key is tried at once, so a key just
+# fixed in Settings is not still reported as rejected.
 _RETRY_AFTER_ERROR = 60.0
 
 # Tags that describe the listener rather than the music, and bare years or
@@ -215,8 +217,9 @@ def library(*, max_age: float = _LIBRARY_CACHE_SECONDS) -> Library:
 
 
 def rank_candidates(accumulated: dict, owned: Library,
-                    limit: int = _RANK_KEEP) -> list[dict]:
-    """Order the suggestions and drop the ones already in the library.
+                    limit: int = _RANK_KEEP, hidden=None) -> list[dict]:
+    """Order the suggestions and drop the ones already in the library or
+    hidden from Discover.
 
     `accumulated` maps a suggested name to the owned artists that named it and
     how strongly. Ties break on how many owned artists agreed, then on name, so
@@ -231,7 +234,7 @@ def rank_candidates(accumulated: dict, owned: Library,
     for score, name, acc in ordered:
         if len(ranked) >= limit:
             break
-        if owned.owns(name):
+        if owned.owns(name) or (hidden and hidden.covers_name(name)):
             continue
         ranked.append({"name": name, "score": score, "seeds": acc["seeds"]})
     return ranked
@@ -464,6 +467,7 @@ def _artist_cards(
     prefer_hires: bool,
     progress=None,
     found: dict | None = None,
+    hidden=None,
 ) -> list[dict]:
     """Work down the ranking until `want` cards are filled. Names Qobuz can't
     serve are skipped and the next candidate promoted, bounded so a run of
@@ -487,7 +491,7 @@ def _artist_cards(
             card = _qobuz_artist(name, token, prefer_hires=prefer_hires)
             if card:
                 found[name] = card
-        if name in found:
+        if name in found and not (hidden and hidden.covers(found[name])):
             cards.append(dict(found[name], seeds=_seed_names(candidate),
                               score=candidate.get("score", 0.0)))
         if progress is not None:
@@ -513,8 +517,13 @@ _MAX_ACTIVE_BUILDS = 8
 
 def _new_build(library_sig: str = "") -> dict:
     return {"phase": "building", "stage": "library", "checked": 0, "total": 0,
-            "error": "", "items": [], "started_at": time.time(),
-            "finished_at": 0.0, "library_sig": library_sig}
+            "looked_up": 0, "error": "", "items": [], "started_at": time.time(),
+            "finished_at": 0.0, "library_sig": library_sig,
+            "key_sig": _key_signature()}
+
+
+def _key_signature() -> str:
+    return hashlib.sha1(api_key().encode("utf-8")).hexdigest()
 
 
 def _catalogue_feed_signature(owned: Library, prefer_hires: bool) -> str:
@@ -587,6 +596,7 @@ def start_build(kind: str, worker, *args, library_sig: str = "") -> dict:
             return _snapshot(build)
         if (build is not None and build["phase"] == "error"
                 and build.get("library_sig", "") == library_sig
+                and build.get("key_sig") == _key_signature()
                 and (time.time() - build["finished_at"]) < _RETRY_AFTER_ERROR):
             return _snapshot(build)
         if sum(
@@ -622,6 +632,7 @@ def _similar_worker(
 ) -> None:
     accumulated: dict[str, dict] = {}
     found: dict[str, dict | None] = {}
+    hidden = discover_hidden.current()
     total = len(owned)
     _publish(kind, total=total)
     consecutive_failures = 0
@@ -652,7 +663,7 @@ def _similar_worker(
             acc["seeds"].append((seed, match))
         _publish(kind, checked=index)
         if index % _PUBLISH_EVERY == 0 and index != total:
-            partial = rank_candidates(accumulated, owned)
+            partial = rank_candidates(accumulated, owned, hidden=hidden)
             _publish(
                 kind,
                 items=_artist_cards(
@@ -661,9 +672,10 @@ def _similar_worker(
                     _PARTIAL_CARDS,
                     prefer_hires=prefer_hires,
                     found=found,
+                    hidden=hidden,
                 ),
             )
-    ranked = rank_candidates(accumulated, owned)
+    ranked = rank_candidates(accumulated, owned, hidden=hidden)
     # Looking every candidate up in Qobuz takes about as long again as the
     # Last.fm pass, so it gets its own counter rather than leaving the library
     # one sitting full.
@@ -686,6 +698,7 @@ def _similar_worker(
         prefer_hires=prefer_hires,
         progress=catalogue_progress,
         found=found,
+        hidden=hidden,
     )
     cache.put_feed(kind, cards, feed_signature)
     _publish(kind, phase="ready", items=cards, checked=len(cards),
@@ -793,10 +806,9 @@ def _genre_worker(
     if rows is None:
         rows = get_tag_top_albums(tag, limit=_GENRE_FETCH)
         cache.put_lastfm(key, rows)
-    _publish(kind, total=len(rows))
+    _publish(kind, total=min(len(rows), GENRE_CARDS))
     cards = []
     for index, row in enumerate(rows, start=1):
-        _publish(kind, checked=index)
         if len(cards) >= GENRE_CARDS:
             break
         album = resolve_album(
@@ -805,6 +817,7 @@ def _genre_worker(
             token,
             prefer_hires=prefer_hires,
         )
+        _publish(kind, looked_up=index)
         if not album:
             continue
         # Same short-release rule as the artist rows; an unknown track count
@@ -814,8 +827,7 @@ def _genre_worker(
         if _owned_on_disk(album):
             continue
         cards.append(album)
-        if index % _PUBLISH_EVERY == 0:
-            _publish(kind, items=list(cards))
+        _publish(kind, checked=len(cards), items=list(cards))
     cache.put_feed(kind, cards, feed_signature)
     _publish(kind, phase="ready", items=cards, finished_at=time.time())
 
@@ -865,9 +877,12 @@ def _without_owned_albums(view: dict) -> dict:
 
 
 def _without_owned_artists(view: dict, owned: Library) -> dict:
+    """The cards still worth showing. An artist hidden since the list was
+    built leaves at once; the next build fills its place."""
+    hidden = discover_hidden.current()
     view["items"] = [
         row for row in view["items"]
-        if not owned.owns(str(row.get("name") or ""))
+        if not owned.owns(str(row.get("name") or "")) and not hidden.covers(row)
     ]
     return view
 
@@ -939,12 +954,14 @@ def _search_worker(
             continue
         match = float(row.get("match") or 0.0)
         accumulated[candidate] = {"score": match, "seeds": [(query, match)]}
-    ranked = rank_candidates(accumulated, owned)
-    _publish(kind, total=len(ranked))
+    hidden = discover_hidden.current()
+    ranked = rank_candidates(accumulated, owned, hidden=hidden)
+    _publish(kind, total=min(len(ranked), SEARCH_CARDS))
     cards = _artist_cards(
-        ranked, token, SEARCH_CARDS, prefer_hires=prefer_hires,
-        progress=lambda checked, found: _publish(kind, checked=checked,
-                                                 items=found))
+        ranked, token, SEARCH_CARDS, prefer_hires=prefer_hires, hidden=hidden,
+        progress=lambda attempts, found: _publish(kind, checked=len(found),
+                                                  looked_up=attempts,
+                                                  items=found))
     cache.put_feed(kind, cards, feed_signature)
     _publish(kind, phase="ready", items=cards, finished_at=time.time())
 
@@ -985,13 +1002,13 @@ def feed_view(kind: str, library_sig: str, *,
     an empty page.
     """
     view = {"phase": "idle", "stage": "library", "checked": 0, "total": 0,
-            "error": "", "items": [], "built_at": 0.0, "stale": False}
+            "looked_up": 0, "error": "", "items": [], "built_at": 0.0, "stale": False}
     build = build_status(kind)
     if build and build["phase"] == "building":
         if build.get("library_sig") == library_sig:
             view.update(phase="building", stage=build["stage"],
                         checked=build["checked"], total=build["total"],
-                        items=build["items"])
+                        looked_up=build["looked_up"], items=build["items"])
         else:
             view.update(phase="waiting", error="busy")
         return view

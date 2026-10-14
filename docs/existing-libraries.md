@@ -57,7 +57,7 @@ Then either:
 
 After migration finishes, point `QL_MUSIC_DIR` at the new destination and run a Library scan.
 
-Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist, no disc numbers) cannot be recognised as one, so each track lands under its own track artist. In the tags-only pass, the year comes from tags, so a file tagged without one lands in `Artist/Album/` rather than `Artist/Album (Year)/`. In copy mode, spot-check the destination before switching `QL_MUSIC_DIR` to it. In move mode, review the preview carefully before confirming.
+Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist, no disc numbers) cannot be recognised as one, so each track lands under its own track artist. In the tags-only pass, the year comes from tags, so a file tagged without one, or with a placeholder year such as 1900, lands in `Artist/Album/` rather than `Artist/Album (Year)/`. In copy mode, spot-check the destination before switching `QL_MUSIC_DIR` to it. In move mode, review the preview carefully before confirming.
 
 ## Bringing an existing beets database
 

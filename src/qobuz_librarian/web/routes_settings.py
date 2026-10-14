@@ -133,6 +133,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "text_fields": settings_store.TEXT_FIELDS,
         "behavior_generation": generations["behaviour"],
         "lastfm_generation": generations["discover"],
+        "lastfm_from_env": settings_store.supplied_by_environment(
+            "LASTFM_API_KEY", values),
         "collection_backup_generation": generations["collection-backup"],
         "collection_backup": diagnostics_mod._collection_backup_status(),
         "lastfm_check": (lastfm_check

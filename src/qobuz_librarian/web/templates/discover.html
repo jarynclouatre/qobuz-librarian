@@ -10,6 +10,8 @@
 
   {% include "_discover_tabs.html" %}
 
+  {% if notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ notice }}</span></div>{% endif %}
+
   {% if not qobuz_ready %}
   {% include "_connect_cta.html" %}
   {% else %}
@@ -23,7 +25,7 @@
           <path d="M21 21l-4.35-4.35" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
         </svg>
         <input type="text" name="q" value="{{ query }}" aria-label="Artist name"
-               placeholder="Artist name" class="ql-search-input" autocomplete="off"
+               placeholder="Find artists like…" class="ql-search-input" autocomplete="off"
                enterkeyhint="search" maxlength="200">
       </div>
       <button type="submit" class="ql-search-submit" aria-label="Find similar">
@@ -58,11 +60,11 @@
         {%- elif discover_tab == 'genres' and tag -%}Asking Last.fm what is tagged {{ tag | lower }}.
         {%- else -%}Reading your library.{%- endif -%}
         {%- elif discover_tab == 'search' -%}
-        Checked {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} Last.fm suggested.
+        Found {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} like {{ query }} in the Qobuz catalogue{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
         {%- elif discover_tab == 'genres' and not tag -%}
         Read the tags on {{ feed.checked }} of {{ feed.total }} of your artists.
         {%- elif discover_tab == 'genres' -%}
-        Checked {{ feed.checked }} of {{ feed.total }} album{{ 's' if feed.total != 1 }} tagged {{ tag | lower }}.
+        Found {{ feed.checked }} of {{ feed.total }} album{{ 's' if feed.total != 1 }} tagged {{ tag | lower }} in the Qobuz catalogue{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
         {%- elif discover_tab == 'favourites' -%}
         Checked {{ feed.checked }} of {{ feed.total }} saved album{{ 's' if feed.total != 1 }}.
         {%- elif feed.stage == 'catalogue' -%}
@@ -90,19 +92,25 @@
       <span class="ql-status-chip is-warning">Unavailable</span>
       <span>Last.fm could not be reached. Try again in a few minutes.</span>
       {% elif discover_tab == 'search' %}
-      <span class="ql-status-chip is-info ql-status-chip--wrap">{% if query %}{{ artists | length }} artist{{ 's' if artists | length != 1 }} like {{ query }}{% else %}Search{% endif %}</span>
-      {% if query and artists %}<span>Artists Qobuz can serve that are not in your library.</span>{% endif %}
+      {% if query %}
+      <span class="ql-status-chip is-info ql-status-chip--wrap">{{ artists | length }} artist{{ 's' if artists | length != 1 }} like {{ query }}</span>
+      {% if artists %}<span>Artists Qobuz can serve that are not in your library.</span>{% endif %}
+      {% endif %}
       {% elif discover_tab == 'genres' %}
       <span class="ql-status-chip is-info ql-status-chip--wrap">{% if tag %}{{ tag | lower }}{% else %}Genres{% endif %}</span>
       {% if tag and albums %}<span>{{ albums | length }} album{{ 's' if albums | length != 1 }} tagged {{ tag | lower }} that are not in your library.</span>{% endif %}
       {% elif discover_tab == 'favourites' %}
       <span class="ql-status-chip is-info">Favourites</span>
       {% if albums %}<span>{{ albums | length }} album{{ 's' if albums | length != 1 }} you saved on Qobuz that are not in your library.</span>{% endif %}
-      {% elif feed_age %}
+      {% elif feed_age and library_count %}
       <span class="ql-status-chip is-info">Suggestions ready</span>
       <span>Built from {{ library_count }} artist{{ 's' if library_count != 1 }} in your library, {{ feed_age }}.</span>
       {% else %}
       <span class="ql-status-chip is-neutral">Nothing yet</span>
+      {% endif %}
+      {% if discover_tab in ('similar', 'search') %}
+      <a href="/discover/hidden" class="ql-discover-hidden-link{% if not hidden_count %} hidden{% endif %}"
+         data-discover-hidden-link>Dismissed (<span data-discover-hidden-count>{{ hidden_count }}</span>)</a>
       {% endif %}
     </div>
 
@@ -129,7 +137,7 @@
     {% else %}
     {% include "_discover_feed.html" %}
     {% if not artists and feed.phase == 'ready' %}
-    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ query }} that Qobuz can serve.{% else %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% endif %}</p>
+    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ query }} that Qobuz can serve.{% elif library_count %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% else %}Your library has no artists to suggest from yet.{% endif %}</p>
     {% endif %}
     {% endif %}
 

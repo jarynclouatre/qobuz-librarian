@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.library.tags import strip_album_decorations_strict
+from qobuz_librarian.library.tags import known_year, strip_album_decorations_strict
 from qobuz_librarian.ui_cli import logging as cli_logging
 
 SCOPE_MISSING = "missing"
@@ -218,11 +218,8 @@ def save(store):
 
 
 def _year_int(value):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return parsed if parsed > 0 else None
+    year = known_year(value)
+    return int(year) if year else None
 
 
 def _undecorated_self_titled(artist, title):
@@ -469,14 +466,14 @@ def hidden_by_artist(scope, store=None):
         first = rows[0]
         groups.setdefault(key, []).append({
             "title": first.get("title") or e.get("title") or "?",
-            "year": first.get("year") or "",
+            "year": known_year(first.get("year")),
             "ts": first.get("ts") or e.get("ts") or "",
             "fp": fp,
             "gap_fill": bool(first.get("gap_fill")),
             # Year travels with each title: two editions sharing one name
             # (a self-titled album and its reissue) are otherwise identical
             # text on screen.
-            "others": [{"title": r.get("title") or "?", "year": r.get("year") or ""}
+            "others": [{"title": r.get("title") or "?", "year": known_year(r.get("year"))}
                        for r in rows[1:]],
         })
     out = []

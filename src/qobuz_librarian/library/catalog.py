@@ -49,6 +49,7 @@ from qobuz_librarian.library.tags import (
     canonical_track_slot,
     canonical_track_title,
     differs_by_album_variant,
+    known_year,
     normalize,
     similarity,
     strip_album_decorations,
@@ -239,7 +240,9 @@ def predicted_album_paths(qobuz_album, *, exact_edition=False):
                 artist_dirs.append(d)
 
     years = []
-    yr = album_year(qobuz_album)
+    # The year as listed: a folder Beets named from a placeholder date
+    # still carries it.
+    yr = _listed_year(qobuz_album)
     if yr:
         years.append(yr)
 
@@ -1180,8 +1183,8 @@ def find_extras_in_existing(qobuz_tracks, existing_tracks):
 
 
 # ── Album metadata helpers ────────────────────────────────────────────────────
-def album_year(album):
-    """Album release year as a string, or '' if unknown.
+def _listed_year(album):
+    """The year Qobuz lists, placeholder or not.
 
     Prefers release_date_original. Falls back to released_at parsed in UTC so
     late UTC releases keep their catalogue year in every local timezone.
@@ -1196,6 +1199,11 @@ def album_year(album):
         except (ValueError, OSError, OverflowError):
             return ""
     return ""
+
+
+def album_year(album):
+    """Album release year as a string, or '' if unknown."""
+    return known_year(_listed_year(album))
 
 
 def album_year_int(album, fallback=99999):

@@ -1165,6 +1165,83 @@
     });
   });
 
+  // Not interested: the card leaves at once, and the notice offers it back.
+  // The albums opened under a card go with it.
+  function discoverHiddenCount(n) {
+    document.querySelectorAll("[data-discover-hidden-link]").forEach(function (link) {
+      var count = link.querySelector("[data-discover-hidden-count]");
+      if (count) count.textContent = String(n);
+      link.classList.toggle("hidden", !n);
+    });
+  }
+  function discoverHiddenPost(url, form) {
+    var body = new FormData(form);
+    return sessionFetch(url, {
+      method: "POST",
+      headers: { "X-CSRF-Token": body.get("_csrf_token") || "", "Accept": "application/json" },
+      body: body,
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (!r.ok) throw new Error(data.error || "That didn't go through. Try again in a moment.");
+        return data;
+      });
+    });
+  }
+  document.addEventListener("submit", function (evt) {
+    var form = evt.target;
+    if (!form.matches || !form.matches("[data-discover-hide]")) return;
+    var card = form.closest("[data-discover-card]");
+    if (!card || !card.parentNode) return;
+    evt.preventDefault();
+    var id = form.querySelector('[name="artist_id"]').value;
+    var name = form.querySelector('[name="name"]').value;
+    var panel = document.getElementById("discover-albums-" + id);
+    var parent = card.parentNode;
+    var after = (panel || card).nextSibling;
+    var cards = Array.prototype.slice.call(parent.querySelectorAll("[data-discover-card]"));
+    var at = cards.indexOf(card);
+    var next = cards[at + 1] || cards[at - 1];
+    card.remove();
+    if (panel) panel.remove();
+    var focusTo = next && next.querySelector(".ql-result-title a");
+    if (focusTo) focusTo.focus({ preventScroll: true });
+    function putBack() {
+      if (!parent.isConnected) return false;
+      parent.insertBefore(card, after && after.parentNode === parent ? after : null);
+      if (panel) parent.insertBefore(panel, card.nextSibling);
+      return true;
+    }
+    discoverHiddenPost(form.action, form).then(function (data) {
+      discoverHiddenCount(data.hidden || 0);
+      var note = document.createElement("span");
+      note.appendChild(document.createTextNode("Dismissed " + name + ". "));
+      var undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "ql-inline-link";
+      undo.textContent = "Undo";
+      undo.setAttribute("aria-label", "Bring back " + name);
+      note.appendChild(undo);
+      var toast = showToast(note, "info");
+      undo.addEventListener("click", function () {
+        undo.disabled = true;
+        discoverHiddenPost("/discover/unhide", form).then(function (back) {
+          discoverHiddenCount(back.hidden || 0);
+          if (toast) toast.remove();
+          if (putBack()) {
+            var link = card.querySelector(".ql-result-title a");
+            if (link) link.focus({ preventScroll: true });
+          }
+        }).catch(function (err) {
+          undo.disabled = false;
+          if (err !== "navigation") showToast(err.message || String(err), "error");
+        });
+      });
+    }).catch(function (err) {
+      putBack();
+      if (err !== "navigation") showToast(err.message || String(err), "error");
+    });
+  });
+
   // Light/dark toggle.
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest && evt.target.closest("#theme-toggle, [data-theme-toggle]");

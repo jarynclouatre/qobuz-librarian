@@ -142,6 +142,11 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     assert len(dedup_album_versions(pairs)) == 1
     pairs = [_qalbum("American Football", 1999), _qalbum("American Football", 2016)]
     assert len(dedup_album_versions(pairs)) == 2
+    # Qobuz's placeholder date is no year at all, in either form it arrives.
+    pairs = [_qalbum("Basie Beat", "1900-01-01"), _qalbum("Basie Beat", "1899-12-31"),
+             _qalbum("April in Paris", 1956)]
+    assert [a["title"] for a, _n in dedup_album_versions(pairs)] == [
+        "April in Paris", "Basie Beat"]
     cjk = [_qalbum("東京", 2020), _qalbum("大阪", 2021)]
     assert len(dedup_album_versions(cjk)) == 2
     pair = [_qalbum("Album", 2020, bd=16, sr=44.1),

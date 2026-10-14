@@ -21,6 +21,7 @@
 </head>
 {% set _nav_tab = 'search' if page == 'dashboard' else page if page in ('library', 'discover', 'upgrade', 'downsample', 'repair', 'lyrics', 'queue', 'settings') else '' %}
 <body class="ql-app-body min-h-screen bg-base-100" data-nav-tab="{{ _nav_tab }}">
+<svg class="hidden" aria-hidden="true"><symbol id="ql-download-glyph" viewBox="0 0 24 24"><path d="M12 4v10"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></symbol></svg>
 
   <a href="#main-content"
      class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:top-3 focus:left-3 ql-btn ql-btn-primary ql-btn-sm">

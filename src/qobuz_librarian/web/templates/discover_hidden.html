@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% import "_job_labels.html" as labels %}
+{% block title %}Dismissed - Qobuz Librarian{% endblock %}
+{% block content_max %}max-w-4xl{% endblock %}
+{% block content %}
+
+<div class="ql-list-page">
+<header class="ql-page-header">
+  <h1>Dismissed</h1>
+</header>
+
+{% if notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ notice }}</span></div>{% endif %}
+
+{% if artists %}
+<div class="ql-work-status">
+  <span>{{ labels.format_count(artists | length) }} dismissed artist{% if artists | length != 1 %}s{% endif %}.</span>
+  <a href="/discover">Back to Discover</a>
+</div>
+
+<ul class="ql-hidden-list ql-discover-hidden-list">
+  {% for a in artists %}
+  <li class="ql-hidden-item">
+    <span class="ql-hidden-title">
+      <span class="ql-hidden-title-line"><span class="ql-hidden-name">{{ a.name }}</span></span>{% if a.when %}
+      <span class="ql-hidden-when"{% if a.when_exact %} title="{{ a.when_exact }}"{% endif %}>Dismissed {{ a.when }}</span>{% endif %}</span>
+    <form action="/discover/unhide" method="post" class="ql-hidden-restore">
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="artist_id" value="{{ a.id }}">
+      <input type="hidden" name="name" value="{{ a.name }}">
+      <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"
+              aria-label="Bring back {{ a.name }}">Bring back</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+
+{% else %}
+<div class="ql-empty-state ql-empty-state--hidden">
+  <span class="ql-state-icon" aria-hidden="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 6.5h14"/>
+      <path d="M7 12h10"/>
+      <path d="M9.5 17.5h5"/>
+    </svg>
+  </span>
+  <p class="ql-empty-title">Nothing dismissed.</p>
+  <a href="/discover" class="ql-btn ql-btn-primary w-full sm:w-auto mt-4">Go to Discover</a>
+</div>
+{% endif %}
+
+</div>
+{% endblock %}

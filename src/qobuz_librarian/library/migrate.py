@@ -53,6 +53,7 @@ from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
 from qobuz_librarian.library.tags import (
     VA_NORMALIZED,
     beets_sanitize,
+    known_year,
     normalize,
     strip_year_decoration,
 )
@@ -304,10 +305,7 @@ def _num_and_total(s: str):
 
 def _parse_year(s: str) -> int:
     m = re.search(r"(\d{4})", str(s or ""))
-    if not m:
-        return 0
-    y = int(m.group(1))
-    return y if 1000 <= y <= 9999 else 0
+    return int(known_year(m.group(1)) or 0) if m else 0
 
 
 def _is_compilation(tags: Mapping, albumartist: str) -> bool:

@@ -3,11 +3,11 @@
 <div class="ql-results-panel ql-artist-results">
   <div class="ql-result-list">
     {% for a in artists %}
-    <div class="ql-result-row ql-result-row--artist">
+    <div class="ql-result-row ql-result-row--artist" data-discover-card>
       <div class="ql-result-main">
         {% if a.cover %}<img src="{{ a.cover }}" alt="" width="52" height="52" class="ql-result-art" loading="lazy">{% endif %}
         <div class="ql-result-copy">
-          <p class="ql-result-title">{{ a.name }}</p>
+          <p class="ql-result-title"><a href="/?kind=artist&amp;q={{ a.name | urlencode }}&amp;artist_id={{ a.artist_id | urlencode }}&amp;artist_name={{ a.name | urlencode }}" class="ql-result-link">{{ a.name }}</a></p>
           {% if discover_tab != 'search' %}
           <p class="ql-discover-reason">Because you have
             {% for s in a.seeds %}<span class="ql-seed-chip">{{ s }}</span>{% endfor %}
@@ -15,11 +15,21 @@
           {% endif %}
         </div>
       </div>
-      <button type="button" class="ql-vchip" data-discover-toggle id="discover-toggle-{{ a.artist_id }}"
-              aria-expanded="false" aria-controls="discover-albums-{{ a.artist_id }}"
-              hx-get="/discover/artist-albums?artist_id={{ a.artist_id | urlencode }}&name={{ a.name | urlencode }}"
-              hx-target="#discover-albums-{{ a.artist_id }}" hx-swap="innerHTML"
-              hx-trigger="click">{{ a.albums | length }} album{{ 's' if a.albums | length != 1 }}</button>
+      <div class="ql-discover-card-actions">
+        <button type="button" class="ql-vchip" data-discover-toggle id="discover-toggle-{{ a.artist_id }}"
+                aria-expanded="false" aria-controls="discover-albums-{{ a.artist_id }}"
+                hx-get="/discover/artist-albums?artist_id={{ a.artist_id | urlencode }}&name={{ a.name | urlencode }}"
+                hx-target="#discover-albums-{{ a.artist_id }}" hx-swap="innerHTML"
+                hx-trigger="click">{{ a.albums | length }} album{{ 's' if a.albums | length != 1 }}</button>
+        <form method="post" action="/discover/hide" data-discover-hide>
+          <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+          <input type="hidden" name="artist_id" value="{{ a.artist_id }}">
+          <input type="hidden" name="name" value="{{ a.name }}">
+          <input type="hidden" name="back" value="{% if discover_tab == 'search' %}/discover/search?q={{ query | urlencode }}{% else %}/discover{% endif %}">
+          <button type="submit" class="ql-group-dismiss ql-discover-hide" title="Not interested"
+                  aria-label="Not interested in {{ a.name }}"><svg class="ql-group-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 12h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+        </form>
+      </div>
     </div>
     <div id="discover-albums-{{ a.artist_id }}" class="hidden" hx-preserve></div>
     {% endfor %}

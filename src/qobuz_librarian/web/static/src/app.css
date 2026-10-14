@@ -2061,6 +2061,12 @@ details.ql-mobile-drawer[open]::before {
   outline: 2px solid var(--ql-gold);
   outline-offset: 2px;
 }
+/* A title clips its overflow for the ellipsis, which would cut the focus
+   ring off a link inside it. */
+.ql-result-title:has(> .ql-result-link) {
+  margin: -0.25rem;
+  padding: 0.25rem;
+}
 /* In a narrow table cell the name ends in an ellipsis like the cell's own
    text would, rather than being cut mid-letter. */
 .ql-table-artist .ql-result-link,
@@ -5938,7 +5944,7 @@ details[data-artist].htmx-swapping {
   margin-bottom: var(--ql-space-2);
 }
 .ql-tag-row {
-  margin-bottom: var(--ql-space-4);
+  margin: var(--ql-space-3) 0 var(--ql-space-4);
 }
 .ql-dchip {
   border: 1px solid var(--ql-line-soft);
@@ -6008,6 +6014,21 @@ details[data-artist].htmx-swapping {
   align-items: center;
   gap: 0.625rem;
 }
+.ql-discover-card-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.25rem;
+}
+.ql-discover-hide {
+  position: static;
+}
+.ql-discover-hidden-link {
+  margin-left: auto;
+}
+.ql-discover-hidden-link.hidden {
+  display: none;
+}
 @media (max-width: 1023.98px) {
   .ql-discover-expand {
     padding: 0.625rem 0.78rem 0.4rem;
@@ -6019,6 +6040,13 @@ details[data-artist].htmx-swapping {
   }
   .ql-discover-album-meta .ql-result-inline-quality {
     margin-left: 0.4rem;
+  }
+}
+/* Editions often differ only at the end of the title, so a phone shows all of
+   it, as the search rows do. */
+@media (max-width: 519.98px) {
+  .ql-discover-album-title {
+    white-space: normal;
   }
 }
 

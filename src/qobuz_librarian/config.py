@@ -295,6 +295,9 @@ MISSING_TYPES_FILE = DATA_DIR / ".qobuz_missing_types.json"
 # resurfacing on every scan. User-driven and durable (no auto-expiry, unlike
 # CAPPED_FILE). See library/hidden.py.
 HIDDEN_FILE          = DATA_DIR / ".qobuz_hidden.json"
+# Artists the user told Discover to stop suggesting. See
+# library/discover_hidden.py.
+DISCOVER_HIDDEN_FILE = DATA_DIR / ".qobuz_discover_hidden.json"
 # Fingerprints surfaced by the last completed library walk, per mode, so a
 # re-run can badge albums that weren't there before ("new since last scan").
 SCAN_SEEN_FILE       = DATA_DIR / ".qobuz_scan_seen.json"

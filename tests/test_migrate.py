@@ -34,6 +34,10 @@ def test_normalize_tags_parses_slashed_track_and_disc_and_year():
     assert meta["disc"] == 2
     assert meta["disctotal"] == 2
     assert meta["year"] == 2008
+    meta = m.normalize_tags(
+        {"albumartist": ["A"], "album": ["B"], "title": ["T"], "date": ["1900-01-01"]},
+        stem="T", ext=".flac")
+    assert m.album_components(meta) == ("A", "B")
 
 
 # ── placement ─────────────────────────────────────────────────────────────────

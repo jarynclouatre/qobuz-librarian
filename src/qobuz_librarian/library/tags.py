@@ -447,3 +447,14 @@ def strip_year_decoration(name):
     s = _LEADING_YEAR_RE.sub("", name).strip()
     s = _YEAR_PAREN_RE.sub("", s).strip()
     return s or name
+
+
+def known_year(value):
+    """The four-digit year `value` starts with, or '' when there is none or
+    it is a placeholder. Qobuz dates a release it has no date for 1900-01-01,
+    which reads as 31 December 1899 in some timezones; years before 1880 are
+    as wrong."""
+    year = str(value or "")[:4]
+    if not year.isdigit() or int(year) < 1880 or year in ("1899", "1900"):
+        return ""
+    return year

@@ -500,7 +500,9 @@
       {% for key, label, help, kind, choices, placeholder in text_fields if key == 'LASTFM_API_KEY' %}
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
-        {% if behavior[key] %}
+        {% if behavior[key] and lastfm_from_env %}
+        <p class="ql-field-state">Key set in your Compose file. A key saved here replaces it.</p>
+        {% elif behavior[key] %}
         <p class="ql-field-state">Key saved. Leave this field blank to keep it.</p>
         {% endif %}
         <div class="relative max-w-lg">
@@ -515,7 +517,7 @@
       {% endfor %}
       <div class="ql-settings-actions">
         <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save key</button>
-        {% if behavior['LASTFM_API_KEY'] %}
+        {% if behavior['LASTFM_API_KEY'] and not lastfm_from_env %}
         <button type="submit" name="lastfm_remove" value="1"
                 class="ql-btn ql-btn-secondary w-full sm:w-auto">Remove key</button>
         {% endif %}

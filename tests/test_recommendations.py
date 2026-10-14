@@ -1,5 +1,8 @@
 """Discover recommendation tests."""
 
+import threading
+from types import SimpleNamespace
+
 import pytest
 
 from qobuz_librarian import config as cfg
@@ -74,3 +77,25 @@ def test_genre_chips_read_artists_from_across_the_library(monkeypatch):
     rec._tags_worker(rec.TAGS, None, _library(names))
     assert len(asked) == rec._TAG_SAMPLE
     assert {names.index(name) * 4 // len(names) for name in asked} == {0, 1, 2, 3}
+
+
+def test_a_replaced_lastfm_key_is_asked_again_at_once(monkeypatch):
+    class _RunNow:
+        def __init__(self, target, args, **_kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(rec, "threading",
+                        SimpleNamespace(Thread=_RunNow, Lock=threading.Lock))
+
+    def rejected(kind):
+        raise rec.LastfmKeyRejected("invalid key", code=10)
+
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "a" * 32)
+    assert rec.start_build("search:x", rejected)["phase"] == "building"
+    assert rec.start_build("search:x", rejected)["error"] == "key"
+    monkeypatch.setattr(cfg, "LASTFM_API_KEY", "b" * 32)
+    rec.start_build("search:x", lambda kind: None)
+    assert rec.build_status("search:x")["phase"] == "building"

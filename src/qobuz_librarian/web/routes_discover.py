@@ -3,7 +3,7 @@ import asyncio
 import urllib.parse
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import (
@@ -12,7 +12,8 @@ from qobuz_librarian.api.auth import (
     QobuzError,
     QobuzUnavailable,
 )
-from qobuz_librarian.library import recommendations
+from qobuz_librarian.library import discover_hidden, recommendations
+from qobuz_librarian.library.tags import known_year
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.web import download_admission, job_labels, qobuz_access, rendering, runtime
 
@@ -43,6 +44,7 @@ def _discover_album_views(rows, queued=None, scanning=None):
         album_id = str(row.get("id") or "")
         out.append(dict(
             row,
+            year=known_year(row.get("year")),
             quality=format_quality(bits, rate) if bits and rate else "",
             hires=bits >= 24,
             lossy=bits == 0,
@@ -89,6 +91,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "poll_url": "/discover",
         "feed_age": "",
         "library_count": 0,
+        "hidden_count": 0,
+        "notice": rendering._notice_text(request.query_params.get("notice")),
     }
     if not context["qobuz_ready"]:
         return rendering._tr(request, "discover.html", context)
@@ -122,6 +126,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
             None, lambda: recommendations.ensure_search_feed(token, query))
         context["feed"] = feed
         context["artists"] = feed["items"]
+        context["hidden_count"] = len(
+            await loop.run_in_executor(None, _hidden_artists))
         context["poll_url"] = (
             "/discover/search?q=" + urllib.parse.quote(query))
     elif tab == "favourites":
@@ -136,6 +142,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         context["feed"] = feed
         context["artists"] = feed["items"]
         context["library_count"] = len(recommendations.library())
+        context["hidden_count"] = len(
+            await loop.run_in_executor(None, _hidden_artists))
         context["poll_url"] = "/discover"
     if context["feed"]["built_at"]:
         context["feed_age"] = job_labels._format_age(context["feed"]["built_at"])
@@ -209,4 +217,82 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
         "decades": _discover_decades(albums),
         "error": error,
         "page": "discover",
+    })
+
+
+def _hidden_artists():
+    try:
+        return discover_hidden.load()
+    except OSError:
+        return []
+
+
+def _discover_return(value, fallback):
+    path = str(value or "")
+    return path if path.startswith("/discover") else fallback
+
+
+def _hidden_answer(request, back, message, *, hidden=0, failed=False):
+    """JSON for the page script, a redirect with a notice without it."""
+    if "application/json" in request.headers.get("accept", ""):
+        if failed:
+            return JSONResponse({"error": message}, status_code=500)
+        return JSONResponse({"hidden": hidden})
+    joiner = "&" if "?" in back else "?"
+    return RedirectResponse(
+        url=f"{back}{joiner}notice={rendering._notice_key(message)}",
+        status_code=303)
+
+
+async def _hidden_change(request, change, fallback):
+    if not runtime._discover_available():
+        return _discover_unavailable_response()
+    form = await request.form()
+    artist_id = str(form.get("artist_id") or "").strip()[:64]
+    name = str(form.get("name") or "").strip()[:200]
+    back = _discover_return(form.get("back"), fallback)
+    if not artist_id and not name:
+        return RedirectResponse(url=back, status_code=303)
+    loop = asyncio.get_running_loop()
+    try:
+        message = await loop.run_in_executor(
+            None, lambda: change(artist_id, name))
+        hidden = await loop.run_in_executor(None, _hidden_artists)
+    except OSError:
+        return _hidden_answer(
+            request, back,
+            "Couldn't save that: the data folder looks full or read-only.",
+            failed=True)
+    return _hidden_answer(request, back, message, hidden=len(hidden))
+
+
+@router.post("/discover/hide")
+async def discover_hide(request: Request):
+    def change(artist_id, name):
+        discover_hidden.hide(artist_id, name)
+        return f"Dismissed {name}."
+    return await _hidden_change(request, change, "/discover")
+
+
+@router.post("/discover/unhide")
+async def discover_unhide(request: Request):
+    def change(artist_id, name):
+        discover_hidden.unhide(artist_id, name)
+        return f"Brought back {name}."
+    return await _hidden_change(request, change, "/discover/hidden")
+
+
+@router.get("/discover/hidden", response_class=HTMLResponse)
+async def discover_hidden_page(request: Request):
+    if not runtime._discover_available():
+        return _discover_unavailable_response()
+    loop = asyncio.get_running_loop()
+    artists = await loop.run_in_executor(None, _hidden_artists)
+    for artist in artists:
+        artist["when"], artist["when_exact"] = job_labels._when_label(
+            artist["ts"])
+    return rendering._tr(request, "discover_hidden.html", {
+        "page": "discover",
+        "artists": artists,
+        "notice": rendering._notice_text(request.query_params.get("notice")),
     })
