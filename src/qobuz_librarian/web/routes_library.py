@@ -147,6 +147,9 @@ def _library_header_note():
     if job.status == job_mgr.JobStatus.RUNNING:
         return {"label": "Downloading…", "detail": "",
                 "title": "Downloading the albums selected in the review."}
+    if job.progress_phase == flows.SETTINGS_WAIT:
+        return {"label": "Waiting for the running job…", "detail": "",
+                "title": "The settings saved during it apply before the refresh."}
     total = int(job.progress_total or 0)
     current = int(job.progress_current or 0)
     unit = str(job.progress_unit or "").strip()
@@ -343,6 +346,12 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
                            "Nothing is selected on that tab yet.")
     elif request.query_params.get("approved"):
         notice_bits.append("Download queued.")
+    # A refresh with nothing to read can end before this page loads, and only
+    # the header's poll, which then never runs, says what it did.
+    refreshed = job_mgr.registry.get(request.query_params.get("refreshed", ""))
+    if (refreshed is not None and refreshed.execute_kind == "library"
+            and refreshed.status is job_mgr.JobStatus.DONE and refreshed.summary):
+        notice_bits.append(refreshed.summary)
     # Bring all back redirects here with what happened, a store-write failure
     # included.
     notice = rendering._notice_text(request.query_params.get("notice"))
@@ -366,9 +375,17 @@ async def library_refresh_note(request: Request):
     never polls."""
     loop = asyncio.get_running_loop()
     def _context():
+        header = _library_header_context()
+        job = _library_current_job()
+        calm = job is None or job.status == job_mgr.JobStatus.AWAITING_REVIEW
         return {
-            **_library_header_context(),
-            "library_job": _library_current_job(),
+            **header,
+            # The work that just ended may have changed what is on disk.
+            "census": (storage._census_view()
+                       if calm and header.get("library_baseline_exists")
+                       and not header.get("library_refresh_running") else None),
+            "census_oob": True,
+            "library_job": job,
             # Only the poll says this, so it lands once, when the work it was
             # watching ends. A page load has the review itself to read.
             "library_refresh_outcome": _library_refresh_outcome(),
@@ -489,7 +506,7 @@ async def library_scan(
     )
     if job is None:
         return scans._scan_submission_failure_response(request, error_home)
-    return RedirectResponse(url="/library", status_code=303)
+    return RedirectResponse(url=f"/library?refreshed={job.id}", status_code=303)
 
 
 @router.post("/library/skip-setup")

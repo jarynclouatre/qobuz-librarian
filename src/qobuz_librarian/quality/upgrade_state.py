@@ -25,13 +25,15 @@ class RefreshResult(artist_scan_store.RefreshResult):
     refresh_started_revision: int = 0
 
 
-def quality_signature(streamrip_quality=None, prefer_hires=None) -> str:
+def quality_signature(streamrip_quality=None, prefer_hires=None,
+                      downsample=None) -> str:
     """Quality policy that shapes Upgrade candidates and their labels."""
     if streamrip_quality is None:
         streamrip_quality = getattr(cfg, "STREAMRIP_QUALITY", "")
     if prefer_hires is None:
         prefer_hires = getattr(cfg, "PREFER_HIRES", False)
-    return f"{streamrip_quality}|{bool(prefer_hires)}"
+    kept = "|downsample" if quality_decision.downsampling(downsample) else ""
+    return f"{streamrip_quality}|{bool(prefer_hires)}{kept}"
 
 
 def _album_cover(album):
@@ -231,14 +233,13 @@ def update_artist(
                 False, {name: fingerprint},
                 quality_signature=scan_quality_signature,
             )
+        same_policy = state.get("quality_signature") == scan_quality_signature
+        # Rows found under another quality setting must not pass as current
+        # when the setting returns, so the folder is left to be checked again.
         saved = _write_state(_store.state_with_artist(
-            state, name, fingerprint, specs,
+            state, name, fingerprint if same_policy else "", specs,
             now=now, generation=target_generation, revision=state_revision,
-            quality_signature=(
-                scan_quality_signature
-                if state.get("quality_signature") == scan_quality_signature
-                else state.get("quality_signature", "")
-            ),
+            quality_signature=state.get("quality_signature", ""),
         ))
         authority_saved = saved and generation_state.mark_output_current(
             "upgrade",

@@ -31,6 +31,7 @@ from pathlib import Path
 
 from qobuz_librarian import config
 from qobuz_librarian.api import album_cache
+from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.dirfd import named_entry_matches as _migration_named_entry_matches
@@ -840,11 +841,13 @@ def _label_words(label):
     return words, _LABEL_FILLER_RE.sub("", _LABEL_WORD_RE.sub("", label))
 
 
-def _shows_edition_tracks(album, existing, pairs):
+def _shows_edition_tracks(album, existing, pairs, token=None):
     """Whether the files hold this release's track list rather than a
-    smaller edition's: all of its tracks by recording ID but at most one in
-    ten, and more of them than any smaller edition of the album in the
-    artist's cached catalogue has."""
+    smaller edition's: all of its tracks by recording ID, or all but at
+    most one in ten and more of them than any smaller edition of the album
+    in its artist's catalogue has. The catalogue is fetched with ``token``
+    when none is cached. Without one that lists the album, nothing rules a
+    smaller edition out."""
     tracks = (album.get("tracks") or {}).get("items") or []
     held = sum(1 for i, j in pairs.items()
                if _norm_isrc(tracks[i].get("isrc"))
@@ -855,14 +858,20 @@ def _shows_edition_tracks(album, existing, pairs):
         return False
     artist_id = (album.get("artist") or {}).get("id")
     cached = album_cache.get_catalog(f"{artist_id}:{config.ARTIST_CATALOG_LIMIT}", math.inf)
+    listed = (cached or {}).get("items")
+    if listed is None and token and artist_id:
+        try:
+            listed, _total = qobuz_search.get_artist_albums(
+                artist_id, token, limit=config.ARTIST_CATALOG_LIMIT)
+        except QobuzError:
+            listed = None
     title = (edition_group_key(album) or (None,))[0]
-    return not any(
-        isinstance(other, dict) and (edition_group_key(other) or (None,))[0] == title
-        and held <= (other.get("tracks_count") or 0) < len(tracks)
-        for other in (cached or {}).get("items") or [])
+    editions = [other.get("tracks_count") or 0 for other in listed or []
+                if isinstance(other, dict) and (edition_group_key(other) or (None,))[0] == title]
+    return bool(editions) and not any(held <= count < len(tracks) for count in editions)
 
 
-def same_edition(album, existing, folder):
+def same_edition(album, existing, folder, token=None):
     """Whether the files are this release rather than another mix or master
     of it: some of its tracks pair with them as the same edition, none of
     the rest is a song they hold as another version, and the labels a
@@ -872,7 +881,8 @@ def same_edition(album, existing, folder):
     title into the album tag, but Qobuz's album version only when the album
     tag or folder names an edition, so that version is checked only then.
     A deluxe, expanded or other edition label the files lack still counts
-    when they hold its track list (_shows_edition_tracks). Wording and word
+    when they hold its track list (_shows_edition_tracks, which may ask
+    Qobuz for the artist's catalogue with ``token``). Wording and word
     order may differ: "Remastered" is the files' "2015 Remaster", but "2009
     Remaster" is not their "Remastered"."""
     tracks = (album.get("tracks") or {}).get("items") or []
@@ -914,7 +924,8 @@ def same_edition(album, existing, folder):
     if not all(_PACKAGING_LABEL_RE.fullmatch(label) for label in lacking):
         return False
     expanded = [label for label in unheld(album_labels) if _EXPANDED_LABEL_RE.search(label)]
-    return not (lacking or expanded) or _shows_edition_tracks(album, existing, pairs)
+    return not (lacking or expanded) or _shows_edition_tracks(
+        album, existing, pairs, token)
 
 
 _ALTERNATE_WORD_RE = re.compile(
@@ -922,14 +933,31 @@ _ALTERNATE_WORD_RE = re.compile(
     r"edit(?!ion)|version|alternat|outtake")
 # "Remastered Version", "2017 Mix", "Stereo Mix 2015": the same recording
 # mastered or mixed again, not another version of the song.
-_REMASTER_LABEL_RE = re.compile(
-    r"(?:(?:19|20)\d\d|digital|remaster(?:ed)?|master(?:ed)?|mono|stereo|new|"
-    r"mix(?:ed)?|version|edition)+")
+_REMASTER_WORD_RE = re.compile(
+    r"(?:19|20)\d\d|digital|remaster(?:ed)?|master(?:ed)?|mono|stereo|new|"
+    r"mix(?:ed)?|version|edition")
+_REMASTER_LABEL_RE = re.compile(f"(?:{_REMASTER_WORD_RE.pattern})+")
 
 
-def _remaster_label(label):
-    return bool(_REMASTER_LABEL_RE.fullmatch(label)
-                and re.search(r"master|(?:19|20)\d\d|new", label))
+def _remaster_words(labels):
+    return {word for label in labels if _REMASTER_LABEL_RE.fullmatch(label)
+            for word in _REMASTER_WORD_RE.findall(label)}
+
+
+def _remaster_label(label, held_labels=()):
+    """Whether a label adds only a remaster or a dated or new mix to the
+    copy held with ``held_labels``. A remastered mono or stereo version,
+    such as "Mono Remastered", is still another version unless the held
+    copy is mono or stereo too."""
+    if not _REMASTER_LABEL_RE.fullmatch(label):
+        return False
+    dated = re.search(r"(?:19|20)\d\d|new", label)
+    if dated and "mix" in label:
+        return True
+    words = _remaster_words([label]) - _remaster_words(held_labels)
+    if words & {"mono", "stereo"}:
+        return False
+    return bool(dated or "master" in label) or words <= {"version", "edition", "digital"}
 
 
 def bonus_versions(missing, present):
@@ -951,7 +979,8 @@ def bonus_versions(missing, present):
             continue
         for other in held.get(base, ()):
             added = recording - other
-            if (added and any(_ALTERNATE_WORD_RE.search(label) and not _remaster_label(label)
+            if (added and any(_ALTERNATE_WORD_RE.search(label)
+                              and not _remaster_label(label, other)
                               for label in added)
                     and not any("reprise" in label for label in added)):
                 bonus.append(track)
@@ -1249,10 +1278,18 @@ def find_extras_in_existing(qobuz_tracks, existing_tracks):
     is flagged rather than hidden. This gates the upgrade wipe-and-replace, so a
     missed extra means silently deleting a track the user can't get back.
     """
+    return [et for et, qt in zip(existing_tracks,
+                                 qobuz_tracks_for(existing_tracks, qobuz_tracks))
+            if qt is None]
+
+
+def qobuz_tracks_for(existing_tracks, qobuz_tracks):
+    """The Qobuz track each on-disk track matches, or None, paired one to
+    one on ISRC, then title (see _pair_indices)."""
     disc_scoped = _disc_scoped_match(qobuz_tracks, existing_tracks)
-    matched = _pair_tracks(_existing_keys(existing_tracks, disc_scoped),
-                           _qobuz_keys(qobuz_tracks, disc_scoped))
-    return [et for i, et in enumerate(existing_tracks) if not matched[i]]
+    slots = _pair_indices(_existing_keys(existing_tracks, disc_scoped),
+                          _qobuz_keys(qobuz_tracks, disc_scoped))
+    return [None if si is None else qobuz_tracks[si] for si in slots]
 
 
 # ── Album metadata helpers ────────────────────────────────────────────────────
@@ -1432,11 +1469,21 @@ def _artist_key(album):
 def _derivative_of(album):
     """The edition_group_key title of the album an instrumental, karaoke or
     a cappella release is named after, or None for a release not named as
-    one."""
-    title = strip_album_decorations(album.get("title") or "")
-    base = strip_album_decorations(_DERIVATIVE_TAIL_RE.sub("", title))
-    if base == title and not re.search(rf"\b{_DERIVATIVE_WORDS}\b",
-                                       album.get("version") or "", re.IGNORECASE):
+    one. A bare trailing word after the artist's own name, as in "Canned
+    Heat Instrumentals", names a collection rather than a version of the
+    self-titled album."""
+    raw = album.get("title") or ""
+    title = strip_album_decorations(raw)
+    tail = _DERIVATIVE_TAIL_RE.search(title)
+    base = strip_album_decorations(title[:tail.start()]) if tail else title
+    if base == title:
+        # strip_album_decorations drops "(Acapella)" or "(Karaoke Version)"
+        # along with edition labels, so look at what it took off.
+        dropped = raw.replace(title, " ", 1)
+        if not re.search(rf"\b{_DERIVATIVE_WORDS}\b",
+                         f"{dropped} {album.get('version') or ''}", re.IGNORECASE):
+            return None
+    elif tail.group().strip()[0].isalpha() and normalize(base) == _artist_key(album):
         return None
     key = edition_group_key({"title": base})
     return key[0] if key else None
@@ -3168,7 +3215,7 @@ def find_expanded_edition(album, album_dir, existing, token, _args=None):
         except QobuzError:
             continue
         q_tracks = (full.get("tracks") or {}).get("items") or []
-        if not q_tracks or not same_edition(full, existing, album_dir):
+        if not q_tracks or not same_edition(full, existing, album_dir, token):
             continue
         new_extras = find_extras_in_existing(q_tracks, existing)
         # Keep candidates that are no worse than current on the extras axis.

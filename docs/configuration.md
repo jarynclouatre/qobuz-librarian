@@ -68,7 +68,7 @@ out of library scans and import targets.
 
 `MIGRATE_MULTI_ARTIST` affects new imports only, including a gap fill or upgrade of an album already in a combined folder. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.
 
-`DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved, originals replaced atomically). To downsample hi-res already in your library, use the on-demand **Downsample** mode instead.
+`DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved, originals replaced atomically). To downsample hi-res already in your library, use the on-demand **Downsample** mode instead. While it is on, Upgrade compares your files with what a download keeps once downsampled, so a downsampled album is not offered its hi-res master again; turn it off and Upgrade offers such albums at the full download quality after the next Library refresh.
 
 Pacing, timeout, and worker knobs are forwarded in `compose.yaml`, so setting them in `.env` takes effect (each is described in `.env.example`):
 

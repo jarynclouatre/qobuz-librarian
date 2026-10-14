@@ -351,11 +351,14 @@ def _fold_into_parked_library_review(job):
         bits.append(f"{' and '.join(changes).capitalize()} in the open "
                     "Library review.")
     unchecked = job.unchecked_artists
-    if not bits:
+    upgrades = getattr(job, "upgrade_finds", 0)
+    if not bits and not upgrades:
         if unchecked:
             bits.append("No new finds from the artists that could be checked.")
         else:
             bits.append("No new finds. The open Library review is up to date.")
+    if upgrades:
+        bits.append(flows.upgrade_finds_note(upgrades))
     if unchecked:
         bits.append(f"{plural(unchecked, 'artist')} couldn't be checked; "
                     "scan again to resume from where it left off.")

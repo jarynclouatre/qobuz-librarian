@@ -8,31 +8,26 @@ from qobuz_librarian.integrations.staging import (
     restore_group,
 )
 from qobuz_librarian.library.catalog import read_album_dir
-from qobuz_librarian.quality.decision import album_max_quality
+from qobuz_librarian.quality.decision import album_max_quality, track_targets
 from qobuz_librarian.ui_cli.logging import log
 
 
-def staged_track_qualities(staged_dirs):
-    quals, n_unknown = [], 0
-    for d in staged_dirs:
-        for t in read_album_dir(d):
-            bits = t.get("bits") or 0
-            rate = t.get("sample_rate") or 0
-            if bits and rate:
-                quals.append((int(bits), int(rate)))
-            else:
-                n_unknown += 1
-    return quals, n_unknown
-
-
 def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None):
-    """Decide whether the staged rip came in below min(source, cap)."""
+    """Decide whether the staged rip came in below min(source, cap), each
+    track against what Qobuz offers for it."""
     target = album_max_quality(qobuz_album, tier=effective_tier)
-    quals, n_unknown = staged_track_qualities(staged_dirs)
-    n_below = sum(
-        1 for bits, rate in quals
-        if bits < target[0] or rate < target[1]
-    )
+    staged = [t for d in staged_dirs for t in read_album_dir(d)]
+    quals, n_unknown, n_below = [], 0, 0
+    for t, (bits_wanted, rate_wanted) in zip(
+            staged, track_targets(staged, qobuz_album, effective_tier)):
+        bits = t.get("bits") or 0
+        rate = t.get("sample_rate") or 0
+        if not (bits and rate):
+            n_unknown += 1
+            continue
+        quals.append((int(bits), int(rate)))
+        if bits < bits_wanted or rate < rate_wanted:
+            n_below += 1
     return {
         "under": n_below > 0 or n_unknown > 0,
         "n_below": n_below,

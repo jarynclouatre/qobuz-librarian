@@ -9,12 +9,14 @@ import threading
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
+from qobuz_librarian.library import candidate_premise, downsample_state
 from qobuz_librarian.library.lyrics import (
     HAVE_LYRICS,
     run_library_lyrics,
     summarize_lyrics_result,
 )
 from qobuz_librarian.library.scanner import clear_scan_caches
+from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.colors import C, banner, block, fmt
 from qobuz_librarian.ui_cli.errors import (
     EXIT_CONFIG,
@@ -90,13 +92,22 @@ def run_library_lyrics_mode(args):
 
     previous_handler = signal.signal(signal.SIGINT, request_stop)
     try:
-        res = run_library_lyrics(
-            dry_run=args.dry_run,
-            rescan=args.lyrics_rescan,
-            synced_only=args.lyrics_synced_only,
-            should_stop=should_stop,
-            log=log,
-        )
+        with lyric_fetch.recording_writes() as written:
+            try:
+                res = run_library_lyrics(
+                    dry_run=args.dry_run,
+                    rescan=args.lyrics_rescan,
+                    synced_only=args.lyrics_synced_only,
+                    should_stop=should_stop,
+                    log=log,
+                )
+            finally:
+                if written:
+                    # Saved Upgrade and Downsample picks stay valid over
+                    # lyrics this pass wrote.
+                    seal = candidate_premise.sealer_after_writes(written)
+                    upgrade_state.reseal(seal)
+                    downsample_state.reseal(seal)
     except KeyboardInterrupt:
         print()
         log.info(fmt(C.GRAY, "  Interrupted."))

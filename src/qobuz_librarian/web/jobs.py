@@ -2364,7 +2364,9 @@ def restore_jobs(
             candidates=row.get("candidates") or [],
             error=row.get("error"),
             summary=row.get("summary") or "",
-            review_verb=row.get("review_verb") or "Download",
+            # Earlier versions saved Upgrade retry reviews with the download verb.
+            review_verb=("Upgrade" if row.get("execute_kind") == "upgrade"
+                         else row.get("review_verb") or "Download"),
             execute_kind=row.get("execute_kind") or "",
             execute_args=row.get("execute_args") or {},
             execute_args_unreadable=bool(row.get("execute_args_unreadable")),

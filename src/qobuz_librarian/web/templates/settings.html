@@ -19,7 +19,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>{% if queued %}Once no job is running, refresh{% else %}Refresh{% endif %} the <a href="/library" class="ql-inline-link">Library</a> so its results follow the new quality or track download setting.</span>
+  <span>Refresh the <a href="/library" class="ql-inline-link">Library</a> so its results follow the new download settings.{% if queued %} A refresh waits for the running job to finish.{% endif %}</span>
 </div>
 {% endif %}
 

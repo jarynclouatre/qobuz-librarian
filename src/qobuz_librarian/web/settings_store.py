@@ -391,9 +391,7 @@ def current() -> dict:
     and the overlay read - that gap silently dropped the pending change.
     """
     with _pending_lock:
-        out = {k: bool(getattr(cfg, k)) for k in BEHAVIOR_KEYS}
-        for key, _, _, kind, _, _ in TEXT_FIELDS:
-            out[key] = _field_str(getattr(cfg, key, ""), kind)
+        out = _live()
         if _pending_apply:
             for k in BEHAVIOR_KEYS:
                 if k in _pending_apply:
@@ -402,6 +400,23 @@ def current() -> dict:
                 if key in _pending_apply:
                     out[key] = _field_str(_pending_apply[key], kind)
     return out
+
+
+def _live() -> dict:
+    out = {k: bool(getattr(cfg, k)) for k in BEHAVIOR_KEYS}
+    for key, _, _, kind, _, _ in TEXT_FIELDS:
+        out[key] = _field_str(getattr(cfg, key, ""), kind)
+    return out
+
+
+def waiting(keys) -> bool:
+    """Whether a saved change to any of ``keys`` waits for a running job."""
+    with _pending_lock:
+        live = _live() if _pending_apply else None
+    if live is None:
+        return False
+    saved = current()
+    return any(live.get(key) != saved.get(key) for key in keys)
 
 
 def form_generation(section: str, values: Optional[dict] = None) -> str:

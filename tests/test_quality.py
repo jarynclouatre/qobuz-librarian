@@ -1,5 +1,6 @@
 """Tests for quality/tiers.py and quality/decision.py."""
 
+import pytest
 
 from qobuz_librarian.quality.decision import (
     compare_album_quality,
@@ -57,7 +58,13 @@ def test_compare_album_quality_classifies_and_counts_unknown():
     assert quality_change_summary([(hires, cd)])["losing_hires"] == 1
 
 
-def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatch):
+def test_upgrade_scan_leaves_downsampled_albums_alone_while_downsample_is_on(
+        tmp_path, monkeypatch):
+    """A downsampled album was offered its hi-res master again whenever the
+    album's Qobuz rating hid nothing, and with Downsample on every download
+    of it would be downsampled again. While Downsample is on, a file is held
+    to what a download keeps after it; once it is off, to the full quality,
+    and an album downsampled earlier is offered again."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import discovery
     from qobuz_librarian.quality import decision
@@ -75,6 +82,15 @@ def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatc
         "maximum_sampling_rate": 192.0,
         "tracks": {"items": [{"title": "Song"}]},
     }
+
+    monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_HIRES_ENABLED", True)
+    monkeypatch.setattr(decision.downsample_engine, "HAVE_DOWNSAMPLE", True)
+    master = {"maximum_bit_depth": 24, "maximum_sampling_rate": 96.0}
+    kept = {"bits": 24, "sample_rate": 48000}
+    cd = {"bits": 16, "sample_rate": 44100}
+    assert decision.compare_album_quality([kept], master)["classification"] == "all_equal"
+    assert decision.compare_album_quality([cd], master)["classification"] == "all_lower"
 
     decision.mark_local_album_capped(album_dir)
     monkeypatch.setattr(decision, "list_artist_album_dirs",
@@ -100,6 +116,13 @@ def test_upgrade_scan_skips_locally_capped_downsample_album(tmp_path, monkeypatc
     )
 
     assert result == []
+    monkeypatch.setattr(cfg, "DOWNSAMPLE_HIRES_ENABLED", False)
+    assert decision.compare_album_quality([kept], master)["classification"] == "all_lower"
+    with pytest.raises(AssertionError, match="skip quality compare"):
+        decision.scan_artist_for_upgrades(
+            "Artist", artist_dir, "tok",
+            type("Args", (), {"prefer_hires": True, "no_upgrade": False})(),
+            capped=decision.load_capped())
 
 
 def test_upgrade_scan_offers_only_the_edition_on_disk(tmp_path, monkeypatch):

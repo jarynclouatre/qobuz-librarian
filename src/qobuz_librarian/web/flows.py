@@ -313,6 +313,8 @@ def _refresh_after_local_album_change(
                     "stale",
                     reason=reason,
                 )
+    if (result or {}).get("imported") and result.get("dir"):
+        reseal_past_album_import(result["dir"])
     artist_dir = _artist_dir_from_result(album, result, fallback_artist)
     if artist_dir is None:
         surfaces = []
@@ -1069,7 +1071,8 @@ def _park_library_failures(failed_cands, execute_kind="library",
     elif execute_kind == "upgrade":
         job = job_mgr.Job(title="Albums to upgrade",
                           execute_kind="upgrade",
-                          status=job_mgr.JobStatus.AWAITING_REVIEW)
+                          status=job_mgr.JobStatus.AWAITING_REVIEW,
+                          review_verb="Upgrade")
     elif execute_kind == "repair":
         job = job_mgr.Job(title="Repair scan", kind="scan",
                           execute_kind="repair",
@@ -1221,6 +1224,7 @@ def return_interrupted_picks(job):
             left_out.append(c)
         else:
             unfinished.append(c)
+    unfinished = _resealed_past_own_imports(job, unfinished)
     surface = job.execute_kind
     remove = {
         "upgrade": lambda p: upgrade_state.remove_album_dir(p.get("album_dir")),
@@ -1268,10 +1272,50 @@ def reseal_put_back_album(backup_receipt):
         return candidate_premise.resealed_after_put_back(
             value, backup_receipt, captures)
 
+    _reseal_reviews(fresh_seal)
+
+
+def reseal_after_own_writes(writes):
+    """Seal again the rows and saved results over folders whose only change
+    is the app's own file ``writes``, such as a lyrics pass's tag writes, so
+    Start does not refuse them. Reads file details only."""
+    if writes:
+        _reseal_reviews(candidate_premise.sealer_after_writes(writes))
+
+
+def reseal_past_album_import(album_dir):
+    """Seal again the missing albums whose artist folder changed only by
+    ``album_dir``, a new folder a download filed an album into, so Start does
+    not refuse another album of that artist for it. One that the new folder
+    may hold keeps its old seal. Reads file details only."""
+    album_dir = Path(album_dir)
+    captures = {}
+
+    def fresh_seal(value):
+        premise = candidate_premise.canonical_premise(value)
+        if premise is None or premise["kind"] != "missing":
+            return None
+        path = Path(premise["path"])
+        if album_dir == path or not album_dir.is_relative_to(path):
+            return None
+        if path not in captures:
+            captures[path] = candidate_premise.capture("missing", path)
+        return candidate_premise.resealed_after_own_imports(
+            value, captures[path], {album_dir.relative_to(path).parts[0]})
+
+    def admits(c):
+        path = Path(c["payload"]["_premise"]["path"])
+        return not _may_hold(
+            c, [path / album_dir.relative_to(path).parts[0]])
+
+    _reseal_reviews(fresh_seal, admits)
+
+
+def _reseal_reviews(fresh_seal, admits=None):
     def resealed(c):
         payload = c.get("payload") or {}
         fresh = fresh_seal(payload.get("_premise"))
-        if fresh is None:
+        if fresh is None or (admits is not None and not admits(c)):
             return None
         payload = {**payload, "_premise": fresh}
         if "_gap_fill_receipts" in payload:
@@ -1852,7 +1896,34 @@ def _finished_pass(cp, name):
     return result
 
 
+# The settings a Library refresh's results are computed under.
+_REFRESH_SETTINGS = ("STREAMRIP_QUALITY", "PREFER_HIRES", "SUPPRESS_SINGLE_TRACK_GAPS",
+                     "DOWNSAMPLE_HIRES_ENABLED")
+SETTINGS_WAIT = "Waiting to apply the saved settings"
+
+
+def _apply_saved_refresh_settings(job):
+    """Wait for any job running beside this refresh to finish, when it holds
+    back a change to the settings the refresh's results follow, and apply
+    the change. False when the refresh was stopped meanwhile."""
+    while settings_store.waiting(_REFRESH_SETTINGS):
+        with job_mgr.settings_admission_guard():
+            others = [j for j in job_mgr.registry.executing() if j is not job]
+            if not others:
+                settings_store.drain_pending()
+                return True
+        job.push_progress(SETTINGS_WAIT,
+                          item=f"waiting for {others[0].title} to finish…")
+        if job.cancel_requested:
+            return False
+        time.sleep(1)
+    return True
+
+
 def scan_library(job, token, partial_only=False, force_full=False):
+    if not _apply_saved_refresh_settings(job):
+        job.summary = "Stopped before anything turned up."
+        return
     previous_generation = generation_state.load()
     previous_attempt_status = str(
         (previous_generation.get("latest_attempt") or {}).get("status")
@@ -2026,6 +2097,7 @@ def _scan_library_impl(
     )
     upgrade_refresh = None
     upgrade_refresh_started_at = None
+    offered_before = _offered_upgrades()
     if not job.cancel_requested and cfg.UPGRADE_SCAN_ENABLED:
         upgrade_refresh_started_at = time.time()
         # A resume carries over the upgrade pass the interrupted scan finished.
@@ -2413,6 +2485,7 @@ def _scan_library_impl(
                 )
                 if not upgrade_save_failed:
                     _sync_surface_badge("upgrade")
+                    job.upgrade_finds = len(_offered_upgrades() - offered_before)
             elif upgrade_refresh is None:
                 generation_state.mark_output_status(
                     "upgrade",
@@ -2467,6 +2540,8 @@ def _scan_library_impl(
         job.summary = "No owned albums are missing tracks."
     else:
         job.summary = "No missing albums found for artists in your library."
+    if getattr(job, "upgrade_finds", 0) and not job.cancel_requested:
+        job.summary += " " + upgrade_finds_note(job.upgrade_finds)
     # Artists that errored or came back with a short catalog page aren't in
     # state_artists; the checkpoint stays for them and the last-scan stamp is
     # withheld.
@@ -2541,6 +2616,16 @@ def _scan_library_impl(
         generation_state.finish_attempt(
             attempt_id, "incomplete", f"{named} results were not updated.")
     log.info(job.summary)
+
+
+def _offered_upgrades():
+    return {((c.get("payload") or {}).get("album_id"),
+             (c.get("payload") or {}).get("album_dir"))
+            for c in upgrade_state.visible_candidates()}
+
+
+def upgrade_finds_note(n):
+    return f"{plural(n, 'new album')} can be upgraded."
 
 
 def _parked_new_release_review(exclude=None):
@@ -2812,6 +2897,7 @@ def _note_staging_wait(job, phase, current, total):
 
 
 _WRITTEN_INTO = "_written_into"
+_IMPORTED_INTO = "_imported_into"
 
 
 def _note_written_into(job, cand):
@@ -2827,12 +2913,58 @@ def _note_written_into(job, cand):
     job_persistence.persist(job)
 
 
-def _settle_pick(job, cand):
+def _settle_pick(job, cand, folder=None):
     """Untick a pick the run has imported, so a hard stop does not put it
-    back in the review."""
+    back in the review, and save the folder it was imported into."""
     with job._lock:
         cand["selected"] = False
+        if folder:
+            imported = (job.execute_args or {}).get(_IMPORTED_INTO) or []
+            job.execute_args = {**(job.execute_args or {}),
+                                _IMPORTED_INTO: [*imported, str(folder)]}
     job_persistence.persist(job)
+
+
+def _resealed_past_own_imports(job, picks):
+    """``picks`` with each missing album whose artist folder changed only by
+    the new folders this run imported albums into sealed again, so Start
+    does not refuse it for the run's own downloads. One that a folder named
+    for it, or the files a check before its download would find, may now
+    hold keeps its old seal."""
+    imported = [Path(p) for p in (job.execute_args or {}).get(_IMPORTED_INTO) or ()]
+    if not imported:
+        return picks
+    clear_scan_caches()
+    captures = {}
+    resealed = []
+    for c in picks:
+        path = (candidate_premise.expected_path(c)
+                if candidate_premise.expected_kind(c) == "missing" else "")
+        own = {p.relative_to(path).parts[0] for p in imported
+               if path and p != Path(path) and p.is_relative_to(path)}
+        fresh = None
+        if own:
+            if path not in captures:
+                captures[path] = candidate_premise.capture("missing", path)
+            fresh = candidate_premise.resealed_after_own_imports(
+                (c.get("payload") or {}).get("_premise"), captures[path], own)
+        if fresh is not None and not _may_hold(c, [Path(path) / name for name in own]):
+            c = {**c, "payload": {**c["payload"], "_premise": fresh}}
+        resealed.append(c)
+    return resealed
+
+
+def _may_hold(cand, folders):
+    """Whether ``folders`` are named for the pick's album, or the check run
+    before its download would find its tracks on disk."""
+    if any(catalog.bears_album_title({"title": cand.get("title")}, folder)
+           for folder in folders):
+        return True
+    full = catalog.album_cache.get((cand.get("payload") or {}).get("album_id")) or {}
+    if not (full.get("tracks") or {}).get("items"):
+        return False
+    _existing, found, _missing, present = catalog.find_edition_tracks(full)
+    return found is not None and bool(present)
 
 
 def execute_albums(job, chosen, token):
@@ -2844,7 +2976,7 @@ def execute_albums(job, chosen, token):
     with job._lock:
         job.execute_args = {key: value
                             for key, value in (job.execute_args or {}).items()
-                            if key != _WRITTEN_INTO}
+                            if key not in (_WRITTEN_INTO, _IMPORTED_INTO)}
     args = build_args()
     _benign = {"already_complete", "skipped_already_higher_quality", "dry_run",
                "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras",
@@ -2943,7 +3075,8 @@ def execute_albums(job, chosen, token):
         # other early exit.
         if not job._imported_any:
             return
-        leftovers = failed_cands + [cand] + chosen[processed:]
+        leftovers = _resealed_past_own_imports(
+            job, failed_cands + [cand] + chosen[processed:])
         if is_library_run:
             _remember_review_save(_return_library_picks(leftovers))
         elif is_nr_run:
@@ -3037,7 +3170,7 @@ def execute_albums(job, chosen, token):
             _settle_pick(job, cand)
         elif result and result.get("imported") and result.get("n_ok", 0) > 0:
             job._imported_any = True
-            _settle_pick(job, cand)
+            _settle_pick(job, cand, result.get("dir"))
             _refresh_after_local_album_change(
                 full,
                 result,
@@ -3096,7 +3229,7 @@ def execute_albums(job, chosen, token):
         unrun = chosen[processed:]
         if cancelled_cand is not None:
             unrun = [cancelled_cand] + unrun
-        leftovers = failed_cands + unrun
+        leftovers = _resealed_past_own_imports(job, failed_cands + unrun)
         if leftovers and is_library_run:
             _remember_review_save(_return_library_picks(leftovers))
         elif leftovers and is_nr_run:
@@ -3205,6 +3338,7 @@ def execute_albums(job, chosen, token):
     _apply_non_track_attention()
     if has_issues:
         job.status = job_mgr.JobStatus.FAILED
+    failed_cands = _resealed_past_own_imports(job, failed_cands)
     # A whole-review download (every candidate ticked, nothing re-parked at
     # approval) consumed the entire living review.
     if getattr(job, "_consumed_whole_review", False):
@@ -3274,6 +3408,7 @@ def execute_upgrades(job, chosen, token):
     current_quality_signature = upgrade_state.quality_signature(
         effective.get("STREAMRIP_QUALITY"),
         effective.get("PREFER_HIRES"),
+        effective.get("DOWNSAMPLE_HIRES_ENABLED"),
     )
     expected_quality_signature = (job.execute_args or {}).get(
         "quality_signature"
@@ -5002,13 +5137,17 @@ def run_lyric_retry(job):
         with job_mgr.staging_lock():
             job_mgr.set_staging_holder("Lyrics retry")
             try:
-                counts = lyric_fetch.fetch_for_paths(
-                    existing, owned_root=cfg.MUSIC_ROOT, log=log,
-                    providers=cfg.LYRICS_PROVIDERS or None,
-                    lyrics_format=cfg.LYRICS_FORMAT,
-                    state_path=cfg.LYRIC_FETCH_STATE_FILE,
-                    should_stop=lambda: job.cancel_requested,
-                )
+                with lyric_fetch.recording_writes() as written:
+                    try:
+                        counts = lyric_fetch.fetch_for_paths(
+                            existing, owned_root=cfg.MUSIC_ROOT, log=log,
+                            providers=cfg.LYRICS_PROVIDERS or None,
+                            lyrics_format=cfg.LYRICS_FORMAT,
+                            state_path=cfg.LYRIC_FETCH_STATE_FILE,
+                            should_stop=lambda: job.cancel_requested,
+                        )
+                    finally:
+                        reseal_after_own_writes(written)
             finally:
                 job_mgr.set_staging_holder(None)
     except Exception as e:
@@ -5086,8 +5225,13 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     with job_mgr.staging_lock():
         job_mgr.set_staging_holder("Lyrics scan")
         try:
-            res = lyrics.run_library_lyrics(rescan=rescan, synced_only=synced_only,
-                         should_stop=lambda: job.cancel_requested, log=log)
+            with lyric_fetch.recording_writes() as written:
+                try:
+                    res = lyrics.run_library_lyrics(
+                        rescan=rescan, synced_only=synced_only,
+                        should_stop=lambda: job.cancel_requested, log=log)
+                finally:
+                    reseal_after_own_writes(written)
         finally:
             job_mgr.set_staging_holder(None)
 

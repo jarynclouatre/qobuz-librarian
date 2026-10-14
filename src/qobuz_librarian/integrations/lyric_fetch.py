@@ -1079,6 +1079,31 @@ def _fd_has_content(fd: int, expected: bytes) -> bool:
     return os.read(fd, 1) == b""
 
 
+_journal_lock = threading.Lock()
+_journals: list[dict] = []
+
+
+@contextmanager
+def recording_writes():
+    """Collect every file this module rewrites, creates or removes while the
+    block runs, as ``{path: (before, after)}`` with ``None`` for absent."""
+    journal: dict = {}
+    with _journal_lock:
+        _journals.append(journal)
+    try:
+        yield journal
+    finally:
+        with _journal_lock:
+            _journals[:] = [j for j in _journals if j is not journal]
+
+
+def _note_write(path, before, after) -> None:
+    key = os.path.abspath(os.fspath(path))
+    with _journal_lock:
+        for journal in _journals:
+            journal[key] = (journal.get(key, (before,))[0], after)
+
+
 def _emit_receipt(output, receipt) -> None:
     if isinstance(output, dict):
         output.clear()
@@ -1508,6 +1533,7 @@ def save_flac_tags(
             or not commit_is_allowed()
         ):
             raise OSError(f"{path.name}: replacement identity couldn't be proved")
+        _note_write(path, before, after)
         _emit_receipt(identity_change_out, {
             "path": os.path.abspath(os.fspath(path)),
             "before": before,
@@ -1742,6 +1768,7 @@ def write_sidecar(
                 "file": published_identity,
             })
             receipt_emitted = True
+            _note_write(target, None, published_identity)
         else:
             if (
                 _regular_identity(os.fstat(existing_fd)) != existing_identity
@@ -1764,6 +1791,8 @@ def write_sidecar(
                 post_exchange_guard=track_guard,
             )
             temp_name = None
+            if replaced is not None:
+                _note_write(target, existing_identity, replaced)
             if (
                 replaced is None
                 or (track_guard is not None and track_guard() is not True)
@@ -2646,13 +2675,16 @@ def _remove_written_sidecar(path: Path, binding: _BoundTrack, expected: str) -> 
         while chunk := os.read(descriptor, 1024 * 1024):
             chunks.append(chunk)
         content = b"".join(chunks).decode("utf-8", errors="replace")
-        return (
+        removed = (
             identity is not None
             and content == expected
             and binding.exact_track_is_named()
             and _unlink_held_name(
                 binding.parent_fd, name, descriptor, identity)
         )
+        if removed:
+            _note_write(path.with_suffix(".lrc"), identity, None)
+        return removed
     finally:
         os.close(descriptor)
 

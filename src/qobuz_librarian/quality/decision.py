@@ -9,6 +9,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError
 from qobuz_librarian.api.search import get_album, get_artist_albums
+from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.library import catalog as catalog_mod
 from qobuz_librarian.library import discovery
 from qobuz_librarian.library import hidden as hidden_mod
@@ -25,7 +26,7 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
 )
 from qobuz_librarian.library.tags import similarity, strip_album_decorations
-from qobuz_librarian.quality.tiers import streamrip_quality_cap
+from qobuz_librarian.quality.tiers import downsample_target_rate, streamrip_quality_cap
 from qobuz_librarian.ui_cli.logging import vlog
 
 
@@ -58,6 +59,28 @@ def album_max_quality(qobuz_album, tier=None):
     bd = min(bd, cap_bd) if bd else 0
     sr_hz = min(sr_hz, cap_sr) if sr_hz else 0
     return (bd, sr_hz)
+
+
+def track_targets(tracks, qobuz_album, tier=None):
+    """The (bit_depth, sample_rate_hz) Qobuz can provide for each of
+    ``tracks``, capped to the streamrip quality tier: that of the Qobuz track
+    it matches, as the album's own figure can be above or below its tracks',
+    or the album's for a track Qobuz does not match or rate."""
+    album_best = album_max_quality(qobuz_album, tier)
+    qobuz_tracks = (qobuz_album.get("tracks") or {}).get("items") or []
+    targets = []
+    for match in catalog_mod.qobuz_tracks_for(tracks, qobuz_tracks):
+        best = album_max_quality(match, tier) if match else (0, 0)
+        targets.append(best if best[0] and best[1] else album_best)
+    return targets
+
+
+def downsampling(enabled=None):
+    """Whether new downloads are brought down to 44.1 or 48 kHz: the
+    Downsample setting, or ``enabled`` in its place, is on and the resampler
+    is installed."""
+    enabled = cfg.DOWNSAMPLE_HIRES_ENABLED if enabled is None else enabled
+    return bool(enabled) and downsample_engine.HAVE_DOWNSAMPLE
 
 
 def existing_track_quality(track):
@@ -99,7 +122,9 @@ def quality_relation(left, right):
 
 
 def compare_album_quality(existing_tracks, qobuz_album):
-    """Classify per-track quality of existing tracks vs the Qobuz album. Returns
+    """Classify per-track quality of existing tracks vs what Qobuz offers for
+    each (track_targets), at the rate Downsample keeps while it is on;
+    ``qobuz_quality`` is the best of those. Returns
     dict with classification (str) and counts. Classifications: 'no_existing'
     : existing list is empty 'unknown' : couldn't read quality from any
     existing track 'all_lower' : every readable track is below Qobuz quality
@@ -111,12 +136,17 @@ def compare_album_quality(existing_tracks, qobuz_album):
     result containing unknown or incomparable quality is never classified as
     an automatic upgrade candidate.
     """
-    qbits, qrate = album_max_quality(qobuz_album)
+    targets = track_targets(existing_tracks, qobuz_album)
+    if downsampling():
+        # Measured against what a download keeps once Downsample has run, so
+        # a downsampled album is not offered its hi-res master again.
+        targets = [(bits, downsample_target_rate(rate)) for bits, rate in targets]
+    qbits, qrate = max(targets) if targets else album_max_quality(qobuz_album)
     n_below = n_at = n_above = n_unknown = n_incomparable = 0
 
-    for t in existing_tracks:
+    for t, target in zip(existing_tracks, targets):
         ebits, erate = existing_track_quality(t)
-        relation = quality_relation((ebits, erate), (qbits, qrate))
+        relation = quality_relation((ebits, erate), target)
         if relation == "unknown":
             n_unknown += 1
         elif relation == "lower":
@@ -428,7 +458,7 @@ def _same_edition_upgrade(album, existing, folder, catalog, artist_name, token, 
         except QobuzError:
             continue
         tracks = (full.get("tracks") or {}).get("items") or []
-        if (tracks and catalog_mod.same_edition(full, existing, folder)
+        if (tracks and catalog_mod.same_edition(full, existing, folder, token)
                 and not find_extras_in_existing(tracks, existing)
                 and compare_album_quality(existing, full)["classification"] in upgrades):
             return full
@@ -495,8 +525,10 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
         if qobuz_album is None or not is_lossless_album(qobuz_album):
             continue
 
-        # Skip albums Qobuz can't actually deliver at target.
-        if capped and is_local_album_capped(album_dir, capped, qobuz_album):
+        # Skip albums Qobuz can't actually deliver at target. One the user
+        # downsampled is offered again once Downsample is off.
+        if (capped and downsampling()
+                and is_local_album_capped(album_dir, capped, qobuz_album)):
             vlog(f"    {album_dir.name}: capped (locally downsampled)")
             continue
         if capped and is_album_capped(qobuz_album.get("id"), capped):
@@ -568,7 +600,7 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
                     break
             if not swapped:
                 continue
-        elif not catalog_mod.same_edition(qobuz_album, existing, folder):
+        elif not catalog_mod.same_edition(qobuz_album, existing, folder, token):
             qobuz_album = _same_edition_upgrade(
                 qobuz_album, existing, folder, catalog, artist_name, token, capped)
             if qobuz_album is None:

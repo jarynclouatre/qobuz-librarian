@@ -1,4 +1,5 @@
 {% macro census_body() %}
+<div id="library-census-body"{% if census_oob %} hx-swap-oob="true"{% endif %}>
   <div class="ql-census-bar" aria-hidden="true">
     {% for seg in census.bar %}<i class="ql-census-seg-{{ seg.key }}" style="flex-basis: {{ seg.pct }}%"></i>{% endfor %}
   </div>
@@ -23,15 +24,19 @@
   <p class="ql-census-foot">Downsampling the files above 48 kHz would reclaim about <b>{{ census.reclaim }}</b>. <a href="/downsample" class="ql-inline-link">Review albums</a></p>
   {% endif %}
   <p class="ql-census-foot">Counts are from your last library scan and the app's own changes since.</p>
+</div>
 {% endmacro %}
-{% if census %}
+{% if census and census_oob %}
+<span id="library-census-total" class="ql-census-total" hx-swap-oob="true">{{ census.total }}</span>
+{{ census_body() }}
+{% elif census %}
 {% if census_folded %}
 {# Above the review as one collapsed line: content below the auto-loading
    list would keep drifting out of reach as more artists stream in. #}
 <details class="ql-census ql-census-fold">
   <summary class="ql-census-head ql-census-fold-summary">
     <p class="ql-scan-panel-title">What's on disk</p>
-    <span class="ql-census-total">{{ census.total }}</span>
+    <span id="library-census-total" class="ql-census-total">{{ census.total }}</span>
   </summary>
   {{ census_body() }}
 </details>
@@ -39,7 +44,7 @@
 <section class="ql-census">
   <div class="ql-census-head">
     <p class="ql-scan-panel-title">What's on disk</p>
-    <span class="ql-census-total">{{ census.total }}</span>
+    <span id="library-census-total" class="ql-census-total">{{ census.total }}</span>
   </div>
   {{ census_body() }}
 </section>

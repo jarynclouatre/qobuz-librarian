@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
@@ -169,6 +170,14 @@ def _durable_premises_match(saved: dict, current: dict | None) -> bool:
         and saved["path"] == current.get("path")
         and durable_receipts_match(saved["receipt"], current["receipt"])
     )
+
+
+def same_files(first, second) -> bool:
+    """Whether two saved seals hold the same files, however the mounts were
+    numbered when each was taken."""
+    first = canonical_premise(first)
+    return first is not None and _durable_premises_match(
+        first, canonical_premise(second))
 
 
 def _durable_generations_match(saved, current) -> bool:
@@ -518,6 +527,92 @@ def resealed_after_put_back(value, backup_receipt, captures):
             != _names_sizes_times(source["tree"])):
         return None
     return fresh
+
+
+def resealed_after_own_imports(value, fresh, folders):
+    """``fresh``, a capture of a missing album's artist folder, as the new
+    seal for a row sealed over it as ``value``, when everything sealed is
+    unchanged and all that was added is the new top-level ``folders`` a run
+    imported albums into. None otherwise, or when nothing changed."""
+    premise = canonical_premise(value)
+    if (premise is None or premise["version"] != PREMISE_VERSION
+            or premise["kind"] != "missing" or fresh is None
+            or _durable_premises_match(premise, fresh)):
+        return None
+    folders = set(folders)
+
+    def outside(receipt):
+        def keep(entries):
+            return {relative: entry for relative, entry in entries.items()
+                    if relative.split("/", 1)[0] not in folders}
+        tree = receipt["tree"]
+        return {**receipt,
+                "tree": {**tree, "directories": keep(tree["directories"]),
+                         "files": keep(tree["files"])},
+                "directory_generations": keep(receipt["directory_generations"])}
+
+    sealed = premise["receipt"]
+    if premise["path"] != fresh["path"] or outside(sealed) != sealed:
+        return None
+    return fresh if durable_receipts_match(sealed, outside(fresh["receipt"])) else None
+
+
+def _sealed_file(identity):
+    if identity is None:
+        return None
+    return {
+        "identity": [stat.S_IFREG, identity["device"], identity["inode"]],
+        "size": identity["size"],
+        "mtime_ns": identity["modified_ns"],
+        "changed_ns": identity["changed_ns"],
+    }
+
+
+def sealer_after_writes(writes):
+    """``resealed_after_writes`` for one set of writes, sharing captures."""
+    captures = {}
+    return lambda value: resealed_after_writes(value, writes, captures)
+
+
+def resealed_after_writes(value, writes, captures):
+    """A fresh seal for a row whose folder changed only by ``writes``, the
+    app's own file writes as ``{path: (before, after)}``, or None.
+
+    Every written file must have been exactly as sealed before the write and
+    be exactly as written now, and nothing else in the folder may differ, so
+    a hand edit anywhere in it still refuses the row.
+    """
+    premise = canonical_premise(value)
+    if premise is None or premise["version"] != PREMISE_VERSION:
+        return None
+    root = Path(premise["path"])
+    touched = {}
+    for path, change in writes.items():
+        path = Path(path)
+        if path != root and path.is_relative_to(root):
+            touched[path.relative_to(root).as_posix()] = change
+    if not touched:
+        return None
+    key = (premise["kind"], premise["path"])
+    if key not in captures:
+        captures[key] = capture(*key)
+    fresh = captures[key]
+    if fresh is None or _durable_premises_match(premise, fresh):
+        return None
+    sealed = premise["receipt"]
+    files = dict(sealed["tree"]["files"])
+    try:
+        for relative, (before, after) in touched.items():
+            if files.get(relative) != _sealed_file(before):
+                return None
+            if after is None:
+                files.pop(relative, None)
+            else:
+                files[relative] = _sealed_file(after)
+    except (KeyError, TypeError, ValueError):
+        return None
+    expected = {**sealed, "tree": {**sealed["tree"], "files": files}}
+    return fresh if durable_receipts_match(expected, fresh["receipt"]) else None
 
 
 def _names_sizes_times(tree):

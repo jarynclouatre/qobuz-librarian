@@ -168,11 +168,17 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     have new inodes, at start-up or during the run. A put-back by the
     terminal before the app started left its pick out altogether. Picks
     whose files still match return ticked, the ones the app put back sealed
-    again; the changed one leaves the review and the saved results."""
+    again; the changed one leaves the review and the saved results. A
+    restart numbers the mounts afresh, so a refresh after it seals the same
+    files differently, and reopening the review from Upgrade then unticked
+    every returned pick. A pick whose files changed outside the app comes
+    back unticked once a refresh seals it again."""
+    import copy
+
     from qobuz_librarian.library import backup as backup_mod
     from qobuz_librarian.library import candidate_premise, generation_state
     from qobuz_librarian.quality import upgrade_state
-    from qobuz_librarian.web import flows, job_runs, lifespan
+    from qobuz_librarian.web import flows, job_runs, lifespan, saved_reviews
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
@@ -196,12 +202,16 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
                       "payload": {"album_id": title, "album_dir": str(album),
                                   "_premise": candidate_premise.capture(
                                       "upgrade", album)}})
+    generation = generation_state.commit_catalog_generation(
+        generation_state.begin_attempt())["generation"]
     revision = generation_state.reserve_revision()
     assert upgrade_state._write_state({
         **upgrade_state._store.empty_state(), "complete": True,
-        "revision": revision, "candidates": specs})
+        "generation": generation, "revision": revision, "candidates": specs,
+        "quality_signature":
+            saved_reviews._effective_upgrade_quality_signature()})
     assert generation_state.mark_output_current(
-        "upgrade", generation=0, revision=revision)
+        "upgrade", generation=generation, revision=revision)
     run = Job(title=jm.RUN_TITLES["upgrade"], kind="scan",
               execute_kind="upgrade", status=JobStatus.RUNNING)
     for spec in specs:
@@ -236,15 +246,39 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     assert [c["title"] for c in upgrade_state.load()["candidates"]] == [
         "Not started", "Put back during the run", "Put back by the terminal"]
     assert jm.registry.get(run.id).status is JobStatus.FAILED
+    assert review.review_verb == "Upgrade"
+
+    def renumbered(premise):
+        premise = copy.deepcopy(premise)
+        receipt = premise["receipt"]
+        for identity in (*receipt["path_generations"],
+                         *receipt["directory_generations"].values()):
+            identity[6] += 1000
+        return premise
+
+    assert upgrade_state.reseal(renumbered)
+    reopened = saved_reviews._review_job_from_current_saved_state("upgrade")
+    assert reopened is review
+    assert all(c["selected"] for c in review.candidates)
+    for c in review.candidates[:2]:
+        candidate_premise.validate(c)
+
+    (cfg.MUSIC_ROOT / "Artist" / "Not started" / "01.flac").write_bytes(b"edited")
+    assert upgrade_state.reseal(
+        lambda premise: candidate_premise.capture("upgrade", premise["path"]))
+    assert saved_reviews._review_job_from_current_saved_state("upgrade") is review
+    assert [c["selected"] for c in review.candidates] == [False, True, False]
 
 
 def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, tagged_flac):
     """A missing album is sealed over its whole artist folder, so after the
     app was killed mid-run every ticked album by an artist the run had
     already downloaded for was taken for changed on disk and lost from the
-    review and the saved Library results. Those come back; the downloaded
-    one does not, and one whose folder changed outside the run still leaves."""
+    review and the saved Library results. Those come back, sealed again
+    unless the run's download may hold them; the downloaded one does not,
+    and one whose folder changed outside the run still leaves. A later
+    download of another album, from Search, made Start refuse them again."""
     from qobuz_librarian.library import (
         candidate_premise,
         generation_state,
@@ -273,6 +307,7 @@ def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(
         folder = cfg.MUSIC_ROOT / artist
         (folder / "Owned").mkdir(parents=True)
         (folder / "Owned" / "01.flac").write_bytes(b"x")
+        tagged_flac(folder / "Owned" / "02.flac", title="Song", artist=artist)
         premise = candidate_premise.capture("missing", folder)
         rows = [{"artist": artist, "title": album,
                  "payload": {"album_id": album, "_artist_dir_path": str(folder),
@@ -295,7 +330,7 @@ def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(
     def process_album(album, *_args, **_kwargs):
         if album["id"] == "B":
             raise HardStop
-        album_dir = cfg.MUSIC_ROOT / "Artist" / album["id"]
+        album_dir = cfg.MUSIC_ROOT / "Artist" / "C (2001)"
         album_dir.mkdir()
         (album_dir / "01.flac").write_bytes(b"y")
         return {"imported": True, "n_ok": 1, "n_fail": 0,
@@ -327,6 +362,42 @@ def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(
             for entry in library_scan_state.kind_state("missing")[
                 "artists"].values()
             for c in entry["candidates"]] == ["B", "C"]
+    stale = candidate_premise.stale_candidate_ids(
+        review.candidates, share_artist_captures=True)
+    assert [c["title"] for c in review.candidates if c["cid"] in stale] == ["C"]
+
+    # Another album of the artist that a download files beside them leaves
+    # B startable too.
+    album_dir = cfg.MUSIC_ROOT / "Artist" / "E (2005)"
+    album_dir.mkdir()
+    tagged_flac(album_dir / "01.flac", title="Other", artist="Artist")
+    flows.reseal_past_album_import(album_dir)
+    stale = candidate_premise.stale_candidate_ids(review.candidates)
+    assert [c["title"] for c in review.candidates if c["cid"] in stale] == ["C"]
+
+    # Lyrics the app writes into the artist's albums leave B startable,
+    # saved for the next start too. A hand edit beside them does not.
+    from qobuz_librarian.integrations import lyric_fetch
+    from qobuz_librarian.library import lyrics
+
+    monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
+    monkeypatch.setattr(lyrics, "HAVE_LYRICS", True)
+    monkeypatch.setattr(cfg, "LYRICS_FORMAT", "both")
+    monkeypatch.setattr(cfg, "LYRIC_FETCH_STATE_FILE", tmp_path / "lyrics.json")
+    for words, edit in (("[00:00.50]words", False), ("[00:00.50]more", True)):
+        monkeypatch.setattr(lyric_fetch, "search_lyrics", lambda *_a, **_k: (
+            words, "Lrclib", "synced", 1, 0))
+        if edit:
+            (cfg.MUSIC_ROOT / "Artist" / "Owned" / "01.flac").write_bytes(b"x2")
+        flows.run_library_lyrics(
+            Job(title="Lyrics scan"), rescan=True)
+        stale = candidate_premise.stale_candidate_ids(review.candidates)
+        assert [c["title"] for c in review.candidates
+                if c["cid"] in stale] == (["B", "C"] if edit else ["C"])
+        assert job_persistence.load_one(review.id)["candidates"] == (
+            review.candidates)
+    assert (cfg.MUSIC_ROOT / "Artist" / "Owned" / "02.lrc").read_text() == (
+        "[00:00.50]more")
 
 
 def test_a_provider_error_never_reaches_the_stored_job_record(

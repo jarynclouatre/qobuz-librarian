@@ -172,6 +172,15 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
               {**_qalbum("Wolf", 2014), "version": "Instrumental"}, _qalbum("Wolf", 2013)]
     assert [(a["title"], a.get("version"), n) for a, n in dedup_album_versions(albums)] == [
         ("Wolf", None, 3), ("Strictly Instrumental", None, 1)]
+    # A label the title normaliser strips still marks one; an artist-named
+    # collection is not the self-titled album's instrumental edition.
+    albums = [_qalbum("Mojo Hand", 1962), _qalbum("Mojo Hand (Acapella)", 2023),
+              _qalbum("Mojo Hand (Karaoke Version)", 2024)]
+    assert [(a["title"], n) for a, n in dedup_album_versions(albums)] == [("Mojo Hand", 3)]
+    heat = {"artist": {"name": "Canned Heat"}}
+    albums = [{**_qalbum("Canned Heat", 1967), **heat},
+              {**_qalbum("Canned Heat Instrumentals", 2019), **heat}]
+    assert len(dedup_album_versions(albums)) == 2
 
     pairs = [({"title": "Reload", "release_date_original": "1997"}, 1),
              ({"title": "Album (Deluxe Edition)", "release_date_original": "2010"}, 1)]
@@ -414,19 +423,37 @@ def test_edition_ownership_keeps_recording_versions(tmp_path, monkeypatch):
     assert not catalog.same_edition(whole, deluxe_files[:1], plain_folder)
     assert not catalog.same_edition(
         {**whole, "version": "Deluxe Edition / 2023 Remaster"}, deluxe_files, deluxe_folder)
+    # Holding all but one of its tracks, the files are the deluxe edition
+    # only when the artist's catalogue rules out a smaller one.
+    songs = [{**old_track, "id": f"s{i}", "title": f"Song {i}", "isrc": f"GBAAA00001{i:02d}"}
+             for i in range(11)]
+    eleven = {**whole, "tracks": {"items": songs}}
+    ten = [{**original, "title": t["title"], "isrc": t["isrc"]} for t in songs[:10]]
+    monkeypatch.setattr(catalog.album_cache, "get_catalog", lambda *_args: {"items": [
+        {"title": "Album", "version": "Deluxe Edition", "tracks_count": 11}]})
+    assert catalog.same_edition(eleven, ten, plain_folder)
+    monkeypatch.setattr(catalog.album_cache, "get_catalog", lambda *_args: None)
+    assert not catalog.same_edition(eleven, ten, plain_folder)
+    # With none cached, it is fetched for the album's own artist.
+    asked = []
+    monkeypatch.setattr(catalog.qobuz_search, "get_artist_albums", lambda artist_id, *_a, **_k: (
+        asked.append(artist_id) or [{"title": "Album", "tracks_count": 11}], 1))
+    assert catalog.same_edition({**eleven, "artist": {"id": 7}}, ten, plain_folder, "tok")
+    assert asked == [7]
 
-    # Another version of a song the folder holds is a bonus; a song the
-    # folder lacks, a title that only starts the same, or the same song
-    # remastered or mixed again, is not.
+    # Another version of a song the folder holds is a bonus, remastered or
+    # not; a song the folder lacks, a title that only starts the same, or
+    # the same song remastered or mixed again, is not.
     held = [{"title": "Footprints"}, {"title": "Kraf Dinner", "version": "Album Version"}]
     wanted = [{"title": "Footprints", "version": "Remix"},
               {"title": "Kraf Dinner (Demo) (Album Version)"},
+              {"title": "Footprints", "version": "Mono Remastered"},
               {"title": "Footprints Part 2"}, {"title": "Footprints"},
               {"title": "Bonita Applebum (Remix)"},
               {"title": "Footprints", "version": "Reprise / Remastered"},
               {"title": "Footprints (Remastered Version)"},
               {"title": "Footprints", "version": "Stereo Mix 2015"}]
-    assert catalog.bonus_versions(wanted, held) == wanted[:2]
+    assert catalog.bonus_versions(wanted, held) == wanted[:3]
 
 
 def test_publishing_a_migration_directory_never_closes_a_reused_number(

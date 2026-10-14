@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import qobuz_librarian.config as config
-from qobuz_librarian.quality import verify
+from qobuz_librarian.quality import decision, verify
 
 
 class _FakeDir:
@@ -39,6 +39,18 @@ def test_one_low_track_among_good_is_under(monkeypatch):
     _patch(monkeypatch, [{"bits": 24, "sample_rate": 96000}], tier=3)
     top = {"maximum_bit_depth": 24, "maximum_sampling_rate": 192.0}
     assert verify.rip_shortfall([_FakeDir()], top)["under"] is False
+    # A bonus disc that tops out below its album is held to its own best:
+    # the album's would mark it short, and Upgrade offer it, for ever.
+    live = {"title": "Song (Live)", "isrc": "US0000000002",
+            "maximum_bit_depth": 24, "maximum_sampling_rate": 96.0}
+    deluxe = {**top, "tracks": {"items": [
+        {**top, "title": "Song", "isrc": "US0000000001"}, live]}}
+    served = {"title": "Song (Live)", "isrc": live["isrc"],
+              "bits": 24, "sample_rate": 96000}
+    _patch(monkeypatch, [served], tier=4)
+    assert verify.rip_shortfall([_FakeDir()], deluxe)["under"] is False
+    assert decision.compare_album_quality(
+        [served], deluxe)["classification"] == "all_equal"
 
 
 def test_redownload_fallback_restores_first_rip_when_retry_less_complete(

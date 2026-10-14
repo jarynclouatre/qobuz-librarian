@@ -5,7 +5,7 @@ import threading
 
 from fastapi.responses import RedirectResponse
 
-from qobuz_librarian.library import downsample_state, generation_state
+from qobuz_librarian.library import candidate_premise, downsample_state, generation_state
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.web import (
     job_labels,
@@ -79,6 +79,7 @@ def _effective_upgrade_quality_signature():
     return upgrade_state.quality_signature(
         values.get("STREAMRIP_QUALITY"),
         values.get("PREFER_HIRES"),
+        values.get("DOWNSAMPLE_HIRES_ENABLED"),
     )
 
 
@@ -156,7 +157,15 @@ def _canonical_json(value):
 
 
 def _saved_review_key(surface, spec):
-    return _canonical_json(_saved_review_row(surface, spec))
+    """The album folder a saved row acts on. A refresh seals it again and
+    may rewrite its details, and the album stays the same."""
+    row = _saved_review_row(surface, spec)
+    payload = row["payload"]
+    if surface == "upgrade" and payload.get("album_id") and payload.get("album_dir"):
+        return "album", str(payload["album_id"]), payload["album_dir"]
+    if surface == "downsample" and payload.get("album_dir"):
+        return "album", payload["album_dir"]
+    return "row", _canonical_json(row)
 
 
 def _saved_review_claim_key(surface, spec):
@@ -317,11 +326,27 @@ def _candidate_from_saved_spec(surface, spec, *, cid, seq, selected):
     }
 
 
+def _same_offer(shown, saved):
+    """Whether a saved row offers what the review showed, on the same files."""
+    def offer(row):
+        payload = {key: value for key, value in (row.get("payload") or {}).items()
+                   if key != "_premise"}
+        return row.get("title"), row.get("artist"), row.get("detail"), payload
+
+    if offer(shown) != offer(saved):
+        return False
+    before = (shown.get("payload") or {}).get("_premise")
+    after = (saved.get("payload") or {}).get("_premise")
+    return before == after or candidate_premise.same_files(before, after)
+
+
 def _sync_saved_review_job(job, surface, state, signature):
     """Bring an existing saved-state review job back in line after restore/hide.
 
-    The job is the user's live review session, so preserve ticks for candidates
-    that still exist and add restored saved candidates unticked.
+    The job is the user's live review session, so preserve ticks for albums
+    still offered as they were shown, on the same files, and take the seal
+    the saved results now hold. A row whose files or offer changed comes back
+    unticked, and so do restored saved candidates.
     """
     desired = list(state.get("candidates") or [])
 
@@ -356,10 +381,11 @@ def _sync_saved_review_job(job, surface, state, signature):
                 seq = job._cand_seq
                 job._cand_seq += 1
                 selected = False
-            rebuilt.append(
-                _candidate_from_saved_spec(
-                    surface, spec, cid=cid, seq=seq, selected=selected)
-            )
+            row = _candidate_from_saved_spec(
+                surface, spec, cid=cid, seq=seq, selected=selected)
+            if selected and not _same_offer(old, row):
+                row["selected"] = False
+            rebuilt.append(row)
         job.candidates = rebuilt
         job._saved_review_signature = signature
         if surface == "upgrade":
@@ -427,6 +453,34 @@ def _sync_saved_review_before_approve(job):
             },
         )
         return job if review_signature == saved_signature else False
+
+
+def open_saved_review(job):
+    """The review to show for ``job`` opened by its own link, such as from
+    History: a parked Upgrade or Downsample review brought in line with the
+    saved results as the Review button on its page does, or the review that
+    already is."""
+    surface = job.execute_kind
+    if (surface not in _SAVED_REVIEW_TITLES
+            or job.status != job_mgr.JobStatus.AWAITING_REVIEW
+            or (getattr(job, "_saved_review_signature", None) is None
+                and not _is_saved_review_title(surface, job.title))):
+        return job
+    with _SAVED_REVIEW_LOCK:
+        state = (
+            _upgrade_state_summary()
+            if surface == "upgrade"
+            else _downsample_state_summary()
+        )
+        if (not state["complete"] or not state["candidates"]
+                or state.get("stale") and surface == "upgrade"
+                or _active_saved_review_claim(surface, state) is not None):
+            return job
+        signature = _saved_review_signature(surface, state)
+        existing = _existing_saved_review_job(surface, signature)
+        if existing is not None:
+            return existing
+        return _sync_saved_review_job(job, surface, state, signature) or job
 
 
 def _review_job_from_upgrade_state(state):

@@ -1063,7 +1063,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     return {"result": "skipped_has_extras",
                             "n_total": len(qobuz_tracks),
                             "n_extras": len(extras)}
-            elif not catalog.same_edition(album, existing, album_dir):
+            elif not catalog.same_edition(album, existing, album_dir, token):
                 log.info(fmt(C.YELLOW,
                     f"\n  ⚠  Not upgrading: the {target_label} copy on Qobuz is "
                     f"another version ({catalog._release_title(album)})."))

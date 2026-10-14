@@ -147,6 +147,9 @@ def plan_durable_new_album(
     bits, rate = album_max_quality(album, effective_tier)
     if type(bits) is not int or type(rate) is not int or bits <= 0 or rate <= 0:
         return None
+    # Qobuz rates each track, and its album figure can differ from them.
+    targets = [album_max_quality(track, effective_tier) for track in tracks]
+    targets = [(b, r) if b and r else (bits, rate) for b, r in targets]
     if check_beets:
         # Late: only an album that qualifies so far needs the Beets
         # integration, whose check runs Beets to read its config.
@@ -161,7 +164,7 @@ def plan_durable_new_album(
         requested_slots=slots,
         baseline_slots=(),
         quality_targets=tuple(
-            QualityTarget(slot, bits, rate) for slot in slots
+            QualityTarget(slot, *target) for slot, target in zip(slots, targets)
         ),
     )
     backup_kind = (

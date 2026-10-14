@@ -988,7 +988,8 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
 
 def test_settings_saves_wait_for_running_jobs_and_never_drop_another_change(
         tmp_path, monkeypatch):
-    """An in-flight job must not see cfg.* flip mid-run. Two saves at once
+    """An in-flight job must not see cfg.* flip mid-run, and a Library refresh
+    waits for it so its results follow the saved quality. Two saves at once
     both land. The terminal saved a new download quality while the web app
     stayed open, and the next web Settings save put the old quality back."""
     import threading
@@ -1010,6 +1011,22 @@ def test_settings_saves_wait_for_running_jobs_and_never_drop_another_change(
     assert cfg.DOWNSAMPLE_HIRES_ENABLED is True
     ss.drain_pending()
     assert cfg.DOWNSAMPLE_HIRES_ENABLED is True  # idempotent
+
+    # A Library refresh started meanwhile saved its results under the old
+    # quality. It now waits for the running job, then applies the change.
+    from qobuz_librarian.web import flows
+    monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 2)
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    download = jm.Job(title="Download", status=jm.JobStatus.RUNNING)
+    jm.registry.add(download)
+    ss.save({"STREAMRIP_QUALITY": "3"})
+    stopped = jm.Job(title="Library scan")
+    stopped.cancel_requested = True
+    assert flows._apply_saved_refresh_settings(stopped) is False
+    assert cfg.STREAMRIP_QUALITY == 2
+    download.status = jm.JobStatus.DONE
+    assert flows._apply_saved_refresh_settings(jm.Job(title="Library scan"))
+    assert cfg.STREAMRIP_QUALITY == 3
 
     monkeypatch.setattr(ss, "SETTINGS_FILE", tmp_path / "s.json")
     monkeypatch.setattr(ss, "_any_active_job", lambda: False)
@@ -1333,7 +1350,9 @@ def test_upgrade_saved_review_respects_hidden_candidates_and_clears_its_dot(
         client, monkeypatch, tmp_path):
     """Hiding an artist in the saved Upgrade review drops its rows from the
     review and the count, reopening reuses the same review, and opening
-    Upgrade clears its review dot."""
+    Upgrade clears its review dot. Opened from History or a job link after a
+    refresh changed a ticked row, the review refused every approval until it
+    was reopened from Upgrade; its own page now brings it in line."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import hidden
     from qobuz_librarian.web import job_persistence, qobuz_access, review_badges, saved_reviews
@@ -1392,6 +1411,13 @@ def test_upgrade_saved_review_respects_hidden_candidates_and_clears_its_dot(
         j for j in job_mgr.registry.awaiting_review()
         if j.execute_kind == "upgrade"
     ]) == 1
+
+    state["candidates"][0] = {**state["candidates"][0],
+                              "detail": "16-bit/44.1 kHz -> 24-bit/192 kHz"}
+    assert saved_reviews._sync_saved_review_before_approve(job) is False
+    assert client.get(f"/jobs/{job.id}").status_code == 200
+    assert saved_reviews._sync_saved_review_before_approve(job) is job
+    assert [c["selected"] for c in job.candidates] == [False]
 
 
 def test_duplicate_qobuz_approval_queues_once(client, monkeypatch):

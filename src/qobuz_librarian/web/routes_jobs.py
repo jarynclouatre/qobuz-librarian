@@ -94,6 +94,16 @@ async def job_page(request: Request, job_id: str,
             params["q"] = q
         query = ("?" + urllib.parse.urlencode(params)) if params else ""
         return RedirectResponse(url=f"/library{query}", status_code=303)
+    if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
+            and job.execute_kind in ("upgrade", "downsample")
+            and job_mgr.registry.get(job.id) is job):
+        loop = asyncio.get_running_loop()
+        shown = await loop.run_in_executor(
+            None, lambda: saved_reviews.open_saved_review(job))
+        if shown is not job:
+            query = f"?{request.url.query}" if request.url.query else ""
+            return RedirectResponse(url=f"/jobs/{shown.id}{query}",
+                                    status_code=303)
     review_badge_ack = _review_badge_ack_for(job)
     nav_page, _return_href, _return_label = job_labels._job_nav_destination(job)
     shown_attention = job.attention
@@ -333,7 +343,8 @@ async def job_approve(request: Request, job_id: str):
             if selected_candidate_ids <= stale_premise_candidate_ids:
                 stale_message = await loop.run_in_executor(
                     None, lambda: _all_stale_message_for(
-                        job, stale_premise_candidate_ids.counts))
+                        job, stale_premise_candidate_ids.counts,
+                        selected_candidate_snapshot))
                 return RedirectResponse(
                     url=dest + "?error=" + rendering._notice_key(stale_message),
                     status_code=303,
@@ -624,7 +635,8 @@ async def job_approve(request: Request, job_id: str):
     if approved == "all_candidates_stale":
         stale_message = await loop.run_in_executor(
             None, lambda: _all_stale_message_for(
-                job, stale_premise_candidate_ids.counts))
+                job, stale_premise_candidate_ids.counts,
+                selected_candidate_snapshot))
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(stale_message),
             status_code=303,
@@ -699,11 +711,15 @@ async def job_approve(request: Request, job_id: str):
     local_stale = len(stale_premise_candidate_ids)
     local_stale_q = ""
     if local_stale and approved:
-        skipped_names = flows.named_albums([
-            c for c in selected_candidate_snapshot
-            if c.get("cid") in stale_premise_candidate_ids
-        ])
+        skipped = [c for c in selected_candidate_snapshot
+                   if c.get("cid") in stale_premise_candidate_ids]
+        skipped_names = flows.named_albums(skipped)
+        folders = _changed_artist_folders(skipped)
         local_stale_q = "&error=" + rendering._notice_key(
+            f"Started the rest. {folders[:1].upper()}{folders[1:]} changed on "
+            f"disk after this review was built, so {skipped_names} "
+            f"{'was' if local_stale == 1 else 'were'} skipped and left ticked."
+            if folders else
             f"Started the rest. {skipped_names} changed on disk after this "
             f"review was built, so "
             f"{'it was' if local_stale == 1 else 'they were'} skipped and "
@@ -749,10 +765,32 @@ def _rebuild_results_hint(execute_kind):
     return "Rebuild these results before trying again."
 
 
-def _all_candidates_stale_message(execute_kind, counts):
+def _changed_artist_folders(candidates):
+    """"the Chiodos folder" when every one of ``candidates`` is a missing
+    album, whose files are its artist folder's, or ""."""
+    if not candidates or any(candidate_premise.expected_kind(c) != "missing"
+                             for c in candidates):
+        return ""
+    names = sorted({Path(candidate_premise.expected_path(c)).name
+                    for c in candidates})
+    if "" in names:
+        return ""
+    if len(names) == 1:
+        return f"the {names[0]} folder"
+    if len(names) <= 3:
+        return f"the {', '.join(names[:-1])} and {names[-1]} folders"
+    return f"{len(names)} artist folders"
+
+
+def _all_candidates_stale_message(execute_kind, counts, candidates=()):
     causes = []
     changed = counts.get("changed", 0)
-    if changed:
+    folders = (_changed_artist_folders(candidates)
+               if changed == len(candidates) else "")
+    if folders:
+        causes.append(f"{folders[:1].upper()}{folders[1:]} changed on disk "
+                      "after this review was built")
+    elif changed:
         causes.append(
             f"{plural(changed, 'album')} changed on disk after this review was built")
     unreadable = counts.get("unreadable", 0)
@@ -767,7 +805,7 @@ def _all_candidates_stale_message(execute_kind, counts):
             + _rebuild_results_hint(execute_kind))
 
 
-def _all_stale_message_for(job, counts):
+def _all_stale_message_for(job, counts, candidates=()):
     """The refusal when every selected candidate went stale.
 
     A restore review records which music-folder incarnation it was read
@@ -783,7 +821,7 @@ def _all_stale_message_for(job, counts):
             return ("Nothing was started. The music folder is not the one "
                     "this review was built against. Check that your library "
                     "is mounted, then try again; the review is still here.")
-    return _all_candidates_stale_message(job.execute_kind, counts)
+    return _all_candidates_stale_message(job.execute_kind, counts, candidates)
 
 
 def _review_origin(request) -> str:

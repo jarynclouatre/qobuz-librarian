@@ -450,6 +450,7 @@ async def save_behavior(request: Request):
         str(effective_before.get("STREAMRIP_QUALITY", "")),
         bool(effective_before.get("PREFER_HIRES", False)),
         bool(effective_before.get("SUPPRESS_SINGLE_TRACK_GAPS", False)),
+        bool(effective_before.get("DOWNSAMPLE_HIRES_ENABLED", False)),
     )
     try:
         ok, warnings = settings_store.save_from_form(
@@ -476,15 +477,17 @@ async def save_behavior(request: Request):
                                   rerendered=True, section=anchor,
                                   submitted_values=values,
                                   submitted_generation=submitted_generation)
-    # A quality or singles change leaves a saved Upgrade review promising
-    # targets the settings no longer produce, and a saved Library scan whose
-    # lists were built under the old policy (library_scan_state signature).
+    # A quality, singles or Downsample change leaves a saved Upgrade review
+    # promising targets the settings no longer produce, and a saved Library
+    # scan whose lists were built under the old policy (library_scan_state
+    # signature).
     quality_note = False
     effective_after = settings_store.current()
     if quality_before != (
         str(effective_after.get("STREAMRIP_QUALITY", "")),
         bool(effective_after.get("PREFER_HIRES", False)),
         bool(effective_after.get("SUPPRESS_SINGLE_TRACK_GAPS", False)),
+        bool(effective_after.get("DOWNSAMPLE_HIRES_ENABLED", False)),
     ):
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, upgrade_state.load)
