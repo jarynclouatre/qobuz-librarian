@@ -36,6 +36,7 @@ from qobuz_librarian.integrations.lyric_fetch import (
 from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, scanner
+from qobuz_librarian.ui_cli.errors import plural
 
 
 def _discard_unused_stash(kept_dir, log):
@@ -1020,7 +1021,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         return {"resampled": 0, "errors": 0, "saved_bytes": 0}
 
     if verbose:
-        log(f"  ⇳ downsample: {len(candidates)} file(s) in {directory.name}")
+        log(f"  ⇳ downsample: {plural(len(candidates), 'file')} in {directory.name}")
 
     # A Stop can land while this album waits its turn for the staging lock;
     # the poll below only runs as encodes finish, so without an entry check
@@ -1058,7 +1059,8 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                            "untouched"}
                 for rel, _, _ in unprotected
             ]
-            log(f"  ⚠ downsample: {n_uncopied} file(s) have no safety copy; "
+            log(f"  ⚠ downsample: {plural(n_uncopied, 'file')} "
+                f"{'has' if n_uncopied == 1 else 'have'} no safety copy; "
                 "left untouched.")
         candidates = protected
         # Copying large masters can take long enough for Stop to arrive after
@@ -1143,7 +1145,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                     ex.shutdown(wait=False, cancel_futures=True)
                     if verbose:
                         log("  ⏹ downsample: stop requested; finishing the "
-                            "in-flight track(s), discarding the rest")
+                            "in-flight tracks, discarding the rest")
                     break
         except KeyboardInterrupt:
             # Stop promptly: discard not-yet-started encodes instead of letting
@@ -1186,8 +1188,9 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     if kept_dir is not None:
         if resampled:
             if verbose:
-                log(f"  ⤷ originals kept {cfg.UPGRADE_BACKUP_RETENTION_DAYS} "
-                    f"day(s): restore from Settings → Diagnostics")
+                log(f"  ⤷ originals kept "
+                    f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}: "
+                    "restore from Settings → Diagnostics")
         else:
             _discard_unused_stash(kept_dir, log)
 

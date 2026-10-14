@@ -145,15 +145,28 @@ def _staging_display_name(path):
 
 
 def _staging_tree_contents(tree):
-    """The deepest album folders one retained tree holds."""
-    relatives = [rel for rel, _identity in tree.directories if rel]
-    leaves = sorted(
-        rel for rel in relatives
-        if not any(other != rel and other.startswith(rel + "/")
-                   for other in relatives)
-    )
-    if leaves:
-        return ", ".join(leaf.replace("/", " / ") for leaf in leaves)
+    """The album folders one retained tree holds: those with tracks in them,
+    else the deepest folders, read past the artwork folder a download keeps
+    inside its album. Tracks at the top of the tree are named by the tree's
+    own folder."""
+    tracks = [Path(rel) for rel, _identity in tree.files
+              if Path(rel).suffix.lower() in cfg.AUDIO_EXTS]
+    folders = sorted({str(rel.parent) for rel in tracks} - {"."})
+    if any(str(rel.parent) == "." for rel in tracks):
+        top = _staging_display_name(tree.original_relative)
+        folders.insert(0, top or plural(
+            sum(str(rel.parent) == "." for rel in tracks), "track"))
+    if not folders:
+        relatives = {str(Path(rel).parent) if Path(rel).name.startswith("__")
+                     else rel for rel, _identity in tree.directories if rel}
+        relatives.discard(".")
+        folders = sorted(
+            rel for rel in relatives
+            if not any(other != rel and other.startswith(rel + "/")
+                       for other in relatives)
+        )
+    if folders:
+        return ", ".join(folder.replace("/", " / ") for folder in folders)
     return plural(len(tree.files), "file")
 
 
@@ -256,7 +269,7 @@ def _diagnostics():
 
     def _dir_check(label, path, *, want_writable, skip_names=(),
                    unit=("entry", "entries"), show_size=False,
-                   dirs_only=False):
+                   dirs_only=False, note=""):
         # The Library paths section above already resolves the same folders to
         # the host path Docker exposes them at; naming this one by its
         # container path made the two sections disagree about what to call
@@ -287,7 +300,7 @@ def _diagnostics():
             return
         size = f" · {format_size(_tree_size(p))}" if show_size else ""
         checks.append({"label": label, "ok": True, "mono": True,
-                       "detail": f"{display}: {plural(n, *unit)}{size}"})
+                       "detail": f"{display}: {plural(n, *unit)}{size}{note}"})
 
     # The panel exists to say what stops a scan or a download before one is
     # started, and a pause is the most direct reason there is. It was the one
@@ -346,9 +359,20 @@ def _diagnostics():
     # row above. The rows further down (Unfinished upgrade backups, Backups
     # needing review) each cover one problem subset; this is the total the
     # folder is actually holding.
+    try:
+        retained = backup_mod.list_retained_backups()
+    except Exception as exc:
+        retained = None
+        _log.warning(
+            "couldn't inspect kept recovery backups: %s", exc)
+    waiting = {item[0] for item in retained or ()
+               if backup_mod.awaiting_retention(item[0])}
+    note = (f" · {plural(len(waiting), 'old copy', 'old copies')}, cleared "
+            f"after {plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}"
+            if waiting else "")
     _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
                show_size=True, unit=("kept backup", "kept backups"),
-               dirs_only=True)
+               dirs_only=True, note=note)
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))
@@ -428,16 +452,12 @@ def _diagnostics():
         })
 
     inventory = {"orphans": [], "undo": [], "leftovers": []}
-    try:
+    if retained is not None:
         # An upgrade's backup inside its retention window is expected, not a
         # fault; the age sweep settles it.
         inventory["orphans"] = [
-            item for item in backup_mod.list_retained_backups()
-            if not backup_mod.awaiting_retention(item[0])
-        ]
-    except Exception as exc:
-        _log.warning(
-            "couldn't inspect kept recovery backups: %s", exc)
+            item for item in retained if item[0] not in waiting]
+    else:
         checks.append({
             "label": "Backups needing review",
             "ok": False,

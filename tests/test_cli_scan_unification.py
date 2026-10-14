@@ -151,12 +151,40 @@ def test_album_gaps_does_not_remember_a_prompt_nobody_answered(
     assert code == walk.EXIT_GENERAL
 
 
+def test_album_gaps_offers_a_remembered_album_again_once_its_tracks_change(
+        monkeypatch, tmp_path):
+    """An album Gap Fill had found complete was left out of every later walk,
+    even after a track went missing from its folder."""
+    from qobuz_librarian.modes import artist, walk
+
+    seen = _album_gaps_over_one_album(monkeypatch, tmp_path, "complete",
+                                      ["", "", ""])
+    matched = []
+    match = artist.match_album_dir(None)
+    monkeypatch.setattr(artist, "match_album_dir",
+                        lambda d, *_a, **_k: matched.append(d) or match)
+    args = SimpleNamespace(yes=False, dry_run=False, consolidate=False,
+                           prefer_hires=True)
+    album_dir = tmp_path / "Artist" / "Album"
+    (album_dir / "01 - One.flac").write_bytes(b"")
+
+    walk.run_album_walk_mode(args, "tok")
+    walk.run_album_walk_mode(args, "tok")
+    assert matched == [album_dir]
+
+    (album_dir / "01 - One.flac").unlink()
+    walk.run_album_walk_mode(args, "tok")
+    assert matched == [album_dir, album_dir]
+    assert seen.exists()
+
+
 def test_ctrl_c_in_a_library_walk_keeps_the_queue_without_asking(
         monkeypatch, tmp_path):
-    """Ctrl-C at "Process queue now?" was followed by "Process them before
+    """Ctrl-C at "Download the queue now?" was followed by "Process them before
     exiting? [Y/n]", so the next Enter started the downloads."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.modes import walk
+    from qobuz_librarian.queue import persistence
 
     monkeypatch.setattr(cfg, "WALK_SEEN_FILE", tmp_path / "seen.txt")
     monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
@@ -174,12 +202,12 @@ def test_ctrl_c_in_a_library_walk_keeps_the_queue_without_asking(
         walk, "_execute_download_queue",
         lambda *_a, **_k: pytest.fail("a Ctrl-C started the downloads"))
     saved = []
-    monkeypatch.setattr(walk, "save_pending_queue",
+    monkeypatch.setattr(persistence, "save_pending_queue",
                         lambda items, mode: saved.append(len(items)))
     replies = iter(["", "y", ""])
 
     def _input(prompt=""):
-        if "Process queue now" in prompt:
+        if "Download the queue now" in prompt:
             raise KeyboardInterrupt
         return next(replies)
 
@@ -189,6 +217,63 @@ def test_ctrl_c_in_a_library_walk_keeps_the_queue_without_asking(
 
     assert walk.run_walk_queued_mode(args, "tok") == walk.EXIT_INTERRUPT
     assert saved
+
+
+def test_ctrl_c_in_a_second_artist_run_keeps_both_runs_approvals(
+        monkeypatch, tmp_path):
+    """A queue left by an earlier Artist mode run stopped the next run saving
+    its own approvals, so a Ctrl-C dropped them while announcing the old
+    queue as kept."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import artist
+    from qobuz_librarian.queue import journal, persistence
+    from qobuz_librarian.queue.builder import _build_queue_item
+
+    root = tmp_path / "music" / "Artist"
+    dirs = [root / name for name in ("Earlier", "Today", "Later")]
+    for d in dirs:
+        d.mkdir(parents=True)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "ARTIST_API_DELAY", 0)
+
+    def album(d):
+        return {"id": d.name, "title": d.name,
+                "tracks": {"items": [{"id": 1}, {"id": 2}]}}
+
+    def queued(d):
+        return _build_queue_item(
+            album=album(d), album_dir=d, label="Artist", missing=[{"id": 2}],
+            present=[{"id": 1}], upgrade_only=False, auto_upgrade=False)
+
+    journal.save_pending_queue([queued(dirs[0])], mode="artist")
+
+    monkeypatch.setattr(artist, "list_artist_album_dirs", lambda _d: dirs)
+    monkeypatch.setattr(artist, "resolve_artist", lambda *_a: (None, None))
+    monkeypatch.setattr(artist, "_admit_new_queue_items", lambda *_a: None)
+    monkeypatch.setattr(artist, "_flush_stdin", lambda: None)
+    monkeypatch.setattr(artist, "match_album_dir", lambda d, *_a, **_k:
+                        SimpleNamespace(status="partial", qobuz_album=album(d),
+                                        existing=[{"id": 1}], present=[{"id": 1}],
+                                        missing=[{"id": 2}]))
+    replies = iter(["y", "y"])
+
+    def _input(prompt=""):
+        reply = next(replies, None)
+        if reply is None:
+            raise KeyboardInterrupt
+        return reply
+
+    monkeypatch.setattr("builtins.input", _input)
+    args = SimpleNamespace(yes=False, dry_run=False, consolidate=False,
+                           prefer_hires=False, include_bonus=False,
+                           no_upgrade=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        artist.run_artist_gap_fill("Artist", root, args, "tok", fresh=True)
+
+    kept, mode, _saved_at = persistence.load_pending_queue()
+    assert mode == "artist"
+    assert [item["album_dir"] for item in kept] == dirs[:2]
 
 
 def test_a_terminal_download_leaves_the_living_library_review(

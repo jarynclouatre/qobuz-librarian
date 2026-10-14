@@ -2331,7 +2331,8 @@ def _report_repair_recovery(backup, *, reason=""):
 def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                         quiet=False):
     """Scan one album dir by ISRC, report, confirm, and repair. Returns
-    "repaired" | "clean" | "attention" | "skipped" | "failed" | "recovery".
+    "repaired" | "would_repair" | "clean" | "attention" | "skipped" | "failed" |
+    "recovery".
     """
     if not quiet:
         section(f"Repair scan, {truncate(album_dir.name, 60)}")
@@ -2357,10 +2358,10 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             f"  {artist_name} - {truncate(album_dir.name, 50)}"))
 
     log.info(fmt(C.GRAY,
-        f"  {verified_ok} verified ok  ·  "
-        f"{len(verified_truncated)} verified truncated  ·  "
-        f"{len(isrc_no_match)} ISRC has no Qobuz match  ·  "
-        f"{len(no_isrc_tag)} no ISRC tag  ·  "
+        f"  {verified_ok} complete  ·  "
+        f"{len(verified_truncated)} cut short  ·  "
+        f"{len(isrc_no_match)} recording ID not on Qobuz  ·  "
+        f"{len(no_isrc_tag)} no recording ID  ·  "
         f"{len(isrc_mismatch)} recording or edition not confirmed"))
     if unverified:
         log.warning(fmt(C.YELLOW,
@@ -2368,8 +2369,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
 
     if isrc_no_match:
         log.info(fmt(C.GRAY,
-            "\n  Skipped (ISRC tag present but no Qobuz match, "
-            "Apple Music import or removed from Qobuz?):"))
+            "\n  Skipped (Qobuz has no track with this recording ID; it may "
+            "come from another store or have left Qobuz):"))
         for x in isrc_no_match[:10]:
             diag = x.get("diagnostic")
             if diag:
@@ -2385,8 +2386,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 f"    ... and {len(isrc_no_match) - 10} more"))
     if no_isrc_tag:
         log.info(fmt(C.GRAY,
-            "\n  Skipped (no ISRC tag, can't verify recording "
-            "identity, refusing to guess):"))
+            "\n  Skipped (no recording ID (ISRC) tag, so the recording "
+            "can't be confirmed):"))
         for x in no_isrc_tag[:10]:
             diag = x.get("diagnostic")
             if diag:
@@ -2448,12 +2449,12 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             ))
         elif not quiet and not unverified:
             log.info(fmt(C.GREEN,
-                "\n  ✓  No verified-truncated tracks. Nothing to repair."))
+                "\n  ✓  No tracks cut short. Nothing to repair."))
         return "attention" if unresolved_damage or unverified else "clean"
 
     log.info(fmt(C.YELLOW + C.BOLD,
-        f"\n  ⚠  {len(verified_truncated)} truncated file(s) "
-        "(ISRC-verified, safe to repair):"))
+        f"\n  ⚠  {plural(len(verified_truncated), 'track')} cut short, "
+        "matched on Qobuz by recording ID (ISRC):"))
     log.info(fmt(C.GRAY,
         "    track  title                                              "
         "  on-disk / Qobuz   ISRC"))
@@ -2480,13 +2481,13 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     # filesystem (and an interrupt mid-repair could strand the originals).
     if getattr(args, "dry_run", False):
         log.info(fmt(C.YELLOW,
-            f"\n  --dry-run: would re-download {len(verified_truncated)} "
-            "ISRC-verified track(s). Nothing changed."))
-        return "attention" if unverified else "skipped"
+            f"\n  --dry-run: would re-download "
+            f"{plural(len(verified_truncated), 'track')}. Nothing changed."))
+        return "attention" if unverified else "would_repair"
 
     if not args.yes:
-        r = ask(f"\n  Re-download {len(verified_truncated)} "
-                "ISRC-verified track(s)? [y/N]: ")
+        r = ask(f"\n  Re-download {plural(len(verified_truncated), 'track')}? "
+                "[y/N]: ")
         if r is None:
             return "attention"
         if r not in ("y", "yes"):
@@ -2574,12 +2575,13 @@ def run_album_repair_mode(args, token, *, loop=False):
                         return EXIT_GENERAL if unreadable else 0
                     continue
                 section(f"Repair scan, whole library "
-                        f"({len(targets)} album(s))")
+                        f"({plural(len(targets), 'album')})")
                 log.info(fmt(C.GRAY,
                     "  Albums with no damaged tracks are skipped silently. "
                     "Ctrl-C to stop."))
                 tally = {
                     "repaired": 0,
+                    "would_repair": 0,
                     "clean": 0,
                     "attention": 0,
                     "skipped": 0,
@@ -2591,7 +2593,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     for i, (adir, aldir) in enumerate(targets, 1):
                         _line = (f"  [{i}/{len(targets)}] Scanning "
                                  f"{truncate(adir.name, 28)} - "
-                                 f"{truncate(aldir.name, 30)}…")
+                                 f"{truncate(aldir.name, 30).removesuffix('…')}…")
                         if sys.stdout.isatty():
                             print(f"\r{_line:<90}", end="", flush=True)
                         else:
@@ -2616,7 +2618,11 @@ def run_album_repair_mode(args, token, *, loop=False):
                     if sys.stdout.isatty():
                         print(f"\r{' ' * 90}\r", end="", flush=True)
                 section("Library repair summary")
-                _summary = (f"  repaired: {tally['repaired']}  ·  "
+                done_label, done_count = (
+                    ("would repair", tally["would_repair"])
+                    if getattr(args, "dry_run", False)
+                    else ("repaired", tally["repaired"]))
+                _summary = (f"  {done_label}: {done_count}  ·  "
                             f"clean: {tally['clean']}  ·  "
                             f"skipped: {tally['skipped']}")
                 if tally["attention"]:

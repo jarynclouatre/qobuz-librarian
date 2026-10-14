@@ -4,7 +4,7 @@
 
 | Symptom | Likely cause / next step |
 |---|---|
-| `… holds the run lock` | The web app holds the run lock. For a CLI run, switch to terminal mode from **Settings → Mode** (then **Resume web app** after); stopping the container with `docker compose stop qobuz-librarian` is the manual alternative. |
+| `The web app is using the library` | The web app holds the run lock. For a CLI run, switch to terminal mode from **Settings → Mode** (then **Resume web app** after); stopping the container with `docker compose stop qobuz-librarian` is the manual alternative. |
 | `Music library unavailable` | Music bind mount unset or wrong. Check `QL_MUSIC_DIR` in `.env` and that the host path exists. |
 | Container exits immediately on `up` | Usually a non-numeric `PUID`/`PGID` (a typo makes the entrypoint refuse to start) or a host bind-mount path that does not exist. `docker compose logs qobuz-librarian` shows which. |
 | A volume shows **!** with "not writable by the container user" on **Settings → Diagnostics** | `PUID`/`PGID` do not match the host owner. Set them in `.env`, or chown the folder the row names, for example `chown -R $(id -u):$(id -g) ./music`. |

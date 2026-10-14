@@ -121,6 +121,7 @@ from qobuz_librarian.queue.startup_recovery import (
 )
 from qobuz_librarian.repair_log import warn_if_download_truncated
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import log_fetch
 
@@ -1227,9 +1228,10 @@ def _move_to_beets_retry(album_dirs, label, *, expected=None):
                 "during the import attempt and was left in staging."))
     if moved:
         log.info(fmt(C.YELLOW,
-            f"  ⏭  parked {moved} album dir(s) under "
-            f"{cfg.BEETS_RETRY_DIR}/ "
-            f"; it will re-import on the next download run."))
+            f"  ⏭  parked {plural(moved, 'album folder')} under "
+            f"{cfg.BEETS_RETRY_DIR}/; "
+            f"{'it' if moved == 1 else 'they'} will re-import on the next "
+            "download run."))
     return parked
 
 
@@ -1249,7 +1251,7 @@ def _reimport_parked_albums():
     for group in groups:
         album_dirs = [tree.path for tree in group.trees]
         log.info(fmt(C.GRAY,
-            f"  ↻  Re-importing parked album(s): "
+            f"  ↻  Re-importing parked album: "
             f"{truncate(group.path.name, 50)}"))
         # Tag signatures survive beets moving/renaming the files, so the
         # landed folder is findable after the import for the lyric finaliser.
@@ -1594,7 +1596,7 @@ def _resolve_queue_item(
             if replacement_receipt is None:
                 log.info(fmt(
                     C.YELLOW,
-                    f"  ⚠  Keeping {len(_sibs)} sibling folder(s); the "
+                    f"  ⚠  Keeping {plural(len(_sibs), 'sibling folder')}; the "
                     "replacement couldn't be held as an exact safe tree.",
                 ))
             else:
@@ -1703,12 +1705,12 @@ def _resolve_queue_item(
                     ))
         elif _sibs and _sibs_clean:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Keeping {len(_sibs)} sibling folder(s); the filled "
+                f"  ⚠  Keeping {plural(len(_sibs), 'sibling folder')}; the filled "
                 f"folder couldn't be verified as holding every track, and a "
                 f"sibling may hold the only copy of what's missing."))
         elif _sibs:
             log.info(fmt(C.GRAY,
-                f"  · Keeping {len(_sibs)} sibling(s) "
+                f"  · Keeping {plural(len(_sibs), 'sibling folder')}"
                 f"; partial result (n_fail={item.get('n_fail', 0)}, "
                 f"n_lossy={item.get('n_lossy', 0)})"))
     item.pop("_sibling_cleanup_receipts", None)
@@ -2002,7 +2004,7 @@ def _resolve_queue_item(
                                                   keep_larger_dst=False)
                 if _n_back and not gfb.exists():
                     log.info(fmt(C.GREEN,
-                        f"  ✓  Restored {_n_back} track(s) to "
+                        f"  ✓  Restored {plural(_n_back, 'track')} to "
                         f"{truncate(_restore_target.name, 50)}"))
                 else:
                     item["recovery_unverified"] = True
@@ -2012,7 +2014,7 @@ def _resolve_queue_item(
                             "partial or failed"):
                         warn_pin_failed(gfb)
                     log.info(fmt(C.RED,
-                        f"  ✗  Restored {_n_back} track(s); remaining originals "
+                        f"  ✗  Restored {plural(_n_back, 'track')}; remaining originals "
                         f"are preserved at:\n     {gfb}"))
 
     n_ok = item.get("n_ok", 0)
@@ -2126,7 +2128,6 @@ def _record_terminal_downloads(successful):
     changes an already-completed download, so a failure to write is logged for
     --verbose and nothing else.
     """
-    from qobuz_librarian.ui_cli.errors import plural
     from qobuz_librarian.web import job_persistence
 
     finished = time.time()
@@ -2753,7 +2754,7 @@ def _durable_completed_result(item, post_dir):
     }
 
 
-def _queue_done_line(results, n_items):
+def _queue_done_line(results, n_items, *, stopped=False):
     """Colour and text for the closing queue summary.
 
     A parked, blocked, cancelled, or interrupted album downloads its tracks
@@ -2776,7 +2777,7 @@ def _queue_done_line(results, n_items):
         n_total_missing += missing
     n_unfinished = max(0, n_items - n_success - n_cancelled)
     clear = n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
-    text = (f"  {'✓' if clear else '⚠'} Queue done: "
+    text = (f"  {'✓' if clear else '⚠'} Queue {'stopped' if stopped else 'done'}: "
             f"{n_success}/{n_items} albums OK · "
             f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
             f"{n_total_missing} track{'s' if n_total_missing != 1 else ''} unresolved")
@@ -2792,7 +2793,7 @@ def _queue_done_line(results, n_items):
 def _durable_completion_line(result, elapsed):
     n_ok = result.get("n_ok", 0)
     if result.get("result") == "downloaded":
-        return C.GREEN, f"    ✓ {n_ok} track(s) · {int(elapsed)}s"
+        return C.GREEN, f"    ✓ {plural(n_ok, 'track')} · {int(elapsed)}s"
 
     details = []
     unresolved = sum(incomplete_track_counts(result))
@@ -2809,7 +2810,7 @@ def _durable_completion_line(result, elapsed):
     detail = " · ".join(details) or "needs attention"
     colour = C.YELLOW if n_ok else C.RED
     symbol = "⚠" if n_ok else "✗"
-    return colour, f"    {symbol} {n_ok} track(s) · {detail} · {int(elapsed)}s"
+    return colour, f"    {symbol} {plural(n_ok, 'track')} · {detail} · {int(elapsed)}s"
 
 
 def _execute_download_queue(queue, args, token, *, on_progress=None,
@@ -2836,7 +2837,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     if not queue:
         return [], True
 
-    section(f"Download queue: {len(queue)} album(s)")
+    section(f"Download queue: {plural(len(queue), 'album')}")
 
     if args.dry_run:
         log.info(fmt(C.YELLOW, "\n  --dry-run: would queue:"))
@@ -2979,8 +2980,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         nonlocal interrupted, disk_full, io_error, auth_lost_exc
         if isinstance(exc, KeyboardInterrupt):
             log.info(fmt(C.YELLOW,
-                "\n    Interrupted. Stopping further downloads; "
-                "resolving backups for albums already processed."))
+                "\n    Interrupted. Stopping further downloads and "
+                "restoring any upgrade backups."))
             item["result"] = "interrupted"
             interrupted = True
         elif isinstance(exc, AuthLost):
@@ -3420,7 +3421,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         summary_n_missing = sum(incomplete_track_counts(item))
         summary_elapsed = int(item.get("elapsed", 0))
         if summary_n_ok and not summary_n_missing:
-            log.info(fmt(C.GREEN, f"    ✓ {summary_n_ok} track(s) · {summary_elapsed}s"))
+            log.info(fmt(C.GREEN, f"    ✓ {plural(summary_n_ok, 'track')} · {summary_elapsed}s"))
         elif summary_n_ok:
             log.info(fmt(C.YELLOW,
                 f"    ⚠ {summary_n_ok} ok · {summary_n_missing} missing · {summary_elapsed}s"))
@@ -3503,7 +3504,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         "    ↻ recovered: re-fetched at the highest source."))
                 elif not item["quality_verdict"]["under"]:
                     log.info(fmt(C.GRAY,
-                        "    Quality check: staged rip meets the selected source cap."))
+                        "    Quality check: the download meets the selected quality."))
                 elif on_quality_shortfall is not None:
                     # Still under target after the retry: the import proceeds,
                     # but the owning job must not look like a clean finish.
@@ -3842,7 +3843,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     if any_imported:
         cache_album_tags(_post_dirs + _parked_post_dirs)
 
-    log.info(fmt(*_queue_done_line(results, n_items)))
+    log.info(fmt(*_queue_done_line(
+        results, n_items,
+        stopped=interrupted or disk_full or io_error or auth_lost_exc is not None)))
 
     # A durable stop leaves the journal holding blocked or retired work on
     # purpose, and rewriting it as pending is what the journal refuses. Every

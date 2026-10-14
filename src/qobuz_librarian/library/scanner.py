@@ -24,6 +24,7 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.library import flac_cache
 from qobuz_librarian.library.tags import normalize
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import vlog
 
 
@@ -208,7 +209,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
         walk_errors.append(f"{album_dir}: {e}")
         vlog(f"walk failed in {album_dir}: {e}")
     audio_files.sort()
-    vlog(f"found {len(audio_files)} audio file(s) in {album_dir}")
+    vlog(f"found {plural(len(audio_files), 'audio file')} in {album_dir}")
 
     tracks = []
     for f in audio_files:
@@ -394,7 +395,7 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
     if empties:
         names = ", ".join(sorted(empties)[:5])
         more = f" (+{len(empties) - 5} more)" if len(empties) > 5 else ""
-        log.info(f"  · Skipping {len(empties)} empty artist dir(s): {names}{more}.")
+        log.info(f"  · Skipping {plural(len(empties), 'empty artist dir')}: {names}{more}.")
     return sorted(artists, key=lambda p: p.name.lower())
 
 
@@ -445,8 +446,8 @@ def list_artist_album_dirs(artist_dir: Path, walk_errors=None):
         more = f" (+{len(empties) - 5} more)" if len(empties) > 5 else ""
         # Verbose-only: in a whole-library sweep this fires per artist and floods
         # the activity log. It's a hand-clean hint, not something every scan needs.
-        vlog(f"  · {artist_dir.name}: skipping {len(empties)} empty album "
-             f"folder(s): {names}{more}.")
+        vlog(f"  · {artist_dir.name}: skipping "
+             f"{plural(len(empties), 'empty album folder')}: {names}{more}.")
     return albums
 
 

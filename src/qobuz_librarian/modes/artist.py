@@ -56,6 +56,13 @@ from qobuz_librarian.queue.executor import (
     _execute_download_queue,
     _refresh_review_state_after_downloads,
 )
+from qobuz_librarian.queue.journal import QueueLoadStatus, load_queue_journal
+from qobuz_librarian.queue.persistence import (
+    clear_pending_queue,
+    kept_queue_note,
+    load_pending_queue,
+    queue_saver,
+)
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
@@ -93,10 +100,18 @@ def _consolidation_disabled_notice(args, mode_name):
             indent="  · ", hanging="    ")))
 
 
+def _queue_album_key(item):
+    """The folder a queued album fills, or the Qobuz album a new one
+    downloads."""
+    if item["album_dir"] is not None:
+        return str(item["album_dir"])
+    return item["album"].get("id")
+
+
 def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                       shared_queue=None, flush_callback=None,
                       skip_predicate=None, save_callback=None, fresh=False,
-                      hidden=None):
+                      hidden=None, numbered=True):
     """Walk every album dir under artist_dir, match each to Qobuz, prompt to fill
     gaps. The matching is library.discovery.match_album_dir; this function is
     the prompting + sibling cleanup around it. Returns (results, owned_titles,
@@ -105,6 +120,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     ``hidden`` is a loaded hidden-store from a whole-library walk, so an album
     dismissed on the web review's Gap Fill tab stays dismissed here. Asking for
     one artist by name leaves it None and is offered every gap.
+
+    ``numbered`` heads the section as step 1 of 2, for the callers that go on
+    to the missing-albums step.
     """
     album_dirs = list_artist_album_dirs(artist_dir)
     if not album_dirs:
@@ -140,7 +158,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                     f"{len(catalog)}. Folders past the limit will fall back to search."))
         except QobuzError as e:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  catalog pre-fetch failed ({e}); per-folder fallback."))
+                f"  ⚠  Couldn't fetch the artist's albums from Qobuz ({e}); "
+                "matching each folder on its own."))
             catalog = []
     elif artist_search_failed:
         log.info(fmt(C.YELLOW,
@@ -148,15 +167,15 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             f"{artist_name!r}; trying each album instead."))
     else:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  No confident Qobuz artist match for {artist_name!r}; "
-            "per-folder fallback."))
+            f"  ⚠  No Qobuz artist matches {artist_name!r} closely enough; "
+            "matching each folder on its own."))
 
     skip_set = set()  # folders set aside while picking among duplicate groups
     no_answer = False
     sibling_groups = detect_sibling_album_groups(album_dirs)
     if sibling_groups:
         log.info(fmt(C.YELLOW,
-            f"\n  ⚠  Detected {len(sibling_groups)} sibling folder group(s):"))
+            f"\n  ⚠  Detected {plural(len(sibling_groups), 'sibling folder group')}:"))
         for bare, dirs in sibling_groups:
             print()
             log.info(fmt(C.WHITE, f"  Group '{bare}':"))
@@ -169,7 +188,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                         _sib_qual = f"  {fmt(C.CYAN, album_quality_label(_sc))}"
                 log.info(f"    {fmt(C.BOLD, str(j))}. "
                          f"{fmt(C.WHITE, d.name)}  "
-                         f"{fmt(C.GRAY, f'[{n_audio} audio file(s)]')}"
+                         f"{fmt(C.GRAY, f'[{plural(n_audio, "audio file")}]')}"
                          f"{_sib_qual}")
             log.info(fmt(C.GRAY,
                 "    Pick which to keep; others are deleted after a successful fill."))
@@ -211,7 +230,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
         if skip_set:
             album_dirs = [d for d in album_dirs if d not in skip_set]
             log.info(fmt(C.GRAY,
-                f"  → {len(album_dirs)} folder(s) to scan."))
+                f"  → {plural(len(album_dirs), 'folder')} to scan."))
 
     # Folder bare-titles seed the owned set the missing-albums step reads, so a
     # catalog album already on disk isn't re-offered.
@@ -220,7 +239,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     resolved_dirs = set()   # folders matched here, so a different edition of the
                             # same album doesn't re-surface them as missing
 
-    section(f"Step 1: Gap fill ({len(album_dirs)} album(s) for {artist_name})")
+    heading = f"Gap fill ({plural(len(album_dirs), 'album')} by {artist_name})"
+    section(f"Step 1: {heading}" if numbered else heading)
     # Asking for one artist by name shows the whole catalogue, dismissals
     # included. Read the store anyway so each one can say why it is here.
     shown_dismissed = hidden_mod.load() if hidden is None else None
@@ -245,6 +265,24 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     # approvals in the caller's queue (which the walk persists on interrupt)
     # instead of dropping them, and the 'd' flush can act on them mid-artist.
     queue = shared_queue if shared_queue is not None else []
+    # On its own, Artist mode saves each approval as it is made, so a Ctrl-C
+    # at a later prompt leaves the queue to resume. Albums an earlier Artist
+    # mode run left in the queue stay there, ahead of this run's; a queue
+    # from another mode is left as it is.
+    save_own_queue = None
+    earlier = []
+    if shared_queue is None:
+        loaded = load_queue_journal()
+        kept, kept_mode, _saved_at = loaded
+        if loaded.status is QueueLoadStatus.ABSENT or kept_mode == "artist":
+            earlier = kept or []
+            save_queue = queue_saver("artist", dry_run=args.dry_run)
+
+            def save_own_queue(items):
+                approved = {_queue_album_key(item) for item in items}
+                earlier[:] = [item for item in earlier
+                              if _queue_album_key(item) not in approved]
+                save_queue(earlier + items)
     # AuthLost / QobuzUnavailable mid-loop: stash it, finish the hand-off so
     # the artist's queue reaches shared_queue, then re-raise.
     pending_stop = None
@@ -315,8 +353,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
         if m.status == "predicted_path_mismatch":
             pred = (m.qobuz_album or {}).get("title") or "?"
             log.info(fmt(C.YELLOW,
-                f"    ⚠  Qobuz match resolves to a different folder ({pred}). "
-                f"Likely false match; skipping to avoid duplication."))
+                f"    ⚠  The Qobuz match ({pred}) would be filed in a different "
+                "folder. Skipping, to avoid a duplicate album."))
             results.append({"dir": ad, "result": "predicted_path_mismatch",
                             "qobuz_title": pred})
             continue
@@ -325,8 +363,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             # A different, similarly-named album fuzz-matched this folder.
             pred = (m.qobuz_album or {}).get("title") or "?"
             log.info(fmt(C.YELLOW,
-                f"    ⚠  Qobuz fuzzy-match has low track overlap with this "
-                f"folder ({pred}); possible wrong album. Skipping."))
+                f"    ⚠  The closest Qobuz album ({pred}) shares few tracks "
+                "with this folder and may be a different album. Skipping."))
             results.append({"dir": ad, "result": "low_overlap",
                             "qobuz_title": pred})
             continue
@@ -337,9 +375,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
 
         if m.status == "false_match":
             log.info(fmt(C.YELLOW,
-                f"    ⚠  Qobuz match has 0 track overlap with this folder "
-                f"({len(m.existing)} on disk, none matched). "
-                f"Likely false match; skipping to avoid duplication."))
+                f"    ⚠  None of the {plural(len(m.existing), 'track')} in this "
+                f"folder is on the Qobuz match ({album.get('title') or '?'}), "
+                "so it is likely a different album. Skipping."))
             results.append({"dir": ad, "result": "false_match",
                             "qobuz_title": album.get("title") or "?",
                             "n_existing": len(m.existing), "n_qobuz": n_total})
@@ -393,13 +431,15 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                         f"    ↑  Switching to {_exp.get('title') or '?'!r} at "
                         f"{album_quality_label(_exp)}; queued for batch upgrade"))
                     queue.append(candidate)
+                    if save_own_queue is not None:
+                        save_own_queue(queue)
                     continue
                 log.info(fmt(C.GRAY,
-                    f"    ✓  All {n_total} track(s) present "
+                    f"    ✓  All {plural(n_total, 'track')} present "
                     f"(Qobuz higher-quality but you have bonus tracks; preserving)"))
             else:
                 log.info(fmt(C.GREEN,
-                    f"    ✓  All {n_total} track(s) present; checking next"))
+                    f"    ✓  All {plural(n_total, 'track')} present"))
             results.append({"dir": ad, "result": "already_complete", "n_total": n_total})
             # Don't delete the picked album's siblings here: the sibling-group
             # prompt promised deletion "on successful fill", but this branch
@@ -431,7 +471,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 "asked for this artist."))
 
         log.info(fmt(C.YELLOW,
-            f"    {len(present)}/{n_total} present; {len(missing)} missing"))
+            f"    {len(present)} of {n_total} tracks present; "
+            f"{len(missing)} missing"))
         for _mt in missing[:8]:
             _tn = _mt.get("track_number") or "?"
             log.info(fmt(C.GRAY,
@@ -454,7 +495,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 _flush_hint = (
                     f"/d=download queue ({len(shared_queue) if shared_queue else 0})"
                 ) if (flush_callback is not None and shared_queue is not None) else ""
-                _q = (f"    Download {len(missing)} missing track(s)? "
+                _q = (f"    Download {plural(len(missing), 'missing track')}? "
                       f"[y/N/a=yes-rest{_flush_hint}/s=stop]: ")
                 _flush_stdin()
                 answer = ask(_q)
@@ -499,6 +540,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             results.append({"dir": ad, "result": "stale_candidate"})
             continue
         queue.append(candidate)
+        if save_own_queue is not None:
+            save_own_queue(queue)
 
     # Shared_queue mode: decisions already went straight into shared_queue
     # (see above), so just persist; no extend (that would double every item).
@@ -511,15 +554,27 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     elif queue and pending_stop is None:
         # The executor deletes each item's chosen siblings itself once the fill
         # lands cleanly, so there's nothing to clean up here.
-        queue_results, drained = _execute_download_queue(queue, args, token,
-                                                         refresh_review=True)
+        queue_results, drained = _execute_download_queue(
+            queue, args, token, refresh_review=True,
+            on_progress=(None if save_own_queue is None
+                         else lambda: save_own_queue(queue)))
         results.extend(queue_results)
-        if not drained:
+        if drained and save_own_queue is not None:
+            if earlier:
+                save_own_queue(queue)
+            else:
+                clear_pending_queue()
+        elif not drained and save_own_queue is not None:
+            log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
+            log.info(kept_queue_note(earlier + queue))
+        elif not drained:
             log.info(fmt(C.YELLOW,
                 "  ⚠  Some albums couldn't be downloaded. They were kept for "
                 "retry; rerun to try them again."))
 
     if pending_stop is not None:
+        if save_own_queue is not None and (earlier or queue):
+            log.info(kept_queue_note(earlier + queue))
         raise pending_stop
 
     # catalog is None when the pre-fetch didn't land (no artist match, or a
@@ -690,7 +745,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         return 0, False
 
     print()
-    header = f"  {len(ordered)} album(s) you don't have"
+    header = f"  {plural(len(ordered), 'album')} you don't have"
     if n_partial:
         header += f"  ({n_partial} partially present; listed first)"
     if hidden is None:
@@ -727,7 +782,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         if gap.on_disk_dir is not None:
             n_have = len(gap.present)
             n_tot = n_have + len(gap.missing)
-            line2 += fmt(C.YELLOW, f"  ← {n_have}/{n_tot} tracks already present")
+            line2 += fmt(C.YELLOW, f"  ← {n_have} of {n_tot} tracks already present")
         print(line1)
         print(line2)
     print()
@@ -914,9 +969,15 @@ def run_artist_mode(artist_name, args, token):
 
         # fresh=True: an explicit single-artist run should see just-released
         # albums.
-        (gap_fill_results, owned_titles, handled_ids, resolved_dirs,
-         artist_id, catalog) = run_artist_gap_fill(artist_name, artist_dir, args, token,
-                                                   fresh=True)
+        try:
+            (gap_fill_results, owned_titles, handled_ids, resolved_dirs,
+             artist_id, catalog) = run_artist_gap_fill(artist_name, artist_dir, args,
+                                                       token, fresh=True)
+        except KeyboardInterrupt:
+            kept, mode, _saved_at = load_pending_queue()
+            if kept and mode == "artist":
+                log.info(kept_queue_note(kept))
+            raise
 
         no_match     = [r for r in gap_fill_results if r.get("result") == "no_qobuz_match"]
         path_mis     = [r for r in gap_fill_results if r.get("result") == "predicted_path_mismatch"]
@@ -963,7 +1024,7 @@ def run_artist_mode(artist_name, args, token):
             prefetched_catalog=catalog,
         )
         if n_added:
-            log.info(fmt(C.GREEN, f"\n  ✓  Added {n_added} new album(s) for {artist_name}.\n"))
+            log.info(fmt(C.GREEN, f"\n  ✓  Added {plural(n_added, 'new album')} for {artist_name}.\n"))
         if step_two_attention:
             clause = "the missing albums step stopped before it finished"
             log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))

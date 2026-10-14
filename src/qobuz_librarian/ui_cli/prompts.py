@@ -19,7 +19,7 @@ from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, term_width, truncate
-from qobuz_librarian.ui_cli.errors import unreadable_artist
+from qobuz_librarian.ui_cli.errors import plural, unreadable_artist
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 
@@ -195,7 +195,7 @@ def show_recent_fetches(limit=10):
         log.info(fmt(C.GRAY, "  No downloads yet."))
         return
     n = min(limit, len(entries))
-    log.info(fmt(C.GRAY, f"  Last {n} download(s):"))
+    log.info(fmt(C.GRAY, f"  Last {plural(n, 'download')}:"))
     for e in entries[-n:]:
         ts = (e.get("ts") or "?")[:10]
         artist = e.get("artist") or "?"
@@ -261,7 +261,25 @@ def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, quiet=False):
         print(fmt(C.YELLOW, "  Answer y or n."))
 
 
-def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
+def _ownership_note(res):
+    """Search's library mark for one result, or ""."""
+    if res.get("owned"):
+        bonus = res.get("bonus_versions") or 0
+        extra = (fmt(C.GRAY, f" +{bonus} bonus version{'s' if bonus != 1 else ''}")
+                 if bonus else "")
+        return fmt(C.GREEN, " • In library") + extra
+    if res.get("partial"):
+        return fmt(C.YELLOW,
+                   f" • {res['have_tracks']} of {res['want_tracks']} tracks")
+    if res.get("as_new_edition") and res.get("folder"):
+        return fmt(C.CYAN, " • Other version in library")
+    return ""
+
+
+def prompt_album_selection(albums, prefer_hires=False, can_load_more=False,
+                           ownership=None):
+    """Pick one search result. ``ownership`` maps an album id to its
+    catalog.search_result_ownership() marks."""
     if not albums:
         return None
     if prefer_hires:
@@ -304,7 +322,9 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False):
                  f"{fmt(C.WHITE, truncate(artist, title_max // 2))} "
                  f"{fmt(C.GRAY, '-')} "
                  f"{fmt(C.WHITE, truncate(title, title_max))}")
-        line2 = f"      {fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}')}{marker}"
+        owned = _ownership_note((ownership or {}).get(a.get("id")) or {})
+        line2 = (f"      {fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}')}"
+                 f"{marker}{owned}")
         print(line1)
         print(line2)
     if can_load_more:
@@ -512,7 +532,7 @@ def print_consolidation_overview(summaries):
     section("Consolidation candidates")
     print()
     log.info(fmt(C.GRAY,
-        f"  Found {len(summaries)} similar album folder(s) for the same artist."))
+        f"  Found {plural(len(summaries), 'similar album folder')} for the same artist."))
     log.info(fmt(C.GRAY,
         "  Tracks that match the primary album can be removed from each sibling."))
     log.info(fmt(C.GRAY,
@@ -527,9 +547,9 @@ def print_consolidation_overview(summaries):
         print()
         log.info(fmt(C.BOLD + C.WHITE, f"  [{i}] {truncate(sib_dir.name, 55)}"))
         log.info(fmt(C.GRAY, f"      similarity: {s['score']:.2f}"))
-        log.info(fmt(C.GRAY, f"      overlap:    {n_over}/{n_total} tracks"))
+        log.info(fmt(C.GRAY, f"      overlap:    {n_over} of {n_total} tracks"))
         if n_uniq:
-            log.info(fmt(C.GRAY, f"      bonus:      {n_uniq} track(s) unique to sibling"))
+            log.info(fmt(C.GRAY, f"      bonus:      {plural(n_uniq, 'track')} unique to sibling"))
 
         if not n_over:
             log.info(fmt(C.GREEN, "      → nothing to consolidate"))
@@ -538,11 +558,14 @@ def print_consolidation_overview(summaries):
         qc = quality_decision.quality_change_summary(s["overlap"])
         if qc["losing_hires"]:
             log.info(fmt(C.RED + C.BOLD,
-                f"      ⚠  {qc['losing_hires']} track(s) here are HIGHER quality than primary."))
+                f"      ⚠  {plural(qc['losing_hires'], 'track')} here "
+                f"{'is' if qc['losing_hires'] == 1 else 'are'} HIGHER quality than primary."))
         if qc["unknown"]:
             log.info(fmt(C.RED + C.BOLD,
-                f"      ⚠  {qc['unknown']} track(s) here have uncertain quality "
-                "or channel layout - can't confirm they're safe to delete."))
+                f"      ⚠  {plural(qc['unknown'], 'track')} here "
+                f"{'has' if qc['unknown'] == 1 else 'have'} uncertain quality or channel "
+                "layout - can't confirm "
+                f"{'it is' if qc['unknown'] == 1 else 'they are'} safe to delete."))
 
 
 def print_per_track_consolidation(summary):
@@ -591,7 +614,7 @@ def prompt_artist_name():
             if not artists:
                 log.info(fmt(C.YELLOW, "  No artist directories found."))
                 continue
-            log.info(fmt(C.GRAY, f"  {len(artists)} artist(s) in library:"))
+            log.info(fmt(C.GRAY, f"  {plural(len(artists), 'artist')} in library:"))
             for d in artists[:50]:
                 log.info(fmt(C.GRAY, f"    • {d.name}"))
             if len(artists) > 50:
@@ -625,9 +648,9 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
         # banner above and reinforces what's about to happen.
         if existing_quality_label:
             log.info(f"  {fmt(C.MAGENTA + C.BOLD, f'↑ AUTO-UPGRADE: {existing_quality_label} → {qual}')} "
-                     f"{fmt(C.GRAY, f'(all {n_total} track(s) will be replaced)')}")
+                     f"{fmt(C.GRAY, f'(all {plural(n_total, "track")} will be replaced)')}")
         else:
-            log.info(f"  {fmt(C.MAGENTA + C.BOLD, f'↑ AUTO-UPGRADE: replace all {n_total} track(s) at {qual}')}")
+            log.info(f"  {fmt(C.MAGENTA + C.BOLD, f'↑ AUTO-UPGRADE: replace all {plural(n_total, "track")} at {qual}')}")
         return
     if force:
         log.info(f"  {fmt(C.YELLOW, '--force: will re-download all tracks regardless')}")
@@ -648,9 +671,10 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
         log.info(f"  {fmt(C.GREEN, 'in your library:')}  none - full album will be fetched")
     elif n_missing == 0:
         log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
-                 f"ALL {n_total} track{'s' if n_total != 1 else ''}")
+                 f"all {n_total} track{'s' if n_total != 1 else ''}")
     else:
-        log.info(f"  {fmt(C.GREEN, 'in your library:')}  {n_present}/{n_total}")
+        log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
+                 f"{n_present} of {n_total} tracks")
         log.info(f"  {fmt(C.YELLOW, 'missing:')}          {n_missing}")
         log.info(fmt(C.GRAY, "  Missing tracks:"))
         for t in missing[:25]:

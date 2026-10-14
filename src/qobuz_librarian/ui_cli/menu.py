@@ -26,7 +26,7 @@ _CHOICES = [
      "better-quality versions of albums you own"),
     ("7", "Library migration", Mode.MIGRATE,
      "one-time setup: reorganise an existing library into the Artist/Album "
-     "layout (copies by default, never touches originals)"),
+     "layout (copies by default, leaving the originals in place)"),
     ("8", "Downsample", Mode.DOWNSAMPLE,
      "bring files you own above 48 kHz down to 44.1 / 48 kHz to reclaim space"),
     ("9", "Lyrics", Mode.LYRICS,

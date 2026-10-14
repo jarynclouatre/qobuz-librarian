@@ -24,6 +24,7 @@ from qobuz_librarian.ui_cli.errors import (
     plural,
 )
 from qobuz_librarian.ui_cli.logging import log
+from qobuz_librarian.web import settings_store
 
 
 def run_library_lyrics_mode(args):
@@ -51,8 +52,10 @@ def run_library_lyrics_mode(args):
 
     providers = (", ".join(lyric_fetch.usable_providers(cfg.LYRICS_PROVIDERS))
                  or "no known provider (check LYRICS_PROVIDERS)")
+    lyrics_format = settings_store.ENUM_OPTION_LABELS["LYRICS_FORMAT"].get(
+        (cfg.LYRICS_FORMAT or "embed").lower(), cfg.LYRICS_FORMAT)
     log.info(fmt(C.GRAY,
-        f"  Writing {(cfg.LYRICS_FORMAT or 'embed').lower()} lyrics via {providers}."))
+        f"  Lyrics providers: {providers}. Lyrics format: {lyrics_format}."))
     if args.lyrics_rescan:
         log.info(fmt(C.GRAY,
             "  Re-checking every track, including ones already checked."))
@@ -62,7 +65,8 @@ def run_library_lyrics_mode(args):
     if args.dry_run:
         log.info(fmt(C.GRAY,
             "  --dry-run: reporting what would be fetched; nothing is written."))
-    log.info(fmt(C.GRAY, "  Ctrl-C to stop; progress is saved.\n"))
+    log.info(fmt(C.GRAY, "  Ctrl-C to stop.\n" if args.dry_run
+                 else "  Ctrl-C to stop; progress is saved.\n"))
 
     stop_requested = threading.Event()
     announced = False
@@ -139,12 +143,13 @@ def _report_summary(res, *, dry_run):
     verb = "Would write" if dry_run else "Wrote"
     skipped_part = (f" · {skipped} skipped (already checked)" if skipped else "")
     unfinished_part = (
-        f" · {summary['unfinished']} left for the next run"
+        f" · {summary['unfinished']} "
+        f"{'not checked' if dry_run else 'left for the next run'}"
         if summary["unfinished"] else ""
     )
     retry_part = (
-        f" (tried again after {lyric_fetch.RECHECK_AFTER_DAYS} days)"
-        if summary["not_found"] else "")
+        f" (next try after {lyric_fetch.RECHECK_AFTER_DAYS} days)"
+        if summary["not_found"] and not dry_run else "")
     checked_part = (
         f"{processed} of {plural(summary['candidate_total'], 'track')} checked"
         if summary["stopped"] else f"{plural(processed, 'track')} checked"

@@ -19,7 +19,7 @@ from qobuz_librarian.library.catalog import (
     find_album_dir_filesystem,
 )
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
-from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
+from qobuz_librarian.library.tags import VA_NORMALIZED, known_year, normalize
 from qobuz_librarian.modes.process import process_album
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import (
@@ -179,11 +179,11 @@ def run_upgrade_walk_mode(args, token):
         if not artists and not discovery_errors:
             log.info(block(fmt(C.YELLOW, f"  ⚠  {no_artist_folders()}")))
             return 0
-        log.info(f"  Checking upgrade quality for {plural(len(artists), 'artist')}…")
+        log.info(f"  Checking {plural(len(artists), 'artist')} for upgrades…")
 
         def on_artist(artist_dir, _candidates, error, done, total):
             if sys.stdout.isatty():
-                line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46)}…"
+                line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46).removesuffix('…')}…"
                 print(f"\r{line:<80}", end="", flush=True)
             if error is not None and artist_dir.name not in discovery_errors:
                 log.info("")
@@ -215,7 +215,7 @@ def run_upgrade_walk_mode(args, token):
         if (c.get("payload") or {}).get("album_id")
     ]
     if not saved:
-        log.info(fmt(C.YELLOW, "  No upgrade candidates."))
+        log.info(fmt(C.YELLOW, "  No upgrades found."))
         return 0
 
     # A saved candidate is a record of a past scan, not a fact about the
@@ -312,7 +312,7 @@ def run_upgrade_walk_mode(args, token):
             for c in candidates:
                 payload = c.get("payload") or {}
                 title = truncate(c.get("title") or "?", 48)
-                year = payload.get("year") or "?"
+                year = known_year(payload.get("year")) or "?"
                 detail = c.get("detail") or "higher Qobuz quality"
                 log.info(f"    • {fmt(C.WHITE, title)} "
                          f"{fmt(C.GRAY, f'({year})')}   "
@@ -348,7 +348,7 @@ def run_upgrade_walk_mode(args, token):
                     log.info("")
                     continue
                 log.info(fmt(C.GREEN,
-                    f"  ✓  --auto-safe: all {n_albums} candidate(s) high-confidence."))
+                    f"  ✓  --auto-safe: all {plural(n_albums, 'candidate')} high-confidence."))
             elif not dry_run:
                 _flush_stdin()
                 # on_eof=None so a closed stdin is distinguishable from a No:
@@ -446,7 +446,7 @@ def run_upgrade_walk_mode(args, token):
                     })
                     log.info(fmt(C.YELLOW,
                         f"     ⚠  Upgrade incomplete: "
-                        f"{verdict['n_below']} track(s) still below target "
+                        f"{plural(verdict['n_below'], 'track')} still below target "
                         f"after retry. Marked capped."))
                 elif attention_kind == "processing":
                     n_attention_albums += 1

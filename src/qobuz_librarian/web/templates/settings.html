@@ -432,7 +432,7 @@
     {% if library_size or music_storage %}
     <div class="ql-storage">
       {% if library_size %}
-      <p class="ql-storage-meta">Your library: {{ library_size }}, as of the last scan</p>
+      <p class="ql-storage-meta">Your library: {{ library_size }}, as of the last scan and the app's own changes since</p>
       {% endif %}
       {% if music_storage %}
       <p class="ql-storage-meta">{{ music_storage.free }} free on {% if music_storage.own_volume %}the music drive{% else %}the drive holding your music{% endif %}</p>

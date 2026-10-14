@@ -112,32 +112,12 @@ def _active_search_downloads() -> tuple[
     return albums, tracks, scanning_albums
 
 
-def _album_tracks_complete(album: dict) -> bool:
-    """Whether this payload carries the album's whole track list.
-
-    A truncated list makes everything on disk look present. tracks.total
-    counts the list itself; tracks_count is album metadata, used only when
-    the payload carries no count of its own.
-    """
-    tracks = album.get("tracks") or {}
-    items = tracks.get("items") or []
-    total = tracks.get("total")
-    if total is None:
-        total = album.get("tracks_count")
-    if not items or total is None:
-        return False
-    try:
-        return int(total) == len(items) and int(tracks.get("offset") or 0) == 0
-    except (TypeError, ValueError):
-        return False
-
-
 def _same_edition_is_complete(album: dict) -> bool:
     """Check this edition's track tags and complete track list."""
 
     try:
         existing, _folder, missing, _present = catalog.find_edition_tracks(album)
-        return bool(existing and _album_tracks_complete(album) and not missing)
+        return bool(existing and catalog.album_tracks_complete(album) and not missing)
     except Exception:
         _log.exception(
             "edition ownership check failed for album %s", album.get("id"))

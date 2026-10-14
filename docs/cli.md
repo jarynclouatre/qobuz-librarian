@@ -30,13 +30,16 @@ docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
 The walks remember what you answered, yes or no, and leave it out next time:
-the Library walk those artists, saying how many, and Gap Fill those albums.
+the Library walk those artists, and Gap Fill those albums along with the ones
+it found complete or could not match, until the album's folder gains or loses
+tracks. Each says how many it left out.
 `--reset-walk-seen` brings them all back.
 
 A real Library walk or Gap Fill run refreshes the collection backup after it
-scans every artist it set out to. A dry run, an interrupted walk, an artist it
-could not read, or anything left to retry leaves the current backup unchanged,
-so the snapshot always describes a walk that finished.
+scans every artist it set out to. A dry run, a walk you stop or interrupt, an
+artist it could not read, or anything left to retry leaves the current backup
+unchanged, so the snapshot always describes a walk that finished. A walk you
+stop with `s` exits with status 0.
 
 Choose `s` in the menu to open Settings, or use the flag to jump straight in.
 It writes to the same store the web Settings page saves to, and `--dry-run`
@@ -48,7 +51,7 @@ docker compose run --rm -it qobuz-librarian cli --settings
 
 ## Direct downloads
 
-Both ask before anything downloads, so keep `-it`. An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N track(s)? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop), then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album and download the queue later. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
+Both ask before anything downloads, so keep `-it`. Search results carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version in library**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album and download the queue later. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)
@@ -117,12 +120,12 @@ docker compose run --rm qobuz-librarian cli --help
 | `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap fill (default: the Library review's Bonus versions switch) |
 | `--[no-]prefer-hires` | Sort 24-bit and higher sample rate results first (default: the Prefer hi-res setting) |
 | `--dry-run` | Show the plan and change nothing |
-| `--force` | Download every track of the album again (album mode only) |
+| `--force` | Download every track of the album again (search or album URL only) |
 | `--yes` | Answer yes to the confirmations; choices still ask |
 | `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |
 | `--no-import` | Download without importing; a complete download stays in staging for the `beet import` command `--help` prints |
 | `--no-upgrade` | Turn off quality upgrades for this run |
-| `--no-downsample` | Skip pre-import downsampling for this run |
+| `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |
 | `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
 | `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: check every track again, fetching lyrics this app wrote again and removing them when no lyrics match the track; write only timed lyrics |

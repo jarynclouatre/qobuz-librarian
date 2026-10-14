@@ -5080,7 +5080,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
 
     log.info(f"Fetching lyrics across the library (writing {(cfg.LYRICS_FORMAT or 'embed').lower()}).")
     if rescan:
-        log.info("Re-checking every track (ignoring saved state).")
+        log.info("Re-checking every track, including ones already checked.")
     # Hold the staging lock: the engine rewrites library FLACs in place, which
     # must not race the scan-lane downsample/repair/upgrade work on the same tree.
     with job_mgr.staging_lock():
@@ -5138,7 +5138,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
          f"{plural(counts['already'], 'track')} already had lyrics"),
         (counts["not_found"],
          f"no lyrics found for {plural(counts['not_found'], 'track')} "
-         f"(tried again after {lyric_fetch.RECHECK_AFTER_DAYS} days)"),
+         f"(next try after {lyric_fetch.RECHECK_AFTER_DAYS} days)"),
         (counts["missing_tags"],
          f"{plural(counts['missing_tags'], 'track')} missing tags"),
         (counts["too_long"],

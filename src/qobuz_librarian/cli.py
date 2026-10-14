@@ -464,39 +464,41 @@ def acquire_run_lock():
         lease = run_lock.acquire("terminal")
     except run_lock.LockBusy as busy:
         if busy.holder == "web":
-            holder = "The Qobuz Librarian web app"
+            message = "\n✗  The web app is using the library.\n"
         elif busy.holder == "terminal":
-            holder = "Another Qobuz Librarian terminal run"
+            message = (f"\n✗  Another terminal run (pid {busy.pid}) is using "
+                       "the library.\n")
         else:
-            holder = "Another Qobuz Librarian process"
-        message = (
-            f"\n✗  {holder} (pid {busy.pid}) holds the run lock.\n"
-            f"   Lock file: {cfg.LOCK_FILE}\n\n"
-        )
+            message = (
+                f"\n✗  Another Qobuz Librarian process (pid {busy.pid}) holds "
+                f"the run lock.\n   Lock file: {cfg.LOCK_FILE}\n"
+            )
+        message += ("   Only one Qobuz Librarian run can change the library at a "
+                    "time.\n\n")
         if busy.holder == "terminal":
-            message += "   Run this again once it finishes.\n\n"
+            message += "   Run this again once it finishes.\n"
         else:
             message += ("   Either:\n" if busy.holder == "web"
                         else "   If it is the web app, either:\n")
-            web_ui = (f"the web UI (http://<host>:{cfg.WEB_PUBLIC_PORT})"
-                      if _in_container() else "the web UI")
+            web_ui = (f"the web app (http://<host>:{cfg.WEB_PUBLIC_PORT})"
+                      if _in_container() else "the web app")
             message += (
-                f"     1. In {web_ui}, open Settings → Mode\n"
-                "        and switch to terminal mode, then re-run this command.\n"
+                f"     1. In {web_ui}, open Settings → Mode and choose\n"
+                "        Switch to terminal mode, then run this command again.\n"
+                "        Choose Resume web app there when you are done.\n"
             )
             if _in_container():
                 _svc = _compose_service_name()
                 message += (
-                    f"     2. Stop the web container instead:  docker compose stop {_svc}\n"
-                    f"        then re-run, then `docker compose start {_svc}`.\n\n"
+                    "     2. Or stop the web container with\n"
+                    f"        `docker compose stop {_svc}`, run this command\n"
+                    f"        again, then `docker compose start {_svc}`.\n"
                 )
             else:
                 message += (
-                    "     2. Stop qobuz-librarian-web instead, re-run, then start it\n"
-                    "        again.\n\n"
+                    "     2. Or stop qobuz-librarian-web, run this command again,\n"
+                    "        then start it again.\n"
                 )
-        message += ("   Only one Qobuz Librarian run can change the library at a "
-                    "time.\n")
         die(fmt(C.RED, message),
             EXIT_LOCK_BUSY)
     if lease is not None and lease.intact() is True:
@@ -812,7 +814,7 @@ def _help_epilog():
         ("0", "success"),
         ("1", "general failure"),
         ("2", "authentication token invalid or missing"),
-        ("3", "another writer holds the run lock"),
+        ("3", "another run is using the library"),
         ("4", "transient network or API error; retry later"),
         ("64", "configuration or required tool missing"),
         ("130", "interrupted with Ctrl-C"),
@@ -851,7 +853,8 @@ def parse_args():
 
     modes.add_argument("query", nargs="*", help="search query or Qobuz album URL")
     modes.add_argument("--artist",       metavar="NAME",
-                   help="run artist mode on NAME (skips interactive menu)")
+                   help="one artist: fill gaps, then offer albums you're "
+                        "missing (same as menu Artist)")
     modes.add_argument("--library-walk", action="store_true",
                    help="walk every artist: fill gaps, then offer albums you're "
                         "missing; queue as you go (same as menu Library walk).")
@@ -866,7 +869,7 @@ def parse_args():
     modes.add_argument("--upgrade-walk", action="store_true",
                    help="review quality upgrades: the Library scan's saved "
                         "results when current, otherwise a fresh check. "
-                        "Per-artist confirm (enter=skip), auto-advance.")
+                        "Asks per artist; Enter skips.")
     modes.add_argument("--downsample-walk", action="store_true",
                    help="scan the library for files above 48 kHz and downsample "
                         "them to 44.1/48 kHz in place (per-artist confirm; "
@@ -921,9 +924,10 @@ def parse_args():
                    default=cfg.PREFER_HIRES,
                    help="sort 24-bit / higher sample rate results first")
 
-    getting.add_argument("--dry-run",      action="store_true", help="show plan, download nothing")
+    getting.add_argument("--dry-run",      action="store_true", help="show the plan and change nothing")
     getting.add_argument("--force",        action="store_true",
-                   help="redownload everything (album mode only)")
+                   help="download every track of the album again (search or "
+                        "album URL only)")
     getting.add_argument("--yes",          action="store_true",
                    help="auto-confirm the confirmations; a gap fill, an "
                         "upgrade, a downsample, a repair or an in-place "
@@ -943,11 +947,11 @@ def parse_args():
     # Passive auto-upgrade is OFF unless AUTO_UPGRADE_ENABLED is set or the
     # explicit Upgrade walk is run.
     getting.add_argument("--no-upgrade",   action="store_true",
-                   help="force-disable quality upgrades for this run (plain gap-fill)")
+                   help="turn off quality upgrades for this run")
     getting.add_argument("--no-downsample",  dest="no_downsample",
                    action="store_true",
-                   help="force-skip pre-import downsampling for this run "
-                        "(only relevant when downsampling is enabled)")
+                   help="skip downsampling new downloads for this run (when "
+                        "Downsample new hi-res downloads is on)")
     # Default from config (CONSOLIDATE, env/CLI overridable).
     getting.add_argument("--consolidate",  dest="consolidate",
                    action=argparse.BooleanOptionalAction,
@@ -999,8 +1003,8 @@ def parse_args():
     # Reject flag/mode combinations that would otherwise be silently dropped
     # or accepted.
     if args.force and not args.query:
-        p.error("--force only applies to album mode (a query or Qobuz URL), "
-                "not --artist or a walk/migrate mode")
+        p.error("--force only applies to a search or an album URL, not "
+                "--artist or a walk or migrate mode")
     # --migrate's extra options mean nothing without it.
     if (args.in_place or args.acoustid or args.migrate_src or args.migrate_dest) \
             and not args.migrate:
@@ -1034,7 +1038,7 @@ def parse_args():
     # Exactly one whole-run mode executes per invocation; main() dispatches
     # the first it finds and returns, so a second would be silently dropped.
     requested = [name for name, on in (
-        ("a query (album mode)", bool(args.query)),
+        ("a search or album URL", bool(args.query)),
         ("--artist", args.artist is not None),
         ("--library-walk", args.library_walk),
         ("--gap-fill", args.album_gaps),
@@ -1380,7 +1384,7 @@ def main():
             n_swept = cleanup_old_upgrade_backups()
             if n_swept:
                 log.info(fmt(C.GRAY,
-                    f"  ⟳  Cleaned up {n_swept} old upgrade backup(s) "
+                    f"  ⟳  Cleaned up {plural(n_swept, 'old upgrade backup')} "
                     f"(>{cfg.UPGRADE_BACKUP_RETENTION_DAYS} days)."))
         except Exception as e:
             # Don't let backup-housekeeping fail the run.
@@ -1570,8 +1574,12 @@ def _check_staging_occupied():
 
 
 def _note_held_staging():
-    """Point once, at the end of the run, at what staging recovery holds."""
-    if _RUN_LEASE is None or _RUN_LEASE.intact() is not True:
+    """Point once, at the end of a run that downloaded, at what staging
+    recovery holds."""
+    from qobuz_librarian import download
+
+    if (not download.download_ran or _RUN_LEASE is None
+            or _RUN_LEASE.intact() is not True):
         return
     from qobuz_librarian.integrations.staging import inspect_retry_groups
 

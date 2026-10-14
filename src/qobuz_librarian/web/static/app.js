@@ -3495,6 +3495,8 @@
               });
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
+              var tabConfirm = submit && submit.getAttribute("data-confirm-" + requestedTab);
+              if (tabConfirm) submit.setAttribute("data-confirm", tabConfirm);
               cont.querySelectorAll("[data-review-switches]").forEach(function (s) {
                 s.classList.toggle("hidden", s.getAttribute("data-review-switches") !== requestedTab);
               });

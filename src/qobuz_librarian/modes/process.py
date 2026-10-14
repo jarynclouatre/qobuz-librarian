@@ -142,7 +142,7 @@ def _recover_incomplete_upgrade_backup(backup, album_dir, *, operation):
             "complete"):
         warn_pin_failed(backup)
     unresolved = (
-        f" ({outcome.unresolved} original file(s) still unresolved)"
+        f" ({plural(outcome.unresolved, 'original file')} still unresolved)"
         if outcome is not None else ""
     )
     log.info(fmt(
@@ -198,7 +198,8 @@ def force_cleanup_preflight(album_dir, args, *, expected_album_receipt=None):
     log.info(fmt(C.YELLOW + C.BOLD, "  ⚠  --force AND existing album folder detected:"))
     log.info(fmt(C.WHITE, f"     {album_dir}"))
     log.info(fmt(C.GRAY,
-        f"     {len(audio_files)} audio file(s), {format_size(total_size)} total"))
+        f"     {plural(len(audio_files), 'audio file')}, "
+        f"{format_size(total_size)} total"))
     log.info(fmt(C.GRAY,
         "     Left in place, beets would create '<n>.1.flac' alongside the old files."))
 
@@ -410,7 +411,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
         return False
     if new_n < old_n:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  Upgrade landed {new_n} track(s) but the original held "
+            f"  ⚠  Upgrade landed {plural(new_n, 'track')} but the original held "
             f"{old_n}."))
         return False
     if old_secs > 0 and new_secs < old_secs * _UPGRADE_VERIFY_DURATION_RATIO:
@@ -929,7 +930,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             # Existing strictly better than Qobuz everywhere. Never replace.
             log.info(fmt(C.GREEN,
                 f"\n  ✓  Already higher quality than Qobuz "
-                f"({qual['n_above']} track(s) above target)."))
+                f"({plural(qual['n_above'], 'track')} above target)."))
             if not missing:
                 log_fetch({
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -945,16 +946,18 @@ def process_album(album, args, *, allow_force=True, label=None,
             # Has missing tracks. Will fall through to gap-fill prompt with
             # explicit warning that this creates mixed quality.
             log.info(fmt(C.YELLOW,
-                f"     ⚠  {len(missing)} track(s) missing; filling them at "
-                f"{target_label} would mix quality."))
+                f"     ⚠  {plural(len(missing), 'track')} missing; filling "
+                f"{'it' if len(missing) == 1 else 'them'} at {target_label} "
+                "would mix quality."))
 
         elif cls in ("all_lower", "mixed_below"):
             # Qobuz is higher quality, but only replace when it's verifiably
             # safe.
             if qual.get("n_unknown"):
                 log.info(fmt(C.YELLOW,
-                    f"\n  ⚠  Can't auto-upgrade: {qual['n_unknown']} track(s) "
-                    f"have unreadable quality and would be replaced unverified; "
+                    f"\n  ⚠  Can't auto-upgrade: {plural(qual['n_unknown'], 'track')} "
+                    f"{'has' if qual['n_unknown'] == 1 else 'have'} unreadable "
+                    "quality and would be replaced unverified; "
                     f"filling gaps only."))
                 # Fall through to plain gap-fill; do NOT set auto_upgrade_active.
             elif extras and missing and already_confirmed:
@@ -976,7 +979,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     missing, present = compute_missing(qobuz_tracks, existing)
                     if extras:
                         log.info(fmt(C.YELLOW,
-                            f"\n  ⚠  Can't auto-upgrade ({len(extras)} bonus track(s) here); "
+                            f"\n  ⚠  Can't auto-upgrade ({plural(len(extras), 'bonus track')} here); "
                             f"filling {len(missing)} at {target_label} (will mix quality)."))
                     else:
                         log.info(fmt(C.MAGENTA + C.BOLD,
@@ -989,7 +992,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         missing, present = qobuz_tracks, []
                 else:
                     log.info(fmt(C.YELLOW,
-                        f"\n  ⚠  Can't auto-upgrade ({len(extras)} bonus track(s) here); "
+                        f"\n  ⚠  Can't auto-upgrade ({plural(len(extras), 'bonus track')} here); "
                         f"filling {len(missing)} at {target_label} (will mix quality)."))
             elif extras:
                 # Before giving up, try to find an expanded edition that
@@ -1021,7 +1024,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 else:
                     log.info(fmt(C.YELLOW,
                         f"\n  ⚠  Upgrade to {target_label} blocked: "
-                        f"{len(extras)} on-disk track(s) Qobuz doesn't carry:"))
+                        f"{plural(len(extras), 'on-disk track')} Qobuz doesn't carry:"))
                     for _e in extras[:5]:
                         log.info(fmt(C.GRAY,
                             f"       • {truncate(_e.get('title') or '?', 60)}"))
@@ -1128,7 +1131,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         elif cls == "mixed_above":
             # Some tracks above, rest equal. Treat like all_higher.
             log.info(fmt(C.GREEN,
-                "\n  ✓  No upgrade available (some track(s) already above target)."))
+                "\n  ✓  No upgrade available (some tracks already above target)."))
             if not missing:
                 log_fetch({
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -1142,8 +1145,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                         "n_total": len(qobuz_tracks)}
             # Has missing tracks.
             log.info(fmt(C.YELLOW,
-                f"     ⚠  {len(missing)} track(s) missing; filling them at "
-                f"{target_label} would mix quality."))
+                f"     ⚠  {plural(len(missing), 'track')} missing; filling "
+                f"{'it' if len(missing) == 1 else 'them'} at {target_label} "
+                "would mix quality."))
 
         elif cls == "mixed_both":
             # Some above, some below: ambiguous. Don't auto-replace.
@@ -1259,7 +1263,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     # they may not want. Press y to proceed.
     if not already_confirmed:
         proceed = confirm(
-            f"\n  Proceed with downloading {len(missing)} track(s)?",
+            f"\n  Proceed with downloading {plural(len(missing), 'track')}?",
             default_yes=False, auto_yes=args.yes, on_eof=None)
         if proceed is None:
             return {"result": "no_answer", "n_missing": len(missing)}
@@ -1296,8 +1300,9 @@ def process_album(album, args, *, allow_force=True, label=None,
     staging_preflight(args)
 
     if force_tracks and not confirm(
-            f"\n  Back up and replace this edition's {len(present)} existing "
-            "track(s), keeping the other files in this folder?",
+            f"\n  Back up and replace this edition's "
+            f"{plural(len(present), 'existing track')}, keeping the other "
+            "files in this folder?",
             default_yes=True, auto_yes=False):
         return {"result": "cancelled"}
 
@@ -1582,7 +1587,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         "a short first rip."))
                 elif not quality_verdict["under"]:
                     log.info(fmt(C.GRAY,
-                        "  Quality check: staged rip meets the selected source cap."))
+                        "  Quality check: the download meets the selected quality."))
 
         # Downsampling and lyric_fetch run on staging BEFORE beets imports.
         if n_ok > 0 and not args.no_import:
@@ -1975,7 +1980,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 # complete restore).
                 if _n_back and not gap_fill_backup_path.exists():
                     log.info(fmt(C.GREEN,
-                        f"  ✓  Restored {_n_back} track(s) to {album_dir}."))
+                        f"  ✓  Restored {plural(_n_back, 'track')} to {album_dir}."))
                 else:
                     recovery_unverified = True
                     if not pin_unverified_upgrade_backup(
@@ -1984,7 +1989,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             "partial or failed"):
                         warn_pin_failed(gap_fill_backup_path)
                     log.info(fmt(C.RED,
-                        f"  ✗  Restored {_n_back} track(s); remaining originals "
+                        f"  ✗  Restored {plural(_n_back, 'track')}; remaining originals "
                         f"preserved at {gap_fill_backup_path}; reconcile by hand."))
 
         # The return value was built before this recovery block. Update the
@@ -2078,8 +2083,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                 else:
                     if relocation.changed:
                         message = (
-                            f"  ✓  Reunited {relocation.published_files} existing "
-                            f"file(s) in the primary-artist folder."
+                            f"  ✓  Reunited "
+                            f"{plural(relocation.published_files, 'existing file')} "
+                            "in the primary-artist folder."
                         )
                         if relocation.reason:
                             message += f" {relocation.reason.capitalize()}."
@@ -2137,7 +2143,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     ):
         if auto_upgrade_active and not upgrade_unverified:
             log.info(fmt(C.MAGENTA + C.BOLD,
-                f"  ↑ upgraded · {n_ok} track(s) · {int(elapsed)}s · imported"))
+                f"  ↑ upgraded · {plural(n_ok, 'track')} · {int(elapsed)}s · imported"))
         elif not auto_upgrade_active and not upgrade_unverified:
             log.info(fmt(C.GREEN,
                 f"  ✓ {n_ok} downloaded · {int(elapsed)}s · imported"))
@@ -2172,7 +2178,8 @@ def process_album(album, args, *, allow_force=True, label=None,
         beets_outcome = (
             "imported" if imported
             else "imported, then the original was put back" if upgrade_put_back
-            else "skipped/failed"
+            else "not imported (--no-import)" if args.no_import
+            else "not imported"
         )
         log.info(f"  {fmt(C.GRAY, '  beets:')}          {beets_outcome}")
         if args.consolidate:

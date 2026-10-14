@@ -150,7 +150,8 @@
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Each file is replaced only after its new copy verifies, and an album too damaged to patch is downloaded again in full. Your originals are set aside while that happens and removed once the replacement is proven good, so a repair cannot be undone. A replacement that cannot be verified keeps them, restorable from Settings."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
-            {%- else %} data-confirm="Download {count} selected album{s}? Downloads queue now and import into your library."
+            {%- else %}{% set _missing_confirm = "Download {count} selected album{s}? Downloads queue now and import into your library." %}{% set _gaps_confirm = "Download the missing tracks of {count} selected album{s}? Downloads queue now and import into your library." %} data-confirm="{{ _gaps_confirm if review_tab == 'gaps' else _missing_confirm }}"
+            {%- if review_tab %} data-confirm-missing="{{ _missing_confirm }}" data-confirm-gaps="{{ _gaps_confirm }}"{% endif %}
             {%- endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-irreversible{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-irreversible{% endif %}
@@ -248,7 +249,7 @@
     {% endif %}
   {% else %}
     {% if job.finished_at %}
-    <p class="ql-job-finished">Finished {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed(job.finished_at - job.started_at) }}{% endif %}</p>
+    <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed(job.finished_at - job.started_at) }}{% endif %}</p>
     {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
        what went wrong. Showing only the error threw away the outcome. #}

@@ -61,6 +61,10 @@ from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
 
+# Set once this process starts a download; the terminal mentions held
+# staging only after a run that downloaded.
+download_ran = False
+
 
 def match_key_from_stem(p):
     """Normalized title key from a filename stem (or bare stem string) used to
@@ -892,7 +896,9 @@ def run_album_download(
     staging_run = None
 
     def _rip(url, **kwargs):
+        global download_ran
         nonlocal staging_run
+        download_ran = True
         if staging_run is None:
             if recovery_owner is None:
                 staging_run = create_staging_run()
@@ -983,15 +989,15 @@ def run_album_download(
 
     if download_full_album:
         log.info(
-            fmt(C.GRAY, f"  Strategy: full-album URL ({len(missing)} of {n_tracks_total} missing)")
+            fmt(C.GRAY, f"  Whole album ({len(missing)} of {n_tracks_total} tracks missing)")
         )
     else:
         why = (
-            "forced per-track (repair)"
+            "repair"
             if force_track_by_track
-            else f"{len(missing)} of {n_tracks_total} missing"
+            else f"{len(missing)} of {n_tracks_total} tracks missing"
         )
-        log.info(fmt(C.GRAY, f"  Strategy: per-track ({why})"))
+        log.info(fmt(C.GRAY, f"  Track by track ({why})"))
 
     # Free-space preflight.
     if cfg.MIN_FREE_STAGING_MB > 0:
@@ -1141,7 +1147,7 @@ def run_album_download(
             log.info(
                 fmt(
                     C.YELLOW,
-                    f"  ⚠  rip exit 0 but {n_errors} error(s) in output - "
+                    f"  ⚠  rip exit 0 but {plural(n_errors, 'error')} in output - "
                     f"some tracks likely skipped (see summary below).",
                 )
             )
@@ -1237,8 +1243,8 @@ def run_album_download(
             log.info(
                 fmt(
                     C.GRAY,
-                    f"  ↻  Retrying {len(retry_pairs)} lossy/incomplete "
-                    "track(s) once via per-track URL",
+                    f"  ↻  Retrying {plural(len(retry_pairs), 'lossy/incomplete track')} "
+                    "once via per-track URL",
                 )
             )
             recovered = 0
@@ -1278,7 +1284,7 @@ def run_album_download(
                 recovered += 1
             if recovered:
                 n_ok = len(kept)
-                log.info(fmt(C.GREEN, f"  ✓  Retry recovered {recovered} track(s)"))
+                log.info(fmt(C.GREEN, f"  ✓  Retry recovered {plural(recovered, 'track')}"))
 
     # The album URL does not say which tracks it failed on, so a track that
     # never landed from it counts as a failed pull, and one that timed out
@@ -1323,7 +1329,8 @@ def run_album_download(
             log.info(
                 fmt(
                     C.GRAY,
-                    f"  ↻  Retrying {len(hard_targets)} failed download(s) once via per-track URL",
+                    f"  ↻  Retrying {plural(len(hard_targets), 'failed download')} "
+                    "once via per-track URL",
                 )
             )
             recovered = 0
@@ -1362,7 +1369,7 @@ def run_album_download(
                 )
             if recovered:
                 n_ok = len(kept)
-                log.info(fmt(C.GREEN, f"  ✓  Retry recovered {recovered} failed download(s)"))
+                log.info(fmt(C.GREEN, f"  ✓  Retry recovered {plural(recovered, 'failed download')}"))
 
     # Reconcile completeness by unique Qobuz track identity, never by the raw
     # number of audio names that appeared.
@@ -1394,7 +1401,7 @@ def run_album_download(
             log.info(
                 fmt(
                     C.GRAY,
-                    f"  · {len(landed_despite_error)} track(s) landed despite a streamrip "
+                    f"  · {plural(len(landed_despite_error), 'track')} landed despite a streamrip "
                     f"post-processing error - counting as success.",
                 )
             )
@@ -1409,7 +1416,7 @@ def run_album_download(
             log.info(
                 fmt(
                     C.GRAY,
-                    f"  · {n_ok} track(s) landed despite rip exit "
+                    f"  · {plural(n_ok, 'track')} landed despite rip exit "
                     f"{full_album_rc} (streamrip post-processing error).",
                 )
             )
@@ -1418,7 +1425,7 @@ def run_album_download(
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  {len(lossy)} track(s) only available lossy on Qobuz "
+                f"  ⚠  {plural(len(lossy), 'track')} only available lossy on Qobuz "
                 f"(no lossless for your tier - another source needed):",
             )
         )
@@ -1430,8 +1437,8 @@ def run_album_download(
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  {len(broken)} track(s) arrived damaged and were "
-                f"discarded ({why}):",
+                f"  ⚠  {plural(len(broken), 'track')} arrived damaged and "
+                f"{'was' if len(broken) == 1 else 'were'} discarded ({why}):",
             )
         )
         for d in broken[:5]:
@@ -1463,7 +1470,7 @@ def run_album_download(
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  {retained_rejects} rejected staging file(s) changed or "
+                f"  ⚠  {plural(retained_rejects, 'rejected staging file')} changed or "
                 "could not be retired; their recovery records were kept.",
             )
         )

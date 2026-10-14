@@ -1454,21 +1454,23 @@ def consolidate_albums(album, args):
             ))
             log.info(fmt(
                 C.GRAY,
-                f"    {overlap_count} track(s) overlap • "
-                f"{len(summary['unique'])} bonus track(s) will remain",
+                f"    {plural(overlap_count, 'track')} "
+                f"{'overlaps' if overlap_count == 1 else 'overlap'} • "
+                f"{plural(len(summary['unique']), 'bonus track')} will remain",
             ))
             if warning:
                 if quality["unknown"]:
                     log.info(fmt(
                         C.RED + C.BOLD,
-                        f"    ⚠  {risky} track(s) here could lose quality "
+                        f"    ⚠  {plural(risky, 'track')} here could lose quality "
                         f"({quality['losing_hires']} higher than primary, "
                         f"{quality['unknown']} uncertain or different layout)!",
                     ))
                 else:
                     log.info(fmt(
                         C.RED + C.BOLD,
-                        f"    ⚠  {quality['losing_hires']} track(s) here are "
+                        f"    ⚠  {plural(quality['losing_hires'], 'track')} here "
+                        f"{'is' if quality['losing_hires'] == 1 else 'are'} "
                         "HIGHER quality than primary!",
                     ))
                 print_per_track_consolidation(summary)
@@ -1498,7 +1500,7 @@ def consolidate_albums(album, args):
                         log.info(fmt(
                             C.YELLOW + C.BOLD,
                             "    Type 'DELETE' to confirm a possible quality "
-                            f"loss on {risky} track(s):",
+                            f"loss on {plural(risky, 'track')}:",
                         ))
                         typed = ask("    > ", lower=False)
                         if typed != "DELETE":
@@ -1506,7 +1508,7 @@ def consolidate_albums(album, args):
                                 C.GRAY, "    Confirmation not given. Skipped."))
                             break
                     elif not confirm(
-                        f"    Move {overlap_count} track(s) from this sibling "
+                        f"    Move {plural(overlap_count, 'track')} from this sibling "
                         "to the backup folder?",
                         default_yes=True,
                         auto_yes=False,

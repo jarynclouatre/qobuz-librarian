@@ -31,8 +31,14 @@ from qobuz_librarian.queue.persistence import (
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt
-from qobuz_librarian.ui_cli.errors import EXIT_AUTH, EXIT_GENERAL, auth_lost_msg, die
-from qobuz_librarian.ui_cli.logging import log
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_AUTH,
+    EXIT_GENERAL,
+    auth_lost_msg,
+    die,
+    plural,
+)
+from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     confirm,
     interactive_query,
@@ -130,7 +136,7 @@ def _download_album_now(
                     ))
                     return {"result": "dry_run", "n_missing": len(missing)}
                 proceed = confirm(
-                    f"\n  Proceed with downloading {len(missing)} track(s)?",
+                    f"\n  Proceed with downloading {plural(len(missing), 'track')}?",
                     default_yes=False,
                     auto_yes=bool(getattr(args, "yes", False)),
                     on_eof=None,
@@ -243,8 +249,18 @@ def resolve_album_from_args(args, token):
         if not results:
             raise CatalogMiss(f"No Qobuz match for: {query}")
         can_load_more = (len(results) >= search_limit and search_limit < 50)
+        ownership = {}
+        for result in results:
+            try:
+                ownership[result.get("id")] = catalog.search_result_ownership(
+                    result, lambda album_id: get_album(album_id, token))
+            except (AuthLost, QobuzUnavailable):
+                raise
+            except Exception as exc:
+                vlog(f"ownership check failed for album {result.get('id')}: {exc}")
         chosen = prompt_album_selection(results, prefer_hires=args.prefer_hires,
-                                        can_load_more=can_load_more)
+                                        can_load_more=can_load_more,
+                                        ownership=ownership)
         if chosen is None:
             raise Aborted("user cancelled at album selection")
         if chosen == NO_ANSWER:
@@ -267,7 +283,7 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
             return
         if album_queue:
             log.info(fmt(C.GRAY,
-                f"  ({len(album_queue)} album(s) already in queue; "
+                f"  ({plural(len(album_queue), 'album')} already in queue; "
                 "enter 'f' to download all)"))
         flush_opt = "  [f]lush queue" if album_queue else ""
         r = ask(f"  [d]ownload now (default)  [q]ueue for later"
@@ -306,7 +322,7 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                 flush_queue()
             else:
                 log.info(fmt(C.CYAN,
-                    f"  ✓  Queued. ({len(album_queue)} album(s) in queue)"))
+                    f"  ✓  Queued. ({plural(len(album_queue), 'album')} in queue)"))
         elif r not in ("", "d", "download"):
             # Only the advertised answers act. This one can replace tracks
             # already on disk, and "n" typed at it used to mean download.
@@ -349,7 +365,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
         nonlocal stopped
         if not album_queue or stopped:
             return
-        banner(f"Executing queue: {len(album_queue)} album(s)", C.GREEN)
+        banner(f"Executing queue: {plural(len(album_queue), 'album')}", C.GREEN)
         while album_queue:
             item = album_queue[0]
             if item.get("keep_edition") or args.force:
@@ -378,7 +394,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                     break
         if not args.dry_run and album_queue:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  {len(album_queue)} album(s) couldn't be downloaded; "
+                f"  ⚠  {plural(len(album_queue), 'album')} couldn't be downloaded; "
                 f"re-run the command to try them again."))
 
     try:
@@ -458,7 +474,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
         interrupted = True
         if album_queue:
             log.info(fmt(C.YELLOW,
-                f"\n  ⚠  Interrupted with {len(album_queue)} album(s) queued; "
+                f"\n  ⚠  Interrupted with {plural(len(album_queue), 'album')} queued; "
                 "discarding queue (Ctrl+C means abort)."))
         raise
     finally:

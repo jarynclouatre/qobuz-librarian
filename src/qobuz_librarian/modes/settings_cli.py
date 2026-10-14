@@ -17,6 +17,7 @@ _QUALITY_CHOICES = ["4", "3", "2"]
 _WEB_ONLY = {"SUPPRESS_SINGLE_TRACK_GAPS"}
 _KEEP_LABEL = next(label for key, label, *_ in settings_store.TEXT_FIELDS
                    if key == "DOWNSAMPLE_KEEP_ORIGINALS")
+_KEEP_CHOICES = settings_store.ENUM_OPTION_LABELS["DOWNSAMPLE_KEEP_ORIGINALS"]
 
 
 def _pick_quality(current_value):
@@ -41,7 +42,7 @@ def _pick_quality(current_value):
 def _pick_downsample_policy(current_value):
     if current_value in ("keep", "delete"):
         default_yes = current_value == "keep"
-        note = f" (current: {current_value})"
+        note = f" (current: {_KEEP_CHOICES[current_value]})"
     else:
         default_yes = True
         note = " (not chosen yet)"
@@ -77,7 +78,8 @@ def _show_current(values):
     quality_label = settings_store.ENUM_OPTION_LABELS["STREAMRIP_QUALITY"].get(
         values.get("STREAMRIP_QUALITY"), "?")
     log.info(fmt(C.GRAY, f"    Download quality: {quality_label}"))
-    policy = values.get("DOWNSAMPLE_KEEP_ORIGINALS") or "not chosen yet"
+    policy = _KEEP_CHOICES.get(values.get("DOWNSAMPLE_KEEP_ORIGINALS"),
+                               "not chosen yet")
     log.info(fmt(C.GRAY, f"    {_KEEP_LABEL}: {policy}"))
     for key, label, _ in settings_store.BEHAVIOR_FIELDS:
         if key in _WEB_ONLY:

@@ -7185,7 +7185,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             return None
         log.info(fmt(
             C.GRAY,
-            f"  ⤷  Cross-filesystem backup: copying {n_files} file(s) / "
+            f"  ⤷  Cross-filesystem backup: copying {errors_mod.plural(n_files, 'file')} / "
             f"{total_bytes / 1024 / 1024:.1f} MB to {backup_root}…"))
 
         partial_name = f".ql-backup-copy-{secrets.token_hex(16)}"

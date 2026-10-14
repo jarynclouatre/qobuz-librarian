@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from qobuz_librarian import __version__
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library import generation_state
+from qobuz_librarian.library.tags import known_year
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
     job_labels,
@@ -198,6 +199,7 @@ templates.env.globals["fmt_clock"] = _fmt_clock
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
+templates.env.filters["known_year"] = known_year
 templates.env.globals["auth_active"] = web_auth.auth_active
 
 static_dir = _here / "static"

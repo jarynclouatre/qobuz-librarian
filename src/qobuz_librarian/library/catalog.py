@@ -1020,6 +1020,79 @@ def holds_recordings(tracks, existing):
     return bool(wanted) and "" not in wanted and wanted <= held
 
 
+def album_tracks_complete(album: dict) -> bool:
+    """Whether this payload carries the album's whole track list.
+
+    A truncated list makes everything on disk look present. tracks.total
+    counts the list itself; tracks_count is album metadata, used only when
+    the payload carries no count of its own.
+    """
+    tracks = album.get("tracks") or {}
+    items = tracks.get("items") or []
+    total = tracks.get("total")
+    if total is None:
+        total = album.get("tracks_count")
+    if not items or total is None:
+        return False
+    try:
+        return int(total) == len(items) and int(tracks.get("offset") or 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def search_result_ownership(album, fetch_album):
+    """How the library holds an album search result, as Search marks it.
+
+    ``fetch_album`` returns the result's full payload by id; it is called only
+    when a folder on disk may hold the album. Owned needs the edition and all
+    its tracks, not just the songs on another mix. ``ownership_unknown``
+    stays set when the check could not finish.
+    """
+    res = {"ownership_unknown": True}
+    folder = (find_album_dir_filesystem(album)
+              or find_album_dir_filesystem(album, exact_edition=True))
+    if folder is None:
+        res["ownership_unknown"] = False
+        return res
+    exact_album = fetch_album(album["id"])
+    qobuz_tracks = (exact_album.get("tracks") or {}).get("items") or []
+    if not album_tracks_complete(exact_album):
+        return res
+    existing, matched_folder, missing, present = find_edition_tracks(exact_album)
+    if not existing:
+        files, other = find_album_folder(exact_album)
+        if other is not None and holds_recordings(qobuz_tracks, files):
+            res["owned"] = True
+        elif other is not None:
+            res["as_new_edition"] = True
+            res["folder"] = str(other.relative_to(config.MUSIC_ROOT))
+        res["ownership_unknown"] = False
+        return res
+    res["disk_year"] = _dir_year(matched_folder.name)
+    held = held_by_other_versions(exact_album, existing, matched_folder, missing)
+    gaps = [t for t in missing if not any(t is h for h in held)]
+    bonus = bonus_versions(gaps, present)
+    if gaps and len(bonus) == len(gaps):
+        # Only other versions of songs on disk are missing: the album is
+        # complete.
+        res["owned"] = True
+        res["bonus_versions"] = len(bonus)
+    elif gaps:
+        res["partial"] = True
+        res["folder"] = str(matched_folder.relative_to(config.MUSIC_ROOT))
+        res["have_tracks"] = len(qobuz_tracks) - len(gaps)
+        res["want_tracks"] = len(qobuz_tracks)
+    elif held:
+        # Every song is on disk, some as another master: a Download here is a
+        # separate copy, not a fill.
+        res["as_new_edition"] = True
+        res["folder"] = str(matched_folder.relative_to(config.MUSIC_ROOT))
+    else:
+        res["owned"] = True
+    res["ownership_unknown"] = False
+    return res
+
+
 def find_album_folder(album):
     """(files, folder) for the folder that holds the album or another
     version of it, or ([], None). The folder the album's name finds counts

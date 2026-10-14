@@ -45,7 +45,7 @@ def _candidate_spec(artist_name: str, candidate: dict):
     title = album.get("title") or "?"
     n_present = candidate.get("n_present", 0)
     n_total = candidate.get("n_total", 0)
-    part = f" · {n_present}/{n_total} tracks" if n_total and n_present < n_total else ""
+    part = f" · {n_present} of {n_total} tracks" if n_total and n_present < n_total else ""
     album_dir = candidate.get("album_dir")
     payload = {
         "album_id": album.get("id"),

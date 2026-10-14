@@ -104,7 +104,7 @@ def run_downsample_walk_mode(args):
     hidden = hidden_mod.load()
 
     def _on_artist(artist_dir, _candidates, error, done, total):
-        _scan_line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46)}…"
+        _scan_line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46).removesuffix('…')}…"
         if sys.stdout.isatty():
             print(f"\r{_scan_line:<80}", end="", flush=True)
         if error is not None and artist_dir.name not in discovery_errors:

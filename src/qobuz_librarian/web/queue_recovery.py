@@ -145,8 +145,10 @@ def _recovery_status_value(result) -> str | None:
     return getattr(status, "value", None)
 
 
-# The queues a terminal walk or album search saves before it downloads.
-_TERMINAL_QUEUE_MODES = frozenset({"walk_queue", "album_walk", "album-now"})
+# The queues a terminal walk, artist run or album search saves before it
+# downloads.
+_TERMINAL_QUEUE_MODES = frozenset(
+    {"walk_queue", "album_walk", "album-now", "artist"})
 
 # Reviews whose approval downloads albums. The terminal holds its repairs for
 # a saved queue too.

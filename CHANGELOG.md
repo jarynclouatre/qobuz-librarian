@@ -2,18 +2,20 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
-## [1.3.4] - 2026-10-11
+## [1.3.4] - 2026-10-13
 
-Downloads retry tracks that arrive missing or damaged, Search stops calling owned tracks missing on albums with several versions, and unchanged settings keep following Compose.
+Search and Library scans recognise what you own from its recordings, Upgrade offers only the version you have, lyrics fit each recording, and large libraries stay quick without rereading every file.
 
-- Downloads retry a track that arrives damaged or not at all, including on deluxe editions that repeat a title on another disc, so an album no longer finishes without it.
-- Retries wait out the usual pause, and the longer cooldown after a rate-limited track or quality re-download. Stop ends the wait at once. A damaged track that cannot be placed is counted once in the download summary.
-- Library scans compare the full track title, version included, so a live take or alternate mix is not taken for the album track.
-- Search counts tracks as owned on albums that mix versions: bonus tracks with their own version, titles whose version word is part of the song name, and discs another release numbers differently.
-- Clearing leftover staging files from the terminal leaves hi-res files alone when Downsample is off.
-- Saving Settings without changes no longer pins the lyric providers set in Compose.
-- Search keeps the search box and tab in step with the results after an artist link or Search results, and Back returns a desktop results list to where it was.
-- Library Expand all matches the open artists after a tab change or Back.
+- Search marks an edition In library when your files hold its recordings (the same ISRCs) and leads each album with its original release, never an instrumental or karaoke one. An album missing only bonus versions shows In library with their count, and tracklists name each track's version and mark the tracks you lack. Switching tab searches the box's text straight away, and an artist's page lists Albums, Live, Compilations, EPs & singles and Appears on, each oldest first by the year shown, 50 at a time for a long list. A year Qobuz gives as 1900 shows as unknown.
+- Library scans match each artist folder to the Qobuz artist whose catalogue holds its albums, and each album folder to the edition its title, edition words and year describe, so a sequel, live album or similarly named album is listed as its own. Download on a partly owned edition adds only the songs its folder lacks.
+- Missing Albums lists what Qobuz files as the artist's albums, one edition of each, and leaves out an album whose every recording sits in one of your folders. Switches add live releases, compilations, EPs and singles, and in Gap Fill bonus versions; the terminal has matching options. The first Library refresh after updating checks every artist again.
+- Upgrade offers a better-quality copy of the edition you have, never a different mix, master or edition, and names it on the row. Upgrade results saved before updating ask for a refresh.
+- Lyrics take an LRCLIB match only when it fits the track's length, title and artist, and leave out headings and site text. Re-check everything replaces or removes lyrics the app wrote that do not fit, keeps them while a provider cannot be reached, and leaves lyrics you added alone.
+- Downloads go into the main artist's folder by default (Migrate multi-artist folders is on). A track that arrives damaged or not at all is retried, an album that imports with tracks missing shows the count and Retry, and while Qobuz rejects the token or cannot be reached, queued downloads wait and are sent on by Check again or a recheck every five minutes.
+- After a restart cuts work short, Library, New releases, Upgrade, Downsample and Repair runs put the albums they had not finished back in their review, and an album left in an upgrade or repair backup is put back, read once at most. POST_JOB_HOOK also reports `awaiting_review` and `interrupted`.
+- The image's code is read-only to the user the app runs as, and POST_JOB_HOOK, streamrip, beets and the audio tools run without the web password, Qobuz token or Last.fm key. Failed sign-ins are logged, and a throttled one gets 429.
+- Discover opens the artist Last.fm meant when a name is shared, builds its first suggestions in minutes, opens a suggested artist in Search, and sets aside an artist you are not interested in until you bring it back. An empty library opens with a first step, and Diagnostics lists and removes files held from earlier downloads.
+- In the terminal, search marks albums In library, Gap Fill offers a remembered album again once its tracks change, a saved queue names its albums before you resume it, Ctrl-C in Artist mode keeps the albums you approved, and stopping a walk with `s` exits with status 0.
 
 ## [1.3.3] - 2026-10-09
 

@@ -657,64 +657,17 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
 
     if _album_raws:
         def _annotate_owned():
-            # Owned needs the edition and all its tracks, not just the songs
-            # on another mix. Partial copies keep their download button.
+            def fetch_album(album_id):
+                return api_client.call_within(
+                    cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
+
             annotations = []
             for alb in _album_raws:
-                res = {"ownership_unknown": True}
-                annotations.append(res)
                 try:
-                    folder = (catalog.find_album_dir_filesystem(alb)
-                              or catalog.find_album_dir_filesystem(alb, exact_edition=True))
-                    if folder is None:
-                        res["ownership_unknown"] = False
-                        continue
-                    exact_album = api_client.call_within(
-                        cfg.WEB_FETCH_TIMEOUT,
-                        qobuz_search.get_album,
-                        alb["id"],
-                        token,
-                    )
-                    qobuz_tracks = (
-                        (exact_album.get("tracks") or {}).get("items")
-                        or []
-                    )
-                    if not download_admission._album_tracks_complete(exact_album):
-                        continue
-                    existing, matched_folder, missing, present = catalog.find_edition_tracks(exact_album)
-                    if not existing:
-                        files, other = catalog.find_album_folder(exact_album)
-                        if other is not None and catalog.holds_recordings(qobuz_tracks, files):
-                            res["owned"] = True
-                        elif other is not None:
-                            res["as_new_edition"] = True
-                            res["folder"] = str(other.relative_to(cfg.MUSIC_ROOT))
-                        res["ownership_unknown"] = False
-                        continue
-                    res["disk_year"] = catalog._dir_year(matched_folder.name)
-                    held = catalog.held_by_other_versions(
-                        exact_album, existing, matched_folder, missing)
-                    gaps = [t for t in missing if not any(t is h for h in held)]
-                    bonus = catalog.bonus_versions(gaps, present)
-                    if gaps and len(bonus) == len(gaps):
-                        # Only other versions of songs on disk are missing:
-                        # the album is complete.
-                        res["owned"] = True
-                        res["bonus_versions"] = len(bonus)
-                    elif gaps:
-                        res["partial"] = True
-                        res["folder"] = str(matched_folder.relative_to(cfg.MUSIC_ROOT))
-                        res["have_tracks"] = len(qobuz_tracks) - len(gaps)
-                        res["want_tracks"] = len(qobuz_tracks)
-                    elif held:
-                        # Every song is on disk, some as another master: a
-                        # Download here is a separate copy, not a fill.
-                        res["as_new_edition"] = True
-                        res["folder"] = str(matched_folder.relative_to(cfg.MUSIC_ROOT))
-                    else:
-                        res["owned"] = True
-                    res["ownership_unknown"] = False
+                    annotations.append(
+                        catalog.search_result_ownership(alb, fetch_album))
                 except Exception:
+                    annotations.append({"ownership_unknown": True})
                     _log.exception(
                         "ownership annotation failed for album %s", alb.get("id"))
             return annotations
@@ -1196,7 +1149,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         if not download_as_new_edition and not track_id:
             existing, folder, missing, present = await loop.run_in_executor(
                 None, catalog.find_edition_tracks, album)
-            if existing and not missing and download_admission._album_tracks_complete(album):
+            if existing and not missing and catalog.album_tracks_complete(album):
                 msg = "This edition is already in your library."
                 if rendering._is_htmx(request):
                     return _download_fragment("warning", html.escape(msg), "owned")

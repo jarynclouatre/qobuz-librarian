@@ -15,6 +15,7 @@ from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import lyric_fetch, rip
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
 
 # Lyric tag I/O (read/write embedded lyrics, materialise .lrc sidecars) needs
@@ -109,7 +110,7 @@ def _run_lyric_hook(album_dir):
         return empty_result
     if not flacs:
         return empty_result
-    log.info(fmt(C.CYAN, f"  ⟳  Checking lyrics for {len(flacs)} track(s)…"))
+    log.info(fmt(C.CYAN, f"  ⟳  Checking lyrics for {plural(len(flacs), 'track')}…"))
     # lyric_fetch.save_state assumes its parent exists; ensure DATA_DIR is
     # created up-front so first-run (no other writer has touched DATA_DIR
     # yet) doesn't crash inside the lyric hook.
@@ -1017,9 +1018,9 @@ def write_post_import_sidecars(
     if ready or failed:
         actions = []
         if written:
-            actions.append(f"wrote {written} .lrc sidecar(s)")
+            actions.append(f"wrote {plural(written, '.lrc sidecar')}")
         if kept:
-            actions.append(f"kept {kept} better existing .lrc sidecar(s)")
+            actions.append(f"kept {plural(kept, 'better existing .lrc sidecar')}")
         if failed:
             noun = "sidecar" if failed == 1 else "sidecars"
             actions.append(f"{failed} {noun} failed")
@@ -1241,7 +1242,7 @@ def offer_resume_lyric_retry(args):
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  {len(paths)} file(s) queued for lyric retry but the "
+                f"  ⚠  {plural(len(paths), 'file')} queued for lyric retry but the "
                 f"syncedlyrics provider library isn't installed. Manifest preserved.",
             )
         )
@@ -1254,8 +1255,10 @@ def offer_resume_lyric_retry(args):
         log.info(
             fmt(
                 C.GRAY,
-                f"  All {len(paths)} file(s) in {cfg.LYRIC_RETRY_FILE.name} "
-                f"are missing on disk; clearing manifest.",
+                f"  {'The file' if len(paths) == 1 else f'All {len(paths)} files'} "
+                f"in {cfg.LYRIC_RETRY_FILE.name} "
+                f"{'is' if len(paths) == 1 else 'are'} missing on disk; "
+                "clearing manifest.",
             )
         )
         if save_lyric_retry([]):
@@ -1272,7 +1275,7 @@ def offer_resume_lyric_retry(args):
     log.info(
         fmt(
             C.BOLD + C.YELLOW,
-            f"  ⚠  Lyric retry pending: {len(existing)} file(s) had providers "
+            f"  ⚠  Lyric retry pending: {plural(len(existing), 'file')} had providers "
             f"unavailable last run.",
         )
     )
@@ -1294,7 +1297,7 @@ def offer_resume_lyric_retry(args):
         if ans is None:
             return False
         if ans in ("", "y", "yes"):
-            log.info(fmt(C.CYAN, f"\n  ⟳  Retrying lyrics on {len(existing)} file(s)…"))
+            log.info(fmt(C.CYAN, f"\n  ⟳  Retrying lyrics on {plural(len(existing), 'file')}…"))
             counts = {}
             try:
                 paths_obj = [Path(p) for p in existing]
@@ -1332,7 +1335,7 @@ def offer_resume_lyric_retry(args):
             if not refreshed:
                 log.info(fmt(
                     C.YELLOW,
-                    f"  ⚠  Retry processed {len(existing)} file(s), but the "
+                    f"  ⚠  Retry processed {plural(len(existing), 'file')}, but the "
                     "saved retry queue couldn't be updated; it was left "
                     "unchanged and will be offered again.",
                 ))
@@ -1350,7 +1353,8 @@ def offer_resume_lyric_retry(args):
                 log.info(
                     fmt(
                         C.YELLOW,
-                        f"  ⚠  {len(remaining)} file(s) still need review or "
+                        f"  ⚠  {plural(len(remaining), 'file')} still "
+                        f"{'needs' if len(remaining) == 1 else 'need'} review or "
                         "retry. Will prompt next launch.",
                     )
                 )
@@ -1364,7 +1368,7 @@ def offer_resume_lyric_retry(args):
             return False
         if ans in ("d", "discard"):
             conf = ask(
-                f"  Really discard {len(existing)} retry-queued file(s)? "
+                f"  Really discard {plural(len(existing), 'retry-queued file')}? "
                 "Type DISCARD to confirm: ",
                 colour=C.YELLOW, lower=False,
             )

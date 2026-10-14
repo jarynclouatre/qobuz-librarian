@@ -39,7 +39,7 @@ class DownsampleCandidate:
 
     @property
     def detail(self):
-        part = "" if self.n_hires == self.n_flac else f" · {self.n_hires}/{self.n_flac} tracks"
+        part = "" if self.n_hires == self.n_flac else f" · {self.n_hires} of {self.n_flac} tracks"
         return f"{self.rate_label}{part} · ~{format_size(self.est_saving)} reclaimable"
 
 

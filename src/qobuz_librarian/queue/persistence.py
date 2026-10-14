@@ -30,7 +30,7 @@ from qobuz_librarian.queue.journal import (
     transition_journal_item,
 )
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, fmt, wrap
+from qobuz_librarian.ui_cli.colors import C, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 
@@ -69,6 +69,7 @@ def _queue_heading(kind, items, mode, saved_at):
         "album_walk": "a Gap Fill walk",
         "walk_queue": "a Library walk",
         "album-now": "an album search",
+        "artist": "Artist mode",
     }.get(mode or "", "an earlier run")
     when = (datetime.fromisoformat(saved_at).astimezone().strftime(
         "%Y-%m-%d %H:%M") if saved_at else "at an unknown time")
@@ -76,6 +77,64 @@ def _queue_heading(kind, items, mode, saved_at):
         f"{kind} download queue from {source}: "
         f"{plural(len(items), 'album')}, saved {when}.",
         indent="  ⚠  ", hanging="     "))
+
+
+def queue_saver(mode, *, dry_run=False):
+    """Persist a run's queue, tolerating a journal that recovery holds.
+
+    A durable item that stops for attention stays blocked in the journal on
+    purpose, and while that stands the journal refuses to be rewritten as
+    pending. The run can't settle it; that happens at the next launch, so it
+    says so once and carries on rather than dying on the refusal. A dry run
+    saves nothing.
+    """
+    told = []
+
+    def save(items):
+        if dry_run:
+            return
+        try:
+            save_pending_queue(items, mode=mode)
+        except QueueJournalBlocked:
+            if not told:
+                told.append(True)
+                log.info(fmt(C.YELLOW,
+                    "  ⚠  An album is parked for recovery, so the saved queue "
+                    "is being kept exactly as it stands until the next "
+                    "launch."))
+
+    return save
+
+
+def kept_queue_note(queue):
+    """Where a run's unfinished queue waits, and how to run it."""
+    return fmt(C.GRAY, wrap(
+        f"{plural(len(queue), 'album')} kept in the saved queue in "
+        f"{cfg.QUEUE_JOURNAL_DIR}. Run Qobuz Librarian with no mode or search "
+        "argument to resume it.",
+        indent="  ", hanging="  "))
+
+
+# Albums a resume prompt names before it counts the rest.
+_QUEUE_ALBUMS_SHOWN = 5
+
+
+def _queued_album_lines(items):
+    """The albums a saved queue holds, a few by name and a count of the
+    rest."""
+    lines = []
+    for item in items[:_QUEUE_ALBUMS_SHOWN]:
+        album = item.get("album") or {}
+        artist = (album.get("artist") or {}).get("name") or "?"
+        title = album.get("title") or item.get("label") or "?"
+        version = album.get("version") or ""
+        if version and version.lower() not in title.lower():
+            title = f"{title} ({version})"
+        lines.append(fmt(C.WHITE, f"     • {truncate(f'{artist} - {title}', 70)}"))
+    if len(items) > _QUEUE_ALBUMS_SHOWN:
+        lines.append(fmt(C.GRAY,
+            f"     … and {len(items) - _QUEUE_ALBUMS_SHOWN} more"))
+    return "\n".join(lines)
 
 
 def load_pending_queue():
@@ -217,6 +276,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
     log.info(_queue_heading(
         "Interrupted" if recovery_bearing else "Saved",
         items, mode, saved_at))
+    log.info(_queued_album_lines(items))
     vlog(f"resume queue file: {queue_path}")
     if recovery_bearing:
         log.info(fmt(C.GRAY,
@@ -235,7 +295,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
             return None
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN,
-                f"\n  ⟳  Resuming {len(items)} saved album(s)…"))
+                f"\n  ⟳  Resuming {plural(len(items), 'saved album')}…"))
             try:
                 token = token_source() if callable(token_source) else token_source
                 from qobuz_librarian.queue.executor import _execute_download_queue
@@ -272,7 +332,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                             settled = False
                     if settled:
                         log.info(fmt(C.YELLOW,
-                            f"  ⚠  {len(items)} album(s) couldn't be "
+                            f"  ⚠  {plural(len(items), 'album')} couldn't be "
                             "downloaded - saved queue kept for next launch."))
                     else:
                         log.info(fmt(C.YELLOW,
@@ -296,7 +356,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
             return "keep"
         if not recovery_bearing and ans in ("d", "discard"):
             conf = ask(
-                f"  Really discard {len(items)} queued album(s)? "
+                f"  Really discard {plural(len(items), 'queued album')}? "
                 "Type DISCARD to confirm: ",
                 colour=C.YELLOW, lower=False,
             )
@@ -324,6 +384,7 @@ def offer_resume_pending_queue(args, token_source):
 
     print()
     log.info(_queue_heading("Saved", items, mode, saved_at))
+    log.info(_queued_album_lines(items))
     queue_path = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
     vlog(f"resume queue file: {queue_path}")
     log.info(fmt(C.GRAY,
@@ -336,7 +397,7 @@ def offer_resume_pending_queue(args, token_source):
             return False
         if ans in ("", "y", "yes"):
             log.info(fmt(C.CYAN,
-                f"\n  ⟳  Resuming {len(items)} saved album(s)…"))
+                f"\n  ⟳  Resuming {plural(len(items), 'saved album')}…"))
             try:
                 token = token_source() if callable(token_source) else token_source
                 # Lazy import to avoid a circular dependency at module load:
@@ -360,7 +421,7 @@ def offer_resume_pending_queue(args, token_source):
                     try:
                         save_pending_queue(items, mode=mode)
                         log.info(fmt(C.YELLOW,
-                            f"  ⚠  {len(items)} album(s) couldn't be "
+                            f"  ⚠  {plural(len(items), 'album')} couldn't be "
                             "downloaded - saved queue kept for next launch."))
                     except QueueJournalBlocked:
                         # An album parked for attention during the flush; the
@@ -385,7 +446,7 @@ def offer_resume_pending_queue(args, token_source):
             return False
         if ans in ("d", "discard"):
             conf = ask(
-                f"  Really discard {len(items)} queued album(s)? "
+                f"  Really discard {plural(len(items), 'queued album')}? "
                 "Type DISCARD to confirm: ",
                 colour=C.YELLOW, lower=False,
             )

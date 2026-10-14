@@ -1117,7 +1117,7 @@ def _prepare_staging_tags(
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Set aside {len(moved)} untagged file(s) in private "
+                f"  ⚠  Set aside {errors.plural(len(moved), 'untagged file')} in private "
                 "staging recovery.\n"
                 "     (each file has its own recovery record; cancelled-rip "
                 "leftovers and files needing a manual retag were not deleted).",
@@ -7113,8 +7113,9 @@ def _beets_direct_guarded(
             log.info(
                 fmt(
                     C.GRAY,
-                    f"     {audio_after} staged track(s) were not imported "
-                    "and remain in staging.",
+                    f"     {errors.plural(audio_after, 'staged track')} "
+                    f"{'was' if audio_after == 1 else 'were'} not imported "
+                    f"and {'remains' if audio_after == 1 else 'remain'} in staging.",
                 )
             )
         return True, "ok"
@@ -7185,7 +7186,7 @@ def _report_staging_remnants():
             )
         except OSError:
             n_audio = 0
-        log.info(fmt(C.GRAY, f"       · {folder.name} ({n_audio} track(s))"))
+        log.info(fmt(C.GRAY, f"       · {folder.name} ({errors.plural(n_audio, 'track')})"))
     if len(folders) > 20:
         log.info(fmt(C.GRAY, f"       … and {len(folders) - 20} more"))
 
@@ -8460,8 +8461,8 @@ def _consolidate_duplicate_albums(protected_paths=None):
         log.info(
             fmt(
                 C.GRAY,
-                f"  ⤷  Tidied {merged} album folder(s) beets had split into "
-                "duplicate library entries.",
+                f"  ⤷  Merged duplicate beets entries for {merged} album "
+                f"folder{'s' if merged != 1 else ''}.",
             )
         )
         clear_scan_caches()
@@ -8496,7 +8497,7 @@ def forget_beets_entries(paths):
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't drop the deleted track(s) from the beets library "
+                f"  ⚠  Couldn't drop the deleted tracks from the beets library "
                 f"({reason}); they'll linger as ghost entries until you run "
                 f"`beet update`.",
             )
@@ -8690,9 +8691,10 @@ def staging_preflight(args):
         log.info(
             fmt(
                 C.YELLOW,
-                f"\n  ⚠  {len(isolated_runs)} isolated interrupted download "
-                f"run(s) remain in {cfg.STAGING_DIR}; they will not be imported "
-                "automatically.",
+                f"\n  ⚠  {errors.plural(len(isolated_runs), 'isolated interrupted download run')} "
+                f"{'remains' if len(isolated_runs) == 1 else 'remain'} in "
+                f"{cfg.STAGING_DIR}; {'it' if len(isolated_runs) == 1 else 'they'} "
+                "will not be imported automatically.",
             )
         )
     files = [
@@ -8704,7 +8706,8 @@ def staging_preflight(args):
         return
 
     log.info(
-        fmt(C.YELLOW, f"\n  ⚠  Staging dir not empty: {len(files)} file(s) at {cfg.STAGING_DIR}.")
+        fmt(C.YELLOW, f"\n  ⚠  Staging dir not empty: {errors.plural(len(files), 'file')} "
+                       f"at {cfg.STAGING_DIR}.")
     )
     sample = [str(f.relative_to(cfg.STAGING_DIR)) for f in files[:5]]
     for s in sample:
@@ -8815,7 +8818,7 @@ def staging_preflight(args):
             log.info(
                 fmt(
                     C.YELLOW,
-                    f"  ⚠  Set aside {quarantined} exact unimported file(s) under "
+                    f"  ⚠  Set aside {errors.plural(quarantined, 'exact unimported file')} under "
                     f"{cfg.BEETS_RETRY_DIR}/.",
                 )
             )
@@ -8832,8 +8835,8 @@ def staging_preflight(args):
             log.info(
                 fmt(
                     C.YELLOW,
-                    f"  ⚠  Kept {len(leftover)} changed or unproved staging "
-                    "file(s) in place for manual review.",
+                    f"  ⚠  Kept {errors.plural(len(leftover), 'changed or unproved staging file')} "
+                    "in place for manual review.",
                 )
             )
     elif r == "3":
