@@ -42,11 +42,14 @@ from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
     _prepare_staging_tags,
     beets_import_albums,
+    capture_beets_album_entries,
     durable_import_possible,
     fill_album_tags,
+    forget_imported_beets_entries,
     prepare_managed_staging_tags,
     relocate_disc_album_artwork,
     retire_backup_beets_entries,
+    retire_replaced_beets_entries,
     staging_preflight,
 )
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
@@ -92,6 +95,7 @@ from qobuz_librarian.library.catalog import (
     find_album_dir_by_track_signatures,
     find_album_dir_filesystem,
     folder_holds_all_tracks,
+    names_other_version,
     other_version_dir,
     prompt_and_migrate_multi_artist_folder,
     track_signatures_for_album_dirs,
@@ -1007,7 +1011,8 @@ def _validate_queue_item_premise(item):
     album_dir = item.get("album_dir")
     if album_dir is None:
         clear_scan_caches()
-        if other_version_dir(item["album"]) is not None:
+        other = other_version_dir(item["album"])
+        if other is not None and not names_other_version(item["album"], other):
             raise CandidateStale(
                 "This album appeared locally after the download was queued. "
                 "Refresh or rescan; nothing was changed."
@@ -1161,7 +1166,7 @@ def _queue_outcome_needs_attention(item):
 
 def _import_album_with_retry(
         album_dirs, *, ownership_out=None, source_receipts=None, album_dir=None,
-        places=None):
+        places=None, folder=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
     attempts, retrying only on idle-timeout (other failures aren't transient).
     Returns True on import success, False on permanent failure."""
@@ -1177,6 +1182,8 @@ def _import_album_with_retry(
         pin = {} if album_dir is None else {"album_dir": album_dir}
         if places:
             pin["places"] = places
+        if folder is not None:
+            pin["folder"] = folder
         if ownership_out is None:
             kind = beets_import_albums(album_dirs, **pin)
             attempt_capture = None
@@ -1413,10 +1420,9 @@ def _resolve_queue_item(
 
     def imported_dir():
         signatures = item.get("post_import_signatures")
-        if item.get("exact_edition") and album_dir is not None:
-            found = find_album_dir_by_track_signatures(signatures, expected_dir=album_dir)
-            if found is not None or bp is None:
-                return found
+        if (item.get("exact_edition") or bp is not None) and album_dir is not None:
+            # An upgrade is imported into the album's own folder.
+            return find_album_dir_by_track_signatures(signatures, expected_dir=album_dir)
         return find_album_dir_by_track_signatures(signatures)
 
     _sibs = item.get("siblings_to_delete", [])
@@ -1744,9 +1750,11 @@ def _resolve_queue_item(
                 _carry_non_audio_from_backup,
                 _keep_backup_for_companions,
                 _put_original_back,
+                _replacement_audio_paths,
                 _upgrade_replacement_verified,
                 _upgrade_trees_verified,
             )
+            replaced_entries = item.get("_replaced_beets_entries")
             if _upgrade_replacement_verified(item["album"], album_dir, bp):
                 # Carry non-audio companions (booklets, scans, .cue/.log,
                 # hand-placed cover art) from the backup into the rebuilt album
@@ -1760,10 +1768,19 @@ def _resolve_queue_item(
                         replacement_dir=post_dir)
                 if carried is not None:
                     replacement_path, replacement_receipt, left = carried
-                    if not retire_backup_beets_entries(
-                        bp,
-                        replacement_path,
-                        replacement_receipt,
+                    if not (
+                        retire_replaced_beets_entries(
+                            replaced_entries,
+                            replacement_path,
+                            _replacement_audio_paths(
+                                replacement_path, replacement_receipt),
+                        )
+                        if replaced_entries is not None
+                        else retire_backup_beets_entries(
+                            bp,
+                            replacement_path,
+                            replacement_receipt,
+                        )
                     ):
                         item["upgrade_unverified"] = True
                         item["catalogue_unverified"] = True
@@ -1809,8 +1826,7 @@ def _resolve_queue_item(
             else:
                 # The walk still flags the album: its upgrade did not happen.
                 item["upgrade_unverified"] = True
-                put_back = _put_original_back(
-                    bp, album_dir, post_dir if post_dir_exact else None)
+                put_back = _put_original_back(bp, album_dir)
                 if put_back is not None:
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {truncate(album_dir.name, 40)}: upgrade "
@@ -1820,6 +1836,8 @@ def _resolve_queue_item(
                         log.info(fmt(C.GRAY,
                             f"     The new download was set aside at "
                             f"{put_back}."))
+                    if replaced_entries is not None:
+                        forget_imported_beets_entries(replaced_entries, album_dir)
                 else:
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {truncate(album_dir.name, 40)}: upgrade "
@@ -3394,6 +3412,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
 
         _seal_queue_item_siblings(item)
         if item["auto_upgrade"] and album_dir and album_dir.exists():
+            # The album's beets entry takes in the replacement once it checks
+            # out, so the album keeps its id and fields.
+            item["_replaced_beets_entries"] = capture_beets_album_entries(album_dir)
             bp = backup_album_dir(
                 album_dir,
                 expected_receipt=item.get("_validated_source_receipt"),
@@ -3547,13 +3568,18 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  repair retag step failed: {_e_rt}"))
                 try:
-                    fill_tags = (
-                        fill_album_tags(album_dir)
-                        if album_dir is not None
-                        and not item.get("download_full_album") else None)
+                    if item.get("backup_path") is not None:
+                        fill_tags = fill_album_tags(item["backup_path"])
+                    else:
+                        fill_tags = (
+                            fill_album_tags(album_dir)
+                            if album_dir is not None
+                            and not item.get("download_full_album") else None)
                     if fill_tags:
                         _prepare_staging_tags(album_dirs, album_tags=fill_tags)
-                    elif item.get("exact_edition"):
+                    elif item.get("exact_edition") or (
+                            item.get("backup_path") is not None
+                            and edition_album_title(album)):
                         _prepare_staging_tags(album_dirs, album_title=edition_album_title(album))
                     prepared = _run_pre_import_hooks_for_dirs(album_dirs, args)
                     if item.get("backup_path") is not None:
@@ -3599,6 +3625,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         else {"album_dir": item["album_dir"],
                               "places": item.get("refill_places")}
                     )
+                    if item.get("backup_path") is not None:
+                        pin["folder"] = item["album_dir"]
+                        if item.get("_replaced_beets_entries") is not None:
+                            del pin["album_dir"]
                     if ownership_capture is None:
                         item_imported = _import_album_with_retry(
                             album_dirs, **pin)

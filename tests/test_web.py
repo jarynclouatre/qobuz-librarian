@@ -806,11 +806,10 @@ def test_album_search_marks_each_edition_by_what_the_library_holds(
         list(albums.values()), "Waiting for the Sun", "tok", set(), set()))
     rows = {r["id"]: r for r in results}
     assert rows["original"]["as_new_edition"] and not rows["original"].get("partial")
-    assert (rows["deluxe"]["have_tracks"], rows["deluxe"]["want_tracks"]) == (2, 3)
+    assert rows["deluxe"]["as_new_edition"] and not rows["deluxe"].get("partial")
     [group] = groups
     assert group["id"] == "original"
     assert [e["id"] for e in group["others"]] == ["deluxe", "reissue"]
-    assert (group["other_have"], group["other_want"]) == (2, 3)
 
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(catalog_mod, "find_album_dir_filesystem", lambda _a, **_kw: None)

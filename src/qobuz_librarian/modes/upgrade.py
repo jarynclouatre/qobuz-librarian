@@ -313,7 +313,10 @@ def run_upgrade_walk_mode(args, token):
             log.info("")
             for c in candidates:
                 payload = c.get("payload") or {}
-                title = truncate(c.get("title") or "?", 48)
+                title = c.get("title") or "?"
+                if payload.get("version"):
+                    title = f"{title} ({payload['version']})"
+                title = truncate(title, 48)
                 year = known_year(payload.get("year")) or "?"
                 detail = c.get("detail") or "higher Qobuz quality"
                 log.info(f"    • {fmt(C.WHITE, title)} "

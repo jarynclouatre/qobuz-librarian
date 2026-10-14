@@ -5279,13 +5279,15 @@ def _build_import_override_yaml(
 def _prepare_for_beets_run(
     roots=None, ownership_out=None, source_files_out=None, album_dir=None,
     places=None,
+    folder=None,
 ):
     """Common setup shared by the whole-staging and per-album entry points:
     resolve Beets' own runtime, prep tags on the staged FLACs, and write the
     one-shot override yaml. Returns ``(override_path, cleanup_fn, runtime)``
     or three ``None`` values if a precondition failed. ``album_dir`` is an
     existing album the staged tracks are added to, ``places`` where in it
-    the tracks with these ISRCs go."""
+    the tracks with these ISRCs go; ``folder`` pins the album
+    to a library folder that may not exist yet."""
     runtime = _resolve_beets_runtime()
     if runtime is None:
         log.info(fmt(C.RED, "  ✗  A supported Beets Python runtime could not be found."))
@@ -5310,7 +5312,9 @@ def _prepare_for_beets_run(
         return None, None, None
 
     album_folder = None
-    if album_dir is not None and Path(album_dir).is_dir():
+    if folder is not None:
+        album_folder = _library_folder(folder)
+    elif album_dir is not None and Path(album_dir).is_dir():
         album_folder = _library_folder(album_dir)
     plugin_config = _configured_beets_plugins(runtime, album_folder)
     if plugin_config is None:
@@ -5860,14 +5864,15 @@ def relocate_disc_album_artwork(album_dir) -> bool:
 
 def beets_import_paths(
     consolidate=True, *, source_files_out=None, album_dirs=None, album_dir=None,
-    protected_paths=None,
+    protected_paths=None, folder=None,
 ):
     """Run beets on explicit staged albums and return a success bool.
 
     With no explicit list, legacy preflight recovery derives only public audio
     directories. Hidden per-rip roots and durable retry recovery are never
     adopted by a whole-staging command. The fold after the import leaves
-    ``protected_paths`` alone.
+    ``protected_paths`` alone. ``folder`` is the library folder the album is
+    filed in whether or not it exists yet.
     """
     roots = [Path(directory) for directory in (album_dirs or [])]
     if album_dirs is None:
@@ -5885,7 +5890,8 @@ def beets_import_paths(
         return True
     prepared_sources = source_files_out if source_files_out is not None else []
     override_path, cleanup, runtime = _prepare_for_beets_run(
-        roots=roots, source_files_out=prepared_sources, album_dir=album_dir
+        roots=roots, source_files_out=prepared_sources, album_dir=album_dir,
+        folder=folder,
     )
     if cleanup is None:
         return False
@@ -5912,7 +5918,7 @@ def beets_import_paths(
 
 
 def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
-                        places=None):
+                        places=None, folder=None):
     """Run beets import scoped to ``album_dirs`` and return a tri-state code:
 
     - ``"ok"``: import succeeded.
@@ -5925,6 +5931,8 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
     album, since the duplicate-album fold is a library-wide pass), apart
     from the folder of an album ``album_dir`` adds tracks to. ``places``
     maps a track's ISRC to its path in that folder, without the extension.
+    ``folder`` files the album in that library folder whether or not it
+    exists yet.
     """
     if not album_dirs:
         return "ok"
@@ -5935,6 +5943,7 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
         source_files_out=prepared_sources,
         album_dir=album_dir,
         places=places,
+        folder=folder,
     )
     if cleanup is None:
         return "error"
@@ -7665,9 +7674,18 @@ def _captured_beets_item_ids(connection, snapshot):
     wanted_attributes = tuple(row for row in snapshot.album_attribute_rows
                               if row[snapshot.album_attribute_columns.index("entity_id")]
                               in album_ids)
-    unchanged("albums", _consolidation_rows_for_ids(
+    albums = _consolidation_rows_for_ids(
         connection, "albums", snapshot.album_columns, "id", snapshot.album_ids,
-    ), wanted_albums)
+    )
+    if not items and "artpath" in snapshot.album_columns:
+        # An album that took in its replacement's tracks took its cover
+        # when it had none.
+        art = snapshot.album_columns.index("artpath")
+        ident = snapshot.album_columns.index("id")
+        uncovered = {row[ident] for row in wanted_albums if row[art] is None}
+        albums = [(*row[:art], None, *row[art + 1:]) if row[ident] in uncovered else row
+                  for row in albums]
+    unchanged("albums", albums, wanted_albums)
     unchanged("album metadata", _consolidation_rows_for_ids(
         connection, "album_attributes", snapshot.album_attribute_columns,
         "entity_id", snapshot.album_ids,
@@ -7820,6 +7838,57 @@ def capture_beets_album_entries(album_dir):
         _close_beets_database_anchor(database_anchor)
 
 
+def _carry_item_fields(connection, retiring, replacements):
+    """Give each replacement track the fields, such as a rating, that only
+    the entry it replaces at the same path had. ``retiring`` maps old entry
+    ids to paths and ``replacements`` maps paths to the new entry ids."""
+    for old_id, path in retiring.items():
+        new_id = replacements.get(path)
+        if new_id is None:
+            continue
+        kept = {key for (key,) in connection.execute(
+            "SELECT key FROM item_attributes WHERE entity_id = ?", (new_id,))}
+        for key, value in connection.execute(
+                "SELECT key, value FROM item_attributes WHERE entity_id = ?",
+                (old_id,)).fetchall():
+            if key not in kept:
+                connection.execute(
+                    "INSERT INTO item_attributes (entity_id, key, value) VALUES (?, ?, ?)",
+                    (new_id, key, value))
+
+
+def _adopt_replacement_album(connection, album_id, snapshot, item_ids, album_columns):
+    """Move the replacement's tracks into the album entry they replace.
+
+    The entry keeps its id, added date and fields, such as a rating, and
+    takes the replacement's cover when it has none. Only an album entry the
+    import made for exactly these tracks is folded in. False when there is
+    none.
+    """
+    placeholders = ",".join("?" for _ in item_ids)
+    albums = {row[0] for row in connection.execute(
+        f"SELECT album_id FROM items WHERE id IN ({placeholders})", item_ids)}
+    if len(albums) != 1:
+        return False
+    (new_id,) = albums
+    if new_id is None or new_id in snapshot.album_ids or connection.execute(
+            f"SELECT 1 FROM items WHERE album_id = ? AND id NOT IN ({placeholders}) LIMIT 1",
+            (new_id, *item_ids)).fetchone() is not None:
+        return False
+    if "artpath" in album_columns:
+        connection.execute(
+            "UPDATE albums SET artpath = (SELECT artpath FROM albums WHERE id = ?) "
+            "WHERE id = ? AND artpath IS NULL", (new_id, album_id))
+    moved = connection.execute(
+        f"UPDATE items SET album_id = ? WHERE id IN ({placeholders})", (album_id, *item_ids))
+    if moved.rowcount != len(item_ids):
+        raise sqlite3.IntegrityError("replacement beets items changed")
+    connection.execute("DELETE FROM album_attributes WHERE entity_id = ?", (new_id,))
+    if connection.execute("DELETE FROM albums WHERE id = ?", (new_id,)).rowcount != 1:
+        raise sqlite3.IntegrityError("replacement beets album changed")
+    return True
+
+
 def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
                                   *, before_commit=None):
     """Retire only captured rows after proving the replacement catalogue."""
@@ -7894,6 +7963,17 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
                 ).fetchone()
                 if remaining is None:
                     retiring_album_ids.append(album_id)
+            if len(retiring_album_ids) == 1 and _adopt_replacement_album(
+                    connection, retiring_album_ids[0], snapshot,
+                    [ids[0] for ids in replacement_rows.values()],
+                    album_columns):
+                retiring_album_ids = []
+            _carry_item_fields(
+                connection,
+                {item_id: _catalogue_item_path(raw, allow_external=True)
+                 for item_id, raw in connection.execute(
+                     f"SELECT id, path FROM items WHERE id IN ({placeholders})", item_ids)},
+                {path: ids[0] for path, ids in replacement_rows.items()})
 
             deleted_attributes = connection.execute(
                 f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
@@ -8701,6 +8781,30 @@ def forget_staged_beets_rows(paths):
     return _remove_beets_rows(matches, warn).complete
 
 
+def forget_imported_beets_entries(snapshot, folder):
+    """Drop the entries an import added under ``folder``, keeping those
+    ``snapshot`` captured there before it. True when none are left."""
+    try:
+        root = _catalogue_item_path(Path(folder) / "placeholder").parent
+    except (OSError, TypeError, ValueError):
+        return False
+
+    def matches(raw_path):
+        try:
+            path = _catalogue_item_path(raw_path, allow_external=True)
+        except (OSError, TypeError, ValueError):
+            return False
+        return root in path.parents
+
+    def warn(reason):
+        log.info(fmt(
+            C.YELLOW,
+            f"  ⚠  Couldn't drop the new download's beets entries ({reason}).",
+        ))
+
+    return _remove_beets_rows(matches, warn, keep=frozenset(snapshot.item_ids)).complete
+
+
 def beets_entry_ids(paths):
     """The ids of the beets entries for ``paths``, or None when the library
     can't be read."""
@@ -8845,8 +8949,9 @@ def forget_replaced_beets_entries(item_ids=(), *, folder=None):
     return dropped
 
 
-def _remove_beets_rows(matches, warn):
-    """Run `beet remove` on the exact items whose path ``matches`` accepts."""
+def _remove_beets_rows(matches, warn, keep=frozenset()):
+    """Run `beet remove` on the exact items whose path ``matches`` accepts,
+    other than the ids in ``keep``."""
     runtime = _resolve_beets_runtime()
     if runtime is None:
         warn("a supported Beets runtime could not be found")
@@ -8879,7 +8984,7 @@ def _remove_beets_rows(matches, warn):
                 if type(item_id) is not int or item_id <= 0 or item_id in seen_ids:
                     raise sqlite3.DatabaseError("beets item identity is invalid")
                 seen_ids.add(item_id)
-                if matches(raw_path):
+                if item_id not in keep and matches(raw_path):
                     tracked.append(item_id)
             return tracked
 

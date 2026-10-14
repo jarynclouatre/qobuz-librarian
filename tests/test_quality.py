@@ -169,6 +169,15 @@ def test_upgrade_scan_offers_only_the_edition_on_disk(tmp_path, monkeypatch):
     found = decision.scan_artist_for_upgrades(
         "The Beatles", album_dir.parent, "tok", args, capped={})
     assert [c["qobuz_album"]["id"] for c in found] == ["remaster"]
+    # Nor one Qobuz won't stream, whole or a track of it.
+    remaster["streamable"] = False
+    assert decision.scan_artist_for_upgrades(
+        "The Beatles", album_dir.parent, "tok", args, capped={}) == []
+    remaster["streamable"] = True
+    remaster["tracks"]["items"][2]["streamable"] = False
+    assert decision.scan_artist_for_upgrades(
+        "The Beatles", album_dir.parent, "tok", args, capped={}) == []
+    del remaster["tracks"]["items"][2]["streamable"]
 
     for local, song in zip(files, songs):
         local["title"] = song

@@ -650,8 +650,11 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'</div></div>'
             )
             continue
-        if backup_mod.is_set_aside_replacement(path):
-            # Restore would put this download over the album's original.
+        if (backup_mod.is_set_aside_replacement(path)
+                and origin and Path(origin).is_dir()):
+            # Restore would put this download over the album's original. One
+            # whose folder is gone is listed as a backup, which Restore can
+            # put back.
             rows.append(
                 f'<div class="ql-diagnostic-row" data-backup-status="set-aside">'
                 f'<span class="ql-diagnostic-status ql-diagnostic-status-error" '

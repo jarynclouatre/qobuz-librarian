@@ -252,6 +252,86 @@ def test_forced_edition_follows_beets_folder_rename(
         assert original.read_bytes() == before
 
 
+def test_failed_upgrade_leaves_the_plain_release_beside_it_alone(
+        tmp_path, monkeypatch, tagged_flac):
+    # Upgrading "Lost Boys" version "Acoustic" filed the download, tagged plain
+    # "Lost Boys", into the plain single's folder; the failed check then set
+    # that whole folder aside, taking the single out of the library.
+    from mutagen.flac import FLAC
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import scanner
+
+    music = tmp_path / "music"
+    acoustic = music / "Phoebe Bridgers" / "Lost Boys (Acoustic) (2026)"
+    plain = music / "Phoebe Bridgers" / "Lost Boys (2026)"
+    common = dict(ARTIST="Phoebe Bridgers", ALBUMARTIST="Phoebe Bridgers")
+    tagged_flac(acoustic / "01 - Lost Boys (Acoustic).flac", 200, TITLE="Lost Boys (Acoustic)",
+                ALBUM="Lost Boys (Acoustic)", ISRC="USJ5G2645018", TRACKNUMBER="1", **common)
+    tagged_flac(acoustic / "02 - Lost Boys.flac", 200, TITLE="Lost Boys",
+                ALBUM="Lost Boys (Acoustic)", ISRC="USJ5G2645002", TRACKNUMBER="2", **common)
+    single = tagged_flac(plain / "01 - Lost Boys.flac", 200, TITLE="Lost Boys",
+                         ALBUM="Lost Boys", ISRC="USJ5G2645002", TRACKNUMBER="1", **common)
+    (plain / "cover.jpg").write_bytes(b"single cover")
+    before = {path: path.read_bytes() for path in [*acoustic.iterdir(), *plain.iterdir()]}
+    staged = tmp_path / "staging" / "Lost Boys (2026)"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "STAGING_DIR", staged.parent)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", tmp_path / "fetch.jsonl")
+    staged.parent.mkdir()
+    scanner.clear_scan_caches()
+    album = {"id": "acoustic", "title": "Lost Boys", "version": "Acoustic",
+             "artist": {"name": "Phoebe Bridgers"}, "release_date_original": "2026-07-16",
+             "maximum_bit_depth": 24, "maximum_sampling_rate": 96,
+             "tracks": {"items": [
+                 {"id": "a1", "title": "Lost Boys", "version": "Acoustic",
+                  "isrc": "USJ5G2645018", "track_number": 1},
+                 {"id": "a2", "title": "Lost Boys", "isrc": "USJ5G2645002",
+                  "track_number": 2}]}}
+
+    def download(**kwargs):
+        # The second track comes back short, so the upgrade is not verified.
+        for number, title, isrc, seconds in ((1, "Lost Boys (Acoustic)", "USJ5G2645018", 200),
+                                             (2, "Lost Boys", "USJ5G2645002", 1)):
+            tagged_flac(staged / f"0{number} - {title}.flac", seconds, TITLE=title,
+                        ALBUM="Lost Boys", ISRC=isrc, TRACKNUMBER=str(number), **common)
+        kwargs["result"].update(n_ok=2, n_fail=0, n_lossy=0,
+                                failed_tracks=[], lossy_tracks=[], elapsed=0)
+
+    imports = []
+
+    def import_album(**kwargs):
+        imports.append(kwargs["folder"])
+        assert {FLAC(path)["album"][0] for path in staged.iterdir()} == {"Lost Boys (Acoustic)"}
+        kwargs["folder"].mkdir()
+        for path in staged.iterdir():
+            path.rename(kwargs["folder"] / path.name)
+        return True
+
+    monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
+    monkeypatch.setattr(proc, "capture_beets_album_entries", lambda _folder: [])
+    monkeypatch.setattr(proc, "forget_imported_beets_entries", lambda *_a: True)
+    monkeypatch.setattr(proc.catalog, "same_edition", lambda *_a, **_kw: True)
+    monkeypatch.setattr(proc, "run_album_download", download)
+    monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
+    monkeypatch.setattr(proc, "verify_and_recover", lambda *_a, **_kw: {
+        "under": False, "recovered": False, "retried": False})
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "beets_import_paths", import_album)
+
+    result = proc.process_album(album, _args(auto_upgrade=True), already_confirmed=True,
+                                upgrade_only=True)
+
+    assert imports == [acoustic]
+    assert result["upgrade_put_back"] and not result["imported"]
+    assert {path: path.read_bytes() for path in [*acoustic.iterdir(), *plain.iterdir()]} == before
+    assert single.exists()
+    (aside,) = cfg.UPGRADE_BACKUP_DIR.iterdir()
+    assert sorted(p.name for p in aside.iterdir() if not p.name.startswith(".")) == [
+        "01 - Lost Boys (Acoustic).flac", "02 - Lost Boys.flac"]
+
+
 def test_direct_download_refuses_files_changed_after_confirmation(
         monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
@@ -619,15 +699,18 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
         assert connection.execute("SELECT id FROM items ORDER BY id").fetchall() == [
             (11,), (12,), (31,)
         ]
-        assert connection.execute("SELECT id FROM albums ORDER BY id").fetchall() == [
-            (20,), (40,)
+        # The album entry stays, with its own fields, and takes the new tracks.
+        assert connection.execute("SELECT id, title FROM albums ORDER BY id").fetchall() == [
+            (10, "Original"), (40, "External")
         ]
+        assert connection.execute(
+            "SELECT album_id FROM items WHERE id IN (11, 12)").fetchall() == [(10,), (10,)]
         assert connection.execute(
             "SELECT entity_id FROM item_attributes ORDER BY id"
         ).fetchall() == [(11,), (31,)]
         assert connection.execute(
-            "SELECT entity_id FROM album_attributes ORDER BY id"
-        ).fetchall() == [(20,), (40,)]
+            "SELECT entity_id, value FROM album_attributes ORDER BY id"
+        ).fetchall() == [(10, "old"), (40, "external")]
         assert connection.execute("SELECT path, title FROM items WHERE id = 31").fetchone() == (
             os.fsencode(external), "External",
         )

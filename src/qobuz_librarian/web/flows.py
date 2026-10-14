@@ -4683,9 +4683,10 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
 
     try:
         with job_mgr.staging_lock():
-            result = process_mode.process_album(full, build_args(), allow_force=False,
-                                   already_confirmed=True, token=token,
-                                   cover_backup=backup) or {}
+            result = process_mode.process_album(
+                full, build_args(), allow_force=False, already_confirmed=True,
+                token=token, cover_backup=backup,
+                rebuild_dir=album_dir if backup is not None else None) or {}
     except Exception as exc:
         if backup:
             if backup_mod.restore_upgrade_backup(backup, album_dir):
@@ -4712,7 +4713,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
             # Carry useful companions, then retire the original's backup when
             # every file it holds is verifiably superseded in the new album.
             carried = process_mode._carry_non_audio_from_backup(
-                full, album_dir, backup)
+                full, album_dir, backup, replacement_dir=album_dir)
             if carried is not None:
                 replacement_path, replacement_receipt, left = carried
                 if not beets_mod.retire_replaced_beets_entries(

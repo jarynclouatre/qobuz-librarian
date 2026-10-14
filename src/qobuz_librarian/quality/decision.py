@@ -609,6 +609,13 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
             qobuz_tracks = qobuz_album["tracks"]["items"]
             qual = compare_album_quality(existing, qobuz_album)
 
+        # Qobuz lists some releases it won't stream, so they can't download.
+        _, present = compute_missing(qobuz_tracks, existing)
+        if qobuz_album.get("streamable") is False or any(
+                track.get("streamable") is False for track in present):
+            vlog(f"    {album_dir.name}: Qobuz doesn't stream it")
+            continue
+
         # Build human-readable quality labels for the upgrade summary.
         qbits, qrate = qual["qobuz_quality"]
         target_label = (f"{qbits}-bit/{qrate / 1000:g}kHz"

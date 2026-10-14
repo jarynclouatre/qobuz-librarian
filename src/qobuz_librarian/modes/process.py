@@ -29,6 +29,7 @@ from qobuz_librarian.integrations.beets import (
     beets_import_paths,
     capture_beets_album_entries,
     fill_album_tags,
+    forget_imported_beets_entries,
     relocate_disc_album_artwork,
     retire_backup_beets_entries,
     retire_replaced_beets_entries,
@@ -381,11 +382,11 @@ def _upgrade_replacement_verified(album, album_dir, backup_path):
     success gate clears `flac -t` per file, which proves each file decodes but
     not that the matcher kept every track or that a re-rip didn't land short.
     """
-    # beets renames the imported folder to its canonical $albumartist/$album,
-    # so the post-import dir is often not the one resolved before the
-    # download.
+    # An upgrade is filed into the album's own folder. Otherwise beets names
+    # the folder from the tags, so it can differ from the one resolved
+    # before the download.
     drop_artist_subdirs_cache(album_dir.parent)
-    post_dir = find_album_dir_filesystem(album)
+    post_dir = album_dir if album_dir.is_dir() else find_album_dir_filesystem(album)
     if not post_dir or not post_dir.exists():
         return False
     return _upgrade_trees_verified(post_dir, backup_path)
@@ -734,27 +735,27 @@ def _keep_backup_for_companions(backup_path, left):
         f"the backup at {backup_path}.")
 
 
-def _put_original_back(backup, album_dir, replacement_dir):
+def _put_original_back(backup, album_dir):
     """Undo an upgrade whose replacement failed verification.
 
-    ``replacement_dir`` is the exactly located folder the replacement was
-    imported into, or None when it could not be told apart. That folder is
-    moved into the backup area as a backup of its own and the original album
-    is restored to ``album_dir``. Returns the set-aside backup, or True when
-    there was no replacement folder to move, once the original is back.
-    Otherwise returns None with the original's backup pinned; the library is
-    then left holding the replacement.
+    The replacement was imported into ``album_dir`` after the original left
+    it, so that folder holds only the new download. It is moved into the
+    backup area as a backup of its own and the original album is restored
+    to ``album_dir``. Returns the set-aside backup, or True when nothing had
+    landed there, once the original is back. Otherwise returns None with
+    the original's backup pinned; the library is then left holding the
+    replacement.
     """
     aside = None
     if not upgrade_backup_restorable(backup, album_dir):
         if not pin_unverified_upgrade_backup(backup):
             warn_pin_failed(backup)
         return None
-    if replacement_dir is not None and replacement_dir.is_dir():
-        aside = backup_album_dir(replacement_dir)
+    if album_dir.is_dir():
+        aside = backup_album_dir(album_dir)
         if aside is not None and not aside.complete:
             _recover_incomplete_upgrade_backup(
-                aside, replacement_dir, operation="move of the new download")
+                aside, album_dir, operation="move of the new download")
             aside = None
         if aside is None:
             if not pin_unverified_upgrade_backup(backup):
@@ -764,8 +765,7 @@ def _put_original_back(backup, album_dir, replacement_dir):
         if aside is not None:
             mark_set_aside_replacement(aside)
         return aside or True
-    if aside is not None and not restore_upgrade_backup(
-            aside, replacement_dir):
+    if aside is not None and not restore_upgrade_backup(aside, album_dir):
         log.info(fmt(C.RED,
             f"  ✗  The new download could not be put back either; it is at "
             f"{aside}."))
@@ -832,7 +832,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                   exact_edition=False,
                   expected_album_receipt=None,
                   expected_gap_fill_receipts=None,
-                  cover_backup=None):
+                  cover_backup=None, rebuild_dir=None):
     """End-to-end processing for one Qobuz album: detect → prompt → download →
     cleanup → import → consolidate.
 
@@ -845,6 +845,8 @@ def process_album(album, args, *, allow_force=True, label=None,
       label         optional prefix for status output (e.g. "[3/12]")
       cover_backup  a whole-album backup the caller took first, whose cover
                     art the download keeps
+      rebuild_dir   the folder ``cover_backup`` was taken from; the whole
+                    album is downloaded into it under the backup's album name
 
     Track-by-track downloading is a queue-only contract: this path always
     downloads the whole album in one rip invocation and delegates per-track
@@ -875,7 +877,10 @@ def process_album(album, args, *, allow_force=True, label=None,
     # --force cleanup is deferred until AFTER the download confirm
     # below: deleting here would mean a 'no' at the download prompt
     # leaves the user with their folder already wiped.
-    if exact_edition:
+    if rebuild_dir is not None:
+        existing, album_dir = [], None
+        missing, present = qobuz_tracks, []
+    elif exact_edition:
         existing, album_dir, missing, present = catalog.find_edition_tracks(album)
         other = catalog.other_version_dir(album)
         mixed_folder = album_dir is not None and len(existing) > len(present)
@@ -923,6 +928,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     auto_upgrade_active = False    # if True, do backup-then-wipe-then-redownload
     upgrade_backup_path = None     # populated after backup_album_dir succeeds
     replaced_beets_entries = None
+    import_folder = rebuild_dir
     upgrade_existing_label = None  # before-quality label, set in the auto-upgrade branch
 
     # Quality-upgrade replace path.
@@ -1207,7 +1213,8 @@ def process_album(album, args, *, allow_force=True, label=None,
             "  ⚠  Upgrade-only requested but no upgrade applies here; skipping."))
         return {"result": "upgrade_only_no_op", "n_total": len(qobuz_tracks)}
 
-    reviewed_album_absent = album_dir is None and not treat_as_new
+    reviewed_album_absent = (
+        album_dir is None and not treat_as_new and rebuild_dir is None)
     source_premise = None
     if missing and not args.dry_run and album_dir is not None:
         premise_kind = (
@@ -1389,6 +1396,9 @@ def process_album(album, args, *, allow_force=True, label=None,
             return {"result": "upgrade_aborted_backup_failed"}
         log.info(fmt(C.GRAY,
             "  ⤷  Backed up existing folder (auto-restore on failure)"))
+        # The download goes into the folder of the album it upgrades, never
+        # wherever its tags would file it beside another album.
+        import_folder = album_dir
 
     if use_force:
         force_outcome = force_cleanup_preflight(
@@ -1437,10 +1447,12 @@ def process_album(album, args, *, allow_force=True, label=None,
     post_dir = None
 
     def _imported_dir():
-        if exact_edition and album_dir is not None:
+        expected = import_folder or album_dir
+        if (exact_edition or import_folder is not None) and expected is not None:
             found = find_album_dir_by_track_signatures(
-                post_import_signatures, expected_dir=album_dir)
-            if found is not None or upgrade_backup_path is None:
+                post_import_signatures, expected_dir=expected)
+            if (found is not None or upgrade_backup_path is None
+                    or import_folder is not None):
                 return found
         return find_album_dir_by_track_signatures(post_import_signatures)
 
@@ -1612,13 +1624,22 @@ def process_album(album, args, *, allow_force=True, label=None,
             if not staged_dirs_for_import:
                 staged_dirs_for_import = validated_staged_album_dirs(
                     download_result)
-            fill_tags = (
-                fill_album_tags(album_dir)
-                if album_dir is not None and not treat_as_new
-                and not download_result.get("download_full_album") else None)
+            if import_folder is not None:
+                # An upgrade or a Repair keeps the album's own name, version
+                # and all.
+                fill_tags = fill_album_tags(
+                    cover_backup if upgrade_backup_path is None
+                    else upgrade_backup_path)
+            else:
+                fill_tags = (
+                    fill_album_tags(album_dir)
+                    if album_dir is not None and not treat_as_new
+                    and not download_result.get("download_full_album") else None)
             if fill_tags:
                 _prepare_staging_tags(staged_dirs_for_import, album_tags=fill_tags)
-            elif exact_edition or treat_as_new:
+            elif exact_edition or treat_as_new or (
+                    import_folder is not None
+                    and catalog.edition_album_title(album)):
                 _prepare_staging_tags(staged_dirs_for_import,
                                       album_title=catalog.edition_album_title(
                                           album, separate=treat_as_new))
@@ -1660,6 +1681,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 consolidate=album_dir is not None and not exact_edition,
                 album_dirs=staged_dirs_for_import,
                 album_dir=album_dir,
+                folder=import_folder,
                 protected_paths=(
                     [album_dir] if replaced_beets_entries is not None else None),
             )
@@ -1697,7 +1719,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                                   and n_fail == 0
                                   and n_lossy == 0)
             replacement_dir = None
-            if exact_edition and upgrade_succeeded:
+            if (exact_edition or import_folder is not None) and upgrade_succeeded:
                 replacement_dir = _imported_dir()
             # An auto-upgrade wipes the only full copy, so it has to clear a
             # higher bar before the backup is deleted: the rebuilt folder must
@@ -1706,12 +1728,11 @@ def process_album(album, args, *, allow_force=True, label=None,
             if exact_edition:
                 upgrade_verified = upgrade_succeeded and folder_holds_all_tracks(
                     replacement_dir, qobuz_tracks, destructive=True, edition=album)
-                if upgrade_verified and auto_upgrade_active:
-                    upgrade_verified = _upgrade_trees_verified(replacement_dir, upgrade_backup_path)
             else:
                 upgrade_verified = upgrade_succeeded and (
-                    not auto_upgrade_active or _upgrade_replacement_verified(
-                        album, album_dir, upgrade_backup_path))
+                    import_folder is None or replacement_dir is not None)
+            if upgrade_verified and auto_upgrade_active:
+                upgrade_verified = _upgrade_trees_verified(replacement_dir, upgrade_backup_path)
             if upgrade_verified:
                 # Carry non-audio companions (booklets, art, .cue/.log) from
                 # the backup into the rebuilt album before deleting it. The
@@ -1798,12 +1819,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 # Passed the decode/lossy gate but the rebuilt folder isn't
                 # verifiably as complete as the original. Put the original
                 # back and move the replacement out of the library.
-                put_back = _put_original_back(
-                    upgrade_backup_path,
-                    album_dir,
-                    _imported_dir()
-                    if post_import_signatures else None,
-                )
+                put_back = _put_original_back(upgrade_backup_path, album_dir)
                 if put_back is not None:
                     upgrade_restored = upgrade_put_back = True
                     imported = False
@@ -1815,9 +1831,11 @@ def process_album(album, args, *, allow_force=True, label=None,
                         log.info(fmt(C.GRAY,
                             "     The new download was set aside at "
                             f"{upgrade_set_aside}."))
-                    log.info(fmt(C.GRAY,
-                        "     If beets still lists the new download, run "
-                        "`beet update`."))
+                    if not forget_imported_beets_entries(
+                            replaced_beets_entries, album_dir):
+                        log.info(fmt(C.GRAY,
+                            "     If beets still lists the new download, run "
+                            "`beet update`."))
                 else:
                     upgrade_unverified = True
                     log.info(fmt(C.YELLOW,

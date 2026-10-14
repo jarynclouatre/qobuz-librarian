@@ -284,10 +284,17 @@ def test_executor_upgrade_runs_completeness_gate_before_dropping_backup(monkeypa
                         lambda *_a, **_k: (album_dir, {"sealed": True}, []))
     item["backup_path"] = backup
     item["upgrade_unverified"] = False
+    # The album's own beets entries, captured before the backup, are the ones
+    # the replacement takes over, so the album keeps its entry.
+    item["_replaced_beets_entries"] = entries = object()
+    retired = []
+    monkeypatch.setattr(executor, "retire_replaced_beets_entries",
+                        lambda snapshot, *_a: retired.append(snapshot) or True)
     verified = executor._resolve_queue_item(
         item, args, imported_globally=True
     )
     assert disposed == [True]
+    assert retired == [entries]
     assert verified["result"] == "downloaded"
 
 

@@ -462,6 +462,8 @@ def _make_single_track_run(album, track, token):
             return
         if album_dir is None:
             existing, album_dir = catalog.find_album_folder(album)
+            if album_dir is not None and catalog.names_other_version(album, album_dir):
+                existing, album_dir = [], None
         qi = queue_builder._build_queue_item(
             album=album, album_dir=album_dir,
             label=f"{artist}, {t_title}  [single]",

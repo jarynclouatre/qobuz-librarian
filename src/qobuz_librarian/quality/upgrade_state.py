@@ -62,16 +62,16 @@ def _candidate_spec(artist_name: str, candidate: dict):
     premise = candidate_premise.capture("upgrade", album_dir) if album_dir else None
     if premise is not None:
         payload["_premise"] = premise
-    # The row names the release that replaces the files, as Search does.
-    target = candidate.get("target_quality_label", "?")
+    # The row names the release's version beside its title, as Search does,
+    # so the arrow speaks only of quality.
     version = (album.get("version") or "").strip()
     if version and version.casefold() not in title.casefold():
-        target = f"{version}, {target}"
+        payload["version"] = version
     return {
         "title": title,
         "artist": artist_name,
         "detail": (f"{candidate.get('existing_quality_label', '?')} → "
-                   f"{target}{part}"),
+                   f"{candidate.get('target_quality_label', '?')}{part}"),
         "payload": payload,
     }
 

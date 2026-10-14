@@ -280,19 +280,7 @@ def predicted_album_paths(qobuz_album, *, exact_edition=False):
     return candidates
 
 
-def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
-    """Resolve a Qobuz album dict to its on-disk directory.
-
-    Fast path: check predicted_album_paths() against cached subdir listings.
-    Fuzzy path: expand artist variants ('The X' / 'X' / comma-prefix) and
-    scan each parent dir for the best-scoring album folder. exact_edition
-    keeps the version label and requires a title match, ignoring folder years.
-    """
-    if exact_edition:
-        title = qobuz_album.get("title") or ""
-        version = (qobuz_album.get("version") or "").strip()
-        if version and version.casefold() not in title.casefold():
-            qobuz_album = {**qobuz_album, "title": f"{title} ({version})"}
+def _predicted_album_dir(qobuz_album, *, exact_edition=False):
     candidates = predicted_album_paths(qobuz_album, exact_edition=exact_edition)
     vlog(f"predicted {plural(len(candidates), 'candidate path')}")
 
@@ -311,6 +299,35 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
         if c.name in _parent_kid_names[p_str]:
             vlog(f"exact match: {c}")
             return c
+    return None
+
+
+def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
+    """Resolve a Qobuz album dict to its on-disk directory.
+
+    Fast path: check predicted_album_paths() against cached subdir listings.
+    Fuzzy path: expand artist variants ('The X' / 'X' / comma-prefix) and
+    scan each parent dir for the best-scoring album folder. exact_edition
+    keeps the version label and requires a title match, ignoring folder years.
+    """
+    title = qobuz_album.get("title") or ""
+    version = (qobuz_album.get("version") or "").strip()
+    labelled = bool(version) and version.casefold() not in title.casefold()
+    if exact_edition:
+        if labelled:
+            qobuz_album = {**qobuz_album, "title": f"{title} ({version})"}
+    elif labelled:
+        # A folder named for this version is its own, even beside the plain
+        # one: "Lost Boys (Acoustic)" is never filed in "Lost Boys". One of
+        # another year gives way to the folder the release's download got.
+        own = find_album_dir_filesystem(qobuz_album, exact_edition=True)
+        if own is not None and (
+                _decoration_year(own.name) in ("", _listed_year(qobuz_album))
+                or _predicted_album_dir(qobuz_album) is None):
+            return own
+    predicted = _predicted_album_dir(qobuz_album, exact_edition=exact_edition)
+    if predicted is not None:
+        return predicted
 
     artist = (qobuz_album.get("artist") or {}).get("name") or ""
     title  = qobuz_album.get("title") or ""
@@ -1008,7 +1025,29 @@ def _edition_matches(album):
     for folder in folders:
         existing, _ = find_existing_tracks(album, album_dir=folder)
         missing, present = edition_missing(album, existing, folder)
+        # A single beside its remixes shares a recording with them, but a
+        # folder holding none of the versioned tracks is not that release.
+        if (any(map(_carries_version, missing)) and not any(map(_carries_version, present))
+                and names_other_version(album, folder)):
+            continue
         yield existing, folder, missing, present
+
+
+def _carries_version(track):
+    return bool(_edition_title_parts(_release_title(track), track.get("version") or "")[1])
+
+
+def names_other_version(album, folder):
+    """Whether the release carries a version, such as "Remixes", "Acoustic"
+    or "Deluxe Edition", that the folder's name lacks. A folder named for
+    the release, or for a title that carries a label of its own, has it."""
+    title, version = album.get("title") or "", (album.get("version") or "").strip()
+    labels = _edition_title_parts(title, "" if version in title else version)[1]
+    named = {canonical_track_title(beets_sanitize(_release_title(album)))}
+    if _edition_title_parts(title)[1]:
+        named.add(canonical_track_title(beets_sanitize(title)))
+    return (bool(labels - _edition_title_parts(folder.name, folder=True, known_versions=labels)[1])
+            and canonical_track_title(_DECORATION_YEAR_RE.sub("", folder.name)) not in named)
 
 
 def find_edition_tracks(album, *, track_id=None):
@@ -1470,9 +1509,10 @@ def _artist_key(album):
 def _derivative_of(album):
     """The edition_group_key title of the album an instrumental, karaoke or
     a cappella release is named after, or None for a release not named as
-    one. A bare trailing word after the artist's own name, as in "Canned
-    Heat Instrumentals", names a collection rather than a version of the
-    self-titled album."""
+    one. The word after the artist's own name, as in "Canned Heat
+    Instrumentals" or "Canned Heat: Instrumentals", names a collection
+    rather than a version of the self-titled album, unless it is in
+    brackets or added with "+"."""
     raw = album.get("title") or ""
     title = strip_album_decorations(raw)
     tail = _DERIVATIVE_TAIL_RE.search(title)
@@ -1484,7 +1524,7 @@ def _derivative_of(album):
         if not re.search(rf"\b{_DERIVATIVE_WORDS}\b",
                          f"{dropped} {album.get('version') or ''}", re.IGNORECASE):
             return None
-    elif tail.group().strip()[0].isalpha() and normalize(base) == _artist_key(album):
+    elif tail.group().strip()[0] not in "([+" and normalize(base) == _artist_key(album):
         return None
     key = edition_group_key({"title": base})
     return key[0] if key else None
@@ -2825,23 +2865,32 @@ def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=Fa
         r_artist = (r.get("artist") or {}).get("name", "")
         if r_artist and similarity(r_artist, artist_name) < config.ARTIST_NAME_THRESH:
             continue
-        r_bare = strip_album_decorations(r.get("title", ""))
-        s1 = similarity(r_bare, bare)
-        s2 = similarity(r_bare, bare_softened) if bare_softened and bare_softened != bare else 0.0
-        score = max(s1, s2)
-        # Coverage + variant guards, mirroring find_album_dir_filesystem: a
-        # 0.65-similar prefix match ('The North Borders' vs '… Tour - Live')
-        # would otherwise pull a live/tour edition onto the studio-album dir.
-        norm_r = normalize(r_bare)
-        norm_b = normalize(bare)
-        if norm_r and norm_b:
-            coverage = min(len(norm_r), len(norm_b)) / max(len(norm_r), len(norm_b))
-            if coverage < config.FUZZY_DIR_MIN_COVERAGE:
-                continue
-            shorter_n, longer_n = sorted((norm_r, norm_b), key=len)
-            if differs_by_album_variant(shorter_n, longer_n):
-                continue
-        candidates.append((score, _year_proximity_bonus(dir_year, r), r))
+        title = r.get("title", "")
+        version = (r.get("version") or "").strip()
+        names = [title]
+        if version and version.casefold() not in title.casefold():
+            # Its own folder may name the version: "Lost Boys (Acoustic)".
+            names.append(f"{title} ({version})")
+        scores = []
+        for name in names:
+            r_bare = strip_album_decorations(name)
+            s1 = similarity(r_bare, bare)
+            s2 = similarity(r_bare, bare_softened) if bare_softened and bare_softened != bare else 0.0
+            # Coverage + variant guards, mirroring find_album_dir_filesystem: a
+            # 0.65-similar prefix match ('The North Borders' vs '… Tour - Live')
+            # would otherwise pull a live/tour edition onto the studio-album dir.
+            norm_r = normalize(r_bare)
+            norm_b = normalize(bare)
+            if norm_r and norm_b:
+                coverage = min(len(norm_r), len(norm_b)) / max(len(norm_r), len(norm_b))
+                if coverage < config.FUZZY_DIR_MIN_COVERAGE:
+                    continue
+                shorter_n, longer_n = sorted((norm_r, norm_b), key=len)
+                if differs_by_album_variant(shorter_n, longer_n):
+                    continue
+            scores.append(max(s1, s2))
+        if scores:
+            candidates.append((max(scores), _year_proximity_bonus(dir_year, r), r))
 
     if not candidates:
         return []

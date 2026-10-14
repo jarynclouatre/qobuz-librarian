@@ -16,7 +16,7 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
     album_dir = tmp_path / "Album"
     album_dir.mkdir()
     backup_dir = tmp_path / "backup"
-    restored = {}
+    restored, called = {}, {}
     monkeypatch.setattr(flows, "get_album", lambda *a: {"id": "x"})
     backup = BackupResult(
         backup_dir,
@@ -32,12 +32,14 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
         lambda _directory: object(),
     )
     monkeypatch.setattr("qobuz_librarian.modes.process.process_album",
-                        lambda *a, **k: {"imported": False, "n_ok": 0})
+                        lambda *a, **k: called.update(k) or {"imported": False, "n_ok": 0})
     monkeypatch.setattr("qobuz_librarian.library.backup.restore_upgrade_backup",
                         lambda bp, d: restored.update(bp=bp, dir=d) or True)
     res = flows._redownload_damaged_album(
         {"album_dir": str(album_dir), "album_id": "x"}, "token")
     assert res["n_ok"] == 0
+    # The album is rebuilt in its own folder, never beside another release.
+    assert called["rebuild_dir"] == album_dir
     assert restored == {"bp": backup, "dir": album_dir}
 
 

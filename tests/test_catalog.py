@@ -179,8 +179,10 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     assert [(a["title"], n) for a, n in dedup_album_versions(albums)] == [("Mojo Hand", 3)]
     heat = {"artist": {"name": "Canned Heat"}}
     albums = [{**_qalbum("Canned Heat", 1967), **heat},
-              {**_qalbum("Canned Heat Instrumentals", 2019), **heat}]
-    assert len(dedup_album_versions(albums)) == 2
+              {**_qalbum("Canned Heat Instrumentals", 2019), **heat},
+              {**_qalbum("Canned Heat: Instrumentals", 2020), **heat},
+              {**_qalbum("Canned Heat (Instrumentals)", 2021), **heat}]
+    assert [n for _a, n in dedup_album_versions(albums)] == [2, 1, 1]
 
     pairs = [({"title": "Reload", "release_date_original": "1997"}, 1),
              ({"title": "Album (Deluxe Edition)", "release_date_original": "2010"}, 1)]
@@ -254,6 +256,32 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
     sequel = {"id": "B", "artist": {"name": "Bloodrock"}, "title": "Bloodrock 3",
               "release_date_original": "1971-01-01"}
     assert find_album_dir_filesystem(sequel) is None
+    # A version keeps its own folder beside the plain release, both ways.
+    acoustic = {"id": "A", "artist": {"name": "Phoebe Bridgers"},
+                "title": "Lost Boys", "version": "Acoustic", "tracks_count": 2,
+                "release_date_original": "2026-07-16", "maximum_bit_depth": 24}
+    plain = {**acoustic, "id": "P", "version": None, "tracks_count": 1}
+    artist = root / "Phoebe Bridgers"
+    for folders in (["Lost Boys (Acoustic) (2026)"],
+                    ["Lost Boys (Acoustic) (2026)", "Lost Boys (2026)"]):
+        for name in folders:
+            (artist / name).mkdir(parents=True, exist_ok=True)
+        scanner.clear_scan_caches()
+        assert find_album_dir_filesystem(acoustic).name == folders[0]
+        for name in folders:
+            found = catalog._pick_best_target_dir_match(
+                catalog._catalog_candidates_for_dir(
+                    artist / name, [acoustic, plain], "Phoebe Bridgers"),
+                artist / name)
+            assert found["id"] == ("A" if "Acoustic" in name else "P")
+    # One named for the version but of another year doesn't take the
+    # release from the folder its download got.
+    deluxe = {"id": "R", "artist": {"name": "Fleetwood Mac"}, "title": "Rumours",
+              "version": "Deluxe Edition", "release_date_original": "2013-01-28"}
+    for name in ("Rumours (Deluxe Edition) (2004)", "Rumours (2013)"):
+        (root / "Fleetwood Mac" / name).mkdir(parents=True)
+    scanner.clear_scan_caches()
+    assert find_album_dir_filesystem(deluxe).name == "Rumours (2013)"
     # A format tag or a thousands separator is not one of the title's numbers.
     (root / "Pink Floyd" / "The Dark Side of the Moon [16-44.1]").mkdir(parents=True)
     (root / "Tool" / "10000 Days").mkdir(parents=True)
@@ -284,6 +312,19 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
 
     assert owned_in("Youth", "USSM10900002", 2009) == ["Youth EP (2009)"]
     assert owned_in("We", "USSM11400002", 2014) == []
+    # A release of remixes holding the single's recording is not the single.
+    tagged_flac(root / "Galantis" / "Heartbreak Anthem (2021)" / "01.flac",
+                TITLE="Heartbreak Anthem", ISRC="USAT22100346")
+    scanner.clear_scan_caches()
+    remixes = {"id": "R", "title": "Heartbreak Anthem", "version": "Remixes",
+               "artist": {"name": "Galantis"}, "release_date_original": "2021-07-02",
+               "tracks": {"items": [
+                   {"id": "r1", "title": "Heartbreak Anthem", "version": "Tchami Remix",
+                    "isrc": "USAT22102769"},
+                   {"id": "r2", "title": "Heartbreak Anthem", "isrc": "USAT22100346"}],
+                   "total": 2, "offset": 0}}
+    assert catalog.find_edition_tracks(remixes)[1] is None
+    assert catalog.search_result_ownership(remixes, lambda _id: remixes)["as_new_edition"]
 
     # A folder the name finds is the album's only when it holds its songs.
     for n in range(1, 6):
