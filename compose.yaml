@@ -173,7 +173,7 @@ services:
       # to have CLI runs offer it.
       CONSOLIDATE: "${CONSOLIDATE:-false}"
       # Move "Primary, Other/<album>" into "Primary/<album>" after import.
-      MIGRATE_MULTI_ARTIST: "${MIGRATE_MULTI_ARTIST:-false}"
+      MIGRATE_MULTI_ARTIST: "${MIGRATE_MULTI_ARTIST:-true}"
       # Web Library scans and checks for new releases don't offer the rest of
       # an album you took tracks from with a Search Track download, and skip an
       # artist whose only folders came from such downloads. Other one-track

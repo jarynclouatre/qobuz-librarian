@@ -21,6 +21,9 @@
   var searchPositionRestoring = false;
   var searchRestoreFallback = null;
   var searchSnapshotsInvalidated = false;
+  // Each tab's results for the query in the box, so switching back to a tab
+  // shows them again without asking Qobuz.
+  var keptSearchViews = {};
 
   function searchStateId(kind, query, artistId, albumId) {
     kind = ["artist", "album", "track"].indexOf(kind) >= 0 ? kind : "artist";
@@ -28,6 +31,15 @@
     if (artistId) state += "|artist:" + String(artistId).trim();
     if (kind === "album" && albumId) state += "|album:" + String(albumId).trim();
     return state;
+  }
+
+  // htmx restores only entries it marked, and a page opened from its
+  // address carries no mark until htmx pushes from it.
+  function pushSearchUrl(url) {
+    if (!(history.state && history.state.htmx)) {
+      history.replaceState({ htmx: true }, "", location.href);
+    }
+    history.pushState({ htmx: true }, "", url);
   }
 
   function searchStateFromUrl() {
@@ -154,6 +166,7 @@
 
   function invalidateSearchSnapshots() {
     searchSnapshotsInvalidated = true;
+    keptSearchViews = {};
     clearSearchSnapshots();
     var now = Date.now();
     try {
@@ -1062,18 +1075,69 @@
     q.setAttribute("aria-label", label);
   }
 
+  // A tab is another view of the query in the box: switching runs it there
+  // straight away, or shows what that tab already found for it.
   document.addEventListener("change", function (evt) {
     var radio = evt.target;
     if (!radio.matches || !radio.matches('input[name="kind"]')) return;
+    showSearchTab(radio);
+  });
+
+  // Enter on an empty box clears the search and its address as a tab does.
+  document.addEventListener("submit", function (evt) {
+    var form = evt.target;
+    if (!isSearchRequestForm(form)
+        || form.querySelector('input[name="q"]').value.trim()) return;
+    evt.preventDefault();
+    evt.stopImmediatePropagation();
+    showSearchTab(form.querySelector('input[name="kind"]:checked'));
+  }, true);
+
+  function showSearchTab(radio) {
     var form = radio.closest("form");
     var q = form && form.querySelector('input[name="q"]');
     if (!q) return;
     syncSearchLabel(form);
-    saveSearchSnapshot();
+    var results = document.getElementById("search-results");
+    var shown = searchResponseState(results);
+    (searchExitSave || saveSearchSnapshot)();
+    if (shown && !searchSnapshotsInvalidated
+        && results.querySelector('[data-search-cacheable="1"]')) {
+      keptSearchViews[shown] = searchSnapshotHtml(results);
+    }
     cancelSearchRequests();
     form.querySelectorAll("[data-deep-link]").forEach(function (node) { node.remove(); });
-    var results = document.getElementById("search-results");
-    if (results) results.replaceChildren();
+    var query = q.value.trim();
+    if (!query) {
+      if (shown) results.replaceChildren();
+      var empty = "/?kind=" + encodeURIComponent(radio.value);
+      if (location.pathname + location.search !== empty) {
+        // Back still returns to a search the box was cleared from.
+        if (searchStateFromUrl()) pushSearchUrl(empty);
+        else history.replaceState(history.state, "", empty);
+        try { sessionStorage.setItem("htmx-current-path-for-history", empty); } catch (e) {}
+      }
+      return;
+    }
+    var state = searchStateId(radio.value, query);
+    if (state === shown) return;
+    if (!keptSearchViews[state]) {
+      form.requestSubmit();
+      return;
+    }
+    var url = "/?" + new URLSearchParams({ kind: radio.value, q: query }).toString();
+    if (location.pathname + location.search !== url) {
+      pushSearchUrl(url);
+      // htmx files the page it saves on the next Back under this path.
+      try { sessionStorage.setItem("htmx-current-path-for-history", url); } catch (e) {}
+    }
+    restoreSearchHistory();
+  }
+
+  document.addEventListener("input", function (evt) {
+    if (evt.target.matches && evt.target.matches('.ql-search-form input[name="q"]')) {
+      keptSearchViews = {};
+    }
   });
 
   document.addEventListener("click", function (evt) {
@@ -1084,7 +1148,6 @@
     var radio = form.querySelector('input[name="kind"][value="artist"]');
     radio.checked = true;
     radio.dispatchEvent(new Event("change", { bubbles: true }));
-    form.requestSubmit();
   });
 
   // Search result version lists and tracklists use a real button so the row
@@ -1699,6 +1762,7 @@
           hideOwned: !!(hideOwnedButton
             && hideOwnedButton.getAttribute("aria-pressed") === "true"),
           viewScroll: viewScroll,
+          loadedThrough: loadedThrough(),
         };
         if (!searchPositionRestoring) {
           values.scrollY = Math.max(0, Math.round(window.scrollY || 0));
@@ -1708,6 +1772,19 @@
           values,
           preserveSavedAt || searchSnapshotsInvalidated
         );
+      }
+      // The last album of the batches loaded so far, so coming back to the
+      // search loads them again.
+      function loadedThrough() {
+        var button = root.querySelector("[data-search-more-url]");
+        var found = button && /[?&]start=(\d+)/.exec(button.dataset.searchMoreUrl);
+        var end = found ? Number(found[1]) : Infinity;
+        var last = null;
+        root.querySelectorAll("[data-search-key][data-search-order]").forEach(function (item) {
+          var order = Number(item.dataset.searchOrder);
+          if (order < end && (!last || order > Number(last.dataset.searchOrder))) last = item;
+        });
+        return last ? last.dataset.searchKey : "";
       }
       var restored = loadSelection();
       var selected = {};
@@ -1865,6 +1942,24 @@
       }
       // A long artist list comes a batch at a time. Each batch carries rows
       // for both views, and a parked view takes its rows into its template.
+      // Albums already in the library came with the first batch, so a batch
+      // goes in around them, by each row's place in the list.
+      function insertInOrder(target, rows) {
+        var placed = Array.prototype.filter.call(target.children, function (el) {
+          return el.dataset.searchOrder;
+        });
+        Array.prototype.slice.call(rows.children).forEach(function (row) {
+          var order = Number(row.dataset.searchOrder);
+          var next = null;
+          for (var i = 0; i < placed.length; i++) {
+            if (Number(placed[i].dataset.searchOrder) > order) {
+              next = placed[i];
+              break;
+            }
+          }
+          target.insertBefore(row, next);
+        });
+      }
       var moreRequest = null;
       function loadMoreAlbums(through) {
         var more = root.querySelector("[data-search-more]");
@@ -1896,7 +1991,7 @@
               var host = parked && parked.content.childNodes.length ? parked.content : panel;
               var target = batch.dataset.searchBatch === "table"
                 ? host.querySelector(".ql-table-body") : host;
-              if (target) target.appendChild(batch.content);
+              if (target) insertInOrder(target, batch.content);
             });
             var next = reply.content.querySelector("[data-search-more]");
             if (next) more.replaceWith(next);
@@ -2146,14 +2241,33 @@
       syncBoxes();
       applyOwnedFilterCount();
       var unloadedPicks = Object.keys(selected).filter(inUnloadedBatch);
-      if (unloadedPicks.length) {
-        loadMoreAlbums(unloadedPicks.map(function (key) {
+      var reach = unloadedPicks.slice();
+      if (restored.loadedThrough && inUnloadedBatch(restored.loadedThrough)) {
+        reach.push(restored.loadedThrough);
+      }
+      if (reach.length) {
+        // The page could only scroll as far as the first batch reached.
+        var moved = false;
+        var noteMove = function () { moved = true; };
+        ["wheel", "touchmove", "keydown"].forEach(function (name) {
+          window.addEventListener(name, noteMove, { once: true, passive: true });
+        });
+        loadMoreAlbums(reach.map(function (key) {
           return key.replace(/^album-/, "");
         })).then(function (loaded) {
           if (!loaded) return;
           unloadedPicks.forEach(function (key) {
             if (!actionableFormForKey(key)) delete selected[key];
           });
+          if (!moved) {
+            root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
+              var y = (restored.viewScroll || {})[panel.dataset.searchViewPanel];
+              if (!panel.classList.contains("hidden") && typeof y === "number") {
+                panel.scrollTop = y;
+              }
+            });
+            if (typeof restored.scrollY === "number") window.scrollTo(0, restored.scrollY);
+          }
           syncBoxes();
         });
       }
@@ -4195,7 +4309,7 @@
       var record = readSearchRecord(state);
       pendingSearchRestoreY = record && typeof record.scrollY === "number"
         ? record.scrollY : 0;
-      var snapshot = readSearchSnapshot(state);
+      var snapshot = keptSearchViews[state] || readSearchSnapshot(state);
       if (snapshot) {
         results.innerHTML = snapshot;
         window.htmx.process(results);

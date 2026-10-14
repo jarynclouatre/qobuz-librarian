@@ -1816,6 +1816,40 @@ details.ql-mobile-drawer[open]::before {
 .ql-search-root.is-filtering-owned [data-owned="1"] {
   display: none !important;
 }
+/* Section headings in an artist's album list, in both views. Under "Hide
+   owned" the count is of the albums not in the library. */
+.ql-search-section {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--ql-line);
+  padding: 1.5rem var(--ql-space-1) 0.5rem;
+}
+.ql-table-body > .ql-search-section:first-child,
+.ql-grid-view > .ql-search-section:first-child {
+  padding-top: 0.5rem;
+}
+.ql-grid-view > .ql-search-section {
+  padding-top: 1rem;
+}
+.ql-search-section + .ql-table-row {
+  border-top: 0;
+}
+.ql-search-section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--ql-space-2);
+  margin: 0;
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.ql-search-section .ql-search-section-missing,
+.ql-search-root.is-filtering-owned .ql-search-section .ql-search-section-all {
+  display: none;
+}
+.ql-search-root.is-filtering-owned .ql-search-section .ql-search-section-missing {
+  display: inline-grid;
+}
 .ql-table {
   min-width: 0;
 }
@@ -2445,6 +2479,9 @@ details.ql-mobile-drawer[open]::before {
     row-gap: 0.4rem;
     min-height: 0;
     padding: 0.75rem 0;
+  }
+  .ql-search-section {
+    padding-inline: 0;
   }
   .ql-table-check {
     position: static;

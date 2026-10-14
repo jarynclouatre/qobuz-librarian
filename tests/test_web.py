@@ -832,6 +832,65 @@ def test_album_search_marks_each_edition_by_what_the_library_holds(
     assert 'data-search-key="album-crystal-castles-iii"' not in response.text
 
 
+def test_artist_albums_list_by_release_type_oldest_first(
+        client, monkeypatch, tmp_path):
+    """An artist's albums came in Qobuz's own order, a box set from 2014
+    ahead of the 1969 records. They list under Albums, Live, Compilations,
+    EPs & singles and Appears on, each oldest first by the year on the
+    row, a placeholder year last. A release Qobuz files in no list is an
+    album when the artist is its main artist. Without the release lists,
+    one list oldest first."""
+    import re
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.api import search
+    from qobuz_librarian.web import qobuz_access
+
+    def album(album_id, title, date, version="", artist_id=7):
+        return {"id": album_id, "title": title, "version": version,
+                "artist": {"id": artist_id, "name": "The Testers"},
+                "release_date_original": date, "tracks_count": 10,
+                "maximum_bit_depth": 16}
+
+    albums = [album("box", "The Box", "2014-10-27"),
+              album("cover", "Their Song", "2020-01-01", artist_id=99),
+              album("reissue", "Third", "1971-01-01"),
+              album("remaster", "Debut", "2008-05-01", "Remastered"),
+              album("live", "Live One", "1975-01-01"),
+              album("undated", "Lost Tapes", "1900-01-01"),
+              album("single", "Hit Single", "1969-03-01"),
+              album("debut", "Debut", "1968-07-01"),
+              album("second", "Second", "1970-04-01")]
+    types = {"box": "compilation", "remaster": "album", "live": "live",
+             "undated": "album", "single": "epSingle", "debut": "album",
+             "second": "album"}
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
+    monkeypatch.setattr(search, "get_artist_albums",
+                        lambda *_a, **_kw: (albums, len(albums)))
+
+    def listed():
+        page = client.post("/search", data={
+            "q": "The Testers", "kind": "artist", "artist_id": "7",
+            "artist_name": "The Testers"}, headers={"HX-Request": "true"})
+        rows = re.findall(r'role="row" data-search-order="\d+"\s+'
+                          r'data-search-item data-search-key="album-([^"]+)"',
+                          page.text)
+        return rows, page.text.count('class="ql-search-section" role="row"')
+
+    monkeypatch.setattr(search, "get_artist_release_types",
+                        lambda *_a, **_kw: types)
+    assert listed() == (["debut", "second", "reissue", "undated", "live",
+                         "box", "single", "cover"], 5)
+
+    def unreadable(*_a, **_kw):
+        raise search.QobuzError("busy")
+
+    monkeypatch.setattr(search, "get_artist_release_types", unreadable)
+    assert listed() == (["debut", "single", "second", "reissue", "live",
+                         "box", "cover", "undated"], 0)
+
+
 def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
         client, monkeypatch, tmp_path, tagged_flac):
     """An artist with hundreds of albums lists them a batch at a time. An
@@ -847,7 +906,7 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
     from qobuz_librarian.library import scanner
     from qobuz_librarian.web import qobuz_access
 
-    albums = [{"id": f"rec-{n}", "title": f"Record {n}",
+    albums = [{"id": f"rec-{n}", "title": f"Record {n:03d}",
                "artist": {"name": "The Testers"},
                "release_date_original": "2001-01-01", "tracks_count": 1,
                "maximum_bit_depth": 16,
@@ -862,6 +921,8 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(search, "get_artist_albums",
                         lambda *_a, **_kw: (albums, len(albums)))
+    monkeypatch.setattr(search, "get_artist_release_types",
+                        lambda *_a, **_kw: {a["id"]: "album" for a in albums})
     busy = []
 
     def get_album(album_id, _token):
@@ -887,9 +948,11 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
         "artist_name": "The Testers"}, headers=headers)
     assert listed(first) == records(range(50)) | {"rec-120"}
     assert 'data-search-key="album-rec-120" data-owned="1"' in first.text
+    assert first.text.count('class="ql-search-section"') == 2
 
     second = client.get(next_batch(first), headers=headers)
     assert listed(second) == records(range(50, 100))
+    assert 'class="ql-search-section"' not in second.text
     last = client.get(next_batch(second), headers=headers)
     assert listed(last) == records(range(100, 130))
     assert next_batch(last) is None
@@ -909,6 +972,18 @@ def test_long_artist_list_shows_owned_albums_before_the_rest_loads(
         pages.append(client.get(next_batch(pages[-1]), headers=headers))
     assert sorted(n for page in pages for n in listed(page)) == sorted(
         f"rec-{n}" for n in range(130))
+
+    # Records that moved after the first page, as a restart in between can
+    # bring, and a release added since, are each listed once.
+    for n in (100, 101):
+        albums[n]["release_date_original"] = "1990-01-01"
+    albums.append(dict(albums[0], id="rec-130", title="Record 130",
+                       release_date_original="2030-01-01"))
+    pages = [first]
+    while next_batch(pages[-1]):
+        pages.append(client.get(next_batch(pages[-1]), headers=headers))
+    assert sorted(n for page in pages for n in listed(page)) == sorted(
+        f"rec-{n}" for n in range(131))
 
 
 def test_settings_saves_wait_for_running_jobs_and_never_drop_another_change(

@@ -2,6 +2,7 @@
 import sys
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import (
     Aborted,
     AuthLost,
@@ -241,6 +242,7 @@ def resolve_album_from_args(args, token):
 
     search_limit = cfg.SEARCH_LIMIT
     first_search = True
+    ownership = {}
     while True:
         if not first_search:
             log.info(fmt(C.GRAY, f"  ⟳  Loading more results (up to {search_limit}) …"))
@@ -249,12 +251,27 @@ def resolve_album_from_args(args, token):
         if not results:
             raise CatalogMiss(f"No Qobuz match for: {query}")
         can_load_more = (len(results) >= search_limit and search_limit < 50)
-        ownership = {}
+        # A mark Qobuz can't answer for in time is left off, as on the web
+        # Search page; once Qobuz fails, the rest are left off without waiting.
+        unavailable = []
+
+        def fetch_album(album_id):
+            if unavailable:
+                raise unavailable[0]
+            try:
+                return api_client.call_within(
+                    cfg.WEB_FETCH_TIMEOUT, get_album, album_id, token)
+            except QobuzUnavailable as exc:
+                unavailable.append(exc)
+                raise
+
         for result in results:
+            if result.get("id") in ownership:
+                continue
             try:
                 ownership[result.get("id")] = catalog.search_result_ownership(
-                    result, lambda album_id: get_album(album_id, token))
-            except (AuthLost, QobuzUnavailable):
+                    result, fetch_album)
+            except AuthLost:
                 raise
             except Exception as exc:
                 vlog(f"ownership check failed for album {result.get('id')}: {exc}")

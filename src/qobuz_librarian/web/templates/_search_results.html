@@ -99,11 +99,18 @@
   </button>
 {%- endmacro %}
 
+{% macro section_heading(s, table=False) -%}
+  <div class="ql-search-section"{% if table %} role="row"{% endif %} data-search-order="{{ s.order }}" data-owned="{{ 0 if s.missing else 1 }}">
+    <div{% if table %} role="cell"{% endif %}><h3 class="ql-search-section-title">{{ s.label }} <span class="ql-count ql-search-section-all">{{ s.count }}</span><span class="ql-count ql-search-section-missing">{{ s.missing }}</span></h3></div>
+  </div>
+{%- endmacro %}
+
 {% macro album_rows(groups) -%}
   {% for g in groups %}
   {% set gi = g.index %}
   {% set key = 'album-' ~ g.id %}
-  <div class="ql-table-row ql-table-row--album{% if g.owned %} is-owned{% endif %}" role="row"
+  {% if g.heading %}{{ section_heading(g.heading, table=True) }}{% endif %}
+  <div class="ql-table-row ql-table-row--album{% if g.owned %} is-owned{% endif %}" role="row" data-search-order="{{ gi }}"
        data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
     <label class="ql-table-check" role="cell" data-search-select-wrap>
       {% if not g.owned %}
@@ -143,10 +150,10 @@
     <span role="cell">{{ album_quality_status(g) }}</span>
     <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, as_new_edition=g.as_new_edition, small=True, queued=g.queued, scanning=g.scanning, ownership_unknown=g.ownership_unknown, missing=g.partial and g.want_tracks - g.have_tracks, folder=g.folder) }}{% endif %}</span>
   </div>
-  <div id="search-tracks-{{ gi }}" class="ql-tracklist-panel hidden"
+  <div id="search-tracks-{{ gi }}" class="ql-tracklist-panel hidden" data-search-order="{{ gi }}"
        data-owned="{{ 1 if g.owned else 0 }}"></div>
   {% if g.others %}
-  <div id="search-versions-{{ gi }}" class="ql-version-panel hidden"
+  <div id="search-versions-{{ gi }}" class="ql-version-panel hidden" data-search-order="{{ gi }}"
        data-version-panel data-owned="{{ 1 if g.owned else 0 }}">
     {% for e in g.others %}
     <div class="ql-table-row ql-subrow{% if e.owned %} is-owned{% endif %}{% if loop.last %} ql-subrow-last{% endif %}" role="row"
@@ -186,7 +193,8 @@
   {% for g in groups %}
   {% set gi = g.index %}
   {% set key = 'album-' ~ g.id %}
-  <div class="ql-grid-tile{% if g.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
+  {% if g.heading %}{{ section_heading(g.heading) }}{% endif %}
+  <div class="ql-grid-tile{% if g.owned %} is-owned{% endif %}" data-search-order="{{ gi }}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if g.owned else 0 }}" data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
     {% if not g.owned %}
     <label class="ql-grid-check" data-search-select-wrap>
       <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"

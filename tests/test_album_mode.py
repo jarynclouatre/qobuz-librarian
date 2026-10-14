@@ -48,3 +48,31 @@ def test_queued_mix_rechecks_files_and_stops_after_failure(tmp_path, monkeypatch
     assert len(downloaded) == 1
     assert downloaded[0][1]["keep_edition"]
     assert original.read_bytes() == b"changed outside the app"
+
+
+def test_a_failed_in_library_mark_leaves_the_search_running(tmp_path, monkeypatch):
+    """One mark lookup Qobuz couldn't answer ended the search with exit 4."""
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    (tmp_path / "Feist" / "Metals").mkdir(parents=True)
+    scanner.clear_scan_caches()
+    results = [{"id": f"metals-{n}", "title": "Metals",
+                "artist": {"name": "Feist"}} for n in range(3)]
+    fetched = []
+
+    def get_album(album_id, _token):
+        fetched.append(album_id)
+        if album_id == "metals-0":
+            raise auth.QobuzUnavailable("timed out")
+        return {"id": album_id}
+
+    shown = []
+    monkeypatch.setattr(album_mode, "search_albums", lambda *_a, **_k: results)
+    monkeypatch.setattr(album_mode, "get_album", get_album)
+    monkeypatch.setattr(album_mode, "prompt_album_selection",
+                        lambda albums, **kw: shown.append(kw["ownership"]) or albums[1])
+    args = flows.build_args()
+    args.query = ["Feist", "Metals"]
+
+    assert album_mode.resolve_album_from_args(args, "tok") == {"id": "metals-1"}
+    assert shown == [{}]
+    assert fetched == ["metals-0", "metals-1"]

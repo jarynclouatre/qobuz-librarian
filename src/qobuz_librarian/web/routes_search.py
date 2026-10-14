@@ -1,5 +1,7 @@
 """Routes for the Search page and downloads."""
 import asyncio
+import base64
+import hashlib
 import html
 import logging
 import re
@@ -365,6 +367,18 @@ _SEARCH_SNAPSHOT_RESULT_LIMIT = 150
 _ARTIST_ALBUMS_AT_ONCE = 100
 _ARTIST_ALBUM_BATCH = 50
 
+# An artist's albums are listed in this order, by the Qobuz list each is
+# filed in. A release in none of them is one of the artist's albums when the
+# artist is its main artist, such as a label reissue, and Appears on holds
+# the rest, such as another artist's cover.
+_ARTIST_SECTIONS = {
+    "album": "Albums",
+    "live": "Live",
+    "compilation": "Compilations",
+    "epSingle": "EPs & singles",
+    "appears": "Appears on",
+}
+
 # Seconds Search waits for its Owned marks, which can need an album's exact
 # track list after the folder check, before it renders the results with the
 # marks it has.
@@ -475,6 +489,74 @@ async def _fetch_artist_albums(artist_id, artist_name, query, token):
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
     return raw, selected_artist, error
+
+
+async def _release_types(artist_id, raw, token):
+    """The Qobuz list each of an artist's releases is filed in, or None when
+    the lists can't be read and the albums are listed in one run."""
+    try:
+        return await qobuz_access._qobuz_call(
+            qobuz_search.get_artist_release_types, artist_id, token,
+            [a["id"] for a in raw if a.get("id") is not None])
+    except (asyncio.TimeoutError, AuthLost, QobuzError, QobuzUnavailable) as exc:
+        _log.info("release lists for artist %s couldn't be read: %s",
+                  artist_id, exc)
+        return None
+
+
+async def _artist_album_results(artist_id, raw, query, token, queued_albums,
+                                scanning_albums, sectioned=True):
+    """An artist's records for the page, and whether they are in sections.
+    The release lists are read while the Owned marks are worked out."""
+    types = None
+    if sectioned:
+        (results, groups), types = await asyncio.gather(
+            _album_results(raw, query, token, queued_albums, scanning_albums),
+            _release_types(artist_id, raw, token))
+    else:
+        results, groups = await _album_results(
+            raw, query, token, queued_albums, scanning_albums)
+    _order_artist_albums(artist_id, groups, types)
+    return results, groups, types is not None
+
+
+def _order_artist_albums(artist_id, groups, types):
+    """Sort an artist's records oldest first by the year on their row, then
+    by title, under the section of the Qobuz list each is filed in when
+    ``types`` is known."""
+    rank = {name: i for i, name in enumerate(_ARTIST_SECTIONS)}
+    for g in groups:
+        g["section"] = None
+        if types is not None:
+            main = any(str(e["artist_id"]) == str(artist_id) for e in g["editions"])
+            g["section"] = next((types[str(e["id"])] for e in g["editions"]
+                                 if str(e["id"]) in types),
+                                "album" if main else "appears")
+    groups.sort(key=lambda g: (rank.get(g["section"], 0), g["sort_year"],
+                               tags.normalize(g["title"])))
+    for index, g in enumerate(groups):
+        g["index"] = index
+
+
+def _section_headings(groups, batch, shown=()):
+    """Give the first record of each section in ``batch`` its section's
+    heading, unless a record of that section is on the page already, at a
+    position in ``shown``."""
+    sections = {}
+    for g in groups:
+        if g["section"] is None:
+            return
+        s = sections.setdefault(g["section"], {
+            "label": _ARTIST_SECTIONS[g["section"]], "order": g["index"],
+            "count": 0, "missing": 0, "listed": False})
+        s["count"] += 1
+        s["missing"] += not g["owned"]
+        if g["index"] in shown:
+            s["listed"] = True
+    for g in batch:
+        s = sections[g["section"]]
+        g["heading"] = None if s["listed"] else s
+        s["listed"] = True
 
 
 async def _search_artists(query, token):
@@ -764,6 +846,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
             else:
                 original = catalog._best_edition(raws, prefer_hires=False)
                 rep_i = next(i for i, alb in enumerate(raws) if alb is original)
+            g["sort_year"] = catalog.album_year_int(raws[rep_i])
             if rep_i:
                 eds.insert(0, eds.pop(rep_i))
             rep = eds[0]
@@ -794,35 +877,67 @@ def _in_library(group):
     return any(e["owned"] or e["folder"] for e in group["editions"])
 
 
-def _album_batch(groups, start, through=(), shown=()):
-    """The records an artist's batch starting at ``start`` lists, and the
-    next batch's start, count and how many records are left after this one.
+def _album_batch(groups, through=(), listed=None):
+    """The records an artist's next batch lists, and the next batch's start,
+    count, how many records are left after this one and the token naming
+    every record on the page by then.
 
-    The first batch also lists every record with a copy in the library, and
-    ``shown`` carries the positions of those later in the list, so a later
-    batch leaves them out whatever the library holds by then. ``through``
+    The first batch, with ``listed`` None, also lists every record with a
+    copy in the library. A later batch takes the next records that are not
+    in ``listed``, a token from _listed_token, so a record whose place or
+    Owned mark changed since is neither repeated nor left out. ``through``
     names album ids the batch has to reach, such as picks kept from before a
     reload."""
-    end = start + _ARTIST_ALBUM_BATCH
+    on_page = set()
+    if listed is None:
+        remaining = groups
+    else:
+        listed_ids = _listed_ids(groups, listed)
+        on_page = {g["index"] for g in groups
+                   if any(str(e["id"]) in listed_ids for e in g["editions"])}
+        remaining = [g for g in groups if g["index"] not in on_page]
+    end = _ARTIST_ALBUM_BATCH
     wanted = {str(album_id) for album_id in through}
     if wanted:
-        last = max((i for i, g in enumerate(groups[start:], start)
+        last = max((i for i, g in enumerate(remaining)
                     if any(str(e["id"]) in wanted for e in g["editions"])),
                    default=-1)
         while end <= last:
             end += _ARTIST_ALBUM_BATCH
-    if start:
-        batch = [g for g in groups[start:end] if g["index"] not in shown]
-    else:
+    batch = remaining[:end]
+    if listed is None:
         batch = [g for g in groups if g["index"] < end or _in_library(g)]
-        shown = {g["index"] for g in batch}
-    shown = {i for i in shown if i >= end}
-    left = sum(1 for g in groups[end:] if g["index"] not in shown)
-    following = sum(1 for g in groups[end:end + _ARTIST_ALBUM_BATCH]
-                    if g["index"] not in shown)
-    more = ({"start": end, "count": following, "left": left,
-             "total": len(groups), "shown": sorted(shown)} if left else None)
-    return batch, more
+    _section_headings(groups, batch, shown=on_page)
+    on_page |= {g["index"] for g in batch}
+    left = len(groups) - len(on_page)
+    if not left:
+        return batch, None
+    return batch, {"start": remaining[end - 1]["index"] + 1, "count": min(left, _ARTIST_ALBUM_BATCH),
+                   "left": left, "total": len(groups),
+                   "listed": _listed_token(groups, on_page)}
+
+
+def _album_id_hash(album_id):
+    return hashlib.blake2s(str(album_id).encode(), digest_size=4).digest()
+
+
+def _listed_token(groups, indexes):
+    """The album ids of the records at ``indexes``, four bytes of a hash
+    each, so the token names the same albums when the artist's list gains,
+    loses or reorders albums between requests."""
+    hashes = sorted({_album_id_hash(e["id"]) for g in groups
+                     if g["index"] in indexes for e in g["editions"]})
+    return base64.urlsafe_b64encode(b"".join(hashes)).decode().rstrip("=")
+
+
+def _listed_ids(groups, token):
+    try:
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    except ValueError:
+        return set()
+    hashes = {raw[i:i + 4] for i in range(0, len(raw) - 3, 4)}
+    return {str(e["id"]) for g in groups for e in g["editions"]
+            if _album_id_hash(e["id"]) in hashes}
 
 
 def _search_error(exc, query):
@@ -849,6 +964,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     artist_results = []
     artist_only_count = 0
     selected_artist = None
+    sectioned = False
     error = None
     query = q.strip()
     kind_raw = str(kind).strip().lower()
@@ -897,7 +1013,10 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 download_admission._active_search_downloads())
             if kind == "track":
                 results = await _track_results(raw, query, token, queued_tracks)
-            elif kind == "album" or selected_artist:
+            elif selected_artist:
+                results, album_groups, sectioned = await _artist_album_results(
+                    artist_id, raw, query, token, queued_albums, scanning_albums)
+            elif kind == "album":
                 results, album_groups = await _album_results(
                     raw, query, token, queued_albums, scanning_albums)
         except Exception as exc:
@@ -905,9 +1024,11 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     album_total = len(album_groups)
     album_more = None
     if selected_artist and album_total > _ARTIST_ALBUMS_AT_ONCE:
-        album_groups, album_more = _album_batch(album_groups, 0)
+        album_groups, album_more = _album_batch(album_groups)
         album_more["url"] = _album_batch_url(
-            artist_id, artist_name, query, album_more["shown"])
+            artist_id, artist_name, query, album_more["listed"], sectioned)
+    elif selected_artist:
+        _section_headings(album_groups, album_groups)
     creds_ok = qobuz_access._creds_ok()
     search_state = f"{kind}|{query}"
     if artist_id:
@@ -952,16 +1073,17 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     return RedirectResponse(url="/", status_code=303)
 
 
-def _album_batch_url(artist_id, artist_name, query, shown):
+def _album_batch_url(artist_id, artist_name, query, listed, sectioned):
     return "/search/artist-albums?" + urllib.parse.urlencode(
         {"artist_id": artist_id, "artist_name": artist_name, "q": query,
-         "shown": ",".join(map(str, shown))})
+         "listed": listed, "sections": 1 if sectioned else 0})
 
 
 @router.get("/search/artist-albums", response_class=HTMLResponse)
 async def search_artist_albums(request: Request, artist_id: str = "",
                                artist_name: str = "", q: str = "",
-                               start: int = 0, shown: str = "",
+                               start: int = 0, listed: str = "",
+                               sections: int = 0,
                                through: list[str] = Query(default=[])):
     """The next batch of a long artist list, rows for both views."""
     artist_id = artist_id.strip()[:64]
@@ -978,18 +1100,20 @@ async def search_artist_albums(request: Request, artist_id: str = "",
         if not error:
             queued_albums, _queued_tracks, scanning_albums = (
                 download_admission._active_search_downloads())
-            _results, album_groups = await _album_results(
-                raw, query, token, queued_albums, scanning_albums)
+            _results, album_groups, sectioned = await _artist_album_results(
+                artist_id, raw, query, token, queued_albums, scanning_albums,
+                sectioned=bool(sections))
+            if sections and not sectioned:
+                error = "Couldn't read Qobuz's release lists. Try again."
     except Exception as exc:
         error = _search_error(exc, query)
     if error:
         return HTMLResponse(rendering._ql_notice_html("error", html.escape(error)))
     album_groups, album_more = _album_batch(
-        album_groups, start, through,
-        {int(i) for i in shown.split(",") if i.isascii() and i.isdigit()})
+        album_groups, through, listed[:6 * cfg.ARTIST_CATALOG_LIMIT])
     if album_more:
         album_more["url"] = _album_batch_url(
-            artist_id, artist_name, query, album_more["shown"])
+            artist_id, artist_name, query, album_more["listed"], sectioned)
     return rendering._tr(request, "_search_results.html", {
         "album_batch": True, "album_groups": album_groups,
         "album_more": album_more, "selected_artist": selected_artist,
