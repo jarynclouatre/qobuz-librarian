@@ -8,8 +8,10 @@ file is decode-verified before it replaces anything.
 import signal
 import sys
 import threading
+import time
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import post_job_hook
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
 from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
@@ -65,6 +67,7 @@ def run_downsample_walk_mode(args):
     """
     clear_scan_caches()
     banner("Downsample: bring library files above 48 kHz down to 44.1 / 48 kHz")
+    started = time.time()
 
     if not HAVE_DOWNSAMPLE:
         log.info(fmt(C.YELLOW,
@@ -337,6 +340,23 @@ def run_downsample_walk_mode(args):
         log.info(fmt(C.GRAY, "  Nothing to do."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
+    if n_attempted:
+        parts = [f"{plural(n_albums_done, 'album')} downsampled, "
+                 f"{format_size(total_saved)} smaller"]
+        if total_errors:
+            parts.append(f"{plural(total_errors, 'file')} left unchanged")
+        if total_flush_warns:
+            parts.append(f"{plural(total_flush_warns, 'file')} not flushed "
+                         "to disk")
+        failed = total_errors or total_flush_warns
+        post_job_hook.report_terminal_run(
+            kind="downsample", title="Downsample run",
+            status="canceled" if interrupted else "failed" if failed else "done",
+            summary=(("Stopped early. " if interrupted else "")
+                     + ", ".join(parts) + "."),
+            error=(f"Finished with {plural(failed, 'error')}."
+                   if failed and not interrupted else None),
+            started_at=started)
     if interrupted:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if (no_answer or unchecked

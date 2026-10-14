@@ -4,8 +4,20 @@
 {% block content %}
 
 <div id="repair-page" class="ql-tool-page ql-tool-page--wide">
-  <header class="ql-page-header">
+  {% set review_parked = repair_job and repair_job.status.value == 'awaiting_review' %}
+  <header class="ql-page-header{% if review_parked %} ql-page-header--split{% endif %}">
     <h1>Repair</h1>
+    {% if review_parked %}
+    <form action="/repair" method="post" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <button type="submit" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+              title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Start a new repair scan{% else %}Connect Qobuz before scanning{% endif %}"
+              aria-label="Start a new repair scan"
+              data-confirm="Scan the whole library for damaged files again? The new results replace this review, and anything ticked here starts unticked." data-confirm-action="Scan">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </form>
+    {% endif %}
   </header>
 
   {% include "_writes_paused_notice.html" %}

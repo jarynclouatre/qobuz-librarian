@@ -15,6 +15,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.completion_live import capture_new_album_completion
 from qobuz_librarian.download import (
+    clear_attempts_after_import,
     discard_download_staging,
     exact_download_coverage,
     refresh_staged_track_bindings,
@@ -1481,6 +1482,7 @@ def execute_durable_new_album(
                 operation_id,
                 item_id,
             )
+    clear_attempts_after_import(item)
     return DurableAlbumResult(
         DurableAlbumStatus.COMPLETE,
         post_dir=post_dir,

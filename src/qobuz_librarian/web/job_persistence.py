@@ -700,13 +700,37 @@ def _write_snapshot(job, snapshot) -> bool:
         _lock.release()
 
 
-_TERMINAL_DOWNLOAD_SQL = (
+_TERMINAL_RECORD_SQL = (
     "INSERT INTO jobs "
-    "(id, title, artist, album_id, kind, status, summary, created_at, "
-    " finished_at, edition, attention, quality_shortfall, execute_args, "
-    " tracks_missing) "
-    "VALUES (?,?,?,?,'download',?,?,?,?,?,?,?,?,?)"
+    "(id, title, artist, album_id, kind, execute_kind, status, summary, "
+    " error, created_at, finished_at, edition, attention, quality_shortfall, "
+    " execute_args, tracks_missing) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
+
+
+def _insert_terminal_record(values, what):
+    """Insert one row for finished terminal work and return its id."""
+    init()
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return None
+        for _ in range(3):
+            job_id = uuid.uuid4().hex[:8]
+            try:
+                conn.execute(_TERMINAL_RECORD_SQL, (job_id, *values))
+                conn.commit()
+                return job_id
+            except sqlite3.IntegrityError:
+                # Same eight-character id space the web uses; a collision is
+                # rare enough to just draw again.
+                _rollback_failed_write(conn)
+            except sqlite3.Error as e:
+                _rollback_failed_write(conn)
+                _note_write_failure(f"record terminal {what}", e)
+                return None
+    return None
 
 
 def record_terminal_download(
@@ -719,8 +743,10 @@ def record_terminal_download(
     finished_at,
     result,
     edition="",
-) -> bool:
-    """Add one finished terminal download to the activity record.
+    status=None,
+):
+    """Add one finished terminal download to the activity record and return
+    its id.
 
     History reads this table, and the table is only ever written from live Job
     objects, which a terminal run does not have. Downloads made in the terminal
@@ -730,39 +756,30 @@ def record_terminal_download(
     """
     album_id = str(album_id or "").strip()
     if not album_id:
-        return False
-    status, attention = download_result.download_job_outcome(result)
+        return None
+    outcome, attention = download_result.download_job_outcome(result)
     shortfall = (
         download_result.quality_shortfall_record(result.get("quality_verdict"))
         if attention == "quality" else {}
     )
-    init()
-    with _lock:
-        conn = _get_conn()
-        if conn is None:
-            return False
-        values = (
-            str(title or ""), str(artist or ""), album_id, status, str(summary or ""),
-            started_at, finished_at, str(edition or "").strip(),
-            attention, json.dumps(shortfall),
-            json.dumps({"retry_disabled": "terminal"}),
-            download_result.tracks_missing(result),
-        )
-        for _ in range(3):
-            try:
-                conn.execute(
-                    _TERMINAL_DOWNLOAD_SQL, (uuid.uuid4().hex[:8], *values))
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                # Same eight-character id space the web uses; a collision is
-                # rare enough to just draw again.
-                _rollback_failed_write(conn)
-            except sqlite3.Error as e:
-                _rollback_failed_write(conn)
-                _note_write_failure(f"record terminal download {album_id}", e)
-                return False
-    return False
+    return _insert_terminal_record((
+        str(title or ""), str(artist or ""), album_id, "download", "",
+        status or outcome, str(summary or ""), None, started_at, finished_at,
+        str(edition or "").strip(), attention, json.dumps(shortfall),
+        json.dumps({"retry_disabled": "terminal"}),
+        download_result.tracks_missing(result),
+    ), f"download {album_id}")
+
+
+def record_terminal_run(*, kind, title, status, summary, started_at,
+                        finished_at, error=None):
+    """Add one finished terminal Upgrade, Repair or Downsample run to the
+    activity record, as the card its web run leaves, and return its id."""
+    return _insert_terminal_record((
+        str(title or ""), "", "", "scan", kind, status, str(summary or ""),
+        error, started_at, finished_at, "", "", "{}",
+        json.dumps({"retry_disabled": "terminal"}), 0,
+    ), kind)
 
 
 def _persist_locked(job, *, admission=False) -> bool:
@@ -1859,6 +1876,12 @@ _HISTORY_SQL = (
 # keeps a Retry, and only the opening of its summary or error tells it apart
 # from a stop or failure of its own.
 RESTART_INTERRUPTED = "Interrupted by a restart."
+
+# How many albums an Upgrade, Downsample, Repair or Library download run has
+# finished, and of how many picked, saved with its details so a restart can
+# say what it had already done.
+ALBUMS_DONE = "_albums_done"
+ALBUMS_PICKED = "_albums_picked"
 
 
 def interrupted_by_restart(status: str, summary: str, error=None) -> bool:

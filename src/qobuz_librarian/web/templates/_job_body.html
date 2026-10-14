@@ -28,6 +28,7 @@
       {%- if job.status.value == 'done' and _attention == 'cancel_late' %} is-warning
       {%- elif job.tracks_missing %} is-warning
       {%- elif job.status.value == 'done' %} is-success
+      {%- elif job.interrupted_by_restart %} is-neutral
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
       {%- elif job.status.value == 'awaiting_review' %} is-info

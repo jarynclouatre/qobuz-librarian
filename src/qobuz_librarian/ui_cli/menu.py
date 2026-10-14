@@ -21,7 +21,7 @@ _CHOICES = [
      "fill missing tracks in every incomplete album you own; "
      "never suggests albums you don't have"),
     ("5", "Repair", Mode.ALBUM_REPAIR,
-     "re-download damaged (truncated) tracks you own"),
+     "re-download damaged (truncated or corrupt) tracks you own"),
     ("6", "Upgrade", Mode.UPGRADE,
      "better-quality versions of albums you own"),
     ("7", "Library migration", Mode.MIGRATE,

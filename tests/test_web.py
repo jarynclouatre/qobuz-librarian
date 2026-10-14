@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from qobuz_librarian import post_job_hook
 from qobuz_librarian.web import jobs as jm
 
 # ── jobs.py: worker loop ──────────────────────────────────────────────────────
@@ -204,7 +205,7 @@ def test_post_job_hook_reports_reviews_and_results_without_the_app_secrets(
     monkeypatch.setenv(
         "POST_JOB_HOOK", 'tee "$HOOK_SINK"; env | cut -d= -f1 > "$HOOK_SINK.env"')
 
-    jm._run_post_job_hook(payload)
+    post_job_hook.run(payload)
 
     assert sink.read_text() == (
         '{"id": "local-hook-check", "status": "done", "title": "Album"}'
@@ -1896,6 +1897,8 @@ def test_an_unfinished_queue_holds_only_downloads_until_given_up(
         _record(authority)
         assert queue_recovery._startup_recovery_status_value() == "resume_required"
         control = queue_recovery._durable_recovery_control()
+        hooks = []
+        monkeypatch.setattr(jm, "_start_post_job_hook", hooks.append)
 
         r = client.post(
             f"/jobs/{job.id}/give-up",
@@ -1908,6 +1911,8 @@ def test_an_unfinished_queue_holds_only_downloads_until_given_up(
         assert (journal.load_queue_journal(saved.operation_id).status
                 is journal.QueueLoadStatus.ABSENT)
         assert queue_recovery._startup_recovery_status_value() == "clear"
+        assert [(hook["id"], hook["status"], hook["summary"]) for hook in hooks] == [
+            (job.id, "canceled", job.summary)]
     finally:
         authority.close()
         _remove_job(job)

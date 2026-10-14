@@ -38,7 +38,7 @@ def _patch(monkeypatch, *, rip, added, cleanup, cancel=False):
 
     monkeypatch.setattr(dl, "rip_url", rip)
     monkeypatch.setattr(dl, "files_added_since", sealed_added)
-    monkeypatch.setattr(dl, "cleanup_lossy", cleanup)
+    monkeypatch.setattr(dl, "cleanup_lossy", lambda f, **_kw: cleanup(f))
     monkeypatch.setattr(dl, "create_staging_run", lambda: _Run())
     monkeypatch.setattr(dl, "capture_staging_run", lambda _run: object())
     monkeypatch.setattr(dl, "snapshot_staging", lambda: set())
@@ -167,7 +167,7 @@ def test_track_by_track_twins_on_two_discs_keep_their_own_files(monkeypatch, tmp
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
     monkeypatch.setattr(cfg, "MIN_FREE_STAGING_MB", 0)
     monkeypatch.setattr(dl, "rip_url", rip)
-    monkeypatch.setattr(dl, "cleanup_lossy", lambda f: (list(f), [], []))
+    monkeypatch.setattr(dl, "cleanup_lossy", lambda f, **_kw: (list(f), [], []))
     monkeypatch.setattr(dl, "read_audio_meta", lambda _p: {})
     monkeypatch.setattr(dl.time, "sleep", lambda _s: None)
 
@@ -456,3 +456,74 @@ def test_retire_download_staging_after_import_sweeps_leftover_art(monkeypatch, t
     # A user cancel discards the partial rip instead of holding it for recovery.
     assert dl.discard_download_staging({"_staging_run": run2.to_record()}) is True
     assert not run2.path.exists()
+
+
+def test_kept_attempts_give_way_only_to_a_copy_holding_all_they_hold(
+        monkeypatch, tmp_path):
+    """Each stopped attempt at an album kept a full staging copy of its own,
+    and every one stayed after the album imported. A later attempt or the
+    import now replaces the older copies it holds all of, never one with a
+    file it lacks, a track cut shorter, damaged or of another recording, nor
+    another album's, and an import compares what went in after
+    downsampling. Tracks set aside as damaged stayed listed after the album
+    imported whole; the import clears those it holds all of too."""
+    from qobuz_librarian.integrations import staging
+
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    album = "Tom Waits/Heartattack And Vine (1980)"
+
+    def run_with(tracks, folder=album):
+        run = staging.create_staging_run()
+        for name, md5, audio in tracks:
+            path = run.path / folder / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(
+                audio if name.endswith((".pdf", ".m4a")) else
+                b"fLaC" + bytes([0x80, 0, 0, 34]) + bytes(18)
+                + md5.ljust(16, b"-")
+                + (b"a" * audio if isinstance(audio, int) else audio))
+        return run
+
+    def keep(tracks, folder=album):
+        result = {"_staging_run": run_with(tracks, folder).to_record()}
+        assert dl.retain_download_staging(result)
+
+    def kept():
+        return sorted(sum(len(tree.files) for tree in inspection.current_trees)
+                      for inspection in staging.inspect_retry_groups()
+                      if inspection.kind != "rejected")
+
+    def reject(name, md5, audio, folder=album):
+        run = run_with([(name, md5, audio)], folder)
+        assert staging.quarantine_file(run.path / folder / name, ".rejected")
+
+    full = [("01.flac", b"a", 900), ("02.flac", b"b", 900)]
+    keep(full)
+    keep([("01.flac", b"z", 100)], folder="Other/Album (2000)")
+    keep(full)
+    assert kept() == [1, 2]
+    keep([("01.flac", b"a", b"a" * 400 + b"\0" * 500), ("02.flac", b"b", 900)])
+    keep([("01.flac", b"remaster", 2000)])
+    keep([("01.flac", b"\0", 900), ("02.flac", b"b", 900)])
+    keep([("03.m4a", b"", b"A" * 900)])
+    keep([("03.m4a", b"", b"B" * 900)])
+    keep(full + [("booklet.pdf", b"", b"pdf")])
+    assert kept() == [1, 1, 1, 1, 2, 2, 3]
+    keep([("01.flac", b"a", 900), ("02.flac", b"b", 300)])
+    keep(full[:1])
+
+    downsampled = run_with([("01.flac", b"a48", 500), ("02.flac", b"b48", 500)])
+    result = {"_staging_run": downsampled.to_record()}
+    dl.note_superseded_attempts(result)
+    assert dl.clear_attempts_after_import(result) == 0
+
+    reject("02.flac", b"b", 300)
+    reject("01.flac", b"a", b"a" * 400 + b"\0" * 500)
+    reject("01.flac", b"z", 50, folder="Other/Album (2000)")
+
+    imported = run_with(full)
+    result = {"_staging_run": imported.to_record()}
+    dl.note_superseded_attempts(result)
+    assert dl.clear_attempts_after_import(result) == 3
+    assert kept() == [1, 1, 1, 1, 2, 2, 3]
+    assert len(staging.list_file_groups(kind="rejected")) == 2

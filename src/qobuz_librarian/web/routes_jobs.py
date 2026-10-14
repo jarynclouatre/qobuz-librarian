@@ -756,7 +756,8 @@ def _rebuild_results_hint(execute_kind):
         return ("Refresh the Library, which rebuilds these results, then try "
                 "again.")
     if execute_kind == "repair":
-        return "Start a new scan on the Repair page, then try again."
+        return ("Start a new scan with the button beside the Repair title, "
+                "then try again.")
     if execute_kind == "new_releases":
         return "Run Check new releases on the Library page, then try again."
     if execute_kind == "collection_restore":
@@ -1284,7 +1285,9 @@ async def job_give_up(request: Request, job_id: str):
         )
     with job._lock:
         job.attention = ""
-        job.error = (
+        job.status = job_mgr.JobStatus.CANCELED
+        job.error = None
+        job.summary = (
             f"Abandoned. {reason} Downloads and scans can run again."
             if imported else
             "Abandoned. The interrupted download was discarded and nothing "
@@ -1299,6 +1302,7 @@ async def job_give_up(request: Request, job_id: str):
             + " Check the data-folder permissions before restarting Qobuz "
             "Librarian.",
         )
+    job_mgr._start_post_job_hook_for_job(job)
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 

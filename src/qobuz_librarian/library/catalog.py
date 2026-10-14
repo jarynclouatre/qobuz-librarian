@@ -59,6 +59,7 @@ from qobuz_librarian.library.tags import (
     strip_year_decoration,
 )
 from qobuz_librarian.ui_cli.colors import C, fmt
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 
 # ── Multi-artist folder detection ─────────────────────────────────────────────
@@ -293,7 +294,7 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
         if version and version.casefold() not in title.casefold():
             qobuz_album = {**qobuz_album, "title": f"{title} ({version})"}
     candidates = predicted_album_paths(qobuz_album, exact_edition=exact_edition)
-    vlog(f"predicted {len(candidates)} candidate path(s)")
+    vlog(f"predicted {plural(len(candidates), 'candidate path')}")
 
     _parent_kid_names: dict = {}
     for c in candidates:

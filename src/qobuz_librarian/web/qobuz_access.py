@@ -20,6 +20,7 @@ from qobuz_librarian.api.auth import (
     credentials_from_values,
     qobuz_capability,
 )
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import job_persistence, runtime
 from qobuz_librarian.web import jobs as job_mgr
 
@@ -160,8 +161,8 @@ def _scrub_stored_credentials(logger) -> None:
             complete = False
     if rows or files:
         logger.info(
-            f"Masked account details in {rows} stored job record(s) and "
-            f"{files} log file(s) written by an earlier version.")
+            f"Masked account details in {plural(rows, 'stored job record')} "
+            f"and {plural(files, 'log file')} written by an earlier version.")
     if complete:
         try:
             marker.touch()

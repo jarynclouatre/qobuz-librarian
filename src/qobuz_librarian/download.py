@@ -35,6 +35,7 @@ from qobuz_librarian.integrations import staging
 from qobuz_librarian.integrations.rip import (
     cleanup_lossy,
     files_added_since,
+    flac_audio_offset,
     is_cancel_requested,
     rip_url,
     snapshot_staging,
@@ -337,6 +338,10 @@ def _remove_reject(bucket, rejected):
     return False
 
 
+def _reject_key(path):
+    return str(Path(path)), getattr(path, "identity", None)
+
+
 def _reject_label(path):
     try:
         return Path(path).stem
@@ -362,6 +367,15 @@ def retain_download_staging(result, *, label="interrupted", recovery_checkpoint=
     if retained is None:
         return False
     result["_staging_run_retained"] = True
+    if retained.owner is None:
+        try:
+            clear_superseded_attempts(
+                {relative: tree.path / relative
+                 for tree in retained.trees
+                 for relative, _identity in tree.files},
+                keep=retained.path)
+        except OSError as exc:
+            vlog(f"couldn't clear older kept copies: {exc}")
     return True
 
 
@@ -461,6 +475,169 @@ def discard_download_staging(result, *, recovery_checkpoint=None):
         return retained is not None and discard_group(retained)
     retained = retain_staging_run(run, label="cancelled", on_intent=recovery_checkpoint)
     return retained is not None and discard_group(retained, expected_owner=run.owner)
+
+
+def _same_bytes(older, newer, older_start, newer_start, length):
+    with open(older, "rb") as left, open(newer, "rb") as right:
+        left.seek(older_start)
+        right.seek(newer_start)
+        while length > 0:
+            chunk = min(length, 1 << 20)
+            if left.read(chunk) != right.read(chunk):
+                return False
+            length -= chunk
+    return True
+
+
+def _holds_file(kept, newer):
+    """Whether the file ``newer`` holds everything the kept file ``kept``
+    does. A FLAC track must carry the same stream header and start with all
+    of the kept copy's audio, so a whole track covers one cut short while
+    another master, a downsampled copy or one damaged past its header never
+    does; tags and art may differ. Any other file must be the same bytes."""
+    try:
+        kept_size = os.stat(kept, follow_symlinks=False).st_size
+        newer_size = os.stat(newer, follow_symlinks=False).st_size
+        if Path(kept).suffix.lower() != ".flac":
+            return (kept_size == newer_size
+                    and _same_bytes(kept, newer, 0, 0, kept_size))
+        with open(kept, "rb") as fh:
+            kept_head = fh.read(42)
+        with open(newer, "rb") as fh:
+            newer_head = fh.read(42)
+        kept_start = flac_audio_offset(kept)
+        newer_start = flac_audio_offset(newer)
+    except OSError:
+        return False
+    if (
+        len(kept_head) != 42
+        or kept_head != newer_head
+        or kept_head[:4] != b"fLaC"
+        or kept_head[4] & 0x7F
+        or not kept_start
+        or not newer_start
+    ):
+        return False
+    audio = kept_size - kept_start
+    try:
+        return (newer_size - newer_start >= audio
+                and _same_bytes(kept, newer, kept_start, newer_start, audio))
+    except OSError:
+        return False
+
+
+def _attempt_covered(tree, later):
+    """Whether a kept attempt holds nothing the later copy ``later`` (path
+    inside the run -> file) lacks."""
+    if not tree.files or any(relative not in later for relative, _ in tree.files):
+        return False
+    return all(_holds_file(tree.path / relative, later[relative])
+               for relative, _identity in tree.files)
+
+
+def _superseded_attempts(later, *, keep=None):
+    if not later:
+        return []
+    return [
+        inspection.path
+        for inspection in staging.inspect_retry_groups()
+        if inspection.kind == "interrupted"
+        and inspection.status == "ready"
+        and inspection.owner is None
+        and inspection.path != keep
+        and inspection.current_trees
+        and all(tree is not None and _attempt_covered(tree, later)
+                for tree in inspection.current_trees)
+    ]
+
+
+def _discard_superseded(paths):
+    removed = sum(1 for path in paths if discard_group(Path(path)))
+    if removed:
+        log.info(fmt(C.GRAY,
+            f"  Removed {plural(removed, 'older kept copy', 'older kept copies')} "
+            "of this album from staging."))
+    return removed
+
+
+def clear_superseded_attempts(later, *, keep=None):
+    """Remove the copies earlier stopped downloads kept of an album that a
+    later copy, ``later`` (path inside the run -> file), holds all of.
+
+    Only kept staging attempts no download is tied to are considered, and one
+    is removed only while every file is exactly as it was set aside.
+    """
+    return _discard_superseded(_superseded_attempts(later, keep=keep))
+
+
+def _run_relative(path):
+    """``path`` inside a download run, as the run's own files are named."""
+    try:
+        parts = Path(path).relative_to(cfg.STAGING_DIR).parts
+    except ValueError:
+        return None
+    if len(parts) < 2 or not staging._RUN_DIR_RE.fullmatch(parts[0]):
+        return None
+    return Path(*parts[1:]).as_posix()
+
+
+def _superseded_rejects(later):
+    """The tracks earlier downloads set aside as damaged that a later copy,
+    ``later`` (path inside the run -> file), holds all of, as (group, owner)
+    pairs. One tied to a download still saved is left to that download."""
+    from qobuz_librarian.queue import startup_recovery
+
+    saved = None
+    found = []
+    for inspection in staging.inspect_retry_groups():
+        group = inspection.file_group
+        if (inspection.kind != "rejected" or inspection.status != "ready"
+                or group is None or group.original is None):
+            continue
+        if inspection.owner is not None:
+            if saved is None:
+                saved = startup_recovery.saved_queue_operation_ids()
+            if saved is None or inspection.owner["operation_id"] in saved:
+                continue
+        relative = _run_relative(group.original.path)
+        if relative in later and _holds_file(group.retained.path, later[relative]):
+            found.append([str(inspection.path), inspection.owner])
+    return found
+
+
+def note_superseded_attempts(result):
+    """Just before an album imports, note the copies earlier attempts kept of
+    it, and the tracks they set aside as damaged, that the files about to go
+    in, as downsampled and tagged, hold all of."""
+    try:
+        current = staging.capture_staging_run(
+            staging_run_from_record(result.get("_staging_run")))
+        if current is not None:
+            later = {relative: current.path / relative
+                     for relative, _identity in current.files}
+            result["_superseded_attempts"] = [
+                str(path) for path in _superseded_attempts(later)]
+            result["_superseded_rejects"] = _superseded_rejects(later)
+    except OSError as exc:
+        vlog(f"couldn't compare older kept copies: {exc}")
+
+
+def clear_attempts_after_import(result):
+    """Once an album imported, drop the kept copies noted before it went in."""
+    try:
+        removed = _discard_superseded(
+            result.pop("_superseded_attempts", None) or ())
+        rejects = sum(
+            1 for path, owner in result.pop("_superseded_rejects", None) or ()
+            if staging.discard_file_group(Path(path), expected_owner=owner))
+    except OSError as exc:
+        vlog(f"couldn't clear older kept copies: {exc}")
+        return 0
+    if rejects:
+        log.info(fmt(C.GRAY,
+            f"  Removed {plural(rejects, 'damaged copy', 'damaged copies')} "
+            "of this album's tracks from staging."))
+    return removed + rejects
 
 
 def _receipt_records(receipts):
@@ -967,10 +1144,21 @@ def run_album_download(
             audio = [moved for f in audio if (moved := _into_disc_folder(f, track))]
         return rc, out, audio
 
+    cut_short = set()
+
     def _sort_audio(paths):
+        # A track the stop cut off is not damaged: it stays in the run, which
+        # the stop keeps or throws away whole.
+        stopping = is_cancel_requested()
         if recovery_owner is None:
-            return cleanup_lossy(paths)
-        return cleanup_lossy(paths, owner=recovery_owner, on_intent=recovery_checkpoint)
+            sorted_audio = cleanup_lossy(paths, keep_broken=stopping)
+        else:
+            sorted_audio = cleanup_lossy(
+                paths, owner=recovery_owner, on_intent=recovery_checkpoint,
+                keep_broken=stopping)
+        if stopping:
+            cut_short.update(_reject_key(path) for path in sorted_audio[2])
+        return sorted_audio
 
     album_id = album.get("id")
     t_start = time.time()
@@ -1059,8 +1247,9 @@ def run_album_download(
                             "started."
                         ) from None
                 vlog(
-                    f"pre-download: backing up + removing {len(to_clear)} present "
-                    f"track(s) to prevent .1.flac collisions"
+                    f"pre-download: backing up + removing "
+                    f"{plural(len(to_clear), 'present track')} to prevent "
+                    ".1.flac collisions"
                 )
                 if recovery_owner is None:
                     backup_result = (
@@ -1217,7 +1406,8 @@ def run_album_download(
 
     new_files = _run_files_since(snapshot)
     audio_new = [f for f in new_files if f.suffix.lower() in cfg.AUDIO_EXTS]
-    vlog(f"  {len(new_files)} new file(s) in staging ({len(audio_new)} audio)")
+    vlog(f"  {plural(len(new_files), 'new file')} in staging "
+         f"({len(audio_new)} audio)")
     # cleanup_lossy removes rejects, so capture their tags and path-derived
     # disc/track identity first. A title alone is not safe for same-title twins.
     file_identities = _capture_file_identities(audio_new, qobuz_tracks)
@@ -1431,18 +1621,20 @@ def run_album_download(
         )
         for d in lossy[:5]:
             log.info(fmt(C.GRAY, f"     {_reject_label(d)}"))
+        if len(lossy) > 5:
+            log.info(fmt(C.GRAY, f"     and {len(lossy) - 5} more"))
     if broken:
-        why = ("the stop cut them off" if is_cancel_requested()
-               else "another run fetches them again")
-        log.info(
-            fmt(
-                C.YELLOW,
-                f"  ⚠  {plural(len(broken), 'track')} arrived damaged and "
-                f"{'was' if len(broken) == 1 else 'were'} discarded ({why}):",
-            )
-        )
+        if is_cancel_requested():
+            note = f"The stop cut {plural(len(broken), 'track')} short:"
+        else:
+            note = (f"{plural(len(broken), 'track')} arrived damaged and "
+                    f"{'was' if len(broken) == 1 else 'were'} discarded "
+                    "(another run fetches them again):")
+        log.info(fmt(C.YELLOW, f"  ⚠  {note}"))
         for d in broken[:5]:
             log.info(fmt(C.GRAY, f"     {_reject_label(d)}"))
+        if len(broken) > 5:
+            log.info(fmt(C.GRAY, f"     and {len(broken) - 5} more"))
 
     # Paths are retained only inside this download phase. The queue, activity
     # log, and CLI have always exposed short display strings.
@@ -1456,8 +1648,8 @@ def run_album_download(
     retained_rejects = 0
     seen_rejects = set()
     for rejected in rejects_to_retire:
-        key = (str(Path(rejected)), getattr(rejected, "identity", None))
-        if key in seen_rejects:
+        key = _reject_key(rejected)
+        if key in seen_rejects or key in cut_short:
             continue
         seen_rejects.add(key)
         if recovery_owner is None:

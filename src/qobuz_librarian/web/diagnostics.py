@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import stat
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Request
@@ -147,27 +149,46 @@ def _staging_display_name(path):
 def _staging_tree_contents(tree):
     """The album folders one retained tree holds: those with tracks in them,
     else the deepest folders, read past the artwork folder a download keeps
-    inside its album. Tracks at the top of the tree are named by the tree's
-    own folder."""
+    inside its album. Tracks or artwork at the top of the tree are named by
+    the tree's own folder, and a tree with no folder of its own by the
+    files it holds."""
     tracks = [Path(rel) for rel, _identity in tree.files
               if Path(rel).suffix.lower() in cfg.AUDIO_EXTS]
-    folders = sorted({str(rel.parent) for rel in tracks} - {"."})
-    if any(str(rel.parent) == "." for rel in tracks):
-        top = _staging_display_name(tree.original_relative)
-        folders.insert(0, top or plural(
-            sum(str(rel.parent) == "." for rel in tracks), "track"))
+    folders = {str(rel.parent) for rel in tracks}
     if not folders:
         relatives = {str(Path(rel).parent) if Path(rel).name.startswith("__")
                      else rel for rel, _identity in tree.directories if rel}
-        relatives.discard(".")
-        folders = sorted(
+        if len(relatives) > 1:
+            relatives.discard(".")
+        folders = {
             rel for rel in relatives
             if not any(other != rel and other.startswith(rel + "/")
                        for other in relatives)
-        )
-    if folders:
-        return ", ".join(folder.replace("/", " / ") for folder in folders)
-    return plural(len(tree.files), "file")
+        }
+    names = [folder.replace("/", " / ") for folder in sorted(folders - {"."})]
+    if "." in folders or not names:
+        top_tracks = sum(str(rel.parent) == "." for rel in tracks)
+        files = sorted({Path(rel).name for rel, _identity in tree.files})
+        names.insert(0, _staging_display_name(tree.original_relative) or (
+            plural(top_tracks, "track") if top_tracks
+            else ", ".join(files) if 0 < len(files) <= 3
+            else plural(len(tree.files), "file")))
+    return ", ".join(names)
+
+
+def _kept_at(group):
+    """When a staging group was set aside: the time its folder is named
+    with, or else the folder's own."""
+    stamp = re.match(r"(\d{8}_\d{6})-", group.name)
+    if stamp:
+        try:
+            return datetime.strptime(stamp.group(1), "%Y%m%d_%H%M%S")
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(group.stat(follow_symlinks=False).st_mtime)
+    except OSError:
+        return None
 
 
 def _staging_leftovers():
@@ -187,6 +208,9 @@ def _staging_leftovers():
             label, reason = _FAILED_RUN
         what = ""
         held = inspection.file_group or inspection.planned_file
+        size = (held.retained.identity[3] if held is not None
+                else sum(identity[3] for tree in inspection.planned_trees
+                         for _relative, identity in tree.files))
         if held is not None:
             source = held.original or held.retained
             what = _staging_display_name(source)
@@ -234,11 +258,24 @@ def _staging_leftovers():
         leftovers.append({
             "name": inspection.path.name,
             "label": f"{label}: {what}" if what else label,
+            "what": what,
             "reason": reason,
             "removable": removable,
             "note": note,
             "path": str(inspection.path),
+            "size": size,
         })
+    # Several groups can hold the same album, one from each attempt.
+    named = Counter(leftover["what"] for leftover in leftovers)
+    for leftover in leftovers:
+        if leftover["what"] and named[leftover["what"]] > 1:
+            kept = _kept_at(Path(leftover["path"]))
+            if kept is not None:
+                leftover["label"] += (f", kept {kept:%b} {kept.day}, "
+                                      f"{kept:%H:%M:%S}")
+    for leftover in leftovers:
+        if leftover["size"]:
+            leftover["label"] += f" · {format_size(leftover['size'])}"
     return leftovers
 
 
@@ -378,11 +415,11 @@ def _diagnostics():
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))
     if beets_db.exists():
         ok = os.access(beets_db, os.R_OK)
-        checks.append({"label": "Beets database", "ok": ok,
+        checks.append({"label": "Beets database", "ok": ok, "mono": ok,
                        "detail": f"{beets_db_display}" if ok
                        else f"{beets_db_display} exists but is not readable"})
     elif beets_db.parent.exists():
-        checks.append({"label": "Beets database", "ok": True,
+        checks.append({"label": "Beets database", "ok": True, "mono": True,
                        "detail": f"{beets_db_display} (created on first import)"})
     else:
         parent_display, _is_host = storage._resolve_host_path(str(beets_db.parent))
@@ -395,13 +432,14 @@ def _diagnostics():
     for binary in ("rip", "ffmpeg", "flac"):
         found = shutil.which(binary)
         checks.append({"label": f"{binary} binary",
-                       "ok": bool(found),
+                       "ok": bool(found), "mono": bool(found),
                        "detail": found or f"{binary} was not found. "
                        f"{missing_tool_fix}"})
     beets_python, beets_detail = _beets_runtime_diagnostic()
     checks.append({
         "label": "Beets",
         "ok": beets_python is not None,
+        "mono": beets_python is not None,
         "detail": beets_detail,
     })
 
@@ -634,7 +672,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         icon = "OK" if classification.removable else "!"
         aria = "OK" if classification.removable else "Needs attention"
         where = dest if origin else "the album folder it came from"
-        if re.match(r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|downsample)_", path.name):
+        if re.match(r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name):
             # These restore file by file and the backup wins each swap.
             restore_confirm = (
                 f"Put these files back in {where}? Any file of the same name "

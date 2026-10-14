@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import run_lock
+from qobuz_librarian import download_result, post_job_hook, run_lock
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.completion import (
@@ -21,9 +21,11 @@ from qobuz_librarian.completion import (
     parse_completion_input_record,
 )
 from qobuz_librarian.download import (
+    clear_attempts_after_import,
     disc_names_overwrite,
     download_staged_files,
     keep_unimported_download,
+    note_superseded_attempts,
     retain_download_staging,
     retire_download_staging_after_import,
     retire_empty_download_staging,
@@ -32,7 +34,10 @@ from qobuz_librarian.download import (
     staged_track_bindings,
     validated_staged_album_dirs,
 )
-from qobuz_librarian.download_result import incomplete_track_counts
+from qobuz_librarian.download_result import (
+    download_job_outcome,
+    incomplete_track_counts,
+)
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.integrations.beets import (
     _consolidate_duplicate_albums,
@@ -2102,6 +2107,7 @@ def _resolve_queue_item(
         "imported": imported_globally,
         "auto_upgrade": item["auto_upgrade"],
         "elapsed_s": int(item.get("elapsed", 0)),
+        "album": item["album"],
     }
 
 
@@ -2120,8 +2126,9 @@ def _sleep_unless_cancelled(seconds, cancel_check, step=0.5):
         time.sleep(min(step, remaining))
 
 
-def _record_terminal_downloads(successful):
-    """Give the terminal's finished downloads their row in the activity record.
+def _record_terminal_downloads(changes):
+    """Give the terminal's finished, failed and stopped downloads their row in
+    the activity record, and report each to POST_JOB_HOOK.
 
     Queue and History read the job archive, which only the web writes, so
     terminal downloads left no trace on the record at all. Bookkeeping never
@@ -2132,34 +2139,47 @@ def _record_terminal_downloads(successful):
 
     finished = time.time()
     recorded = False
-    for change in successful:
+    for change in changes:
         album = change.get("album") or {}
         album_id = str(album.get("id") or "").strip()
         if not album_id:
             continue
+        stopped = change.get("result") == "interrupted"
+        status = ("canceled" if stopped
+                  else download_job_outcome(change)[0])
         parts = [f"{plural(change.get('n_ok', 0), 'track')} downloaded"]
         if change.get("n_fail"):
             parts.append(f"{change['n_fail']} failed")
         if change.get("n_lossy"):
             parts.append(f"{change['n_lossy']} lossy-dropped")
+        summary = ("Stopped before it finished." if stopped
+                   else ", ".join(parts) + ".")
+        artist = (album.get("artist") or {}).get("name") or ""
         try:
             saved = job_persistence.record_terminal_download(
                 album_id=album_id,
-                artist=(album.get("artist") or {}).get("name") or "",
+                artist=artist,
                 title=album.get("title") or "",
-                summary=", ".join(parts) + ".",
+                summary=summary,
                 started_at=finished - float(change.get("elapsed_s", 0) or 0),
                 finished_at=finished,
                 edition=album.get("version") or "",
                 result=change,
+                status=status,
             )
         except Exception as exc:
-            saved = False
+            saved = None
             vlog(f"activity record write failed: {exc}")
         if not saved:
             vlog(f"activity record write failed for album {album_id}")
         else:
             recorded = True
+        post_job_hook.run(post_job_hook.payload(
+            event_id=saved or album_id, status=status,
+            title=album.get("title") or "", edition=album.get("version") or "",
+            artist=artist, finished_at=finished,
+            tracks_missing=download_result.tracks_missing(change),
+            kind="download", summary=summary))
     if recorded:
         job_persistence.prune_finished(
             job_persistence.FINISHED_HISTORY_KEEP
@@ -2186,10 +2206,13 @@ def _refresh_review_state_after_downloads(
         for change in changes
         if change.get("imported") and change.get("n_ok", 0) > 0
     ]
+    _record_terminal_downloads([
+        change for change in changes
+        if change in successful or change.get("result") == "interrupted"
+        or download_job_outcome(change)[0] == "failed"
+    ])
     if not successful:
         return
-
-    _record_terminal_downloads(successful)
 
     try:
         from qobuz_librarian.library import generation_state
@@ -3298,11 +3321,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         album_dirs, staged_track_bindings(item), album_title=title,
                         authority_check=lambda: _require_executor_authority(authority))
                     checkpoint_sources(SourceTransitionKind.BEETS_TAG_CLEAN)
-                return _run_pre_import_hooks_for_dirs(
+                prepared = _run_pre_import_hooks_for_dirs(
                     album_dirs,
                     args,
                     on_sources_changed=checkpoint_sources,
                 )
+                note_superseded_attempts(item)
+                return prepared
 
             outcome = execute_durable_new_album(
                 queue,
@@ -3531,6 +3556,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         )
 
                         _keep_own_cover(item["backup_path"], album_dirs)
+                    note_superseded_attempts(item)
                     sigs, resampled_n = prepared
                     item["resampled_n"] = resampled_n
                     item.update(_pre_import_outcome_fields(prepared))
@@ -3615,6 +3641,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         ))
                 if item_imported and retired_import_staging:
                     any_imported = True
+                    clear_attempts_after_import(item)
                 else:
                     if item_imported:
                         log.info(fmt(
@@ -3769,8 +3796,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 queue_transient_lyric_sigs, _post_dirs + [cfg.STAGING_DIR])
             if resolved:
                 if _record_post_import_lyric_retry(resolved):
-                    vlog(f"lyric retry: queued {len(resolved)} "
-                         f"post-import path(s) for next-launch retry")
+                    vlog(f"lyric retry: queued "
+                         f"{plural(len(resolved), 'post-import path')} "
+                         "for next-launch retry")
         except Exception as _e_lr:
             vlog(f"lyric retry resolution failed: {_e_lr}")
     elif (queue_transient_lyric_sigs
@@ -3785,7 +3813,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             if resolved:
                 if _record_post_import_lyric_retry(resolved):
                     vlog(f"lyric retry: no album imported; queued "
-                         f"{len(resolved)} staging path(s) for next-launch retry")
+                         f"{plural(len(resolved), 'staging path')} for "
+                         "next-launch retry")
         except Exception as _e_lr:
             vlog(f"lyric retry (staging fallback) failed: {_e_lr}")
 
@@ -3859,7 +3888,11 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     # after their own higher-level operation has verified the file change.
     if refresh_review:
         _refresh_review_state_after_downloads(
-            saved_state_changes,
+            saved_state_changes + [
+                result for result in results
+                if result.get("album")
+                and not (result.get("imported") and result.get("n_ok", 0) > 0)
+            ],
             token,
             args,
             allow_upgrade_refresh=(auth_lost_exc is None and not interrupted),

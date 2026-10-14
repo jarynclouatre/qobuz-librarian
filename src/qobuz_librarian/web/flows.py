@@ -2913,6 +2913,25 @@ def _note_written_into(job, cand):
     job_persistence.persist(job)
 
 
+def _start_album_count(job):
+    with job._lock:
+        job.execute_args = {
+            key: value for key, value in (job.execute_args or {}).items()
+            if key != job_persistence.ALBUMS_DONE}
+
+
+def _note_album_done(job):
+    """Count an album the run has finished and save it, so a hard stop can
+    say what was already done."""
+    with job._lock:
+        args = job.execute_args or {}
+        job.execute_args = {
+            **args,
+            job_persistence.ALBUMS_DONE:
+                (args.get(job_persistence.ALBUMS_DONE) or 0) + 1}
+    job_persistence.persist(job)
+
+
 def _settle_pick(job, cand, folder=None):
     """Untick a pick the run has imported, so a hard stop does not put it
     back in the review, and save the folder it was imported into."""
@@ -2974,9 +2993,11 @@ def execute_albums(job, chosen, token):
     # have moved since.
     clear_scan_caches()
     with job._lock:
-        job.execute_args = {key: value
-                            for key, value in (job.execute_args or {}).items()
-                            if key not in (_WRITTEN_INTO, _IMPORTED_INTO)}
+        job.execute_args = {**{key: value
+                               for key, value in (job.execute_args or {}).items()
+                               if key not in (_WRITTEN_INTO, _IMPORTED_INTO,
+                                              job_persistence.ALBUMS_DONE)},
+                            job_persistence.ALBUMS_PICKED: len(chosen)}
     args = build_args()
     _benign = {"already_complete", "skipped_already_higher_quality", "dry_run",
                "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras",
@@ -3171,6 +3192,7 @@ def execute_albums(job, chosen, token):
         elif result and result.get("imported") and result.get("n_ok", 0) > 0:
             job._imported_any = True
             _settle_pick(job, cand, result.get("dir"))
+            _note_album_done(job)
             _refresh_after_local_album_change(
                 full,
                 result,
@@ -3425,6 +3447,7 @@ def execute_upgrades(job, chosen, token):
         return
 
     clear_scan_caches()
+    _start_album_count(job)
     args = build_args()
     # Explicit upgrade: enable the replace path for this run only, and turn
     # off per-album consolidation prompts (the CLI upgrade walk does the same).
@@ -3515,15 +3538,18 @@ def execute_upgrades(job, chosen, token):
         elif result and result.get("catalogue_unverified"):
             catalogue_failed += 1
             job._imported_any = True
+            _note_album_done(job)
         elif result and attention_kind == "backup":
             # Imported, but the rebuilt folder couldn't be verified as
             # complete as the original, so the backup was kept.
             kept += 1
             job._imported_any = True
+            _note_album_done(job)
         elif result and result.get("imported") and _res not in (
                 _skip | {"upgrade_aborted_backup_failed"}):
             ok += 1
             job._imported_any = True
+            _note_album_done(job)
             if result.get("companions_kept"):
                 companion_notes.append((
                     f"{cand.get('artist', '')} - {cand.get('title') or '?'}",
@@ -3828,6 +3854,7 @@ def execute_downsamples(
         job.summary = job.error
         _mark_job_failed(job)
         return
+    _start_album_count(job)
     shrunk = 0
     total_saved = 0
     interrupted_saved = 0
@@ -3926,6 +3953,7 @@ def execute_downsamples(
         elif res.get("resampled"):
             shrunk += 1
             total_saved += res.get("saved_bytes", 0)
+            _note_album_done(job)
         elif res.get("errors"):
             failed_albums += 1
         else:
@@ -4856,6 +4884,7 @@ def execute_repairs(job, chosen, token):
     """Refill ISRC-verified truncated tracks, or re-download whole albums
     whose damage couldn't be ID-verified, depending on each candidate."""
     clear_scan_caches()
+    _start_album_count(job)
     args = build_args()
     fixed = 0
     unverified = 0
@@ -4980,6 +5009,7 @@ def execute_repairs(job, chosen, token):
                 and result.get("n_fail", 0) == 0):
             fixed += 1
             job._imported_any = True
+            _note_album_done(job)
         else:
             failed += 1
             failed_cands.append(cand)

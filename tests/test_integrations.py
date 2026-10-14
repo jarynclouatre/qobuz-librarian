@@ -95,6 +95,12 @@ def test_rip_reaps_a_timed_out_process_and_sorts_what_it_left(monkeypatch, tmp_p
     assert lossy == [mp3] and broken == [bad]
     assert not bad.exists() and not mp3.exists()
 
+    # A track a stop cut off stays with the rest of the stopped download.
+    bad.write_bytes(b"\x00" * 200_000)
+    with patch("qobuz_librarian.integrations.rip.is_flac", return_value=False):
+        assert cleanup_lossy([bad], keep_broken=True) == ([], [], [bad])
+    assert bad.exists()
+
 
 # ── lyrics: retry manifest + atomic writes ────────────────────────────────
 

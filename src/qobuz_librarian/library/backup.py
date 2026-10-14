@@ -7608,7 +7608,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
 
 def backup_gap_fill_files(file_paths, album_dir: Path, *,
                           expected_receipts=None, owner=None,
-                          on_intent=None):
+                          on_intent=None, kind="gapfill"):
     """Back up selected files while every accepted source is writer-held.
 
     A verified source remains excluded from writers from receipt validation
@@ -7624,6 +7624,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
     if on_intent is not None and not callable(on_intent):
         raise ValueError("backup intent checkpoint must be callable")
 
+    what = "" if kind == "repair" else "gap-fill "
     file_paths = list(file_paths)
     requested_count = len(file_paths)
     if not file_paths:
@@ -7636,7 +7637,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         except OSError as exc:
             log.info(fmt(
                 C.RED,
-                f"  ✗  Refusing malformed gap-fill source receipts "
+                f"  ✗  Refusing malformed {what}source receipts "
                 f"({exc}); leaving every source file in place."))
             return None
 
@@ -7786,7 +7787,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
             if rooted is None or rooted[2][-1] in _SIDECARS:
                 log.info(fmt(
                     C.RED,
-                    f"  ✗  Refusing unsafe gap-fill source {raw_path}; "
+                    f"  ✗  Refusing unsafe {what}source {raw_path}; "
                     "leaving every source file in place."))
                 return None
             _source_path, _album_root, parts = rooted
@@ -7794,7 +7795,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
             if relative_text in seen:
                 log.info(fmt(
                     C.RED,
-                    "  ✗  A gap-fill source path is duplicated; leaving "
+                    f"  ✗  A {what}source path is duplicated; leaving "
                     "every source file in place."))
                 return None
             seen.add(relative_text)
@@ -7875,13 +7876,13 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         if expected is not None and seen != set(expected):
             log.info(fmt(
                 C.RED,
-                "  ✗  Gap-fill receipts do not cover exactly the requested "
+                f"  ✗  The {what}receipts do not cover exactly the requested "
                 "files; leaving every source file in place."))
             return None
         if not records or not all(_source_intact(record) for record in records):
             log.info(fmt(
                 C.RED,
-                "  ✗  A gap-fill source changed while writer exclusions "
+                f"  ✗  A {what}source changed while writer exclusions "
                 "were acquired; leaving the public tree untouched."))
             return None
 
@@ -7892,11 +7893,11 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
             backup_root_fd = _open_backup_directory(backup_root)
             if not _backup_root_is_public(backup_root, backup_root_fd):
                 raise OSError("backup directory changed while it was opened")
-            bp = backup_root / _backup_dir_name(public, kind="gapfill")
+            bp = backup_root / _backup_dir_name(public, kind=kind)
         except (OSError, shutil.Error) as exc:
             log.info(fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't prepare a protected gap-fill backup "
+                f"  ⚠  Couldn't prepare a protected {what}backup "
                 f"({exc}); leaving every source file in place."))
             return None
 
@@ -7928,7 +7929,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         except (OSError, shutil.Error) as exc:
             log.info(fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't create a protected gap-fill backup "
+                f"  ⚠  Couldn't create a protected {what}backup "
                 f"({exc}); leaving every source file in place."))
             if (
                 backup_fd is not None
@@ -8130,7 +8131,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         if not complete:
             log.info(fmt(
                 C.RED,
-                "  ✗  Gap-fill backup did not complete. Any exact moved "
+                f"  ✗  The {what}backup did not complete. Any exact moved "
                 f"copies are retained at {bp}; no replacement work may "
                 "continue."))
             return result or BackupResult(
@@ -9796,7 +9797,7 @@ def _restore_upgrade_backup(
             if backup_bytes <= original_bytes:
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Cannot auto-restore: {original_public} has "
-                    f"{len(original_manifest)} file(s) / "
+                    f"{errors_mod.plural(len(original_manifest), 'file')} / "
                     f"{original_bytes / 1024 / 1024:.1f} MB (backup has "
                     f"{len(backup_manifest)} / "
                     f"{backup_bytes / 1024 / 1024:.1f} MB)."))
@@ -10170,7 +10171,7 @@ def albums_left_in_backups():
             or (
                 not (entry / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file()
                 and re.match(
-                    r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|downsample)_",
+                    r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_",
                     entry.name)
             )
             or is_set_aside_replacement(entry)

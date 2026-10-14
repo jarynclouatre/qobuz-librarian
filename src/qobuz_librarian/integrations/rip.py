@@ -19,6 +19,7 @@ from qobuz_librarian.integrations.staging import (
 from qobuz_librarian.library import scanner
 from qobuz_librarian.recovery import normalise_recovery_owner
 from qobuz_librarian.ui_cli.colors import C, fmt
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog, wrap_thread_target
 
 # Optional cancel-check hook. The web JobManager installs a callable here that
@@ -153,7 +154,7 @@ def flac_audio_offset(path, *, descriptor=None):
         return 0
 
 
-def is_flac(path: Path) -> bool:
+def is_flac(path: Path, *, quiet=False) -> bool:
     """True when the file is a complete, decodable FLAC.
 
     An interrupted streamrip download leaves a truncated file behind whose
@@ -175,7 +176,7 @@ def is_flac(path: Path) -> bool:
 
     ok = flac_audio_ok(path)
     if ok is not None:
-        if not ok:
+        if not ok and not quiet:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {path.name} won't decode cleanly (truncated/corrupt); "
                 "treating as broken."))
@@ -186,9 +187,10 @@ def is_flac(path: Path) -> bool:
     except OSError:
         small = True
     if small:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  {path.name} suspiciously small and flac tool unavailable; "
-            "treating as broken."))
+        if not quiet:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  {path.name} suspiciously small and flac tool "
+                "unavailable; treating as broken."))
         return False
     log.info(fmt(C.YELLOW,
         f"  ⚠  flac tool unavailable for {path.name}; trusting .flac extension."))
@@ -446,7 +448,7 @@ def files_added_since(prior_snapshot):
     return added
 
 
-def cleanup_lossy(new_files, *, owner=None, on_intent=None):
+def cleanup_lossy(new_files, *, owner=None, on_intent=None, keep_broken=False):
     """Sort freshly-downloaded audio into (kept, lossy, broken), setting both
     kinds of reject aside. Returns Paths for all three buckets so the
     caller can retain enough identity to retry the exact rejected track:
@@ -455,7 +457,8 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None):
                 lossless master is available for the user's tier; another
                 source would be needed.
       broken  - a .flac that won't decode (truncated/interrupted download).
-                A re-rip usually fixes it.
+                A re-rip usually fixes it. ``keep_broken`` leaves these where
+                they are, for a download a stop cut off.
     """
     owner = normalise_recovery_owner(owner)
     if (owner is None) != (on_intent is None):
@@ -469,7 +472,7 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None):
         path = Path(f)
         ext = f.suffix.lower()
         if ext == ".flac":
-            if is_flac(path):
+            if is_flac(path, quiet=True) if keep_broken else is_flac(path):
                 # Validation belongs to the exact receipt, not the public
                 # filename. A replacement that arrived while flac(1) ran is
                 # neither credited nor moved by this run.
@@ -481,6 +484,9 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None):
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {path.name} changed while it was being checked; "
                         "it was left untouched and will not be imported."))
+                continue
+            if keep_broken:
+                broken.append(receipt or f)
                 continue
             bucket, what = broken, "broken FLAC"
         elif ext in cfg.AUDIO_EXTS:
@@ -530,5 +536,6 @@ def cleanup_staging_residue():
     """Keep legacy residue for preflight instead of deleting by name alone."""
     reconciled = reconcile_legacy_file_groups()
     if reconciled:
-        vlog(f"recorded {reconciled} legacy rejected staging file(s) for recovery")
+        vlog(f"recorded {plural(reconciled, 'legacy rejected staging file')} "
+             "for recovery")
     return 0

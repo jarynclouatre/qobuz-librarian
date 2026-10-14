@@ -29,7 +29,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import download_result, redaction
+from qobuz_librarian import download_result, post_job_hook, redaction
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import (
     AuthLost,
@@ -50,6 +50,7 @@ from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
 from qobuz_librarian.library import library_scan_state, scan_checkpoint
 from qobuz_librarian.library.candidate_premise import CandidateStale
+from qobuz_librarian.post_job_hook import release_title
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
 from qobuz_librarian.web import job_persistence, review_badges
@@ -285,14 +286,6 @@ REVIEW_TITLES = {
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:8]
-
-
-def release_title(title, edition="") -> str:
-    title = str(title or "").strip() or "?"
-    edition = str(edition or "").strip()
-    if not edition or edition.casefold() in title.casefold():
-        return title
-    return f"{title} ({edition})"
 
 
 @dataclass
@@ -1285,69 +1278,6 @@ def _run_task(job: Job, fn):
         _finish_task_phase(job)
 
 
-def _run_post_job_hook(payload: dict) -> None:
-    """Run the POST_JOB_HOOK command (if set) with ``payload`` as JSON on
-    stdin. Errors are logged via vlog and never raised; a broken hook
-    can't kill the worker."""
-    import json
-    import os
-    import signal
-    import subprocess
-
-    cmd = os.environ.get("POST_JOB_HOOK", "").strip()
-    if not cmd:
-        return
-    try:
-        proc = subprocess.Popen(
-            ["sh", "-c", cmd],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=cfg.child_env(),
-            # Own process group, so the timeout can kill a hook's whole
-            # pipeline. Killing just the shell leaves its children running.
-            start_new_session=True,
-        )
-    except OSError as e:
-        log.warning("post-job hook could not start: %s", e)
-        return
-    try:
-        proc.communicate(json.dumps(payload).encode("utf-8"),
-                         timeout=cfg.POST_JOB_HOOK_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        # Kill and reap the whole pipeline, including the shell process.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            proc.kill()
-        proc.communicate()
-        log.warning("post-job hook timed out")
-    else:
-        if proc.returncode:
-            log.warning(
-                "post-job hook exited with status %s", proc.returncode)
-
-
-def _build_post_job_hook_payload(
-    *, event_id, status, title, edition="", artist="", error=None,
-    finished_at=None, tracks_missing=0, kind="", summary="", review_items=0,
-):
-    return {
-        "id": event_id,
-        "status": status,
-        "title": title,
-        "edition": edition,
-        "display_title": release_title(title, edition),
-        "artist": artist,
-        "error": error,
-        "tracks_missing": tracks_missing,
-        "finished_at": finished_at,
-        "kind": kind,
-        "summary": summary,
-        "review_items": review_items,
-    }
-
-
 def _review_items(job) -> int:
     """How many items a parked review lists, leaving out Library picks a
     switch that is off holds back."""
@@ -1361,13 +1291,15 @@ def _review_items(job) -> int:
 def _post_job_hook_payload(job):
     """The hook's report of a job: finished, parked for review, or cut short
     by a restart, which reads ``interrupted`` so it is not taken for a
-    cancel."""
+    cancel and carries the restart line History shows as its summary."""
     with job._lock:
         review = job.status is JobStatus.AWAITING_REVIEW
-        return _build_post_job_hook_payload(
+        interrupted = job.interrupted_by_restart
+        restart_line = (job.summary if job.status is JobStatus.CANCELED
+                        else job.error)
+        return post_job_hook.payload(
             event_id=job.id,
-            status=("interrupted" if job.interrupted_by_restart
-                    else job.status.value),
+            status="interrupted" if interrupted else job.status.value,
             title=job.title,
             edition=job.edition,
             artist=job.artist,
@@ -1375,7 +1307,7 @@ def _post_job_hook_payload(job):
             finished_at=time.time() if review else job.finished_at,
             tracks_missing=job.tracks_missing,
             kind=job.execute_kind or "download",
-            summary=job.summary,
+            summary=restart_line if interrupted else job.summary,
             review_items=_review_items(job) if review else 0,
         )
 
@@ -1385,7 +1317,7 @@ def _start_post_job_hook_for_job(job):
 
 
 def _fire_post_job_hook(payload):
-    _run_post_job_hook(payload)
+    post_job_hook.run(payload)
 
 
 def _post_job_hook_worker():
@@ -1439,8 +1371,9 @@ def _wait_for_post_job_hooks():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             log.warning(
-                "%s post-job hook notification(s) still pending at shutdown",
-                _post_job_hook_queue.unfinished_tasks,
+                "%s still pending at shutdown",
+                plural(_post_job_hook_queue.unfinished_tasks,
+                       "post-job hook notification"),
             )
             return
         time.sleep(min(0.05, remaining))
@@ -1452,7 +1385,7 @@ def fire_auth_lost_hook():
     The payload keeps the normal hook's core fields so existing scripts can
     render it without special-casing.
     """
-    payload = _build_post_job_hook_payload(
+    payload = post_job_hook.payload(
         event_id="qobuz-auth",
         status="auth_lost",
         title="Qobuz token rejected: replace it on the Settings page",
@@ -2493,10 +2426,18 @@ def restore_jobs(
             restart = job_persistence.RESTART_INTERRUPTED + " "
             stopped = next((line for line in reversed(job.log_lines)
                             if line.startswith("Stopped early. ")), "")
+            done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
             if stopped:
                 job.summary = restart + stopped.removeprefix("Stopped early. ")
                 if job.execute_kind == "library":
                     job.attention = "interrupted"
+            elif done:
+                picked = (job.execute_args or {}).get(
+                    job_persistence.ALBUMS_PICKED) or done + sum(
+                        1 for c in job.candidates if c.get("selected"))
+                job.summary = (restart + f"{done} of "
+                               f"{plural(max(picked, done), 'album')} downloaded "
+                               "before it stopped. The rest did not finish.")
             else:
                 job.summary = restart + "The download did not finish."
             job.finished_at = job.finished_at or time.time()
@@ -2512,6 +2453,12 @@ def restore_jobs(
             # album_id, and only those get a Retry button on the job + history
             # pages.
             restart = job_persistence.RESTART_INTERRUPTED + " "
+            done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
+            verb = _RUN_DONE_VERBS.get(job.execute_kind)
+            if done and verb:
+                picked = sum(1 for c in job.candidates if c.get("selected"))
+                restart += (f"{done} of {plural(max(picked, done), 'album')} "
+                            f"{verb} before it stopped. ")
             if job.execute_args_unreadable:
                 job.error = (
                     restart
@@ -2639,6 +2586,13 @@ def restore_jobs(
             plural(len(requeued), "queued download"),
             plural(interrupted, "interrupted job"),
         )
+
+
+_RUN_DONE_VERBS = {
+    "upgrade": "upgraded",
+    "downsample": "downsampled",
+    "repair": "repaired",
+}
 
 
 def _interrupted_scan_summary(job: Job) -> str:

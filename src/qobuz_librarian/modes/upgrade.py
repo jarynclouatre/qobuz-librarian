@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import post_job_hook
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import download_attention_kind
@@ -150,6 +151,7 @@ def run_upgrade_walk_mode(args, token):
         return 0
     clear_scan_caches()
     banner("Upgrade walk")
+    started = time.time()
 
     saved_state = upgrade_state.load()
     authority = generation_state.load()
@@ -537,6 +539,26 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(C.GRAY, "  Nothing to do."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
+    if n_attempted:
+        parts = [f"{plural(n_upgraded_albums, 'album')} upgraded"]
+        for count, what in (
+                (n_failed_albums, "couldn't be upgraded"),
+                (n_unverified_albums, "kept a safety backup"),
+                (n_catalogue_failed, "need Beets catalogue attention"),
+                (n_attention_albums, "did not finish cleanly"),
+                (n_gone_albums, "no longer in the library"),
+                (n_stale_albums, "changed after being checked")):
+            if count:
+                parts.append(f"{count} {what}")
+        post_job_hook.report_terminal_run(
+            kind="upgrade", title="Upgrade run",
+            status=("canceled" if interrupted
+                    else "failed" if n_failed_attempts else "done"),
+            summary=(("Stopped early. " if interrupted else "")
+                     + ", ".join(parts) + "."),
+            error=(f"Finished with {plural(n_failed_attempts, 'error')}."
+                   if n_failed_attempts and not interrupted else None),
+            started_at=started)
     if interrupted:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if no_answer or n_failed_attempts else 0

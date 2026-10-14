@@ -218,6 +218,8 @@ def test_repair_counts_a_verified_refill_and_settles_its_backup(
                                        n_ok=1, n_fail=0, imported=True,
                                        present=True, intact=True)
     assert [f for f in _backup_files(p) if f.is_file()]
+    assert all("_repair_" in f.relative_to(p / "backups").parts[0]
+               for f in _backup_files(p))
     assert result["n_ok"] == 1
     assert result["imported"] is True
     assert result["backup"] is not None

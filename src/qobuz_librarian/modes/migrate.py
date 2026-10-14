@@ -76,11 +76,11 @@ def _print_preview(plan, verbose: bool, in_place: bool,
     log.info(fmt(C.BOLD + C.CYAN, "  Preview"))
     if s["place"]:
         log.info(fmt(C.WHITE,
-            f"    {s['place']} file(s) to place across "
-            f"{_artist_count(plan.placed)} artist(s)"))
+            f"    {plural(s['place'], 'file')} to place across "
+            f"{plural(_artist_count(plan.placed), 'artist')}"))
     if resume_entries:
         log.info(fmt(C.WHITE,
-            f"    {len(resume_entries)} existing file(s) verified; "
+            f"    {plural(len(resume_entries), 'existing file')} verified; "
             "cover art and sidecars can be resumed"))
     if s["unplaceable"]:
         log.info(fmt(C.YELLOW,
@@ -190,15 +190,15 @@ def run_migrate_mode(args):
             log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
             return 0
     elif resume_entries:
-        action = (f"{verb} {len(plan.placed)} new file(s) and finish "
-                  f"{len(resume_entries)} verified existing file(s)"
+        action = (f"{verb} {plural(len(plan.placed), 'new file')} and finish "
+                  f"{plural(len(resume_entries), 'verified existing file')}"
                   if plan.placed else
-                  f"Finish {len(resume_entries)} verified existing file(s)")
+                  f"Finish {plural(len(resume_entries), 'verified existing file')}")
         if not confirm(f"  {action} in {dest}?", default_yes=False,
                        auto_yes=bool(getattr(args, "yes", False))):
             log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
             return 0
-    elif not confirm(f"  {verb} {len(plan.placed)} file(s) into {dest}?",
+    elif not confirm(f"  {verb} {plural(len(plan.placed), 'file')} into {dest}?",
                      default_yes=False,
                      auto_yes=bool(getattr(args, "yes", False))):
         log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
@@ -270,17 +270,17 @@ def run_migrate_mode(args):
     log.info("")
     if has_problem or result.cancelled:
         log.info(fmt(C.GRAY,
-            f"     {result.copied} file(s) "
+            f"     {plural(result.copied, 'file')} "
             f"{'moved' if in_place else 'copied'} before the run ended."))
     else:
         if result.copied or not resume_entries:
             log.info(fmt(C.GRAY,
-                f"     {result.copied} file(s) "
+                f"     {plural(result.copied, 'file')} "
                 f"{'moved' if in_place else 'copied'}."))
         if resume_entries:
             log.info(fmt(C.GRAY,
-                f"     {len(resume_entries)} file(s) already in place were "
-                "verified."))
+                f"     {plural(len(resume_entries), 'file')} already in place "
+                f"{'was' if len(resume_entries) == 1 else 'were'} verified."))
     if result.interrupted:
         log.info(fmt(C.YELLOW,
             f"     ⚠  Stopped early; the library is partly moved into {dest}."
@@ -291,13 +291,13 @@ def run_migrate_mode(args):
             f"  ⚠  {result.skipped} skipped (destination already existed)."))
     if getattr(result, "companions", 0):
         log.info(fmt(C.GREEN,
-            f"  ✓  {result.companions} cover/sidecar file(s) carried."))
+            f"  ✓  {plural(result.companions, 'cover/sidecar file')} carried."))
     if companion_skipped:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  {companion_skipped} cover/sidecar file(s) already existed."))
+            f"  ⚠  {plural(companion_skipped, 'cover/sidecar file')} already existed."))
     if companion_failed:
         log.info(fmt(C.RED,
-            f"  ✗  {companion_failed} cover/sidecar file(s) could not be "
+            f"  ✗  {plural(companion_failed, 'cover/sidecar file')} could not be "
             "carried; see the results manifest."))
     if result.lingered:
         log.info(fmt(C.YELLOW,
@@ -305,7 +305,7 @@ def run_migrate_mode(args):
             f"(still at the source)."))
     if pruned:
         log.info(fmt(C.GRAY,
-            f"  Cleared {pruned} now-empty folder(s) from the source."))
+            f"  Cleared {plural(pruned, 'now-empty folder')} from the source."))
     left = getattr(result, "left_in_source", ())
     left_out = [(folder, names) for folder, names in left if names]
     copies_only = len(left) - len(left_out)

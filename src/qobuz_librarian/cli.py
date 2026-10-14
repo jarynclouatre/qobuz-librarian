@@ -864,8 +864,9 @@ def parse_args():
                         "never suggests albums you don't have (same as menu "
                         "Gap Fill).")
     modes.add_argument("--repair", action="store_true",
-                   help="re-download damaged (truncated) tracks you own. '*' at "
-                        "the artist prompt sweeps the whole library.")
+                   help="re-download damaged (truncated or corrupt) tracks "
+                        "you own. '*' at the artist prompt sweeps the whole "
+                        "library.")
     modes.add_argument("--upgrade-walk", action="store_true",
                    help="review quality upgrades: the Library scan's saved "
                         "results when current, otherwise a fresh check. "
@@ -1587,10 +1588,10 @@ def _note_held_staging():
     held = len(inspect_retry_groups())
     if held:
         log.info(fmt(C.GRAY, wrap(
-            f"{plural(held, 'item')} from earlier downloads "
+            f"{plural(held, 'kept download item')} "
             f"{'is' if held == 1 else 'are'} held in "
             f"{cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR}. Settings > Diagnostics "
-            "in the web app lists them.",
+            f"in the web app lists {'it' if held == 1 else 'them'}.",
             indent="  ", hanging="  ")))
 
 

@@ -25,7 +25,7 @@ docker compose run --rm -it qobuz-librarian cli --library-walk
 # Gap Fill: fill missing tracks in albums you own (--album-gaps also works)
 docker compose run --rm -it qobuz-librarian cli --gap-fill
 
-# Re-download damaged (truncated) tracks ('*' at the prompt sweeps everything)
+# Re-download damaged (truncated or corrupt) tracks ('*' at the prompt sweeps everything)
 docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
@@ -51,7 +51,7 @@ docker compose run --rm -it qobuz-librarian cli --settings
 
 ## Direct downloads
 
-Both ask before anything downloads, so keep `-it`. Search results carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version in library**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album and download the queue later. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
+Both ask before anything downloads, so keep `-it`. Search results carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version in library**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album; the queue downloads when you leave Search with `q`, and a Ctrl-C drops what is still queued. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)
@@ -94,9 +94,11 @@ docker compose run --rm qobuz-librarian cli --help
 |---|---|
 | The Library walk and Gap Fill walk, which ask as they go | The Library scan and the reviews it builds |
 | Downloading without importing (`--no-import`) | New releases checks and Discover |
+| | Downloading a single track (Search's Track tab) |
 | | Dismissing and bringing back albums |
 | | Putting downsampled originals back, and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |
+| | History entries and `POST_JOB_HOOK` reports for Lyrics and Library migration runs |
 
 ## Every flag
 
@@ -108,7 +110,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--artist NAME` | One artist: fill gaps, then offer albums you're missing |
 | `--library-walk` | Every artist in turn, queueing as you go (menu: Library walk) |
 | `--gap-fill`, `--album-gaps` | Fill missing tracks in every incomplete album you own (menu: Gap Fill) |
-| `--repair` | Re-download damaged (truncated) tracks you own |
+| `--repair` | Re-download damaged (truncated or corrupt) tracks you own |
 | `--upgrade-walk` | Review quality upgrades, artist by artist |
 | `--downsample-walk` | Bring files above 48 kHz down to 44.1 / 48 kHz in place |
 | `--lyrics-walk` | Fetch lyrics for tracks that are missing them |

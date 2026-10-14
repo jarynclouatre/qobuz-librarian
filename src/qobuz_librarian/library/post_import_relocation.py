@@ -53,6 +53,7 @@ from qobuz_librarian.library.sqlite_atomic import (
 )
 from qobuz_librarian.recovery import decode_recovery_json
 from qobuz_librarian.run_lock import RunLockLease
+from qobuz_librarian.ui_cli.errors import plural
 
 _NAMESPACE_NAME = ".qobuz_post_import_relocations"
 _LOCK_NAME = ".lock"
@@ -3691,8 +3692,9 @@ def relocate_post_import_album(
                             payload["ownership_receipt"],
                             True,
                             (
-                                f"kept {len(plan['conflicts'])} existing destination "
-                                "name(s)"
+                                "kept " + plural(
+                                    len(plan["conflicts"]),
+                                    "existing destination name")
                                 if plan["conflicts"] else None
                             ),
                         )
@@ -3710,8 +3712,9 @@ def relocate_post_import_album(
                         payload["ownership_receipt"],
                         True,
                         (
-                            f"kept {len(plan['conflicts'])} existing destination "
-                            "name(s)"
+                            "kept " + plural(
+                                len(plan["conflicts"]),
+                                "existing destination name")
                             if plan["conflicts"] else None
                         ),
                     )

@@ -858,11 +858,11 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                               already_confirmed=True, token=token)
             if r.get("n_ok", 0) > 0 and r.get("imported", False):
                 n_done += 1
-                _refresh_review_state_after_downloads(
-                    [{**r, "album": full}],
-                    token,
-                    args,
-                )
+            _refresh_review_state_after_downloads(
+                [{**r, "album": full}],
+                token,
+                args,
+            )
             if _gap_fill_result_bucket(r) in _ATTENTION_BUCKETS:
                 needs_attention = True
             time.sleep(cfg.ARTIST_API_DELAY)

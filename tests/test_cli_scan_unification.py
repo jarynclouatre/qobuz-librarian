@@ -341,11 +341,15 @@ def test_a_terminal_download_leaves_the_living_library_review(
 
 def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     """Queue and History read the job archive, which only the web writes, so a
-    finished terminal download left no trace on the activity record at all."""
+    finished terminal download left no trace on the activity record at all,
+    and terminal runs never reached POST_JOB_HOOK."""
+    from qobuz_librarian import post_job_hook
     from qobuz_librarian.queue import executor
     from qobuz_librarian.web import job_persistence
 
     monkeypatch.setattr(job_persistence, "_disabled", False)
+    hooks = []
+    monkeypatch.setattr(post_job_hook, "run", hooks.append)
 
     executor._record_terminal_downloads([{
         "album": {
@@ -387,6 +391,28 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     saved = job_persistence.load_one(row["id"])
     assert saved["quality_shortfall"]["served"] == [16, 44100]
     assert job_persistence.acknowledge_attention(row["id"], "quality")
+
+    # A download stopped with Ctrl-C, and an Upgrade, Repair or Downsample
+    # run, are recorded and reported as their web jobs are.
+    executor._record_terminal_downloads([{
+        "album": {"id": "terminal-stopped", "title": "Drukqs",
+                  "artist": {"name": "Aphex Twin"}},
+        "result": "interrupted",
+    }])
+    post_job_hook.report_terminal_run(
+        kind="upgrade", title="Upgrade run", status="failed",
+        summary="1 album upgraded, 1 couldn't be upgraded.",
+        error="Finished with 1 error.", started_at=0)
+    stopped = next(
+        row for row in job_persistence.history_page(50, 0, bulk=False)
+        if row["album_id"] == "terminal-stopped")
+    card = job_persistence.history_page(50, 0, bulk=True)[0]
+    assert stopped["status"] == "canceled"
+    assert (card["execute_kind"], card["status"]) == ("upgrade", "failed")
+    assert [(h["id"], h["kind"], h["status"]) for h in hooks[-2:]] == [
+        (stopped["id"], "download", "canceled"),
+        (card["id"], "upgrade", "failed")]
+    assert len(hooks) == 4
 
 
 def test_ctrl_c_exits_with_the_interrupt_code(monkeypatch):

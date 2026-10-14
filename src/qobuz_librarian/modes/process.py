@@ -10,8 +10,10 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
+    clear_attempts_after_import,
     download_staged_files,
     keep_unimported_download,
+    note_superseded_attempts,
     retain_download_staging,
     retire_download_staging_after_import,
     retire_empty_download_staging,
@@ -911,7 +913,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         missing, present = qobuz_tracks, []
     else:
         existing, album_dir = catalog.find_album_folder(album)
-        vlog(f"hybrid detection: {len(existing)} existing track(s) total")
+        vlog(f"hybrid detection: {plural(len(existing), 'existing track')} total")
         missing, present = compute_missing(qobuz_tracks, existing)
 
     # Runs BEFORE the "already complete" early-exit, because an album that is
@@ -1641,6 +1643,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 upgrade_backup_path if auto_upgrade_active else cover_backup)
             if own_cover is not None:
                 _keep_own_cover(own_cover, staged_dirs_for_import or [])
+            note_superseded_attempts(download_result)
             # A brand-new album (no folder found on disk) lands in a fresh
             # directory, so it can't split an existing beets album into
             # duplicate rows, so skip the full-library de-dup scan for it.
@@ -2016,6 +2019,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                 recovery_unverified=recovery_unverified,
             )
 
+    if imported:
+        clear_attempts_after_import(download_result)
+
     n_consolidated = 0
     consolidation_interrupted = False
     # treat_as_new keeps this download as its own edition; consolidation folds
@@ -2117,8 +2123,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                     transient_lyric_sigs, [post_dir])
                 if resolved:
                     if _record_post_import_lyric_retry(resolved):
-                        vlog(f"lyric retry: queued {len(resolved)} "
-                             f"post-import path(s) for next-launch retry")
+                        vlog(f"lyric retry: queued "
+                             f"{plural(len(resolved), 'post-import path')} "
+                             "for next-launch retry")
             # Materialise .lrc sidecars next to the final renamed files
             # (no-op unless LYRICS_FORMAT is sidecar/both).
             try:
@@ -2135,8 +2142,9 @@ def process_album(album, args, *, allow_force=True, label=None,
             transient_lyric_sigs, [cfg.STAGING_DIR])
         if resolved:
             if _record_post_import_lyric_retry(resolved):
-                vlog(f"lyric retry: import unsuccessful; queued {len(resolved)} "
-                     f"staging path(s) for next-launch retry")
+                vlog(f"lyric retry: import unsuccessful; queued "
+                     f"{plural(len(resolved), 'staging path')} for "
+                     "next-launch retry")
 
     n_retryable, n_truly_lossy = incomplete_track_counts(download_result)
     downsample_attention = bool(

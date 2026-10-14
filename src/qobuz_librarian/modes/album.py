@@ -162,16 +162,20 @@ def _download_album_now(
 
             if not getattr(args, "dry_run", False):
                 _save_progress()
-            results, drained = _execute_download_queue(
-                queue,
-                args,
-                token,
-                on_progress=(
-                    None if getattr(args, "dry_run", False)
-                    else _save_progress
-                ),
-                consolidate_duplicates=False,
-            )
+            try:
+                results, drained = _execute_download_queue(
+                    queue,
+                    args,
+                    token,
+                    on_progress=(
+                        None if getattr(args, "dry_run", False)
+                        else _save_progress
+                    ),
+                    consolidate_duplicates=False,
+                )
+            except KeyboardInterrupt:
+                finish({"result": "interrupted"})
+                raise
             if not getattr(args, "dry_run", False):
                 if drained:
                     clear_pending_queue()
@@ -182,11 +186,16 @@ def _download_album_now(
                         "search argument and choose Resume before other work.",
                     ))
             return finish(results[0] if results else None)
-    return finish(process_album(
-        album, args, token=token, exact_edition=True,
-        expected_album_receipt=expected_album_receipt,
-        expected_gap_fill_receipts=expected_gap_fill_receipts,
-        already_confirmed=already_confirmed))
+    try:
+        result = process_album(
+            album, args, token=token, exact_edition=True,
+            expected_album_receipt=expected_album_receipt,
+            expected_gap_fill_receipts=expected_gap_fill_receipts,
+            already_confirmed=already_confirmed)
+    except KeyboardInterrupt:
+        finish({"result": "interrupted"})
+        raise
+    return finish(result)
 
 
 def resolve_album_from_args(args, token):
@@ -229,8 +238,9 @@ def resolve_album_from_args(args, token):
                 # keeps any albums already queued) instead of die()ing the whole
                 # session over one mistyped paste.
                 raise CatalogMiss(
-                    "That's a track URL. Paste the album URL instead, or use "
-                    "`rip url <track-url>` for a single track.")
+                    "That's a track URL. Paste the album URL instead. Download "
+                    "a single track from Search in the web app (its Track "
+                    "tab), or outside Docker with `rip url <url>`.")
             if not parsed:
                 raise CatalogMiss("Bad Qobuz URL. Paste an album URL.")
             return get_album(parsed[1], token)
@@ -377,11 +387,13 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
     album_queue = []
     interrupted = False
     stopped = False
+    flushing = False
 
     def _flush_queue():
-        nonlocal stopped
+        nonlocal stopped, flushing
         if not album_queue or stopped:
             return
+        flushing = True
         banner(f"Executing queue: {plural(len(album_queue), 'album')}", C.GREEN)
         while album_queue:
             item = album_queue[0]
@@ -460,7 +472,8 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                     log.info(fmt(C.GRAY, "  Cancelled; back to album prompt."))
                     args.query = saved_query
                     continue
-                log.info(fmt(C.GRAY, "  Cancelled."))
+                if not album_queue or stopped:
+                    log.info(fmt(C.GRAY, "  Cancelled."))
                 args.query = saved_query
                 _flush_queue()
                 return EXIT_GENERAL if no_answer or stopped else 0
@@ -489,7 +502,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 return exit_code
     except KeyboardInterrupt:
         interrupted = True
-        if album_queue:
+        if album_queue and not flushing:
             log.info(fmt(C.YELLOW,
                 f"\n  ⚠  Interrupted with {plural(len(album_queue), 'album')} queued; "
                 "discarding queue (Ctrl+C means abort)."))

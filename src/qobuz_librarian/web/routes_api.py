@@ -215,13 +215,15 @@ async def job_review_stream(request: Request, job_id: str):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _job_row(*, job_id, status, title, edition, artist, album_id, summary,
-             error, quality_shortfall, tracks_missing, created_at, finished_at):
+def _job_row(*, job_id, status, interrupted, title, edition, artist,
+             album_id, summary, error, quality_shortfall, tracks_missing,
+             created_at, finished_at):
     """A job as the API returns it, with the same keys whether it is live or
     read back from History."""
     return {
         "id": job_id,
         "status": status,
+        "interrupted": interrupted,
         "title": title,
         "edition": edition,
         "display_title": job_mgr.release_title(title, edition),
@@ -238,7 +240,8 @@ def _job_row(*, job_id, status, title, edition, artist, album_id, summary,
 
 def _job_to_dict(job, *, log_tail: int = 50):
     out = _job_row(
-        job_id=job.id, status=job.status.value, title=job.title,
+        job_id=job.id, status=job.status.value,
+        interrupted=job.interrupted_by_restart, title=job.title,
         edition=job.edition, artist=job.artist, album_id=job.album_id,
         summary=job.summary, error=job.error,
         quality_shortfall=job.quality_shortfall,
@@ -352,7 +355,8 @@ async def jobs_list(status: str = "", limit: int = 50):
             if row["id"] in seen:
                 continue
             matching.append(_job_row(
-                job_id=row["id"], status=row["status"], title=row["title"],
+                job_id=row["id"], status=row["status"],
+                interrupted=row["interrupted_by_restart"], title=row["title"],
                 edition=row["edition"], artist=row["artist"],
                 album_id=row["album_id"], summary=row["summary"],
                 error=row["error"],

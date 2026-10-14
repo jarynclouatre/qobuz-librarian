@@ -48,7 +48,7 @@ Most scan modes work the same way: **scan → review → act.** A scan runs in t
 | **Discover** | Suggested artists, library genres, similar-artist search, and your saved Qobuz albums (needs a Last.fm API key) |
 | **Upgrade** | Re-rip albums Qobuz can now serve at higher quality |
 | **Downsample** | Bring files above 48 kHz down to 44.1 / 48 kHz (local, no login) |
-| **Repair** | Refill truncated or partial FLACs (recording and edition verified) |
+| **Repair** | Refill truncated or corrupt FLACs (recording and edition verified) |
 | **Lyrics** | Fetch lyrics for tracks missing them (no Qobuz login; uses internet lyric websites) |
 | **Library migration** (on Settings) | Reorganise an existing library into the folder structure `Artist/Album (Year)` (copies by default; optional move mode) |
 | **Queue / History** | Running and waiting work, plus a record of finished jobs |
