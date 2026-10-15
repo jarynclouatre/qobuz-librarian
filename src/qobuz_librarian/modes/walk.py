@@ -336,17 +336,21 @@ def run_album_walk_mode(args, token):
         _save_queue(shared_queue)
         log.info(fmt(C.CYAN,
             f"\n  ⟳  Downloading the queue ({plural(len(shared_queue), 'album')})…"))
-        results, drained = _execute_download_queue(
-            shared_queue, args, token, on_progress=_save_now,
-            refresh_review=True)
+        results = []
+        try:
+            _, drained = _execute_download_queue(
+                shared_queue, args, token, on_progress=_save_now,
+                refresh_review=True, results_out=results)
+        finally:
+            n_albums_filled += sum(
+                1 for r in results
+                if r.get("result") in ("downloaded", "partial"))
         if args.dry_run:
             return
         partial_completion = partial_completion or any(
             r.get("result") == "partial" for r in results
         )
         retry_needed = not drained
-        n_albums_filled += sum(1 for r in results
-                               if r.get("result") in ("downloaded", "partial"))
         if drained:
             clear_pending_queue()
         else:

@@ -5295,9 +5295,11 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     skipped = counts["already_checked"]
     if not processed and not unreadable:
         job.summary = (
-            f"Nothing needed checking, all {plural(total, 'track')} have "
-            "lyrics or were checked before. Tick “Re-check everything” to "
-            "check them again.")
+            f"Nothing needed checking, "
+            f"{'the one track has' if total == 1 else f'all {total} tracks have'} "
+            f"lyrics or {'was' if total == 1 else 'were'} checked before. "
+            "Tick “Re-check everything” to check "
+            f"{'it' if total == 1 else 'them'} again.")
         log.info(job.summary)
         _close_completed_job(job)
         return

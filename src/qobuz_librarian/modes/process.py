@@ -1,4 +1,5 @@
 """Core album processing: detect gaps, prompt, download, import, consolidate."""
+import json
 import math
 import os
 import stat
@@ -25,6 +26,8 @@ from qobuz_librarian.download_result import incomplete_track_counts, tracks_miss
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations.beets import (
     _ART_EXTS,
+    _beets_snapshot_from_record,
+    _beets_snapshot_record,
     _prepare_staging_tags,
     beets_import_paths,
     capture_beets_album_entries,
@@ -52,7 +55,8 @@ from qobuz_librarian.library.backup import (
     carry_backup_companions,
     companion_conflicts,
     dispose_backup,
-    mark_set_aside_replacement,
+    interrupted_upgrades,
+    mark_upgrade_pending,
     pin_unverified_upgrade_backup,
     restore_gap_fill_backup,
     restore_incomplete_upgrade_backup,
@@ -546,23 +550,26 @@ def _track_annotations_preserved(backup_path, replacement_path):
         try:
             source = FLAC(old["path"])
             target = FLAC(new["path"])
-            original = {}
-            for key, value in _original_track_tags(source):
-                original.setdefault(key.lower(), []).append(value)
-            lyric_keys = _LYRIC_TAGS
-            if original.keys() & lyric_keys:
-                for key in lyric_keys:
-                    original.setdefault(key, [])
-            for key, values in original.items():
-                actual = [value for value in target.get(key, [])
-                          if key not in lyric_keys or value.strip()]
-                if values != actual:
-                    return False
-            if _missing_track_pictures(source, target):
+            if (not _tags_present(_original_track_tags(source), target)
+                    or _missing_track_pictures(source, target)):
                 return False
         except Exception:
             return False
     return True
+
+
+def _tags_present(tags, target):
+    """Whether ``target`` already holds each of ``tags`` as it is."""
+    original = {}
+    for key, value in tags:
+        original.setdefault(key.lower(), []).append(value)
+    if original.keys() & _LYRIC_TAGS:
+        for key in _LYRIC_TAGS:
+            original.setdefault(key, [])
+    return all(
+        values == [value for value in target.get(key, [])
+                   if key not in _LYRIC_TAGS or value.strip()]
+        for key, values in original.items())
 
 
 def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
@@ -597,7 +604,7 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
             lyric_keys = _LYRIC_TAGS
             tags = _original_track_tags(source)
             pictures = _missing_track_pictures(source, target)
-            if not tags and not pictures:
+            if not pictures and _tags_present(tags, target):
                 continue
             if any(key.lower() in lyric_keys for key, _value in tags):
                 for key in lyric_keys:
@@ -740,9 +747,10 @@ def _put_original_back(backup, album_dir):
 
     The replacement was imported into ``album_dir`` after the original left
     it, so that folder holds only the new download. It is moved into the
-    backup area as a backup of its own and the original album is restored
-    to ``album_dir``. Returns the set-aside backup, or True when nothing had
-    landed there, once the original is back. Otherwise returns None with
+    backup area as a backup of its own, marked as set aside before it is
+    complete, and the original album is restored to ``album_dir``. Returns
+    the set-aside backup, or True when nothing had landed there, once the
+    original is back. Otherwise returns None with
     the original's backup pinned; the library is then left holding the
     replacement.
     """
@@ -752,7 +760,7 @@ def _put_original_back(backup, album_dir):
             warn_pin_failed(backup)
         return None
     if album_dir.is_dir():
-        aside = backup_album_dir(album_dir)
+        aside = backup_album_dir(album_dir, set_aside=True)
         if aside is not None and not aside.complete:
             _recover_incomplete_upgrade_backup(
                 aside, album_dir, operation="move of the new download")
@@ -762,8 +770,6 @@ def _put_original_back(backup, album_dir):
                 warn_pin_failed(backup)
             return None
     if restore_upgrade_backup(backup, album_dir):
-        if aside is not None:
-            mark_set_aside_replacement(aside)
         return aside or True
     if aside is not None and not restore_upgrade_backup(aside, album_dir):
         log.info(fmt(C.RED,
@@ -772,6 +778,94 @@ def _put_original_back(backup, album_dir):
     if not pin_unverified_upgrade_backup(backup):
         warn_pin_failed(backup)
     return None
+
+
+def mark_pending_upgrade(backup, entries, staged_dirs):
+    """Record in an upgrade's backup the album's beets entries and the
+    folders its download is imported from, for a start-up after a hard stop.
+    """
+    return mark_upgrade_pending(backup, json.dumps({
+        "beets": _beets_snapshot_record(entries),
+        "staged": [os.fspath(directory) for directory in staged_dirs],
+    }, sort_keys=True))
+
+
+def _finish_upgrade(backup, album_dir, entries):
+    """Finish an upgrade whose download is in ``album_dir`` as the run
+    would have. False, with nothing removed, when the download doesn't
+    check out against the original or its beets entries can't take it."""
+    if not _upgrade_trees_verified(album_dir, backup.path):
+        return False
+    carried = _carry_non_audio_from_backup(
+        None, album_dir, backup, replacement_dir=album_dir)
+    if carried is None:
+        return False
+    replacement_path, replacement_receipt, left = carried
+    if not retire_replaced_beets_entries(
+            entries, replacement_path,
+            _replacement_audio_paths(replacement_path, replacement_receipt)):
+        return False
+    if left:
+        log.info(fmt(C.YELLOW, _keep_backup_for_companions(backup, left)))
+    elif not dispose_backup(
+            backup,
+            replacement_path=replacement_path,
+            expected_replacement_receipt=replacement_receipt,
+            replacement_validator=_upgrade_trees_verified):
+        if not pin_unverified_upgrade_backup(
+                backup,
+                "upgrade kept; final exact replacement proof did not hold"):
+            warn_pin_failed(backup.path)
+    return True
+
+
+def finish_interrupted_upgrades():
+    """Settle each upgrade a hard stop cut short once its download began to
+    import. A download that checks out against the original is kept, with
+    the user's tags and companions carried onto it and its tracks in the
+    album's beets entry; anything else gives way to the original, and the
+    entries the import added are dropped. An album still in its backup is
+    left to the start-up put-back, and one whose parent folder is gone, as
+    an unmounted library reads, is left alone. Returns the album folders
+    upgraded and those put back."""
+    finished, put_back = [], []
+    for backup, note in interrupted_upgrades():
+        try:
+            record = json.loads(note)
+            entries = _beets_snapshot_from_record(record["beets"])
+            staged = [Path(directory) for directory in record["staged"]]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if entries is None:
+            continue
+        album_dir = Path(backup.receipt["origin"])
+        if not album_dir.is_dir():
+            if album_dir.parent.is_dir():
+                forget_imported_beets_entries(entries, album_dir, staged)
+            continue
+        if _finish_upgrade(backup, album_dir, entries):
+            log.info(fmt(C.GRAY,
+                f"  ✓  Finished the upgrade of {album_dir} that a restart "
+                "interrupted."))
+            finished.append(album_dir)
+            continue
+        try:
+            album_dir.rmdir()
+        except OSError:
+            pass
+        aside = _put_original_back(backup, album_dir)
+        if aside is None:
+            continue
+        log.info(fmt(C.YELLOW,
+            f"  ⟲  Put back the original album in {album_dir}; the upgrade "
+            "a restart interrupted could not be finished."))
+        if aside is not True:
+            log.info(fmt(C.GRAY, f"     The new download was set aside at {aside}."))
+        forget_imported_beets_entries(entries, album_dir, staged)
+        put_back.append(album_dir)
+    if finished or put_back:
+        clear_scan_caches()
+    return finished, put_back
 
 
 def _replacement_audio_paths(replacement_path, receipt):
@@ -1672,12 +1766,22 @@ def process_album(album, args, *, allow_force=True, label=None,
             if own_cover is not None:
                 _keep_own_cover(own_cover, staged_dirs_for_import or [])
             note_superseded_attempts(download_result)
+            pending = (
+                not auto_upgrade_active
+                or replaced_beets_entries is None
+                or mark_pending_upgrade(
+                    upgrade_backup_path, replaced_beets_entries,
+                    staged_dirs_for_import or []))
+            if not pending:
+                log.info(fmt(C.RED,
+                    "  ✗  Couldn't record the upgrade in its backup; "
+                    "skipping the import."))
             # A brand-new album (no folder found on disk) lands in a fresh
             # directory, so it can't split an existing beets album into
             # duplicate rows, so skip the full-library de-dup scan for it.
             # Folding the new entry into the replaced one would change the
             # rows the retire step below proves it is removing.
-            imported = beets_import_paths(
+            imported = pending and beets_import_paths(
                 consolidate=album_dir is not None and not exact_edition,
                 album_dirs=staged_dirs_for_import,
                 album_dir=album_dir,

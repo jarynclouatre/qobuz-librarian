@@ -1057,6 +1057,9 @@ def _prepare_staging_tags(
         for key, value in (album_tags or {}).items():
             if type(value) is int:
                 value = [str(max(value, _tag_number(tags.get("discnumber")) or 1))]
+            if (key == "disctotal" and value is not None
+                    and _tag_number(tags.get(key)) == _tag_number(value)):
+                continue
             if value is None and key in tags:
                 del tags[key]
                 changed = True
@@ -1139,8 +1142,8 @@ def _prepare_staging_tags(
                 fmt(
                     C.YELLOW,
                     f"  ⚠  Directory sync could not be confirmed for "
-                    f"{uncertain_quarantines} recovery file(s); their current "
-                    "private locations remain recorded.",
+                    f"{errors.plural(uncertain_quarantines, 'recovery file')}; "
+                    "each one's private location is still recorded.",
                 )
             )
     if managed_by_path is not None:
@@ -1227,6 +1230,7 @@ def fill_album_tags(album_dir):
         return {}
     values = {key: set() for key in _ALBUM_TAG_KEYS}
     discs = set()
+    written = set()
     for path in tracks:
         try:
             parsed = mutagen.File(os.fspath(path), easy=True)
@@ -1236,6 +1240,7 @@ def fill_album_tags(album_dir):
         for key in _ALBUM_TAG_KEYS:
             values[key].add(tuple(str(value) for value in tags.get(key) or ()))
         total = _tag_number(tags.get("disctotal") or tags.get("totaldiscs"))
+        written.add(tuple(tags.get("disctotal") or tags.get("totaldiscs") or ()))
         if total is None and "/" in str((tags.get("discnumber") or [""])[0]):
             total = _tag_number([str(tags["discnumber"][0]).split("/")[1]])
         discs.add(total)
@@ -1250,7 +1255,9 @@ def fill_album_tags(album_dir):
         found["disctotal"] = max(total or 1 for total in discs)
     elif len(discs) == 1:
         total = discs.pop()
-        found["disctotal"] = None if total is None else [str(total)]
+        shared = written.pop() if len(written) == 1 else ()
+        found["disctotal"] = (
+            None if total is None else list(shared) or [str(total)])
     return found
 
 
@@ -4946,6 +4953,77 @@ def _database_write_locked(anchor):
     return _FLOCK.unpack(held)[0] != fcntl.F_UNLCK
 
 
+def recover_interrupted_beets_write():
+    """Let SQLite settle the journal a beets write cut short by a hard stop
+    left beside the database, which keeps every later import out. Only
+    while no program holds the database's write lock. True when it did."""
+    exclusion = _SQLiteDatabaseExclusion()
+    anchor = None
+    try:
+        anchor = _open_beets_database_anchor()
+        if anchor is None or anchor["descriptor"] is None:
+            return False
+        parent_fd = anchor["parent_chain"][-1]
+        if _merge_name_missing(parent_fd, anchor["name"] + "-journal"):
+            return False
+        exclusion.acquire(parent_fd)
+        if _database_write_locked(anchor) or not _beets_database_anchor_matches(anchor):
+            return False
+        connection = sqlite3.connect(
+            os.fspath(anchor["path"]), timeout=_beets_lock_wait(),
+            isolation_level=None)
+        try:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()
+            if mode is None or str(mode[0]).casefold() != "delete":
+                return False
+            # A write is what makes SQLite remove the journal once it has
+            # rolled back whatever the cut-short write left half done.
+            connection.execute("BEGIN IMMEDIATE")
+            (version,) = connection.execute("PRAGMA user_version").fetchone()
+            connection.execute(f"PRAGMA user_version = {int(version)}")
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+        return _merge_name_missing(parent_fd, anchor["name"] + "-journal")
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
+    finally:
+        exclusion.release()
+        _close_beets_database_anchor(anchor)
+
+
+def remove_stale_import_overrides():
+    """Remove the one-shot import settings files a hard stop left beside the
+    beets database. An import holds a lock on its own file while it runs, so
+    that one stays. Returns how many."""
+    parent = Path(os.path.abspath(os.fspath(cfg.BEETS_DB_PATH.parent)))
+    try:
+        names = [name for name in os.listdir(parent)
+                 if name.startswith(".beets-import-") and name.endswith(".yaml")]
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        try:
+            descriptor = os.open(
+                parent / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = os.fstat(descriptor)
+            named = os.lstat(parent / name)
+            if (stat.S_ISREG(held.st_mode)
+                    and (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)):
+                os.unlink(parent / name)
+                removed += 1
+        except OSError:
+            continue
+        finally:
+            os.close(descriptor)
+    return removed
+
+
 def _beets_lock_wait():
     """Seconds an import waits on a Beets database another program locked."""
     idle = float(cfg.BEETS_TIMEOUT or 0)
@@ -5355,6 +5433,7 @@ def _prepare_for_beets_run(
         ownership_out.clear()
 
     override_path = None
+    override_lock = None
     ownership_file = None
     try:
         config_parent = Path(os.path.abspath(os.fspath(cfg.BEETS_DB_PATH.parent)))
@@ -5378,6 +5457,10 @@ def _prepare_for_beets_run(
             dir=config_parent,
         )
         override_path = Path(override_name)
+        # Held until the import is cleaned up, so the start-up sweep of the
+        # ones a hard stop left behind passes over it.
+        fcntl.flock(override_fd, fcntl.LOCK_SH)
+        override_lock = os.dup(override_fd)
         with os.fdopen(override_fd, "w", encoding="utf-8") as handle:
             handle.write(
                 _build_import_override_yaml(
@@ -5403,6 +5486,8 @@ def _prepare_for_beets_run(
                 override_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if override_lock is not None:
+            os.close(override_lock)
         if ownership_file is not None:
             ownership_file.close()
         if ownership_out is not None:
@@ -5410,11 +5495,15 @@ def _prepare_for_beets_run(
         return None, None, None
 
     def _clean():
+        nonlocal override_lock
         if override_path:
             try:
                 override_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if override_lock is not None:
+            descriptor, override_lock = override_lock, None
+            os.close(descriptor)
         if ownership_file is not None:
             ownership_file.close()
 
@@ -5917,6 +6006,10 @@ def beets_import_paths(
     return ok
 
 
+class ImportedThenInterrupted(KeyboardInterrupt):
+    """Ctrl-C landed after beets had imported the album."""
+
+
 def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
                         places=None, folder=None):
     """Run beets import scoped to ``album_dirs`` and return a tri-state code:
@@ -5959,9 +6052,12 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
         beets_runtime=runtime,
     )
     if ok and album_dir is not None:
-        forget_replaced_beets_entries(folder=album_dir)
-        # Beets files tracks added to an album as an album of their own.
-        _consolidate_duplicate_albums(folders=[album_dir])
+        try:
+            forget_replaced_beets_entries(folder=album_dir)
+            # Beets files tracks added to an album as an album of their own.
+            _consolidate_duplicate_albums(folders=[album_dir])
+        except KeyboardInterrupt:
+            raise ImportedThenInterrupted from None
     return "ok" if ok else kind
 
 
@@ -7364,7 +7460,7 @@ def _warn_legacy_untracked_library_dirs():
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Found {count} album path(s) in the legacy beets recovery "
+                f"  ⚠  Found {errors.plural(count, 'album path')} in the legacy beets recovery "
                 f"list at {f}. Automatic re-import is disabled because it can "
                 "discard database-only metadata; review those paths manually.",
             )
@@ -7838,14 +7934,35 @@ def capture_beets_album_entries(album_dir):
         _close_beets_database_anchor(database_anchor)
 
 
-def _carry_item_fields(connection, retiring, replacements):
-    """Give each replacement track the fields, such as a rating, that only
-    the entry it replaces at the same path had. ``retiring`` maps old entry
-    ids to paths and ``replacements`` maps paths to the new entry ids."""
-    for old_id, path in retiring.items():
-        new_id = replacements.get(path)
-        if new_id is None:
-            continue
+def _carry_item_fields(connection, retiring, replacements, item_columns):
+    """Give each replacement track the date it was added and the fields,
+    such as a rating, that only the entry it replaces had. That is the entry
+    at the same path, or else the one with the same disc and track number.
+    ``retiring`` maps old entry ids to paths and ``replacements`` maps paths
+    to the new entry ids."""
+    pairs = {old_id: replacements[path] for old_id, path in retiring.items()
+             if path in replacements}
+    unpaired_old = [old_id for old_id in retiring if old_id not in pairs]
+    unpaired_new = [new_id for new_id in replacements.values()
+                    if new_id not in pairs.values()]
+    if unpaired_old and unpaired_new and {"disc", "track"} <= set(item_columns):
+        def positions(item_ids):
+            placeholders = ",".join("?" for _ in item_ids)
+            found = {}
+            for item_id, disc, track in connection.execute(
+                    f"SELECT id, disc, track FROM items WHERE id IN ({placeholders})",
+                    item_ids):
+                found.setdefault((disc, track), []).append(item_id)
+            return {key: ids[0] for key, ids in found.items() if len(ids) == 1 and key[1]}
+        new_at = positions(unpaired_new)
+        for key, old_id in positions(unpaired_old).items():
+            if key in new_at:
+                pairs[old_id] = new_at[key]
+    for old_id, new_id in pairs.items():
+        if "added" in item_columns:
+            connection.execute(
+                "UPDATE items SET added = (SELECT added FROM items WHERE id = ?) WHERE id = ?",
+                (old_id, new_id))
         kept = {key for (key,) in connection.execute(
             "SELECT key FROM item_attributes WHERE entity_id = ?", (new_id,))}
         for key, value in connection.execute(
@@ -7973,7 +8090,8 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
                 {item_id: _catalogue_item_path(raw, allow_external=True)
                  for item_id, raw in connection.execute(
                      f"SELECT id, path FROM items WHERE id IN ({placeholders})", item_ids)},
-                {path: ids[0] for path, ids in replacement_rows.items()})
+                {path: ids[0] for path, ids in replacement_rows.items()},
+                item_columns)
 
             deleted_attributes = connection.execute(
                 f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
@@ -8728,11 +8846,14 @@ def forget_beets_entries(paths):
         # leaves their rows behind as ghost entries in `beet ls` until a
         # hand-run `beet update` notices the missing files. Keep the warning
         # alongside the structured failure returned to the caller.
+        tracks, they, entries = (
+            ("track", "it", "a ghost entry") if len(paths) == 1
+            else ("tracks", "they", "ghost entries"))
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't drop the deleted tracks from the beets library "
-                f"({reason}); they'll linger as ghost entries until you run "
+                f"  ⚠  Couldn't drop the deleted {tracks} from the beets library "
+                f"({reason}); {they}'ll linger as {entries} until you run "
                 f"`beet update`.",
             )
         )
@@ -8781,11 +8902,15 @@ def forget_staged_beets_rows(paths):
     return _remove_beets_rows(matches, warn).complete
 
 
-def forget_imported_beets_entries(snapshot, folder):
+def forget_imported_beets_entries(snapshot, folder, staged=()):
     """Drop the entries an import added under ``folder``, keeping those
-    ``snapshot`` captured there before it. True when none are left."""
+    ``snapshot`` captured there before it, and any it left on the
+    ``staged`` folders it was importing from. True when none are left."""
     try:
-        root = _catalogue_item_path(Path(folder) / "placeholder").parent
+        roots = [_catalogue_item_path(Path(folder) / "placeholder").parent]
+        roots += [_catalogue_item_path(Path(directory) / "placeholder",
+                                       allow_external=True).parent
+                  for directory in staged]
     except (OSError, TypeError, ValueError):
         return False
 
@@ -8794,7 +8919,7 @@ def forget_imported_beets_entries(snapshot, folder):
             path = _catalogue_item_path(raw_path, allow_external=True)
         except (OSError, TypeError, ValueError):
             return False
-        return root in path.parents
+        return any(root in path.parents for root in roots)
 
     def warn(reason):
         log.info(fmt(
@@ -9083,7 +9208,7 @@ def staging_preflight(args):
 
     n_swept = cleanup_staging_residue()
     if n_swept:
-        vlog(f"staging_preflight: swept {n_swept} non-audio residue item(s)")
+        vlog(f"staging_preflight: swept {errors.plural(n_swept, 'non-audio residue item')}")
 
     isolated_runs = [
         entry
@@ -9230,8 +9355,8 @@ def staging_preflight(args):
                 fmt(
                     C.YELLOW,
                     f"  ⚠  Directory sync could not be confirmed for "
-                    f"{uncertain_quarantines} recovery file(s); their current "
-                    "private locations remain recorded.",
+                    f"{errors.plural(uncertain_quarantines, 'recovery file')}; "
+                    "each one's private location is still recorded.",
                 )
             )
         if leftover:

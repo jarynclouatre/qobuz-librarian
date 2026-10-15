@@ -619,6 +619,95 @@ def test_executor_stops_when_queue_progress_cannot_be_persisted(
     assert started == ["first"]
 
 
+def test_a_stopped_queue_records_only_the_albums_it_started(
+        monkeypatch, tmp_path):
+    """Albums a stopped queue never reached stay queued without a History
+    row or a POST_JOB_HOOK call of their own. An album that imported before
+    a Ctrl-C, at the end of its import or in the pause before the next one,
+    is recorded and counted as done."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import post_job_hook
+    from qobuz_librarian.api.auth import AuthLost
+    from qobuz_librarian.integrations.beets import ImportedThenInterrupted
+    from qobuz_librarian.queue import executor
+    from qobuz_librarian.web import job_persistence
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(cfg, "STAGING_DIR", staging)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    hooks = []
+    monkeypatch.setattr(post_job_hook, "run", hooks.append)
+    monkeypatch.setattr(executor, "staging_preflight", lambda _a: None)
+    monkeypatch.setattr(executor, "is_cancel_requested", lambda: False)
+    args = Namespace(dry_run=False, no_import=False, no_downsample=True,
+                     consolidate=False)
+
+    def queue_of(prefix):
+        return [
+            _qitem(f"{prefix} {n}",
+                   album={"id": f"{prefix}-{n}", "title": f"{prefix} {n}"},
+                   album_dir=None)
+            for n in range(3)
+        ]
+
+    def recorded(prefix):
+        return [(row["album_id"], row["status"])
+                for row in job_persistence.history_page(50, 0, bulk=False)
+                if row["album_id"].startswith(f"{prefix}-")]
+
+    def lose_token(item):
+        raise AuthLost("token rejected")
+
+    monkeypatch.setattr(executor, "_download_for_queue_item", lose_token)
+    queue = queue_of("token")
+    with pytest.raises(AuthLost):
+        executor._execute_download_queue(
+            queue, args, token=None, refresh_review=True)
+    assert recorded("token") == [("token-0", "failed")]
+    assert len(hooks) == 1
+    assert len(queue) == 3
+
+    def download(item):
+        item["n_ok"] = 1
+        (staging / item["label"]).mkdir()
+        (staging / item["label"] / "01.flac").write_bytes(b"")
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    def interrupt_after_import(*_args, **_kwargs):
+        raise ImportedThenInterrupted
+
+    monkeypatch.setattr(executor, "_download_for_queue_item", download)
+    monkeypatch.setattr(executor, "_staged_album_dirs",
+                        lambda item: [staging / item["label"]])
+    monkeypatch.setattr(executor, "_run_pre_import_hooks_for_dirs",
+                        lambda _d, _a: ([], 0))
+    monkeypatch.setattr(executor, "verify_and_recover", lambda *_a, **_k: {
+        "retried": False, "recovered": False, "under": False})
+    monkeypatch.setattr(executor, "retire_download_staging_after_import",
+                        lambda _item: True)
+    monkeypatch.setattr(executor, "_consolidate_duplicate_albums",
+                        lambda **_k: None)
+    for prefix, beets_import, pause in (
+            ("import", interrupt_after_import, lambda *_a: False),
+            ("pause", lambda *_a, **_k: "ok", interrupt)):
+        monkeypatch.setattr(executor, "beets_import_albums", beets_import)
+        monkeypatch.setattr(executor, "_sleep_unless_cancelled", pause)
+        queue = queue_of(prefix)
+        results = []
+        with pytest.raises(KeyboardInterrupt):
+            executor._execute_download_queue(
+                queue, args, token=None, refresh_review=True,
+                results_out=results)
+        assert recorded(prefix) == [(f"{prefix}-0", "done")]
+        assert [r["result"] for r in results][:1] == ["downloaded"]
+        assert len(queue) == 2
+    assert len(hooks) == 3
+
+
 def test_reimport_parked_albums_clears_moved_and_keeps_skipped(monkeypatch, tmp_path):
     """A parked album is cleared only when its audio actually leaves disk on the
     retry import. A beets run that exits 0 while skipping the album (e.g. a

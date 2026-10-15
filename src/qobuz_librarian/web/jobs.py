@@ -2203,6 +2203,7 @@ def restore_jobs(
     durable_recovery_job_id: str | None = None,
     requeue: Callable[[Job], Optional[Callable]] | None = None,
     return_picks: Callable[[Job], None] | None = None,
+    finished_upgrades=(),
 ) -> None:
     """Rehydrate the registry from the on-disk job table at app startup.
 
@@ -2225,6 +2226,8 @@ def restore_jobs(
         returns a run function for: it never started, so it waits in the
         queue again, in the order it was first queued. A review's run that
         stopped without saving its stop hands its picks to ``return_picks``.
+        An Upgrade run counts the album folders in ``finished_upgrades``,
+        whose upgrade the start-up finished, as upgraded.
     """
     job_persistence.init()
     rows = job_persistence.load_all()
@@ -2455,10 +2458,23 @@ def restore_jobs(
             restart = job_persistence.RESTART_INTERRUPTED + " "
             done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
             verb = _RUN_DONE_VERBS.get(job.execute_kind)
+            picked = sum(1 for c in job.candidates if c.get("selected"))
+            finished = 0
+            if job.execute_kind == "upgrade":
+                finished = sum(
+                    1 for c in job.candidates if c.get("selected")
+                    and (c.get("payload") or {}).get("album_dir")
+                    in finished_upgrades)
+            if finished:
+                done = (done or 0) + finished
+                job.execute_args = {**(job.execute_args or {}),
+                                    job_persistence.ALBUMS_DONE: done}
             if done and verb:
-                picked = sum(1 for c in job.candidates if c.get("selected"))
                 restart += (f"{done} of {plural(max(picked, done), 'album')} "
-                            f"{verb} before it stopped. ")
+                            f"{verb}")
+                restart += ("; the one it was upgrading when it stopped was "
+                            "finished when the app started again. "
+                            if finished else " before it stopped. ")
             if job.execute_args_unreadable:
                 job.error = (
                     restart
@@ -2479,7 +2495,8 @@ def restore_jobs(
             elif job.execute_kind == "downsample":
                 job.error = restart + "Start it again from Downsample."
             elif job.execute_kind == "upgrade":
-                job.error = restart + "Start it again from Upgrade."
+                job.error = (restart.rstrip() if done and done >= picked
+                             else restart + "Start it again from Upgrade.")
             else:
                 job.error = restart + "Run it again to retry."
             if job.recoveries:

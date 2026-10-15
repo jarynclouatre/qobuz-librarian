@@ -401,6 +401,14 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 "error", "The saved recovery records could not be checked, "
                 "so this backup was left untouched. Check that the data "
                 "volume is writable, then try again.")
+        elif (
+            kind == "downsample"
+            and not backup_mod.downsample_outputs_in_place(carried)
+        ):
+            note = _diagnostics_result_notice(
+                "error", "The album no longer holds the files Downsample "
+                "wrote, or the app can't confirm it does, so the kept "
+                "originals were not put back over them.")
         elif kind in {"gap-fill", "downsample"}:
             # These backups hold the good originals; the destination may hold a
             # partial or a rewritten copy, so the backup always wins the swap.

@@ -2716,6 +2716,11 @@ _SET_ASIDE_SENTINEL = ".ql_set_aside_replacement"
 # a state the user asked for. It inverts the default: age alone reaps it.
 _REAP_AFTER_RETENTION_SENTINEL = ".ql_reap_after_retention"
 
+# Added to a downsample's kept originals once the rewrite is done. It names
+# the STREAMINFO of each file the album was left holding, so a restore can
+# tell the album still has what Downsample wrote and not a later download.
+_DOWNSAMPLE_OUTPUTS_SENTINEL = ".ql_downsample_outputs"
+
 # Added to the backup a consolidation moves a duplicate folder's tracks into.
 # Its origin is the duplicate folder, which no longer holds them, so the
 # content proof can never pass there. The marker names the album kept in its
@@ -2731,6 +2736,11 @@ _UPGRADE_RETIREMENT_COMPLETE_SENTINEL = ".ql_upgrade_retirement_complete"
 # When source retirement cannot be proved complete, this marker binds the
 # exact namespace state that an explicit recovery may reconcile later.
 _UPGRADE_RECOVERY_STATE_SENTINEL = ".ql_upgrade_recovery_state"
+
+# Written into an upgrade's backup before its download is imported. It names
+# the album's beets entries and the download's staged folders, so a start-up
+# after a hard stop can finish the upgrade or undo it.
+_UPGRADE_PENDING_SENTINEL = ".ql_upgrade_pending"
 
 # A companion carry is recoverable across an asynchronous interruption only
 # when the retained backup says exactly what was planned and which private
@@ -2774,9 +2784,11 @@ _SIDECARS = (
     _UNVERIFIED_UPGRADE_SENTINEL,
     _SET_ASIDE_SENTINEL,
     _REAP_AFTER_RETENTION_SENTINEL,
+    _DOWNSAMPLE_OUTPUTS_SENTINEL,
     _CONSOLIDATED_SENTINEL,
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
+    _UPGRADE_PENDING_SENTINEL,
     _COMPANION_CARRY_INTENT_SENTINEL,
     _COMPANION_CARRY_READY_SENTINEL,
     _COMPANION_CARRY_COMMITTED_SENTINEL,
@@ -2790,9 +2802,11 @@ _OPTIONAL_RECEIPT_MARKERS = (
     _PARTIAL_RESTORE_SENTINEL,
     _UNVERIFIED_UPGRADE_SENTINEL,
     _SET_ASIDE_SENTINEL,
+    _DOWNSAMPLE_OUTPUTS_SENTINEL,
     _CONSOLIDATED_SENTINEL,
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
+    _UPGRADE_PENDING_SENTINEL,
     _COMPANION_CARRY_INTENT_SENTINEL,
     _COMPANION_CARRY_READY_SENTINEL,
     _COMPANION_CARRY_COMMITTED_SENTINEL,
@@ -6605,7 +6619,7 @@ def _upgrade_recovery_carrier(path, directory_fd, *, requested,
     )
 
 
-def _complete_upgrade_backup(backup):
+def _complete_upgrade_backup(backup, *, set_aside=False):
     if (
         not isinstance(backup, BackupResult)
         or backup.complete
@@ -6613,6 +6627,8 @@ def _complete_upgrade_backup(backup):
         or backup.receipt.get("kind") != "upgrade"
         or backup.receipt.get("complete") is not False
     ):
+        return None
+    if set_aside and not mark_set_aside_replacement(backup):
         return None
     if not _write_receipt_marker(
             backup,
@@ -6785,7 +6801,7 @@ def _finish_put_back(root_fd, note_name) -> None:
 
 
 def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
-                     on_intent=None):
+                     on_intent=None, set_aside=False):
     """Move album_dir to a timestamped, receipt-bound backup.
 
     Returns a complete ``BackupResult`` on success, an incomplete result when
@@ -6793,6 +6809,8 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
     was retained. The source is held through a complete no-follow chain beneath
     MUSIC_ROOT. Cross-filesystem backups copy from that held directory, then
     move the exact source into a private quarantine before recursive removal.
+    With ``set_aside`` the backup is marked as a download an upgrade set
+    aside before it is complete, so it is never taken for the album.
     """
     owner = normalise_recovery_owner(owner)
     if (owner is None) != (on_intent is None):
@@ -7105,7 +7123,8 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     ):
                         raise OSError(
                             "album or library path changed after backup")
-                    completed = _complete_upgrade_backup(result)
+                    completed = _complete_upgrade_backup(
+                        result, set_aside=set_aside)
                     if completed is None:
                         raise OSError(
                             "backup completion marker could not be committed")
@@ -7567,7 +7586,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 "  ✗  The public album path changed as backup finished; "
                 f"nothing at that path was touched and the backup is at {bp}."))
             return _retained_incomplete_result()
-        completed = _complete_upgrade_backup(result)
+        completed = _complete_upgrade_backup(result, set_aside=set_aside)
         if completed is None:
             log.info(fmt(
                 C.RED,
@@ -8199,9 +8218,10 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
 
 def list_undo_copies():
     """Deliberate undo copies (downsample originals) still inside their
-    retention window, as (backup_path, origin). Shown on the diagnostics list
-    with a Restore button - separate from the orphaned-backup alarm, because
-    this state is one the user asked for, not a failure."""
+    retention window, as (backup_path, origin, restorable). Shown on the
+    diagnostics list - separate from the orphaned-backup alarm, because this
+    state is one the user asked for, not a failure. ``restorable`` is whether
+    the album still holds the files Downsample wrote."""
     out = []
     if not cfg.UPGRADE_BACKUP_DIR.exists():
         return out
@@ -8209,10 +8229,82 @@ def list_undo_copies():
         for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
             if (entry.is_dir()
                     and (entry / _REAP_AFTER_RETENTION_SENTINEL).is_file()):
-                out.append((entry, _read_backup_origin(entry)))
+                out.append((
+                    entry,
+                    _read_backup_origin(entry),
+                    downsample_outputs_in_place(load_backup_result(entry)),
+                ))
     except OSError:
         pass
     return out
+
+
+def _flac_streaminfo(path: Path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        head = os.pread(descriptor, 42, 0)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    if len(head) < 42 or head[:4] != b"fLaC" or head[4] & 0x7F != 0:
+        return None
+    return head[8:42].hex()
+
+
+def _downsample_kept_files(receipt):
+    return [
+        relative for relative in receipt["tree"]["files"]
+        if PurePosixPath(relative).name not in _SIDECARS
+    ]
+
+
+def record_downsample_outputs(backup) -> bool:
+    """Note, beside the kept originals, what the album holds after the
+    rewrite, for ``downsample_outputs_in_place`` to compare against."""
+    if not isinstance(backup, BackupResult) or backup.receipt is None:
+        return False
+    origin = Path(backup.receipt["origin"])
+    outputs = {}
+    for relative in _downsample_kept_files(backup.receipt):
+        streaminfo = _flac_streaminfo(origin / relative)
+        if streaminfo is None:
+            return False
+        outputs[relative] = streaminfo
+    return _write_receipt_marker(
+        backup, _DOWNSAMPLE_OUTPUTS_SENTINEL,
+        json.dumps(outputs, sort_keys=True))
+
+
+def downsample_outputs_in_place(backup) -> bool:
+    """Whether the album still holds exactly the audio Downsample left it
+    with. A later Upgrade, Repair or Gap Fill replaces those files, and the
+    kept originals must not be put back over them. Tag edits keep the
+    STREAMINFO, so lyrics and retagging don't count as a change."""
+    opened = _validated_backup_result(backup, kinds={"downsample"})
+    if opened is None:
+        return False
+    try:
+        note = _receipt_marker_note(
+            opened[-1][-1], _DOWNSAMPLE_OUTPUTS_SENTINEL, backup.receipt)
+    finally:
+        _close_descriptors(opened[-1])
+    try:
+        outputs = json.loads(note) if note is not None else None
+    except ValueError:
+        return False
+    if not isinstance(outputs, dict):
+        return False
+    origin = Path(backup.receipt["origin"])
+    kept = _downsample_kept_files(backup.receipt)
+    return bool(kept) and all(
+        outputs.get(relative) is not None
+        and _flac_streaminfo(origin / relative) == outputs[relative]
+        for relative in kept
+    )
 
 
 def stash_downsample_originals(files, album_dir, *, include_identity_receipts=False):
@@ -10146,6 +10238,51 @@ def mark_set_aside_replacement(backup) -> bool:
 
 def is_set_aside_replacement(path) -> bool:
     return (Path(path) / _SET_ASIDE_SENTINEL).is_file()
+
+
+def mark_upgrade_pending(backup, note) -> bool:
+    """Record in an upgrade's backup what finishing or undoing the upgrade
+    needs, before its download is imported."""
+    return _write_receipt_marker(backup, _UPGRADE_PENDING_SENTINEL, note)
+
+
+def interrupted_upgrades():
+    """(backup, note) for each upgrade a hard stop cut short after its
+    download began to import, oldest first. A backup a saved download owns,
+    or one kept for the user to look at, is left out."""
+    found = []
+    try:
+        entries = sorted(cfg.UPGRADE_BACKUP_DIR.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if (
+            not (entry / _UPGRADE_PENDING_SENTINEL).is_file()
+            or any((entry / marker).exists() for marker in (
+                _PARTIAL_RESTORE_SENTINEL, _UNVERIFIED_UPGRADE_SENTINEL,
+                _SET_ASIDE_SENTINEL))
+        ):
+            continue
+        backup = load_backup_result(entry)
+        if (
+            backup is None
+            or not backup.complete
+            or backup.receipt["kind"] != "upgrade"
+            or not _backup_owner_authorized(backup, None)
+        ):
+            continue
+        opened = _validated_backup_result(backup, require_complete=True)
+        if opened is None:
+            continue
+        descriptors = opened[-1]
+        try:
+            note = _receipt_marker_note(
+                descriptors[-1], _UPGRADE_PENDING_SENTINEL, backup.receipt)
+        finally:
+            _close_descriptors(descriptors)
+        if note is not None:
+            found.append((backup, note))
+    return found
 
 
 def albums_left_in_backups():

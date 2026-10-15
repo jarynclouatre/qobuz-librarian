@@ -142,9 +142,10 @@ def _report_summary(res, *, dry_run):
         return True
     if not processed and not summary["stopped"] and not unreadable:
         log.info(fmt(C.GRAY,
-            f"     Nothing needed checking; all {plural(total, 'track')} "
-            "have lyrics or were checked before (--lyrics-rescan checks "
-            "them again)."))
+            f"     Nothing needed checking; "
+            f"{'the one track has' if total == 1 else f'all {total} tracks have'} "
+            f"lyrics or {'was' if total == 1 else 'were'} checked before "
+            f"(--lyrics-rescan checks {'it' if total == 1 else 'them'} again)."))
         log.info(fmt(C.GRAY, "  Nothing to do."))
         return False
 
@@ -177,8 +178,8 @@ def _report_summary(res, *, dry_run):
             "artist or title tags are missing."))
     if summary["too_long"]:
         log.info(fmt(C.YELLOW,
-            f"     {plural(summary['too_long'], 'track')} skipped because "
-            "they are longer than 20 minutes."))
+            f"     {plural(summary['too_long'], 'track')} skipped for running "
+            "longer than 20 minutes."))
     if summary["instrumental"]:
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['instrumental'], 'track')} skipped as "
@@ -207,7 +208,8 @@ def _report_summary(res, *, dry_run):
     if summary["unavailable"]:
         log.warning(fmt(C.YELLOW,
             f"     {plural(summary['unavailable'], 'track')} couldn't reach a "
-            "provider (rate-limited or down); re-run later to pick them up."))
+            "provider (rate-limited or down); re-run later to pick "
+            f"{'it' if summary['unavailable'] == 1 else 'them'} up."))
     for provider, count in summary["set_aside"].items():
         log.info(fmt(C.YELLOW,
             f"     {plural(count, 'track')} checked without {provider}, "

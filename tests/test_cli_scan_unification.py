@@ -414,6 +414,17 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
         (card["id"], "upgrade", "failed")]
     assert len(hooks) == 4
 
+    # A whole --no-import download is done, kept in staging.
+    executor._refresh_review_state_after_downloads([{
+        "album": {"id": "terminal-kept", "title": "Syro",
+                  "artist": {"name": "Aphex Twin"}},
+        "result": "downloaded", "imported": False, "n_ok": 12,
+    }], None, SimpleNamespace(no_import=True))
+    kept = next(
+        row for row in job_persistence.history_page(50, 0, bulk=False)
+        if row["album_id"] == "terminal-kept")
+    assert kept["status"] == hooks[-1]["status"] == "done"
+
 
 def test_ctrl_c_exits_with_the_interrupt_code(monkeypatch):
     """A typo, a real failure and Ctrl-C all exited 1, so nothing reading the

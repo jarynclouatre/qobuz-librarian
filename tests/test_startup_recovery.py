@@ -996,6 +996,8 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
     run_dir = tmp_path / "staging" / f".qobuz-run-{'0' * 24}"
     run_dir.mkdir(parents=True)
     (run_dir / "cover.jpg").write_bytes(b"art")
+    imported = tmp_path / "staging" / f".qobuz-run-{'1' * 24}"
+    imported.mkdir()
     unimported = create_staging_run()
     (unimported.path / "Album").mkdir()
     (unimported.path / "Album" / "01 Track.flac").write_bytes(b"audio")
@@ -1017,6 +1019,16 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
         )
     )
     assert len(retained) == 1
+    assert retained[0].read_bytes() == b"art"
+    # The folder an import emptied just before the stop is not kept as an
+    # empty download for review.
+    from qobuz_librarian.integrations import staging
+    assert staging.remove_empty_retry_groups() == 1
+    assert not imported.exists()
+    assert [
+        group.name.split("-")[1]
+        for group in (tmp_path / "staging" / cfg.BEETS_RETRY_DIR).iterdir()
+    ] == ["abandoned"]
     assert retained[0].read_bytes() == b"art"
 
 

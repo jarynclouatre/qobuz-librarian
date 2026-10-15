@@ -84,8 +84,8 @@ _STAGING_LEFTOVER_KINDS = {
     ),
     "interrupted": (
         "Files from a stopped download",
-        "A download stopped part way before these files were filed into "
-        "your library.",
+        "The download run stopped before these files were filed into your "
+        "library.",
     ),
 }
 
@@ -553,8 +553,9 @@ def _diagnostics():
         checks.append({
             "label": "Hi-res originals kept",
             "ok": True,
-            "detail": f"{plural(len(undo_copies), 'downsampled album')} can be "
-                      f"put back, listed below. Cleared automatically after "
+            "detail": f"Originals of "
+                      f"{plural(len(undo_copies), 'downsampled album')} "
+                      f"kept, listed below. Cleared automatically after "
                       f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}.",
         })
 
@@ -738,7 +739,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'</div></div></div>'
         )
     undo = report["undo"]
-    for path, origin in undo:
+    for path, origin, restorable in undo:
         name = html.escape(path.name)
         if origin:
             dest_display, _is_host = storage._resolve_host_path(str(origin))
@@ -747,24 +748,40 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         else:
             dest = "its album folder"
             album = ""
+        if restorable:
+            detail = (
+                f'Copies of the files this album had before it was '
+                f'downsampled, so the rewrite can be undone; cleared '
+                f'automatically after '
+                f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.')
+            restore_form = (
+                f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
+                f'<input type="hidden" name="_csrf_token" value="{tok}">'
+                f'<input type="hidden" name="backup" value="{name}">'
+                f'<button type="submit" class="ql-btn ql-btn-sm" '
+                f'data-confirm="Put the hi-res originals of '
+                f'{album or dest} back? This undoes the downsample." '
+                f'data-confirm-action="Restore">Restore</button>'
+                f'</form>')
+            delete_note = (
+                " The album keeps its downsampled files, and the downsample "
+                "can no longer be undone.")
+        else:
+            detail = (
+                "Copies of the files this album had before it was "
+                "downsampled. The album no longer holds the files Downsample "
+                "wrote, or the app can't confirm it does, so they can't be "
+                "put back.")
+            restore_form = ""
+            delete_note = ""
         rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-ok" aria-label="OK">OK</span>'
             f'<div class="min-w-0"><div class="ql-diagnostic-label">'
             f'Hi-res originals kept{f": {album}" if album else ""}</div>'
-            f'<div class="ql-diagnostic-detail">Copies of the files this album '
-            f'had before it was downsampled, so the rewrite can be undone; '
-            f'cleared automatically after '
-            f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.</div>'
+            f'<div class="ql-diagnostic-detail">{detail}</div>'
             f'<div class="mt-2 flex gap-2">'
-            f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
-            f'<input type="hidden" name="_csrf_token" value="{tok}">'
-            f'<input type="hidden" name="backup" value="{name}">'
-            f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Put the hi-res originals of '
-            f'{album or dest} back? This undoes the downsample." '
-            f'data-confirm-action="Restore">Restore</button>'
-            f'</form>'
+            f'{restore_form}'
             f'<form hx-post="/backups/release-originals" '
             f'hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
@@ -772,8 +789,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<button type="submit" class="ql-btn ql-btn-sm" '
             f'data-confirm="Delete the hi-res originals of '
             f'{album or dest}? They are the only copies left at the original '
-            f'quality, the album keeps its downsampled files, and the '
-            f'downsample can no longer be undone." '
+            f'quality.{delete_note}" '
             f'data-confirm-action="Delete originals" data-irreversible>'
             f'Delete originals</button>'
             f'</form>'

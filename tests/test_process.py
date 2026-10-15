@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from qobuz_librarian.integrations import beets
 from qobuz_librarian.modes import process as proc
 
 
@@ -231,7 +232,8 @@ def test_forced_edition_follows_beets_folder_rename(
 
     monkeypatch.setattr(proc, "confirm", lambda *_a, **_kw: True)
     monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
-    monkeypatch.setattr(proc, "capture_beets_album_entries", lambda _folder: [])
+    monkeypatch.setattr(proc, "capture_beets_album_entries",
+                        lambda _folder: beets.BeetsAlbumSnapshot(*[()] * 8))
     monkeypatch.setattr(proc, "retire_replaced_beets_entries", lambda *_a: True)
     monkeypatch.setattr(proc, "run_album_download", download)
     monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
@@ -256,10 +258,13 @@ def test_failed_upgrade_leaves_the_plain_release_beside_it_alone(
         tmp_path, monkeypatch, tagged_flac):
     # Upgrading "Lost Boys" version "Acoustic" filed the download, tagged plain
     # "Lost Boys", into the plain single's folder; the failed check then set
-    # that whole folder aside, taking the single out of the library.
+    # that whole folder aside, taking the single out of the library. The
+    # download set aside must read as one before the original goes back, or
+    # a hard stop leaves it listed as the album's backup.
     from mutagen.flac import FLAC
 
     from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import backup as backup_mod
     from qobuz_librarian.library import scanner
 
     music = tmp_path / "music"
@@ -310,7 +315,8 @@ def test_failed_upgrade_leaves_the_plain_release_beside_it_alone(
         return True
 
     monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
-    monkeypatch.setattr(proc, "capture_beets_album_entries", lambda _folder: [])
+    monkeypatch.setattr(proc, "capture_beets_album_entries",
+                        lambda _folder: beets.BeetsAlbumSnapshot(*[()] * 8))
     monkeypatch.setattr(proc, "forget_imported_beets_entries", lambda *_a: True)
     monkeypatch.setattr(proc.catalog, "same_edition", lambda *_a, **_kw: True)
     monkeypatch.setattr(proc, "run_album_download", download)
@@ -319,11 +325,22 @@ def test_failed_upgrade_leaves_the_plain_release_beside_it_alone(
         "under": False, "recovered": False, "retried": False})
     monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
     monkeypatch.setattr(proc, "beets_import_paths", import_album)
+    marked = []
+    restore = proc.restore_upgrade_backup
+
+    def restore_original(backup, album_dir, **kwargs):
+        marked.extend(backup_mod.is_set_aside_replacement(path)
+                      for path in cfg.UPGRADE_BACKUP_DIR.iterdir()
+                      if path != backup.path and not path.name.startswith("."))
+        return restore(backup, album_dir, **kwargs)
+
+    monkeypatch.setattr(proc, "restore_upgrade_backup", restore_original)
 
     result = proc.process_album(album, _args(auto_upgrade=True), already_confirmed=True,
                                 upgrade_only=True)
 
     assert imports == [acoustic]
+    assert marked == [True]
     assert result["upgrade_put_back"] and not result["imported"]
     assert {path: path.read_bytes() for path in [*acoustic.iterdir(), *plain.iterdir()]} == before
     assert single.exists()
@@ -532,7 +549,6 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
     import sqlite3
 
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import beets
 
     music = tmp_path / "music"
     album = music / "Artist" / "Album"
@@ -726,7 +742,6 @@ def test_backup_catalogue_retirement_selects_one_complete_replacement_album(
     import sqlite3
 
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.integrations import beets
 
     music = tmp_path / "music"
     album = music / "Artist" / "Album"
@@ -895,3 +910,80 @@ def test_upgrade_verification_rejects_a_masked_per_track_downgrade(monkeypatch, 
     assert verifies([{"title": "T1", **cd}], [{"title": "T1", **cd, "length": 20.0}]) is False
     assert verifies([{"title": "A", **cd}, {"title": "B", **hires}],
                     [{"title": "A", **hires}, {"title": "B", **cd}]) is False
+
+
+def test_restart_finishes_an_upgrade_killed_after_its_import(
+        tmp_path, monkeypatch, tagged_flac):
+    # Killed right after the import, an upgrade left beets two albums for
+    # the same files and the new files without the lyrics the old ones had.
+    # Started with the library unmounted, it dropped the import's entries and
+    # the next start undid the upgrade.
+    import os
+    import sqlite3
+
+    from mutagen.flac import FLAC
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import backup as backup_mod
+
+    music = tmp_path / "music"
+    album = music / "Feist" / "Multi (2023)"
+    database = tmp_path / "beets.db"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+
+    def tracks(**tags):
+        return [tagged_flac(album / f"0{n}.flac", 200, TITLE=f"Song {n}", ALBUM="Multi",
+                            ISRC=f"CAAA1230000{n}", TRACKNUMBER=str(n), **tags)
+                for n in (1, 2)]
+
+    def rows(connection, album_id, items, added):
+        connection.execute("INSERT INTO albums VALUES (?, 'Multi', ?)", (album_id, added))
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, ?, ?, 1, ?)",
+            [(item_id, os.fsencode(path), album_id, added + n, n)
+             for n, (item_id, path) in enumerate(items, 1)])
+
+    old = tracks(LYRICS="the words")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, added REAL)")
+        connection.execute(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB NOT NULL, "
+            "album_id INTEGER, added REAL, disc INTEGER, track INTEGER)")
+        for table in ("album_attributes", "item_attributes"):
+            connection.execute(
+                f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, "
+                "entity_id INTEGER NOT NULL, key TEXT, value TEXT)")
+        rows(connection, 10, [(1, old[0]), (2, old[1])], 1000.0)
+        connection.execute("INSERT INTO album_attributes VALUES (1, 10, 'rating', '5')")
+    connection.close()
+    entries = beets.capture_beets_album_entries(album)
+    backup = backup_mod.backup_album_dir(album)
+    new = tracks()
+    with sqlite3.connect(database) as connection:
+        rows(connection, 20, [(11, new[0]), (12, new[1])], 5000.0)
+    connection.close()
+    assert proc.mark_pending_upgrade(backup, entries, [tmp_path / "staging"])
+    unmounted = tmp_path / "unmounted"
+    music.rename(unmounted)
+    music.mkdir()
+    forgotten = []
+    monkeypatch.setattr(proc, "forget_imported_beets_entries",
+                        lambda *args: forgotten.append(args))
+
+    assert proc.finish_interrupted_upgrades() == ([], [])
+
+    assert forgotten == []
+    music.rmdir()
+    unmounted.rename(music)
+    assert proc.finish_interrupted_upgrades() == ([album], [])
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT id, added FROM albums").fetchall() == [(10, 1000.0)]
+        assert connection.execute("SELECT id, album_id, added FROM items").fetchall() == [
+            (11, 10, 1001.0), (12, 10, 1002.0)]
+    connection.close()
+    assert [FLAC(path)["lyrics"] for path in new] == [["the words"]] * 2
+    assert not backup.path.exists()

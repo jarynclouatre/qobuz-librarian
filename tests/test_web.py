@@ -3141,6 +3141,31 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
     finally:
         _remove_job(job)
 
+    # Kept pre-Downsample originals go back only over the files Downsample
+    # wrote; a later Upgrade's download at the same path is left alone.
+    root = tmp_path / "downsampled"
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", root / "backups")
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", root / "music")
+    track = root / "music" / "Artist" / "Album (2020)" / "01 - Song.flac"
+    track.parent.mkdir(parents=True)
+
+    def flac(rate, body):
+        return b"fLaC\x80\x00\x00\x22" + rate.to_bytes(34, "big") + body
+
+    for upgraded in (False, True):
+        track.write_bytes(flac(96000, b"hi-res"))
+        undo = backup_mod.stash_downsample_originals([track], track.parent)[0]
+        track.write_bytes(flac(48000, b"downsampled"))
+        assert backup_mod.record_downsample_outputs(undo)
+        track.write_bytes(flac(48000 + upgraded, b"new download"))
+        assert backup_mod.list_undo_copies() == [
+            (undo.path, track.parent, not upgraded)]
+        client.post("/backups/restore", data={"backup": undo.name})
+        assert undo.exists() is upgraded
+        assert track.read_bytes() == (
+            flac(48001, b"new download") if upgraded
+            else flac(96000, b"hi-res"))
+
     job_persistence._reset_for_tests()
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()

@@ -33,6 +33,7 @@ from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
 from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.interrupts import run_sigint_deferred
+from qobuz_librarian.library import scanner
 from qobuz_librarian.library.catalog import (
     _close_migration_database_anchor,
     _migration_database_anchor_matches,
@@ -3381,6 +3382,7 @@ def acknowledge_post_import_relocation(
         finally:
             _close_migration_database_anchor(database_anchor)
             _close_all(root_owner)
+            scanner.clear_scan_caches()
 
 
 def release_post_import_relocation(
@@ -3753,6 +3755,7 @@ def relocate_post_import_album(
             _close_all(destination_chain)
             _close_all(source_chain)
             _close_all(root_owner)
+            scanner.clear_scan_caches()
 
 
 __all__ = [

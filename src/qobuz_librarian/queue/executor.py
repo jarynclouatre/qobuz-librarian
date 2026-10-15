@@ -39,6 +39,7 @@ from qobuz_librarian.download_result import (
 )
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.integrations.beets import (
+    ImportedThenInterrupted,
     _consolidate_duplicate_albums,
     _prepare_staging_tags,
     beets_import_albums,
@@ -1189,11 +1190,17 @@ def _import_album_with_retry(
             attempt_capture = None
         else:
             attempt_capture = {}
-            kind = beets_import_albums(
-                album_dirs,
-                ownership_out=attempt_capture,
-                **pin,
-            )
+            try:
+                kind = beets_import_albums(
+                    album_dirs,
+                    ownership_out=attempt_capture,
+                    **pin,
+                )
+            except ImportedThenInterrupted:
+                result = attempt_capture.get("result")
+                if isinstance(result, dict):
+                    ownership_out["result"] = result
+                raise
         if kind == "ok":
             if ownership_out is not None:
                 result = attempt_capture.get("result")
@@ -2147,9 +2154,10 @@ def _sleep_unless_cancelled(seconds, cancel_check, step=0.5):
         time.sleep(min(step, remaining))
 
 
-def _record_terminal_downloads(changes):
+def _record_terminal_downloads(changes, *, no_import=False):
     """Give the terminal's finished, failed and stopped downloads their row in
-    the activity record, and report each to POST_JOB_HOOK.
+    the activity record, and report each to POST_JOB_HOOK. With ``no_import``
+    a download that landed whole is done, kept in staging.
 
     Queue and History read the job archive, which only the web writes, so
     terminal downloads left no trace on the record at all. Bookkeeping never
@@ -2166,9 +2174,13 @@ def _record_terminal_downloads(changes):
         if not album_id:
             continue
         stopped = change.get("result") == "interrupted"
+        kept = no_import and change.get("result") == "downloaded"
         status = ("canceled" if stopped
+                  else "done" if kept
                   else download_job_outcome(change)[0])
         parts = [f"{plural(change.get('n_ok', 0), 'track')} downloaded"]
+        if kept:
+            parts.append("not imported")
         if change.get("n_fail"):
             parts.append(f"{change['n_fail']} failed")
         if change.get("n_lossy"):
@@ -2231,7 +2243,7 @@ def _refresh_review_state_after_downloads(
         change for change in changes
         if change in successful or change.get("result") == "interrupted"
         or download_job_outcome(change)[0] == "failed"
-    ])
+    ], no_import=getattr(args, "no_import", False))
     if not successful:
         return
 
@@ -2859,7 +2871,8 @@ def _durable_completion_line(result, elapsed):
 
 def _execute_download_queue(queue, args, token, *, on_progress=None,
                             refresh_review=False,
-                            consolidate_duplicates=True):
+                            consolidate_duplicates=True,
+                            results_out=None):
     """Flush a batch of pre-confirmed download decisions, one album at a time.
 
     Each item runs through its own pipeline: download, downsample, lyrics,
@@ -2876,7 +2889,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
 
     Returns ``(results, drained)``. A durable safety stop may return before the
     rest of the batch has results; ``drained`` is True only when nothing is
-    left to retry or recover.
+    left to retry or recover. ``results_out`` collects the same results as
+    they come, for a caller that a Ctrl-C leaves without a return value.
     """
     if not queue:
         return [], True
@@ -2924,7 +2938,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     preflight_done = False
     durable_stopped = False
     recovery_persist_blocked = False
-    results = []
+    results = [] if results_out is None else results_out
+    never_started = []
     saved_state_changes = []
 
     def _persist():
@@ -2990,13 +3005,15 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                               else "disk_full" if disk_full
                               else "io_error" if io_error
                               else "auth_lost")
-        results.append(_resolve_queue_item(
+        result = _resolve_queue_item(
             item,
             args,
             False,
             authority=authority,
             record_fetch=False,
-        ))
+        )
+        results.append(result)
+        never_started.append(result)
 
     def _retain_failed_staging(item, *, label=None):
         """Capture a retention failure without skipping backup resolution."""
@@ -3076,32 +3093,46 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         log.info(fmt(*_durable_completion_line(
             result, item.get("elapsed", 0)
         )))
-        if token and item.get("n_ok", 0) > 0:
-            try:
-                warn_if_download_truncated(
-                    post_dir,
-                    token,
-                    item["album"].get("title"),
+        _after_album(item, post_dir, idx)
+
+    def _after_album(item, post_dir, idx):
+        """Recheck a finished album's track lengths, then pause before the
+        next one. A Ctrl-C here stops the queue and keeps the album."""
+        nonlocal cancelled, interrupted
+        if interrupted:
+            return
+        try:
+            # A frame-boundary truncation decodes fine and only shows against
+            # the real Qobuz length. Advisory: it never alters the album.
+            if post_dir is not None and token and item.get("n_ok", 0) > 0:
+                try:
+                    warn_if_download_truncated(
+                        post_dir, token, item["album"].get("title"))
+                except Exception as _e_rc:
+                    vlog(f"post-download recheck raised: {_e_rc}")
+            # Qobuz throttles sustained bulk queues. When the last rip showed
+            # throttle signals, pause longer than the normal inter-album gap.
+            if idx < n_items:
+                cooldown = (
+                    cfg.RATE_LIMIT_COOLDOWN if item.get("rate_limited") else 0
                 )
-            except Exception as _e_rc:
-                vlog(f"post-download recheck raised: {_e_rc}")
-        if idx < n_items:
-            cooldown = (
-                cfg.RATE_LIMIT_COOLDOWN if item.get("rate_limited") else 0
-            )
-            if cooldown:
-                log.info(fmt(
-                    C.YELLOW,
-                    f"    ⏳ Qobuz rate-limit detected; cooling down "
-                    f"{int(cooldown)}s before the next album.",
-                ))
-                if _sleep_unless_cancelled(cooldown, is_cancel_requested):
-                    cancelled = True
-            else:
-                _sleep_unless_cancelled(
-                    cfg.DELAY_BETWEEN,
-                    is_cancel_requested,
-                )
+                if cooldown:
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"    ⏳ Qobuz rate-limit detected; cooling down "
+                        f"{int(cooldown)}s before the next album.",
+                    ))
+                    if _sleep_unless_cancelled(cooldown, is_cancel_requested):
+                        cancelled = True
+                else:
+                    _sleep_unless_cancelled(
+                        cfg.DELAY_BETWEEN,
+                        is_cancel_requested,
+                    )
+        except KeyboardInterrupt:
+            log.info(fmt(C.YELLOW,
+                "\n    Interrupted. Stopping further downloads."))
+            interrupted = True
 
     for idx, item in enumerate(items, 1):
         _require_executor_authority(authority)
@@ -3629,6 +3660,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         pin["folder"] = item["album_dir"]
                         if item.get("_replaced_beets_entries") is not None:
                             del pin["album_dir"]
+                            from qobuz_librarian.modes.process import mark_pending_upgrade
+                            if not mark_pending_upgrade(
+                                    item["backup_path"],
+                                    item["_replaced_beets_entries"], album_dirs):
+                                raise OSError(
+                                    "couldn't record the upgrade in its backup")
                     if ownership_capture is None:
                         item_imported = _import_album_with_retry(
                             album_dirs, **pin)
@@ -3638,10 +3675,11 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                             ownership_out=ownership_capture,
                             **pin,
                         )
-                    if item_imported and ownership_capture is not None:
-                        ownership_result = ownership_capture.get("result")
-                        if isinstance(ownership_result, dict):
-                            item["_import_ownership"] = ownership_result
+                except ImportedThenInterrupted:
+                    log.info(fmt(C.YELLOW,
+                        "\n    Interrupted. Stopping further downloads."))
+                    interrupted = True
+                    item_imported = True
                 except KeyboardInterrupt:
                     log.info(fmt(C.YELLOW,
                         "\n  beets interrupted. Resolving backups based on disk."))
@@ -3660,6 +3698,11 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         item, exc, phase="library import"
                     )
                     continue
+
+                if item_imported and ownership_capture is not None:
+                    ownership_result = ownership_capture.get("result")
+                    if isinstance(ownership_result, dict):
+                        item["_import_ownership"] = ownership_result
 
                 retired_import_staging = True
                 if item_imported and "_staging_run" in item:
@@ -3739,35 +3782,12 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         if retention_exc is not None:
             raise retention_exc
 
-        # Same post-import length recheck process_album runs, here covering every
-        # queue path (walk fill, artist/album queue, repair refill, resume,
-        # web single-track): a frame-boundary truncation decodes fine and only
-        # shows against the real Qobuz length. This is advisory and never alters the
-        # album, logs its own auth/outage case, and is wrapped so it can't take
-        # down a batch whose album already imported cleanly.
-        if (item_imported and token and not args.no_import
-                and item.get("n_ok", 0) > 0):
-            post_dir = item.get("_resolved_post_dir")
-            if post_dir is not None:
-                try:
-                    warn_if_download_truncated(
-                        post_dir, token, item["album"].get("title"))
-                except Exception as _e_rc:
-                    vlog(f"post-download recheck raised: {_e_rc}")
-
-        # Qobuz throttles sustained bulk queues. When the last rip showed
-        # throttle signals, pause longer than the normal inter-album gap
-        # so we stop pounding the limit. No pause after the final album.
-        if idx < n_items:
-            cooldown = cfg.RATE_LIMIT_COOLDOWN if item.get("rate_limited") else 0
-            if cooldown:
-                log.info(fmt(C.YELLOW,
-                    f"    ⏳ Qobuz rate-limit detected; cooling down "
-                    f"{int(cooldown)}s before the next album."))
-                if _sleep_unless_cancelled(cooldown, is_cancel_requested):
-                    cancelled = True  # next album short-circuits at the loop top
-            else:
-                _sleep_unless_cancelled(cfg.DELAY_BETWEEN, is_cancel_requested)
+        _after_album(
+            item,
+            item.get("_resolved_post_dir")
+            if item_imported and not args.no_import else None,
+            idx,
+        )
 
     if not preflight_done and not durable_stopped:
         _require_executor_authority(authority)
@@ -3929,6 +3949,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 result for result in results
                 if result.get("album")
                 and not (result.get("imported") and result.get("n_ok", 0) > 0)
+                and all(result is not skipped for skipped in never_started)
             ],
             token,
             args,

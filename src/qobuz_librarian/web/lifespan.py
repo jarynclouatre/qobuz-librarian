@@ -13,9 +13,13 @@ from fastapi import FastAPI
 from qobuz_librarian import config as cfg
 from qobuz_librarian import raise_open_file_limit, run_lock
 from qobuz_librarian.api import auth as api_auth
+from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import lyrics as lyrics_mode
+from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, generation_state, repair_cache
+from qobuz_librarian.modes import process as process_mode
+from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.ui_cli import logging as cli_logging
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import auth as web_auth
@@ -65,6 +69,11 @@ def _startup_cleanup() -> None:
         lyrics_mode._prune_lyric_state_orphans()
     except Exception as e:
         _log.debug("lyric-state prune error at startup: %s", e)
+    try:
+        if startup_recovery.saved_queue_operation_ids() == set():
+            staging_mod.remove_empty_retry_groups()
+    except Exception as e:
+        _log.debug("staging clean-up error at startup: %s", e)
 
 
 def _prune_caches() -> None:
@@ -265,6 +274,7 @@ def _restore_jobs_once() -> bool:
                 return False
             rendering._retire_gone_recoveries(
                 job_persistence.recovery_history(strict=True))
+            finished = _settle_interrupted_upgrades()
             job_mgr.restore_jobs(
                 job_runs._RESUME_EXECUTE,
                 durable_recovery_clear=(
@@ -273,6 +283,7 @@ def _restore_jobs_once() -> bool:
                 durable_recovery_job_id=queue_recovery._startup_recovery_web_job_id(),
                 requeue=job_runs._requeued_download_run,
                 return_picks=flows.return_interrupted_picks,
+                finished_upgrades=finished,
             )
         except Exception as exc:
             _log.warning(
@@ -282,6 +293,23 @@ def _restore_jobs_once() -> bool:
             return False
         runtime._JOBS_RESTORED = True
         return True
+
+
+def _settle_interrupted_upgrades() -> list:
+    """Finish or undo the upgrades a hard stop cut short, before the saved
+    jobs say what their runs did. Returns the album folders upgraded."""
+    if storage._unwritable_volumes():
+        return []
+    try:
+        if beets_mod.recover_interrupted_beets_write():
+            _log.warning("Settled a beets write a hard stop cut short.")
+        beets_mod.remove_stale_import_overrides()
+        finished, put_back = process_mode.finish_interrupted_upgrades()
+    except Exception:
+        _log.exception("couldn't settle the upgrades a hard stop cut short")
+        return []
+    runtime.note_restored_albums(put_back)
+    return [str(path) for path in finished]
 
 
 def _watch_stop_signal(loop) -> None:

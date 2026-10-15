@@ -180,7 +180,7 @@ def lastfm_get(method: str, params: dict | None = None, *,
             if attempt >= _MAX_ATTEMPTS:
                 raise LastfmUnavailable(
                     f"Last.fm kept returning HTTP {r.status_code} after "
-                    f"{attempt} attempt(s) (while calling {method}) - "
+                    f"{attempt} attempts (while calling {method}) - "
                     f"try again later")
             wait = min(2 ** (attempt - 1), 8)
             vlog(f"{method}: HTTP {r.status_code}; retry "

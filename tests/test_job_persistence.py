@@ -237,10 +237,12 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     hooks = []
     monkeypatch.setattr(jm, "_start_post_job_hook", hooks.append)
     jm.restore_jobs(job_runs._RESUME_EXECUTE,
-                    return_picks=flows.return_interrupted_picks)
+                    return_picks=flows.return_interrupted_picks,
+                    finished_upgrades=[specs[0]["payload"]["album_dir"]])
     lifespan._put_back_albums()
     assert [(hook["status"], hook["summary"]) for hook in hooks] == [
         ("interrupted", jm.registry.get(run.id).error)]
+    assert jm.registry.get(run.id).execute_args[job_persistence.ALBUMS_DONE] == 1
     review, = jm.registry.awaiting_review()
     assert [(c["title"], c["selected"]) for c in review.candidates] == [
         ("Not started", True), ("Put back during the run", True),

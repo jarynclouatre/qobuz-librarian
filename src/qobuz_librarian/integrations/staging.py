@@ -1101,6 +1101,43 @@ def _new_private_group(prefix):
                 os.close(descriptor)
 
 
+def remove_empty_retry_groups():
+    """Remove what a hard stop left in the retry area with nothing in it:
+    folders whose record was not yet written or already removed, and
+    download folders set aside empty, such as one an import had just
+    emptied. Returns how many."""
+    staging_fd = retry_fd = None
+    removed = 0
+    try:
+        staging_fd, retry_fd, _retry_root = _open_retry_root()
+        for name in os.listdir(retry_fd):
+            try:
+                os.rmdir(name, dir_fd=retry_fd)
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            os.fsync(retry_fd)
+    except OSError:
+        pass
+    finally:
+        for descriptor in (retry_fd, staging_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+    for inspection in inspect_retry_groups():
+        if (
+            inspection.status == "ready"
+            and inspection.owner is None
+            and inspection.planned_trees
+            and not any(
+                tree.files or any(rel for rel, _identity in tree.directories)
+                for tree in inspection.planned_trees)
+            and discard_group(inspection.path)
+        ):
+            removed += 1
+    return removed
+
+
 def _is_private_retry_group(path):
     retry_root = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR))) / cfg.BEETS_RETRY_DIR
     candidate = Path(os.path.abspath(os.fspath(path)))

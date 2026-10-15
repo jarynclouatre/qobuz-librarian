@@ -1183,7 +1183,10 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     # keep them, only once something actually was rewritten.
     if kept_dir is not None:
         if resampled:
-            if verbose:
+            if not backup_mod.record_downsample_outputs(kept_dir):
+                log("  ⚠ downsample: couldn't record the rewritten files, "
+                    "so the kept originals can't be put back from the app.")
+            elif verbose:
                 log(f"  ⤷ originals kept "
                     f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}: "
                     "restore from Settings → Diagnostics")

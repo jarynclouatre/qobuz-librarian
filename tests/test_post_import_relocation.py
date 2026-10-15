@@ -6,6 +6,7 @@ import pytest
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock
+from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library import post_import_relocation as relocation
 
 
@@ -139,6 +140,36 @@ def test_whole_album_conflict_keeps_the_source_album_intact(
     assert destination_track.read_bytes() == b"different destination audio"
     assert not (destination / source_art.name).exists()
     assert _paths(database) == ([str(source_track)], str(source_art))
+
+
+def test_next_album_lookup_survives_a_collaboration_folder_moving_away(
+    tmp_path, monkeypatch
+):
+    music, _data, database = _configure(tmp_path, monkeypatch)
+    source = music / "Artist, Other" / "Collab"
+    source.mkdir(parents=True)
+    track = source / "01 - Track.flac"
+    track.write_bytes(b"audio")
+    _database(database, tracks=(track,))
+    scanner.clear_scan_caches()
+    scanner._list_artist_subdirs_cached(music)
+
+    authority = run_lock.acquire()
+    try:
+        result = relocation.relocate_post_import_album(
+            source,
+            music / "Artist" / "Collab",
+            kind=relocation.RelocationKind.WHOLE_ALBUM,
+            authority=authority,
+        )
+    finally:
+        authority.close()
+
+    assert result.changed is True
+    assert not (music / "Artist, Other").exists()
+    assert catalog.find_album_dir_filesystem(
+        {"title": "Next Album", "artist": {"name": "Artist"}}
+    ) is None
 
 
 @pytest.mark.parametrize(

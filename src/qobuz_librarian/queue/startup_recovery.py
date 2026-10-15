@@ -1466,7 +1466,8 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
     moved = len(intent) - staged
     reason = (
         f"The download was cleared. Beets had moved {plural(moved, 'track')} "
-        "into your library, and they stay there."
+        f"into your library, and {'it stays' if moved == 1 else 'they stay'} "
+        "there."
     )
     listed = (
         "listed in Settings > Diagnostics as “Files from a stopped download”, "

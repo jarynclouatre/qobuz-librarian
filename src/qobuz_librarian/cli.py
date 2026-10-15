@@ -1309,9 +1309,12 @@ def main():
     def download_token():
         return remote_token(QobuzAccess.DOWNLOAD_ACTION)
 
-    if resume_saved_queue:
+    def offer_saved_queue():
+        """Offer the saved queue: resume, keep or discard it. None when the
+        prompt was abandoned."""
+        nonlocal saved_queue, queue_started
         try:
-            recovery_choice = offer_resume_startup_recovery(
+            choice = offer_resume_startup_recovery(
                 args,
                 download_token,
                 _STARTUP_RECOVERY_RESULT,
@@ -1344,13 +1347,27 @@ def main():
                 log.info(fmt(C.YELLOW, wrap(
                     f"Queue kept in {cfg.QUEUE_JOURNAL_DIR}. Other downloads "
                     "wait until it is resumed or discarded.")))
+        return choice
+
+    if resume_saved_queue:
+        recovery_choice = offer_saved_queue()
         if recovery_choice is None:
             raise SystemExit(EXIT_GENERAL)
 
     # Housekeeping deletes expired backups and rewrites state files, so a
     # dry run skips it.
     if not args.dry_run and not saved_queue:
+        from qobuz_librarian.integrations import beets as beets_mod
+        from qobuz_librarian.integrations import staging as staging_mod
         from qobuz_librarian.library import backup as backup_mod
+        from qobuz_librarian.modes import process as process_mode
+        try:
+            beets_mod.recover_interrupted_beets_write()
+            beets_mod.remove_stale_import_overrides()
+            process_mode.finish_interrupted_upgrades()
+            staging_mod.remove_empty_retry_groups()
+        except Exception as e:
+            vlog(f"interrupted upgrade settle error: {e}")
         try:
             for path, origin in backup_mod.albums_left_in_backups():
                 backup = backup_mod.album_backup_to_put_back(path, origin)
@@ -1460,14 +1477,16 @@ def main():
         mode = interactive_session_mode()
         if mode == Mode.QUIT:
             return
-        refusal = queue_refusal(
+        uses = (
             mode in (Mode.ALBUM, Mode.ARTIST, Mode.WALK_QUEUE,
                      Mode.ALBUM_WALK, Mode.ALBUM_REPAIR),
             mode in (Mode.UPGRADE, Mode.MIGRATE, Mode.DOWNSAMPLE, Mode.LYRICS),
         )
-        if refusal:
-            log.info(refusal)
-            continue
+        if queue_refusal(*uses):
+            if offer_saved_queue() is None:
+                return
+            if queue_refusal(*uses):
+                continue
         if mode == Mode.ALBUM:
             # Loop inside album mode so the user can search album after album
             # without bouncing back to the top menu each time.
