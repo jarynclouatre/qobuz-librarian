@@ -14,7 +14,6 @@ Two non-obvious behaviours kept here:
 """
 
 import codecs
-import ctypes
 import errno
 import fcntl
 import hashlib
@@ -61,6 +60,14 @@ from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
 )
+from qobuz_librarian.safefile import identity_record as _ownership_identity
+from qobuz_librarian.safefile import (
+    named_entry_matches,
+    named_entry_missing,
+    rename_noreplace,
+    write_atomic,
+)
+from qobuz_librarian.safefile import stat_identity as _staged_identity
 from qobuz_librarian.ui_cli import errors
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
@@ -246,27 +253,6 @@ def _open_exact_merge_dir(parent_fd, name, expected=None):
     raise OSError("split-folder directory changed while it was opened")
 
 
-def _merge_name_missing(parent_fd, name):
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
-
-
-def _merge_name_matches(parent_fd, name, held_fd, *, regular=False):
-    try:
-        held = os.fstat(held_fd)
-        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError:
-        return False
-    return (not regular or stat.S_ISREG(held.st_mode)) and _ownership_identity(
-        held
-    ) == _ownership_identity(named)
-
-
 def _remove_empty_dir(name, *, dir_fd=None):
     """Remove one folder with a plain rmdir, which refuses one holding anything."""
     try:
@@ -411,12 +397,12 @@ def _beets_database_anchor_matches(anchor):
             return False
         descriptor = anchor["descriptor"]
         if descriptor is None:
-            return _merge_name_missing(anchor["parent_chain"][-1], anchor["name"])
-        return _merge_name_matches(
+            return named_entry_missing(anchor["parent_chain"][-1], anchor["name"])
+        return named_entry_matches(
             anchor["parent_chain"][-1],
             anchor["name"],
             descriptor,
-            regular=True,
+            directory=False,
         )
     except (OSError, TypeError, ValueError):
         return False
@@ -456,7 +442,7 @@ def _bootstrap_beets_database_anchor(anchor):
             dir_fd=parent_fd,
         )
         os.fchmod(descriptor, 0o600)
-        if not _merge_name_matches(parent_fd, temporary, descriptor, regular=True) or not (
+        if not named_entry_matches(parent_fd, temporary, descriptor, directory=False) or not (
             _beets_database_anchor_matches(anchor)
         ):
             raise OSError("configured beets database changed during creation")
@@ -475,13 +461,13 @@ def _bootstrap_beets_database_anchor(anchor):
         connection.close()
         connection = None
         os.fsync(descriptor)
-        if not _merge_name_matches(parent_fd, temporary, descriptor, regular=True) or not (
+        if not named_entry_matches(parent_fd, temporary, descriptor, directory=False) or not (
             _beets_database_anchor_matches(anchor)
         ):
             raise OSError("configured beets database changed during creation")
 
         try:
-            _rename_ownership_noreplace(parent_fd, temporary, parent_fd, anchor["name"])
+            rename_noreplace(parent_fd, temporary, parent_fd, anchor["name"])
         except FileExistsError as exc:
             raise OSError("configured beets database appeared before creation") from exc
         anchor["descriptor"] = descriptor
@@ -490,9 +476,9 @@ def _bootstrap_beets_database_anchor(anchor):
             raise OSError("configured beets database changed after creation")
     except BaseException:
         if descriptor is not None and anchor["descriptor"] is None:
-            if _merge_name_matches(parent_fd, anchor["name"], descriptor, regular=True):
+            if named_entry_matches(parent_fd, anchor["name"], descriptor, directory=False):
                 anchor["descriptor"] = descriptor
-            elif _merge_name_matches(parent_fd, temporary, descriptor, regular=True):
+            elif named_entry_matches(parent_fd, temporary, descriptor, directory=False):
                 try:
                     os.unlink(temporary, dir_fd=parent_fd)
                     os.fsync(parent_fd)
@@ -551,13 +537,13 @@ def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destinat
     """Restore one exact moved entry without overwriting either name."""
 
     def layout():
-        source_exact = _merge_name_matches(source_fd, source_name, held_fd, regular=True)
-        destination_exact = _merge_name_matches(
-            destination_fd, destination_name, held_fd, regular=True
+        source_exact = named_entry_matches(source_fd, source_name, held_fd, directory=False)
+        destination_exact = named_entry_matches(
+            destination_fd, destination_name, held_fd, directory=False
         )
-        if source_exact and _merge_name_missing(destination_fd, destination_name):
+        if source_exact and named_entry_missing(destination_fd, destination_name):
             return "source"
-        if destination_exact and _merge_name_missing(source_fd, source_name):
+        if destination_exact and named_entry_missing(source_fd, source_name):
             return "destination"
         return "changed"
 
@@ -567,7 +553,7 @@ def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destinat
     if state != "destination":
         return False
     try:
-        _rename_ownership_noreplace(destination_fd, destination_name, source_fd, source_name)
+        rename_noreplace(destination_fd, destination_name, source_fd, source_name)
         if layout() != "source":
             return False
         os.fsync(destination_fd)
@@ -711,11 +697,11 @@ def _prepare_staging_tags(
                 if (
                     _staged_identity(os.fstat(inspection_fd)) != receipt.identity
                     or not _merge_chain_is_named(inspection_chain, inspection_names)
-                    or not _merge_name_matches(
+                    or not named_entry_matches(
                         inspection_chain[-1],
                         Path(f).name,
                         inspection_fd,
-                        regular=True,
+                        directory=False,
                     )
                 ):
                     raise OSError("managed beets source changed during inspection")
@@ -1040,7 +1026,6 @@ _OWNERSHIP_IDENTITY_FIELDS = (
     "modified_ns",
     "changed_ns",
 )
-_RENAME_NOREPLACE = 1
 
 
 @dataclass(frozen=True)
@@ -1053,30 +1038,9 @@ class ManagedBeetsImportResult:
     replaced_entries: dict | None = None
 
 
-def _ownership_identity(value):
-    return {
-        "device": int(value.st_dev),
-        "inode": int(value.st_ino),
-        "size": int(value.st_size),
-        "modified_ns": int(value.st_mtime_ns),
-        "changed_ns": int(value.st_ctime_ns),
-    }
-
-
 def _valid_ownership_identity(value):
     return isinstance(value, dict) and all(
         type(value.get(field)) is int for field in _OWNERSHIP_IDENTITY_FIELDS
-    )
-
-
-def _staged_identity(value):
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(value.st_mode),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
     )
 
 
@@ -1316,33 +1280,6 @@ def _open_ownership_dir(path, *, dir_fd=None):
     return os.open(path, flags, dir_fd=dir_fd)
 
 
-def _rename_ownership_noreplace(source_fd, source, destination_fd, destination):
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except (AttributeError, OSError) as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    if (
-        renameat2(
-            source_fd,
-            os.fsencode(source),
-            destination_fd,
-            os.fsencode(destination),
-            _RENAME_NOREPLACE,
-        )
-        != 0
-    ):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), os.fsdecode(source))
-
-
 def _ownership_marker_token(nonce, relative):
     return hashlib.sha256(nonce.encode("ascii") + b"\0" + os.fsencode(relative)).hexdigest()
 
@@ -1499,11 +1436,11 @@ def _managed_carrier_namespace_matches(capture):
         return (
             carrier.parent == Path(capture["parent"])
             and _managed_parent_namespace_matches(capture)
-            and _merge_name_matches(
+            and named_entry_matches(
                 capture["_parent_chain"][-1],
                 carrier.name,
                 manifest.fileno(),
-                regular=True,
+                directory=False,
             )
         )
     except (AttributeError, KeyError, OSError, TypeError, ValueError):
@@ -1564,7 +1501,7 @@ def _managed_destination_matches(root, root_identity, destination):
             stat.S_ISREG(held.st_mode)
             and _ownership_identity(held) == expected
             and _merge_chain_is_named(chain, (*root_names, *parts[:-1]))
-            and _merge_name_matches(chain[-1], parts[-1], leaf_fd, regular=True)
+            and named_entry_matches(chain[-1], parts[-1], leaf_fd, directory=False)
         )
     except (OSError, TypeError, ValueError):
         return False
@@ -2214,7 +2151,7 @@ def _managed_carrier_history(
             or before[1] != reference["inode"]
             or before[5] <= 0
             or before[5] > _OWNERSHIP_MAX_BYTES
-            or not _merge_name_matches(parent_fd, name, descriptor, regular=True)
+            or not named_entry_matches(parent_fd, name, descriptor, directory=False)
         ):
             return None
         raw = os.pread(descriptor, before[5] + 1, 0)
@@ -2649,8 +2586,8 @@ def _inspect_managed_carrier_with_interrupts_deferred(
             or held.st_uid != os.geteuid()
             or stat.S_IMODE(held.st_mode) != 0o600
             or held.st_nlink != 1
-            or not _merge_name_matches(
-                parent_chain[-1], carrier_path.name, carrier.fileno(), regular=True
+            or not named_entry_matches(
+                parent_chain[-1], carrier_path.name, carrier.fileno(), directory=False
             )
         ):
             return unavailable
@@ -2707,7 +2644,7 @@ def _inspect_managed_reservation_with_interrupts_deferred(reservation, expected_
             carrier = _open_managed_carrier_file(parent_chain[-1], carrier_path.name)
         except FileNotFoundError:
             quarantine_name = f".qobuz-retire-managed-beets-{reservation['nonce']}"
-            if _merge_chain_is_named(parent_chain, parent_names) and _merge_name_missing(
+            if _merge_chain_is_named(parent_chain, parent_names) and named_entry_missing(
                 parent_chain[-1], quarantine_name
             ):
                 return ManagedReservationInspectionResult(
@@ -2721,8 +2658,8 @@ def _inspect_managed_reservation_with_interrupts_deferred(reservation, expected_
             or stat.S_IMODE(held.st_mode) != 0o600
             or held.st_nlink != 1
             or not _merge_chain_is_named(parent_chain, parent_names)
-            or not _merge_name_matches(
-                parent_chain[-1], carrier_path.name, carrier.fileno(), regular=True
+            or not named_entry_matches(
+                parent_chain[-1], carrier_path.name, carrier.fileno(), directory=False
             )
         ):
             return unavailable
@@ -2868,14 +2805,14 @@ def _retire_managed_carrier_with_interrupts_deferred(
                 and held.st_nlink == 1
                 and int(held.st_dev) == reference["device"]
                 and int(held.st_ino) == reference["inode"]
-                and _merge_name_matches(parent_fd, name, candidate.fileno(), regular=True)
+                and named_entry_matches(parent_fd, name, candidate.fileno(), directory=False)
             )
         except OSError:
             return False
 
     def private_group_is_exact():
         if private_fd is None:
-            return _merge_name_missing(parent_chain[-1], quarantine_name)
+            return named_entry_missing(parent_chain[-1], quarantine_name)
         try:
             held = os.fstat(private_fd)
             return (
@@ -2938,20 +2875,20 @@ def _retire_managed_carrier_with_interrupts_deferred(
 
     def layout(selected):
         try:
-            public_exact = _merge_name_matches(
-                parent_chain[-1], carrier_path.name, selected.fileno(), regular=True
+            public_exact = named_entry_matches(
+                parent_chain[-1], carrier_path.name, selected.fileno(), directory=False
             )
             private_exact = (
                 private_fd is not None
                 and private_group_is_exact()
-                and _merge_name_matches(private_fd, private_name, selected.fileno(), regular=True)
+                and named_entry_matches(private_fd, private_name, selected.fileno(), directory=False)
             )
             private_missing = (
-                private_fd is None and _merge_name_missing(parent_chain[-1], quarantine_name)
+                private_fd is None and named_entry_missing(parent_chain[-1], quarantine_name)
             ) or (
                 private_fd is not None
                 and private_group_is_exact()
-                and _merge_name_missing(private_fd, private_name)
+                and named_entry_missing(private_fd, private_name)
             )
             held = os.fstat(selected.fileno())
         except OSError:
@@ -2968,10 +2905,10 @@ def _retire_managed_carrier_with_interrupts_deferred(
         nonlocal namespace_mutated
         if (
             not parent_namespace_is_exact()
-            or not _merge_name_missing(parent_chain[-1], carrier_path.name)
+            or not named_entry_missing(parent_chain[-1], carrier_path.name)
             or private_fd is None
             or not private_group_is_exact()
-            or _merge_name_missing(private_fd, private_name)
+            or named_entry_missing(private_fd, private_name)
         ):
             return False
         unexpected = None
@@ -2980,15 +2917,15 @@ def _retire_managed_carrier_with_interrupts_deferred(
             opened_files.append(unexpected)
             if not parent_namespace_is_exact():
                 return False
-            _rename_ownership_noreplace(
+            rename_noreplace(
                 private_fd,
                 private_name,
                 parent_chain[-1],
                 carrier_path.name,
             )
-            restored = _merge_name_matches(
-                parent_chain[-1], carrier_path.name, unexpected.fileno(), regular=True
-            ) and _merge_name_missing(private_fd, private_name)
+            restored = named_entry_matches(
+                parent_chain[-1], carrier_path.name, unexpected.fileno(), directory=False
+            ) and named_entry_missing(private_fd, private_name)
             if restored:
                 namespace_mutated = True
                 if not parent_namespace_is_exact():
@@ -3092,8 +3029,8 @@ def _retire_managed_carrier_with_interrupts_deferred(
                     "managed carrier absence could not be committed",
                 )
             if (
-                not _merge_name_missing(parent_chain[-1], carrier_path.name)
-                or not _merge_name_missing(parent_chain[-1], quarantine_name)
+                not named_entry_missing(parent_chain[-1], carrier_path.name)
+                or not named_entry_missing(parent_chain[-1], quarantine_name)
                 or not parent_namespace_is_exact()
             ):
                 if not parent_namespace_is_exact():
@@ -3122,7 +3059,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
         if exclusion is None or not exclusion.intact():
             return ManagedCarrierRetirementResult(
                 ManagedCarrierRetirementOutcome.REFUSED,
-                "managed carrier writer exclusion is unavailable",
+                "managed carrier changed since it was checked",
             )
         selected_name = private_name if private_exact else carrier_path.name
         selected_parent_fd = private_fd if private_exact else parent_chain[-1]
@@ -3170,7 +3107,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
                 )
             deferred = None
             try:
-                _rename_ownership_noreplace(
+                rename_noreplace(
                     parent_chain[-1],
                     carrier_path.name,
                     private_fd,
@@ -3286,8 +3223,8 @@ def _retire_managed_carrier_with_interrupts_deferred(
                     "managed carrier unlink could not be committed",
                 )
             if (
-                not _merge_name_missing(parent_chain[-1], carrier_path.name)
-                or not _merge_name_missing(parent_chain[-1], quarantine_name)
+                not named_entry_missing(parent_chain[-1], carrier_path.name)
+                or not named_entry_missing(parent_chain[-1], quarantine_name)
                 or not parent_namespace_is_exact()
             ):
                 if not parent_namespace_is_exact():
@@ -3386,7 +3323,7 @@ def clear_stopped_import_folders(snapshot):
             except FileNotFoundError:
                 continue
             try:
-                if not _merge_name_missing(parent_fd, temporary[-1]):
+                if not named_entry_missing(parent_fd, temporary[-1]):
                     return False
                 try:
                     directory_fd = _open_ownership_dir(parts[-1], dir_fd=parent_fd)
@@ -3752,11 +3689,11 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
             or int(held_before.st_ino) != carrier_reference["inode"]
             or held_before.st_size <= 0
             or held_before.st_size > _OWNERSHIP_MAX_BYTES
-            or not _merge_name_matches(
+            or not named_entry_matches(
                 parent_chain[-1],
                 carrier_path.name,
                 carrier_file.fileno(),
-                regular=True,
+                directory=False,
             )
         ):
             raise ManagedEvidenceUnavailable("managed completion carrier identity changed")
@@ -4547,7 +4484,7 @@ def recover_interrupted_beets_write():
         if anchor is None or anchor["descriptor"] is None:
             return False
         parent_fd = anchor["parent_chain"][-1]
-        if _merge_name_missing(parent_fd, anchor["name"] + "-journal"):
+        if named_entry_missing(parent_fd, anchor["name"] + "-journal"):
             return False
         exclusion.acquire(parent_fd)
         if _database_write_locked(anchor) or not _beets_database_anchor_matches(anchor):
@@ -4567,7 +4504,7 @@ def recover_interrupted_beets_write():
             connection.execute("COMMIT")
         finally:
             connection.close()
-        return _merge_name_missing(parent_fd, anchor["name"] + "-journal")
+        return named_entry_missing(parent_fd, anchor["name"] + "-journal")
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
     finally:
@@ -4742,20 +4679,13 @@ def _back_up_before_migrations(plugin_config, database_path):
                 return True
             # The inspection holds the database's write lock, so the file
             # on disk is a whole, settled copy.
-            fd, temporary = tempfile.mkstemp(
-                prefix=f".{backup.name}.", dir=backup.parent)
-            try:
-                with os.fdopen(fd, "wb") as out:
-                    offset = 0
-                    while chunk := os.pread(anchor["descriptor"], 1 << 20, offset):
-                        out.write(chunk)
-                        offset += len(chunk)
-                    out.flush()
-                    os.fsync(out.fileno())
-                os.replace(temporary, backup)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+            def chunks():
+                offset = 0
+                while chunk := os.pread(anchor["descriptor"], 1 << 20, offset):
+                    yield chunk
+                    offset += len(chunk)
+
+            write_atomic(backup, chunks(), prefix=f".{backup.name}.")
             log.info(fmt(C.GRAY, f"  Saved a copy of the beets database at {backup} "
                                  "before Beets updates it."))
             return True

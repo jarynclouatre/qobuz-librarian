@@ -98,36 +98,6 @@ def test_shallow_scan_does_not_false_flag_healthy(tmp_path, _need_tools):
     assert r["verified_ok"] == 2
 
 
-def test_scan_diagnoses_a_file_it_cannot_lease(tmp_path, _need_tools):
-    # A write lease needs file ownership (or CAP_LEASE), so on a
-    # mixed-ownership library every non-owned file would be given up as
-    # "unverified" and a genuinely broken one never flagged. The sealed receipt
-    # already proves the file held still, so diagnosis carries on without the
-    # lease.
-    album = tmp_path / "Artist" / "Album (2020)"
-    album.mkdir(parents=True)
-    good = album / "01.flac"
-    bad = album / "02.flac"
-    _make_flac(good)
-    _make_flac(bad)
-    _frame_corrupt(bad)
-    assert not _decodes(bad)
-
-    with patch("qobuz_librarian.repair_log.acquire_inode_write_exclusion",
-               return_value=None), \
-         patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
-               return_value=_QT):
-        r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=False)
-
-    assert r["unverified"] == 0, f"lease refusal must not skip diagnosis (got {r})"
-    assert r["verified_ok"] == 1
-    assert "02.flac" in _names(r["verified_truncated"])
-    assert r["verified_truncated"][0]["reason"] == "decode_failed"
-    assert r["verified_truncated"][0].get("source_receipt"), (
-        "a lease-less verdict still needs the exact receipt the repair act "
-        "verifies against")
-
-
 def _qt(title, duration, isrc):
     return {"duration": duration, "title": title, "track_number": 1,
             "isrc": isrc}

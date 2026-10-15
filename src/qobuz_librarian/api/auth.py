@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable
 
-from qobuz_librarian import config, redaction, state_file
+from qobuz_librarian import config, redaction, safefile, state_file
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log
 
@@ -376,44 +376,11 @@ def _write_streamrip_creds(user_id, auth_token):
 def _save_streamrip_config(doc, *, mode=0o600) -> bool:
     """Replace the file the config path names, through any symlink. It holds
     the account token, so by default only its owner can read it."""
-    import tempfile
-
     import tomlkit
     try:
-        target = Path(os.path.realpath(config.STREAMRIP_CONFIG))
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent),
-                                   prefix=".streamrip.", suffix=".tmp")
-        fd_owned = False
-        try:
-            os.fchmod(fd, mode)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                fd_owned = True
-                f.write(tomlkit.dumps(doc))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, target)
-            # Make the rename durable, matching web/auth.py: a power loss right
-            # after replace() must not roll back a token the UI already reported
-            # as saved. fsync the parent dir so the new directory entry is on disk.
-            try:
-                dfd = os.open(str(target.parent), os.O_RDONLY)
-                try:
-                    os.fsync(dfd)
-                finally:
-                    os.close(dfd)
-            except OSError:
-                pass
-        finally:
-            if not fd_owned:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if os.path.exists(tmp):
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+        safefile.write_atomic(
+            os.path.realpath(config.STREAMRIP_CONFIG), tomlkit.dumps(doc),
+            mode=mode, prefix=".streamrip.")
     except OSError:
         return False
     return True

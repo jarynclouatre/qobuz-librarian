@@ -1600,7 +1600,7 @@ def _maybe_drop_privileges():
     import os
     import shutil
     import sys
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+    if os.geteuid() != 0:
         return
     puid = (os.environ.get("PUID") or "").strip()
     pgid = (os.environ.get("PGID") or "").strip()

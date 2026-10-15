@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional, TextIO
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.safefile import named_entry_matches
 from qobuz_librarian.ui_cli import colors
 from qobuz_librarian.ui_cli import logging as cli_logging
 from qobuz_librarian.ui_cli.colors import C
@@ -51,21 +52,6 @@ def _lock_path_parts(value):
     return path, tuple(parts)
 
 
-def _directory_matches(descriptor, parent_descriptor, name):
-    try:
-        held = os.fstat(descriptor)
-        named = os.stat(
-            name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except OSError:
-        return False
-    return (
-        stat.S_ISDIR(held.st_mode)
-        and stat.S_ISDIR(named.st_mode)
-        and (int(held.st_dev), int(held.st_ino))
-        == (int(named.st_dev), int(named.st_ino))
-    )
-
-
 def _parent_chain_intact(chain, names):
     if len(chain) != len(names) + 1:
         return False
@@ -82,7 +68,7 @@ def _parent_chain_intact(chain, names):
     ):
         return False
     return all(
-        _directory_matches(chain[index + 1], chain[index], name)
+        named_entry_matches(chain[index], name, chain[index + 1], directory=True)
         for index, name in enumerate(names)
     )
 
@@ -90,11 +76,7 @@ def _parent_chain_intact(chain, names):
 def _open_lock_parent(value):
     path, parts = _lock_path_parts(value)
     names = parts[:-1]
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe run-lock access is unavailable")
-    flags = os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     chain = [os.open(os.path.sep, flags)]
     try:
         for name in names:
@@ -106,7 +88,7 @@ def _open_lock_parent(value):
                 except FileExistsError:
                     pass
                 descriptor = os.open(name, flags, dir_fd=chain[-1])
-            if not _directory_matches(descriptor, chain[-1], name):
+            if not named_entry_matches(chain[-1], name, descriptor, directory=True):
                 os.close(descriptor)
                 raise OSError("run-lock directory changed while it was opened")
             chain.append(descriptor)
@@ -125,15 +107,12 @@ def _open_lock_parent(value):
 def _read_lock_holder(parent_descriptor, name):
     descriptor = -1
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            return "?", None
         descriptor = os.open(
             name,
             os.O_RDONLY
-            | nofollow
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NONBLOCK", 0),
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC
+            | os.O_NONBLOCK,
             dir_fd=parent_descriptor,
         )
         value = os.fstat(descriptor)
@@ -237,9 +216,9 @@ class RunLockLease:
                 probe = os.open(
                     self._leaf,
                     os.O_RDWR
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_NONBLOCK", 0),
+                    | os.O_CLOEXEC
+                    | os.O_NOFOLLOW
+                    | os.O_NONBLOCK,
                     dir_fd=parent_descriptor,
                 )
                 probe_stat = os.fstat(probe)
@@ -392,16 +371,13 @@ def acquire(holder: Optional[str] = None) -> Optional[RunLockLease]:
     descriptor = -1
     stream = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe run-lock access is unavailable")
         descriptor = os.open(
             leaf,
             os.O_CREAT
             | os.O_RDWR
-            | nofollow
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NONBLOCK", 0),
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC
+            | os.O_NONBLOCK,
             0o600,
             dir_fd=parent_descriptor,
         )

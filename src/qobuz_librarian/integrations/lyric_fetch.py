@@ -22,8 +22,6 @@ writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import functools
 import logging
 import math
@@ -50,6 +48,8 @@ from qobuz_librarian import state_file
 from qobuz_librarian.api.client import ua_string
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.library import backup as backup_mod
+from qobuz_librarian.safefile import identity_record, rename_exchange, rename_noreplace
+from qobuz_librarian.safefile import stat_identity as _node_identity
 
 # mutagen and syncedlyrics are decoupled on purpose: tag-only operations
 # (classify/read/write embedded lyrics, .lrc sidecars) need only mutagen,
@@ -510,15 +510,7 @@ def get_existing_lyrics(f, path=None, include_sidecar=False, *,
 
 
 def _regular_identity(value):
-    if not stat.S_ISREG(value.st_mode):
-        return None
-    return {
-        "device": int(value.st_dev),
-        "inode": int(value.st_ino),
-        "size": int(value.st_size),
-        "modified_ns": int(value.st_mtime_ns),
-        "changed_ns": int(value.st_ctime_ns),
-    }
+    return identity_record(value) if stat.S_ISREG(value.st_mode) else None
 
 
 def _guard_passes(guard) -> bool:
@@ -533,16 +525,14 @@ def _guard_passes(guard) -> bool:
 def _read_bound_sidecar(
         path: Path, parent_fd, parent_guard, track_guard) -> Optional[str]:
     """Read one exact regular .lrc beside one exact held track, or refuse it."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None or parent_fd is None:
+    if parent_fd is None:
         return None
     descriptor = None
     target = Path(path).with_suffix(".lrc")
     try:
         if not _guard_passes(parent_guard) or not _guard_passes(track_guard):
             return None
-        flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         descriptor = os.open(target.name, flags, dir_fd=parent_fd)
         frozen = _regular_identity(os.fstat(descriptor))
         if frozen is None or _named_identity(parent_fd, target.name) != frozen:
@@ -584,10 +574,6 @@ class _BoundTrack:
     """An exact regular file held beneath an exact no-follow directory chain."""
 
     def __init__(self, path: Path, owned_root: Path):
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        directory = getattr(os, "O_DIRECTORY", None)
-        if nofollow is None or directory is None:
-            raise OSError("safe no-follow file operations are unavailable")
 
         self.path = Path(os.path.abspath(os.fspath(path)))
         self.root = Path(os.path.abspath(os.fspath(owned_root)))
@@ -604,8 +590,8 @@ class _BoundTrack:
         self._directory_names: list[str] = []
         self.track_fd: Optional[int] = None
         try:
-            directory_flags = os.O_RDONLY | directory | nofollow
-            directory_flags |= getattr(os, "O_CLOEXEC", 0)
+            directory_flags = (
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             root_fd = os.open(str(self.root), directory_flags)
             root_stat = os.fstat(root_fd)
             named_root = os.stat(self.root, follow_symlinks=False)
@@ -640,8 +626,7 @@ class _BoundTrack:
                 self._directory_fds.append(child_fd)
 
             track_flags = (
-                os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
-            track_flags |= getattr(os, "O_CLOEXEC", 0)
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             self.track_fd = os.open(
                 relative.parts[-1],
                 track_flags,
@@ -736,12 +721,7 @@ class _BoundTrack:
 
 
 def _open_parent(path: Path) -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow file operations are unavailable")
-    flags = os.O_RDONLY | directory | nofollow
-    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     return os.open(str(path.parent), flags)
 
 
@@ -769,72 +749,13 @@ def _named_identity(parent_fd: int, name: str):
     return _regular_identity(value)
 
 
-def _node_identity(value):
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(value.st_mode),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
-
-
 def _named_node_identity(parent_fd: int, name: str):
     return _node_identity(os.stat(
         name, dir_fd=parent_fd, follow_symlinks=False))
 
 
-def _renameat2(
-        first_parent_fd: int,
-        first: str,
-        second_parent_fd: int,
-        second: str,
-        flags: int,
-) -> None:
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError:
-        raise OSError(
-            errno.ENOTSUP, "atomic exchange is unavailable") from None
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    if renameat2(
-            first_parent_fd,
-            os.fsencode(first),
-            second_parent_fd,
-            os.fsencode(second),
-            flags,
-    ):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
-
-
-def _rename_exchange(parent_fd: int, first: str, second: str) -> None:
-    _renameat2(parent_fd, first, parent_fd, second, 2)
-
-
-def _rename_noreplace(
-        first_parent_fd: int,
-        first: str,
-        second_parent_fd: int,
-        second: str,
-) -> None:
-    _renameat2(first_parent_fd, first, second_parent_fd, second, 1)
-
-
 def _make_temp(parent_fd: int, target_name: str):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file operations are unavailable")
-    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow
-    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
     for _ in range(16):
         name = f"{target_name}.{secrets.token_hex(8)}.tmp"
         try:
@@ -935,10 +856,6 @@ def _unlink_held_name(
     except OSError:
         return False
 
-    directory = getattr(os, "O_DIRECTORY", None)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if directory is None or nofollow is None:
-        return False
     quarantine_name = None
     quarantine_fd = None
     moved = False
@@ -989,11 +906,11 @@ def _unlink_held_name(
             return False
         quarantine_fd = os.open(
             quarantine_name,
-            os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
             dir_fd=parent_fd,
         )
         try:
-            _rename_noreplace(parent_fd, name, quarantine_fd, "held")
+            rename_noreplace(parent_fd, name, quarantine_fd, "held")
         finally:
             # Python may deliver a signal after renameat2 completed but before
             # its wrapper returned. Derive the namespace outcome from the held
@@ -1030,7 +947,7 @@ def _unlink_held_name(
     finally:
         if moved and quarantine_fd is not None:
             try:
-                _rename_noreplace(
+                rename_noreplace(
                     quarantine_fd, "held", parent_fd, name)
                 moved = False
             except OSError:
@@ -1064,20 +981,13 @@ def _exchange_existing(
         new_identity=None,
         post_exchange_guard=None,
 ):
-    path_flag = getattr(os, "O_PATH", None)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if path_flag is None or nofollow is None:
-        raise OSError(errno.ENOTSUP, "safe atomic exchange is unavailable")
 
     frozen_expected = (
         expected_identity or _regular_identity(os.fstat(expected_fd)))
     frozen_new = new_identity or _regular_identity(os.fstat(temp_fd))
     exclusion = acquire_inode_write_exclusion(expected_fd)
     if exclusion is None:
-        raise OSError(
-            errno.EBUSY,
-            f"{target_name}: target is open for writing or cannot be protected",
-        )
+        raise OSError(f"{target_name}: target is not a regular file")
 
     def restore_original_layout() -> bool:
         """Reconcile an exchange whose syscall or follow-up was interrupted."""
@@ -1093,7 +1003,7 @@ def _exchange_existing(
         if named_target != new_node or named_temp != old_node:
             return False
         try:
-            _rename_exchange(parent_fd, temp_name, target_name)
+            rename_exchange(parent_fd, temp_name, parent_fd, target_name)
         except BaseException:
             # The exchange may have completed before Python delivered a signal.
             # Derive the outcome below instead of trusting the raised control
@@ -1174,10 +1084,10 @@ def _exchange_existing(
             # A signal can be delivered after renameat2 completed but before its
             # wrapper returns, so every exceptional exit from this point first
             # derives the real layout from the two held identities.
-            _rename_exchange(parent_fd, temp_name, target_name)
+            rename_exchange(parent_fd, temp_name, parent_fd, target_name)
             swapped_fd = os.open(
                 temp_name,
-                path_flag | nofollow | getattr(os, "O_CLOEXEC", 0),
+                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=parent_fd,
             )
             new_after = _regular_identity(os.fstat(temp_fd))
@@ -1261,13 +1171,9 @@ def save_flac_tags(
             return False
 
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe no-follow file operations are unavailable")
         if not commit_is_allowed():
             raise OSError(f"{path.name}: commit guard changed before tag rewrite")
-        source_flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-        source_flags |= getattr(os, "O_CLOEXEC", 0)
+        source_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         source_fd = os.open(path.name, source_flags, dir_fd=owned_parent_fd)
         before = _regular_identity(os.fstat(source_fd))
         if (
@@ -1410,13 +1316,9 @@ def write_sidecar(
     created_target = False
     receipt_emitted = False
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe no-follow file operations are unavailable")
         if track_guard is not None and track_guard() is not True:
             raise OSError(f"{path.name}: track changed before sidecar write")
-        existing_flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-        existing_flags |= getattr(os, "O_CLOEXEC", 0)
+        existing_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         try:
             existing_fd = os.open(
                 target.name, existing_flags, dir_fd=owned_parent_fd)
@@ -1485,7 +1387,7 @@ def write_sidecar(
             if _regular_identity(os.fstat(temp_fd)) != temp_identity:
                 raise OSError(f"{target.name}: temporary sidecar changed")
             temp_mode = stat.S_IMODE(os.fstat(temp_fd).st_mode)
-            _rename_noreplace(
+            rename_noreplace(
                 owned_parent_fd,
                 temp_name,
                 owned_parent_fd,

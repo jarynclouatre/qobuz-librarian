@@ -1,10 +1,9 @@
 """Walk modes: library walk, walk+queue, and album fill walk."""
-import os
 import re
 import sys
-import tempfile
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import safefile
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
 from qobuz_librarian.library import collection_snapshot
 from qobuz_librarian.library import hidden as hidden_mod
@@ -62,14 +61,11 @@ def load_walk_seen():
 
 
 def _atomic_append(path, header_lines, entry):
-    """Read-modify-write via tmp+os.replace.
+    """Read-modify-write through an atomic replace.
 
     Plain "a" mode leaves a truncated line on the disk if the process dies
     mid-write; the next reader silently drops the partial line and the
-    entry is lost. Writing the full intended content to a unique sibling temp
-    and renaming it eliminates the partial-write window, and a unique name
-    (not a shared ``.tmp``) avoids clobbering a concurrent writer or orphaning
-    a fixed temp if a write is interrupted.
+    entry is lost.
     """
     existing = path.read_bytes() if path.exists() else b""
     content = bytearray()
@@ -78,18 +74,7 @@ def _atomic_append(path, header_lines, entry):
             content.extend(line.encode("utf-8"))
     content.extend(existing)
     content.extend(entry.encode("utf-8"))
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".",
-                               suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(bytes(content))
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    safefile.write_atomic(path, content)
 
 
 def record_walk_seen(artist_name, seen=None):

@@ -449,6 +449,7 @@ def _diagnostics():
     })
 
     stranded = []
+    copies = []
     left_in_backups = []
     stranded_error = False
     if cfg.UPGRADE_BACKUP_DIR.exists():
@@ -456,6 +457,8 @@ def _diagnostics():
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
                 if entry.is_dir() and entry.name == ".restore_trash":
                     stranded.append(entry)
+                elif entry.is_dir() and entry.name.startswith(".ql-backup-copy-"):
+                    copies.append(entry)
             left_in_backups = backup_mod.albums_left_in_backups()
         except OSError as exc:
             stranded_error = True
@@ -467,7 +470,7 @@ def _diagnostics():
             "ok": False,
             "detail": "Could not inspect this folder; its status is unknown.",
         })
-    elif stranded or left_in_backups:
+    elif stranded or copies or left_in_backups:
         found = []
         if left_in_backups:
             n = len(left_in_backups)
@@ -478,6 +481,11 @@ def _diagnostics():
         if stranded:
             found.append(f"{len(stranded)} found in "
                          f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed")
+        if copies:
+            found.append(
+                f"{plural(len(copies), 'unfinished album copy', 'unfinished album copies')} "
+                f"in {cfg.UPGRADE_BACKUP_DIR}, left when a backup stopped "
+                "while copying; compare each with its album before removing it")
         checks.append({"label": "Unfinished upgrade backups", "ok": False,
                        "detail": ". ".join(found)})
     else:

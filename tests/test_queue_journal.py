@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import safefile
 from qobuz_librarian.completion import (
     AlbumInventory,
     CompletionExpectation,
@@ -170,47 +171,27 @@ def test_durability_failures_leave_last_committed_snapshot(
     base_journals = queue_paths
     journals = base_journals.parent / "new-data" / "state" / "journals"
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", journals)
-    synced = []
-    real_fsync_directory = journal_module._fsync_directory
-    durability = {
-        "ancestor_failed": False,
-        "post_replace": False,
-        "post_replace_failed": False,
-        "replaced": False,
-    }
+    real_fsync_dir = safefile.fsync_dir
+    replaced = []
+    failed = []
 
-    def controlled_fsync(path):
-        if path == journals.parent.parent.parent and not durability["ancestor_failed"]:
-            durability["ancestor_failed"] = True
-            raise OSError("ancestor relationship not synced")
-        if (
-            path == journals
-            and durability["post_replace"]
-            and durability["replaced"]
-            and not durability["post_replace_failed"]
-        ):
-            durability["post_replace_failed"] = True
+    def controlled_fsync(path, *, strict=False):
+        if Path(path) == journals and replaced and not failed:
+            failed.append(path)
             raise OSError("replacement namespace not synced")
-        real_fsync_directory(path)
-        synced.append(path)
+        return real_fsync_dir(path, strict=strict)
 
-    monkeypatch.setattr(journal_module, "_fsync_directory", controlled_fsync)
+    monkeypatch.setattr(safefile, "fsync_dir", controlled_fsync)
     uncommitted = create_queue_journal(
         [_queue_item("First"), _queue_item("Second")],
         mode="album",
     )
-    with pytest.raises(OSError, match="ancestor relationship"):
-        save_queue_journal(uncommitted)
-
-    assert not list(journals.glob("*.json"))
-
     real_replace = journal_module.os.replace
 
     def mark_replace(source, destination):
         real_replace(source, destination)
-        durability["replaced"] = True
+        replaced.append(destination)
 
-    durability["post_replace"] = True
     monkeypatch.setattr(journal_module.os, "replace", mark_replace)
     with pytest.raises(OSError, match="replacement namespace"):
         save_queue_journal(uncommitted)
@@ -220,12 +201,6 @@ def test_durability_failures_leave_last_committed_snapshot(
 
     assert recovered.status is QueueLoadStatus.READY
     assert pending.generation == 1
-    assert {
-        journals.parent.parent.parent,
-        journals.parent.parent,
-        journals.parent,
-        journals,
-    }.issubset(synced)
     current = transition_journal_item(
         pending,
         pending.items[0].item_id,

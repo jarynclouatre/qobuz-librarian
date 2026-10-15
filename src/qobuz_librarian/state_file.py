@@ -11,18 +11,16 @@ A file that is present but unreadable (permissions, a failing disk) is left
 alone. The loader raises the read error so a caller cannot replace it with an
 empty store.
 """
-import fcntl
 import json
 import logging
 import math
 import os
 import re
-import stat
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import safefile
 
 log = logging.getLogger("qobuz_librarian")
 
@@ -53,61 +51,14 @@ def optional_time(value):
 def store_lock(path):
     """Hold an exclusive cross-process lock around one load-modify-save.
 
-    The web worker and CLI are separate processes, so a threading lock cannot
-    serialize them. The sidecar is part of the store's integrity boundary: if
-    it cannot be opened or is not the exact regular file we locked, fail before
-    the caller reads state rather than silently allowing a lost update.
+    The lock lives in a `….lock` file beside the store. If it cannot be
+    taken safely the caller fails before it reads state, rather than
+    silently allowing a lost update.
     """
     path = Path(path)
-    lock_path = path.with_name(path.name + ".lock")
-    descriptor = -1
-    locked = False
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe state-lock access is unavailable")
-        descriptor = os.open(
-            lock_path,
-            os.O_CREAT
-            | os.O_RDWR
-            | nofollow
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NONBLOCK", 0),
-            0o600,
-        )
-        held = os.fstat(descriptor)
-        named = os.stat(lock_path, follow_symlinks=False)
-        identity = (int(held.st_dev), int(held.st_ino))
-        if (
-            not stat.S_ISREG(held.st_mode)
-            or not stat.S_ISREG(named.st_mode)
-            or held.st_nlink != 1
-            or named.st_nlink != 1
-            or identity != (int(named.st_dev), int(named.st_ino))
-        ):
-            raise OSError("state-lock namespace is unsafe")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        locked = True
-
-        # The name may have changed while flock waited for another process.
-        held = os.fstat(descriptor)
-        named = os.stat(lock_path, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(named.st_mode)
-            or named.st_nlink != 1
-            or (int(held.st_dev), int(held.st_ino))
-            != (int(named.st_dev), int(named.st_ino))
-        ):
-            raise OSError("state-lock changed during acquisition")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with safefile.exclusive_lock(path.with_name(path.name + ".lock")):
         yield
-    finally:
-        if descriptor >= 0:
-            try:
-                if locked:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-            finally:
-                os.close(descriptor)
 
 
 def _identity(st):
@@ -124,49 +75,18 @@ def file_identity(path):
 
 def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None):
     """Atomically replace the store at `path` with `data` as JSON."""
-    return write_chunks(path, json.JSONEncoder(
-        ensure_ascii=ensure_ascii, indent=indent,
-        separators=separators).iterencode(data))
+    return _identity(safefile.write_json(
+        path, data, indent=indent, ensure_ascii=ensure_ascii,
+        separators=separators))
 
 
 def write_chunks(path, chunks):
     """Atomically replace the store at `path` with the text in `chunks`.
 
-    A unique temp file in the store's own directory, fsynced before the
-    rename: a fixed ".tmp" name lets two processes clobber each other's
-    half-written file into place, and an unsynced rename can leave an empty
-    store after a power cut. `load_json_object` exists to preserve that damaged
-    store. Returns the new file's `file_identity`. Raises OSError; callers keep
+    `load_json_object` exists to preserve a store a crash damaged anyway.
+    Returns the new file's `file_identity`. Raises OSError; callers keep
     their own policy for surfacing it."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".",
-                               suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            for chunk in chunks:
-                f.write(chunk)
-            f.flush()
-            os.fsync(f.fileno())
-            identity = _identity(os.fstat(f.fileno()))
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    try:
-        # Best-effort: make the rename itself durable too.
-        dfd = os.open(str(path.parent),
-                      os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
-    except OSError:
-        pass
-    return identity
+    return _identity(safefile.write_atomic(path, chunks))
 
 
 def preserve_corrupt(path, what, reason, lost):

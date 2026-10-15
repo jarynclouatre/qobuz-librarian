@@ -301,15 +301,10 @@ def _verified_import_album_dir(item):
         return None
     album_parts, directory_identities = validated_scope
 
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        return None
-    dir_flags = os.O_RDONLY | nofollow | directory | getattr(
-        os, "O_CLOEXEC", 0)
+    dir_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     leaf_flags = (
-        os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        | os.O_NONBLOCK
     )
     chain = []
     leaf_fd = None

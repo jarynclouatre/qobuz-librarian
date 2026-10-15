@@ -9,11 +9,12 @@ from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.dirfd import same_directory as _same_directory
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import lyric_fetch, rip
 from qobuz_librarian.library import candidate_premise, downsample_state
 from qobuz_librarian.quality import upgrade_state
+from qobuz_librarian.safefile import identity_record
+from qobuz_librarian.safefile import same_directory as _same_directory
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import plural
@@ -241,27 +242,11 @@ def _resolve_signatures_to_paths(signatures, search_dirs):
 
 
 def _regular_file_identity(value):
-    if not stat.S_ISREG(value.st_mode):
-        return None
-    return {
-        "device": int(value.st_dev),
-        "inode": int(value.st_ino),
-        "size": int(value.st_size),
-        "modified_ns": int(value.st_mtime_ns),
-        "changed_ns": int(value.st_ctime_ns),
-    }
+    return identity_record(value) if stat.S_ISREG(value.st_mode) else None
 
 
 def _directory_identity(value):
-    if not stat.S_ISDIR(value.st_mode):
-        return None
-    return {
-        "device": int(value.st_dev),
-        "inode": int(value.st_ino),
-        "size": int(value.st_size),
-        "modified_ns": int(value.st_mtime_ns),
-        "changed_ns": int(value.st_ctime_ns),
-    }
+    return identity_record(value) if stat.S_ISDIR(value.st_mode) else None
 
 
 def _valid_file_identity(value):
@@ -272,12 +257,7 @@ def _valid_file_identity(value):
 
 
 def _open_nofollow_directory(path, *, dir_fd=None):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow file operations are unavailable")
-    flags = os.O_RDONLY | directory | nofollow
-    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     return os.open(os.fspath(path), flags, dir_fd=dir_fd)
 
 
@@ -691,18 +671,11 @@ def write_post_import_sidecars(
         track_fd = None
         parent_identity = None
         directory_mutated = False
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        directory = getattr(os, "O_DIRECTORY", None)
-        if nofollow is None or directory is None:
-            vlog("sidecar: safe no-follow file operations unavailable")
-            failed += 1
-            continue
         try:
             parent_identity = _directory_identity(os.fstat(parent_fd))
             if parent_identity is None:
                 raise OSError("track parent is not a directory")
-            track_flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-            track_flags |= getattr(os, "O_CLOEXEC", 0)
+            track_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
             track_fd = os.open(fp.name, track_flags, dir_fd=parent_fd)
             track_identity = _regular_file_identity(os.fstat(track_fd))
             if (
@@ -811,9 +784,8 @@ def write_post_import_sidecars(
                         raise OSError(
                             f"{sidecar.name}: final sidecar identity wasn't proved"
                         )
-                    sidecar_flags = os.O_RDONLY | nofollow
-                    sidecar_flags |= getattr(os, "O_NONBLOCK", 0)
-                    sidecar_flags |= getattr(os, "O_CLOEXEC", 0)
+                    sidecar_flags = (
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
                     sidecar_fd = os.open(sidecar.name, sidecar_flags, dir_fd=parent_fd)
                     if not _held_track_is_named(
                         sidecar,
@@ -826,9 +798,7 @@ def write_post_import_sidecars(
                     sidecar_exclusion = acquire_inode_write_exclusion(sidecar_fd)
                     if sidecar_exclusion is None:
                         raise OSError(
-                            f"{sidecar.name}: sidecar is open for writing or "
-                            "cannot be protected"
-                        )
+                            f"{sidecar.name}: sidecar is not a regular file")
 
                     def sidecar_guard(
                         sidecar=sidecar,

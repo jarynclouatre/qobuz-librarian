@@ -269,13 +269,14 @@ def _diagnostics_result_notice(kind: str, body: str) -> str:
 
 def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
     """A refusal that names the backup's folder and offers to delete it
-    unchecked."""
+    unchecked, unless it is the only copy of some of its files."""
     location, _is_host = storage._resolve_host_path(str(target))
+    counts = backup_mod.files_not_back_in_album(target)
     return _diagnostics_result_notice(
         "error",
         rendering.templates.get_template("_stuck_backup_notice.html").render(
             request=request, headline=headline, location=location,
-            name=target.name),
+            name=target.name, only_copy=bool(counts and counts[0])),
     )
 
 
@@ -287,12 +288,27 @@ def _unreadable_record_notice(request: Request, target: Path) -> str:
         "untouched.")
 
 
-def _restore_refused_notice(request: Request, target: Path, origin) -> str:
+def _restore_refused_notice(request: Request, target: Path, origin, *,
+                            complete=True, replaced=False) -> str:
     """Say why an upgrade restore refused, in the figures it refused on."""
     backup_size = backup_mod.album_tree_size(target)
     origin_size = backup_mod.album_tree_size(origin) if origin else None
     origin_display, _is_host = storage._resolve_host_path(str(origin or ""))
-    if (backup_size and origin_size
+    counts = (None if complete or not origin_size
+              else backup_mod.files_not_back_in_album(target, compare=True))
+    if replaced:
+        headline = (
+            f"{origin_display} was replaced by a newer album after this "
+            "backup was made. The backup holds the earlier original files, so "
+            "it was kept. Copy what you want from it, then remove its folder "
+            "yourself.")
+    elif counts and counts[1]:
+        headline = (
+            f"{plural(counts[1], 'file')} in {origin_display} "
+            f"{'differs' if counts[1] == 1 else 'differ'} from this backup's "
+            "copy, so both were kept: the album keeps its own and the backup "
+            "keeps the original.")
+    elif (complete and backup_size and origin_size
             and origin_size[1] >= backup_size[1] > 0):
         headline = (
             f"{origin_display} now holds "
@@ -365,7 +381,13 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
         if refusal:
             return refusal
         location, _is_host = storage._resolve_host_path(str(target))
-        if backup_mod.discard_backup_unchecked(target):
+        counts = backup_mod.files_not_back_in_album(target)
+        if counts and counts[0]:
+            note = _diagnostics_result_notice(
+                "error", f"This backup holds {plural(counts[0], 'file')} "
+                "your album folder doesn't have, so it is their only copy "
+                "and was kept.")
+        elif backup_mod.discard_backup_unchecked(target):
             note = _diagnostics_result_notice(
                 "success", "Deleted the backup.")
         else:
@@ -473,7 +495,10 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                     "flag the recovery; do not run Restore again until the "
                     "data volume has been checked.")
             else:
-                note = _restore_refused_notice(request, target, origin)
+                note = _restore_refused_notice(
+                    request, target, origin, complete=carried.complete,
+                    replaced=not carried.complete
+                    and backup_mod.album_folder_replaced(carried))
         else:
             note = _diagnostics_result_notice(
                 "error", "This backup has an unsupported recovery record, so "

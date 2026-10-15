@@ -3,12 +3,11 @@ import json
 import math
 import os
 import stat
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import run_lock
+from qobuz_librarian import run_lock, safefile
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
     clear_attempts_after_import,
@@ -633,7 +632,7 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
     companions left in the backup because the replacement has a different
     file of that name. Callers must use the path and receipt for the final
     held-view disposal decision, and keep the backup while anything was left
-    in it. Any changed name, symlink, active writer, or uncertain durability
+    in it. Any changed name, symlink, changed file, or uncertain durability
     keeps the backup and returns ``None``.
     """
     dest = replacement_dir
@@ -681,30 +680,18 @@ def _keep_own_cover(backup, staged_dirs):
             continue
         for image in images:
             own = Path(backup) / image.relative_to(staged)
-            temporary = None
             try:
                 if own.is_symlink() or not own.is_file():
                     continue
                 data = own.read_bytes()
                 if data == image.read_bytes():
                     continue
-                descriptor, temporary = tempfile.mkstemp(
-                    dir=image.parent, prefix=".ql-own-cover-")
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(data)
-                    os.fchmod(handle.fileno(),
-                              stat.S_IMODE(image.stat().st_mode))
-                os.replace(temporary, image)
-                temporary = None
+                safefile.write_atomic(
+                    image, data, mode=stat.S_IMODE(image.stat().st_mode),
+                    prefix=".ql-own-cover-")
                 kept += 1
             except OSError as e:
                 vlog(f"couldn't stage your own {image.name}: {e}")
-            finally:
-                if temporary is not None:
-                    try:
-                        os.unlink(temporary)
-                    except OSError:
-                        pass
     if kept:
         log.info(fmt(C.GRAY, "  ⤷  Kept your own cover art for the album."))
 

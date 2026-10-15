@@ -1,4 +1,5 @@
 """Album consolidation - find and remove duplicate sibling folders."""
+import functools
 import math
 import os
 import re
@@ -8,8 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from qobuz_librarian import config
-from qobuz_librarian.dirfd import digest_fd as _digest_fd
-from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import beets as beets_integration
 from qobuz_librarian.library import backup as backup_mod
@@ -28,6 +27,9 @@ from qobuz_librarian.library.tags import (
     strip_album_decorations,
 )
 from qobuz_librarian.quality.decision import quality_change_summary
+from qobuz_librarian.safefile import digest_fd as _digest_fd
+from qobuz_librarian.safefile import named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import plural
@@ -67,18 +69,7 @@ def _same_held_file(descriptor, expected, *, moved=False):
     return all(current.get(field) == expected.get(field) for field in fields)
 
 
-def _named_file_matches(parent_fd, name, descriptor):
-    try:
-        held = os.fstat(descriptor)
-        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError:
-        return False
-    return (
-        stat.S_ISREG(held.st_mode)
-        and stat.S_ISREG(named.st_mode)
-        and (int(held.st_dev), int(held.st_ino))
-        == (int(named.st_dev), int(named.st_ino))
-    )
+_named_file_matches = functools.partial(named_entry_matches, directory=False)
 
 
 def _metadata_from_held_file(descriptor, path):
@@ -321,13 +312,10 @@ class _AlbumSeal:
 
 
 def _open_held_file(parent_fd, name):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe consolidation file access is unavailable")
     descriptor = os.open(
         name,
-        os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0),
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        | os.O_NONBLOCK,
         dir_fd=parent_fd,
     )
     try:
@@ -381,7 +369,7 @@ def _populate_album_seal(seal):
                     lease = acquire_inode_write_exclusion(descriptor)
                     if lease is None or not lease.intact():
                         raise OSError(
-                            f"audio file has an active or uncertain writer: {child_path}")
+                            f"audio file changed while it was opened: {child_path}")
                     metadata = _metadata_from_held_file(descriptor, child_path)
                     if (
                         not lease.intact()
@@ -942,7 +930,7 @@ class _BeetsItemSeal:
                     and not isinstance(exc, Exception)
                 ):
                     caught = exc
-                elif hasattr(caught, "add_note"):
+                else:
                     caught.add_note(
                         "SQLite transaction cleanup also failed")
         if caught is not None:

@@ -1,5 +1,4 @@
 """Ownership records for downloaded files and their safe removal."""
-import ctypes
 import errno
 import logging
 import os
@@ -10,23 +9,14 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
+from qobuz_librarian.safefile import fsync_dirs, rename_noreplace
+from qobuz_librarian.safefile import identity_record as _owned_file_identity
 
 _log = logging.getLogger("qobuz_librarian")
 
 
 def _file_identity(st) -> list[int]:
     return [int(st.st_dev), int(st.st_ino)]
-
-
-def _owned_file_identity(st) -> dict[str, int]:
-    # Inodes can be recycled after a file is replaced.
-    return {
-        "device": int(st.st_dev),
-        "inode": int(st.st_ino),
-        "size": int(st.st_size),
-        "modified_ns": int(st.st_mtime_ns),
-        "changed_ns": int(st.st_ctime_ns),
-    }
 
 
 def _owned_directory_cleanup_entry(st, *, created) -> dict[str, int | bool]:
@@ -67,11 +57,7 @@ def _ownership_identity_matches(st, expected):
 
 def _open_directory_nofollow(path, *, dir_fd=None):
     """Open one real directory without following a symlink."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow directory access is unavailable")
-    flags = os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     return os.open(path, flags, dir_fd=dir_fd)
 
 
@@ -235,32 +221,6 @@ def _close_owned_unlink_plan(plan):
             pass
 
 
-def _ownership_rename_noreplace(
-        first_parent_fd, first, second_parent_fd, second):
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError:
-        raise OSError(
-            errno.ENOTSUP, "atomic no-overwrite rename is unavailable") from None
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    if renameat2(
-            first_parent_fd,
-            os.fsencode(first),
-            second_parent_fd,
-            os.fsencode(second),
-            1,
-    ):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
-
-
 _INVALID_OWNED_DELETION = object()
 _OWNED_QUARANTINE_NAME = re.compile(
     r"^\.ql-undo-(?:file|dir)-[0-9a-f]{32}$")
@@ -326,21 +286,6 @@ def _ownership_stable_matches(st, expected, *, directory=False):
             for field in ("device", "inode", "size", "modified_ns")
         )
     )
-
-
-def _fsync_owned_directories(*descriptors):
-    synced = set()
-    for descriptor in descriptors:
-        if descriptor is None:
-            continue
-        current = os.fstat(descriptor)
-        if not stat.S_ISDIR(current.st_mode):
-            raise OSError(errno.ENOTDIR, "Undo anchor is not a directory")
-        identity = (int(current.st_dev), int(current.st_ino))
-        if identity in synced:
-            continue
-        os.fsync(descriptor)
-        synced.add(identity)
 
 
 def _owned_unlink_plan(root, owned):
@@ -425,17 +370,14 @@ def _owned_unlink_plan(root, owned):
             if parent_fds[0] is not None and cleanup_records is not None
             else None
         )
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe no-follow file access is unavailable")
         leaf_fd = None
         try:
             leaf_fd = os.open(
                 rel.parts[-1],
                 os.O_RDONLY
-                | nofollow
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK
+                | os.O_CLOEXEC,
                 dir_fd=current,
             )
         except FileNotFoundError:
@@ -531,16 +473,13 @@ def _open_owned_leaf_quarantine(plan):
             or _owned_file_identity(current) != _owned_file_identity(named)
         ):
             raise ValueError("quarantine directory changed")
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe no-follow file access is unavailable")
         try:
             held_fd = os.open(
                 "held",
                 os.O_RDONLY
-                | nofollow
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK
+                | os.O_CLOEXEC,
                 dir_fd=quarantine_fd,
             )
         except FileNotFoundError:
@@ -649,7 +588,7 @@ def _remove_owned_leaf_quarantine(plan, snapshot):
             plan["deletion"]["quarantine"],
             dir_fd=plan["leaf_parent"],
         )
-        _fsync_owned_directories(plan["leaf_parent"])
+        fsync_dirs(plan["leaf_parent"])
         return True
     except (OSError, TypeError, ValueError):
         return False
@@ -667,7 +606,7 @@ def _restore_owned_leaf_from_intent(
     previous_file = dict(plan["file"])
     moved = False
     try:
-        _ownership_rename_noreplace(
+        rename_noreplace(
             snapshot["fd"],
             "held",
             plan["leaf_parent"],
@@ -685,7 +624,7 @@ def _restore_owned_leaf_from_intent(
             or not _ownership_stable_matches(restored, plan["file"])
         ):
             raise OSError("restored Undo leaf changed")
-        _fsync_owned_directories(snapshot["fd"], plan["leaf_parent"])
+        fsync_dirs(snapshot["fd"], plan["leaf_parent"])
         plan["owned"]["file"] = _owned_file_identity(restored)
         plan["file"] = plan["owned"]["file"]
         plan["deletion"]["state"] = "intent"
@@ -693,7 +632,7 @@ def _restore_owned_leaf_from_intent(
         if _record_owned_progress(progress):
             return {"status": "restored", "mutated": True}
         try:
-            _ownership_rename_noreplace(
+            rename_noreplace(
                 plan["leaf_parent"],
                 plan["leaf_name"],
                 snapshot["fd"],
@@ -709,7 +648,7 @@ def _restore_owned_leaf_from_intent(
                     held_again, previous_file)
             ):
                 raise OSError("rolled-back Undo leaf changed")
-            _fsync_owned_directories(
+            fsync_dirs(
                 snapshot["fd"], plan["leaf_parent"])
             plan["owned"]["file"] = previous_file
             plan["file"] = previous_file
@@ -721,13 +660,13 @@ def _restore_owned_leaf_from_intent(
     except (OSError, TypeError, ValueError):
         if moved:
             try:
-                _ownership_rename_noreplace(
+                rename_noreplace(
                     plan["leaf_parent"],
                     plan["leaf_name"],
                     snapshot["fd"],
                     "held",
                 )
-                _fsync_owned_directories(
+                fsync_dirs(
                     snapshot["fd"], plan["leaf_parent"])
             except OSError:
                 pass
@@ -808,7 +747,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                 _refresh_owned_cleanup_records(cleanup_plan)
             else:
                 try:
-                    _fsync_owned_directories(plan["leaf_parent"])
+                    fsync_dirs(plan["leaf_parent"])
                 except OSError:
                     return {"status": "held", "mutated": False}
             deletion["state"] = "removed"
@@ -824,7 +763,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                     0o700,
                     dir_fd=plan["leaf_parent"],
                 )
-                _fsync_owned_directories(plan["leaf_parent"])
+                fsync_dirs(plan["leaf_parent"])
             except OSError:
                 return {"status": "refused", "mutated": False}
             _refresh_owned_cleanup_records(cleanup_plan)
@@ -857,7 +796,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                 ):
                     raise ValueError(
                         "public leaf changed after deletion intent")
-                _ownership_rename_noreplace(
+                rename_noreplace(
                     plan["leaf_parent"],
                     plan["leaf_name"],
                     snapshot["fd"],
@@ -873,12 +812,12 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                 ):
                     raise ValueError("public leaf changed at quarantine")
                 validated_moved = True
-                _fsync_owned_directories(
+                fsync_dirs(
                     snapshot["fd"], plan["leaf_parent"])
             except (OSError, TypeError, ValueError):
                 if moved_public:
                     try:
-                        _ownership_rename_noreplace(
+                        rename_noreplace(
                             snapshot["fd"],
                             "held",
                             plan["leaf_parent"],
@@ -897,7 +836,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                                 restored, plan["file"])
                         ):
                             raise OSError("restored Undo leaf changed")
-                        _fsync_owned_directories(
+                        fsync_dirs(
                             snapshot["fd"], plan["leaf_parent"])
                         rolled_back = True
                     except (OSError, TypeError, ValueError):
@@ -924,7 +863,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                                 current, refreshed_file)
                         ):
                             raise OSError("restored Undo leaf changed")
-                        _ownership_rename_noreplace(
+                        rename_noreplace(
                             plan["leaf_parent"],
                             plan["leaf_name"],
                             snapshot["fd"],
@@ -943,7 +882,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
                                 held_again, refreshed_file)
                         ):
                             raise OSError("re-quarantined Undo leaf changed")
-                        _fsync_owned_directories(
+                        fsync_dirs(
                             snapshot["fd"], plan["leaf_parent"])
                         plan["owned"]["file"] = previous_file
                         plan["file"] = previous_file
@@ -989,7 +928,7 @@ def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
             if exclusion is None or not exclusion.intact():
                 return {"status": "held", "mutated": False}
             os.unlink("held", dir_fd=snapshot["fd"])
-            _fsync_owned_directories(snapshot["fd"])
+            fsync_dirs(snapshot["fd"])
         except (OSError, TypeError, ValueError):
             # Keep the exact leaf under its persisted private name.
             return {"status": "held", "mutated": False}
@@ -1068,7 +1007,7 @@ def _restore_owned_directory(
     }
     previous_state = deletion["state"]
     try:
-        _ownership_rename_noreplace(
+        rename_noreplace(
             parent_fd, deletion["quarantine"], parent_fd, name)
     except OSError:
         record.update(_owned_file_identity(os.fstat(held_fd)))
@@ -1077,13 +1016,13 @@ def _restore_owned_directory(
         _record_owned_progress(progress)
         return "retry"
     try:
-        _fsync_owned_directories(parent_fd)
+        fsync_dirs(parent_fd)
     except OSError:
         state = "intent"
         try:
-            _ownership_rename_noreplace(
+            rename_noreplace(
                 parent_fd, name, parent_fd, deletion["quarantine"])
-            _fsync_owned_directories(parent_fd)
+            fsync_dirs(parent_fd)
             state = "held"
         except OSError:
             pass
@@ -1114,7 +1053,7 @@ def _restore_owned_directory(
         if persisted:
             return "skipped" if terminal_skip else "retry"
         try:
-            _ownership_rename_noreplace(
+            rename_noreplace(
                 parent_fd, name, parent_fd, deletion["quarantine"])
             held_again = os.fstat(held_fd)
             named_again = os.stat(
@@ -1129,7 +1068,7 @@ def _restore_owned_directory(
                     held_again, previous_identity, directory=True)
             ):
                 raise OSError("rolled-back Undo directory changed")
-            _fsync_owned_directories(parent_fd)
+            fsync_dirs(parent_fd)
             record.update(previous_identity)
             deletion["state"] = previous_state
             _refresh_open_directory_records(opened, include_last=False)
@@ -1248,7 +1187,7 @@ def _cleanup_one_owned_directory(chain, index, progress):
 
         if not public_exists and quarantine_fd is None:
             try:
-                _fsync_owned_directories(parent_fd)
+                fsync_dirs(parent_fd)
             except OSError:
                 return "retry"
             deletion["state"] = "removed"
@@ -1279,7 +1218,7 @@ def _cleanup_one_owned_directory(chain, index, progress):
                 ):
                     raise ValueError(
                         "public directory changed after deletion intent")
-                _ownership_rename_noreplace(
+                rename_noreplace(
                     parent_fd,
                     chain["names"][index],
                     parent_fd,
@@ -1299,11 +1238,11 @@ def _cleanup_one_owned_directory(chain, index, progress):
                 ):
                     raise ValueError("public directory changed at quarantine")
                 validated_moved = True
-                _fsync_owned_directories(parent_fd)
+                fsync_dirs(parent_fd)
             except (OSError, TypeError, ValueError):
                 if moved_public:
                     try:
-                        _ownership_rename_noreplace(
+                        rename_noreplace(
                             parent_fd,
                             deletion["quarantine"],
                             parent_fd,
@@ -1322,7 +1261,7 @@ def _cleanup_one_owned_directory(chain, index, progress):
                                 restored, record, directory=True)
                         ):
                             raise OSError("restored Undo directory changed")
-                        _fsync_owned_directories(parent_fd)
+                        fsync_dirs(parent_fd)
                         rolled_back = True
                     except (OSError, TypeError, ValueError):
                         pass
@@ -1353,7 +1292,7 @@ def _cleanup_one_owned_directory(chain, index, progress):
                                 current, refreshed_identity)
                         ):
                             raise OSError("restored Undo directory changed")
-                        _ownership_rename_noreplace(
+                        rename_noreplace(
                             parent_fd,
                             chain["names"][index],
                             parent_fd,
@@ -1376,7 +1315,7 @@ def _cleanup_one_owned_directory(chain, index, progress):
                         ):
                             raise OSError(
                                 "re-quarantined Undo directory changed")
-                        _fsync_owned_directories(parent_fd)
+                        fsync_dirs(parent_fd)
                         record.update(previous_identity)
                         deletion["state"] = previous_state
                         _refresh_open_directory_records(
@@ -1410,7 +1349,7 @@ def _cleanup_one_owned_directory(chain, index, progress):
             ):
                 return "refused"
             os.rmdir(deletion["quarantine"], dir_fd=parent_fd)
-            _fsync_owned_directories(parent_fd)
+            fsync_dirs(parent_fd)
         except OSError as exc:
             return _restore_owned_directory(
                 parent_fd,

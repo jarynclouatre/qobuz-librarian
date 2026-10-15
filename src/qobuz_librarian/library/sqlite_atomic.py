@@ -12,6 +12,7 @@ import base64
 import ctypes
 import errno
 import fcntl
+import functools
 import hashlib
 import io
 import json
@@ -26,10 +27,11 @@ import threading
 import time
 import weakref
 
-from qobuz_librarian.dirfd import digest_fd as _descriptor_digest
-from qobuz_librarian.file_exclusion import _LeaseSignalTarget
+from qobuz_librarian.safefile import digest_fd as _descriptor_digest
+from qobuz_librarian.safefile import named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _name_missing
+from qobuz_librarian.safefile import rename_exchange as _rename_exchange
 
-_RENAME_EXCHANGE = 2
 _SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _RECEIPT_NAME = "receipt.json"
 _RECEIPT_VERSION = 1
@@ -79,28 +81,7 @@ def _identity(value):
     return int(value.st_dev), int(value.st_ino)
 
 
-def _named_entry_matches(directory_fd, name, descriptor, *, directory=False):
-    try:
-        held = os.fstat(descriptor)
-        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except OSError:
-        return False
-    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
-    return (
-        expected_type(held.st_mode)
-        and expected_type(named.st_mode)
-        and _identity(held) == _identity(named)
-    )
-
-
-def _name_missing(directory_fd, name):
-    try:
-        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
+_named_entry_matches = functools.partial(named_entry_matches, directory=False)
 
 
 def canonical_sidecars_clear(anchor):
@@ -280,9 +261,9 @@ def _receipt_payload_is_valid(payload, anchor, private_name):
 def _read_receipt(directory_fd, anchor, private_name):
     flags = (
         os.O_RDONLY
-        | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
+        | os.O_NONBLOCK
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC
     )
     descriptor = os.open(_RECEIPT_NAME, flags, dir_fd=directory_fd)
     try:
@@ -328,15 +309,9 @@ def _open_sqlite_child_lease(record):
     """Open the named lock whose open description may cross a child exec."""
     descriptor = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError(
-                errno.ENOSYS,
-                "SQLite child exclusion is unavailable",
-            )
         descriptor = os.open(
             _CHILD_LEASE_NAME,
-            os.O_CREAT | os.O_RDWR | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o600,
             dir_fd=record["descriptor"],
         )
@@ -481,25 +456,6 @@ def _finalize_sqlite_database_exclusion_state(state):
         pass
 
 
-def _reset_sqlite_database_exclusions_after_fork():
-    global _SQLITE_DATABASE_EXCLUSIONS_LOCK
-    records = tuple(_SQLITE_DATABASE_EXCLUSIONS.values())
-    _SQLITE_DATABASE_EXCLUSIONS.clear()
-    _SQLITE_DATABASE_EXCLUSIONS_LOCK = threading.RLock()
-    for record in records:
-        try:
-            # The child inherited the parent's open-file description. Closing
-            # its copy leaves the parent's lock intact; LOCK_UN here would not.
-            os.close(record["descriptor"])
-        except OSError:
-            pass
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(
-        after_in_child=_reset_sqlite_database_exclusions_after_fork)
-
-
 class _SQLiteDatabaseExclusion:
     """Cooperatively serialize access to one SQLite database directory."""
 
@@ -522,11 +478,6 @@ class _SQLiteDatabaseExclusion:
                 self._state,
             )
         self.release_error = None
-        if not hasattr(fcntl, "flock") or os.name != "posix":
-            raise OSError(
-                errno.ENOSYS,
-                "SQLite database exclusion is unavailable",
-            )
         parent = os.fstat(parent_fd)
         if not stat.S_ISDIR(parent.st_mode):
             raise OSError("SQLite database parent is not a directory")
@@ -578,7 +529,7 @@ class _SQLiteDatabaseExclusion:
                         f"/proc/self/fd/{parent_fd}",
                         os.O_RDONLY
                         | os.O_DIRECTORY
-                        | getattr(os, "O_CLOEXEC", 0),
+                        | os.O_CLOEXEC,
                     )
                     record["descriptor"] = descriptor
                     held = os.fstat(descriptor)
@@ -644,7 +595,7 @@ class _SQLiteDatabaseExclusion:
             except BaseException as exc:
                 cleanup_error = _release_sqlite_database_exclusion_state(
                     self._state)
-                if cleanup_error is not None and hasattr(exc, "add_note"):
+                if cleanup_error is not None:
                     exc.add_note(
                         "SQLite database exclusion cleanup also failed")
                 if (
@@ -759,6 +710,251 @@ class _SQLiteDatabaseExclusion:
         return error, proven and error is None
 
 
+# Lease breaks are signalled with SIGIO. One shared thread blocks and waits
+# for it, so the process-wide signal handler stays as it is.
+class _LeaseSignalTarget:
+    _shared_lock = threading.RLock()
+    _shared: "_LeaseSignalTarget | None" = None
+
+    def __init__(self):
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._failed = False
+        self._references = set()
+        self.tid: int | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name="ql-file-lease-signal",
+            # Kernel teardown closes every process fd and therefore every
+            # lease.  A forgotten main-module owner must never make this
+            # process-local signal receiver hold interpreter exit hostage.
+            daemon=True,
+        )
+
+    @classmethod
+    def acquire(cls) -> "_LeaseSignalReference | None":
+        reference = None
+        try:
+            with cls._shared_lock:
+                target = cls._shared
+                if target is not None:
+                    if not target.usable():
+                        return None
+                    reference = _LeaseSignalReference(target)
+                    reference._arm_locked()
+            if reference is not None:
+                return reference
+        except BaseException:
+            if reference is not None:
+                reference.close()
+            raise
+
+        # Starting and stopping a thread can join it.  Neither is allowed
+        # while holding _shared_lock because the receiver also takes that lock
+        # during self-reaping.  Concurrent starters are harmless: publication
+        # below selects one winner and deterministically shuts down the rest.
+        new_target = cls()
+        reference = None
+        winner_reference = None
+        published = False
+        try:
+            reference = _LeaseSignalReference(new_target)
+            with cls._shared_lock:
+                reference._arm_locked()
+            if not new_target._start():
+                reference.close()
+                reference = None
+                return None
+
+            with cls._shared_lock:
+                target = cls._shared
+                if target is None:
+                    cls._shared = new_target
+                    published = True
+                elif target.usable():
+                    winner_reference = _LeaseSignalReference(target)
+                    winner_reference._arm_locked()
+
+            if published:
+                return reference
+            reference.close()
+            reference = None
+            return winner_reference
+        except BaseException:
+            if winner_reference is not None:
+                winner_reference.close()
+            if reference is not None:
+                reference.close()
+            raise
+        finally:
+            if not published:
+                new_target._shutdown()
+
+    def _start(self) -> bool:
+        try:
+            self._thread.start()
+        except RuntimeError:
+            self._shutdown()
+            return False
+        except BaseException:
+            self._shutdown()
+            raise
+        try:
+            if not self._ready.wait(timeout=2) or not self.usable():
+                self._shutdown()
+                return False
+            return True
+        except BaseException:
+            self._shutdown()
+            raise
+
+    def _run(self) -> None:
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGIO})
+            self.tid = threading.get_native_id()
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            self._failed = True
+            self._ready.set()
+            return
+        self._ready.set()
+        while not self._stop.is_set():
+            try:
+                signal.sigtimedwait({signal.SIGIO}, 0.05)
+            except InterruptedError:
+                continue
+            except (AttributeError, OSError, RuntimeError, ValueError):
+                self._failed = True
+                return
+
+            # A lost return value must not strand a live receiver.  The target
+            # owns only weak owner references, so it can reap itself even when
+            # finalisation was interrupted before explicit release.
+            with self._shared_lock:
+                self._prune_references_locked()
+                if not self._references:
+                    self._stop.set()
+                    if type(self)._shared is self:
+                        type(self)._shared = None
+                    return
+
+    def usable(self) -> bool:
+        return (
+            not self._failed
+            and not self._stop.is_set()
+            and self.tid is not None
+            and self._thread.is_alive()
+        )
+
+    def _prune_references_locked(self) -> None:
+        retained = set()
+        for reference in self._references:
+            owner = reference()
+            if (
+                owner is not None
+                and not owner.closing
+                and owner.finalizer_alive
+            ):
+                retained.add(reference)
+        self._references = retained
+
+    def _register_locked(self, reference) -> None:
+        self._prune_references_locked()
+        self._references.add(weakref.ref(reference))
+
+    def release(self, token) -> None:
+        thread = None
+        with self._shared_lock:
+            retained = set()
+            for reference in self._references:
+                owner = reference()
+                if (
+                    owner is not None
+                    and owner._token is not token
+                    and not owner.closing
+                    and owner.finalizer_alive
+                ):
+                    retained.add(reference)
+            self._references = retained
+            if self._references:
+                return
+            self._stop.set()
+            if type(self)._shared is self:
+                type(self)._shared = None
+            thread = self._thread
+        if (
+            thread.ident is not None
+            and threading.current_thread() is not thread
+        ):
+            thread.join()
+
+    def _shutdown(self) -> None:
+        self._stop.set()
+        if (
+            self._thread.ident is not None
+            and threading.current_thread() is not self._thread
+        ):
+            self._thread.join()
+        with self._shared_lock:
+            if type(self)._shared is self:
+                type(self)._shared = None
+
+
+class _LeaseReferenceToken:
+    pass
+
+
+class _LeaseSignalReference:
+    """One finalisable ownership token for the shared signal target."""
+
+    def __init__(self, target: _LeaseSignalTarget):
+        self._target = target
+        self._token = _LeaseReferenceToken()
+        self._closing = False
+        self._closed = False
+        self._finalizer = weakref.finalize(
+            self,
+            target.release,
+            self._token,
+        )
+
+    def _arm_locked(self) -> None:
+        # The finaliser already owns the token before registration.  An
+        # asynchronous exception immediately after registration therefore
+        # unwinds through an owner that can release it.
+        self._target._register_locked(self)
+
+    @property
+    def closing(self) -> bool:
+        return self._closing or self._closed
+
+    @property
+    def finalizer_alive(self) -> bool:
+        return self._finalizer.alive
+
+    @property
+    def tid(self) -> int | None:
+        return self._target.tid
+
+    def usable(self) -> bool:
+        return (
+            not self.closing
+            and self._finalizer.alive
+            and self._target.usable()
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        # Publish the closing state before the potentially interruptible join.
+        # The target's own thread prunes closing references, so a retained
+        # traceback cannot keep the signal target alive after an interrupted
+        # explicit close.
+        self._closing = True
+        self._target.release(self._token)
+        self._closed = True
+        self._finalizer.detach()
+
+
 class _FileLeaseState:
     def __init__(self):
         self.records = []
@@ -869,12 +1065,7 @@ class _FileLeases:
             raise
 
     def acquire(self):
-        required = (
-            hasattr(fcntl, "F_SETLEASE")
-            and hasattr(fcntl, "F_GETLEASE")
-            and hasattr(fcntl, "F_SETSIG")
-        )
-        if not required or os.name != "posix" or not os.path.isdir("/proc/self/fd"):
+        if not os.path.isdir("/proc/self/fd"):
             raise OSError("safe SQLite publication requires Linux file leases")
         if self._acquisition_started or not self._state.records:
             raise OSError("SQLite lease acquisition is not available")
@@ -969,9 +1160,9 @@ def _recovery_prefix(anchor):
 def _open_regular(directory_fd, name):
     flags = (
         os.O_RDONLY
-        | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
+        | os.O_NONBLOCK
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC
     )
     descriptor = os.open(name, flags, dir_fd=directory_fd)
     if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -991,8 +1182,8 @@ def _open_recovery_directory(parent_fd, name):
         name,
         os.O_RDONLY
         | os.O_DIRECTORY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0),
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC,
         dir_fd=parent_fd,
     )
     value = os.fstat(descriptor)
@@ -1337,30 +1528,6 @@ def _require_security_metadata(
         raise OSError("SQLite database xattrs changed while cloning")
 
 
-def _rename_exchange(source_fd, source, destination_fd, destination):
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    if renameat2(
-        source_fd,
-        os.fsencode(source),
-        destination_fd,
-        os.fsencode(destination),
-        _RENAME_EXCHANGE,
-    ):
-        value = ctypes.get_errno()
-        raise OSError(value, os.strerror(value))
-
-
 def _backup_target(connection):
     target = connection
     seen = set()
@@ -1474,8 +1641,8 @@ class AtomicSQLiteWrite:
                     name,
                     os.O_RDONLY
                     | os.O_DIRECTORY
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
+                    | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
                     dir_fd=self.parent_fd,
                 )
                 if not _named_entry_matches(
@@ -1562,8 +1729,8 @@ class AtomicSQLiteWrite:
                 os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
                 0o600,
                 dir_fd=self.private_fd,
             )
@@ -1673,8 +1840,8 @@ class AtomicSQLiteWrite:
             os.O_WRONLY
             | os.O_CREAT
             | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
             0o600,
             dir_fd=self.private_fd,
         )
@@ -2066,17 +2233,15 @@ class AtomicSQLiteWrite:
                 isinstance(active_error, Exception)
                 and not isinstance(cleanup_error, Exception)
             ):
-                if hasattr(cleanup_error, "add_note"):
-                    cleanup_error.add_note(
-                        "SQLite transaction also failed before cleanup; "
-                        "publication state is uncertain"
-                    )
-                raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-            if hasattr(active_error, "add_note"):
-                active_error.add_note(
-                    "SQLite transaction cleanup also failed; "
+                cleanup_error.add_note(
+                    "SQLite transaction also failed before cleanup; "
                     "publication state is uncertain"
                 )
+                raise cleanup_error.with_traceback(cleanup_error.__traceback__)
+            active_error.add_note(
+                "SQLite transaction cleanup also failed; "
+                "publication state is uncertain"
+            )
             return
         if not isinstance(cleanup_error, Exception):
             raise cleanup_error.with_traceback(cleanup_error.__traceback__)

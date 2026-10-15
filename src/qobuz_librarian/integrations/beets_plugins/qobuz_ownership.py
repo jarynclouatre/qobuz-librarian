@@ -28,12 +28,12 @@ from qobuz_librarian.integrations.beets import (
     _ownership_relative_parts,
     _reclaim_ownership_directories,
     _remove_exact_ownership_marker,
-    _rename_ownership_noreplace,
     _staged_identity,
     _valid_managed_snapshot,
     _write_managed_snapshot,
 )
 from qobuz_librarian.recovery import decode_recovery_json
+from qobuz_librarian.safefile import rename_noreplace
 
 _MANIFEST_FD_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_FD"
 _NONCE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_NONCE"
@@ -777,7 +777,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             ):
                 raise OSError("ownership parent chain changed")
             try:
-                _rename_ownership_noreplace(
+                rename_noreplace(
                     parent_fd, temporary_name, parent_fd, public_name
                 )
             except FileExistsError:

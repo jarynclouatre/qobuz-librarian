@@ -3204,11 +3204,13 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
 
     # A hard stop can also land while the album is half way into its
     # backup: renamed but not yet sealed, or copied to another filesystem
-    # with its folder part removed. Both come back on the next start, and
-    # the reviews of the one rebuilt from the copy are sealed again.
+    # with its folder part removed, or Ctrl-C there, which lets the removal
+    # finish. All come back on the next start, and the reviews of the ones
+    # rebuilt from the copy are sealed again.
     moved = root / "music" / "Artist" / "Moved (2022)"
     copied = root / "music" / "Artist" / "Copied (2023)"
-    for album in (moved, copied):
+    interrupted = root / "music" / "Artist" / "Interrupted (2025)"
+    for album in (moved, copied, interrupted):
         album.mkdir()
         (album / "01 - Song.flac").write_bytes(b"one")
         (album / "02 - Song.flac").write_bytes(b"two")
@@ -3229,6 +3231,20 @@ elif album.endswith("Renamed (2024)"):
     backup_mod.restore_upgrade_backup(
         backup_mod.load_backup_result(path), Path(album))
     os._exit(92)
+elif album.endswith("Interrupted (2025)"):
+    backup_mod._same_filesystem = lambda *_args: False
+    unlink = os.unlink
+
+    def unlink_then_interrupt(*args, **kwargs):
+        unlink(*args, **kwargs)
+        os.unlink = unlink
+        raise KeyboardInterrupt
+
+    os.unlink = unlink_then_interrupt
+    try:
+        backup_mod.backup_album_dir(Path(album))
+    except KeyboardInterrupt:
+        os._exit(91)
 else:
     backup_mod._same_filesystem = lambda *_args: False
     unlink = backup_mod._unlink_exact_at
@@ -3242,27 +3258,32 @@ backup_mod.backup_album_dir(Path(album))
 os._exit(92)
 """
     child_home = str(tmp_path / "child")
-    for album in (moved, copied):
+    for album in (moved, copied, interrupted):
         stopped = subprocess.run(
             [sys.executable, "-c", script, str(root / "music"),
              str(root / "backups"), str(album)],
             env={**os.environ, "DATA_DIR": child_home, "HOME": child_home})
         assert stopped.returncode == 91
         assert not album.exists()
+    only_copy = next(path for path, origin in backup_mod.albums_left_in_backups()
+                     if origin == interrupted)
+    assert not backup_mod.discard_backup_unchecked(only_copy)
     resealed = []
     monkeypatch.setattr(backup_mod, "on_restored",
                         lambda receipt: resealed.append(receipt["origin"]))
     lifespan._put_back_albums_left_in_backups()
-    assert runtime.take_restored_albums() == [moved, copied]
-    assert resealed == [str(copied)]
-    for album in (moved, copied):
+    assert sorted(runtime.take_restored_albums()) == [
+        copied, interrupted, moved]
+    assert sorted(resealed) == [str(copied), str(interrupted)]
+    for album in (moved, copied, interrupted):
         assert sorted(p.name for p in album.iterdir()) == [
             "01 - Song.flac", "02 - Song.flac"]
         assert (album / "02 - Song.flac").read_bytes() == b"two"
     assert sorted(p.name for p in (root / "backups").iterdir()) == [
         kept.name]
     assert sorted(p.name for p in (root / "music" / "Artist").iterdir()) == [
-        "Album (2020)", "Copied (2023)", "Moved (2022)", "Other (2021)"]
+        "Album (2020)", "Copied (2023)", "Interrupted (2025)", "Moved (2022)",
+        "Other (2021)"]
 
     # A hard stop after a restore renamed an album home but before it took
     # the backup's own files out of it; the next start removes them.

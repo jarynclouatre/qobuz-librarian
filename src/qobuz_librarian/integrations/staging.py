@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
@@ -23,9 +21,13 @@ from qobuz_librarian.recovery import (
     normalise_recovery_owner,
     recovery_owner_matches,
 )
+from qobuz_librarian.safefile import fsync_dirs, write_new_at
+from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _name_missing_at
+from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace
+from qobuz_librarian.safefile import stat_identity as _identity
 
 _MANIFEST = ".qobuz-librarian-retry.json"
-_RENAME_NOREPLACE = 1
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_TREE_ENTRIES = 100_000
 _RUN_DIR_RE = re.compile(r"^\.qobuz-run-[0-9a-f]{24}$")
@@ -71,17 +73,6 @@ def kept_staging_run_names() -> tuple[str, ...]:
     return _staging_names(_KEPT_RUN_RE)
 
 
-def _identity(value):
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(value.st_mode),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
-
-
 def _same_node(left, right):
     return left[:2] == right[:2]
 
@@ -90,16 +81,6 @@ def _same_file_after_move(before, after):
     # rename(2) changes ctime on the same inode. Everything else remains part
     # of the sealed file identity and must still agree.
     return before[:5] == after[:5]
-
-
-def _name_missing_at(parent_fd, name):
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
 
 
 def _absolute_staging_path(path):
@@ -115,18 +96,11 @@ def _absolute_staging_path(path):
 
 
 def _directory_flags():
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow directory access is unavailable")
-    return os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+    return os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
 
 
 def _regular_flags():
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file access is unavailable")
-    return os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    return os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def _open_staging_chain(path, *, directory):
@@ -523,54 +497,14 @@ def tree_matches(receipt):
     return current is not None and receipt.same_contents(current)
 
 
-def _rename_noreplace(source_fd, source, destination_fd, destination):
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except (AttributeError, OSError) as exc:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable") from exc
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    if (
-        renameat2(
-            source_fd,
-            os.fsencode(source),
-            destination_fd,
-            os.fsencode(destination),
-            _RENAME_NOREPLACE,
-        )
-        != 0
-    ):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), os.fsdecode(source))
-
-
 class _RacedStagingEntryRetained(OSError):
     """A raced public entry remains at a reported private recovery name."""
 
 
-def _named_entry_matches(parent_fd, name, descriptor):
-    try:
-        held = _identity(os.fstat(descriptor))
-        named = _identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
-        return _same_node(held, named)
-    except OSError:
-        return False
-
-
 def _open_exact_entry(parent_fd, name):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    path_only = getattr(os, "O_PATH", None)
-    if nofollow is None or path_only is None:
-        raise OSError("safe exact staging-entry access is unavailable")
     descriptor = os.open(
         name,
-        path_only | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=parent_fd,
     )
     try:
@@ -580,11 +514,6 @@ def _open_exact_entry(parent_fd, name):
     except BaseException:
         os.close(descriptor)
         raise
-
-
-def _fsync_move_parents(source_parent_fd, destination_parent_fd):
-    for descriptor in dict.fromkeys((source_parent_fd, destination_parent_fd)):
-        os.fsync(descriptor)
 
 
 def _fsync_staging_directory(path):
@@ -660,7 +589,7 @@ def _restore_raced_entry(
         sync_error = None
         if restored:
             try:
-                _fsync_move_parents(source_parent_fd, destination_parent_fd)
+                fsync_dirs(source_parent_fd, destination_parent_fd)
             except BaseException as exc:
                 sync_error = exc
             if deferred is not None and not isinstance(deferred, OSError):
@@ -677,7 +606,7 @@ def _restore_raced_entry(
         retained = _named_entry_matches(destination_parent_fd, destination_name, descriptor)
         if retained:
             try:
-                _fsync_move_parents(source_parent_fd, destination_parent_fd)
+                fsync_dirs(source_parent_fd, destination_parent_fd)
             except BaseException as exc:
                 sync_error = exc
             if deferred is not None and not isinstance(deferred, OSError):
@@ -925,7 +854,7 @@ def _tree_exclusions_intact(held):
 
 
 def _acquire_tree_exclusions(tree):
-    """Hold every exact regular-file inode against a late/stuck writer."""
+    """Hold every exact regular-file inode and watch it for writes."""
     held = []
     try:
         for relative, identity_record in tree.files:
@@ -980,9 +909,9 @@ def retain_staging_run(run, *, label="interrupted", on_intent=None, release=Fals
         return None
     exclusions = _acquire_tree_exclusions(current)
     if exclusions is None:
-        # A stuck streamrip child may still have a writable descriptor. Leave
-        # the hidden run at its exact public name; it remains ineligible for
-        # import and can be retained after the writer exits.
+        # A file changed while the run was checked. Leave the hidden run at
+        # its exact public name; it remains ineligible for import and can be
+        # retained on a later pass.
         return None
     try:
         return _retain_staging_run_locked(current, label, exclusions, owner, on_intent)
@@ -1056,8 +985,8 @@ def _retain_staging_run_locked(current, label, exclusions, owner, on_intent):
     if recovered is not None:
         if not _tree_exclusions_intact(exclusions):
             raise OSError(
-                "interrupted download was retained after a writer requested "
-                "the sealed files; review its recovery record"
+                "a file of the interrupted download changed while it was "
+                "retained; review its recovery record"
             )
         # Flush both renamed directory entries after the already-durable
         # manifest. If either flush is unavailable, the sealed transaction is
@@ -1204,14 +1133,14 @@ def _move_file(receipt, destination, destination_name=None):
             )
             if layout() != "source":
                 return False
-            _fsync_move_parents(source_chain[-1], destination_chain[-1])
+            fsync_dirs(source_chain[-1], destination_chain[-1])
             return True
         except BaseException as exc:
             restored = layout() == "source"
             committed = False
             if restored:
                 try:
-                    _fsync_move_parents(source_chain[-1], destination_chain[-1])
+                    fsync_dirs(source_chain[-1], destination_chain[-1])
                     committed = True
                 except BaseException as sync_exc:
                     if not isinstance(sync_exc, OSError):
@@ -1338,14 +1267,14 @@ def remove_file(receipt):
             )
             if layout() != "source":
                 return False
-            _fsync_move_parents(source_chain[-1], destination_chain[-1])
+            fsync_dirs(source_chain[-1], destination_chain[-1])
             return True
         except BaseException as exc:
             recovered = layout() == "source"
             committed = False
             if recovered:
                 try:
-                    _fsync_move_parents(source_chain[-1], destination_chain[-1])
+                    fsync_dirs(source_chain[-1], destination_chain[-1])
                     committed = True
                 except BaseException as sync_exc:
                     if not isinstance(sync_exc, OSError):
@@ -1411,11 +1340,11 @@ def remove_file(receipt):
 
         # Commit both sides of the cross-directory rename before destroying
         # its only remaining name. A failed flush rolls the exact entry back.
-        _fsync_move_parents(source_chain[-1], destination_chain[-1])
+        fsync_dirs(source_chain[-1], destination_chain[-1])
 
         # The unpredictable mode-0700 directory is now the only name for the
-        # exact held inode. The lease still excludes every existing or newly
-        # opened writer while the final identity gate and unlink complete.
+        # exact held inode. The final identity gate runs right before the
+        # unlink.
         if (
             _identity(os.fstat(source_fd)) != private_identity
             or named_identity(destination_chain[-1], "entry") != private_identity
@@ -1596,14 +1525,14 @@ def _move_tree(receipt, destination, destination_name):
             )
             if layout() != "source":
                 return False
-            _fsync_move_parents(source_chain[-2], destination_chain[-1])
+            fsync_dirs(source_chain[-2], destination_chain[-1])
             return True
         except BaseException as exc:
             restored = layout() == "source"
             committed = False
             if restored:
                 try:
-                    _fsync_move_parents(source_chain[-2], destination_chain[-1])
+                    fsync_dirs(source_chain[-2], destination_chain[-1])
                     committed = True
                 except BaseException as sync_exc:
                     if not isinstance(sync_exc, OSError):
@@ -1780,22 +1709,11 @@ def _write_manifest_payload(group, value):
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(payload) > _MAX_MANIFEST_BYTES:
         return False
-    directory_fd = descriptor = None
+    directory_fd = None
     temporary = f".manifest-{secrets.token_hex(12)}"
     try:
         directory_fd = os.open(group, _directory_flags())
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-            dir_fd=directory_fd,
-        )
-        written = 0
-        while written < len(payload):
-            written += os.write(descriptor, payload[written:])
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
+        write_new_at(directory_fd, temporary, payload)
         _rename_noreplace(directory_fd, temporary, directory_fd, _MANIFEST)
         os.fsync(directory_fd)
         return True
@@ -1807,8 +1725,6 @@ def _write_manifest_payload(group, value):
                 pass
         return False
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
         if directory_fd is not None:
             os.close(directory_fd)
 

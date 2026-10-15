@@ -19,6 +19,7 @@ Behaviour you should not change without understanding the consequence:
 - predicted_album_paths uses a list, not a set, to preserve deterministic
   candidate order across runs (set hash iteration is non-deterministic).
 """
+import functools
 import math
 import os
 import re
@@ -31,8 +32,6 @@ from qobuz_librarian.api import album_cache
 from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import QobuzError
 from qobuz_librarian.api.search import get_album, search_albums
-from qobuz_librarian.dirfd import named_entry_matches as _migration_named_entry_matches
-from qobuz_librarian.dirfd import named_entry_missing as _migration_name_missing
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
     _list_artist_subdirs_cached,
@@ -53,6 +52,8 @@ from qobuz_librarian.library.tags import (
     strip_leading_article,
     strip_year_decoration,
 )
+from qobuz_librarian.safefile import named_entry_matches as _migration_named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _migration_name_missing
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -1778,11 +1779,7 @@ def _count_audio_files_in(d):
 
 
 def _open_migration_directory(path, *, dir_fd=None):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe directory access is unavailable")
-    flags = os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     return os.open(path, flags, dir_fd=dir_fd)
 
 
@@ -1843,13 +1840,10 @@ def _open_migration_database_anchor():
         database.parent)
     descriptor = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe beets database access is unavailable")
         try:
             descriptor = os.open(
                 database.name,
-                os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=parent_chain[-1],
             )
         except FileNotFoundError:
@@ -1902,6 +1896,10 @@ def _migration_database_anchor_matches(anchor):
         return False
 
 
+_migration_named_directory_matches = functools.partial(
+    _migration_named_entry_matches, directory=True)
+
+
 def _close_migration_database_anchor(anchor):
     if anchor is None:
         return
@@ -1916,15 +1914,6 @@ def _close_migration_database_anchor(anchor):
             os.close(directory_fd)
         except OSError:
             pass
-
-
-def _migration_named_directory_matches(parent_fd, name, directory_fd):
-    try:
-        if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
-            return False
-    except (OSError, TypeError, ValueError):
-        return False
-    return _migration_named_entry_matches(parent_fd, name, directory_fd)
 
 
 def multi_artist_migration_destination(album, source_dir):

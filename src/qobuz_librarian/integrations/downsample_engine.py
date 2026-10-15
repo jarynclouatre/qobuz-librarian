@@ -25,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.dirfd import digest_fd as _sha256_fd
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.lyric_fetch import (
     _exchange_existing,
@@ -36,6 +35,8 @@ from qobuz_librarian.integrations.lyric_fetch import (
 from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, scanner
+from qobuz_librarian.safefile import digest_fd as _sha256_fd
+from qobuz_librarian.safefile import named_entry_matches
 from qobuz_librarian.ui_cli.errors import plural
 
 
@@ -396,10 +397,6 @@ class _BoundSource:
     """One regular file beneath a fully held, no-follow absolute root chain."""
 
     def __init__(self, path: Path, owned_root: Path):
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        directory = getattr(os, "O_DIRECTORY", None)
-        if nofollow is None or directory is None:
-            raise OSError("safe no-follow file operations are unavailable")
 
         self.path = Path(os.path.abspath(os.fspath(path)))
         self.root = Path(os.path.abspath(os.fspath(owned_root)))
@@ -418,8 +415,7 @@ class _BoundSource:
         self._directory_fds = []
         self._directory_names = []
         self.track_fd = None
-        directory_flags = os.O_RDONLY | directory | nofollow
-        directory_flags |= getattr(os, "O_CLOEXEC", 0)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
             filesystem_root_fd = os.open(os.path.sep, directory_flags)
             self._directory_fds.append(filesystem_root_fd)
@@ -429,16 +425,16 @@ class _BoundSource:
                     directory_flags,
                     dir_fd=self._directory_fds[-1],
                 )
-                if not self._directory_entry_matches(
-                        self._directory_fds[-1], part, child_fd):
+                if not named_entry_matches(
+                        self._directory_fds[-1], part, child_fd,
+                        directory=True):
                     os.close(child_fd)
                     raise OSError(f"{self.path}: directory chain changed")
                 self._directory_names.append(part)
                 self._directory_fds.append(child_fd)
 
             track_flags = (
-                os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
-            track_flags |= getattr(os, "O_CLOEXEC", 0)
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             self.track_fd = os.open(
                 relative.parts[-1],
                 track_flags,
@@ -454,21 +450,6 @@ class _BoundSource:
         except BaseException:
             self.close()
             raise
-
-    @staticmethod
-    def _directory_entry_matches(parent_fd, name, descriptor) -> bool:
-        try:
-            held = os.fstat(descriptor)
-            named = os.stat(
-                name, dir_fd=parent_fd, follow_symlinks=False)
-            return (
-                stat.S_ISDIR(held.st_mode)
-                and stat.S_ISDIR(named.st_mode)
-                and held.st_dev == named.st_dev
-                and held.st_ino == named.st_ino
-            )
-        except OSError:
-            return False
 
     @property
     def parent_fd(self) -> int:
@@ -490,10 +471,11 @@ class _BoundSource:
             ):
                 return False
             for index, name in enumerate(self._directory_names, start=1):
-                if not self._directory_entry_matches(
+                if not named_entry_matches(
                         self._directory_fds[index - 1],
                         name,
                         self._directory_fds[index],
+                        directory=True,
                 ):
                     return False
         except (OSError, IndexError):
@@ -537,11 +519,7 @@ def _descriptor_path(descriptor: int) -> Path:
 
 
 def _make_encode_temp(parent_fd: int):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file operations are unavailable")
-    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow
-    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
     for _ in range(16):
         name = f"{_TMP_PREFIX}{secrets.token_hex(16)}.flac"
         try:
@@ -633,15 +611,11 @@ def _exact_temp_is_named(parent_fd: int, name: str, descriptor: int,
 
 
 def _reopen_encode_temp_readonly(parent_fd: int, name: str, descriptor: int):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file operations are unavailable")
     expected = _regular_identity(os.fstat(descriptor))
     if expected is None or not _exact_temp_is_named(
             parent_fd, name, descriptor, expected):
         raise OSError("resampled output changed while it was being opened")
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     readonly_fd = os.open(name, flags, dir_fd=parent_fd)
     if not _exact_temp_is_named(parent_fd, name, readonly_fd, expected):
         os.close(readonly_fd)
@@ -712,8 +686,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         exclusion = acquire_inode_write_exclusion(binding.track_fd)
         if exclusion is None:
             return (rel, sr, rate, None,
-                    "source is open for writing or cannot be protected; "
-                    "left the original untouched")
+                    "source is not a regular file; left it untouched")
         if (
             expected_source_receipt is not None
             and not _receipt_matches_source(
@@ -912,9 +885,9 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "source or resampled output changed before replacement; "
                     "left the current file untouched")
 
-        # _exchange_existing acquires its own fresh lease at the final identity
-        # gate. Release this long-held encode lease first; any write landing in
-        # the narrow handoff changes the full source identity and is refused.
+        # _exchange_existing checks the final identity itself. Any write
+        # landing in the narrow handoff changes the full source identity and
+        # is refused.
         exclusion.close()
         exclusion = None
         _exchange_existing(

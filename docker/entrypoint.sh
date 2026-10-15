@@ -241,12 +241,17 @@ case "${PUID}${PGID}" in
         # writability check below guides them if PUID doesn't match). The rest
         # are small app-managed volumes: chown them so a fresh deploy doesn't
         # warn "not writable" on every boot until the user fixes it by hand.
+        # /upgrade_backups keeps the user's own music files with their own
+        # owners, and /collection_backups the collection snapshots, so only
+        # the two volume folders themselves are fixed there.
         # Only entries with the wrong owner are touched. chown(2) bumps ctime
         # even when nothing changes, which would break every sealed backup
         # receipt on every restart. Non-fatal on failure (a NAS-bound staging
         # just falls through to the writability warning).
         find "$BEETS_DIR" "$STREAMRIP_DIR" /data /staging \
-            /upgrade_backups /collection_backups \
+            \( ! -user "$PUID" -o ! -group "$PGID" \) \
+            -exec chown -h "$APP_USER" -- {} + 2>/dev/null || true
+        find /upgrade_backups /collection_backups -maxdepth 0 \
             \( ! -user "$PUID" -o ! -group "$PGID" \) \
             -exec chown -h "$APP_USER" -- {} + 2>/dev/null || true
         echo "[init] Running as ${APP_USER}."

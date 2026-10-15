@@ -10,7 +10,7 @@ old rows remain, or finishes source cleanup after the new rows are durable.
 from __future__ import annotations
 
 import errno
-import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -28,9 +28,6 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock
 from qobuz_librarian.completion import normalise_album_id
-from qobuz_librarian.dirfd import digest_fd as _digest_fd
-from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
-from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import scanner
@@ -54,6 +51,11 @@ from qobuz_librarian.library.sqlite_atomic import (
 )
 from qobuz_librarian.recovery import decode_recovery_json
 from qobuz_librarian.run_lock import RunLockLease
+from qobuz_librarian.safefile import digest_fd as _digest_fd
+from qobuz_librarian.safefile import exclusive_lock, write_new_at
+from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _name_missing
+from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace
 from qobuz_librarian.ui_cli.errors import plural
 
 _NAMESPACE_NAME = ".qobuz_post_import_relocations"
@@ -166,24 +168,17 @@ def _absolute_album_path(value) -> tuple[Path, Path, tuple[str, str]]:
 
 
 def _open_directory(value, *, dir_fd=None) -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow directory access is unavailable")
     return os.open(
         value,
-        os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0),
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC,
         dir_fd=dir_fd,
     )
 
 
 def _open_regular(value, *, dir_fd=None) -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file access is unavailable")
     descriptor = os.open(
         value,
-        os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=dir_fd,
     )
     if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -193,13 +188,9 @@ def _open_regular(value, *, dir_fd=None) -> int:
 
 
 def _open_entry_handle(value, *, dir_fd=None) -> int:
-    path_only = getattr(os, "O_PATH", None)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if path_only is None or nofollow is None:
-        raise OSError("safe no-follow entry access is unavailable")
     return os.open(
         value,
-        path_only | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=dir_fd,
     )
 
@@ -208,26 +199,7 @@ def _entry_identity(value) -> tuple[int, int]:
     return int(value.st_dev), int(value.st_ino)
 
 
-def _named_matches(parent_fd, name, descriptor, *, directory=False) -> bool:
-    try:
-        held = os.fstat(descriptor)
-        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError:
-        return False
-    expected = stat.S_ISDIR if directory else stat.S_ISREG
-    return expected(held.st_mode) and expected(named.st_mode) and (
-        _entry_identity(held) == _entry_identity(named)
-    )
-
-
-def _name_missing(parent_fd, name) -> bool:
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
+_named_matches = functools.partial(_named_entry_matches, directory=False)
 
 
 def _run_descriptor_sigint_deferred(callback):
@@ -798,7 +770,7 @@ def _locked_namespace(*, create):
         data_path.mkdir(parents=True, mode=0o700, exist_ok=True)
         data_fd, data_owner = _open_configured_directory(data_path)
 
-    namespace_fd = lock_fd = None
+    namespace_fd = None
     try:
         try:
             namespace_fd = _open_directory(_NAMESPACE_NAME, dir_fd=data_fd)
@@ -811,28 +783,9 @@ def _locked_namespace(*, create):
             namespace_fd = _open_directory(_NAMESPACE_NAME, dir_fd=data_fd)
         if not _named_matches(data_fd, _NAMESPACE_NAME, namespace_fd, directory=True):
             raise OSError("relocation journal directory changed while it was opened")
-        lock_fd = os.open(
-            _LOCK_NAME,
-            os.O_RDWR
-            | os.O_CREAT
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-            dir_fd=namespace_fd,
-        )
-        lock_stat = os.fstat(lock_fd)
-        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
-            raise OSError("relocation journal lock is unsafe")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        if not _named_matches(namespace_fd, _LOCK_NAME, lock_fd):
-            raise OSError("relocation journal lock changed while it was acquired")
-        yield namespace_fd
+        with exclusive_lock(_LOCK_NAME, dir_fd=namespace_fd):
+            yield namespace_fd
     finally:
-        if lock_fd is not None:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(lock_fd)
         if namespace_fd is not None:
             os.close(namespace_fd)
         _close_all(data_owner)
@@ -890,27 +843,8 @@ def _write_journal(namespace_fd, payload, *, initial=False) -> None:
     if len(raw) > _MAX_JOURNAL_BYTES:
         raise OSError(errno.EFBIG, "relocation journal is too large")
     temporary = f".tmp-{operation_id}-{secrets.token_hex(12)}"
-    descriptor = None
     try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-            dir_fd=namespace_fd,
-        )
-        offset = 0
-        while offset < len(raw):
-            written = os.write(descriptor, raw[offset:])
-            if written <= 0:
-                raise OSError("relocation journal write made no progress")
-            offset += written
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
+        write_new_at(namespace_fd, temporary, raw)
         if initial:
             _rename_noreplace(namespace_fd, temporary, namespace_fd, name)
         else:
@@ -920,8 +854,6 @@ def _write_journal(namespace_fd, payload, *, initial=False) -> None:
             os.replace(temporary, name, src_dir_fd=namespace_fd, dst_dir_fd=namespace_fd)
         os.fsync(namespace_fd)
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
         try:
             os.unlink(temporary, dir_fd=namespace_fd)
         except FileNotFoundError:
@@ -1086,7 +1018,7 @@ def _copy_file(
 ) -> dict:
     if not _record_matches_fd(source_fd, expected):
         raise OSError("relocation source changed before it was copied")
-    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     if container is None:
         flags |= os.O_CREAT | os.O_EXCL
     descriptor = os.open(
@@ -1404,8 +1336,8 @@ def _prepare_units(source_fd, workspace_fd, payload, namespace_fd) -> None:
                 os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
                 0o600,
                 dir_fd=workspace_fd,
             )

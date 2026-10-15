@@ -597,15 +597,15 @@ def test_retire_verified_repair_backup_needs_superseding_tracks(tmp_path, monkey
     assert (album / "01.flac").read_bytes() == quiet.read_bytes()
 
 
-def test_gap_fill_backup_copies_an_unleased_source_and_returns_a_partial_one(
+def test_gap_fill_backup_refuses_a_changed_source_and_returns_a_partial_one(
         tmp_path, monkeypatch):
-    """A repair source the app doesn't own can't carry a write lease. With the
-    scan's sealed receipt pinning its content, the backup takes the copy route
-    instead of giving up; without a receipt the refusal stands. A backup cut
-    short by a track replaced mid-move still returns its recovery path."""
+    """A repair source edited in place after the scan sealed its receipt, or
+    retagged with its mtime kept just before its removal, is left where it
+    is. A backup cut short by a track replaced mid-move still returns its
+    recovery path."""
     import qobuz_librarian.library.backup as bkmod
 
-    root = tmp_path / "unleased"
+    root = tmp_path / "edited"
     monkeypatch.setattr(bkmod.cfg, "UPGRADE_BACKUP_DIR", root / "backups")
     monkeypatch.setattr(bkmod.cfg, "MUSIC_ROOT", root / "music")
     album = root / "music" / "Artist" / "Album (2020)"
@@ -620,30 +620,28 @@ def test_gap_fill_backup_copies_an_unleased_source_and_returns_a_partial_one(
         os.close(fd)
     expected = bkmod._normalise_gap_fill_expected_receipts(
         {"01 - Damaged.flac": sealed})
+    with source.open("r+b") as tagger:
+        tagger.write(b"D")
 
-    real_acquire = bkmod.acquire_inode_write_exclusion
-    denied = source.stat().st_ino
+    assert bkmod.backup_gap_fill_files(
+        [source], album, expected_receipts=expected) is None
+    assert source.read_bytes() == b"Damaged audio bytes"
 
-    def deny_source(descriptor):
-        if os.fstat(descriptor).st_ino == denied:
-            return None
-        return real_acquire(descriptor)
+    real_reserve = bkmod._reserve_backup_quarantine
+
+    def quiet_retag(parent_fd, prefix, **kwargs):
+        if prefix == "ql-gap-remove":
+            kept = source.stat()
+            with source.open("r+b") as tagger:
+                tagger.write(b"d")
+            os.utime(source, ns=(kept.st_atime_ns, kept.st_mtime_ns))
+        return real_reserve(parent_fd, prefix, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(bkmod, "acquire_inode_write_exclusion", deny_source)
-
-        result = bkmod.backup_gap_fill_files(
-            [source], album, expected_receipts=expected)
-        assert result is not None and result.complete
-        assert not source.exists()
-        assert (result.path / "01 - Damaged.flac").read_bytes() == (
-            b"damaged audio bytes")
-
-        other = album / "02 - Other.flac"
-        other.write_bytes(b"other")
-        denied = other.stat().st_ino
-        assert bkmod.backup_gap_fill_files([other], album) is None
-        assert other.read_bytes() == b"other"
+        patch.setattr(bkmod, "_same_filesystem", lambda a, b: False)
+        patch.setattr(bkmod, "_reserve_backup_quarantine", quiet_retag)
+        bkmod.backup_gap_fill_files([source], album)
+    assert source.read_bytes() == b"damaged audio bytes"
 
     root = tmp_path / "partial"
     music = root / "music"

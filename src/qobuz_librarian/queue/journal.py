@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
@@ -10,11 +9,10 @@ import os
 import re
 import secrets
 import stat
-import tempfile
 import threading
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -23,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import safefile
 from qobuz_librarian.completion import (
     CompletionEvidence,
     CompletionInput,
@@ -150,27 +149,7 @@ _MANAGED_CARRIER_SUFFIX = ".jsonl"
 _UNSET = object()
 _NAMESPACE_THREAD_LOCK = threading.RLock()
 _namespace_lock_depth = 0
-_namespace_lock_descriptor: int | None = None
-_namespace_lock_epoch = 0
-
-
-def _reset_namespace_lock_after_fork() -> None:
-    global _NAMESPACE_THREAD_LOCK, _namespace_lock_depth
-    global _namespace_lock_descriptor, _namespace_lock_epoch
-
-    if _namespace_lock_descriptor is not None:
-        try:
-            os.close(_namespace_lock_descriptor)
-        except OSError:
-            pass
-    _NAMESPACE_THREAD_LOCK = threading.RLock()
-    _namespace_lock_depth = 0
-    _namespace_lock_descriptor = None
-    _namespace_lock_epoch += 1
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_namespace_lock_after_fork)
+_namespace_lock_held: ExitStack | None = None
 
 
 class QueuePhase(str, Enum):
@@ -1416,38 +1395,6 @@ def _parse_journal(value: Any, expected_operation_id: str) -> QueueJournal:
     )
 
 
-def _fsync_directory(path: Path) -> None:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(path, flags)
-    try:
-        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            raise QueueJournalError(f"queue journal ancestor is not a directory: {path}")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _confirm_namespace_durable(directory: Path) -> None:
-    """Fsync the journal directory and every relationship back to its root."""
-    cursor = directory if directory.is_absolute() else directory.absolute()
-    while True:
-        info = cursor.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise QueueJournalError(
-                f"queue journal ancestor is not a directory: {cursor}"
-            )
-        _fsync_directory(cursor)
-        parent = cursor.parent
-        if parent == cursor:
-            return
-        cursor = parent
-
-
 def _ensure_journal_dir() -> Path:
     directory = cfg.QUEUE_JOURNAL_DIR
     missing = []
@@ -1482,69 +1429,24 @@ def _ensure_journal_dir() -> Path:
                 f"queue journal location is not a directory: {path}"
             )
         if created:
-            _fsync_directory(path.parent)
+            safefile.fsync_dir(path.parent, strict=True)
 
     info = directory.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise QueueJournalError(
             f"queue journal location is not a directory: {directory}"
         )
-    # A previous mkdir may have succeeded just before its parent fsync failed.
-    # Reconfirm the complete chain on every retry before any state is exposed.
-    _confirm_namespace_durable(directory)
     return directory
 
 
-def _open_namespace_lock() -> int:
-    directory = _ensure_journal_dir()
-    path = directory / _JOURNAL_LOCK_NAME
-    flags = (
-        os.O_RDWR
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    descriptor = -1
-    locked = False
+def _open_namespace_lock() -> ExitStack:
+    held = ExitStack()
     try:
-        try:
-            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            descriptor = os.open(path, flags)
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-            raise QueueJournalError(
-                f"queue journal lock is not a private regular file: {path}"
-            )
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        locked = True
-        settled = os.fstat(descriptor)
-        linked = path.lstat()
-        if (
-            not stat.S_ISREG(settled.st_mode)
-            or settled.st_nlink != 1
-            or not stat.S_ISREG(linked.st_mode)
-            or linked.st_nlink != 1
-            or linked.st_dev != settled.st_dev
-            or linked.st_ino != settled.st_ino
-        ):
-            raise QueueJournalError(
-                f"queue journal lock changed while it was opened: {path}"
-            )
-        os.fsync(descriptor)
-        # This confirms both a newly linked lock and every ancestor that may
-        # have survived an earlier mkdir/parent-fsync failure.
-        _confirm_namespace_durable(directory)
-        return descriptor
+        held.enter_context(
+            safefile.exclusive_lock(_ensure_journal_dir() / _JOURNAL_LOCK_NAME))
+        return held
     except BaseException as exc:
-        if locked:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            except OSError:
-                pass
-        if descriptor >= 0:
-            os.close(descriptor)
+        held.close()
         if isinstance(exc, QueueJournalError) or not isinstance(exc, Exception):
             raise
         raise QueueJournalError(f"queue journal lock could not be established: {exc}") from exc
@@ -1552,36 +1454,27 @@ def _open_namespace_lock() -> int:
 
 @contextmanager
 def _journal_namespace_lock():
-    global _namespace_lock_depth, _namespace_lock_descriptor
+    global _namespace_lock_depth, _namespace_lock_held
 
-    entry_pid = os.getpid()
-    entry_epoch = _namespace_lock_epoch
-    thread_lock = _NAMESPACE_THREAD_LOCK
-    thread_lock.acquire()
+    _NAMESPACE_THREAD_LOCK.acquire()
     try:
         outermost = _namespace_lock_depth == 0
         if outermost:
-            _namespace_lock_descriptor = _open_namespace_lock()
+            _namespace_lock_held = _open_namespace_lock()
         _namespace_lock_depth += 1
     except BaseException:
-        thread_lock.release()
+        _NAMESPACE_THREAD_LOCK.release()
         raise
     try:
         yield
     finally:
-        if os.getpid() == entry_pid and _namespace_lock_epoch == entry_epoch:
-            try:
-                _namespace_lock_depth -= 1
-                if outermost:
-                    descriptor = _namespace_lock_descriptor
-                    _namespace_lock_descriptor = None
-                    if descriptor is not None:
-                        try:
-                            fcntl.flock(descriptor, fcntl.LOCK_UN)
-                        finally:
-                            os.close(descriptor)
-            finally:
-                thread_lock.release()
+        try:
+            _namespace_lock_depth -= 1
+            if outermost:
+                held, _namespace_lock_held = _namespace_lock_held, None
+                held.close()
+        finally:
+            _NAMESPACE_THREAD_LOCK.release()
 
 
 def _locked_transaction(function):
@@ -1696,39 +1589,15 @@ def _write_durable_json(path: Path, payload: dict[str, Any]) -> None:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=directory,
-        prefix=f".{path.stem}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            descriptor = -1
-            written = stream.write(encoded)
-            if written != len(encoded):
-                raise OSError("short write while saving queue journal")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(directory)
-    except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    safefile.write_atomic(path, encoded, prefix=f".{path.stem}.", strict=True)
 
 
 def _read_regular_file(path: Path) -> bytes:
     flags = (
         os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
+        | os.O_CLOEXEC
+        | os.O_NOFOLLOW
+        | os.O_NONBLOCK
     )
     descriptor = os.open(path, flags)
     try:
@@ -1766,7 +1635,7 @@ def _read_regular_file(path: Path) -> bytes:
 def _unlink_and_sync(path: Path) -> None:
     _COMMITTED.pop(path, None)
     path.unlink()
-    _fsync_directory(path.parent)
+    safefile.fsync_dir(path.parent, strict=True)
 
 
 def create_queue_journal(items, *, mode: str) -> QueueJournal:

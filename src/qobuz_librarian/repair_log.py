@@ -26,10 +26,6 @@ from pathlib import Path
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
 from qobuz_librarian.api.search import find_qobuz_track_by_isrc
-from qobuz_librarian.file_exclusion import (
-    acquire_inode_write_exclusion,
-    inode_write_exclusion_scope,
-)
 from qobuz_librarian.integrations.rip import flac_audio_offset, flac_audio_ok
 from qobuz_librarian.library import catalog, repair_cache, scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks, parse_track_num
@@ -231,7 +227,6 @@ class _HeldRepairSource:
         self._directories = []
         self._parts = ()
         self.descriptor = None
-        self.exclusion = None
         self.source_receipt = None
         try:
             relative = self.path.relative_to(self.album_dir)
@@ -239,8 +234,7 @@ class _HeldRepairSource:
                     or any(part in ("", ".", "..") for part in relative.parts)):
                 raise OSError("repair source escaped the selected album")
             self._parts = relative.parts
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-            flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
             self._directories.append(os.open(self.album_dir, flags))
             for part in self._parts[:-1]:
                 named = os.stat(
@@ -255,19 +249,11 @@ class _HeldRepairSource:
                     raise OSError("repair source parent changed while opening")
                 self._directories.append(child)
 
-            file_flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
-            file_flags |= getattr(os, "O_NOFOLLOW", 0)
+            file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
             self.descriptor = os.open(
                 self._parts[-1], file_flags, dir_fd=self._directories[-1])
             if not stat.S_ISREG(os.fstat(self.descriptor).st_mode):
                 raise OSError("repair source is not a regular file")
-            # A file the app user doesn't own can't carry a write lease
-            # (F_SETLEASE needs ownership or CAP_LEASE). Diagnosis is sound
-            # without one: the sealed receipt and every intact() recheck
-            # compare the full stat identity, so a concurrent write
-            # downgrades the verdict instead of standing behind it.
-            self.exclusion = acquire_inode_write_exclusion(self.descriptor)
-
             receipt = self._seal_receipt()
             if receipt is None or not self._receipt_matches(receipt):
                 raise OSError("repair source could not be sealed before diagnosis")
@@ -326,7 +312,6 @@ class _HeldRepairSource:
 
     def intact(self):
         if (self.descriptor is None
-                or self.exclusion is not None and not self.exclusion.intact()
                 or not self._receipt_matches(self.source_receipt)):
             return False
         try:
@@ -355,9 +340,6 @@ class _HeldRepairSource:
             return False
 
     def close(self):
-        if self.exclusion is not None:
-            self.exclusion.close()
-            self.exclusion = None
         if self.descriptor is not None:
             os.close(self.descriptor)
             self.descriptor = None
@@ -463,7 +445,7 @@ def _append_verified_ok(report, source, isrc, *, record_isrc=True):
 def _scan_held_repair_source(
         report, source, token, *, min_short_seconds, max_ratio,
         max_short_seconds, deep, only_isrcs):
-    """Diagnose one file while its descriptor, namespace, and writer lease hold."""
+    """Diagnose one file while its descriptor, namespace and receipt hold."""
     et = _read_held_audio_meta(source)
     path = str(source.path)
     title = et.get("title") or source.path.stem
@@ -659,22 +641,21 @@ def scan_dir_for_isrc_repairs(album_dir, token,
         report["unverified"] += 1
         return report
 
-    with inode_write_exclusion_scope():
-        for path in paths:
-            try:
-                with _HeldRepairSource(album_dir, path) as source:
-                    _scan_held_repair_source(
-                        report, source, token,
-                        min_short_seconds=min_short_seconds,
-                        max_ratio=max_ratio,
-                        max_short_seconds=max_short_seconds,
-                        deep=deep,
-                        only_isrcs=only_isrcs,
-                    )
-            except (AuthLost, QobuzUnavailable):
-                raise
-            except OSError:
-                report["unverified"] += 1
+    for path in paths:
+        try:
+            with _HeldRepairSource(album_dir, path) as source:
+                _scan_held_repair_source(
+                    report, source, token,
+                    min_short_seconds=min_short_seconds,
+                    max_ratio=max_ratio,
+                    max_short_seconds=max_short_seconds,
+                    deep=deep,
+                    only_isrcs=only_isrcs,
+                )
+        except (AuthLost, QobuzUnavailable):
+            raise
+        except OSError:
+            report["unverified"] += 1
     return report
 
 

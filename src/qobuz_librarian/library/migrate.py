@@ -46,10 +46,6 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from qobuz_librarian import config, file_exclusion
-from qobuz_librarian.dirfd import digest_fd as _digest_fd
-from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
-from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
-from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
 from qobuz_librarian.library.tags import (
     VA_NORMALIZED,
     beets_sanitize,
@@ -57,6 +53,11 @@ from qobuz_librarian.library.tags import (
     normalize,
     strip_year_decoration,
 )
+from qobuz_librarian.safefile import digest_fd as _digest_fd
+from qobuz_librarian.safefile import fsync_dirs
+from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
+from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace_at
 from qobuz_librarian.ui_cli.logging import vlog
 
 log = logging.getLogger("qobuz_librarian")
@@ -652,31 +653,23 @@ def _safe_component(value) -> bool:
 
 
 def _open_directory(path, *, dir_fd=None) -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow directory access is unavailable")
     return os.open(
         os.fspath(path),
-        os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=dir_fd,
     )
 
 
 def _open_regular_file(name, *, dir_fd) -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file access is unavailable")
     flags = (
-        os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        | os.O_NONBLOCK
     )
-    noatime = getattr(os, "O_NOATIME", 0)
     try:
         descriptor = os.open(
-            os.fspath(name), flags | noatime, dir_fd=dir_fd)
+            os.fspath(name), flags | os.O_NOATIME, dir_fd=dir_fd)
     except OSError as exc:
-        if not noatime or exc.errno not in (errno.EACCES, errno.EPERM):
+        if exc.errno not in (errno.EACCES, errno.EPERM):
             raise
         descriptor = os.open(os.fspath(name), flags, dir_fd=dir_fd)
     try:
@@ -692,13 +685,9 @@ def _open_regular_file(name, *, dir_fd) -> int:
 
 
 def _open_entry_handle(name, *, dir_fd) -> int:
-    path_only = getattr(os, "O_PATH", None)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if path_only is None or nofollow is None:
-        raise OSError("safe no-follow entry access is unavailable")
     descriptor = os.open(
         os.fspath(name),
-        path_only | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=dir_fd,
     )
     if not _named_entry_matches(dir_fd, name, descriptor):
@@ -754,7 +743,7 @@ def _rename_exact_noreplace_at(source_fd, source_name, destination_fd,
     ):
         sync_error = None
         try:
-            _fsync_directories(source_fd, destination_fd)
+            fsync_dirs(source_fd, destination_fd)
         except BaseException as exc:
             sync_error = exc
         return deferred or sync_error
@@ -783,7 +772,7 @@ def _rename_exact_noreplace_at(source_fd, source_name, destination_fd,
                     source_fd, source_name, unexpected_fd)
             ):
                 try:
-                    _fsync_directories(source_fd, destination_fd)
+                    fsync_dirs(source_fd, destination_fd)
                 except BaseException as exc:
                     rollback_error = rollback_error or exc
                 raise OSError(
@@ -811,15 +800,6 @@ def _rename_exact_noreplace_at(source_fd, source_name, destination_fd,
         raise deferred
     raise OSError("exact no-replace rename outcome could not be reconciled") \
         from deferred
-
-
-def _fsync_directories(*descriptors) -> None:
-    seen = set()
-    for descriptor in descriptors:
-        if descriptor in seen:
-            continue
-        seen.add(descriptor)
-        os.fsync(descriptor)
 
 
 def _file_receipt(descriptor, digest=None) -> dict:
@@ -1161,7 +1141,7 @@ def _create_directory_noreplace(parent_fd, name) -> int:
                 pass
         if published:
             try:
-                _fsync_directories(parent_fd)
+                fsync_dirs(parent_fd)
             except OSError:
                 pass
         os.close(temporary_fd)
@@ -1172,7 +1152,7 @@ def _create_directory_noreplace(parent_fd, name) -> int:
     ):
         os.close(temporary_fd)
         raise OSError("migration directory publication was ambiguous")
-    _fsync_directories(parent_fd)
+    fsync_dirs(parent_fd)
     return temporary_fd
 
 
@@ -1429,7 +1409,7 @@ def _open_file_receipt(binding: _RootBinding, receipt) -> _OpenedFile:
             raise OSError("migration path crosses a nested filesystem mount")
         exclusion = file_exclusion.acquire_inode_write_exclusion(file_fd)
         if exclusion is None:
-            raise OSError("migration source could not be protected from writers")
+            raise OSError("migration source is not a regular file")
         verified_digest = _digest_fd(file_fd)
         if (
             not binding.matches_public()
@@ -1568,7 +1548,7 @@ def _probe_destination_name_semantics(dest_root: Path) -> dict:
         probe_fd = os.open(
             probe_name,
             os.O_RDONLY | os.O_CREAT | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o600,
             dir_fd=private_fd,
         )
@@ -1614,7 +1594,7 @@ def _probe_destination_name_semantics(dest_root: Path) -> dict:
                         binding.root_fd, private_name, private_fd)
                 ):
                     os.rmdir(private_name, dir_fd=binding.root_fd)
-                    _fsync_directories(binding.root_fd)
+                    fsync_dirs(binding.root_fd)
                 if (
                     private_name is not None
                     and not _named_entry_missing(binding.root_fd, private_name)
@@ -2190,7 +2170,7 @@ def _scan_file_from_descriptor(binding, parent_fd, parent_receipts,
             raise OSError("migration source crosses a nested filesystem mount")
         exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
         if exclusion is None or not exclusion.intact():
-            raise OSError("migration source could not be protected from writers")
+            raise OSError("migration source changed while it was opened")
         before = {
             "relative": list(relative),
             "parents": list(parent_receipts),
@@ -2682,23 +2662,6 @@ def collect_items(source_root: Path, *, use_acoustid: bool = False,
                   cancel_check: Optional[Callable[[], bool]] = None,
                   progress: Optional[Callable] = None,
                   min_score: float = ACOUSTID_MIN_SCORE) -> list:
-    with file_exclusion.inode_write_exclusion_scope() as available:
-        if not available:
-            raise OSError(
-                "migration scan could not initialise writer protection")
-        return _collect_items(
-            source_root,
-            use_acoustid=use_acoustid,
-            cancel_check=cancel_check,
-            progress=progress,
-            min_score=min_score,
-        )
-
-
-def _collect_items(source_root: Path, *, use_acoustid: bool = False,
-                   cancel_check: Optional[Callable[[], bool]] = None,
-                   progress: Optional[Callable] = None,
-                   min_score: float = ACOUSTID_MIN_SCORE) -> list:
     """Walk the source and return ``(path, meta, source_of_truth)`` tuples.
 
     Stage 1 reads tags for every file. Stage 2 (only when ``use_acoustid`` is
@@ -2837,17 +2800,6 @@ def verified_resume_entries(plan: MigrationPlan, *,
                             progress: Optional[Callable] = None,
                             cancel_check: Optional[Callable[[], bool]] = None
                             ) -> list:
-    with file_exclusion.inode_write_exclusion_scope() as available:
-        if not available:
-            return []
-        return _verified_resume_entries(
-            plan, progress=progress, cancel_check=cancel_check)
-
-
-def _verified_resume_entries(plan: MigrationPlan, *,
-                             progress: Optional[Callable] = None,
-                             cancel_check: Optional[Callable[[], bool]] = None
-                             ) -> list:
     """Existing destinations currently proven identical to their sources."""
     candidates = [
         entry for entry in plan.collisions if _is_resume_collision(entry)
@@ -2952,16 +2904,13 @@ def _open_destination_parent(binding: _RootBinding, dest_rel: Path,
 
 
 def _reserve_temporary_file(parent_fd):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file creation is unavailable")
     for _ in range(16):
         name = f".qobuz-migrate-copy-{secrets.token_hex(16)}"
         try:
             descriptor = os.open(
                 name,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | nofollow
-                | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
                 0o600,
                 dir_fd=parent_fd,
             )
@@ -3054,7 +3003,7 @@ def _remove_exact_named_file_privately(parent_fd, name, descriptor) -> bool:
                 return False
             raise deferred
         try:
-            _fsync_directories(parent_fd, private_fd)
+            fsync_dirs(parent_fd, private_fd)
         except BaseException:
             restore_exact()
             return False
@@ -3069,7 +3018,7 @@ def _remove_exact_named_file_privately(parent_fd, name, descriptor) -> bool:
             return False
         moved = False
         try:
-            _fsync_directories(parent_fd, private_fd)
+            fsync_dirs(parent_fd, private_fd)
         except BaseException:
             return False
         return True
@@ -3102,7 +3051,7 @@ def _remove_exact_named_file_privately(parent_fd, name, descriptor) -> bool:
                 ):
                     os.rmdir(private_name, dir_fd=parent_fd)
                     if _named_entry_missing(parent_fd, private_name):
-                        _fsync_directories(parent_fd)
+                        fsync_dirs(parent_fd)
             except BaseException:
                 # Once the exact candidate is gone, an empty private directory
                 # is harmless residue.  If it is still present, leave it alone.
@@ -3208,7 +3157,7 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
                     parent_fd, temporary_name, temporary_fd)
             if published:
                 try:
-                    _fsync_directories(parent_fd)
+                    fsync_dirs(parent_fd)
                 except OSError:
                     pass
             raise
@@ -3222,12 +3171,11 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
                 destination, dest_rel, parents)
         ):
             raise OSError("migration publication could not be proven")
-        _fsync_directories(parent_fd)
+        fsync_dirs(parent_fd)
 
         # Do not carry the writable staging descriptor into source
-        # retirement.  Reopen the published inode read-only so a Linux read
-        # lease can exclude both existing and newly arriving writers while
-        # the source's last link is retired.
+        # retirement.  Reopen the published inode read-only and watch it for
+        # writes while the source's last link is retired.
         read_fd = _open_regular_file(destination_name, dir_fd=parent_fd)
         if (
             not _same_entry(os.fstat(read_fd), os.fstat(temporary_fd))
@@ -3253,9 +3201,9 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
                 parent_fd, destination_name, temporary_fd)
         ):
             # An exception may land before the normal writable-to-read-only
-            # descriptor handoff. Best-effort normalise here so rollback can
-            # acquire a read lease; if this proof fails the writable descriptor
-            # is retained and rollback will refuse rather than delete blindly.
+            # descriptor handoff. Best-effort normalise here; if this proof
+            # fails the writable descriptor is kept, and rollback still
+            # removes the app's own copy only while its identity matches.
             replacement_fd = None
             try:
                 replacement_fd = _open_regular_file(
@@ -3348,7 +3296,7 @@ def _discard_owned_publication(
             if not _named_entry_missing(parent_fd, quarantine_name):
                 return False
             quarantine_name = None
-            _fsync_directories(parent_fd)
+            fsync_dirs(parent_fd)
             return True
         except BaseException:
             return False
@@ -3421,7 +3369,7 @@ def _discard_owned_publication(
             restore_exact()
             raise deferred
         try:
-            _fsync_directories(parent_fd, quarantine_fd)
+            fsync_dirs(parent_fd, quarantine_fd)
         except BaseException:
             restore_exact()
             return False
@@ -3436,7 +3384,7 @@ def _discard_owned_publication(
             return False
         moved = False
         try:
-            _fsync_directories(parent_fd, quarantine_fd)
+            fsync_dirs(parent_fd, quarantine_fd)
         except BaseException:
             return False
         if not clear_quarantine():
@@ -3637,7 +3585,7 @@ class _DestinationSafety:
                 return
             os.rmdir(self.private_name, dir_fd=self.parent_fd)
             if _named_entry_missing(self.parent_fd, self.private_name):
-                _fsync_directories(self.parent_fd)
+                fsync_dirs(self.parent_fd)
         except BaseException as exc:
             self._note_exception(exc)
             # Once an exact public destination is proved, an empty private
@@ -3709,7 +3657,7 @@ class _DestinationSafety:
                     )
                 return False
             try:
-                _fsync_directories(self.parent_fd, self.private_fd)
+                fsync_dirs(self.parent_fd, self.private_fd)
             except BaseException as exc:
                 self._note_exception(exc)
                 if self._recovery_exact() or self._anchor_exact():
@@ -3744,7 +3692,7 @@ class _DestinationSafety:
                     )
                 return False
             try:
-                _fsync_directories(self.private_fd)
+                fsync_dirs(self.private_fd)
             except BaseException as exc:
                 self._note_exception(exc)
                 if self._recovery_exact() or self._anchor_exact():
@@ -3779,7 +3727,7 @@ class _DestinationSafety:
                 )
             return False
         try:
-            _fsync_directories(self.parent_fd, self.private_fd)
+            fsync_dirs(self.parent_fd, self.private_fd)
         except BaseException as exc:
             self._note_exception(exc)
             self._record_recovery(
@@ -3805,12 +3753,11 @@ class _DestinationSafety:
                 self.released = True
                 return True
             return False
-        # The final fidelity and lease proof immediately above authorises
-        # removing the redundant link. The still-held read lease prevents a
-        # writer from changing the public inode across this unlink boundary.
+        # The final fidelity and change check immediately above authorises
+        # removing the redundant link.
         self.released = True
         try:
-            _fsync_directories(self.private_fd)
+            fsync_dirs(self.private_fd)
         except BaseException as exc:
             self._note_exception(exc)
             pass
@@ -3840,7 +3787,7 @@ def _hold_published_destination(published, expected_receipt):
         published
     exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
     if exclusion is None:
-        raise OSError("migration destination could not be protected from writers")
+        raise OSError("migration destination is not a regular file")
     private_name = None
     private_fd = None
     try:
@@ -3891,7 +3838,7 @@ def _hold_published_destination(published, expected_receipt):
         )
         if not safety.intact():
             raise OSError("migration destination changed while it was sealed")
-        _fsync_directories(parent_fd, private_fd)
+        fsync_dirs(parent_fd, private_fd)
         if not safety.intact():
             raise OSError("migration destination changed while it was sealed")
         private_fd = None
@@ -3914,7 +3861,7 @@ def _hold_published_destination(published, expected_receipt):
                         parent_fd, private_name, private_fd)
                 ):
                     os.rmdir(private_name, dir_fd=parent_fd)
-                    _fsync_directories(parent_fd)
+                    fsync_dirs(parent_fd)
             except BaseException:
                 pass
             try:
@@ -4010,7 +3957,7 @@ def _remove_sealed_source(source: _OpenedFile, receipt,
                 os.rmdir(quarantine_name, dir_fd=source.parent_fd)
                 if _named_entry_missing(source.parent_fd, quarantine_name):
                     quarantine_name = None
-                _fsync_directories(source.parent_fd)
+                fsync_dirs(source.parent_fd)
         except BaseException:
             pass
 
@@ -4145,7 +4092,7 @@ def _remove_sealed_source(source: _OpenedFile, receipt,
             raise OSError("migration source changed during retirement")
         _require_private_source_state()
         try:
-            _fsync_directories(source.parent_fd, quarantine_fd)
+            fsync_dirs(source.parent_fd, quarantine_fd)
         except BaseException:
             _restore_exact()
             moved_exact = False
@@ -4200,7 +4147,7 @@ def _remove_sealed_source(source: _OpenedFile, receipt,
         # forward state, so classify the item as moved and leave only possible
         # app-owned empty residue.
         try:
-            _fsync_directories(source.parent_fd, quarantine_fd)
+            fsync_dirs(source.parent_fd, quarantine_fd)
         except BaseException:
             pass
         _clear_empty_quarantine()
@@ -4699,50 +4646,6 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                  cancel_check: Optional[Callable[[], bool]] = None,
                  progress: Optional[Callable] = None,
                  resume_entries=None) -> ExecResult:
-    result = None
-    try:
-        with file_exclusion.inode_write_exclusion_scope() as available:
-            if not available:
-                result = _record_plan_refusal(
-                    ExecResult(),
-                    plan,
-                    resume_entries,
-                    "migration could not initialise writer protection",
-                )
-            else:
-                result = _execute_plan(
-                    plan,
-                    in_place=in_place,
-                    cancel_check=cancel_check,
-                    progress=progress,
-                    resume_entries=resume_entries,
-                )
-    except BaseException as exc:
-        existing_abort = _migration_abort_in_chain(exc)
-        if existing_abort is not None:
-            if existing_abort is exc:
-                raise
-            existing_abort.note_cleanup_failure(
-                "writer-protection teardown", exc)
-            raise existing_abort from existing_abort.cause
-        if result is None:
-            result = ExecResult()
-        result.cancelled = True
-        if isinstance(exc, KeyboardInterrupt):
-            result.interrupted = True
-            _record_cleanup_failure(
-                result, "writer-protection teardown", exc)
-            return result
-        abort = MigrationExecutionAbort(result, exc)
-        abort.note_cleanup_failure("writer-protection teardown", exc)
-        raise abort from exc
-    return result
-
-
-def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
-                  cancel_check: Optional[Callable[[], bool]] = None,
-                  progress: Optional[Callable] = None,
-                  resume_entries=None) -> ExecResult:
     """Carry out placements and finish verified existing-file resumes.
 
     Audio is written only for ``PLACE`` entries. Existing-destination
@@ -5211,7 +5114,7 @@ def _write_csv_for_plan(plan, prefix, header, rows) -> Path:
                 os.fsync(file_handle.fileno())
             _rename_noreplace_at(
                 binding.root_fd, temporary_name, binding.root_fd, name)
-            _fsync_directories(binding.root_fd)
+            fsync_dirs(binding.root_fd)
         except BaseException:
             if _named_entry_matches(
                     binding.root_fd, temporary_name, temporary_fd):

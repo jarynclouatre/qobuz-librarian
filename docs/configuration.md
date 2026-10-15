@@ -149,7 +149,7 @@ PUID=1000   # id -u
 PGID=1000   # id -g
 ```
 
-On boot, the container chowns its managed config folders and the `data`, `staging`, `upgrade_backups`, and `collection_backups` volumes to that user, and warns if a mounted path is not writable. `/music` is left alone because it is often a large NAS mount; the run user must be able to write to it.
+On boot, the container chowns its managed config folders and the `data` and `staging` volumes to that user, and the `upgrade_backups` and `collection_backups` folders themselves but not the music files and collection snapshots kept inside them, and warns if a mounted path is not writable. `/music` is left alone because it is often a large NAS mount; the run user must be able to write to it.
 
 Operations that replace or remove an existing library file also require the share to flush file and directory changes reliably. If the mount cannot do that, Qobuz Librarian stops the destructive step and keeps the original.
 

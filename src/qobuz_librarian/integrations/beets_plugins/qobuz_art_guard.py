@@ -12,21 +12,19 @@ from beets import plugins
 from beets.plugins import BeetsPlugin
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import dirfd
+from qobuz_librarian import safefile
 from qobuz_librarian.integrations.beets import (
     _FILE_NAME_FUNCTION,
     _MANAGED_OWNERSHIP_MODE,
     _OWNERSHIP_MODE_ENV,
     _merge_chain_is_named,
-    _merge_name_matches,
-    _merge_name_missing,
     _open_exact_merge_dir,
     _open_ownership_dir,
     _ownership_identity,
     _ownership_relative_parts,
-    _rename_ownership_noreplace,
     _rollback_exact_merge_entry,
 )
+from qobuz_librarian.safefile import named_entry_matches, named_entry_missing, rename_noreplace
 
 _STATE_ATTRIBUTE = "_qobuz_librarian_art_guard"
 _MANIFEST_FD_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_FD"
@@ -62,20 +60,6 @@ def _remove_state(task):
         pass
 
 
-def _name_is_missing(parent_fd, name):
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
-
-
-def _leaf_is_absent(parent_fd, name):
-    return _name_is_missing(parent_fd, name)
-
-
 def _close_chain(chain):
     if isinstance(chain, list):
         for descriptor in reversed(chain):
@@ -105,7 +89,7 @@ def _same_directory(first_fd, second_fd):
         second = os.fstat(second_fd)
     except OSError:
         return False
-    return dirfd.same_directory(first, second)
+    return safefile.same_directory(first, second)
 
 
 def _parent_still_held(state):
@@ -197,8 +181,8 @@ def _hold_task_item_in_parent(state, item):
         held = os.fstat(descriptor)
         if (
             stat.S_ISREG(held.st_mode)
-            and _merge_name_matches(
-                parent_fd, name, descriptor, regular=True
+            and named_entry_matches(
+                parent_fd, name, descriptor, directory=False
             )
         ):
             state["item_fd"] = descriptor
@@ -242,8 +226,8 @@ def _held_task_item_is_still_named(state, *, allow_metadata_change=False):
         current = _ownership_identity(held)
         if (
             not stat.S_ISREG(held.st_mode)
-            or not _merge_name_matches(
-                parent_fd, item_name, item_fd, regular=True
+            or not named_entry_matches(
+                parent_fd, item_name, item_fd, directory=False
             )
         ):
             return False
@@ -288,7 +272,7 @@ def _authorise_deferred_parent(state):
         state["parent_fd"] = chain[-1]
         if (
             not _parent_still_held(state)
-            or not _leaf_is_absent(chain[-1], state["leaf"])
+            or not named_entry_missing(chain[-1], state["leaf"])
             or not _task_item_is_in_parent(state)
         ):
             return False
@@ -469,12 +453,12 @@ def _album_store_rollback_is_proved(album, old_art):
 
 
 def _exact_file_layout(parent_fd, public_name, private_name, held_fd):
-    public_matches = _merge_name_matches(
-        parent_fd, public_name, held_fd, regular=True)
-    private_matches = _merge_name_matches(
-        parent_fd, private_name, held_fd, regular=True)
-    public_missing = _merge_name_missing(parent_fd, public_name)
-    private_missing = _merge_name_missing(parent_fd, private_name)
+    public_matches = named_entry_matches(
+        parent_fd, public_name, held_fd, directory=False)
+    private_matches = named_entry_matches(
+        parent_fd, private_name, held_fd, directory=False)
+    public_missing = named_entry_missing(parent_fd, public_name)
+    private_missing = named_entry_missing(parent_fd, private_name)
     if public_matches and private_missing:
         return "public"
     if private_matches and public_missing:
@@ -513,7 +497,7 @@ def _open_exact_entry(parent_fd, name):
         dir_fd=parent_fd,
     )
     try:
-        if not _merge_name_matches(parent_fd, name, descriptor):
+        if not named_entry_matches(parent_fd, name, descriptor):
             raise OSError("private artwork entry changed while it was opened")
         return descriptor
     except BaseException:
@@ -525,24 +509,24 @@ def _restore_unexpected_private_file(
         parent_fd, public_name, private_name, held_fd):
     """Put back an unexpected entry moved by a raced path-based rename."""
     if (
-        not _merge_name_missing(parent_fd, public_name)
-        or _merge_name_missing(parent_fd, private_name)
+        not named_entry_missing(parent_fd, public_name)
+        or named_entry_missing(parent_fd, private_name)
     ):
         return False
     unexpected_fd = None
     try:
         unexpected_fd = _open_exact_entry(parent_fd, private_name)
-        if _merge_name_matches(parent_fd, private_name, held_fd):
+        if named_entry_matches(parent_fd, private_name, held_fd):
             return False
         deferred = None
         try:
-            _rename_ownership_noreplace(
+            rename_noreplace(
                 parent_fd, private_name, parent_fd, public_name)
         except BaseException as exc:
             deferred = exc
         restored = (
-            _merge_name_matches(parent_fd, public_name, unexpected_fd)
-            and _merge_name_missing(parent_fd, private_name)
+            named_entry_matches(parent_fd, public_name, unexpected_fd)
+            and named_entry_missing(parent_fd, private_name)
         )
         if restored:
             try:
@@ -572,7 +556,7 @@ def _remove_exact_file(parent_fd, name, held_fd):
                 parent_fd, name, quarantine, held_fd) != "public":
             return False
         try:
-            _rename_ownership_noreplace(
+            rename_noreplace(
                 parent_fd, name, parent_fd, quarantine)
         except BaseException as exc:
             if _exact_file_layout(
@@ -674,8 +658,8 @@ def _copy_candidate_to_private(parent_fd, candidate_fd):
                     raise OSError("artwork write failed")
                 offset += written
         os.fsync(descriptor)
-        if not _merge_name_matches(
-            parent_fd, temporary, descriptor, regular=True
+        if not named_entry_matches(
+            parent_fd, temporary, descriptor, directory=False
         ):
             raise OSError("private artwork changed before publication")
         return temporary, descriptor
@@ -737,8 +721,8 @@ def _capture_art(state):
         current = os.fstat(descriptor)
         if (
             not stat.S_ISREG(current.st_mode)
-            or not _merge_name_matches(
-                parent_fd, leaf, descriptor, regular=True
+            or not named_entry_matches(
+                parent_fd, leaf, descriptor, directory=False
             )
             or _ownership_identity(current) != state.get("published_identity")
         ):
@@ -791,7 +775,7 @@ def authorise_ownership_art(task, root_fd, created_record, selected_item):
         opened = _open_relative_directory(root_fd, parts)
         if (
             not _same_directory(opened, record_fd)
-            or not _leaf_is_absent(record_fd, state["leaf"])
+            or not named_entry_missing(record_fd, state["leaf"])
         ):
             return False
         state["root_fd"] = root_fd
@@ -938,7 +922,7 @@ class QobuzArtGuardPlugin(BeetsPlugin):
                             and _merge_chain_is_named(chain, album_parts)
                             and (
                                 len(relative) == 1
-                                or _merge_name_matches(
+                                or named_entry_matches(
                                     album_fd, relative[0], folder_fd)
                             )
                         ),
@@ -967,8 +951,8 @@ class QobuzArtGuardPlugin(BeetsPlugin):
             )
             if (
                 not stat.S_ISREG(os.fstat(descriptor).st_mode)
-                or not _merge_name_matches(
-                    folder_fd, name, descriptor, regular=True
+                or not named_entry_matches(
+                    folder_fd, name, descriptor, directory=False
                 )
                 or not named()
                 or not _parent_still_held(state)
@@ -1006,7 +990,7 @@ class QobuzArtGuardPlugin(BeetsPlugin):
             return
         if state.get("album_folder") is True and self._use_album_cover(state):
             return
-        if not _leaf_is_absent(state["parent_fd"], state["leaf"]):
+        if not named_entry_missing(state["parent_fd"], state["leaf"]):
             return
         task = state["task"]
         candidate = state["candidate"]
@@ -1031,12 +1015,12 @@ class QobuzArtGuardPlugin(BeetsPlugin):
                 raise OSError("artwork source changed while it was copied")
             if (
                 not _parent_still_held(state)
-                or not _leaf_is_absent(state["parent_fd"], state["leaf"])
+                or not named_entry_missing(state["parent_fd"], state["leaf"])
                 or not _held_task_item_is_still_named(state)
             ):
                 raise OSError("artwork destination changed while it was copied")
             try:
-                _rename_ownership_noreplace(
+                rename_noreplace(
                     state["parent_fd"],
                     temporary,
                     state["parent_fd"],
@@ -1054,11 +1038,11 @@ class QobuzArtGuardPlugin(BeetsPlugin):
                 raise
             published = True
             temporary = None
-            if not _merge_name_matches(
+            if not named_entry_matches(
                 state["parent_fd"],
                 state["leaf"],
                 temporary_fd,
-                regular=True,
+                directory=False,
             ):
                 raise OSError("published artwork changed")
             os.fsync(state["parent_fd"])

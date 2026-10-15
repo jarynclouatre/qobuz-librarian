@@ -403,7 +403,7 @@ def _retain_unclaimed_staging_runs(authority, names) -> bool:
     """Park run roots no journal claims; the terminal lane leaves them behind.
 
     The boot holder owns the run lock, so no live rip can be writing these.
-    A refusal (a stuck writer still holds a descriptor) falls back to the
+    A refusal (a file changed while it was checked) falls back to the
     attention stop instead of touching the tree.
     """
     settled = True
@@ -1030,8 +1030,8 @@ def _discard_parked_item_staging(authority, journal, item):
             return None
         if reference.kind == _STAGING_RUN_KIND:
             # A crash leaves the run root itself behind, never parked. Park
-            # it the way a deliberate stop would - the park refuses while any
-            # writer still holds a descriptor - then discard the parked copy.
+            # it the way a deliberate stop would - the park refuses if a file
+            # changes while it is checked - then discard the parked copy.
             # The item stays BLOCKED throughout: that is the phase a settlement
             # runs in, and a crash mid-park leaves it in the state the next
             # recovery pass already looks for.

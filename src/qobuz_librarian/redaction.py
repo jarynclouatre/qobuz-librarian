@@ -1,7 +1,6 @@
 """Keep account secrets out of logs and stored jobs."""
 import os
 import re
-import tempfile
 import threading
 
 MASK = "[redacted]"
@@ -58,30 +57,27 @@ def redact(text):
 
 
 def scrub_file(path) -> bool | None:
-    """Mask credentials in a file, returning None when it could not be read."""
+    """Mask credentials in a file, returning None when it could not be read.
+
+    The file is rewritten in place, so a logger that already has it open goes
+    on writing into the same file."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            original = f.read()
+        f = open(path, "r+b")
     except FileNotFoundError:
         return False
-    except (OSError, ValueError):
-        return None
-    cleaned = redact(original)
-    if cleaned == original:
-        return False
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    try:
-        fd, tmp = tempfile.mkstemp(dir=directory)
     except OSError:
         return None
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(cleaned)
-        os.replace(tmp, path)
-    except OSError:
+    with f:
         try:
-            os.unlink(tmp)
+            original = f.read().decode("utf-8", errors="replace")
+            cleaned = redact(original)
+            if cleaned == original:
+                return False
+            f.seek(0)
+            f.write(cleaned.encode("utf-8"))
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
         except OSError:
-            pass
-        return None
+            return None
     return True

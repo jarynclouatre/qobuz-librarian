@@ -1,5 +1,7 @@
 """Upgrade and gap-fill backup/restore functions."""
 import errno
+import filecmp
+import functools
 import hashlib
 import io
 import json
@@ -17,11 +19,6 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.dirfd import digest_fd as _read_file_digest_fd
-from qobuz_librarian.dirfd import named_entry_matches as _named_entry_matches
-from qobuz_librarian.dirfd import named_entry_missing as _named_entry_missing
-from qobuz_librarian.dirfd import rename_noreplace as _rename_noreplace_at
-from qobuz_librarian.dirfd import same_directory as _same_directory
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.interrupts import run_sigint_deferred
@@ -32,6 +29,12 @@ from qobuz_librarian.recovery import (
     normalise_recovery_owner,
     recovery_owner_matches,
 )
+from qobuz_librarian.safefile import digest_fd as _read_file_digest_fd
+from qobuz_librarian.safefile import fsync_dirs
+from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
+from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
+from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace_at
+from qobuz_librarian.safefile import same_directory as _same_directory
 from qobuz_librarian.ui_cli import errors as errors_mod
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -154,11 +157,7 @@ def _same_filesystem(a: Path, b: Path) -> bool:
 
 
 def _open_backup_directory(path, *, dir_fd=None):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe no-follow directory access is unavailable")
-    flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     return os.open(os.fspath(path), flags, dir_fd=dir_fd)
 
 
@@ -174,24 +173,15 @@ def _same_entry(left, right) -> bool:
     return _entry_identity(left) == _entry_identity(right)
 
 
-def _named_directory_matches(parent_fd, name, directory_fd) -> bool:
-    try:
-        held = os.fstat(directory_fd)
-        return stat.S_ISDIR(held.st_mode) and _same_entry(
-            held, os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
-    except (OSError, TypeError, ValueError):
-        return False
+_named_directory_matches = functools.partial(
+    _named_entry_matches, directory=True)
 
 
 def _open_entry_at(parent_fd, name):
     """Hold any exact directory entry, including a symlink, without following."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    path_only = getattr(os, "O_PATH", None)
-    if nofollow is None or path_only is None:
-        raise OSError("safe no-follow entry access is unavailable")
     descriptor = os.open(
         os.fspath(name),
-        path_only | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=parent_fd,
     )
     try:
@@ -391,19 +381,10 @@ def _held_directory_path(directory_fd) -> Path:
 
 
 def _fsync_directory_fds(*descriptors) -> bool:
-    seen = set()
-    for descriptor in descriptors:
-        try:
-            value = os.fstat(descriptor)
-            if not stat.S_ISDIR(value.st_mode):
-                return False
-            identity = (int(value.st_dev), int(value.st_ino))
-            if identity in seen:
-                continue
-            os.fsync(descriptor)
-            seen.add(identity)
-        except OSError:
-            return False
+    try:
+        fsync_dirs(*descriptors)
+    except OSError:
+        return False
     return True
 
 
@@ -748,13 +729,10 @@ def _write_backup_origin_durable(directory_fd, origin: Path) -> bool:
 def _write_text_noreplace_at(directory_fd, name, value) -> bool:
     descriptor = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            return False
         descriptor = os.open(
             name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
-            | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
             0o600,
             dir_fd=directory_fd,
         )
@@ -887,11 +865,8 @@ def _relative_directories_are_named(base_fd, parts, descriptors) -> bool:
 
 
 def _open_regular_file_at(parent_fd, name):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow file access is unavailable")
-    flags = (os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
-             | getattr(os, "O_NONBLOCK", 0))
+    flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+             | os.O_NONBLOCK)
     descriptor = os.open(os.fspath(name), flags, dir_fd=parent_fd)
     try:
         held = os.fstat(descriptor)
@@ -920,13 +895,30 @@ def _xattrs_fd(descriptor):
     return values
 
 
+def _copy_owner(value):
+    """The owner and group a copy of this file or folder can be given.
+
+    Only root can give a copy another user's uid or a group it is not in.
+    Any other app user keeps the copy its own, in the source's group when it
+    belongs to that group, so a library owned by another account still backs
+    up and restores.
+    """
+    uid, gid = int(value.st_uid), int(value.st_gid)
+    if os.geteuid() == 0:
+        return uid, gid
+    if gid != os.getegid() and gid not in os.getgroups():
+        gid = os.getegid()
+    return os.geteuid(), gid
+
+
 def _fidelity_fd(descriptor, *, include_times=True):
     value = os.fstat(descriptor)
+    uid, gid = _copy_owner(value)
     result = {
         "type": stat.S_IFMT(value.st_mode),
         "mode": stat.S_IMODE(value.st_mode),
-        "uid": int(value.st_uid),
-        "gid": int(value.st_gid),
+        "uid": uid,
+        "gid": gid,
         "xattrs": _xattrs_fd(descriptor),
     }
     if include_times:
@@ -937,20 +929,11 @@ def _fidelity_fd(descriptor, *, include_times=True):
     return result
 
 
-def _copy_fidelity_fd(source_fd, destination_fd, *, adopt_owner=False) -> None:
-    """Copy and verify ownership, permissions, times, xattrs and ACL xattrs.
-
-    ``adopt_owner`` keeps the destination's own ownership instead of the
-    source's - the app can't chown a copy of a file it doesn't own, and a
-    backup copy the app owns is what lets the rest of that transaction hold
-    ordinary leases."""
+def _copy_fidelity_fd(source_fd, destination_fd) -> None:
+    """Copy and verify ownership, permissions, times, xattrs and ACL xattrs."""
     source = _fidelity_fd(source_fd)
     destination = os.fstat(destination_fd)
-    if adopt_owner:
-        source["uid"] = int(destination.st_uid)
-        source["gid"] = int(destination.st_gid)
-    if (int(destination.st_uid), int(destination.st_gid)) != (
-            source["uid"], source["gid"]):
+    if _copy_owner(destination) != (source["uid"], source["gid"]):
         os.fchown(destination_fd, source["uid"], source["gid"])
     os.fchmod(destination_fd, source["mode"])
     existing = _xattrs_fd(destination_fd)
@@ -1361,7 +1344,7 @@ def _copy_tree_directory_fidelity(source_root_fd, destination_root_fd) -> bool:
 
 
 def _remove_exact_file_at(parent_fd, name, expected_fd, *, prefix,
-                          commit_guard=None) -> bool:
+                          commit_guard=None, before_move=None) -> bool:
     """Unlink one held regular file through a private exact quarantine."""
     try:
         held = os.fstat(expected_fd)
@@ -1379,6 +1362,8 @@ def _remove_exact_file_at(parent_fd, name, expected_fd, *, prefix,
     try:
         quarantine_name, quarantine_fd = _reserve_backup_quarantine(
             parent_fd, prefix)
+        if before_move is not None and not before_move():
+            return False
         move_exception = _rename_exact_noreplace_at(
             parent_fd, name, quarantine_fd, "held", expected_fd)
         moved = True
@@ -1615,11 +1600,11 @@ def _release_copy_publication(publication) -> None:
         publication.close()
 
 
-def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
+def _copy_file_noreplace_at(source_fd, publication):
     """Durably copy one held file into a private directory without overwrite.
 
     The caller-owned ``publication`` receives the read-only descriptor and
-    writer exclusion before the namespace commit.  Only the digest is
+    its change check before the namespace commit.  Only the digest is
     returned, closing the CALL-to-STORE ownership gap at every caller.
     """
     destination_parent_fd = publication.destination_parent_fd
@@ -1629,10 +1614,6 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
         raise OSError("backup source is not a regular file")
     source_digest = _file_digest_fd(source_fd)
     source_fidelity = _fidelity_fd(source_fd, include_times=False)
-    copy_fidelity = dict(source_fidelity)
-    if adopt_owner:
-        copy_fidelity["uid"] = os.geteuid()
-        copy_fidelity["gid"] = os.getegid()
     source_mtime_ns = int(os.fstat(source_fd).st_mtime_ns)
     temporary_name = None
     writable_file = None
@@ -1640,9 +1621,6 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
     destination_lease = None
     published = False
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe no-follow file creation is unavailable")
         for _ in range(16):
             temporary_name = f".ql-copy-{secrets.token_hex(16)}"
             publication.reserve_temporary(temporary_name)
@@ -1652,7 +1630,7 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
                     "x+b",
                     opener=lambda path, flags: os.open(
                         path,
-                        flags | nofollow | getattr(os, "O_CLOEXEC", 0),
+                        flags | os.O_NOFOLLOW | os.O_CLOEXEC,
                         0o600,
                         dir_fd=destination_parent_fd,
                     ),
@@ -1680,13 +1658,13 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
                     raise OSError("backup copy made no write progress")
                 written += count
             offset += len(chunk)
-        _copy_fidelity_fd(source_fd, writable_fd, adopt_owner=adopt_owner)
+        _copy_fidelity_fd(source_fd, writable_fd)
         os.fsync(writable_fd)
         if (
             _file_digest_fd(source_fd) != source_digest
             or _fidelity_fd(source_fd, include_times=False) != source_fidelity
             or _fidelity_fd(
-                writable_fd, include_times=False) != copy_fidelity
+                writable_fd, include_times=False) != source_fidelity
             or int(os.fstat(source_fd).st_mtime_ns) != source_mtime_ns
             or int(os.fstat(writable_fd).st_mtime_ns) != source_mtime_ns
             or os.fstat(writable_fd).st_nlink != 1
@@ -1698,7 +1676,7 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
             "rb",
             opener=lambda path, flags: os.open(
                 path,
-                flags | nofollow | getattr(os, "O_CLOEXEC", 0),
+                flags | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=destination_parent_fd,
             ),
         )
@@ -1713,7 +1691,7 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
         destination_lease = acquire_inode_write_exclusion(
             publication.descriptor)
         if destination_lease is None or not destination_lease.intact():
-            raise OSError("private backup copy could not be writer-excluded")
+            raise OSError("private backup copy changed since it was checked")
         publication.bind_lease(destination_lease)
         if publication.lease is destination_lease:
             destination_lease = None
@@ -1724,13 +1702,13 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
             or _fidelity_fd(source_fd, include_times=False) != source_fidelity
             or _fidelity_fd(
                 publication.descriptor,
-                include_times=False) != copy_fidelity
+                include_times=False) != source_fidelity
             or int(os.fstat(source_fd).st_mtime_ns) != source_mtime_ns
             or int(os.fstat(
                 publication.descriptor).st_mtime_ns) != source_mtime_ns
             or os.fstat(publication.descriptor).st_nlink != 1
         ):
-            raise OSError("writer-excluded backup copy changed before publication")
+            raise OSError("backup copy changed before publication")
         deferred = _rename_exact_noreplace_at(
             destination_parent_fd,
             temporary_name,
@@ -1771,7 +1749,7 @@ def _copy_file_noreplace_at(source_fd, publication, *, adopt_owner=False):
                         source_fd, include_times=False) == source_fidelity
                     and _fidelity_fd(
                         publication.descriptor,
-                        include_times=False) == copy_fidelity
+                        include_times=False) == source_fidelity
                     and int(os.fstat(source_fd).st_mtime_ns)
                         == source_mtime_ns
                     and int(os.fstat(
@@ -2130,15 +2108,14 @@ def _run_backup_sigint_deferred(callback):
         callback, detail="interrupt-safe snapshot access is unavailable")
 
 
-# Digests read while this process holds the file's inode under a writer
-# lease. No writer can open the file until that lease breaks, so while it is
-# intact and the inode's size and times are unchanged, reading it again
-# would only return the same digest.
+# Digests read while this process holds the file open. While its inode,
+# size and times are unchanged, reading it again would only return the same
+# digest.
 _HELD_DIGESTS = {}
 # Digests of files whose ctime was already older than the filesystem's
-# timestamp granularity when they were read under a lease. A later write,
-# or a new file on the reused inode number, moves the ctime, so these stay
-# good after the lease is gone while the size and times match. A ctime on a
+# timestamp granularity when they were read. A later write, or a new file on
+# the reused inode number, moves the ctime, so these stay good after the file
+# is closed while the size and times match. A ctime on a
 # whole second may come from a filesystem that keeps only seconds. Only
 # local Linux filesystems keep a ctime no one can set: FAT and exFAT keep
 # none on disk, and FUSE and network mounts report whatever they are given.
@@ -2202,10 +2179,10 @@ def _forget_held_digest(remembered) -> None:
 
 
 def _hold_snapshot_files(root_fd, snapshot, held, *, sealed=False):
-    """Hold and writer-exclude every exact regular file in a snapshot.
+    """Hold every exact regular file in a snapshot and watch it for writes.
 
-    Each file is read once, after its lease is held, and that digest serves
-    every later check while the lease stays intact, or for a settled file
+    Each file is read once, after it is held, and that digest serves every
+    later check while the file stays unwritten, or for a settled file
     while its size and times are unchanged. A snapshot taken with
     ``digests=False`` is matched on everything but the digest. With
     ``sealed``, a file on a local filesystem whose inode, size and times
@@ -2244,8 +2221,7 @@ def _hold_snapshot_files(root_fd, snapshot, held, *, sealed=False):
             _run_backup_sigint_deferred(acquire_and_adopt)
             lease = item["lease"]
             if lease is None or not lease.intact():
-                raise OSError(
-                    "snapshotted file has an active or uncertain writer")
+                raise OSError("snapshotted file changed since it was checked")
             read_ns = time.time_ns()
             current = None
             if (sealed and "sha256" in expected
@@ -2264,20 +2240,18 @@ def _hold_snapshot_files(root_fd, snapshot, held, *, sealed=False):
         current = _exact_tree_snapshot(root_fd)
         if (current if current is None or _tree_has_digests(snapshot)
                 else _tree_identity(current)) != snapshot:
-            raise OSError("tree changed while writer exclusions were acquired")
+            raise OSError("tree changed while its files were opened")
         return held
     except BaseException as exc:
         try:
             _release_held_snapshot_files(held)
         except BaseException as cleanup_exc:
             if not isinstance(cleanup_exc, Exception):
-                if hasattr(cleanup_exc, "add_note"):
-                    cleanup_exc.add_note(
-                        f"snapshot hold also failed: {exc}")
+                cleanup_exc.add_note(
+                    f"snapshot hold also failed: {exc}")
                 raise
-            if hasattr(exc, "add_note"):
-                exc.add_note(
-                    f"snapshot hold cleanup also failed: {cleanup_exc}")
+            exc.add_note(
+                f"snapshot hold cleanup also failed: {cleanup_exc}")
         raise
 
 
@@ -2344,9 +2318,8 @@ def _release_held_snapshot_files(held) -> None:
             and not isinstance(active, Exception)
             and isinstance(cleanup_exc, Exception)
         ):
-            if hasattr(active, "add_note"):
-                active.add_note(
-                    f"snapshot cleanup also failed: {cleanup_exc}")
+            active.add_note(
+                f"snapshot cleanup also failed: {cleanup_exc}")
             return
         raise
 
@@ -2449,7 +2422,7 @@ def _delete_exact_tree_contents(root_fd, snapshot, *, held=None,
                 parent_fd = item["parent_fd"]
                 descriptor = item["descriptor"]
                 if not item["lease"].intact():
-                    raise OSError("writer exclusion broke during exact disposal")
+                    raise OSError("file changed during exact disposal")
             current = _snapshot_file(parent_fd, relative[-1])
             identity = tuple(expected["identity"])
             hardlink_ctime_only = (
@@ -2598,8 +2571,7 @@ def _file_digest(path: Path) -> str:
         return _file_digest_fd(fh.fileno())
 
 
-_XATTR_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP,
-                      getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+_XATTR_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
 
 
 def _fsync(path: Path) -> bool:
@@ -2712,6 +2684,10 @@ _BACKUP_INTENT_PREFIX = ".ql-backup-intent-"
 # backup's own files inside it are removed.
 _PUT_BACK_PREFIX = ".ql-put-back-"
 
+# The copy of an album to another filesystem, named after its backup, until
+# it is complete and renamed to the backup's own name.
+_PARTIAL_COPY_PREFIX = ".ql-backup-copy-"
+
 # Files a backup carries that aren't backed-up tracks.
 _SIDECARS = (
     _ORIGIN_SIDECAR,
@@ -2761,13 +2737,10 @@ def _write_backup_receipt(directory_fd, origin, *, kind, complete,
         return None
     descriptor = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            return None
         descriptor = os.open(
             _RECEIPT_SIDECAR,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
-            | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
             0o600,
             dir_fd=directory_fd,
         )
@@ -4128,7 +4101,7 @@ def _album_proof_is_intact(proof) -> bool:
 
 
 def _hold_album_proof(path, expected_receipt):
-    """Bind a public album receipt and exclude writers from every file."""
+    """Bind a public album receipt and hold every file it names."""
     expected = _canonical_receipt(expected_receipt)
     if expected is None:
         return None
@@ -4654,13 +4627,9 @@ def _descriptor_alias_binding(path: Path, directory_fd):
     """Seal one validator-facing symlink to its exact held directory."""
     descriptor = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        path_only = getattr(os, "O_PATH", None)
-        if nofollow is None or path_only is None:
-            return None
         descriptor = os.open(
             path,
-            path_only | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         )
         linked = os.fstat(descriptor)
         target = os.readlink(path)
@@ -4722,7 +4691,7 @@ def dispose_backup(
     The validator receives private, uniquely-named descriptor-root paths as
     ``validator(replacement_view, backup_view)``.  Existing path-based media
     checks can therefore inspect the exact open directories without reopening
-    either mutable public path, and every file stays writer-excluded.  Unique
+    either mutable public path, and every file stays held and checked.  Unique
     names also prevent path-keyed media caches from reusing an earlier proof.
     Both namespaces are rechecked after validation and through every unlink.
     Missing proof, a raw backup path, or any uncertainty keeps the backup.
@@ -5591,8 +5560,7 @@ def _open_companion_units(opened, parent_fd, workspace_fd, intent, ready):
                         raise OSError("prepared companion file changed")
                     lease = acquire_inode_write_exclusion(descriptor)
                     if lease is None or not lease.intact():
-                        raise OSError(
-                            "prepared companion file has a writer")
+                        raise OSError("prepared companion file changed")
                 units.append({
                     "kind": kind,
                     "prepared": prepared,
@@ -5892,7 +5860,7 @@ def carry_backup_companions(
 
     ``backup`` must be the carried complete ``BackupResult`` and the expected
     replacement receipt must describe the exact public album before this call.
-    Both trees stay writer-excluded.  Existing byte-identical companions count
+    Both trees stay held and checked.  Existing byte-identical companions count
     as already carried; every conflict is left untouched and keeps the backup.
     A conflict returns ``None`` unless ``skip_conflicts`` is set, in which case
     the other companions are still carried; ``companion_conflicts`` names what
@@ -6182,13 +6150,10 @@ def release_backup_owner(backup: BackupResult, *, expected_owner) -> bool:
         current = _read_backup_receipt(directory_fd)
         if current is None or current.get("version") != _OWNED_RECEIPT_VERSION:
             return False
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            return False
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
-            | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
             0o600,
             dir_fd=directory_fd,
         )
@@ -6341,6 +6306,10 @@ def list_retained_backups():
                 # "not redundant" here - but it isn't orphaned, and the
                 # diagnostics list it feeds shows it separately.
                 if (entry / _REAP_AFTER_RETENTION_SENTINEL).is_file():
+                    continue
+                # An unfinished copy has no record to restore from; the
+                # diagnostics list counts it with the other leftovers.
+                if entry.name.startswith(_PARTIAL_COPY_PREFIX):
                     continue
                 origin_root = entry
                 manifest = None
@@ -6800,7 +6769,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             except OSError as exc:
                 log.info(fmt(
                     C.RED,
-                    f"  ✗  Couldn't exclude writers from {public} ({exc}); "
+                    f"  ✗  Couldn't check the files of {public} ({exc}); "
                     "leaving it in place."))
                 return None
             source_snapshot = _exact_tree_snapshot(source_fd)
@@ -7144,8 +7113,12 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             f"  ⤷  Cross-filesystem backup: copying {errors_mod.plural(n_files, 'file')} / "
             f"{total_bytes / 1024 / 1024:.1f} MB to {backup_root}…"))
 
-        partial_name = f".ql-backup-copy-{secrets.token_hex(16)}"
+        partial_name = _PARTIAL_COPY_PREFIX + bp.name
         partial_path = _held_directory_path(backup_root_fd) / partial_name
+        if not _named_entry_missing(backup_root_fd, partial_name):
+            log.info(fmt(C.RED, f"  ✗  {partial_path} is in the way; "
+                         "leaving the album in place."))
+            return None
         try:
             shutil.copytree(
                 os.fspath(held_source),
@@ -7417,7 +7390,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
         except OSError as exc:
             log.info(fmt(
                 C.RED,
-                "  ✗  Couldn't exclude writers from the committed backup "
+                "  ✗  Couldn't check the committed backup "
                 f"({exc}); the original remains in place and the copy is "
                 f"at {bp}."))
             return _retained_incomplete_result()
@@ -7562,10 +7535,10 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
 def backup_gap_fill_files(file_paths, album_dir: Path, *,
                           expected_receipts=None, owner=None,
                           on_intent=None, kind="gapfill"):
-    """Back up selected files while every accepted source is writer-held.
+    """Back up selected files, refusing any that change on the way.
 
-    A verified source remains excluded from writers from receipt validation
-    until a durable backup receipt exists.  Same-filesystem, single-link files
+    A verified source stays held and checked from receipt validation until a
+    durable backup receipt exists.  Same-filesystem, single-link files
     move atomically; multiply-linked and cross-filesystem files become distinct
     fidelity-checked copies before the exact source link is removed.  An
     interruption after any forward step is reconciled into a durable partial
@@ -7612,8 +7585,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
     def _source_intact(record):
         try:
             return (
-                (record["source_lease"] is None
-                 or record["source_lease"].intact())
+                record["source_lease"].intact()
                 and _named_entry_matches(
                     record["source_parent_fd"],
                     record["parts"][-1],
@@ -7763,6 +7735,9 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                     source_parents[-1] if source_parents else album_fd)
                 source_fd = _open_regular_file_at(
                     source_parent_fd, parts[-1])
+                source_lease = acquire_inode_write_exclusion(source_fd)
+                if source_lease is None:
+                    raise OSError("source is not a regular file")
                 digest = _file_digest_fd(source_fd)
                 receipt = _gap_fill_file_receipt(source_fd, digest)
                 if expected is not None and (
@@ -7773,21 +7748,6 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                     }
                 ):
                     raise OSError("verified source receipt changed")
-                # A file the app user doesn't own can't carry a write lease.
-                # With a sealed receipt pinning the reviewed inode, size and
-                # ctime the copy route below still moves it safely - every
-                # gate re-hashes against the digest taken here, and the copy
-                # the app makes is its own, so the rest of the transaction
-                # holds ordinary leases.
-                source_lease = acquire_inode_write_exclusion(source_fd)
-                if source_lease is not None and not source_lease.intact():
-                    raise OSError("source has an active or uncertain writer")
-                if source_lease is None and expected is None:
-                    if os.fstat(source_fd).st_uid != os.geteuid():
-                        raise OSError(
-                            "the app does not own this file - check "
-                            "ownership and PUID")
-                    raise OSError("source has an active or uncertain writer")
                 records.append({
                     "parts": parts,
                     "relative": relative_text,
@@ -7835,8 +7795,8 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         if not records or not all(_source_intact(record) for record in records):
             log.info(fmt(
                 C.RED,
-                f"  ✗  A {what}source changed while writer exclusions "
-                "were acquired; leaving the public tree untouched."))
+                f"  ✗  A {what}source changed while it was being checked; "
+                "leaving the public tree untouched."))
             return None
 
         try:
@@ -7915,8 +7875,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                 moved = False
                 move_exception = None
                 if (
-                    record["source_lease"] is not None
-                    and _same_filesystem(public, backup_root)
+                    _same_filesystem(public, backup_root)
                     and os.fstat(record["source_fd"]).st_nlink == 1
                 ):
                     try:
@@ -7964,10 +7923,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                 publication = _CopyPublication(
                     destination_parent_fd, parts[-1])
                 copied_digest = _copy_file_noreplace_at(
-                    record["source_fd"],
-                    publication,
-                    adopt_owner=record["source_lease"] is None,
-                )
+                    record["source_fd"], publication)
                 destination_fd = publication.descriptor
                 destination_lease = publication.lease
                 if (
@@ -7975,7 +7931,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                     or copied_digest != record["digest"]
                     or not _source_intact(record)
                 ):
-                    raise OSError("copied backup could not be writer-excluded")
+                    raise OSError("copied backup did not match its source")
                 record.update({
                     "backup_parents": destination_parents,
                     "backup_parent_fd": destination_parent_fd,
@@ -7993,9 +7949,14 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                     parts[-1],
                     record["source_fd"],
                     prefix="ql-gap-remove",
+                    # The move itself changes ctime, so a retag that kept
+                    # the size and mtime is caught only before it.
+                    before_move=lambda: (
+                        os.fstat(record["source_fd"]).st_ctime_ns
+                        == record["receipt"]["ctime_ns"]
+                    ),
                     commit_guard=lambda: (
-                        (record["source_lease"] is None
-                         or record["source_lease"].intact())
+                        record["source_lease"].intact()
                         and _backup_intact(record)
                     ),
                 )
@@ -8752,7 +8713,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                         or not existing_lease.intact()
                     ):
                         raise OSError(
-                            "kept destination could not be writer-excluded")
+                            "kept destination changed since it was checked")
                     if flac_audio_ok(
                             _held_directory_path(existing_fd)) is True:
                         if not (
@@ -8788,7 +8749,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                 if copied_digest != source_digest:
                     raise OSError("restore copy did not match backup")
                 if not destination_lease.intact():
-                    raise OSError("restored copy could not be writer-excluded")
+                    raise OSError("restored copy changed since it was checked")
 
                 if existing_fd is not None:
                     hold_exception = _rename_exact_noreplace_at(
@@ -9070,8 +9031,7 @@ def _apply_serialized_directory_fidelity(descriptor, expected, *,
         current = os.fstat(descriptor)
         if not stat.S_ISDIR(current.st_mode):
             return False
-        if (int(current.st_uid), int(current.st_gid)) != (
-                expected["uid"], expected["gid"]):
+        if _copy_owner(current) != (expected["uid"], expected["gid"]):
             os.fchown(descriptor, expected["uid"], expected["gid"])
         os.fchmod(descriptor, expected["mode"])
         expected_xattrs = {
@@ -9113,11 +9073,11 @@ def restore_incomplete_upgrade_backup(
     """Reconcile one receipt-bound incomplete whole-album backup.
 
     This deliberately refuses complete upgrades and every file-subset kind.
-    The original ancestor chain and, when present, album root must be the same
-    statx incarnations sealed before backup. Existing entries are never
+    The original ancestor chain and, when present, album root must be the
+    folders sealed before backup. Existing entries are never
     overwritten: exact originals count as already present and every conflict is
     reported unresolved. The backup is disposed only after every original file
-    is writer-held, content/fidelity checked, and durably named at the origin.
+    is held, content/fidelity checked, and durably named at the origin.
     """
     if not _backup_owner_authorized(backup, expected_owner):
         return None
@@ -9145,6 +9105,10 @@ def restore_incomplete_upgrade_backup(
         return None
     original_public, music_root, source_parts = rooted
     state = _read_upgrade_recovery_state(backup_fd, backup.receipt)
+    if state is None and _named_entry_missing(
+            backup_fd, _UPGRADE_RECOVERY_STATE_SENTINEL):
+        # A hard stop records nothing; the album is found where it is.
+        state = {"version": 1, "location": "unrecorded"}
     backup_snapshot = _receipt_disposal_snapshot(
         backup_fd, backup.receipt)
     if state is None or backup_snapshot is None:
@@ -9180,8 +9144,28 @@ def restore_incomplete_upgrade_backup(
     _parent_public, _music_root, _parent_parts, parent_fds = parent_opened
     original_parent_fd = parent_fds[-1]
     original_name = source_parts[-1]
-    if not _source_parent_is_bound(
-            music_root, source_parts, parent_fds, source_receipt):
+
+    # Folders are known by inode and birth time, which a restart that
+    # renumbers the device or the mount keeps.
+    def _parents_bound():
+        try:
+            return (
+                _backup_source_is_public(
+                    music_root, source_parts[:-1], parent_fds)
+                and _incarnations(_path_directory_generations(parent_fds))
+                    == _incarnations(source_receipt["path_generations"][:-1])
+            )
+        except (OSError, TypeError, ValueError, IndexError):
+            return False
+
+    def _root_bound(descriptor):
+        try:
+            return _incarnations(_path_directory_generations([descriptor])) == (
+                _incarnations(source_receipt["path_generations"][-1:]))
+        except (OSError, TypeError, ValueError, IndexError):
+            return False
+
+    if not _parents_bound():
         _close_descriptors(parent_fds)
         _close_descriptors(backup_fds)
         return refused
@@ -9206,11 +9190,10 @@ def restore_incomplete_upgrade_backup(
             album_fd is not None
             and _named_directory_matches(
                 original_parent_fd, original_name, album_fd)
-            and _source_parent_is_bound(
-                music_root, source_parts, parent_fds, source_receipt)
+            and _parents_bound()
             and (
                 not destination_is_original_root
-                or _source_root_is_bound(album_fd, source_receipt)
+                or _root_bound(album_fd)
             )
         )
 
@@ -9269,7 +9252,7 @@ def restore_incomplete_upgrade_backup(
         except OSError:
             return refused
         if candidate_fd is not None:
-            if not _source_root_is_bound(candidate_fd, source_receipt):
+            if not _root_bound(candidate_fd):
                 os.close(candidate_fd)
                 return refused
             album_fd = candidate_fd
@@ -9277,7 +9260,20 @@ def restore_incomplete_upgrade_backup(
         elif not _named_entry_missing(original_parent_fd, original_name):
             return refused
 
-        if album_fd is None and state["location"] == "hidden":
+        if album_fd is None and state["location"] == "unrecorded":
+            remnant = _hidden_album_remnant(original_parent_fd, source_receipt)
+            if remnant is not None:
+                hidden_name, hidden_fd, album_fd = remnant
+            else:
+                # A hard stop after the last file left its removal folder
+                # empty.
+                for name in os.listdir(original_parent_fd):
+                    if name.startswith(".ql-backup-remove-"):
+                        try:
+                            os.rmdir(name, dir_fd=original_parent_fd)
+                        except OSError:
+                            pass
+        elif album_fd is None and state["location"] == "hidden":
             hidden_name = state["quarantine_name"]
             try:
                 hidden_fd = _open_backup_directory(
@@ -9285,16 +9281,17 @@ def restore_incomplete_upgrade_backup(
                 if (
                     not _named_directory_matches(
                         original_parent_fd, hidden_name, hidden_fd)
-                    or _path_directory_generations([hidden_fd])[-1]
-                        != state["quarantine_generation"]
+                    or _incarnations(_path_directory_generations([hidden_fd]))
+                        != _incarnations([state["quarantine_generation"]])
                 ):
                     return refused
                 album_fd = _open_backup_directory("held", dir_fd=hidden_fd)
             except OSError:
                 return refused
+        if hidden_fd is not None:
             if (
                 not _named_directory_matches(hidden_fd, "held", album_fd)
-                or not _source_root_is_bound(album_fd, source_receipt)
+                or not _root_bound(album_fd)
                 or not _named_entry_missing(
                     original_parent_fd, original_name)
             ):
@@ -9310,8 +9307,7 @@ def restore_incomplete_upgrade_backup(
                 _named_entry_missing(hidden_fd, "held")
                 and _named_directory_matches(
                     original_parent_fd, original_name, album_fd)
-                and _source_parent_is_bound(
-                    music_root, source_parts, parent_fds, source_receipt)
+                and _parents_bound()
                 and _fsync_directory_fds(
                     hidden_fd, original_parent_fd)
             ):
@@ -9334,7 +9330,7 @@ def restore_incomplete_upgrade_backup(
         if album_fd is None and state["location"] == "public":
             return refused
         if album_fd is None:
-            if state["location"] != "absent":
+            if state["location"] not in {"absent", "unrecorded"}:
                 return refused
             stage_name, stage_fd = _reserve_backup_quarantine(
                 original_parent_fd, "ql-incomplete-upgrade-restore")
@@ -9574,8 +9570,7 @@ def restore_incomplete_upgrade_backup(
                 _named_entry_missing(original_parent_fd, stage_name)
                 and _named_directory_matches(
                     original_parent_fd, original_name, stage_fd)
-                and _source_parent_is_bound(
-                    music_root, source_parts, parent_fds, source_receipt)
+                and _parents_bound()
                 and _fsync_directory_fds(original_parent_fd)
             ):
                 return IncompleteUpgradeRestoreOutcome(0, 0, total, False)
@@ -9664,11 +9659,32 @@ def _tell_restored(receipt, original_path) -> None:
 def restore_upgrade_backup(
         backup, original_path: Path, *, expected_owner=None,
         replace_partial=True) -> bool:
-    """Move a carried complete whole-album upgrade backup to its origin, and
-    tell ``on_restored`` once it is back."""
-    restored = _restore_upgrade_backup(
-        backup, original_path, expected_owner=expected_owner,
-        replace_partial=replace_partial)
+    """Put a whole-album upgrade backup back at its origin, and tell
+    ``on_restored`` once it is back.
+
+    A complete backup moves back. An incomplete one, which a stop part way
+    through the backup leaves, supplies the files the album is missing and
+    replaces none: a file that differs keeps both copies, and the backup
+    stays.
+    """
+    if backup.complete:
+        restored = _restore_upgrade_backup(
+            backup, original_path, expected_owner=expected_owner,
+            replace_partial=replace_partial)
+    else:
+        outcome = restore_incomplete_upgrade_backup(
+            backup, original_path, expected_owner=expected_owner)
+        restored = (
+            outcome is not None
+            and outcome.unresolved == 0
+            and outcome.backup_disposed
+        )
+        if outcome is not None and outcome.unresolved:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  {errors_mod.plural(outcome.unresolved, 'file')} of "
+                f"{original_path} couldn't be put back from the backup, "
+                "or differ from it; both copies were kept and the backup "
+                f"stays at {backup.path}."))
     if restored:
         _tell_restored(backup.receipt, original_path)
     return restored
@@ -10212,16 +10228,102 @@ def interrupted_upgrades():
     return found
 
 
+def _unfinished_upgrade(path) -> bool:
+    """Whether this is an upgrade backup a stop left before the album's
+    folder was retired. Metadata only."""
+    try:
+        receipt = json.loads(
+            (path / _RECEIPT_SIDECAR).read_text(encoding="utf-8"))
+        return (
+            receipt["kind"] == "upgrade"
+            and receipt["complete"] is False
+            and not (path / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file()
+            and not is_set_aside_replacement(path)
+        )
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+
+
+def _backup_stamp(name):
+    match = re.match(r"^(\d{8}_\d{6})(?:_(\d{6}))?_", name)
+    return None if match is None else (match.group(1), match.group(2) or "")
+
+
+def _superseded(path, origin) -> bool:
+    """Whether a later finished whole-album backup of the same album folder
+    exists. It took the album as it was after this one, so this one must
+    never be put back over it. A download set aside, or a backup still
+    unfinished, holds no newer state of the album."""
+    stamp = _backup_stamp(path.name)
+    try:
+        for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
+            later = _backup_stamp(entry.name)
+            if (
+                stamp is not None and later is not None and later > stamp
+                and not re.match(
+                    r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|downsample)_",
+                    entry.name)
+                and (entry / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file()
+                and not is_set_aside_replacement(entry)
+                and _read_backup_origin(entry) == origin
+            ):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _album_untouched(origin, source_receipt, *, whole=False) -> bool:
+    """Whether everything in the album folder is a file or folder of its
+    sealed tree, each file with the same size and sha256, and with
+    ``whole`` none of it missing."""
+    opened = _open_rooted_directory(cfg.MUSIC_ROOT, origin)
+    if opened is None:
+        return False
+    descriptors = opened[-1]
+    try:
+        sealed = source_receipt["tree"]
+        current = _exact_tree_snapshot(descriptors[-1], digests=False)
+        if (
+            current is None
+            or not set(current["directories"]) <= set(sealed["directories"])
+            or not set(current["files"]) <= set(sealed["files"])
+            or whole and set(current["files"]) != set(sealed["files"])
+        ):
+            return False
+        for relative in current["files"]:
+            parents, _parent_fd, descriptor = _open_tree_file(
+                descriptors[-1], PurePosixPath(relative).parts)
+            try:
+                if (
+                    os.fstat(descriptor).st_size
+                        != sealed["files"][relative]["size"]
+                    or _file_digest_fd(descriptor)
+                        != sealed["files"][relative]["sha256"]
+                ):
+                    return False
+            finally:
+                os.close(descriptor)
+                _close_descriptors(parents)
+        return True
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+    finally:
+        _close_descriptors(descriptors)
+
+
 def albums_left_in_backups():
     """(backup, album folder) for each whole-album backup whose folder is
-    missing from the library, oldest first.
+    missing from the library, or missing files an unfinished backup holds,
+    oldest first.
 
-    A hard stop during an upgrade, a forced re-download or a whole-album
-    repair leaves the album here with nothing in its place, and so does a
-    backup the start-up put-back could not finish. Downloads an upgrade set
-    aside and file-by-file backups are left out, and so is an album whose
-    parent folder is gone too, which is how an unmounted library reads.
-    Metadata only.
+    A hard stop or Ctrl-C during an upgrade, a forced re-download or a
+    whole-album repair leaves the album here with nothing, or only part of
+    it, in its place, and so does a backup the start-up put-back could not
+    finish. Downloads an upgrade set aside and file-by-file backups are left
+    out, and so is an album whose parent folder is gone too, which is how an
+    unmounted library reads. An unfinished backup counts beside its album
+    only until a later backup of it exists. Metadata only.
     """
     found = []
     try:
@@ -10242,10 +10344,11 @@ def albums_left_in_backups():
         ):
             continue
         origin = _read_backup_origin(entry) or _intended_origin(entry)
-        if (
-            origin is not None
-            and not os.path.lexists(origin)
-            and origin.parent.is_dir()
+        if origin is None or not origin.parent.is_dir():
+            continue
+        if not os.path.lexists(origin) or (
+            origin.is_dir()
+            and (files_not_back_in_album(entry) or (0,))[0]
         ):
             found.append((entry, origin))
     return found
@@ -10294,20 +10397,27 @@ def album_backup_to_put_back(path, origin):
     """The backup an album listed by albums_left_in_backups can be restored
     from without asking, or None.
 
-    It must be complete, unpinned and owned by no saved download, and the
-    album's folder must still be missing beneath the same parent folders.
-    Anything else stays for the user in Diagnostics.
+    It must be unpinned, owned by no saved download, the latest backup of
+    the album, and beneath the same parent folders. The album's folder must
+    still be missing, or for an unfinished backup hold nothing but untouched
+    files of the sealed tree, so files the user renamed, changed or added
+    since are never joined by the old ones. Anything else stays for the user
+    in Diagnostics.
     """
-    if backup_keep_markers_present(path) or os.path.lexists(origin):
+    if backup_keep_markers_present(path) or os.path.lexists(origin) and (
+            path / _UPGRADE_RETIREMENT_COMPLETE_SENTINEL).is_file():
         return None
     candidate = load_backup_result(path)
     if (
         candidate is None
-        or not candidate.complete
         or candidate.receipt["kind"] != "upgrade"
         or candidate.receipt["origin"] != os.fspath(origin)
+        or candidate.complete and os.path.lexists(origin)
         or not _backup_owner_authorized(candidate, None)
         or not _album_parents_unchanged(candidate.receipt)
+        or _superseded(path, origin)
+        or os.path.lexists(origin) and not _album_untouched(
+            origin, candidate.receipt["source_receipt"])
     ):
         return None
     return candidate
@@ -10320,12 +10430,12 @@ def put_back_interrupted_backups():
     Only an album whose folder is still missing beneath the same parent
     folders is touched. A backup that is the moved folder itself goes back
     by rename once every file in it has the inode, size and times sealed
-    before the move. A copy on another filesystem supplies the files its
-    removal had already deleted, and the album's folder goes back in place.
-    The copy is read once to prove it before it is removed, and the files it
-    supplies once more as they are copied. An album put back from a copy is
-    passed to ``on_restored``. An album a restore had renamed home loses the
-    backup's own files that a hard stop left inside it.
+    before the move. A copy on another filesystem supplies the files the
+    album is missing, as Restore does for it, and the album's folder goes
+    back in place. An album put back from a copy is passed to
+    ``on_restored``. An album a restore had renamed home loses the backup's
+    own files that a hard stop left inside it, and an unfinished backup of an
+    album that is whole and untouched in its place is removed.
     """
     put_back = []
     try:
@@ -10345,7 +10455,41 @@ def put_back_interrupted_backups():
         pass
     finally:
         os.close(root_fd)
+    _clear_unfinished_backups_of_whole_albums()
     return put_back
+
+
+def _clear_unfinished_backups_of_whole_albums():
+    """Dispose of each unfinished whole-album backup whose album is whole and
+    untouched in its place. It holds only duplicates, and left alone it
+    could later put old files back into an album the user has changed."""
+    try:
+        entries = sorted(cfg.UPGRADE_BACKUP_DIR.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if (
+            not re.match(r"^\d{8}_\d{6}_", entry.name)
+            or re.match(
+                r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_",
+                entry.name)
+            or not _unfinished_upgrade(entry)
+            or backup_keep_markers_present(entry)
+        ):
+            continue
+        origin = _read_backup_origin(entry)
+        if origin is None or files_not_back_in_album(entry) != (0, 0):
+            continue
+        candidate = load_backup_result(entry)
+        if (
+            candidate is not None
+            and not candidate.complete
+            and candidate.receipt["origin"] == os.fspath(origin)
+            and _backup_owner_authorized(candidate, None)
+            and _album_untouched(
+                origin, candidate.receipt["source_receipt"], whole=True)
+        ):
+            restore_incomplete_upgrade_backup(candidate, origin)
 
 
 def _put_back_interrupted_backup(root_fd, intent_name):
@@ -10363,7 +10507,8 @@ def _put_back_interrupted_backup(root_fd, intent_name):
     ):
         # The album never left, or it waits in a complete backup, which the
         # put-back of albums_left_in_backups restores.
-        _drop_backup_intent(root_fd, intent_name)
+        if _partial_copy_settled(root_fd, backup_name, origin, source_receipt):
+            _drop_backup_intent(root_fd, intent_name)
         return None
     if not _album_parents_unchanged(
             {"origin": os.fspath(origin), "source_receipt": source_receipt}):
@@ -10375,6 +10520,7 @@ def _put_back_interrupted_backup(root_fd, intent_name):
     parent_fd = opened[-1][-1]
     backup_fd = None
     copied = False
+    restored = False
     try:
         backup_fd = _open_backup_directory(backup_name, dir_fd=root_fd)
         expected = _tree_identity(source_receipt["tree"])
@@ -10384,7 +10530,7 @@ def _put_back_interrupted_backup(root_fd, intent_name):
             ignore_root_names=(_ORIGIN_SIDECAR, _RECEIPT_SIDECAR),
         )
         if current is None:
-            restored = False
+            pass
         elif current["root_identity"] == expected["root_identity"]:
             restored = (
                 current == expected
@@ -10394,16 +10540,10 @@ def _put_back_interrupted_backup(root_fd, intent_name):
                     root_fd, backup_name, parent_fd, origin.name, backup_fd)
             )
         else:
-            restored = copied = (
+            copied = (
                 backup is not None
-                and backup.receipt["kind"] == "upgrade"
                 and backup.receipt["origin"] == os.fspath(origin)
                 and backup.receipt.get("source_receipt") == source_receipt
-                and _backup_owner_authorized(backup, None)
-                and _named_entry_missing(
-                    backup_fd, _UPGRADE_RECOVERY_STATE_SENTINEL)
-                and _put_back_from_copy(
-                    backup, root_fd, backup_fd, parent_fd, origin)
             )
     except OSError:
         restored = False
@@ -10411,12 +10551,76 @@ def _put_back_interrupted_backup(root_fd, intent_name):
         if backup_fd is not None:
             os.close(backup_fd)
         _close_descriptors(opened[-1])
+    if copied and album_backup_to_put_back(path, origin) is not None:
+        # The same put-back as a stop the app saw, which recorded where the
+        # album was left.
+        restored = restore_upgrade_backup(
+            backup, origin, replace_partial=False)
     if not restored:
         return None
     _drop_backup_intent(root_fd, intent_name)
-    if copied:
-        _tell_restored(backup.receipt, origin)
     return origin
+
+
+def _album_matches_receipt(origin, source_receipt) -> bool:
+    """Whether the album folder holds every file of its sealed tree with the
+    same size and sha256."""
+    opened = _open_rooted_directory(cfg.MUSIC_ROOT, origin)
+    if opened is None:
+        return False
+    descriptors = opened[-1]
+    try:
+        for relative, expected in source_receipt["tree"]["files"].items():
+            parts = PurePosixPath(relative).parts
+            parents = _open_relative_directories(descriptors[-1], parts[:-1])
+            try:
+                descriptor = _open_regular_file_at(
+                    parents[-1] if parents else descriptors[-1], parts[-1])
+                try:
+                    if (
+                        os.fstat(descriptor).st_size != expected["size"]
+                        or _file_digest_fd(descriptor) != expected["sha256"]
+                    ):
+                        return False
+                finally:
+                    os.close(descriptor)
+            finally:
+                _close_descriptors(parents)
+        return True
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+    finally:
+        _close_descriptors(descriptors)
+
+
+def _partial_copy_settled(root_fd, backup_name, origin, source_receipt):
+    """Remove the unfinished copy a hard stop left of an album that is still
+    whole in its place, and say whether none is left. One whose album
+    changed is kept and said so."""
+    name = _PARTIAL_COPY_PREFIX + backup_name
+    try:
+        partial_fd = _open_backup_directory(name, dir_fd=root_fd)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        copied = _exact_tree_snapshot(partial_fd, digests=False)
+        if (
+            copied is not None
+            and set(copied["files"]) <= set(source_receipt["tree"]["files"])
+            and _album_matches_receipt(origin, source_receipt)
+            and _remove_exact_tree_at(
+                root_fd, name, partial_fd, prefix="ql-backup-partial")
+        ):
+            return True
+    finally:
+        os.close(partial_fd)
+    log.info(fmt(C.YELLOW,
+        f"  ⚠  Kept the unfinished backup copy of {origin} at "
+        f"{cfg.UPGRADE_BACKUP_DIR / name}: the album no longer holds every "
+        "file it was copying."))
+    return False
 
 
 def _hidden_album_remnant(parent_fd, source_receipt):
@@ -10441,129 +10645,6 @@ def _hidden_album_remnant(parent_fd, source_receipt):
             descriptor for descriptor in (quarantine_fd, held_fd)
             if descriptor is not None])
     return None
-
-
-def _put_back_from_copy(backup, root_fd, backup_fd, parent_fd, origin) -> bool:
-    """Put an album back that a hard stop caught while its folder was being
-    removed after the copy to another filesystem.
-
-    The files the removal left in the album's hidden folder stay; the rest
-    are copied from the backup, into a new hidden folder when none were
-    left, and the folder then goes back in place.
-    """
-    source_receipt = backup.receipt["source_receipt"]
-    expected = _tree_identity(source_receipt["tree"])
-    remnant = _hidden_album_remnant(parent_fd, source_receipt)
-    if remnant is None:
-        for name in os.listdir(parent_fd):
-            if name.startswith(".ql-backup-remove-"):
-                try:
-                    os.rmdir(name, dir_fd=parent_fd)
-                except OSError:
-                    pass
-        stage_name, held_fd = _reserve_backup_quarantine(
-            parent_fd, "ql-backup-restore")
-        quarantine_name = quarantine_fd = None
-        left = {"root_identity": None, "directories": {}, "files": {}}
-    else:
-        quarantine_name, quarantine_fd, held_fd = remnant
-        stage_name = None
-        left = _exact_tree_snapshot(held_fd, digests=False)
-    held_backup = None
-    published = False
-    try:
-        if stage_name is not None:
-            if not _apply_serialized_directory_fidelity(
-                    held_fd, source_receipt["fidelity"]["directories"][""]):
-                return False
-        elif (
-            left is None
-            or left["root_identity"] != expected["root_identity"]
-            or any(expected["directories"].get(relative) != identity
-                   for relative, identity in left["directories"].items())
-            or any(expected["files"].get(relative) != snapshot
-                   for relative, snapshot in left["files"].items())
-        ):
-            return False
-        backup_snapshot = _receipt_disposal_snapshot(
-            backup_fd, backup.receipt)
-        if backup_snapshot is None:
-            return False
-        held_backup = {}
-        _hold_snapshot_files(backup_fd, backup_snapshot, held_backup)
-        missing_directories = sorted(
-            set(expected["directories"]) - set(left["directories"]),
-            key=lambda relative: relative.count("/"))
-        for relative in missing_directories:
-            descriptors = _open_relative_directories(
-                held_fd, PurePosixPath(relative).parts, create=True)
-            try:
-                if not _apply_serialized_directory_fidelity(
-                        descriptors[-1],
-                        source_receipt["fidelity"]["directories"][relative]):
-                    return False
-            finally:
-                _close_descriptors(descriptors)
-        for relative, original in source_receipt["tree"]["files"].items():
-            if relative in left["files"]:
-                continue
-            if backup.receipt["tree"]["files"].get(
-                    relative, {}).get("sha256") != original["sha256"]:
-                return False
-            parts = PurePosixPath(relative).parts
-            parents = _open_relative_directories(held_fd, parts[:-1])
-            publication = _CopyPublication(
-                parents[-1] if parents else held_fd, parts[-1])
-            try:
-                if _copy_file_noreplace_at(
-                        held_backup[relative]["descriptor"],
-                        publication) != original["sha256"]:
-                    return False
-            finally:
-                _release_copy_publication(publication)
-                _close_descriptors(parents)
-        filled = _exact_tree_snapshot(held_fd, digests=False)
-        if (
-            filled is None
-            or set(filled["files"]) != set(expected["files"])
-            or set(filled["directories"]) != set(expected["directories"])
-            or any(filled["files"][relative] != snapshot
-                   for relative, snapshot in left["files"].items())
-        ):
-            return False
-        if stage_name is not None:
-            _rename_exact_noreplace_at(
-                parent_fd, stage_name, parent_fd, origin.name, held_fd)
-        else:
-            _rename_exact_noreplace_at(
-                quarantine_fd, "held", parent_fd, origin.name, held_fd)
-        published = _named_directory_matches(parent_fd, origin.name, held_fd)
-        if not published:
-            return False
-        if quarantine_name is not None:
-            try:
-                _rmdir_exact_at(parent_fd, quarantine_name, quarantine_fd)
-            except OSError:
-                pass
-        _remove_exact_tree_at(
-            root_fd,
-            backup.path.name,
-            backup_fd,
-            prefix="ql-restored-incomplete-upgrade",
-            expected_snapshot=backup_snapshot,
-            held_files=held_backup,
-        )
-        return True
-    finally:
-        if held_backup is not None:
-            _release_held_snapshot_files(held_backup)
-        if stage_name is not None and not published:
-            _remove_exact_tree_at(
-                parent_fd, stage_name, held_fd,
-                prefix="ql-backup-restore-cleanup")
-        os.close(held_fd)
-        if quarantine_fd is not None:
-            os.close(quarantine_fd)
 
 
 def _audio_duration_seconds(path: Path):
@@ -10999,6 +11080,69 @@ def album_tree_size(path):
     return files, total
 
 
+def album_folder_replaced(backup) -> bool:
+    """Whether the album's folder is now another folder than the one this
+    backup was taken from, as a later download makes it."""
+    try:
+        recorded = backup.receipt["source_receipt"]["path_generations"][-1:]
+        origin = Path(backup.receipt["origin"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    opened = _open_rooted_directory(cfg.MUSIC_ROOT, origin)
+    if opened is None:
+        return False
+    descriptors = opened[-1]
+    try:
+        return _incarnations(_path_directory_generations(descriptors[-1:])) != (
+            _incarnations(recorded))
+    except (OSError, TypeError, ValueError, IndexError):
+        return False
+    finally:
+        _close_descriptors(descriptors)
+
+
+def files_not_back_in_album(path, *, compare=False):
+    """(missing, different) for the files this backup holds: how many have
+    nothing at their place in the album it came from, so the backup is their
+    only copy, and with ``compare`` how many have a different file there.
+
+    None when that can't be told: the album isn't known or the backup can't
+    be read. Beside its album folder only an unfinished upgrade backup that
+    no later backup of the album replaced counts: a finished one's album
+    holds the new download, whose names may differ, and a download an
+    upgrade set aside holds none of the user's files.
+    """
+    target = Path(path)
+    origin = _read_backup_origin(target) or _intended_origin(target)
+    if origin is None:
+        return None
+    if origin.is_dir() and (
+            not _unfinished_upgrade(target)
+            or _superseded(target, origin)):
+        return 0, 0
+    entries = _list_tree(target)
+    if entries is None:
+        return None
+    missing = different = 0
+    try:
+        for source in entries:
+            relative = source.relative_to(target)
+            if (
+                not stat.S_ISREG(source.lstat().st_mode)
+                or len(relative.parts) == 1 and source.name in _SIDECARS
+            ):
+                continue
+            destination = origin / relative
+            if not destination.is_file():
+                missing += 1
+            elif compare and not filecmp.cmp(
+                    source, destination, shallow=False):
+                different += 1
+    except OSError:
+        return None
+    return missing, different
+
+
 def discard_backup_unchecked(path) -> bool:
     """Delete a kept backup without checking anything, because the user said so.
 
@@ -11007,9 +11151,13 @@ def discard_backup_unchecked(path) -> bool:
     more than the backup does. Each refusal is right, and together they left
     the row a permanent dead end with a standing alarm beside it. This is the
     deliberate override behind an explicit warning, not a shortcut anything
-    else may take.
+    else may take. A backup holding files the album doesn't have is their
+    only copy, so it is never deleted this way.
     """
     target = Path(path)
+    counts = files_not_back_in_album(target)
+    if counts is not None and counts[0]:
+        return False
     opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, target)
     if opened is None:
         return False

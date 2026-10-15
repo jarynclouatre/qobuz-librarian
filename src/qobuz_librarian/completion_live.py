@@ -77,7 +77,7 @@ def _run_sigint_deferred(callback):
 
 
 class _LiveCompletionLifetime:
-    """One-shot owner for the tree descriptors and writer exclusions."""
+    """One-shot owner for the tree descriptors and their change checks."""
 
     def __init__(self):
         self.held = {}
@@ -570,13 +570,11 @@ class LiveCompletionLease:
             if exc is None:
                 raise
             if not isinstance(close_exc, Exception):
-                if hasattr(close_exc, "add_note"):
-                    close_exc.add_note(
-                        f"completion body also failed: {exc}")
+                close_exc.add_note(
+                    f"completion body also failed: {exc}")
                 raise
-            if hasattr(exc, "add_note"):
-                exc.add_note(
-                    f"live completion cleanup also failed: {close_exc}")
+            exc.add_note(
+                f"live completion cleanup also failed: {close_exc}")
         return False
 
 
@@ -673,7 +671,7 @@ def _capture_new_album_completion(
                 cleanup_error = _run_sigint_deferred(lifetime.close)
         except BaseException as close_exc:
             cleanup_error = close_exc
-        if cleanup_error is not None and hasattr(exc, "add_note"):
+        if cleanup_error is not None:
             exc.add_note(
                 f"live completion cleanup also failed: {cleanup_error}")
         if cleanup_error is not None and not isinstance(

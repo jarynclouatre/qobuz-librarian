@@ -1,11 +1,11 @@
 """Interactive prompts, display helpers, and fetch-log functions."""
-import fcntl
 import json
 import re
 import sys
 from urllib.parse import urlsplit
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.catalog import (
     album_quality_label,
@@ -30,41 +30,20 @@ from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 _FETCH_LOG_MAX_BYTES = 5 * 1024 * 1024
 
 
-def _fetch_log_lock():
-    """Exclusive cross-process lock for the fetch-log read-modify-write. Both web
-    worker lanes and concurrent CLI runs call log_fetch on the same file; without
-    serialising the rotate/append sequence, a tmp.replace can discard an
-    entry another writer appended between its read and its replace, and two
-    rotations can race. Returns an open fd to keep referenced (closing releases
-    the lock), or None if the lock can't be taken (degrade to best-effort)."""
-    try:
-        lock_path = cfg.FETCH_LOG_FILE.parent / (cfg.FETCH_LOG_FILE.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fp = open(lock_path, "a+", encoding="utf-8")
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        return fp
-    except OSError:
-        return None
-
-
 def log_fetch(entry):
-    lock = _fetch_log_lock()
+    # Both web worker lanes and terminal runs append here; the lock keeps a
+    # rotation from discarding an entry another writer just appended.
     try:
         cfg.FETCH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if cfg.FETCH_LOG_FILE.exists():
-            _rotate_fetch_log_if_needed()
-        with open(cfg.FETCH_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with state_file.store_lock(cfg.FETCH_LOG_FILE):
+            if cfg.FETCH_LOG_FILE.exists():
+                _rotate_fetch_log_if_needed()
+            with open(cfg.FETCH_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
         # Surface in --verbose instead of silently lying about
         # a successful log write. Still doesn't crash the run.
         vlog(f"log_fetch failed: {e}")
-    finally:
-        if lock is not None:
-            try:
-                lock.close()
-            except OSError:
-                pass
 
 
 def _rotate_fetch_log_if_needed():

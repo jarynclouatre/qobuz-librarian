@@ -1031,35 +1031,6 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
     assert retained[0].read_bytes() == b"art"
 
 
-def test_boot_still_stops_when_an_unclaimed_run_has_a_live_writer(
-    tmp_path,
-    monkeypatch,
-):
-    monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
-    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
-    monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
-    run_dir = tmp_path / "staging" / f".qobuz-run-{'1' * 24}"
-    run_dir.mkdir(parents=True)
-    track = run_dir / "01 Track.flac"
-    track.write_bytes(b"partial audio")
-
-    descriptor = os.open(track, os.O_WRONLY)
-    try:
-        authority = run_lock.acquire()
-        try:
-            result = startup_recovery.recover_startup_state(
-                authority=authority)
-        finally:
-            authority.close()
-    finally:
-        os.close(descriptor)
-
-    assert result.status is (
-        startup_recovery.StartupRecoveryStatus.ATTENTION_REQUIRED)
-    assert result.reason == "unclaimed-staging-run"
-    assert track.read_bytes() == b"partial audio"
-
-
 def test_a_staged_leftover_is_settleable_beside_its_beets_carrier():
     """A download that imported and stranded a file keeps its Beets carrier
     listed next to the staging record, so reading the class off the reference
