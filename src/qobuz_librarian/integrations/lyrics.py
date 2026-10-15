@@ -12,6 +12,8 @@ from qobuz_librarian import state_file
 from qobuz_librarian.dirfd import same_directory as _same_directory
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import lyric_fetch, rip
+from qobuz_librarian.library import candidate_premise, downsample_state
+from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import plural
@@ -1224,14 +1226,21 @@ def offer_resume_lyric_retry(args):
             counts = {}
             try:
                 paths_obj = [Path(p) for p in existing]
-                counts = lyric_fetch.fetch_for_paths(
-                    paths_obj,
-                    owned_root=cfg.MUSIC_ROOT,
-                    log=log,
-                    providers=cfg.LYRICS_PROVIDERS or None,
-                    lyrics_format=cfg.LYRICS_FORMAT,
-                    state_path=cfg.LYRIC_FETCH_STATE_FILE,
-                )
+                with lyric_fetch.recording_writes() as written:
+                    try:
+                        counts = lyric_fetch.fetch_for_paths(
+                            paths_obj,
+                            owned_root=cfg.MUSIC_ROOT,
+                            log=log,
+                            providers=cfg.LYRICS_PROVIDERS or None,
+                            lyrics_format=cfg.LYRICS_FORMAT,
+                            state_path=cfg.LYRIC_FETCH_STATE_FILE,
+                        )
+                    finally:
+                        if written:
+                            seal = candidate_premise.sealer_after_writes(written)
+                            upgrade_state.reseal(seal)
+                            downsample_state.reseal(seal)
             except KeyboardInterrupt:
                 log.info(
                     fmt(

@@ -162,45 +162,41 @@ def _undeliverable_album_error(r):
     )
 
 
-def _mark_download_attention(job, result):
-    """Record what a finished download left that still needs attention."""
+def download_error(result, *, job_controls=True):
+    """The error line a finished download shows, or None when it has none.
+
+    Without ``job_controls``, as on a terminal row with no log or Retry, it
+    leaves out the hint pointing at them."""
+
+    def hint(text):
+        return f" {text}" if job_controls else ""
+
     retryable, lossy_only = download_result.incomplete_track_counts(result)
     status, kind = download_result.download_job_outcome(result)
-    job.status = job_mgr.JobStatus(status)
-    job.tracks_missing = download_result.tracks_missing(result)
     if kind == "backup":
-        job.attention = "backup"
-        if not isinstance(job.execute_args, dict):
-            job.execute_args = {}
-        job.execute_args["retry_disabled"] = "backup"
         if result.get("catalogue_unverified"):
-            job.error = (
+            return (
                 "The album's Beets catalogue entries could not be reconciled "
                 "safely. A backup was retained. Review it under Settings > "
                 "Diagnostics before downloading this album again."
             )
-        elif result.get("recovery_unverified"):
-            job.error = (
+        if result.get("recovery_unverified"):
+            return (
                 "The album recovery could not be verified complete. A backup "
                 "was retained. Review it under Settings > Diagnostics before "
                 "downloading this album again."
             )
-        else:
-            job.error = (
-                "The replacement could not be verified complete. Your "
-                "original was retained as a backup. Review it under Settings "
-                "> Diagnostics before downloading this album again."
-            )
-        return
+        return (
+            "The replacement could not be verified complete. Your "
+            "original was retained as a backup. Review it under Settings "
+            "> Diagnostics before downloading this album again."
+        )
     if kind == "quality":
-        job_mgr.record_quality_shortfall(job, result.get("quality_verdict"))
-        job.error = (
+        return (
             "The album downloaded, but it still finished below the target "
             "quality after the automatic retry."
         )
-        return
     if kind == "processing":
-        job.attention = "processing"
         messages = []
         if result.get("downsample_errors"):
             messages.append(
@@ -219,40 +215,82 @@ def _mark_download_attention(job, result):
         if result.get("siblings_preserved"):
             messages.append("sibling cleanup needs review")
         detail = "; ".join(messages) or "post-download work did not finish"
-        job.error = (
-            f"The album imported, but {detail}. Check the job log before "
-            "retrying."
+        return (
+            f"The album imported, but {detail}."
+            + hint("Check the job log before retrying.")
         )
-        return
     if kind == "lossy":
-        job.attention = "lossy"
-        job.execute_args["retry_disabled"] = "lossy"
-        job.error = (
+        return (
             f"{plural(lossy_only, 'track')} "
             f"{'is' if lossy_only == 1 else 'are'} only available "
             "lossy on Qobuz. The album is incomplete and needs another "
             "source."
         )
-        return
-    job.attention = "partial"
-    if retryable:
+    if kind:
+        if not retryable:
+            return (
+                "The album imported, but the download reported unfinished "
+                "work." + hint("Check the job log before retrying.")
+            )
         damaged = result.get("n_broken", 0)
         causes = []
         if damaged:
             causes.append(f"{plural(damaged, 'track')} arrived damaged")
         if retryable > damaged:
             causes.append(f"{plural(retryable - damaged, 'track')} did not arrive")
-        job.error = (
-            f"{' and '.join(causes)}. "
-            f"Retry fetches {'it' if retryable == 1 else 'them'}."
-        )
+        error = f"{' and '.join(causes)}." + hint(
+            f"Retry fetches {'it' if retryable == 1 else 'them'}.")
         if lossy_only:
-            job.error += (
+            error += (
                 f" {plural(lossy_only, 'track')} can only be found "
                 "lossy on Qobuz and needs another source."
             )
+        return error
+    if status == "failed":
+        if result.get("rate_limited"):
+            return "Qobuz rate-limited this download. Try again later."
+        if result.get("result") == "incomplete":
+            return _undeliverable_album_error(result)
+        if result.get("n_fail"):
+            return (f"{plural(result['n_fail'], 'track')} failed."
+                    + hint("See job log."))
+        if result.get("n_ok"):
+            return "Downloaded, but the import failed." + hint("See job log.")
+        if retryable:
+            return (
+                f"{plural(retryable, 'track')} did not arrive as a "
+                "complete file, so nothing was added to your library."
+                + hint("The job log names them."))
+        if lossy_only:
+            return (
+                f"Qobuz offered {plural(lossy_only, 'track')} only in a "
+                "lossy format, so nothing was added to your library.")
+        if result.get("result") in _DOWNLOAD_SUMMARY_LABELS:
+            return _DOWNLOAD_SUMMARY_LABELS[result["result"]]
+        return "No tracks were retrieved." + hint("The job log says why.")
+    if result.get("imported") and result.get("n_fail", 0) > 0:
+        return (f"{plural(result['n_fail'], 'track')} failed."
+                + hint("See job log."))
+    return None
+
+
+def _mark_download_attention(job, result):
+    """Record what a finished download left that still needs attention."""
+    status, kind = download_result.download_job_outcome(result)
+    job.status = job_mgr.JobStatus(status)
+    job.tracks_missing = download_result.tracks_missing(result)
+    job.error = download_error(result)
+    if kind == "backup":
+        job.attention = "backup"
+        if not isinstance(job.execute_args, dict):
+            job.execute_args = {}
+        job.execute_args["retry_disabled"] = "backup"
+    elif kind == "quality":
+        job_mgr.record_quality_shortfall(job, result.get("quality_verdict"))
+    elif kind == "processing":
+        job.attention = "processing"
+    elif kind == "lossy":
+        job.attention = "lossy"
+        job.execute_args["retry_disabled"] = "lossy"
     else:
-        job.error = (
-            "The album imported, but the download reported unfinished work. "
-            "Check the job log before retrying."
-        )
+        job.attention = "partial"

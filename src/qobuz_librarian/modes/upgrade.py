@@ -383,12 +383,13 @@ def run_upgrade_walk_mode(args, token):
                     f"  {label} {truncate(c.get('title') or '?', 55)}"))
                 try:
                     premise = candidate_premise.validate(c)
-                except candidate_premise.CandidateStale:
-                    log.info(fmt(
-                        C.YELLOW,
-                        "  The local album changed after it was checked. "
-                        "It was left unchanged.",
-                    ))
+                except candidate_premise.CandidateStale as exc:
+                    message = (
+                        str(exc) if exc.cause == "link" else
+                        "The local album changed after it was checked. "
+                        "It was left unchanged."
+                    )
+                    log.info(fmt(C.YELLOW, f"  {message}"))
                     n_stale_albums += 1
                     continue
                 try:

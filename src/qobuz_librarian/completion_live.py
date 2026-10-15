@@ -46,6 +46,7 @@ from qobuz_librarian.library.backup import (
     _held_snapshot_files_intact,
     _hold_snapshot_files,
     _open_backup_source,
+    _tree_identity,
 )
 
 
@@ -481,36 +482,31 @@ class LiveCompletionLease:
             )
         return assessment.evidence
 
+    def _album_unchanged(self, lifetime):
+        album_fd = lifetime.chain[-1]
+        return (
+            self._namespace_intact()
+            and _exact_tree_snapshot(album_fd) == self._snapshot
+            and _held_snapshot_files_intact(
+                album_fd, self._snapshot, lifetime.held)
+        )
+
     def _revalidate_once(self):
         lifetime = self._lifetime()
         if lifetime is None or lifetime.closed or not lifetime.chain:
             raise LiveCompletionUnavailable(
                 "live completion descriptors are unavailable")
-        if self._managed_lease.revalidate() != self._managed:
-            raise LiveCompletionUnavailable(
-                "managed completion evidence changed")
-        album_fd = lifetime.chain[-1]
-        if (
-            not self._namespace_intact()
-            or _exact_tree_snapshot(album_fd) != self._snapshot
-            or not _held_snapshot_files_intact(
-                album_fd, self._snapshot, lifetime.held)
-        ):
-            raise LiveCompletionUnavailable(
-                "managed album changed during completion verification")
-        evidence = (
-            self._evidence
-            if self._evidence is not None
-            else self._build_evidence()
-        )
-        if (
-            self._evidence is not None
-            and evidence != self._evidence
-            or not self._namespace_intact()
-            or _exact_tree_snapshot(album_fd) != self._snapshot
-            or not _held_snapshot_files_intact(
-                album_fd, self._snapshot, lifetime.held)
-        ):
+        if self._evidence is None:
+            if self._managed_lease.revalidate() != self._managed:
+                raise LiveCompletionUnavailable(
+                    "managed completion evidence changed")
+            if not self._album_unchanged(lifetime):
+                raise LiveCompletionUnavailable(
+                    "managed album changed during completion verification")
+            evidence = self._build_evidence()
+        else:
+            evidence = self._evidence
+        if not self._album_unchanged(lifetime):
             raise LiveCompletionUnavailable(
                 "managed album changed during completion verification")
         if self._managed_lease.revalidate() != self._managed:
@@ -629,13 +625,13 @@ def _capture_new_album_completion(
         ):
             raise LiveCompletionUnavailable(
                 "managed album identity changed")
-        snapshot = _exact_tree_snapshot(lifetime.chain[-1])
-        if snapshot is None:
+        listing = _exact_tree_snapshot(lifetime.chain[-1], digests=False)
+        if listing is None:
             raise LiveCompletionUnavailable(
                 "managed album contains an unsafe entry")
         actual_audio = {
             relative
-            for relative in snapshot["files"]
+            for relative in listing["files"]
             if PurePosixPath(relative).suffix.lower() in cfg.AUDIO_EXTS
         }
         if actual_audio != {relative for _slot, relative in slot_relatives}:
@@ -644,7 +640,11 @@ def _capture_new_album_completion(
                 failure=CompletionFailure.INVENTORY_MISMATCH,
             )
         _hold_snapshot_files(
-            lifetime.chain[-1], snapshot, lifetime.held)
+            lifetime.chain[-1], listing, lifetime.held)
+        snapshot = _exact_tree_snapshot(lifetime.chain[-1])
+        if snapshot is None or _tree_identity(snapshot) != listing:
+            raise LiveCompletionUnavailable(
+                "managed album changed while it was held")
         if not _fsync_exact_tree(
             lifetime.chain[-1], snapshot, lifetime.held
         ) or not _fsync_directory_fds(*lifetime.chain):

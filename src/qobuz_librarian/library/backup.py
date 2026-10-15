@@ -6730,6 +6730,19 @@ def _finish_put_back(root_fd, note_name) -> None:
         _close_descriptors(descriptors)
 
 
+def first_symlink(folder) -> str | None:
+    """The first symbolic link below ``folder``, relative to it.
+
+    A backup copies and seals only real files and folders, so one link, such
+    as folder.jpg pointing at cover.jpg, keeps the whole album out of it.
+    """
+    root = Path(folder)
+    for path in sorted(iter_tree_no_symlinks(root, errors=[])):
+        if path.is_symlink():
+            return path.relative_to(root).as_posix()
+    return None
+
+
 def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                      on_intent=None, set_aside=False):
     """Move album_dir to a timestamped, receipt-bound backup.
@@ -6806,10 +6819,13 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             or source_generations is None
             or source_path_generations is None
         ):
+            link = first_symlink(public)
+            reason = (f"{link} is a symbolic link; replace it with a copy of "
+                      "its file" if link else "couldn't seal its exact tree")
             log.info(fmt(
                 C.RED,
-                f"  ✗  Couldn't seal the exact source tree at {public}; "
-                "leaving it in place."))
+                f"  ✗  Couldn't back up {public}: {reason}. The album was "
+                "left in place."))
             return None
         current_source_receipt = {
             "version": 1,

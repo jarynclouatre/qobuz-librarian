@@ -1373,8 +1373,7 @@ def execute_durable_new_album(
         managed = settled_managed
         post_dir = Path(managed.library_root) / managed.album_path
         with reopen_managed_evidence(carrier.data, owner) as managed_lease:
-            reopened = managed_lease.revalidate()
-            if reopened != managed:
+            if managed_lease.evidence != managed:
                 raise DurableAlbumUnavailable("managed completion changed before publication")
             with capture_new_album_completion(
                 managed_lease=managed_lease,
@@ -1384,9 +1383,6 @@ def execute_durable_new_album(
             ) as live_lease:
                 evidence = live_lease.revalidate()
                 _require_authority(authority)
-                managed_lease.revalidate()
-                live_lease.revalidate()
-                _require_authority(authority)
                 journal = queue_state.transition_journal_item(
                     journal,
                     item_id,
@@ -1394,8 +1390,6 @@ def execute_durable_new_album(
                     completion_evidence=evidence.to_record(),
                 )
                 _require_authority(authority)
-                if managed_lease.revalidate() != managed:
-                    raise DurableAlbumUnavailable("managed completion changed during publication")
                 live_lease.revalidate()
                 _require_authority(authority)
                 post_import_action = plan_post_import_action(

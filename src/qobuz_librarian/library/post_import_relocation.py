@@ -61,7 +61,7 @@ _LOCK_NAME = ".lock"
 _WORKSPACE_PREFIX = ".qobuz-librarian-relocation-"
 _JOURNAL_VERSION = 1
 _EXPECTATION_VERSION = 1
-_MAX_JOURNAL_BYTES = 1024 * 1024
+_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 _MAX_TREE_ENTRIES = 10_000
 _MAX_TREE_DEPTH = 16
 _COPY_BLOCK_SIZE = 1024 * 1024
@@ -872,13 +872,13 @@ def _read_journal(namespace_fd, operation_id) -> dict:
         value = os.fstat(descriptor)
         if value.st_nlink != 1 or value.st_size > _MAX_JOURNAL_BYTES:
             raise ValueError("relocation journal is unsafe or too large")
-        raw = b""
+        raw = bytearray()
         while len(raw) <= _MAX_JOURNAL_BYTES:
-            block = os.read(descriptor, min(65536, _MAX_JOURNAL_BYTES + 1 - len(raw)))
+            block = os.read(descriptor, min(_COPY_BLOCK_SIZE, _MAX_JOURNAL_BYTES + 1 - len(raw)))
             if not block:
                 break
             raw += block
-        return _decode_journal(raw)
+        return _decode_journal(bytes(raw))
     finally:
         os.close(descriptor)
 

@@ -3760,6 +3760,7 @@ def execute_downsamples(
     skipped_missing_details = 0
     skipped_missing_folders = 0
     skipped_unchanged = 0
+    skipped_changed = 0
     failed_albums = 0
     interrupted = 0
     processed = 0
@@ -3784,6 +3785,11 @@ def execute_downsamples(
             parts.append(
                 f"{plural(skipped_unchanged, 'album')} skipped "
                 "(nothing needed changing)"
+            )
+        if skipped_changed:
+            parts.append(
+                f"{plural(skipped_changed, 'album')} skipped "
+                "(the files no longer match the review; refresh it)"
             )
         return parts
 
@@ -3835,6 +3841,10 @@ def execute_downsamples(
                                      base_dir=album_dir, log=log.info,
                                      keep_originals=keep_originals,
                                      cancel_check=lambda: job.cancel_requested)
+        except CandidateStale as e:
+            log.info(f"  skipped: {e}")
+            skipped_changed += 1
+            continue
         except Exception as e:
             log.info(f"  failed: {e}")
             total_errors += 1

@@ -345,7 +345,7 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     and terminal runs never reached POST_JOB_HOOK."""
     from qobuz_librarian import post_job_hook
     from qobuz_librarian.queue import executor
-    from qobuz_librarian.web import job_persistence
+    from qobuz_librarian.web import download_outcomes, job_persistence
 
     monkeypatch.setattr(job_persistence, "_disabled", False)
     hooks = []
@@ -392,6 +392,25 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     assert saved["quality_shortfall"]["served"] == [16, 44100]
     assert job_persistence.acknowledge_attention(row["id"], "quality")
 
+    # An album Qobuz could not serve whole imported nothing; History and the
+    # hook say so in the web's words instead of counting landed tracks.
+    short = {"result": "incomplete", "imported": False, "n_ok": 8, "n_fail": 2}
+    executor._record_terminal_downloads([{
+        **short,
+        "album": {"id": "terminal-short", "title": "Syro",
+                  "artist": {"name": "Aphex Twin"}},
+    }])
+    row = next(
+        row for row in job_persistence.history_page(50, 0, bulk=False)
+        if row["album_id"] == "terminal-short"
+    )
+    assert row["status"] == "failed"
+    assert row["summary"] == download_outcomes._summarize_download_result(short)
+    assert row["error"] == download_outcomes.download_error(
+        short, job_controls=False)
+    assert (hooks[-1]["summary"], hooks[-1]["error"]) == (
+        row["summary"], row["error"])
+
     # A download stopped with Ctrl-C, and an Upgrade, Repair or Downsample
     # run, are recorded and reported as their web jobs are.
     executor._record_terminal_downloads([{
@@ -412,7 +431,7 @@ def test_a_terminal_download_lands_in_the_activity_record(monkeypatch):
     assert [(h["id"], h["kind"], h["status"]) for h in hooks[-2:]] == [
         (stopped["id"], "download", "canceled"),
         (card["id"], "upgrade", "failed")]
-    assert len(hooks) == 4
+    assert len(hooks) == 5
 
     # A whole --no-import download is done, kept in staging.
     executor._refresh_review_state_after_downloads([{

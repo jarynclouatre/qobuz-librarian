@@ -24,6 +24,7 @@ from qobuz_librarian.api.auth import CredentialChanged, NoCredsError, QobuzAcces
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.library import (
+    backup,
     candidate_premise,
     generation_state,
     missing_types,
@@ -802,6 +803,22 @@ def _all_candidates_stale_message(execute_kind, counts, candidates=()):
     if older:
         label = str(older) if causes else plural(older, "album")
         causes.append(f"{label} {'comes' if older == 1 else 'come'} from an older review")
+    if counts.get("link", 0):
+        links = []
+        for path in dict.fromkeys(
+                candidate_premise.expected_path(c) for c in candidates):
+            link = backup.first_symlink(path) if path else None
+            if link:
+                links.append(f"{link} in {Path(path).name}")
+        if links:
+            one = len(links) == 1
+            named = "; ".join(links[:3])
+            if len(links) > 3:
+                named += f" and {len(links) - 3} more"
+            causes.append(
+                f"{named} {'is a symbolic link' if one else 'are symbolic links'}, "
+                "which can't be checked or backed up safely; replace "
+                f"{'it' if one else 'them'} with a copy of the file")
     return (", ".join(causes) + ". Nothing was started. "
             + _rebuild_results_hint(execute_kind))
 

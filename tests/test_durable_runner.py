@@ -571,6 +571,10 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
         def __init__(self):
             self.database_generation = observed["database_generation"]
 
+        @property
+        def evidence(self):
+            return self.revalidate()
+
         def revalidate(self):
             if self.database_generation != observed["database_generation"]:
                 raise OSError("database anchor was replaced")

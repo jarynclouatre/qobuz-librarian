@@ -1194,27 +1194,6 @@ def main():
         from qobuz_librarian.modes.settings_cli import run_settings_mode
         raise SystemExit(run_settings_mode(args))
 
-    # Library migration is local-only: it reorganises files on disk and never
-    # touches Qobuz.
-    if args.migrate:
-        from qobuz_librarian.modes.migrate import run_migrate_mode
-        raise SystemExit(run_migrate_mode(args))
-
-    # Lyrics backfill reads/writes library files and fetches from lyric
-    # providers; no streamrip, ffmpeg or Qobuz token involved.
-    if args.lyrics_walk:
-        require_music_root()
-        from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
-        raise SystemExit(run_library_lyrics_mode(args))
-
-    # Downsample walk is local-only; it reads hi-res files off disk and
-    # resamples them in place, never touching Qobuz.
-    if args.downsample_walk:
-        check_media_tools()
-        require_music_root()
-        from qobuz_librarian.modes.downsample import run_downsample_walk_mode
-        raise SystemExit(run_downsample_walk_mode(args))
-
     # Keep the interactive menu and saved-work choices available on a local-
     # only box.
     download_stack = {}
@@ -1336,8 +1315,9 @@ def main():
             raise SystemExit(EXIT_GENERAL)
 
     # Housekeeping deletes expired backups and rewrites state files, so a
-    # dry run skips it.
-    if not args.dry_run and not saved_queue:
+    # dry run skips it. A queue that stopped part way holds all other work
+    # until it is resumed, so this waits for it too.
+    if not args.dry_run and not queue_started:
         from qobuz_librarian.integrations import beets as beets_mod
         from qobuz_librarian.integrations import staging as staging_mod
         from qobuz_librarian.library import backup as backup_mod
@@ -1346,7 +1326,8 @@ def main():
             beets_mod.recover_interrupted_beets_write()
             beets_mod.remove_stale_import_overrides()
             process_mode.finish_interrupted_upgrades()
-            staging_mod.remove_empty_retry_groups()
+            if not saved_queue:
+                staging_mod.remove_empty_retry_groups()
         except Exception as e:
             vlog(f"interrupted upgrade settle error: {e}")
         try:
@@ -1402,6 +1383,28 @@ def main():
             repair_cache.prune_expired()
         except Exception as e:
             vlog(f"repair-cache prune error: {e}")
+
+    # Library migration is local-only: it reorganises files on disk and never
+    # touches Qobuz.
+    if args.migrate:
+        from qobuz_librarian.modes.migrate import run_migrate_mode
+        raise SystemExit(run_migrate_mode(args))
+
+    # Lyrics backfill reads/writes library files and fetches from lyric
+    # providers; no streamrip, ffmpeg or Qobuz token involved.
+    if args.lyrics_walk:
+        require_music_root()
+        from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
+        raise SystemExit(run_library_lyrics_mode(args))
+
+    # Downsample walk is local-only; it reads hi-res files off disk and
+    # resamples them in place, never touching Qobuz.
+    if args.downsample_walk:
+        check_media_tools()
+        require_music_root()
+        from qobuz_librarian.modes.downsample import run_downsample_walk_mode
+        raise SystemExit(run_downsample_walk_mode(args))
+
     # Single-shot flag paths first (each skips the menu loop), then positional
     # args / URL → album mode, then the interactive menu. The single-shot paths
     # still respect AuthLost / KeyboardInterrupt cleanly; all caught at the

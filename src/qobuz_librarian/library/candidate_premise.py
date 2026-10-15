@@ -27,6 +27,7 @@ from qobuz_librarian.library.backup import (
     canonical_album_tree_identity,
     capture_album_tree_identity,
     capture_music_root_identity,
+    first_symlink,
 )
 
 PREMISE_VERSION = 2
@@ -51,7 +52,7 @@ class CandidateStale(Exception):
 class StaleCandidateIds(set):
     def __init__(self):
         super().__init__()
-        self.counts = {"changed": 0, "unreadable": 0, "older": 0}
+        self.counts = {"changed": 0, "unreadable": 0, "older": 0, "link": 0}
 
 
 def _canonical_receipt(value, *, origin: str, version: int = PREMISE_VERSION):
@@ -423,18 +424,39 @@ def gap_fill_receipts(value) -> dict | None:
         return None
 
 
-def validate(candidate: dict, *, missing_premises=None) -> dict:
+def _refuse_unsealed(candidate, premise, links=None):
+    """Refuse a row saved without a current seal, naming the symbolic link
+    that kept its folder from being sealed when there is one. ``links``
+    remembers each folder's answer across one sweep of rows."""
+    path = expected_path(candidate)
+    link = None
+    if premise is None and path:
+        links = {} if links is None else links
+        if path not in links:
+            links[path] = first_symlink(path)
+        link = links[path]
+    if link:
+        raise CandidateStale(
+            f"{link} in {Path(path).name} is a symbolic link, which can't be "
+            "checked or backed up safely. Replace it with a copy of its file, "
+            "then refresh; nothing was changed.",
+            cause="link",
+        )
+    raise CandidateStale(
+        "This saved review is too old to check against the current files. "
+        "Refresh it before changing music files.",
+        cause="older",
+    )
+
+
+def validate(candidate: dict, *, missing_premises=None, links=None) -> dict:
     """Check a saved review against the current files before using it."""
     absent = _canonical_absent(candidate)
     if absent is not None:
         return _validate_absent(absent)
     premise = canonical(candidate)
     if premise is None or premise["version"] != PREMISE_VERSION:
-        raise CandidateStale(
-            "This saved review is too old to check against the current files. "
-            "Refresh it before changing music files.",
-            cause="older",
-        )
+        _refuse_unsealed(candidate, premise, links)
     if premise["kind"] == "missing" and missing_premises is not None:
         path = premise["path"]
         if path not in missing_premises:
@@ -632,11 +654,7 @@ def validate_container(candidate: dict) -> dict:
         return _validate_absent(absent)
     premise = canonical(candidate)
     if premise is None or premise["version"] != PREMISE_VERSION:
-        raise CandidateStale(
-            "This saved review is too old to check against the current files. "
-            "Refresh it before changing music files.",
-            cause="older",
-        )
+        _refuse_unsealed(candidate, premise)
     if premise["kind"] != "missing":
         return validate(candidate)
     opened = _open_backup_source(Path(premise["path"]))
@@ -699,10 +717,11 @@ def stale_candidate_ids(candidates, *, share_artist_captures=False) -> StaleCand
     is written.
     """
     missing_premises = {} if share_artist_captures else None
+    links = {}
     stale = StaleCandidateIds()
     for candidate in candidates:
         try:
-            validate(candidate, missing_premises=missing_premises)
+            validate(candidate, missing_premises=missing_premises, links=links)
         except CandidateStale as exc:
             stale.add(candidate.get("cid"))
             stale.counts[exc.cause] += 1

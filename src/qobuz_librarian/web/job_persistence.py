@@ -744,6 +744,7 @@ def record_terminal_download(
     result,
     edition="",
     status=None,
+    error=None,
 ):
     """Add one finished terminal download to the activity record and return
     its id.
@@ -764,7 +765,7 @@ def record_terminal_download(
     )
     return _insert_terminal_record((
         str(title or ""), str(artist or ""), album_id, "download", "",
-        status or outcome, str(summary or ""), None, started_at, finished_at,
+        status or outcome, str(summary or ""), error, started_at, finished_at,
         str(edition or "").strip(), attention, json.dumps(shortfall),
         json.dumps({"retry_disabled": "terminal"}),
         download_result.tracks_missing(result),

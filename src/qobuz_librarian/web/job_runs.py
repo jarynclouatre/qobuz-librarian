@@ -18,7 +18,6 @@ from qobuz_librarian.queue import builder as queue_builder
 from qobuz_librarian.queue import durable_album
 from qobuz_librarian.queue import executor as queue_executor
 from qobuz_librarian.queue import journal as queue_state
-from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
     download_outcomes,
     flows,
@@ -319,30 +318,9 @@ def _make_download_run(
             download_outcomes._mark_download_attention(j, r)
         elif status == "failed":
             j.status = job_mgr.JobStatus.FAILED
-            retryable, lossy_only = download_result.incomplete_track_counts(r)
-            if r.get("rate_limited"):
-                j.error = "Qobuz rate-limited this download. Try again later."
-            elif r.get("result") == "incomplete":
-                j.error = download_outcomes._undeliverable_album_error(r)
-            elif r.get("n_fail"):
-                j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
-            elif r.get("n_ok"):
-                j.error = "Downloaded, but the import failed. See job log."
-            elif retryable:
-                j.error = (
-                    f"{plural(retryable, 'track')} did not arrive as a "
-                    "complete file, so nothing was added to your library. "
-                    "The job log names them.")
-            elif lossy_only:
-                j.error = (
-                    f"Qobuz offered {plural(lossy_only, 'track')} only in a "
-                    "lossy format, so nothing was added to your library.")
-            elif r.get("result") in download_outcomes._DOWNLOAD_SUMMARY_LABELS:
-                j.error = download_outcomes._DOWNLOAD_SUMMARY_LABELS[r["result"]]
-            else:
-                j.error = "No tracks were retrieved. The job log says why."
+            j.error = download_outcomes.download_error(r)
         elif r.get("imported") and r.get("n_fail", 0) > 0:
-            j.error = f"{plural(r['n_fail'], 'track')} failed. See job log."
+            j.error = download_outcomes.download_error(r)
         # Surface a one-line outcome here so the /jobs page tells the user what
         # happened without expanding the log.
         summary = download_outcomes._summarize_download_result(r)

@@ -1031,7 +1031,7 @@ _OWNERSHIP_ENV_KEYS = (
 _MANAGED_OWNERSHIP_MODE = "managed-v3"
 _MANAGED_SNAPSHOT_VERSION = 3
 _OWNERSHIP_MAX_SOURCE_ROOTS = 16
-_OWNERSHIP_MAX_BYTES = 1024 * 1024
+_OWNERSHIP_MAX_BYTES = 64 * 1024 * 1024
 _OWNERSHIP_MARKER = ".qobuz-librarian-owner"
 _OWNERSHIP_IDENTITY_FIELDS = (
     "device",
@@ -6933,14 +6933,12 @@ def _catalogue_item_path(value, *, allow_external=False):
     if not os.path.isabs(raw):
         raw = os.path.join(root, raw)
     path = os.path.abspath(raw)
-    try:
-        relative = Path(path).relative_to(root)
-    except ValueError:
+    if path == root:
+        raise ValueError("invalid beets item path")
+    if not path.startswith(os.path.join(root, "")):
         if allow_external:
             return Path(path)
-        raise ValueError("beets item is outside the library") from None
-    if not relative.parts:
-        raise ValueError("invalid beets item path")
+        raise ValueError("beets item is outside the library")
     return Path(path)
 
 
@@ -7641,6 +7639,81 @@ def _backup_receipt(value):
     return getattr(value, "receipt", None)
 
 
+def _backup_retirement(connection, old_paths, replacement_paths):
+    """The old rows ``retire_backup_beets_entries`` retires, their albums,
+    the replacement album and the attribute columns, after proving the
+    replacement is catalogued exactly."""
+    (
+        album_columns,
+        item_columns,
+        album_attribute_columns,
+        item_attribute_columns,
+    ) = _replacement_catalogue_columns(connection)
+    item_id_index = item_columns.index("id")
+    item_album_index = item_columns.index("album_id")
+    item_path_index = item_columns.index("path")
+    music_root = _catalogue_item_path(
+        Path(cfg.MUSIC_ROOT) / "placeholder"
+    ).parent
+    replacement_relatives = {
+        path.relative_to(music_root).as_posix()
+        for path in replacement_paths
+    }
+    catalogue_album = _managed_catalogue_album(
+        connection, replacement_relatives, music_root, allow_overlap=True,
+    )
+    if catalogue_album is None:
+        raise sqlite3.IntegrityError("exact Beets replacement proof failed")
+    replacement_album_id, _replacement_album_paths = catalogue_album
+    retiring_ids = []
+    retiring_album_ids = set()
+    replacement_rows = {path: [] for path in replacement_paths}
+    for row in connection.execute(
+        f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
+        "FROM items ORDER BY id"
+    ):
+        item_id = row[item_id_index]
+        path = _catalogue_item_path(row[item_path_index], allow_external=True)
+        if path not in old_paths and path not in replacement_rows:
+            continue
+        if type(item_id) is not int or item_id <= 0:
+            raise sqlite3.DatabaseError("invalid beets item identity")
+        album_id = row[item_album_index]
+        if path in replacement_rows:
+            if type(album_id) is not int or album_id <= 0:
+                raise sqlite3.DatabaseError("invalid beets album identity")
+            replacement_rows[path].append((item_id, album_id))
+        if path in old_paths and (
+            path not in replacement_rows
+            or album_id != replacement_album_id
+        ):
+            retiring_ids.append(item_id)
+            if album_id is not None:
+                if type(album_id) is not int or album_id <= 0:
+                    raise sqlite3.DatabaseError("invalid beets album identity")
+                retiring_album_ids.add(album_id)
+    replacement_proven = all(
+        sum(
+            album_id == replacement_album_id
+            for _item_id, album_id in rows
+        )
+        == 1
+        and all(
+            album_id == replacement_album_id or path in old_paths
+            for _item_id, album_id in rows
+        )
+        for path, rows in replacement_rows.items()
+    )
+    if (
+        len(retiring_ids) > 4096
+        or len(retiring_ids) != len(set(retiring_ids))
+        or not replacement_proven
+    ):
+        raise sqlite3.IntegrityError("exact Beets replacement proof failed")
+    return (retiring_ids, retiring_album_ids, replacement_album_id,
+            album_attribute_columns, item_attribute_columns)
+
+
 def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
                                *, replacement_audio_paths=None):
     """Retire exact old rows before disposing a moved-aside backup."""
@@ -7684,6 +7757,14 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
         database_anchor = _open_beets_database_anchor()
         if database_anchor is None or database_anchor["descriptor"] is None:
             return False
+        if not inspect_sqlite_source(
+            database_anchor,
+            _beets_database_anchor_matches,
+            lambda current: _backup_retirement(current, old_paths, replacement_paths)[0],
+            connect=sqlite3.connect,
+            timeout=timeout,
+        ):
+            return True
         transaction = AtomicSQLiteWrite(
             database_anchor,
             _beets_database_anchor_matches,
@@ -7693,72 +7774,12 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
         connection = transaction.open()
         connection.execute("BEGIN IMMEDIATE")
         (
-            album_columns,
-            item_columns,
+            retiring_ids,
+            retiring_album_ids,
+            replacement_album_id,
             album_attribute_columns,
             item_attribute_columns,
-        ) = _replacement_catalogue_columns(connection)
-        item_id_index = item_columns.index("id")
-        item_album_index = item_columns.index("album_id")
-        item_path_index = item_columns.index("path")
-        music_root = _catalogue_item_path(
-            Path(cfg.MUSIC_ROOT) / "placeholder"
-        ).parent
-        replacement_relatives = {
-            path.relative_to(music_root).as_posix()
-            for path in replacement_paths
-        }
-        catalogue_album = _managed_catalogue_album(
-            connection, replacement_relatives, music_root, allow_overlap=True,
-        )
-        if catalogue_album is None:
-            raise sqlite3.IntegrityError("exact Beets replacement proof failed")
-        replacement_album_id, _replacement_album_paths = catalogue_album
-        retiring_ids = []
-        retiring_album_ids = set()
-        replacement_rows = {path: [] for path in replacement_paths}
-        for row in connection.execute(
-            f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
-            "FROM items ORDER BY id"
-        ):
-            item_id = row[item_id_index]
-            path = _catalogue_item_path(row[item_path_index], allow_external=True)
-            if path not in old_paths and path not in replacement_rows:
-                continue
-            if type(item_id) is not int or item_id <= 0:
-                raise sqlite3.DatabaseError("invalid beets item identity")
-            album_id = row[item_album_index]
-            if path in replacement_rows:
-                if type(album_id) is not int or album_id <= 0:
-                    raise sqlite3.DatabaseError("invalid beets album identity")
-                replacement_rows[path].append((item_id, album_id))
-            if path in old_paths and (
-                path not in replacement_rows
-                or album_id != replacement_album_id
-            ):
-                retiring_ids.append(item_id)
-                if album_id is not None:
-                    if type(album_id) is not int or album_id <= 0:
-                        raise sqlite3.DatabaseError("invalid beets album identity")
-                    retiring_album_ids.add(album_id)
-        replacement_proven = all(
-            sum(
-                album_id == replacement_album_id
-                for _item_id, album_id in rows
-            )
-            == 1
-            and all(
-                album_id == replacement_album_id or path in old_paths
-                for _item_id, album_id in rows
-            )
-            for path, rows in replacement_rows.items()
-        )
-        if (
-            len(retiring_ids) > 4096
-            or len(retiring_ids) != len(set(retiring_ids))
-            or not replacement_proven
-        ):
-            raise sqlite3.IntegrityError("exact Beets replacement proof failed")
+        ) = _backup_retirement(connection, old_paths, replacement_paths)
         if not retiring_ids:
             connection.rollback()
             return True
@@ -8014,6 +8035,118 @@ def _fold_duplicate_album_group(
     return True
 
 
+def _duplicate_album_groups(connection, folders):
+    """The folders holding several beets albums, each with their ids, only
+    those in ``folders`` when given, and the column names a fold needs."""
+    known_tables = {
+        "albums",
+        "items",
+        "album_attributes",
+        "item_attributes",
+        "migrations",
+    }
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    if not tables.issubset(known_tables):
+        raise sqlite3.DatabaseError("unknown tables make a lossless fold unverifiable")
+    for table in tables:
+        foreign_keys = connection.execute(
+            f"PRAGMA foreign_key_list({_sql_identifier(table)})"
+        ).fetchone()
+        if foreign_keys is not None:
+            raise sqlite3.DatabaseError("foreign keys make a lossless fold unverifiable")
+
+    triggers = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND tbl_name IN ('albums', 'items', 'album_attributes', "
+        "'item_attributes') LIMIT 1"
+    ).fetchone()
+    if triggers is not None:
+        raise sqlite3.DatabaseError(
+            "custom database triggers make a lossless fold unverifiable"
+        )
+
+    album_columns = _consolidation_columns(connection, "albums")
+    item_columns = _consolidation_columns(connection, "items")
+    album_attribute_columns = _consolidation_columns(connection, "album_attributes")
+    item_attribute_columns = _consolidation_columns(connection, "item_attributes")
+    if (
+        not {"id", "added", "artpath"}.issubset(album_columns)
+        or not {"id", "album_id", "path"}.issubset(item_columns)
+        or not {"id", "entity_id", "key", "value"}.issubset(album_attribute_columns)
+        or not {"id", "entity_id", "key", "value"}.issubset(item_attribute_columns)
+    ):
+        raise sqlite3.DatabaseError("unrecognised beets database schema")
+
+    album_ids = {
+        row[0] for row in connection.execute("SELECT id FROM albums") if type(row[0]) is int
+    }
+    album_directories = {}
+    album_order = []
+    unsafe_albums = set()
+    seen_albums = set()
+    for album_id, path in connection.execute(
+        "SELECT album_id, path FROM items WHERE album_id IS NOT NULL ORDER BY id"
+    ):
+        if type(album_id) is not int or album_id not in album_ids:
+            continue
+        if album_id not in seen_albums:
+            album_order.append(album_id)
+            seen_albums.add(album_id)
+        try:
+            directory = _consolidation_item_dir(path)
+        except (OSError, TypeError, ValueError):
+            unsafe_albums.add(album_id)
+            continue
+        album_directories.setdefault(album_id, set()).add(directory)
+
+    disc_directories = {}
+    for album_id, directories in album_directories.items():
+        if album_id in unsafe_albums:
+            continue
+        parents = {_consolidation_disc_parent(directory) for directory in directories}
+        if None not in parents and len(parents) == 1:
+            parent = next(iter(parents))
+            disc_directories.setdefault(parent, set()).update(directories)
+    confirmed_disc_parents = {
+        parent for parent, directories in disc_directories.items() if len(directories) > 1
+    }
+
+    by_directory = {}
+    for album_id in album_order:
+        if album_id in unsafe_albums:
+            continue
+        directories = album_directories.get(album_id, set())
+        if len(directories) == 1:
+            directory = next(iter(directories))
+            disc_parent = _consolidation_disc_parent(directory)
+            scope = disc_parent if disc_parent in confirmed_disc_parents else directory
+        else:
+            parents = {_consolidation_disc_parent(directory) for directory in directories}
+            if (
+                None in parents
+                or len(parents) != 1
+                or next(iter(parents)) not in confirmed_disc_parents
+            ):
+                continue
+            scope = next(iter(parents))
+        by_directory.setdefault(scope, []).append(album_id)
+
+    groups = [
+        (directory, tuple(ids))
+        for directory, ids in by_directory.items()
+        if len(ids) > 1 and not any(album_id in unsafe_albums for album_id in ids)
+    ]
+    if folders is not None:
+        groups = [(directory, ids) for directory, ids in groups if directory in folders]
+    return groups, (album_columns, item_columns, album_attribute_columns,
+                    item_attribute_columns)
+
+
 def _consolidate_duplicate_albums(protected_paths=None, folders=None):
     """Fold provably identical album rows in one rollback-safe DB transaction.
 
@@ -8044,6 +8177,16 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None):
         database_anchor = _open_beets_database_anchor()
         if database_anchor is None or database_anchor["descriptor"] is None:
             return
+        candidates, _columns = inspect_sqlite_source(
+            database_anchor,
+            _beets_database_anchor_matches,
+            lambda current: _duplicate_album_groups(current, folders),
+            connect=sqlite3.connect,
+            timeout=timeout,
+        )
+        if all(_consolidation_path_is_protected(directory, protected)
+               for directory, _ids in candidates):
+            return
         transaction = AtomicSQLiteWrite(
             database_anchor,
             _beets_database_anchor_matches,
@@ -8052,124 +8195,12 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None):
         )
         connection = transaction.open()
         connection.execute("BEGIN IMMEDIATE")
-
-        known_tables = {
-            "albums",
-            "items",
-            "album_attributes",
-            "item_attributes",
-            "migrations",
-        }
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        if not tables.issubset(known_tables):
-            raise sqlite3.DatabaseError("unknown tables make a lossless fold unverifiable")
-        for table in tables:
-            foreign_keys = connection.execute(
-                f"PRAGMA foreign_key_list({_sql_identifier(table)})"
-            ).fetchone()
-            if foreign_keys is not None:
-                raise sqlite3.DatabaseError("foreign keys make a lossless fold unverifiable")
-
-        triggers = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
-            "AND tbl_name IN ('albums', 'items', 'album_attributes', "
-            "'item_attributes') LIMIT 1"
-        ).fetchone()
-        if triggers is not None:
-            raise sqlite3.DatabaseError(
-                "custom database triggers make a lossless fold unverifiable"
-            )
-
-        album_columns = _consolidation_columns(connection, "albums")
-        item_columns = _consolidation_columns(connection, "items")
-        album_attribute_columns = _consolidation_columns(connection, "album_attributes")
-        item_attribute_columns = _consolidation_columns(connection, "item_attributes")
-        if (
-            not {"id", "added", "artpath"}.issubset(album_columns)
-            or not {"id", "album_id", "path"}.issubset(item_columns)
-            or not {"id", "entity_id", "key", "value"}.issubset(album_attribute_columns)
-            or not {"id", "entity_id", "key", "value"}.issubset(item_attribute_columns)
-        ):
-            raise sqlite3.DatabaseError("unrecognised beets database schema")
-
-        album_ids = {
-            row[0] for row in connection.execute("SELECT id FROM albums") if type(row[0]) is int
-        }
-        album_directories = {}
-        album_order = []
-        unsafe_albums = set()
-        seen_albums = set()
-        for album_id, path in connection.execute(
-            "SELECT album_id, path FROM items WHERE album_id IS NOT NULL ORDER BY id"
-        ):
-            if type(album_id) is not int or album_id not in album_ids:
-                continue
-            if album_id not in seen_albums:
-                album_order.append(album_id)
-                seen_albums.add(album_id)
-            try:
-                directory = _consolidation_item_dir(path)
-            except (OSError, TypeError, ValueError):
-                unsafe_albums.add(album_id)
-                continue
-            album_directories.setdefault(album_id, set()).add(directory)
-
-        disc_directories = {}
-        for album_id, directories in album_directories.items():
-            if album_id in unsafe_albums:
-                continue
-            parents = {_consolidation_disc_parent(directory) for directory in directories}
-            if None not in parents and len(parents) == 1:
-                parent = next(iter(parents))
-                disc_directories.setdefault(parent, set()).update(directories)
-        confirmed_disc_parents = {
-            parent for parent, directories in disc_directories.items() if len(directories) > 1
-        }
-
-        by_directory = {}
-        for album_id in album_order:
-            if album_id in unsafe_albums:
-                continue
-            directories = album_directories.get(album_id, set())
-            if len(directories) == 1:
-                directory = next(iter(directories))
-                disc_parent = _consolidation_disc_parent(directory)
-                scope = disc_parent if disc_parent in confirmed_disc_parents else directory
-            else:
-                parents = {_consolidation_disc_parent(directory) for directory in directories}
-                if (
-                    None in parents
-                    or len(parents) != 1
-                    or next(iter(parents)) not in confirmed_disc_parents
-                ):
-                    continue
-                scope = next(iter(parents))
-            by_directory.setdefault(scope, []).append(album_id)
-
-        groups = [
-            (directory, tuple(ids))
-            for directory, ids in by_directory.items()
-            if len(ids) > 1 and not any(album_id in unsafe_albums for album_id in ids)
-        ]
+        groups, columns = _duplicate_album_groups(connection, folders)
         for directory, ids in groups:
-            if folders is not None and directory not in folders:
-                continue
             if _consolidation_path_is_protected(directory, protected):
                 vlog(f"consolidation: keep ownership-protected folder {directory}")
                 continue
-            if _fold_duplicate_album_group(
-                connection,
-                ids,
-                album_columns,
-                item_columns,
-                album_attribute_columns,
-                item_attribute_columns,
-            ):
+            if _fold_duplicate_album_group(connection, ids, *columns):
                 merged += 1
 
         if not merged:
@@ -8357,6 +8388,35 @@ def beets_entry_ids(paths):
             _close_beets_database_anchor(database_anchor)
 
 
+def _replaced_beets_entries(connection, item_ids, folder):
+    """(old id, newest id, old album id) for each entry
+    ``forget_replaced_beets_entries`` drops."""
+    by_path = {}
+    rows = connection.execute("SELECT id, path, album_id FROM items").fetchall()
+    for item_id, raw_path, _album_id in rows:
+        try:
+            path = _catalogue_item_path(raw_path, allow_external=True)
+        except (OSError, TypeError, ValueError):
+            continue
+        by_path.setdefault(path, []).append(item_id)
+    albums = {item_id: album_id for item_id, _path, album_id in rows}
+    replaced = []
+    for path, ids in by_path.items():
+        if len(ids) < 2:
+            continue
+        newest = max(ids)
+        if folder is not None:
+            retiring = ids if folder in path.parents else ()
+        else:
+            retiring = () if newest in item_ids else item_ids
+        replaced.extend(
+            (old_id, newest, albums.get(old_id))
+            for old_id in ids
+            if old_id in retiring and old_id != newest
+        )
+    return replaced
+
+
 def forget_replaced_beets_entries(item_ids=(), *, folder=None):
     """Drop the beets entries ``item_ids`` of tracks replaced in place.
 
@@ -8380,6 +8440,14 @@ def forget_replaced_beets_entries(item_ids=(), *, folder=None):
         database_anchor = _open_beets_database_anchor()
         if database_anchor is None or database_anchor["descriptor"] is None:
             return 0
+        if not inspect_sqlite_source(
+            database_anchor,
+            _beets_database_anchor_matches,
+            lambda current: _replaced_beets_entries(current, item_ids, folder),
+            connect=sqlite3.connect,
+            timeout=_beets_lock_wait(),
+        ):
+            return 0
         transaction = AtomicSQLiteWrite(
             database_anchor,
             _beets_database_anchor_matches,
@@ -8392,55 +8460,38 @@ def forget_replaced_beets_entries(item_ids=(), *, folder=None):
             "SELECT name FROM sqlite_master WHERE type = 'trigger' LIMIT 1"
         ).fetchone() is not None:
             raise sqlite3.DatabaseError("custom database triggers")
-        by_path = {}
-        rows = connection.execute("SELECT id, path, album_id FROM items").fetchall()
-        for item_id, raw_path, _album_id in rows:
-            try:
-                path = _catalogue_item_path(raw_path, allow_external=True)
-            except (OSError, TypeError, ValueError):
-                continue
-            by_path.setdefault(path, []).append(item_id)
-        albums = {item_id: album_id for item_id, _path, album_id in rows}
         dropped = 0
-        for path, ids in by_path.items():
-            newest = max(ids)
-            if folder is not None:
-                retiring = ids if folder in path.parents else ()
-            else:
-                retiring = () if newest in item_ids else item_ids
-            for old_id in ids:
-                if old_id not in retiring or old_id == newest:
-                    continue
-                kept = {
-                    key for (key,) in connection.execute(
-                        "SELECT key FROM item_attributes WHERE entity_id = ?",
-                        (newest,))
-                }
-                for key, value in connection.execute(
-                    "SELECT key, value FROM item_attributes WHERE entity_id = ?",
-                    (old_id,),
-                ).fetchall():
-                    if key not in kept:
-                        connection.execute(
-                            "INSERT INTO item_attributes (entity_id, key, value) "
-                            "VALUES (?, ?, ?)",
-                            (newest, key, value),
-                        )
-                connection.execute(
-                    "DELETE FROM item_attributes WHERE entity_id = ?", (old_id,))
-                if connection.execute(
-                    "DELETE FROM items WHERE id = ?", (old_id,)
-                ).rowcount != 1:
-                    raise sqlite3.IntegrityError("replaced entry changed")
-                album_id = albums.get(old_id)
-                if album_id is not None and connection.execute(
-                    "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
-                ).fetchone() is None:
+        for old_id, newest, album_id in _replaced_beets_entries(
+                connection, item_ids, folder):
+            kept = {
+                key for (key,) in connection.execute(
+                    "SELECT key FROM item_attributes WHERE entity_id = ?",
+                    (newest,))
+            }
+            for key, value in connection.execute(
+                "SELECT key, value FROM item_attributes WHERE entity_id = ?",
+                (old_id,),
+            ).fetchall():
+                if key not in kept:
                     connection.execute(
-                        "DELETE FROM album_attributes WHERE entity_id = ?",
-                        (album_id,))
-                    connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
-                dropped += 1
+                        "INSERT INTO item_attributes (entity_id, key, value) "
+                        "VALUES (?, ?, ?)",
+                        (newest, key, value),
+                    )
+            connection.execute(
+                "DELETE FROM item_attributes WHERE entity_id = ?", (old_id,))
+            if connection.execute(
+                "DELETE FROM items WHERE id = ?", (old_id,)
+            ).rowcount != 1:
+                raise sqlite3.IntegrityError("replaced entry changed")
+            if album_id is not None and connection.execute(
+                "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
+            ).fetchone() is None:
+                connection.execute(
+                    "DELETE FROM album_attributes WHERE entity_id = ?",
+                    (album_id,))
+                connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+            dropped += 1
         if not dropped:
             connection.rollback()
             return 0

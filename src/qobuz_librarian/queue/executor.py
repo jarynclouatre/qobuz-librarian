@@ -2164,7 +2164,7 @@ def _record_terminal_downloads(changes, *, no_import=False):
     changes an already-completed download, so a failure to write is logged for
     --verbose and nothing else.
     """
-    from qobuz_librarian.web import job_persistence
+    from qobuz_librarian.web import download_outcomes, job_persistence
 
     finished = time.time()
     recorded = False
@@ -2178,15 +2178,16 @@ def _record_terminal_downloads(changes, *, no_import=False):
         status = ("canceled" if stopped
                   else "done" if kept
                   else download_job_outcome(change)[0])
-        parts = [f"{plural(change.get('n_ok', 0), 'track')} downloaded"]
-        if kept:
-            parts.append("not imported")
-        if change.get("n_fail"):
-            parts.append(f"{change['n_fail']} failed")
-        if change.get("n_lossy"):
-            parts.append(f"{change['n_lossy']} lossy-dropped")
-        summary = ("Stopped before it finished." if stopped
-                   else ", ".join(parts) + ".")
+        error = None
+        if stopped:
+            summary = "Stopped before it finished."
+        elif kept:
+            summary = (f"{plural(change.get('n_ok', 0), 'track')} downloaded, "
+                       "not imported.")
+        else:
+            summary = download_outcomes._summarize_download_result(change)
+            error = download_outcomes.download_error(
+                change, job_controls=False)
         artist = (album.get("artist") or {}).get("name") or ""
         try:
             saved = job_persistence.record_terminal_download(
@@ -2199,6 +2200,7 @@ def _record_terminal_downloads(changes, *, no_import=False):
                 edition=album.get("version") or "",
                 result=change,
                 status=status,
+                error=error,
             )
         except Exception as exc:
             saved = None
@@ -2210,7 +2212,7 @@ def _record_terminal_downloads(changes, *, no_import=False):
         post_job_hook.run(post_job_hook.payload(
             event_id=saved or album_id, status=status,
             title=album.get("title") or "", edition=album.get("version") or "",
-            artist=artist, finished_at=finished,
+            artist=artist, error=error, finished_at=finished,
             tracks_missing=download_result.tracks_missing(change),
             kind="download", summary=summary))
     if recorded:
