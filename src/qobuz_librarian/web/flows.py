@@ -5344,7 +5344,11 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     ):
         if count:
             parts.append(phrase)
-    if counts["failures"]:
+    parts.extend(
+        f"{plural(count, 'track')} checked without {provider}, which did "
+        "not answer"
+        for provider, count in counts["set_aside"].items())
+    if counts["failed"]:
         failures = []
         if unreadable:
             failures.append("unreadable artists: " + ", ".join(unreadable))
@@ -5366,7 +5370,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     if skipped:
         parts.append(f"{skipped} skipped (already checked)")
     job.summary = " · ".join(parts) + "."
-    if not counts["failures"]:
+    if not counts["failed"]:
         _close_completed_job(job)
     log.info(job.summary)
 

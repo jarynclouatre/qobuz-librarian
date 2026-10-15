@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -306,9 +307,9 @@ def test_lyrics_an_earlier_version_wrote_without_a_record_are_the_apps(
         tmp_path, monkeypatch, tagged_flac):
     """Lyrics an earlier version wrote into its downloads, under the name it
     always used and with streamrip's numbering intact, are upgraded with no
-    record of them when a provider returns their words. Other words there
-    may have been added by hand, and stay, as do lyrics another tool wrote,
-    in a track retagged since, or with an .lrc beside them."""
+    record of them when a provider returns them. Other lyrics there may have
+    been added or corrected by hand, and stay, as do lyrics another tool
+    wrote, in a track retagged since, or with an .lrc beside them."""
     from mutagen import flac
 
     from qobuz_librarian.integrations import lyric_fetch
@@ -320,22 +321,27 @@ def test_lyrics_an_earlier_version_wrote_without_a_record_are_the_apps(
     numbers = {"TRACKNUMBER": "01", "DISCNUMBER": "01", "TRACKTOTAL": "09",
                "DISCTOTAL": "01", "TITLE": "Song", "ARTIST": "Artist"}
     album = tmp_path / "Artist" / "Album"
-    earlier = tagged_flac(album / "01.flac", lyrics="This song", **numbers)
+    earlier = tagged_flac(album / "01.flac", lyrics="this song", **numbers)
     other = tagged_flac(album / "02.flac", LYRICS="[00:00.50]by hand", **numbers)
     retagged = tagged_flac(album / "03.flac", lyrics="[00:00.50]by hand",
                            **{**numbers, "TRACKNUMBER": "3"})
     beside = tagged_flac(album / "04.flac", lyrics="[00:00.50]by hand", **numbers)
     beside.with_suffix(".lrc").write_text("[00:00.50]by hand")
     typed = tagged_flac(album / "05.flac", lyrics="[00:00.50]by hand", **numbers)
+    corrected = tagged_flac(album / "06.flac", lyrics="This song!", **numbers)
+    timed = tagged_flac(album / "07.flac", lyrics="[00:02.00]this song", **numbers)
     tracks = [earlier, other, retagged, beside, typed]
     options = dict(owned_root=tmp_path, state_path=tmp_path / "state.json", workers=1)
 
-    counts = lyric_fetch.fetch_for_paths(tracks, rescan=True, **options)
+    counts = lyric_fetch.fetch_for_paths([*tracks, corrected, timed], rescan=True,
+                                         **options)
 
-    assert counts == {"wrote-synced": 1, "kept-unrecorded": 4}
+    assert counts == {"wrote-synced": 1, "kept-unrecorded": 6}
     assert flac.FLAC(earlier)["lyrics"] == ["[00:00.50]this song"]
     assert all(flac.FLAC(track)["lyrics"] == ["[00:00.50]by hand"]
                for track in tracks[1:])
+    assert flac.FLAC(corrected)["lyrics"] == ["This song!"]
+    assert flac.FLAC(timed)["lyrics"] == ["[00:02.00]this song"]
     with monkeypatch.context() as mp:
         mp.setattr(lyric_fetch, "search_lyrics",
                    lambda *_args, **_kwargs: (None, None, "", 1, 0))
@@ -392,7 +398,8 @@ def test_synced_lyrics_must_fit_the_length_of_this_cut(
         if "q" in params:
             return SimpleNamespace(status_code=200,
                                    json=lambda: hits.get(params["q"], []))
-        return SimpleNamespace(status_code=404, json=lambda: {})
+        return SimpleNamespace(status_code=404,
+                               json=lambda: {"code": 404, "name": "TrackNotFound"})
 
     monkeypatch.setattr(lyric_fetch, "_lrclib_session",
                         lambda: SimpleNamespace(get=get))
@@ -423,6 +430,7 @@ def test_a_recheck_keeps_the_apps_lyrics_while_a_provider_is_disabled(
     monkeypatch.setattr(lyric_fetch, "AVAILABLE", True)
     monkeypatch.setattr(lyric_fetch, "syncedlyrics",
                         SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    monkeypatch.setattr(lyric_fetch, "LRCLIB_RETRY_WAIT", 0.0)
     words = "[00:10.00]timed words\n[03:10.00]end"
     status = [200]
     asked = []
@@ -430,15 +438,29 @@ def test_a_recheck_keeps_the_apps_lyrics_while_a_provider_is_disabled(
     def answer(params):
         if status[0] == "page":
             raise ValueError("an HTML page")
-        return [] if "q" in params else {"syncedLyrics": words}
+        if "q" in params:
+            return []
+        if status[0] == "moved":
+            raise ValueError("a not-found page")
+        if status[0] == 404:
+            return {"code": 404, "name": "TrackNotFound"}
+        if status[0] == "plain":
+            return {"plainLyrics": "timed words\nend"}
+        if status[0] == "other":
+            return {"plainLyrics": "other lines\nentirely"}
+        return {"syncedLyrics": words}
 
     def get(_url, params, timeout):
         asked.append(params)
-        # Busy on four requests in five, as LRCLIB is under load.
+        # Busy on four requests in five, as LRCLIB is under load, saying
+        # when to ask again or not.
         busy = status[0] == 200 and len(asked) % 5
+        code = 404 if status[0] == "moved" else status[0]
+        if status[0] in ("page", "plain", "other") or code == 404 and "q" in params:
+            code = 200
         return SimpleNamespace(
-            status_code=503 if busy else 200 if status[0] == "page" else status[0],
-            headers={"Retry-After": "0"} if busy else {},
+            status_code=503 if busy else code,
+            headers={"Retry-After": "0"} if busy and len(asked) % 2 else {},
             json=lambda: answer(params))
 
     monkeypatch.setattr(lyric_fetch, "_lrclib_session", lambda: SimpleNamespace(get=get))
@@ -449,10 +471,10 @@ def test_a_recheck_keeps_the_apps_lyrics_while_a_provider_is_disabled(
                    providers=["Lrclib", "NetEase"], workers=1)
     assert lyric_fetch.fetch_for_paths(tracks, **options) == {"wrote-synced": 6}
 
-    # LRCLIB is rate-limited until the circuit breaker disables it, so
-    # only NetEase is left to answer for the later tracks. A refusal or a
-    # page from something in the way is no answer either.
-    for status[0] in (429, 403, "page"):
+    # LRCLIB rate-limited past its waits is no answer. Nor is a refusal or
+    # a page from something in the way, a not-found page too, which the
+    # circuit breaker counts until it disables LRCLIB.
+    for status[0] in (429, 403, "page", "moved"):
         counts = lyric_fetch.fetch_for_paths(tracks, rescan=True, **options)
 
         assert counts == {"providers-unavailable": 6}
@@ -473,11 +495,40 @@ def test_a_recheck_keeps_the_apps_lyrics_while_a_provider_is_disabled(
             lyric_fetch._note_refused_response(refusal)
 
     monkeypatch.setattr(lyric_fetch, "syncedlyrics", SimpleNamespace(search=refusing))
+    monkeypatch.setattr(lyric_fetch, "PROVIDER_FAIL_THRESHOLD", 100)
     status[0] = 404
     counts = lyric_fetch.fetch_for_paths(
         tracks, rescan=True, **{**options, "providers": ["Lrclib", "Musixmatch"]})
     assert counts == {"providers-unavailable": 6}
     assert all(flac.FLAC(track)["lyrics"] == [words] for track in tracks)
+    # Refusing a track on two passes in a row, it is set aside for it.
+    for outcome in ("providers-unavailable", "not-found"):
+        assert lyric_fetch.fetch_for_paths(
+            [new], **{**options, "providers": ["Lrclib", "Musixmatch"]}) == {outcome: 1}
+
+    # What LRCLIB finds stands without it: the same words keep their timing.
+    status[0] = "plain"
+    counts = lyric_fetch.fetch_for_paths(
+        tracks, rescan=True, **{**options, "providers": ["Lrclib", "Musixmatch"]})
+    assert counts == {"already-synced": 6}
+    # Other words without timing replace them only once it answers, set
+    # aside for the track or not, and a pass counts the tracks it judged
+    # without it.
+    status[0] = "other"
+    set_aside = Counter()
+    for outcome in ("providers-unavailable", "already-synced"):
+        counts = lyric_fetch.fetch_for_paths(
+            tracks, rescan=True, set_aside=set_aside,
+            **{**options, "providers": ["Lrclib", "Musixmatch"]})
+        assert counts == {outcome: 6}
+        assert all(flac.FLAC(track)["lyrics"] == [words] for track in tracks)
+    assert set_aside == {"Musixmatch": 6}
+    with monkeypatch.context() as mp:
+        mp.setattr(lyric_fetch, "syncedlyrics",
+                   SimpleNamespace(search=lambda *_args, **_kwargs: None))
+        counts = lyric_fetch.fetch_for_paths(
+            tracks, rescan=True, **{**options, "providers": ["Lrclib", "Musixmatch"]})
+    assert counts == {"wrote-plain": 6}
 
     # NetEase asked too often answers busy for a while, and is waited for.
     busy = SimpleNamespace(status_code=200, content=b'{"code":405}',
@@ -518,6 +569,14 @@ def test_a_recheck_keeps_the_apps_lyrics_while_a_provider_is_disabled(
     assert counts == {"providers-unavailable": 6}
     assert not netease
     assert all(flac.FLAC(track)["lyrics"] == [words] for track in later)
+
+    # The next pass judges them again, also after the library index.
+    monkeypatch.setattr(lyric_fetch, "syncedlyrics",
+                        SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    lyric_fetch._provider_held.clear()
+    lyric_fetch.index_existing(later, owned_root=tmp_path,
+                               state_path=options["state_path"], workers=1)
+    assert lyric_fetch.fetch_for_paths(later, **options) == {"removed-unfit": 6}
 
 
 def _import_with_lyric_hook(tagged_flac):
@@ -601,7 +660,8 @@ def test_lyric_sidecars_keep_the_tags_and_permissions_around_them(
     """Writing a sidecar after import removes only the embedded copy it
     preserved, never other tags, and leaves tracks with lyrics from
     anywhere else and their .lrc alone. A preview leaves an existing
-    sidecar's permissions alone, and a real write gives it the track's."""
+    sidecar's permissions alone, and a real write gives it the track's.
+    A user's .lrc copied into the tag stays theirs."""
     from mutagen import flac
 
     from qobuz_librarian import config as cfg
@@ -646,6 +706,13 @@ def test_lyric_sidecars_keep_the_tags_and_permissions_around_them(
 
     lyric_fetch.fetch_for_paths([track], **options)
     assert sidecar.stat().st_mode & 0o777 == 0o644
+
+    # Copied into the tag the format asks for, they are still not the app's.
+    counts = lyric_fetch.fetch_for_paths([track], **{**options, "lyrics_format": "embed"})
+    assert counts == {"copied-synced": 1}
+    audio = flac.FLAC(track)
+    assert audio["lyrics"] == ["[00:00.50]line\n"]
+    assert lyric_fetch.WRITTEN_MARK not in audio
 
 
 # ── beets: _beets_direct behaviour ─────────────────────────────────────────

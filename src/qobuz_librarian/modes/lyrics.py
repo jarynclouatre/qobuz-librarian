@@ -208,6 +208,10 @@ def _report_summary(res, *, dry_run):
         log.warning(fmt(C.YELLOW,
             f"     {plural(summary['unavailable'], 'track')} couldn't reach a "
             "provider (rate-limited or down); re-run later to pick them up."))
+    for provider, count in summary["set_aside"].items():
+        log.info(fmt(C.YELLOW,
+            f"     {plural(count, 'track')} checked without {provider}, "
+            "which did not answer."))
     if summary["errors"]:
         log.warning(fmt(C.YELLOW,
             f"     {plural(summary['errors'], 'track')} hit an error while "
@@ -218,8 +222,8 @@ def _report_summary(res, *, dry_run):
             "unexpected result; see the log above."))
     if summary["stopped"]:
         log.info(fmt(C.GRAY, "  Interrupted."))
-    elif summary["failures"]:
+    elif summary["failed"]:
         log.warning(fmt(C.RED, f"  ✗  Finished with {plural(summary['failures'], 'error')}."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
-    return bool(summary["stopped"] or summary["failures"])
+    return bool(summary["stopped"] or summary["failed"])

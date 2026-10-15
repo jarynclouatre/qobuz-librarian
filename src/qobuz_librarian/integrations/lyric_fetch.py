@@ -88,6 +88,10 @@ _OUTCOME_LABELS = {
     "wrote-synced": "added synced lyrics", "wrote-plain": "added lyrics",
     "dry:wrote-synced": "would add synced lyrics",
     "dry:wrote-plain": "would add lyrics",
+    "copied-synced": "copied its synced lyrics to the other format",
+    "copied-plain": "copied its lyrics to the other format",
+    "dry:copied-synced": "would copy its synced lyrics to the other format",
+    "dry:copied-plain": "would copy its lyrics to the other format",
     "already-synced": "already had synced lyrics",
     "already-plain": "already had lyrics",
     "cached-synced": "already had synced lyrics",
@@ -154,16 +158,17 @@ LRCLIB_SEARCH_GRACE = 3
 # LRCLIB answers a busy moment with 503, or 429 when asked too often, and a
 # Retry-After of a second or so: one request in seven asked one at a time,
 # a third of them or more from a full pass, and its searches more often.
-# The request waits that long and up to as long again, picked at random so
-# the workers do not all ask again at once, and asks again. After
-# LRCLIB_ATTEMPTS tries each wait doubles, and a request that has waited
-# LRCLIB_BUSY_LIMIT seconds, or been asked LRCLIB_MAX_ATTEMPTS times, goes
-# unanswered, which is no failure for the circuit breaker. A 429 holds back
-# every worker's next request too.
+# The request waits that long, LRCLIB_RETRY_WAIT when it is not told, and
+# up to as long again, picked at random so the workers do not all ask
+# again at once, and asks again. After LRCLIB_ATTEMPTS tries each wait
+# doubles, and a request that would wait past LRCLIB_BUSY_LIMIT seconds,
+# or has been asked LRCLIB_MAX_ATTEMPTS times, goes unanswered, which is
+# no failure for the circuit breaker. A 429 holds back every worker's next
+# request too.
 LRCLIB_ATTEMPTS = 8
 LRCLIB_MAX_ATTEMPTS = 30
 LRCLIB_BUSY_LIMIT = 120.0
-LRCLIB_RETRY_MAX_WAIT = 5.0
+LRCLIB_RETRY_WAIT = 1.0
 _lrclib_busy_until = 0.0
 _lrclib_busy_lock = threading.Lock()
 
@@ -189,6 +194,8 @@ _provider_held: dict[str, float] = {}   # provider -> monotonic end of its pause
 _pacing_lock = threading.Lock()
 _dead_providers: dict[str, float] = {}   # provider -> epoch when disabled
 _provider_fails: dict[str, int] = {}
+_answered_providers: set[str] = set()    # answered a lookup this pass
+_refusing_providers: set[str] = set()    # disabled this pass before any answer
 
 
 def _is_provider_dead(prov: str, log: Optional[logging.Logger] = None) -> bool:
@@ -363,6 +370,8 @@ class TrackState:
     representations: str = ""  # embed | sidecar | both
     written: str = ""       # sha256 of the lyrics this app last wrote
     missing_since: float = 0.0  # epoch the file was first found gone
+    recheck: bool = False   # a re-check has yet to judge the track
+    refused: str = ""       # providers that last failed its lookups, comma-separated
 
 
 _SAVED_STATUSES = frozenset({
@@ -448,6 +457,8 @@ def _track_state_from_dict(value) -> TrackState | None:
             or type(missing_since) not in (int, float)
             or not math.isfinite(missing_since) or missing_since < 0):
         missing_since = 0.0
+    recheck = value.get("recheck", False)
+    refused = value.get("refused", "")
     return TrackState(
         mtime=float(mtime),
         size=size,
@@ -466,6 +477,8 @@ def _track_state_from_dict(value) -> TrackState | None:
             else ""
         ),
         missing_since=float(missing_since),
+        recheck=recheck is True,
+        refused=refused if isinstance(refused, str) else "",
     )
 
 
@@ -2132,10 +2145,16 @@ def lrc_duration_sane(lyrics: str, track_seconds: float, *,
     return True, ""
 
 
-def _same_text(first: str, second: str) -> bool:
-    """Whether two lyrics are the same words in the same order, timed or
-    not."""
-    return _words(LRC_TS_RE.sub("", first)) == _words(LRC_TS_RE.sub("", second))
+def _written_from(tagged: str, lyrics: str) -> bool:
+    """Whether ``tagged`` is what the app writes for ``lyrics``: the same
+    lines with the same capitals, punctuation and timing, or untimed where
+    ``tagged`` has no timing. Only blank lines and the spaces around a line
+    may differ."""
+    if not SYNCED_RE.search(tagged):
+        lyrics = LRC_TS_RE.sub("", lyrics)
+    tagged_lines, lines = ([line.strip() for line in text.splitlines() if line.strip()]
+                           for text in (tagged, lyrics))
+    return tagged_lines == lines
 
 
 def _same_words(first: str, second: str) -> bool:
@@ -2163,8 +2182,9 @@ class _Stopped(Exception):
 
 
 class _Pass:
-    """What one lyrics pass's lookups share: its stop request, and how long
-    it waits for a provider that asked to be asked later."""
+    """What one lyrics pass's lookups share: its stop request, how long it
+    waits for a provider that asked to be asked later, and how many tracks
+    it judged without each provider it set aside."""
 
     def __init__(self, should_stop: Optional[Callable[[], bool]] = None,
                  patience: float = BUSY_PATIENCE):
@@ -2173,6 +2193,7 @@ class _Pass:
         self._busy_since: dict[str, float] = {}
         self._given_up: set[str] = set()
         self._lock = threading.Lock()
+        self.set_aside: Counter = Counter()
 
     def waits_for(self, prov: str, log: logging.Logger) -> bool:
         """Whether lookups still wait for ``prov``, which asked to be asked
@@ -2190,6 +2211,11 @@ class _Pass:
             log.info("%s is still busy; tracks that need it are left for "
                      "the next pass", prov)
         return waits
+
+    def note_set_aside(self, provs) -> None:
+        """Count a track judged without ``provs``, which did not answer."""
+        with self._lock:
+            self.set_aside.update(provs)
 
     def answered(self, prov: str) -> None:
         with self._lock:
@@ -2277,6 +2303,7 @@ def _hold_busy_provider(prov: str) -> None:
 
 def _query_provider(query: str, prov: str, log: logging.Logger,
                     run: _Pass, answers: Optional[dict] = None,
+                    missed: Optional[dict] = None,
                     **kwargs) -> tuple[Optional[str], bool]:
     """
     Wrap syncedlyrics.search() for a single provider. Provider errors come
@@ -2288,7 +2315,8 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
     Returns (result, failed_hard). failed_hard means the provider raised or
     logged a warning or error - the query never got an answer, which is not
     the same fact as a clean "no lyrics here" and must not be recorded as
-    one.
+    one. A provider the pass stopped waiting for as busy is noted "busy" in
+    ``missed``.
     """
     if _is_provider_dead(prov, log):
         return None, True
@@ -2298,6 +2326,8 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
         # or leaves the track for the next pass.
         if ((answers is None or (prov, query) not in answers)
                 and not _take_provider_turn(prov, run, log)):
+            if missed is not None:
+                missed[prov] = "busy"
             return None, True
         result, error, chatter = _bounded_provider_search(
             query, prov, run, budget=cfg.LYRICS_PROVIDER_TIMEOUT,
@@ -2332,6 +2362,8 @@ def _provider_failed(prov: str, log: logging.Logger, detail: str) -> None:
         # longer matches the threshold being applied.
         if n >= PROVIDER_FAIL_THRESHOLD and prov not in _dead_providers:
             _dead_providers[prov] = time.time()
+            if prov not in _answered_providers:
+                _refusing_providers.add(prov)
             log.info("disabling provider %s for %ds after %d consecutive "
                      "failures (will retry after cooldown)",
                      prov, PROVIDER_COOLDOWN_SECONDS,
@@ -2341,6 +2373,8 @@ def _provider_failed(prov: str, log: logging.Logger, detail: str) -> None:
 def _provider_answered(prov: str) -> None:
     with _breaker_lock:
         _provider_fails[prov] = 0
+        _answered_providers.add(prov)
+        _refusing_providers.discard(prov)
 
 
 _http = threading.local()
@@ -2368,30 +2402,43 @@ def lrclib_signature(f, duration: float) -> Optional[dict]:
 
 
 def _retry_after(response) -> Optional[float]:
-    """The short wait a busy LRCLIB asks for, or None when it gives none or
-    one too long to wait out."""
+    """How long a busy LRCLIB asks to be left, or None when it is not
+    busy."""
     if response.status_code not in (429, 503):
         return None
     try:
         wait = float(response.headers.get("Retry-After", ""))
     except (TypeError, ValueError):
-        return None
-    return wait if 0 <= wait <= LRCLIB_RETRY_MAX_WAIT else None
+        return LRCLIB_RETRY_WAIT
+    return wait if 0 <= wait < math.inf else LRCLIB_RETRY_WAIT
+
+
+def _lrclib_not_found(response) -> bool:
+    """Whether a 404 is LRCLIB's own answer that it has no such track."""
+    try:
+        answer = response.json()
+    except ValueError:
+        return False
+    return isinstance(answer, dict) and answer.get("name") == "TrackNotFound"
 
 
 def _lrclib_get(url: str, params: dict, log: logging.Logger, what: str,
                 answer_type: type, run: _Pass):
-    """LRCLIB's JSON answer, or None on a 404. Returns (answer, failed_hard)
-    like _query_provider: any other status, or a body that is not the JSON
-    LRCLIB sends, is a page from something else in the way, not a miss. A
-    busy answer is asked again after the wait it gives."""
+    """LRCLIB's JSON answer, or None when it has no such track. Returns
+    (answer, failed_hard) like _query_provider: any other status, or a body
+    that is not the JSON LRCLIB sends, a not-found page too, is a page from
+    something else in the way, not a miss. A busy answer is asked again
+    after the wait it gives."""
     global _lrclib_busy_until
+    response = None
     retry_at = 0.0
     waited = 0.0
     for attempt in range(1, LRCLIB_MAX_ATTEMPTS + 1):
         run.check()
         with _lrclib_busy_lock:
             held = _lrclib_busy_until
+        if held - time.monotonic() > LRCLIB_BUSY_LIMIT - waited:
+            break
         if held > time.monotonic():
             retry_at = max(retry_at, held + random.random())
         run.sleep_until(retry_at)
@@ -2414,10 +2461,10 @@ def _lrclib_get(url: str, params: dict, log: logging.Logger, what: str,
             break
         waited += pause
         retry_at = time.monotonic() + pause
-    if _retry_after(response) is not None:
+    if response is None or _retry_after(response) is not None:
         log.debug("LRCLIB %s: still busy after %d tries", what, attempt)
         return None, True
-    if response.status_code == 404:
+    if response.status_code == 404 and _lrclib_not_found(response):
         _provider_answered("Lrclib")
         return None, False
     try:
@@ -2482,7 +2529,7 @@ def search_lyrics(
     log: logging.Logger, skip_plain: bool = False, *,
     exact: Optional[dict] = None, other_cut: bool = False,
     song: tuple[str, frozenset] = ("", frozenset()),
-    run: Optional[_Pass] = None,
+    run: Optional[_Pass] = None, missed: Optional[dict] = None,
 ) -> tuple[Optional[str], Optional[str], str, int, int]:
     """
     With Lrclib among the providers, its exact lookup by ``exact`` (see
@@ -2497,9 +2544,12 @@ def search_lyrics(
     made or skipped. failed_hard counts those that never got an answer:
     the provider raised, was refused or failed, stayed busy, or was
     skipped as disabled by the circuit breaker. Only a miss with failed_hard at 0 says
-    no provider has the lyrics, so an outage doesn't poison state.
+    no provider has the lyrics, so an outage doesn't poison state. Each
+    provider with such a lookup is noted in ``missed``, "busy" when it
+    stayed busy and "failed" otherwise.
     """
     run = run or _Pass()
+    missed = {} if missed is None else missed
     answers: dict = {}
     tried = 0
     hard = 0
@@ -2511,6 +2561,8 @@ def search_lyrics(
         else:
             record, failed = _lrclib_exact(exact, log, run)
         hard += failed
+        if failed:
+            missed.setdefault("Lrclib", "failed")
         if record is not None:
             if record.get("instrumental"):
                 return None, "Lrclib", "instrumental", tried, hard
@@ -2524,6 +2576,7 @@ def search_lyrics(
             tried += 1
             if _is_provider_dead(prov, log):
                 hard += 1
+                missed.setdefault(prov, "failed")
                 continue
             if prov == "Lrclib":
                 lrclib_hits, failed = _lrclib_search(
@@ -2531,9 +2584,11 @@ def search_lyrics(
                 results = [hit.get("syncedLyrics") for hit in lrclib_hits]
             else:
                 result, failed = _query_provider(
-                    query, prov, log, run, answers, synced_only=True)
+                    query, prov, log, run, answers, missed, synced_only=True)
                 results = [result]
             hard += failed
+            if failed:
+                missed.setdefault(prov, "failed")
             for result in results:
                 if not result or not SYNCED_RE.search(result):
                     continue
@@ -2554,8 +2609,10 @@ def search_lyrics(
             else:
                 tried += 1
                 result, failed = _query_provider(
-                    query, prov, log, run, answers, plain_only=True)
+                    query, prov, log, run, answers, missed, plain_only=True)
                 hard += failed
+                if failed:
+                    missed.setdefault(prov, "failed")
             if result and result.strip():
                 return result, prov, "plain", tried, hard
     return None, None, "", tried, hard
@@ -2616,7 +2673,7 @@ def should_process(
     Decide whether `path` is worth (re-)processing. mtime/size may be passed
     in by the caller (e.g. from a bulk listing) to avoid an extra path.stat().
     """
-    if rescan or st is None:
+    if rescan or st is None or st.recheck:
         return True
     if mtime is None or size is None:
         try:
@@ -2799,12 +2856,19 @@ def _process_bound_file(
 ) -> str:
     key = str(path)
     st = replace(state[key]) if key in state else TrackState()
+    rescan = rescan or st.recheck
     # Keep uncommitted changes out of checkpoints; previews never commit.
     if dry_run:
         def commit(*_args, **_kwargs):
             return None
     else:
-        commit = _commit
+        def commit(state, key, st):
+            # A re-check that could not judge the track leaves it to the
+            # next pass.
+            st.recheck = rescan and st.status in ("transient", "error")
+            if st.status != "transient":
+                st.refused = ""
+            _commit(state, key, st)
 
     try:
         f = FLAC(f"/proc/self/fd/{binding.track_fd}")
@@ -2886,8 +2950,9 @@ def _process_bound_file(
     only_tag = bool(tagged) and len(tagged) == 1 and all(
         value == tagged[0] for value in embedded_lyric_values(f))
     # Lyrics an earlier version wrote are known only by how the track looks,
-    # which lyrics added since by hand can share. They are replaced only by
-    # a provider's lyrics with the same words, and never removed.
+    # which lyrics added since by hand can share. They are replaced only
+    # when they are what the app writes for a provider's lyrics, and never
+    # removed.
     guessed = (only_tag and not written and not unchanged_since_fetch
                and "sidecar" not in present and lyriced_by_earlier_version(f))
     ours = {
@@ -2951,7 +3016,7 @@ def _process_bound_file(
         )
         source = "existing-representation"
         kind = "synced"
-        action = "wrote-synced"
+        action = "copied-synced"
         st.last_seen = time.time()
     elif (missing and existing_kind != "none"
           and not (synced_only and existing_kind == "plain")):
@@ -2962,7 +3027,7 @@ def _process_bound_file(
         source = "existing-representation"
         kind = existing_kind
         write_format = missing[0]
-        action = f"wrote-{kind}"
+        action = f"copied-{kind}"
         st.last_seen = time.time()
     else:
         if not missing and existing_kind == "synced":
@@ -3016,22 +3081,36 @@ def _process_bound_file(
         title = (f.tags.get("title") or [""])[0]
         artists = credited_names(*f.tags.get("artist", ()),
                                  *f.tags.get("albumartist", ()))
+        missed = {}
         lyrics, source, kind, _tried, failed_hard = search_lyrics(
             [query, *fallback_queries(f)], providers, duration, log,
             skip_plain=skip_plain, exact=lrclib_signature(f, duration),
             other_cut=is_other_cut(title), song=(title, artists),
-            run=run,
+            run=run, missed=missed,
         )
         st.last_seen = time.time()
+        refused = {prov for prov, why in missed.items()
+                   if why == "failed" and prov != "Lrclib"}
+        # A provider that failed the track's lookups on its last pass too,
+        # or every lookup of this pass until it was disabled, is set aside,
+        # LRCLIB never, and the track judged on the answers of the others.
+        # Lyrics it may have given are not removed.
+        with _breaker_lock:
+            refusing = set(_refusing_providers)
+        set_aside = refused & (set(st.refused.split(",")) | refusing)
+        if set_aside and set_aside == set(missed) and len(missed) < len(providers):
+            failed_hard = 0
+            run.note_set_aside(set_aside)
+        unconfirmed = bool(set_aside) and st.source not in set(providers) - set_aside
         if lyrics:
             lyrics = clean_lyrics(lyrics, title) or None
-        if guessed and lyrics and _same_text(clean_lyrics(tagged[0], title), lyrics):
+        if guessed and lyrics and _written_from(clean_lyrics(tagged[0], title), lyrics):
             guessed = False
         elif guessed:
             lyrics = None
-        if rejudge and failed_hard:
-            # A provider that did not answer may have had better lyrics, or
-            # the exact track's.
+        if rejudge and failed_hard and (source != "Lrclib" or "Lrclib" in missed):
+            # A provider that did not answer may have had better lyrics.
+            # LRCLIB's own, when it answered, are held to the track's length.
             lyrics = None
         timed = _best_existing_lyrics(*representations.values())
         if (rejudge and lyrics and kind == "plain" and classify(timed) == "synced"
@@ -3040,6 +3119,13 @@ def _process_bound_file(
             # Providers do not offer timing every time they are asked; the
             # same words with timing that fits the track stay.
             lyrics, source, kind = clean_lyrics(timed, title), st.source, "synced"
+        if rejudge and lyrics and missed and (
+                kind == "plain" and classify(timed) == "synced"
+                or st.source in missed and source != st.source):
+            # A provider that did not answer may have had timed lyrics, or
+            # may still have the lyrics it gave; the track keeps its own.
+            lyrics = None
+            unconfirmed = True
 
         if kind == "instrumental":
             return remove_written("instrumental")
@@ -3052,13 +3138,14 @@ def _process_bound_file(
                 # - "not found" here would suppress it for RECHECK_AFTER_DAYS.
                 # Keep it immediately retryable, and remove nothing.
                 st.status = "transient"
-                st.source = "providers-unavailable"
+                st.refused = ",".join(sorted(refused))
                 commit(state, key, st)
                 return "providers-unavailable"
-            if rejudge and not synced_only:
+            if rejudge and not synced_only and not unconfirmed:
                 return remove_written("unfit")
             if rejudge:
-                # Plain lyrics were not searched for.
+                # Plain lyrics were not searched for, or a provider set aside
+                # may have given these.
                 st.status = classify(_best_existing_lyrics(*representations.values()))
                 commit(state, key, st)
                 return kept(f"already-{st.status}")
@@ -3153,6 +3240,7 @@ def fetch_for_paths(
     *,
     owned_root: Path,
     busy_patience: float = BUSY_PATIENCE,
+    set_aside: Optional[Counter] = None,
 ) -> Counter:
     """
     Run the lyrics pipeline over `paths`. Returns Counter of outcome → n.
@@ -3166,6 +3254,9 @@ def fetch_for_paths(
 
     `busy_patience` is how many seconds the pass waits for a provider that
     asked to be asked later before leaving the tracks that need it.
+
+    `set_aside`, if supplied, gets the number of tracks judged without each
+    provider set aside for them.
 
     `workers` controls per-file concurrency. Each file's work is dominated
     by network I/O (multi-provider HTTP), which releases the GIL - so
@@ -3183,6 +3274,8 @@ def fetch_for_paths(
     with _breaker_lock:
         _dead_providers.clear()
         _provider_fails.clear()
+        _answered_providers.clear()
+        _refusing_providers.clear()
 
     paths = [Path(p) for p in paths]
     if not dry_run:
@@ -3194,6 +3287,13 @@ def fetch_for_paths(
                   if should_process(p, state.get(str(p)), rescan,
                                     skip_existing_plain=skip_existing_plain,
                                     lyrics_format=lyrics_format)]
+    if rescan and not dry_run:
+        # Tracks a stop leaves unjudged are re-checked by the next pass.
+        for p in candidates:
+            st = state.get(str(p))
+            state[str(p)] = (replace(st, recheck=True) if st is not None
+                             else TrackState(recheck=True))
+        state.flush()
 
     counts: Counter = Counter()
     total = len(candidates)
@@ -3299,6 +3399,8 @@ def fetch_for_paths(
 
     finally:
         state.flush()
+        if set_aside is not None:
+            set_aside.update(run.set_aside)
 
     if stopped:
         counts["stopped"] = 1
@@ -3362,6 +3464,8 @@ def index_existing(
             held = os.fstat(binding.track_fd)
             mtime, size = held.st_mtime, held.st_size
             cached = state.get(key)
+            if cached is not None and cached.recheck:
+                return "awaiting-recheck"
             if (cached is not None
                     and int(mtime) == int(cached.mtime)
                     and size == cached.size

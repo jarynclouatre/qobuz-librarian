@@ -31,6 +31,10 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "wrote-plain",
     "dry:wrote-synced",
     "dry:wrote-plain",
+    "copied-synced",
+    "copied-plain",
+    "dry:copied-synced",
+    "dry:copied-plain",
     "already-synced",
     "already-plain",
     "kept-existing-plain",
@@ -125,6 +129,7 @@ def _run_lyric_hook(album_dir):
         # track (beets moves only the audio).
         # A provider asking to be asked later is not waited for here, where
         # the download waits too; those tracks are queued for a retry.
+        set_aside = Counter()
         counts = lyric_fetch.fetch_for_paths(
             flacs,
             owned_root=cfg.STAGING_DIR,
@@ -134,6 +139,7 @@ def _run_lyric_hook(album_dir):
             state_path=cfg.LYRIC_FETCH_STATE_FILE,
             progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
             busy_patience=0,
+            set_aside=set_aside,
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))
@@ -144,7 +150,8 @@ def _run_lyric_hook(album_dir):
     already = sum(
         counts.get(outcome, 0)
         for outcome in (
-            "already-synced", "already-plain", "kept-existing-plain"
+            "already-synced", "already-plain", "kept-existing-plain",
+            "copied-synced", "copied-plain",
         )
     )
     # Files where a provider was unavailable when their turn came up. The
@@ -171,6 +178,8 @@ def _run_lyric_hook(album_dir):
         msg += f"; {no_tags} skipped (missing tags)"
     if unavailable:
         msg += f"; {unavailable} provider-unavailable and need retry after import"
+    for provider, count in sorted(set_aside.items()):
+        msg += f"; {count} checked without {provider}, which did not answer"
     if failed:
         msg += f"; {failed} failed"
     if failed or unavailable:
