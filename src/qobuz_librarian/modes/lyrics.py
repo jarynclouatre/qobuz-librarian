@@ -60,7 +60,7 @@ def run_library_lyrics_mode(args):
         f"  Lyrics providers: {providers}. Lyrics format: {lyrics_format}."))
     if args.lyrics_rescan:
         log.info(fmt(C.GRAY,
-            "  Re-checking every track, including ones already checked."))
+            "  Also looking up tracks checked in the last 30 days."))
     if args.lyrics_synced_only:
         log.info(fmt(C.GRAY,
             "  --lyrics-synced-only: only timed (synced) lyrics will be written."))
@@ -184,19 +184,6 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['instrumental'], 'track')} skipped as "
             "instrumental."))
-    if summary["cleared_instrumental"]:
-        log.info(fmt(C.YELLOW,
-            f"     {'Would remove' if dry_run else 'Removed'} lyrics this app "
-            f"wrote from {plural(summary['cleared_instrumental'], 'instrumental track')}."))
-    if summary["cleared_unfit"]:
-        log.info(fmt(C.YELLOW,
-            f"     {'Would remove' if dry_run else 'Removed'} lyrics this app "
-            f"wrote from {plural(summary['cleared_unfit'], 'track')} with no "
-            "matching lyrics."))
-    if summary["unrecorded"]:
-        log.info(fmt(C.GRAY,
-            f"     {plural(summary['unrecorded'], 'track')} kept lyrics this "
-            "app has no record of writing."))
     if summary["policy_skipped"]:
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['policy_skipped'], 'track')} skipped by "
@@ -210,10 +197,6 @@ def _report_summary(res, *, dry_run):
             f"     {plural(summary['unavailable'], 'track')} couldn't reach a "
             "provider (rate-limited or down); re-run later to pick "
             f"{'it' if summary['unavailable'] == 1 else 'them'} up."))
-    for provider, count in summary["set_aside"].items():
-        log.info(fmt(C.YELLOW,
-            f"     {plural(count, 'track')} checked without {provider}, "
-            "which did not answer."))
     if summary["errors"]:
         log.warning(fmt(C.YELLOW,
             f"     {plural(summary['errors'], 'track')} hit an error while "

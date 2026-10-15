@@ -403,7 +403,7 @@ def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(
         assert job_persistence.load_one(review.id)["candidates"] == (
             review.candidates)
     assert (cfg.MUSIC_ROOT / "Artist" / "Owned" / "02.lrc").read_text() == (
-        "[00:00.50]more")
+        "[00:00.50]words")
 
 
 def test_a_provider_error_never_reaches_the_stored_job_record(

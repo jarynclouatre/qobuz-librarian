@@ -5322,15 +5322,6 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
          f"{plural(counts['too_long'], 'track')} too long"),
         (counts["instrumental"],
          f"{plural(counts['instrumental'], 'track')} instrumental"),
-        (counts["cleared_instrumental"],
-         "lyrics removed from "
-         f"{plural(counts['cleared_instrumental'], 'instrumental track')}"),
-        (counts["cleared_unfit"],
-         "lyrics removed from "
-         f"{plural(counts['cleared_unfit'], 'track')} with no match"),
-        (counts["unrecorded"],
-         f"{plural(counts['unrecorded'], 'track')} kept lyrics this app has "
-         "no record of writing"),
         (counts["policy_skipped"],
          f"{plural(counts['policy_skipped'], 'track')} skipped by policy"),
         (counts["unsafe"],
@@ -5346,10 +5337,6 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     ):
         if count:
             parts.append(phrase)
-    parts.extend(
-        f"{plural(count, 'track')} checked without {provider}, which did "
-        "not answer"
-        for provider, count in counts["set_aside"].items())
     if counts["failed"]:
         failures = []
         if unreadable:

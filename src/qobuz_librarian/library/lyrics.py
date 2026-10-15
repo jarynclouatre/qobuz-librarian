@@ -10,8 +10,6 @@ Local apart from the provider HTTP; no Qobuz login needed. Honours the
 ``LYRICS_FORMAT`` / ``LYRICS_PROVIDERS`` settings; ``LYRICS_ENABLED`` only
 gates the automatic import-time fetch, so an explicit backfill runs regardless.
 """
-from collections import Counter
-
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library.scanner import (
@@ -124,7 +122,6 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
                 "unreadable_artists": unreadable,
             }
 
-    set_aside = Counter()
     counts = lyric_fetch.fetch_for_paths(
         paths,
         owned_root=cfg.MUSIC_ROOT,
@@ -137,10 +134,8 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
         log=log,
         should_stop=should_stop,
         progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
-        set_aside=set_aside,
     )
     result = dict(counts)
-    result["set_aside"] = dict(set_aside)
     result["unreadable_artists"] = unreadable
     result["total"] = total
     result["processed"] = sum(
@@ -185,22 +180,16 @@ def summarize_lyrics_result(result):
         "missing_tags": count("skipped-tags"),
         "too_long": count("skipped-long"),
         "instrumental": count("skipped-instrumental"),
-        "cleared_instrumental": count(
-            "removed-instrumental", "dry:removed-instrumental"),
-        "cleared_unfit": count("removed-unfit", "dry:removed-unfit"),
-        "unrecorded": count("kept-unrecorded"),
         "policy_skipped": count("skipped"),
         "unsafe": count("unsafe-path"),
         "unavailable": count("providers-unavailable"),
         "errors": count("write-error", "exception", "error"),
-        "set_aside": dict(sorted(result.get("set_aside", {}).items())),
     }
     accounted = sum(
         summary[key]
         for key in (
             "wrote", "already", "not_found", "missing_tags", "too_long",
-            "instrumental", "cleared_instrumental", "cleared_unfit",
-            "unrecorded", "policy_skipped",
+            "instrumental", "policy_skipped",
             "unsafe", "unavailable", "errors",
         )
     )

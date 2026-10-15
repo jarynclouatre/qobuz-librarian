@@ -39,7 +39,7 @@ Qobuz Librarian searches Qobuz for artists, albums, and tracks, downloads what y
 
 A single Docker image bundles streamrip, beets, ffmpeg, and the FLAC tools, with no sidecar containers. The web UI is the primary interface; the CLI runs the same engine for scripted or unattended jobs. Day-to-day behaviour (quality, lyrics, artwork, beets layout, scan cadence) lives on the **Settings** page; paths, ports, and a few advanced knobs come from environment variables (see [Configuration](docs/configuration.md)).
 
-Most scan modes work the same way: **scan → review → act.** A scan runs in the background and saves a checklist of findings, and your music files remain unchanged until items are selected and approved. Two exceptions: Search downloads straight from its results, and Lyrics writes missing lyrics as the job runs.
+Most scan modes work the same way: **scan → review → act.** A scan runs in the background and saves a checklist of findings, and your music files remain unchanged until items are selected and approved. Two exceptions: Search downloads straight from its results, and Lyrics writes missing lyrics, and synced lyrics over plain ones, as the job runs.
 
 | Page | What it does |
 |---|---|

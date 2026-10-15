@@ -507,20 +507,15 @@ _REPLACEMENT_OWNED_PREFIXES = (
 )
 
 
-_LYRIC_TAGS = frozenset({
-    "lyrics", "unsyncedlyrics", lyric_fetch.WRITTEN_MARK.lower(),
-})
+_LYRIC_TAGS = frozenset({"lyrics", "unsyncedlyrics"})
 
 
 def _original_track_tags(source):
-    # The app's mark goes only with the lyrics it names.
-    lyrics = any(value.strip() for key, value in (source.tags or [])
-                 if key.lower() in {"lyrics", "unsyncedlyrics"})
     return [
         (key, value) for key, value in (source.tags or [])
         if key.lower() not in _REPLACEMENT_OWNED_TAGS
         and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
-        and (key.lower() not in _LYRIC_TAGS or (lyrics and value.strip()))
+        and (key.lower() not in _LYRIC_TAGS or value.strip())
     ]
 
 
@@ -590,7 +585,6 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
     if pairs is None:
         return False
     carried_to = 0
-    lyrics_copied = []
     for old, new in pairs:
         target_path = Path(new["path"])
         if (Path(old["path"]).suffix.lower() != ".flac"
@@ -617,9 +611,6 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
             for picture in pictures:
                 target.add_picture(picture)
             lyric_fetch.save_flac_tags(target, target_path)
-            copied = [value for key, value in tags if key.lower() == "lyrics"]
-            if copied:
-                lyrics_copied.append((Path(old["path"]), target_path, copied[0]))
         except Exception as e:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Couldn't carry your own tags onto "
@@ -627,10 +618,6 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
                 "backup."))
             return False
         carried_to += 1
-    try:
-        lyric_fetch.carry_copied_lyrics(lyrics_copied, cfg.LYRIC_FETCH_STATE_FILE)
-    except Exception as e:
-        vlog(f"couldn't carry the lyric records onto the replacement: {e}")
     if carried_to:
         log.info(fmt(C.GRAY,
             f"  ⤷  Carried your own tags and pictures onto "

@@ -4,7 +4,6 @@ import os
 import stat
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -38,13 +37,8 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "already-synced",
     "already-plain",
     "kept-existing-plain",
-    "kept-unrecorded",
     "not-found",
     "skipped-instrumental",
-    "removed-instrumental",
-    "dry:removed-instrumental",
-    "removed-unfit",
-    "dry:removed-unfit",
     "skipped-long",
     "skipped-tags",
     "skipped",
@@ -129,7 +123,6 @@ def _run_lyric_hook(album_dir):
         # track (beets moves only the audio).
         # A provider asking to be asked later is not waited for here, where
         # the download waits too; those tracks are queued for a retry.
-        set_aside = Counter()
         counts = lyric_fetch.fetch_for_paths(
             flacs,
             owned_root=cfg.STAGING_DIR,
@@ -139,7 +132,6 @@ def _run_lyric_hook(album_dir):
             state_path=cfg.LYRIC_FETCH_STATE_FILE,
             progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
             busy_patience=0,
-            set_aside=set_aside,
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))
@@ -166,8 +158,7 @@ def _run_lyric_hook(album_dir):
         f"lyrics: {synced} synced, {plain} plain, "
         f"{already} already, {nofnd} not found"
     )
-    instrumental = (counts.get("skipped-instrumental", 0)
-                    + counts.get("removed-instrumental", 0))
+    instrumental = counts.get("skipped-instrumental", 0)
     if instrumental:
         msg += f"; {instrumental} skipped as instrumental"
     too_long = counts.get("skipped-long", 0)
@@ -178,8 +169,6 @@ def _run_lyric_hook(album_dir):
         msg += f"; {no_tags} skipped (missing tags)"
     if unavailable:
         msg += f"; {unavailable} provider-unavailable and need retry after import"
-    for provider, count in sorted(set_aside.items()):
-        msg += f"; {count} checked without {provider}, which did not answer"
     if failed:
         msg += f"; {failed} failed"
     if failed or unavailable:
@@ -661,90 +650,6 @@ def _sidecar_identity_from_receipt(path, receipt):
     return dict(identity)
 
 
-def _carry_written_lyric_state(album_dirs, owned_tracks=None):
-    """Move the import hook's record of the lyrics it wrote from the staged
-    path to the imported file, so a later pass can still replace them. The
-    imported file is matched by its lyrics: exactly what the hook wrote into a
-    staged file that has since left staging. Another file in the folder can
-    hold the same words from somewhere else, so a record moves only to a file
-    changed since it was written, and only when the files holding those words
-    are exactly as many as the staged files they were written into."""
-    staging = os.path.join(os.path.abspath(os.fspath(cfg.STAGING_DIR)), "")
-    try:
-        state = lyric_fetch.load_state(cfg.LYRIC_FETCH_STATE_FILE)
-    except Exception as e:
-        vlog(f"lyric state carry: state load failed: {e}")
-        return
-    written = {}
-    for key, st in state.items():
-        if st.written and key.startswith(staging) and not os.path.exists(key):
-            written.setdefault(st.written, []).append((key, st.last_seen))
-    if not written:
-        return
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-    holders = {}
-    for fp, parent_fd, _guard, _expected in _iter_post_import_flacs(
-            album_dirs, owned_tracks, set()):
-        try:
-            descriptor = os.open(fp.name, flags, dir_fd=parent_fd)
-        except OSError:
-            continue
-        try:
-            held = os.fstat(descriptor)
-            values = lyric_fetch.embedded_lyric_values(
-                lyric_fetch.FLAC(f"/proc/self/fd/{descriptor}"))
-        except Exception:
-            continue
-        finally:
-            os.close(descriptor)
-        if not stat.S_ISREG(held.st_mode) or not values or any(
-                value != values[0] for value in values):
-            continue
-        digest = lyric_fetch._lyrics_digest(values[0])
-        staged = written.get(digest)
-        if not staged:
-            continue
-        known = state.get(str(fp))
-        if held.st_ctime < min(at for _key, at in staged) or (
-                known is not None and int(known.mtime) == int(held.st_mtime)
-                and known.size == held.st_size):
-            continue
-        holders.setdefault(digest, []).append(
-            (str(fp), held.st_mtime, held.st_size))
-    carried = {}
-    for digest, files in holders.items():
-        staged = written[digest]
-        if len(files) != len(staged):
-            continue
-        for (path, mtime, size), (key, _at) in zip(sorted(files), sorted(staged)):
-            carried[path] = (key, digest, mtime, size)
-    if not carried:
-        return
-
-    def rekey(state):
-        for path, (staged, digest, mtime, size) in carried.items():
-            st = state.get(staged)
-            if st is not None and st.written == digest:
-                state[path] = replace(
-                    st, mtime=mtime, size=size, representations="embed")
-        for staged, *_ in carried.values():
-            state.pop(staged, None)
-
-    try:
-        lyric_fetch.update_state(rekey, cfg.LYRIC_FETCH_STATE_FILE)
-    except Exception as e:
-        vlog(f"lyric state carry: update failed: {e}")
-
-
-def _load_lyric_records():
-    try:
-        return lyric_fetch.load_state(cfg.LYRIC_FETCH_STATE_FILE)
-    except Exception as e:
-        vlog(f"sidecar: lyric state load failed: {e}")
-        return {}
-
-
 def write_post_import_sidecars(
     album_dirs,
     *,
@@ -753,14 +658,11 @@ def write_post_import_sidecars(
     directory_changes_out=None,
     owned_tracks=None,
 ):
-    """Carry the lyric hook's records over to the imported FLACs, then write
-    .lrc sidecars next to them when LYRICS_FORMAT
+    """Write .lrc sidecars next to imported FLACs when LYRICS_FORMAT
     requests them. Embedded tag is removed afterward for 'sidecar' mode,
-    kept for 'both'. Only tracks holding lyrics this app wrote get one, and
-    an existing .lrc is replaced only when the app wrote it too; other
-    tracks in the folders stay as they are. Optional output lists receive
-    exact identity changes and
-    sidecars that this pass can prove it created, plus exact parent-directory
+    kept for 'both'. An existing .lrc is replaced only when it is plain and
+    the tag is synced. Optional output lists receive exact identity changes
+    and sidecars that this pass can prove it created, plus exact parent-directory
     identity transitions caused by those writes. ``owned_tracks`` contains
     sealed one-file import receipts; those leaves are excluded from album
     scans and handled only while their original identities still match."""
@@ -773,12 +675,8 @@ def write_post_import_sidecars(
     if getattr(lyric_fetch, "FLAC", None) is None:
         return
     lyr_fmt = (cfg.LYRICS_FORMAT or "embed").strip().lower()
-    sidecars = lyr_fmt in ("sidecar", "both")
-    earlier = _load_lyric_records() if sidecars else {}
-    _carry_written_lyric_state(album_dirs, owned_tracks)
-    if not sidecars:
+    if lyr_fmt not in ("sidecar", "both"):
         return
-    records = _load_lyric_records()
     strip_tag = lyr_fmt == "sidecar"
     seen = set()
     written = 0
@@ -839,21 +737,10 @@ def write_post_import_sidecars(
             content = lyric_fetch.get_existing_lyrics(f)
             if not content or not content.strip():
                 continue
-            digest = lyric_fetch._lyrics_digest(content)
-            if digest not in (getattr(records.get(str(fp)), "written", ""),
-                              lyric_fetch.written_mark(f)):
-                continue
             if not _held_track_is_named(fp, parent_fd, track_fd, track_identity, parent_guard):
                 vlog(f"sidecar: track changed before write {fp}")
                 failed += 1
                 continue
-            own = {digest, getattr(earlier.get(str(fp)), "written", "")}
-            existing = lyric_fetch._read_bound_sidecar(
-                fp, parent_fd, parent_guard, track_guard)
-            replaces = (
-                existing
-                if existing is not None and lyric_fetch._lyrics_digest(existing) in own
-                else "")
             creation = {}
             sidecar_identity_receipt = {}
             sidecar_directory_mutation = {}
@@ -869,7 +756,6 @@ def write_post_import_sidecars(
                         parent_guard=parent_guard,
                         track_guard=track_guard,
                         sidecar_identity_out=sidecar_identity_receipt,
-                        replaces=replaces,
                     )
                 else:
                     sidecar_written = lyric_fetch.write_sidecar(
@@ -879,7 +765,6 @@ def write_post_import_sidecars(
                         parent_guard=parent_guard,
                         track_guard=track_guard,
                         sidecar_identity_out=sidecar_identity_receipt,
-                        replaces=replaces,
                     )
             except OSError as e:
                 sidecar_error = e

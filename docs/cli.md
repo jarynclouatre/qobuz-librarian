@@ -78,7 +78,7 @@ docker compose run --rm qobuz-librarian cli --upgrade-walk --dry-run
 docker compose run --rm qobuz-librarian cli --downsample-walk --dry-run
 
 # Fetch lyrics for tracks missing them (--lyrics-synced-only for timed
-# lyrics only; --lyrics-rescan to re-query tracks already checked)
+# lyrics only; --lyrics-rescan to look up tracks checked recently too)
 docker compose run --rm qobuz-librarian cli --lyrics-walk
 
 # Start the next walk fresh, revisiting artists already reviewed
@@ -130,7 +130,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |
 | `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
-| `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: check every track again, fetching lyrics this app wrote again and removing them when no lyrics match the track, while lyrics it did not write stay as they are; write only timed lyrics |
+| `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: also look up tracks checked in the last 30 days; write only timed lyrics |
 | `--migrate-src PATH`, `--migrate-dest PATH`, `--in-place`, `--acoustid` | With `--migrate`: source, destination, move instead of copy, fingerprint untagged files (see [Existing libraries](existing-libraries.md)) |
 | `--verbose`, `--quiet` / `-q`, `--no-color` | More detail, warnings and errors only, no colours |
 | `--version`, `-h` / `--help` | Print the version or the help |

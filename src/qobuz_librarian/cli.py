@@ -965,10 +965,7 @@ def parse_args():
                         "under 'Primary'")
 
     lyrics.add_argument("--lyrics-rescan", action="store_true",
-                   help="check every track again, including ones already "
-                        "checked. Lyrics this app wrote are fetched again, and "
-                        "removed when no lyrics match the track. Lyrics it did "
-                        "not write stay as they are.")
+                   help="also look up tracks checked in the last 30 days.")
     lyrics.add_argument("--lyrics-synced-only", action="store_true",
                    help="only write timed (synced) lyrics, never plain.")
 
