@@ -154,8 +154,6 @@ def test_executor_refuses_changed_queued_album_before_download(
 
 
 def test_pending_queue_round_trips_and_clears(tmp_path, monkeypatch):
-    qfile = tmp_path / "queue.json"
-    monkeypatch.setattr("qobuz_librarian.config.PENDING_QUEUE_FILE", qfile)
     monkeypatch.setattr("qobuz_librarian.config.QUEUE_JOURNAL_DIR", tmp_path / "journals")
     save_pending_queue([_qitem(title="Album A")], mode="album_walk")
     items, mode, saved_at = load_pending_queue()
@@ -164,14 +162,9 @@ def test_pending_queue_round_trips_and_clears(tmp_path, monkeypatch):
     datetime.fromisoformat(saved_at)        # saved_at is valid ISO
     clear_pending_queue(explicit_discard=True)
     assert load_pending_queue().status is QueueLoadStatus.ABSENT
-    # A power cut can leave the file truncated; load discards it, not raise.
-    qfile.write_text('{"version": 1, "items": [{"al', encoding="utf-8")
-    assert load_pending_queue() == (None, None, None)
 
 
 def test_resume_keeps_pending_file_when_not_drained(tmp_path, monkeypatch):
-    qfile = tmp_path / "queue.json"
-    monkeypatch.setattr("qobuz_librarian.config.PENDING_QUEUE_FILE", qfile)
     monkeypatch.setattr("qobuz_librarian.config.QUEUE_JOURNAL_DIR", tmp_path / "journals")
     save_pending_queue([_qitem()], mode="walk_queue")
     monkeypatch.setattr("qobuz_librarian.queue.executor._execute_download_queue",
@@ -185,8 +178,6 @@ def test_a_closed_input_does_not_resume_the_saved_queue(tmp_path, monkeypatch):
     """The prompt defaults to yes on Enter, and a closed input was read as
     Enter, so a cron or piped run started downloading a saved queue nobody had
     asked it to."""
-    qfile = tmp_path / "queue.json"
-    monkeypatch.setattr("qobuz_librarian.config.PENDING_QUEUE_FILE", qfile)
     monkeypatch.setattr("qobuz_librarian.config.QUEUE_JOURNAL_DIR", tmp_path / "journals")
     save_pending_queue([_qitem()], mode="walk_queue")
     started = []

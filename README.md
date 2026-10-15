@@ -122,7 +122,7 @@ For internet exposure, put it behind an authenticating reverse proxy, a VPN, or 
 
 - **Stop before database maintenance.** Never sync, restore, or replace the live beets/SQLite database while Qobuz Librarian is running; stop the app first.
 - **Repair backups.** Repair backs up what it replaces. Verified replacements allow that backup to be removed; failed refills may restore the originals automatically. Any unresolved backup remains in Settings → Diagnostics. The job page states what happened to the files: the replacement may already be in the album with your original only in the backup. Review both before restoring or removing it.
-- **Filesystem metadata.** Cross-filesystem migration requires a destination that can preserve file ownership, permissions, timestamps and extended attributes, including Linux ACLs. Some per-track safety-backup copies use the app's ownership.
+- **Filesystem metadata.** Migration keeps each file's permissions and modification time. Its copies take the app's ownership and do not carry extended attributes or Linux ACLs. Some per-track safety-backup copies use the app's ownership.
 - **One library, one container.** The staging area is single-writer. The run-lock keeps the CLI and web container from running at the same time in one stack, but two stacks pointed at the same mount can still conflict.
 - **Qobuz only.** This drives streamrip's Qobuz path; Tidal, Deezer, and SoundCloud are not supported.
 - **FLAC output only.** Imports, repairs, upgrades, and downsampling keep the library in FLAC; MP3 and other lossy output formats are not supported.

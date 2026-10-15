@@ -141,12 +141,10 @@ def test_downloads_run_on_a_copy_and_leave_the_users_config_as_it_is(
             assert os.stat(run_path).st_mode & 0o777 == 0o600
             assert os.stat(run_path.parent).st_mode & 0o777 == 0o700
             # A killed run's copy goes at the next start; a live one stays.
-            killed = [run_path.parent / ".streamrip-run-killed.toml",
-                      cfg_path.parent / ".streamrip-run-killed.toml"]
-            for leftover in killed:
-                leftover.write_text("[qobuz]\n")
+            killed = run_path.parent / ".streamrip-run-killed.toml"
+            killed.write_text("[qobuz]\n")
             auth.sweep_streamrip_run_copies()
-            assert run_path.exists() and not any(p.exists() for p in killed)
+            assert run_path.exists() and not killed.exists()
             data = tomllib.loads(run_path.read_text())
             assert data["artwork"]["embed"] is embed and data["artwork"]["save_artwork"] is True
             assert (data["qobuz"]["password_or_token"], data["qobuz"]["email_or_userid"],

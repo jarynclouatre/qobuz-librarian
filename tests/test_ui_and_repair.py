@@ -4,7 +4,6 @@ the backup is only dropped once the refills are proven back in place and
 re-verified. A still-short re-rip keeps the backup, and a failed download puts
 the originals back.
 """
-import os
 from argparse import Namespace
 
 # ── Repair scan: resume from an interrupted sweep ──────────────────────
@@ -43,105 +42,11 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
     assert restored == {"bp": backup, "dir": album_dir}
 
 
-# ── Repair: relocate refilled tracks back to the album folder ─────────
-
-def _repair_relocation_dirs(tmp_path, monkeypatch):
-    from qobuz_librarian.modes import repair
-
-    music_root = tmp_path / "Music"
-    album_dir = music_root / "Artist" / "First Fires (2013)"
-    landed_dir = music_root / "Artist" / "The North Borders (2013)"
-    album_dir.mkdir(parents=True)
-    landed_dir.mkdir()
-    monkeypatch.setattr(repair.cfg, "MUSIC_ROOT", music_root)
-    monkeypatch.setattr(repair.cfg, "BEETS_DB_PATH", tmp_path / "missing.db")
-    monkeypatch.setattr(
-        repair, "_read_repair_isrc", lambda _fd: "GBCFB1300101")
-    return repair, album_dir, landed_dir
-
-
-def _receipt_identity(path):
-    value = os.stat(path, follow_symlinks=False)
-    return {
-        "device": value.st_dev,
-        "inode": value.st_ino,
-        "size": value.st_size,
-        "modified_ns": value.st_mtime_ns,
-        "changed_ns": value.st_ctime_ns,
-    }
-
-
-def _sealed_import_receipt(
-        root, files, album_scope, *, relatives=None, scope_relative=None,
-        created_directories=None):
-    relative_values = (
-        relatives
-        if relatives is not None
-        else [path.relative_to(root).as_posix() for path in files]
-    )
-    scope_value = (
-        scope_relative
-        if scope_relative is not None
-        else album_scope.relative_to(root).as_posix()
-    )
-    if created_directories is None:
-        created_directories = [(scope_value, album_scope)]
-    created_records = [
-        {"relative": relative, **_receipt_identity(path)}
-        for relative, path in created_directories
-    ]
-    return {
-        "version": 1,
-        "root": str(root),
-        "root_identity": _receipt_identity(root),
-        "sealed": True,
-        "items": [
-            {
-                "relative": relative,
-                "file": _receipt_identity(path),
-                "album_scope": {
-                    "relative": scope_value,
-                    "directory": _receipt_identity(album_scope),
-                },
-                "created_directories": [
-                    dict(record) for record in created_records
-                ],
-            }
-            for path, relative in zip(files, relative_values)
-        ],
-    }
-
-
-def test_repair_leaves_a_preexisting_track_sharing_the_recording_alone(tmp_path, monkeypatch):
-    # A track that was already in the target dir's sibling album under the
-    # same ISRC must NOT be moved; it isn't a refill, it's an existing copy.
-    repair, album_dir, owned_dir = _repair_relocation_dirs(
-        tmp_path, monkeypatch)
-    owned = owned_dir / "01 - First Fires.flac"
-    owned.write_bytes(b"already-here")
-    refill = owned_dir / "02 - First Fires refill.flac"
-    refill.write_bytes(b"receipt-owned-refill")
-
-    moved = repair._relocate_refilled_into_album_dir(
-        album_dir,
-        owned_dir,
-        {"GBCFB1300101"},
-        before_names={"01 - First Fires.flac"},
-        ownership_receipt=_sealed_import_receipt(
-            repair.cfg.MUSIC_ROOT, [refill], owned_dir),
-        expected_refills=1,
-    )
-    assert moved == 1 and owned.read_bytes() == b"already-here"
-    assert not (album_dir / "01 - First Fires.flac").exists()
-    assert (album_dir / refill.name).read_bytes() == b"receipt-owned-refill"
-
-
 # ── Repair: backup resolution branches (the core data-safety machinery) ─
 
 def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,
                            present=True, intact=True, recovery_checkpoint=None,
-                           execute_calls=None, relocation_error=None,
-                           retire=None):
+                           execute_calls=None, retire=None):
     import qobuz_librarian.modes.repair as repair_mod
     from qobuz_librarian import repair_log
 
@@ -175,13 +80,6 @@ def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,
             qi["imported"] = imported
 
     monkeypatch.setattr(repair_mod, "_execute_download_queue", fake_execute)
-    def relocate(*_args, **_kwargs):
-        if relocation_error is not None:
-            raise relocation_error
-        return 0
-
-    monkeypatch.setattr(
-        repair_mod, "_relocate_refilled_into_album_dir", relocate)
     monkeypatch.setattr(repair_mod, "append_repair_log", lambda e: True)
     # The dummy file isn't a real FLAC, so drive the post-refill verification
     # gate directly: `present` = the refilled tracks returned to album_dir,
@@ -357,8 +255,6 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
                 retag([])
 
     monkeypatch.setattr(repair_mod, "_execute_download_queue", fake_execute)
-    monkeypatch.setattr(
-        repair_mod, "_relocate_refilled_into_album_dir", lambda *a, **k: 0)
     monkeypatch.setattr(repair_mod, "append_repair_log", lambda e: True)
     monkeypatch.setattr(repair_mod, "_refills_present_in", lambda d, w, b: True)
     monkeypatch.setattr(repair_mod, "_refills_intact", lambda d, w, t, b: True)

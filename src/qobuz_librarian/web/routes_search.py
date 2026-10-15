@@ -275,7 +275,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         # a background thread.
         resuming = _start_due_jobs_in_background()
         scan_state = scans._library_scan_state()
-        library_generation = scans._truthful_library_generation()
+        library_generation = generation_state.load()
         return {
             "new_release_review": _new_release_review(),
             # First run offers the baseline scan as a Run/Skip choice rather than

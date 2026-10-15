@@ -41,7 +41,6 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "skipped-instrumental",
     "skipped-long",
     "skipped-tags",
-    "skipped",
 }
 _LYRIC_QUEUED_OUTCOMES = {"providers-unavailable", "unsafe-path"}
 
@@ -109,7 +108,7 @@ def _run_lyric_hook(album_dir):
     if not flacs:
         return empty_result
     log.info(fmt(C.CYAN, f"  ⟳  Checking lyrics for {plural(len(flacs), 'track')}…"))
-    # lyric_fetch.save_state assumes its parent exists; ensure DATA_DIR is
+    # lyric_fetch's state writer assumes its parent exists; ensure DATA_DIR is
     # created up-front so first-run (no other writer has touched DATA_DIR
     # yet) doesn't crash inside the lyric hook.
     try:

@@ -76,7 +76,6 @@ def _isolate_data_dir():
     cfg.ARTIST_RESOLVE_CACHE_FILE = tmp_root / ".artist_resolve_cache.json"
     cfg.WALK_SEEN_FILE       = tmp_root / ".qobuz_walk_seen.txt"
     cfg.ALBUM_WALK_SEEN_FILE = tmp_root / ".qobuz_album_walk_seen.txt"
-    cfg.PENDING_QUEUE_FILE   = tmp_root / ".qobuz_pending_queue.json"
     cfg.QUEUE_JOURNAL_DIR    = tmp_root / ".qobuz_queue_journals"
     cfg.LYRIC_RETRY_FILE     = tmp_root / ".qobuz_lyric_retry.json"
     cfg.REPAIR_LOG_PATH      = tmp_root / ".qobuz_replaced_tracks.log"

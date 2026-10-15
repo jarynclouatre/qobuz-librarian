@@ -1,6 +1,5 @@
 """Finding, starting and deduplicating scan jobs."""
 import asyncio
-import copy
 from pathlib import Path
 
 from fastapi.responses import RedirectResponse
@@ -9,7 +8,6 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.library import (
     collection_snapshot,
-    generation_state,
     missing_types,
     scan_checkpoint,
     scanner,
@@ -222,21 +220,6 @@ def _check_library_folders():
         }
     return {"ready": True, "empty": False, "count": len(artists),
             "message": ""}
-
-
-def _truthful_library_generation():
-    """Show an interrupted review save before startup recovery can run."""
-    state = generation_state.load()
-    if not generation_state.library_publication_incomplete(state):
-        return state
-    state = copy.deepcopy(state)
-    latest = state.setdefault("latest_attempt", {})
-    latest["status"] = "incomplete"
-    latest["message"] = (
-        "The Library scan finished checking the catalogue, but stopped "
-        "before its review was saved."
-    )
-    return state
 
 
 def _start_library_scan(credentials, partial_only=False, force_full=False):

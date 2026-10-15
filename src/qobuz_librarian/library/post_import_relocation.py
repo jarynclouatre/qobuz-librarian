@@ -1259,12 +1259,6 @@ def _retired_source_file_name(index) -> str:
     return f"source-file-{index:05d}"
 
 
-def _retired_source_directory_name(index) -> str:
-    if type(index) is not int or index < 0 or index > _MAX_TREE_ENTRIES:
-        raise ValueError("relocation source directory index is invalid")
-    return f"source-directory-{index:05d}"
-
-
 def _restore_private_entry(
     private_fd,
     private_name,
@@ -2288,122 +2282,21 @@ def _source_directory_should_be_empty(payload, relative) -> bool:
     )
 
 
-def _delete_retired_empty_source_directory(
-    parent_fd,
-    name,
-    workspace_fd,
-    retired_name,
-    descriptor,
-) -> bool:
-    try:
-        os.rmdir(retired_name, dir_fd=workspace_fd)
-        os.fsync(workspace_fd)
-        return True
-    except BaseException as exc:
-        if _restore_private_entry(
-            workspace_fd,
-            retired_name,
-            parent_fd,
-            name,
-            descriptor,
-        ):
-            if isinstance(exc, Exception):
-                return False
-            raise exc
-        raise PostImportRelocationAttention(
-            "retired relocation source directory requires recovery"
-        ) from exc
-
-
-def _remove_exact_empty_source_directory(
-    parent_fd,
-    name,
-    workspace_fd,
-    retired_name,
-    expected,
-) -> bool:
-    if workspace_fd is not None and not _name_missing(workspace_fd, retired_name):
-        descriptor = _open_directory(retired_name, dir_fd=workspace_fd)
-        try:
-            if (
-                not _named_matches(
-                    workspace_fd, retired_name, descriptor, directory=True
-                )
-                or not _directory_record_equivalent(
-                    _stat_record(os.fstat(descriptor)), expected
-                )
-                or os.listdir(descriptor)
-            ):
-                return False
-            return _delete_retired_empty_source_directory(
-                parent_fd,
-                name,
-                workspace_fd,
-                retired_name,
-                descriptor,
-            )
-        finally:
-            os.close(descriptor)
-
-    if _name_missing(parent_fd, name):
-        return True
-    if workspace_fd is None:
-        return False
-    descriptor = _open_directory(name, dir_fd=parent_fd)
-    try:
-        if (
-            not _named_matches(parent_fd, name, descriptor, directory=True)
-            or not _directory_record_equivalent(
-                _stat_record(os.fstat(descriptor)), expected
-            )
-            or os.listdir(descriptor)
-        ):
-            return False
-        if not _move_exact_to_private(
-            parent_fd,
-            name,
-            workspace_fd,
-            retired_name,
-            descriptor,
-        ):
-            return False
-        if (
-            not _named_matches(
-                workspace_fd, retired_name, descriptor, directory=True
-            )
-            or not _directory_record_equivalent(
-                _stat_record(os.fstat(descriptor)), expected
-            )
-            or os.listdir(descriptor)
-        ):
-            raise PostImportRelocationAttention(
-                "retired relocation source directory requires recovery"
-            )
-        return _delete_retired_empty_source_directory(
-            parent_fd,
-            name,
-            workspace_fd,
-            retired_name,
-            descriptor,
-        )
-    finally:
-        os.close(descriptor)
-
-
-def _remove_empty_source_directories(
-    root_fd, workspace_fd, payload
-) -> tuple[Path, ...]:
-    source_parts = _valid_relative(payload["source"], album=True)
-    failures = []
+def _remove_empty_source_directories(root_fd, workspace_fd, payload) -> None:
+    if workspace_fd is not None:
+        for name in os.listdir(workspace_fd):
+            if name == "source-artist" or name.startswith("source-directory-"):
+                try:
+                    os.rmdir(name, dir_fd=workspace_fd)
+                except OSError:
+                    pass
     directories = sorted(
         payload["source_snapshot"]["directories"],
         key=lambda value: (value.count("/"), value),
         reverse=True,
     )
     directories.append("")
-    for index, relative in enumerate(directories):
-        if failures:
-            break
+    for relative in directories:
         if not _source_directory_should_be_empty(payload, relative):
             continue
         absolute_relative = (
@@ -2411,84 +2304,19 @@ def _remove_empty_source_directories(
         )
         try:
             parent_fd, name, chain = _relative_parent(root_fd, absolute_relative)
-        except FileNotFoundError:
-            continue
         except OSError:
-            failures.append(Path(cfg.MUSIC_ROOT) / absolute_relative)
             continue
         try:
-            expected = (
-                payload["source_snapshot"]["root"]
-                if not relative
-                else payload["source_snapshot"]["directories"][relative]
-            )
-            if not _remove_exact_empty_source_directory(
-                parent_fd,
-                name,
-                workspace_fd,
-                _retired_source_directory_name(index),
-                expected,
-            ):
-                failures.append(Path(cfg.MUSIC_ROOT) / absolute_relative)
-        except FileNotFoundError:
-            pass
-        except PostImportRelocationAttention:
-            raise
+            os.rmdir(name, dir_fd=parent_fd)
         except OSError:
-            failures.append(Path(cfg.MUSIC_ROOT) / absolute_relative)
+            pass
         finally:
             _close_all(chain)
-    if failures:
-        return tuple(dict.fromkeys(failures))
-    artist = source_parts[0]
-    descriptor = None
+    artist = _valid_relative(payload["source"], album=True)[0]
     try:
-        expected = payload.get("source_artist_record")
-        retired_artist = workspace_fd is not None and not _name_missing(
-            workspace_fd, "source-artist"
-        )
-        if retired_artist:
-            if (
-                not isinstance(expected, dict)
-                or not _remove_exact_empty_source_directory(
-                    root_fd,
-                    artist,
-                    workspace_fd,
-                    "source-artist",
-                    expected,
-                )
-            ):
-                failures.append(Path(cfg.MUSIC_ROOT) / artist)
-            return tuple(dict.fromkeys(failures))
-        descriptor = _open_directory(artist, dir_fd=root_fd)
-        matches = (
-            isinstance(expected, dict)
-            and _named_matches(root_fd, artist, descriptor, directory=True)
-            and _directory_record_equivalent(_stat_record(os.fstat(descriptor)), expected)
-        )
-        if matches and not os.listdir(descriptor):
-            os.close(descriptor)
-            descriptor = None
-            if not _remove_exact_empty_source_directory(
-                root_fd,
-                artist,
-                workspace_fd,
-                "source-artist",
-                expected,
-            ):
-                failures.append(Path(cfg.MUSIC_ROOT) / artist)
-        elif not matches:
-            failures.append(Path(cfg.MUSIC_ROOT) / artist)
-    except FileNotFoundError:
-        pass
-    except PostImportRelocationAttention:
-        raise
+        os.rmdir(artist, dir_fd=root_fd)
     except OSError:
-        failures.append(Path(cfg.MUSIC_ROOT) / artist)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    return tuple(dict.fromkeys(failures))
+        pass
 
 
 def _cleanup_source(root_fd, workspace_fd, payload) -> None:
@@ -2508,14 +2336,7 @@ def _cleanup_source(root_fd, workspace_fd, payload) -> None:
             "relocation source file cleanup could not be proved",
             paths=failed_files,
         )
-    failed_directories = _remove_empty_source_directories(
-        root_fd, workspace_fd, payload
-    )
-    if failed_directories:
-        raise PostImportRelocationAttention(
-            "relocation source directory cleanup could not be proved",
-            paths=failed_directories,
-        )
+    _remove_empty_source_directories(root_fd, workspace_fd, payload)
     if not _public_snapshot_matches(root_fd, payload):
         raise PostImportRelocationAttention(
             "relocation destination changed during source cleanup",

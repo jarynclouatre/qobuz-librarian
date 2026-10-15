@@ -17,7 +17,7 @@ from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import lyrics as lyrics_mode
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
-from qobuz_librarian.library import flac_cache, generation_state, repair_cache
+from qobuz_librarian.library import flac_cache, repair_cache
 from qobuz_librarian.modes import process as process_mode
 from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.ui_cli import logging as cli_logging
@@ -175,19 +175,6 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
     try:
         settings_store.reload_from_disk()
         result = queue_recovery._record_startup_recovery(lease)
-
-        publication_recovery = (
-            generation_state.reconcile_interrupted_library_publication(lease)
-        )
-        if publication_recovery is None:
-            raise RuntimeError(
-                "interrupted Library publication state could not be saved"
-            )
-        if publication_recovery:
-            _log.warning(
-                "Recovered a Library crawl interrupted before its saved view "
-                "was published."
-            )
         if restore_jobs:
             _restore_jobs_once()
         return result

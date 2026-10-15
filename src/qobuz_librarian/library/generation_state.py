@@ -16,10 +16,6 @@ _lock = threading.RLock()
 _UNPUBLISHED_LIBRARY_REASON = (
     "The latest Library scan stopped before this review was saved."
 )
-_INTERRUPTED_PUBLICATION_MESSAGE = (
-    "The Library scan finished checking the catalogue, but stopped before "
-    "its review was saved."
-)
 
 
 def _empty_output():
@@ -255,56 +251,6 @@ def baseline_complete(state=None) -> bool:
         library_snapshot_available(state)
         and output_is_current("library", state=state)
     )
-
-
-def library_publication_incomplete(state=None) -> bool:
-    """Detect a restart after the catalogue commit but before the review save.
-
-    A catalogue generation is committed before its Library snapshot so a
-    snapshot can never claim authority from an older crawl. If the process is
-    interrupted between those writes, the attempt used to look complete even
-    though its main view was never saved. The zero revision and original reason
-    distinguish that window from a later local change.
-    """
-    state = load() if state is None else state
-    latest = state.get("latest_attempt") or {}
-    output = output_state("library", state)
-    generation = int(state.get("generation") or 0)
-    return bool(
-        generation > 0
-        and state.get("catalog_complete")
-        and str(latest.get("status") or "") == "complete"
-        and int(output.get("generation") or 0) == generation
-        and int(output.get("revision") or 0) == 0
-        and output.get("status") == "needs_refresh"
-        and not output.get("complete")
-        and output.get("reason") == _UNPUBLISHED_LIBRARY_REASON
-    )
-
-
-def reconcile_interrupted_library_publication(authority) -> bool | None:
-    """Mark a catalogue commit without its saved review as incomplete.
-
-    Callers must hold the process run lock. ``True`` means the interrupted
-    state was repaired, ``False`` means there was nothing to repair, and
-    ``None`` means the required state write failed.
-    """
-    intact = getattr(authority, "intact", None)
-    if not callable(intact) or intact() is not True:
-        raise ValueError("exact run-lock authority is required")
-    with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
-        data = load()
-        if not library_publication_incomplete(data):
-            return False
-        latest = data.get("latest_attempt") or {}
-        _next_revision(data)
-        data["latest_attempt"] = {
-            "id": int(latest.get("id") or 0),
-            "status": "incomplete",
-            "at": time.time(),
-            "message": _INTERRUPTED_PUBLICATION_MESSAGE,
-        }
-        return True if _write(data) else None
 
 
 def _next_revision(data) -> int:

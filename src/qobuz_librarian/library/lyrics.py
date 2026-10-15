@@ -103,7 +103,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     if not rescan and not dry_run:
         report_progress("Scanning library lyrics", 0, total, "")
         indexed = lyric_fetch.index_existing(
-            items, owned_root=cfg.MUSIC_ROOT,
+            paths, owned_root=cfg.MUSIC_ROOT,
             state_path=cfg.LYRIC_FETCH_STATE_FILE, log=log,
             should_stop=should_stop,
             progress_cb=lambda c, t, name: report_progress(
@@ -180,7 +180,6 @@ def summarize_lyrics_result(result):
         "missing_tags": count("skipped-tags"),
         "too_long": count("skipped-long"),
         "instrumental": count("skipped-instrumental"),
-        "policy_skipped": count("skipped"),
         "unsafe": count("unsafe-path"),
         "unavailable": count("providers-unavailable"),
         "errors": count("write-error", "exception", "error"),
@@ -189,7 +188,7 @@ def summarize_lyrics_result(result):
         summary[key]
         for key in (
             "wrote", "already", "not_found", "missing_tags", "too_long",
-            "instrumental", "policy_skipped",
+            "instrumental",
             "unsafe", "unavailable", "errors",
         )
     )

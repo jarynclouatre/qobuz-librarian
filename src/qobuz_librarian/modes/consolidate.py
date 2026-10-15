@@ -277,8 +277,8 @@ class _AlbumSeal:
                 empty = False
             if not empty:
                 continue
-            if beets_integration._remove_exact_empty_merge_dir(
-                    directory.parent_fd, directory.name, directory.descriptor):
+            if beets_integration._remove_empty_dir(
+                    directory.name, dir_fd=directory.parent_fd):
                 cleaned.add(directory.relative)
                 log.info(fmt(
                     C.GREEN,
@@ -287,8 +287,8 @@ class _AlbumSeal:
             else:
                 log.info(fmt(
                     C.YELLOW,
-                    f"    ⚠  Couldn't prove {directory.path.name} was still "
-                    "the reviewed empty folder; left it in place.",
+                    f"    ⚠  Couldn't remove the empty folder "
+                    f"{directory.path.name}; left it in place.",
                 ))
         return cleaned
 

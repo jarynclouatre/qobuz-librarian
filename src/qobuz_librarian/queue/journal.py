@@ -74,7 +74,7 @@ _JOURNAL_KEYS = frozenset({
     "retirements",
     "legacy_source_sha256",
 })
-_LEGACY_ITEM_KEYS = frozenset({
+_ITEM_KEYS = frozenset({
     "item_id",
     "phase",
     "planned",
@@ -82,8 +82,8 @@ _LEGACY_ITEM_KEYS = frozenset({
     "block_reason",
     "completion_input",
     "completion_evidence",
+    "multi_artist_filing",
 })
-_ITEM_KEYS = _LEGACY_ITEM_KEYS | {"multi_artist_filing"}
 _REFERENCE_KEYS = frozenset({"name", "kind", "data"})
 _POST_IMPORT_ACTION_KEYS = frozenset({
     "action_id",
@@ -96,22 +96,19 @@ _POST_IMPORT_ACTION_KEYS = frozenset({
     "handoff_hash",
 })
 _POST_IMPORT_ACTION_KINDS = frozenset({"split-gap-fill", "whole-album"})
-_LEGACY_RETIREMENT_KEYS = frozenset({
+_RETIREMENT_KEYS = frozenset({
     "item_id",
     "reference",
     "manifest_hash",
     "quarantine_name",
     "state",
-})
-_RETIREMENT_KEYS = _LEGACY_RETIREMENT_KEYS | {
     "planned",
     "completion_input",
     "completion_evidence",
     "final_path",
     "action",
     "completion_acknowledged",
-}
-_LEGACY_KEYS = frozenset({"version", "saved_at", "mode", "count", "items"})
+})
 _JOURNAL_LOCK_NAME = ".queue-journal.lock"
 _MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 _MANAGED_COMPLETION_REFERENCE_KIND = "managed-beets"
@@ -282,7 +279,6 @@ class QueueJournal:
     saved_at: str
     items: tuple[JournalItem, ...]
     generation: int = 0
-    legacy_source_sha256: str | None = None
     retirements: tuple[CarrierRetirement, ...] = ()
 
 
@@ -692,24 +688,12 @@ def _parse_post_import_action(value: Any) -> PostImportAction:
 
 
 def _retirement_payload(retirement: CarrierRetirement) -> dict[str, Any]:
-    payload = {
+    return {
         "item_id": retirement.item_id,
         "reference": _reference_payload(retirement.reference),
         "manifest_hash": retirement.manifest_hash,
         "quarantine_name": retirement.quarantine_name,
         "state": retirement.state.value,
-    }
-    if retirement.planned is None:
-        if (
-            retirement.completion_input is not None
-            or retirement.completion_evidence is not None
-            or retirement.final_path is not None
-            or retirement.action is not None
-            or retirement.completion_acknowledged is not True
-        ):
-            raise ValueError("legacy carrier retirement has new-format state")
-        return payload
-    payload.update({
         "planned": _validate_planned(retirement.planned),
         "completion_input": _json_copy(retirement.completion_input),
         "completion_evidence": _json_copy(retirement.completion_evidence),
@@ -720,8 +704,7 @@ def _retirement_payload(retirement: CarrierRetirement) -> dict[str, Any]:
             else _post_import_action_payload(retirement.action)
         ),
         "completion_acknowledged": retirement.completion_acknowledged,
-    })
-    return payload
+    }
 
 
 def _strict_managed_reference(
@@ -1062,8 +1045,7 @@ def _parse_retirement(
 ) -> CarrierRetirement:
     if type(value) is not dict:
         raise ValueError("carrier retirement has an invalid schema")
-    keys = frozenset(value)
-    if keys not in {_LEGACY_RETIREMENT_KEYS, _RETIREMENT_KEYS}:
+    if frozenset(value) != _RETIREMENT_KEYS:
         raise ValueError("carrier retirement has an invalid schema")
     item_id = _validate_id(value["item_id"], "retirement item_id")
     reference = _parse_reference(value["reference"])
@@ -1086,15 +1068,6 @@ def _parse_retirement(
         state = CarrierRetirementState(value["state"])
     except (TypeError, ValueError) as exc:
         raise ValueError("carrier retirement has an invalid state") from exc
-    if keys == _LEGACY_RETIREMENT_KEYS:
-        return CarrierRetirement(
-            item_id=item_id,
-            reference=reference,
-            manifest_hash=manifest_hash,
-            quarantine_name=quarantine_name,
-            state=state,
-        )
-
     planned = _validate_planned(value["planned"])
     owner = RecoveryOwner(expected_operation_id, item_id)
     completion_input = parse_completion_input_record(
@@ -1211,10 +1184,10 @@ def _item_payload(item: JournalItem) -> dict[str, Any]:
 def _parse_item(value: Any, *, expected_operation_id: str) -> JournalItem:
     if (
         not isinstance(value, dict)
-        or frozenset(value) not in {_LEGACY_ITEM_KEYS, _ITEM_KEYS}
+        or frozenset(value) != _ITEM_KEYS
     ):
         raise ValueError("journal item has an invalid schema")
-    multi_artist_filing = value.get("multi_artist_filing", False)
+    multi_artist_filing = value["multi_artist_filing"]
     if type(multi_artist_filing) is not bool:
         raise ValueError("multi_artist_filing must be a boolean")
     item_id = _validate_id(value["item_id"], "item_id")
@@ -1385,7 +1358,7 @@ def _journal_payload(journal: QueueJournal) -> dict[str, Any]:
             _retirement_payload(retirement)
             for retirement in journal.retirements
         ],
-        "legacy_source_sha256": journal.legacy_source_sha256,
+        "legacy_source_sha256": None,
     }
 
 
@@ -1433,16 +1406,12 @@ def _parse_journal(value: Any, expected_operation_id: str) -> QueueJournal:
         or set(retirement_ids).intersection(item_ids)
     ):
         raise ValueError("queue journal retirement item ids must be unique")
-    legacy_source_sha256 = value["legacy_source_sha256"]
-    if legacy_source_sha256 is not None:
-        _validate_id(legacy_source_sha256, "legacy_source_sha256")
     return QueueJournal(
         operation_id=operation_id,
         mode=mode,
         saved_at=_validate_timestamp(value["saved_at"]),
         items=items,
         generation=generation,
-        legacy_source_sha256=legacy_source_sha256,
         retirements=retirements,
     )
 
@@ -1836,11 +1805,8 @@ def _journal_snapshot_bytes(journal: QueueJournal) -> bytes:
 
 
 @_locked_transaction
-def _publish_initial_journal(
-    journal: QueueJournal,
-    *,
-    legacy_migration: bool,
-) -> QueueJournal:
+def save_queue_journal(journal: QueueJournal) -> QueueJournal:
+    """Publish a new pending operation; existing state uses narrow transitions."""
     _discover_journal_paths()
     if type(journal.generation) is not int or journal.generation < 0:
         raise ValueError("queue journal generation must be a non-negative integer")
@@ -1856,10 +1822,6 @@ def _publish_initial_journal(
         raise QueueJournalBlocked(
             "a new queue journal cannot manufacture carrier retirements"
         )
-    if journal.legacy_source_sha256 is not None and not legacy_migration:
-        raise QueueJournalBlocked(
-            "a migration marker can be created only while migrating legacy state"
-        )
     path = _journal_path(journal.operation_id)
     if _path_exists(path):
         raise QueueJournalBlocked(
@@ -1873,17 +1835,7 @@ def _publish_initial_journal(
     return saved
 
 
-@_locked_transaction
-def save_queue_journal(journal: QueueJournal) -> QueueJournal:
-    """Publish a new pending operation; existing state uses narrow transitions."""
-    return _publish_initial_journal(journal, legacy_migration=False)
-
-
-def _reload_matching_journal(
-    previous: QueueJournal,
-    *,
-    allow_legacy_marker: bool = False,
-) -> QueueJournal:
+def _reload_matching_journal(previous: QueueJournal) -> QueueJournal:
     _discover_journal_paths()
     path = _journal_path(previous.operation_id)
     if not _path_exists(path):
@@ -1895,10 +1847,6 @@ def _reload_matching_journal(
     if loaded.status is not QueueLoadStatus.READY or current is None:
         raise QueueJournalBlocked(
             "existing queue journal is unreadable and will not be overwritten"
-        )
-    if current.legacy_source_sha256 is not None and not allow_legacy_marker:
-        raise QueueJournalBlocked(
-            "legacy migration must be resolved before queue state can change"
         )
     try:
         matches = current is previous or (
@@ -1917,21 +1865,8 @@ def _reload_matching_journal(
 def _compare_and_commit(
     previous: QueueJournal,
     updated: QueueJournal,
-    *,
-    legacy_marker_clear: bool = False,
 ) -> QueueJournal:
-    current = _reload_matching_journal(
-        previous,
-        allow_legacy_marker=legacy_marker_clear,
-    )
-    if legacy_marker_clear:
-        if current.legacy_source_sha256 is None:
-            raise QueueJournalBlocked("queue journal has no legacy migration marker")
-        expected = replace(current, legacy_source_sha256=None)
-        if _journal_snapshot_bytes(updated) != _journal_snapshot_bytes(expected):
-            raise QueueJournalBlocked(
-                "legacy cleanup may only clear the exact migration marker"
-            )
+    current = _reload_matching_journal(previous)
     if (
         updated.operation_id != current.operation_id
         or type(updated.generation) is not int
@@ -2041,154 +1976,11 @@ def _discover_journal_paths() -> tuple[Path, ...]:
     return tuple(journal_paths)
 
 
-def _parse_legacy_queue(raw: bytes) -> tuple[list[dict[str, Any]], str, str]:
-    try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_object_pairs,
-        )
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("legacy pending queue is unreadable") from exc
-    if not isinstance(value, dict) or set(value) != _LEGACY_KEYS:
-        raise ValueError("legacy pending queue has an invalid schema")
-    if type(value["version"]) is not int or value["version"] != 1:
-        raise ValueError(f"pending queue version {value.get('version')!r} is unsupported")
-    mode = value["mode"]
-    if not isinstance(mode, str) or not mode:
-        raise ValueError("legacy pending queue mode must be a non-empty string")
-    items = value["items"]
-    if not isinstance(items, list):
-        raise ValueError("legacy pending queue items must be a list")
-    if type(value["count"]) is not int or value["count"] != len(items):
-        raise ValueError("legacy pending queue count does not match its items")
-    planned = [_validate_planned(item) for item in items]
-    return planned, mode, _validate_timestamp(value["saved_at"])
-
-
-@_locked_transaction
-def _migrate_legacy_queue(path: Path) -> QueueLoad:
-    operation_id = _new_id()
-    while _path_exists(_journal_path(operation_id)):
-        operation_id = _new_id()
-    journal_path = _journal_path(operation_id)
-    try:
-        raw = _read_regular_file(path)
-        planned, mode, saved_at = _parse_legacy_queue(raw)
-        journal = QueueJournal(
-            operation_id=operation_id,
-            mode=mode,
-            saved_at=saved_at,
-            items=tuple(
-                JournalItem(
-                    item_id=_new_id(),
-                    phase=QueuePhase.PENDING,
-                    planned=item,
-                )
-                for item in planned
-            ),
-            legacy_source_sha256=hashlib.sha256(raw).hexdigest(),
-        )
-        journal = _publish_initial_journal(journal, legacy_migration=True)
-    except (OSError, QueueJournalError, RecursionError, ValueError) as exc:
-        paths = (path, journal_path) if _path_exists(journal_path) else (path,)
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason=str(exc),
-            paths=paths,
-        )
-    return _complete_legacy_cleanup(path, journal_path, journal)
-
-
-@_locked_transaction
-def _complete_legacy_cleanup(
-    legacy_path: Path,
-    journal_path: Path,
-    journal: QueueJournal,
-) -> QueueLoad:
-    """Expose migrated state only after legacy removal is durably settled."""
-    try:
-        journal = _reload_matching_journal(
-            journal,
-            allow_legacy_marker=True,
-        )
-        if journal.legacy_source_sha256 is None:
-            raise QueueJournalBlocked(
-                "legacy and per-operation queue state both exist"
-            )
-        if _path_exists(legacy_path):
-            raw = _read_regular_file(legacy_path)
-            planned, mode, _saved_at = _parse_legacy_queue(raw)
-            if (
-                journal.legacy_source_sha256 != hashlib.sha256(raw).hexdigest()
-                or journal.mode != mode
-                or any(item.phase is not QueuePhase.PENDING for item in journal.items)
-                or [item.planned for item in journal.items] != planned
-            ):
-                raise QueueJournalBlocked(
-                    "legacy and per-operation queue state both exist"
-                )
-            _unlink_and_sync(legacy_path)
-        else:
-            # A prior unlink may have succeeded before its parent fsync failed.
-            _fsync_directory(legacy_path.parent)
-        cleared = _compare_and_commit(
-            journal,
-            replace(journal, legacy_source_sha256=None),
-            legacy_marker_clear=True,
-        )
-    except (OSError, QueueJournalError, RecursionError, ValueError) as exc:
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            journal=journal,
-            reason=str(exc),
-            paths=(legacy_path, journal_path),
-        )
-    return QueueLoad(
-        status=QueueLoadStatus.READY,
-        journal=cleared,
-        paths=(journal_path,),
-    )
-
-
-@_locked_transaction
-def _finish_legacy_migration(legacy_path: Path, journal_path: Path) -> QueueLoad:
-    if _HEX_ID.fullmatch(journal_path.stem) is None:
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason="queue journal directory contains an invalid journal filename",
-            paths=(legacy_path, journal_path),
-        )
-    loaded = _load_journal_path(journal_path, journal_path.stem)
-    journal = loaded.journal
-    if loaded.status is not QueueLoadStatus.READY or journal is None:
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason=loaded.reason or "queue journal could not be loaded",
-            paths=(legacy_path, journal_path),
-        )
-    return _complete_legacy_cleanup(legacy_path, journal_path, journal)
-
-
-@_locked_transaction
-def _load_visible_journal_path(path: Path, operation_id: str) -> QueueLoad:
-    loaded = _load_journal_path(path, operation_id)
-    journal = loaded.journal
-    if (
-        loaded.status is QueueLoadStatus.READY
-        and journal is not None
-        and journal.legacy_source_sha256 is not None
-    ):
-        return _complete_legacy_cleanup(cfg.PENDING_QUEUE_FILE, path, journal)
-    return loaded
-
-
 @_locked_queue_load
 def load_queue_journal(operation_id: str | None = None) -> QueueLoad:
     """Load one exact operation, or the sole saved operation for compatibility.
 
-    Namespace-wide activation starts with ``list_queue_journals``. An exact
-    unmarked operation stays independent of a separate legacy job, while an
-    exact marked operation must reconcile that legacy state before READY.
+    Namespace-wide activation starts with ``list_queue_journals``.
     """
     _discover_journal_paths()
     if operation_id is not None:
@@ -2198,9 +1990,8 @@ def load_queue_journal(operation_id: str | None = None) -> QueueLoad:
             return QueueLoad(status=QueueLoadStatus.BLOCKED, reason=str(exc))
         if not _path_exists(path):
             return QueueLoad(status=QueueLoadStatus.ABSENT)
-        return _load_visible_journal_path(path, operation_id)
+        return _load_journal_path(path, operation_id)
 
-    legacy_path = cfg.PENDING_QUEUE_FILE
     try:
         journal_paths = _discover_journal_paths()
     except (OSError, QueueJournalError) as exc:
@@ -2209,16 +2000,6 @@ def load_queue_journal(operation_id: str | None = None) -> QueueLoad:
             reason=str(exc),
             paths=getattr(exc, "paths", (cfg.QUEUE_JOURNAL_DIR,)),
         )
-    if _path_exists(legacy_path):
-        if journal_paths:
-            if len(journal_paths) == 1:
-                return _finish_legacy_migration(legacy_path, journal_paths[0])
-            return QueueLoad(
-                status=QueueLoadStatus.BLOCKED,
-                reason="legacy and per-operation queue state both exist",
-                paths=(legacy_path, *journal_paths),
-            )
-        return _migrate_legacy_queue(legacy_path)
     if not journal_paths:
         return QueueLoad(status=QueueLoadStatus.ABSENT)
 
@@ -2236,60 +2017,7 @@ def load_queue_journal(operation_id: str | None = None) -> QueueLoad:
             paths=journal_paths,
         )
     path = journal_paths[0]
-    return _load_visible_journal_path(path, path.stem)
-
-
-@_locked_transaction
-def _reconcile_legacy_for_listing(
-    legacy_path: Path,
-    journal_paths: tuple[Path, ...],
-) -> QueueLoad:
-    try:
-        raw = _read_regular_file(legacy_path)
-        _parse_legacy_queue(raw)
-    except (OSError, QueueJournalError, RecursionError, ValueError) as exc:
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason=str(exc),
-            paths=(legacy_path, *journal_paths),
-        )
-    digest = hashlib.sha256(raw).hexdigest()
-    markers = []
-    ambiguous = []
-    blocked = []
-    for path in journal_paths:
-        if _HEX_ID.fullmatch(path.stem) is None:
-            ambiguous.append(path)
-            continue
-        loaded = _load_journal_path(path, path.stem)
-        if loaded.status is not QueueLoadStatus.READY or loaded.journal is None:
-            ambiguous.append(path)
-        elif any(
-            item.phase is QueuePhase.BLOCKED
-            for item in loaded.journal.items
-        ):
-            blocked.append(path)
-        elif loaded.journal.legacy_source_sha256 is not None:
-            markers.append((path, loaded.journal))
-    marker_paths = [path for path, _journal in markers]
-    if ambiguous or blocked:
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason=(
-                "legacy queue coexists with blocked, unreadable, or ambiguous "
-                "journal state"
-            ),
-            paths=(legacy_path, *blocked, *ambiguous, *marker_paths),
-        )
-    if markers:
-        if len(markers) == 1 and markers[0][1].legacy_source_sha256 == digest:
-            return _finish_legacy_migration(legacy_path, markers[0][0])
-        return QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason="legacy queue bytes do not match the saved migration marker",
-            paths=(legacy_path, *marker_paths),
-        )
-    return _migrate_legacy_queue(legacy_path)
+    return _load_journal_path(path, path.stem)
 
 
 @_locked_queue_list
@@ -2304,82 +2032,16 @@ def list_queue_journals() -> tuple[QueueLoad, ...]:
             paths=getattr(exc, "paths", (cfg.QUEUE_JOURNAL_DIR,)),
         ),)
 
-    legacy_result = None
-    if _path_exists(cfg.PENDING_QUEUE_FILE):
-        legacy_result = _reconcile_legacy_for_listing(
-            cfg.PENDING_QUEUE_FILE,
-            journal_paths,
-        )
-        try:
-            journal_paths = _discover_journal_paths()
-        except (OSError, QueueJournalError) as exc:
-            return (QueueLoad(
-                status=QueueLoadStatus.BLOCKED,
-                reason=str(exc),
-                paths=getattr(exc, "paths", (cfg.QUEUE_JOURNAL_DIR,)),
-            ),)
-
     loads = []
-    blocked_paths = set()
-    if legacy_result is not None and legacy_result.status is QueueLoadStatus.BLOCKED:
-        loads.append(legacy_result)
-        blocked_paths.update(legacy_result.paths)
-    preloaded = []
     for path in journal_paths:
-        if path in blocked_paths:
-            continue
         if _HEX_ID.fullmatch(path.stem) is None:
-            preloaded.append((path, QueueLoad(
+            loads.append(QueueLoad(
                 status=QueueLoadStatus.BLOCKED,
                 reason="queue journal filename is invalid",
                 paths=(path,),
-            )))
-        else:
-            preloaded.append((path, _load_journal_path(path, path.stem)))
-
-    marker_entries = [
-        (path, loaded)
-        for path, loaded in preloaded
-        if loaded.status is QueueLoadStatus.READY
-        and loaded.journal is not None
-        and loaded.journal.legacy_source_sha256 is not None
-    ]
-    preflight_blocked = [
-        path
-        for path, loaded in preloaded
-        if loaded.status is QueueLoadStatus.BLOCKED
-        or loaded.journal is not None
-        and any(item.phase is QueuePhase.BLOCKED for item in loaded.journal.items)
-    ]
-    if marker_entries and (
-        len(marker_entries) != 1 or preflight_blocked or loads
-    ):
-        return (*loads, QueueLoad(
-            status=QueueLoadStatus.BLOCKED,
-            reason=(
-                "legacy migration marker coexists with blocked or ambiguous "
-                "journal state"
-            ),
-            paths=tuple(dict.fromkeys((
-                *(path for path, _loaded in marker_entries),
-                *preflight_blocked,
-            ))),
-        ))
-
-    for path, loaded in preloaded:
-        journal = loaded.journal
-        if (
-            loaded.status is QueueLoadStatus.READY
-            and journal is not None
-            and journal.legacy_source_sha256 is not None
-        ):
-            loads.append(_complete_legacy_cleanup(
-                cfg.PENDING_QUEUE_FILE,
-                path,
-                journal,
             ))
         else:
-            loads.append(loaded)
+            loads.append(_load_journal_path(path, path.stem))
     return tuple(loads)
 
 
@@ -3190,16 +2852,6 @@ def forget_restored_library_backup(
     return _forget_library_backup_carrier(journal, item_id, carrier)
 
 
-@_locked_transaction
-def forget_kept_library_backup(
-    journal: QueueJournal,
-    item_id: str,
-    carrier: RecoveryReference,
-) -> QueueJournal:
-    """Forget an exact carrier whose backup stays, pinned, where it is."""
-    return _forget_library_backup_carrier(journal, item_id, carrier)
-
-
 def _forget_library_backup_carrier(journal, item_id, carrier):
     previous = _reload_matching_journal(journal)
     target_index = next(
@@ -3464,7 +3116,7 @@ def commit_completed_item_removal(
     item_id: str,
     caller_item,
     live_evidence: CompletionEvidence,
-    post_import_action: dict[str, Any] | None | object = _UNSET,
+    post_import_action: dict[str, Any] | None,
 ) -> QueueJournal:
     """Replace a completed entry with durable carrier-cleanup authority.
 
@@ -3555,6 +3207,41 @@ def _commit_completed_retirement(
 ):
     journal_items = list(previous.items)
     del journal_items[target_index]
+    if post_import_action is not None and type(post_import_action) is not dict:
+        raise ValueError("post_import_action must be an action record or null")
+    original_path = _canonical_library_album_path(
+        os.path.join(
+            live_record["library"]["root"],
+            live_record["library"]["album"]["path"],
+        ),
+        "completed album path",
+        artist_album=False,
+    )
+    action = (
+        None
+        if post_import_action is None
+        else _parse_post_import_action(_json_copy(post_import_action))
+    )
+    action_matches = action is None or (
+        action.phase is PostImportActionPhase.PLANNED
+        and (
+            action.kind == "whole-album"
+            and action.source == original_path
+            or action.kind == "split-gap-fill"
+            and action.destination == original_path
+            and target.planned.get("album_dir") is not None
+            and action.source == target.planned["album_dir"]
+        )
+    )
+    if not action_matches:
+        raise QueueJournalBlocked(
+            "post-import action does not match the completed album"
+        )
+    initial_final_path = (
+        action.destination
+        if action is not None and action.kind == "split-gap-fill"
+        else original_path
+    )
     payload = {
         "item_id": target.item_id,
         "reference": _reference_payload(resolved_carrier),
@@ -3564,53 +3251,15 @@ def _commit_completed_retirement(
             f"{secrets.token_hex(32)}"
         ),
         "state": CarrierRetirementState.PUBLIC.value,
+        "planned": target.planned,
+        "completion_input": target.completion_input,
+        "completion_evidence": live_record,
+        "final_path": initial_final_path,
+        "action": (
+            None if action is None else _post_import_action_payload(action)
+        ),
+        "completion_acknowledged": False,
     }
-    if post_import_action is not _UNSET:
-        if post_import_action is not None and type(post_import_action) is not dict:
-            raise ValueError("post_import_action must be an action record or null")
-        original_path = _canonical_library_album_path(
-            os.path.join(
-                live_record["library"]["root"],
-                live_record["library"]["album"]["path"],
-            ),
-            "completed album path",
-            artist_album=False,
-        )
-        action = (
-            None
-            if post_import_action is None
-            else _parse_post_import_action(_json_copy(post_import_action))
-        )
-        action_matches = action is None or (
-            action.phase is PostImportActionPhase.PLANNED
-            and (
-                action.kind == "whole-album"
-                and action.source == original_path
-                or action.kind == "split-gap-fill"
-                and action.destination == original_path
-                and target.planned.get("album_dir") is not None
-                and action.source == target.planned["album_dir"]
-            )
-        )
-        if not action_matches:
-            raise QueueJournalBlocked(
-                "post-import action does not match the completed album"
-            )
-        initial_final_path = (
-            action.destination
-            if action is not None and action.kind == "split-gap-fill"
-            else original_path
-        )
-        payload.update({
-            "planned": target.planned,
-            "completion_input": target.completion_input,
-            "completion_evidence": live_record,
-            "final_path": initial_final_path,
-            "action": (
-                None if action is None else _post_import_action_payload(action)
-            ),
-            "completion_acknowledged": False,
-        })
     retirement = _parse_retirement(
         payload,
         expected_operation_id=previous.operation_id,
@@ -3631,7 +3280,7 @@ def commit_recovered_completed_item_removal(
     *,
     item_id: str,
     live_evidence: CompletionEvidence,
-    post_import_action: dict[str, Any] | None | object = _UNSET,
+    post_import_action: dict[str, Any] | None,
 ) -> QueueJournal:
     """Replace a recovered COMPLETE item without inventing a runtime queue."""
     previous = _reload_matching_journal(journal)
@@ -3699,8 +3348,7 @@ def clear_planned_noop_post_import_action(
             else action.destination
         )
     if (
-        retirement.planned is None
-        or action is None
+        action is None
         or action.action_id != action_id
         or action.phase is not PostImportActionPhase.PLANNED
         or retirement.final_path != expected_final
@@ -3734,8 +3382,7 @@ def checkpoint_post_import_action_handoff(
     retirement_index, retirement = _retirement_target(previous, item_id)
     action = retirement.action
     if (
-        retirement.planned is None
-        or action is None
+        action is None
         or action.action_id != action_id
         or action.phase is not PostImportActionPhase.PLANNED
     ):
@@ -3782,8 +3429,7 @@ def commit_post_import_action(
     retirement_index, retirement = _retirement_target(previous, item_id)
     action = retirement.action
     if (
-        retirement.planned is None
-        or action is None
+        action is None
         or action.action_id != action_id
         or action.phase is not PostImportActionPhase.HANDOFF
         or action.relocation_operation_id != operation_id
@@ -3817,8 +3463,7 @@ def clear_committed_post_import_action(
     retirement_index, retirement = _retirement_target(previous, item_id)
     action = retirement.action
     if (
-        retirement.planned is None
-        or action is None
+        action is None
         or action.action_id != action_id
         or action.phase is not PostImportActionPhase.COMMITTED
         or retirement.final_path != action.destination
@@ -3842,10 +3487,6 @@ def acknowledge_carrier_retirement_completion(
     """Record that the caller durably accepted the final album path."""
     previous = _reload_matching_journal(journal)
     retirement_index, retirement = _retirement_target(previous, item_id)
-    if retirement.planned is None:
-        raise QueueJournalBlocked(
-            "legacy carrier retirement has no completion acknowledgement"
-        )
     if retirement.action is not None:
         raise QueueJournalBlocked(
             "carrier completion cannot be acknowledged before its action settles"
@@ -3931,10 +3572,7 @@ def process_carrier_retirement(
     """Retire one durable carrier and acknowledge only a settled outcome."""
     previous = _reload_matching_journal(journal)
     retirement_index, retirement = _retirement_target(previous, item_id)
-    if retirement.planned is not None and (
-        retirement.action is not None
-        or not retirement.completion_acknowledged
-    ):
+    if retirement.action is not None or not retirement.completion_acknowledged:
         raise QueueJournalBlocked(
             "carrier retirement must settle its post-import completion first"
         )

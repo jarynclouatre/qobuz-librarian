@@ -101,7 +101,7 @@ _FAILED_RUN = (
 # A download sets aside a FLAC that won't decode and any lossy file under one
 # kind; the file's own extension tells them apart. No later download reads
 # either back.
-_REJECTED_KINDS = ("rejected", "legacy-rejected")
+_REJECTED_KINDS = ("rejected",)
 _DAMAGED_LEFTOVER = (
     "Damaged download",
     "This FLAC did not decode cleanly, so it was kept out of your library. "
@@ -454,8 +454,7 @@ def _diagnostics():
     if cfg.UPGRADE_BACKUP_DIR.exists():
         try:
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
-                if entry.is_dir() and (entry.suffix == ".partial"
-                                       or entry.name == ".restore_trash"):
+                if entry.is_dir() and entry.name == ".restore_trash":
                     stranded.append(entry)
             left_in_backups = backup_mod.albums_left_in_backups()
         except OSError as exc:

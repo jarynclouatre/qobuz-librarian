@@ -16,7 +16,6 @@
   --ql-gold-strong: #c98d2c;
   --ql-gold-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
   --ql-action-ink: #231604;
-  --ql-gold-dim: #523d1b;
   --ql-owned: #a8bc7c;
   --ql-danger: #c8553d;
   --ql-warning: #dc8642;
@@ -56,7 +55,6 @@
   --ql-gold-strong: #80500a;
   --ql-gold-hover: color-mix(in oklab, var(--ql-gold) 88%, #fff);
   --ql-action-ink: #090603;
-  --ql-gold-dim: #ead8b4;
   --ql-owned: #526b2e;
   --ql-danger: #a73f2d;
   --ql-warning: #9a551f;

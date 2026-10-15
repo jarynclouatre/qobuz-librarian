@@ -157,19 +157,17 @@ def _managed_reference(journal, item_id):
 
 @pytest.fixture
 def queue_paths(tmp_path, monkeypatch):
-    legacy = tmp_path / ".qobuz_pending_queue.json"
     journals = tmp_path / ".qobuz_queue_journals"
     staging = tmp_path / "staging"
-    monkeypatch.setattr(cfg, "PENDING_QUEUE_FILE", legacy)
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", journals)
     monkeypatch.setattr(cfg, "STAGING_DIR", staging)
-    return legacy, journals
+    return journals
 
 
 def test_durability_failures_leave_last_committed_snapshot(
     queue_paths, monkeypatch
 ):
-    _legacy, base_journals = queue_paths
+    base_journals = queue_paths
     journals = base_journals.parent / "new-data" / "state" / "journals"
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", journals)
     synced = []
@@ -259,7 +257,7 @@ def test_durability_failures_leave_last_committed_snapshot(
 
 
 def test_malformed_v2_blocks_replay_and_requires_explicit_discard(queue_paths):
-    _legacy, journals = queue_paths
+    journals = queue_paths
     operation_id = "a" * 64
     path = journals / f"{operation_id}.json"
     journals.mkdir()
@@ -283,69 +281,20 @@ def test_malformed_v2_blocks_replay_and_requires_explicit_discard(queue_paths):
     assert path.read_bytes() == raw
 
 
-def test_legacy_migration_replays_once_and_completed_removal_commits_first(
-    queue_paths, monkeypatch
-):
-    legacy, journals = queue_paths
-    queue_item = _queue_item("Legacy")
-    legacy_payload = {
-        "version": 1,
-        "saved_at": "2026-07-12T08:00:00+00:00",
-        "mode": "walk_queue",
-        "count": 1,
-        "items": [journal_module._serialize_queue_item(queue_item)],
-    }
-    original_legacy = json.dumps(legacy_payload)
-    legacy.write_text(original_legacy, encoding="utf-8")
-    real_unlink_and_sync = journal_module._unlink_and_sync
+def test_completed_removal_commits_first(queue_paths, monkeypatch):
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", Path("/music"))
+    save_queue_journal(create_queue_journal([_queue_item("Saved")], mode="walk_queue"))
+    loaded = load_pending_queue()
+    caller_items, _mode, _saved_at = loaded
 
-    def crash_before_legacy_unlink(path):
-        if path == legacy:
-            raise OSError("simulated crash boundary")
-        real_unlink_and_sync(path)
-
-    monkeypatch.setattr(journal_module, "_unlink_and_sync", crash_before_legacy_unlink)
-    first_load = load_pending_queue()
-    assert first_load.status is QueueLoadStatus.BLOCKED
-    assert legacy.exists()
-    assert len(list(journals.glob("*.json"))) == 1
-    v2_path = next(journals.glob("*.json"))
-    marker_bytes = v2_path.read_bytes()
-    marker_generation = first_load.journal.generation
-    with pytest.raises(QueueJournalBlocked, match="legacy migration"):
-        transition_journal_item(
-            first_load.journal,
-            first_load.journal.items[0].item_id,
-            QueuePhase.ACTIVE,
-        )
-    assert legacy.read_text(encoding="utf-8") == original_legacy
-    assert v2_path.read_bytes() == marker_bytes
-    assert json.loads(v2_path.read_text(encoding="utf-8"))["generation"] == (
-        marker_generation
-    )
-    blocked_listing = list_queue_journals()
-    assert len(blocked_listing) == 1
-    assert blocked_listing[0].status is QueueLoadStatus.BLOCKED
-    assert v2_path in blocked_listing[0].paths
-
-    monkeypatch.setattr(journal_module, "_unlink_and_sync", real_unlink_and_sync)
-    migrated = load_pending_queue()
-    caller_items, mode, _saved_at = migrated
-    assert migrated.status is QueueLoadStatus.READY
-    assert mode == "walk_queue"
-    assert [item.phase for item in migrated.journal.items] == [QueuePhase.PENDING]
-    assert migrated.journal.legacy_source_sha256 is None
-    assert not legacy.exists()
-    assert len(list(journals.glob("*.json"))) == 1
-
-    item_id = migrated.journal.items[0].item_id
+    item_id = loaded.journal.items[0].item_id
     active = transition_journal_item(
-        migrated.journal,
+        loaded.journal,
         item_id,
         QueuePhase.ACTIVE,
-        completion_input=_completion_input(migrated.journal, item_id),
+        completion_input=_completion_input(loaded.journal, item_id),
     )
-    resolved_carrier = _managed_reference(migrated.journal, item_id)
+    resolved_carrier = _managed_reference(loaded.journal, item_id)
     resolving = transition_journal_item(
         active,
         item_id,
@@ -381,6 +330,7 @@ def test_legacy_migration_replays_once_and_completed_removal_commits_first(
                 live_evidence,
                 managed_manifest_hash="e" * 64,
             ),
+            post_import_action=None,
         )
     assert len(caller_items) == 1
     monkeypatch.setattr(
@@ -393,6 +343,7 @@ def test_legacy_migration_replays_once_and_completed_removal_commits_first(
             complete,
             item_id=item_id,
             live_evidence=live_evidence,
+            post_import_action=None,
         )
     assert len(caller_items) == 1
     retained = load_queue_journal(complete.operation_id).journal.items[0]
@@ -405,6 +356,7 @@ def test_legacy_migration_replays_once_and_completed_removal_commits_first(
         complete,
         item_id=item_id,
         live_evidence=live_evidence,
+        post_import_action=None,
     )
     assert emptied.items == ()
     assert len(emptied.retirements) == 1
@@ -424,6 +376,10 @@ def test_legacy_migration_replays_once_and_completed_removal_commits_first(
         match="retirement cannot be discarded",
     ):
         clear_queue_journal(emptied.operation_id, explicit_discard=True)
+    emptied = journal_module.acknowledge_carrier_retirement_completion(
+        emptied, item_id=item_id
+    )
+    retirement = emptied.retirements[0]
 
     from qobuz_librarian.integrations import beets
 

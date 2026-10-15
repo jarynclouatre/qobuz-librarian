@@ -753,12 +753,6 @@ def test_album_search_marks_each_edition_by_what_the_library_holds(
         flows.execute_albums(job, [candidate], "tok")
         assert planned == [(partial, [remix["tracks"]["items"][1]])]
 
-    restored = flows._refresh_restored_missing_spec(
-        flows._album_candidate_spec(remix, "The Beatles"), "tok")
-    premise = candidate_premise.validate(restored)
-    assert premise["kind"] == "gap-fill" and Path(premise["path"]) == partial
-    assert restored["payload"]["exact_edition"]
-
     old_folder = folder.with_name("Rubber Soul (1966)")
     folder.rename(old_folder)
     kept = folder

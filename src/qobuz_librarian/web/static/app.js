@@ -565,16 +565,6 @@
     }
   }
 
-  function searchResultItems(root) {
-    var items = Array.prototype.slice.call(root.querySelectorAll("[data-search-item]"));
-    root.querySelectorAll("template[data-search-view-template]").forEach(function (template) {
-      items = items.concat(Array.prototype.slice.call(
-        template.content.querySelectorAll("[data-search-item]")
-      ));
-    });
-    return items;
-  }
-
   function searchAvailabilityItems() {
     var items = Array.prototype.slice.call(
       document.querySelectorAll("[data-search-item]")
@@ -1463,8 +1453,7 @@
   function normalizeFlashAnnouncements() {
     document.querySelectorAll("[data-flash]").forEach(function (el) {
       if (el.getAttribute("role")) return;
-      var isError = el.classList.contains("ql-notice-error")
-        || el.classList.contains("ql-flash-error");
+      var isError = el.classList.contains("ql-notice-error");
       el.setAttribute("role", isError ? "alert" : "status");
       if (!isError) el.setAttribute("aria-live", "polite");
     });

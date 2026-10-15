@@ -1035,7 +1035,6 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         kept_dir, copied, receipts = backup_mod.stash_downsample_originals(
             [_bd / rel for rel, _, _ in candidates],
             directory,
-            include_identity_receipts=True,
         )
         protected = [
             c for c in candidates

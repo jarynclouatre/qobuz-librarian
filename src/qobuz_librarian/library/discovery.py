@@ -20,14 +20,13 @@ prefers the artist whose catalog holds the owned albums, then the deepest
 catalog over a bare-name twin, cached to disk).
 """
 import json
-import os
 import re
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import (
     get_album,
@@ -107,7 +106,7 @@ def _load_resolve_cache() -> dict:
                                      .read_text(encoding="utf-8"))
                     if (
                         isinstance(raw, dict)
-                        and raw.get("version") in (_RESOLVE_CACHE_VERSION, 2)
+                        and raw.get("version") == _RESOLVE_CACHE_VERSION
                         and isinstance(raw.get("entries"), dict)
                     ):
                         for query, hit in raw["entries"].items():
@@ -163,24 +162,11 @@ def flush_resolve_cache():
                                 if q in _resolve_cache),
         })
         _resolve_cache_dirty = False
-    path = cfg.ARTIST_RESOLVE_CACHE_FILE
-    tmp = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".arcache.")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(payload)
-        os.replace(tmp, path)
-        tmp = None
+        state_file.write_chunks(cfg.ARTIST_RESOLVE_CACHE_FILE, (payload,))
     except OSError:
         with _resolve_cache_lock:
             _resolve_cache_dirty = True
-    finally:
-        if tmp is not None:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
 
 
 # The tag Qobuz adds to tell namesakes apart: 'Tesla (Band)'.

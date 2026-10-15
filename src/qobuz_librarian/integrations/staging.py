@@ -37,7 +37,6 @@ _FILE_GROUP_KINDS = {
     "untagged",
     "unimported",
     "unresolved",
-    "legacy-rejected",
 }
 
 
@@ -2506,47 +2505,6 @@ def discard_quarantined_file(receipt, *, kind="rejected", expected_owner=None):
         and group.original.identity == receipt.identity
     ]
     return len(matches) == 1 and discard_file_group(matches[0], expected_owner=expected_owner)
-
-
-_LEGACY_FILE_GROUP_RE = re.compile(r"^\.(?P<kind>rejected)-[0-9a-f]{24}$")
-
-
-def reconcile_legacy_file_groups():
-    """Manifest strict old one-file reject groups without deleting payloads."""
-    retry_root = Path(cfg.STAGING_DIR) / cfg.BEETS_RETRY_DIR
-    try:
-        candidates = sorted(retry_root.iterdir())
-    except OSError:
-        return 0
-    reconciled = 0
-    for candidate in candidates:
-        if not _LEGACY_FILE_GROUP_RE.fullmatch(candidate.name):
-            continue
-        try:
-            value = os.stat(candidate, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(value.st_mode)
-                or value.st_uid != os.geteuid()
-                or stat.S_IMODE(value.st_mode) & 0o077
-            ):
-                continue
-        except OSError:
-            continue
-        tree = capture_tree(candidate)
-        if (
-            tree is None
-            or len(tree.directories) != 1
-            or len(tree.files) != 1
-            or tree.files[0][0] == _MANIFEST
-        ):
-            continue
-        relative, identity = tree.files[0]
-        retained = capture_file(candidate / relative, expected=identity)
-        if retained is None:
-            continue
-        if _write_file_manifest(candidate, "legacy-rejected", None, retained.path):
-            reconciled += 1
-    return reconciled
 
 
 def _remove_empty_directory(path, expected):

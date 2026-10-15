@@ -272,7 +272,6 @@ APP_LOG_FILE         = DATA_DIR / "qobuz-librarian.log"
 LOG_LEVEL            = _env_log_level()
 WALK_SEEN_FILE       = DATA_DIR / ".qobuz_walk_seen.txt"
 ALBUM_WALK_SEEN_FILE = DATA_DIR / ".qobuz_album_walk_seen.txt"
-PENDING_QUEUE_FILE   = DATA_DIR / ".qobuz_pending_queue.json"
 QUEUE_JOURNAL_DIR    = DATA_DIR / ".qobuz_queue_journals"
 LYRIC_RETRY_FILE     = DATA_DIR / ".qobuz_lyric_retry.json"
 REPAIR_LOG_PATH      = DATA_DIR / ".qobuz_replaced_tracks.log"
@@ -642,7 +641,6 @@ AUTO_SAFE_TITLE_SIM_THRESH = 0.85
 # ── Catalog / walk ────────────────────────────────────────────────────────────
 EDITION_SEARCH_API_BUDGET = 3
 
-LEFTOVER_WARN_LIMIT    = 50
 # Max albums fetched per artist when scanning. 500 truncated prolific artists
 # (the Beatles list ~900 on Qobuz), so a gap scan missed albums; 1000 covers
 # realistic discographies. Truncation past this is logged by the scanner.

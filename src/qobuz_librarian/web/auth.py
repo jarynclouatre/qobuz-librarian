@@ -18,7 +18,6 @@ import logging
 import math
 import os
 import secrets
-import tempfile
 import threading
 import time
 import unicodedata
@@ -202,34 +201,11 @@ def _load_sessions() -> dict[str, float]:
 
 
 def _save_sessions_locked() -> bool:
-    fd = None
-    tmp = ""
     try:
-        fd, tmp = tempfile.mkstemp(dir=str(cfg.DATA_DIR),
-                                   prefix=".qobuz_web_sessions.", suffix=".tmp")
-        stream = os.fdopen(fd, "w", encoding="utf-8")
-        fd = None
-        with stream as f:
-            json.dump(_sessions, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, _SESSIONS_FILE)
-        tmp = ""
-        return True
+        state_file.write_json(_SESSIONS_FILE, _sessions, indent=None)
     except OSError:
         return False
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+    return True
 
 
 _sessions: dict[str, float] = _load_sessions()
@@ -405,34 +381,7 @@ def set_credentials(username: str, password: str, *,
         if env_password_hash:
             payload["env_password_hash"] = env_password_hash
         try:
-            cfg.WEB_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(cfg.WEB_AUTH_FILE.parent),
-                                       prefix=".qobuz_web_auth.", suffix=".tmp")
-            fd_owned = False
-            try:
-                os.fchmod(fd, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    fd_owned = True
-                    json.dump(payload, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, cfg.WEB_AUTH_FILE)
-                try:
-                    dfd = os.open(str(cfg.WEB_AUTH_FILE.parent), os.O_RDONLY)
-                    try:
-                        os.fsync(dfd)
-                    finally:
-                        os.close(dfd)
-                except OSError:
-                    pass
-            finally:
-                if not fd_owned:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            state_file.write_json(cfg.WEB_AUTH_FILE, payload)
         except OSError:
             return False
         _cred_cache = payload

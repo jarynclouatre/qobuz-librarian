@@ -15,12 +15,10 @@ from qobuz_librarian.integrations.staging import (
     StagingSnapshot,
     capture_file,
     quarantine_file,
-    reconcile_legacy_file_groups,
 )
 from qobuz_librarian.library import scanner
 from qobuz_librarian.recovery import normalise_recovery_owner
 from qobuz_librarian.ui_cli.colors import C, fmt
-from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog, wrap_thread_target
 
 # Optional cancel-check hook. The web JobManager installs a callable here that
@@ -543,12 +541,3 @@ def _quarantine_reject(path, *, owner=None, on_intent=None):
             "could not be confirmed"
         )
     return result is not None
-
-
-def cleanup_staging_residue():
-    """Keep legacy residue for preflight instead of deleting by name alone."""
-    reconciled = reconcile_legacy_file_groups()
-    if reconciled:
-        vlog(f"recorded {plural(reconciled, 'legacy rejected staging file')} "
-             "for recovery")
-    return 0

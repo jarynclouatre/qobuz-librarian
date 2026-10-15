@@ -1775,35 +1775,44 @@ def load_one(job_id: str) -> Optional[dict]:
             return None
     if row is None:
         return None
-    execute_args, execute_args_unreadable = _decode_execute_args(row[12])
-    recoveries, recovery_unreadable = _decode_recoveries(row[17])
+    return _decode_row(row, decode_logs=True)
+
+
+def _decode_row(r, *, decode_logs):
+    """One saved row as a job dict, or None when its recoveries are unreadable.
+
+    Without ``decode_logs`` the log stays encoded under ``log_lines_json``."""
+    recoveries, recovery_unreadable = _decode_recoveries(r[17])
     if recovery_unreadable:
         return None
-    candidates, candidates_unreadable = _decode_candidates(row[7], row[5])
-    single, single_unreadable = _decode_single(row[15])
-    log_lines, log_lines_unreadable = decode_log_lines(row[18])
-    quality_shortfall, _ = _decode_object(row[19])
-    return {
-        "id": row[0], "title": row[1], "artist": row[2], "album_id": row[3],
-        "kind": row[4], "status": row[5], "phase": row[6],
+    execute_args, execute_args_unreadable = _decode_execute_args(r[12])
+    candidates, candidates_unreadable = _decode_candidates(r[7], r[5])
+    single, single_unreadable = _decode_single(r[15])
+    quality_shortfall, _ = _decode_object(r[19])
+    job = {
+        "id": r[0], "title": r[1], "artist": r[2], "album_id": r[3],
+        "kind": r[4], "status": r[5], "phase": r[6],
         "candidates": candidates,
         "candidates_unreadable": candidates_unreadable,
-        "error": row[8], "summary": row[9] or "", "review_verb": row[10] or "Download",
-        "execute_kind": row[11] or "",
+        "error": r[8], "summary": r[9] or "", "review_verb": r[10] or "Download",
+        "execute_kind": r[11] or "",
         "execute_args": execute_args,
         "execute_args_unreadable": execute_args_unreadable,
-        "created_at": _decode_timestamp(row[13]),
-        "finished_at": _decode_timestamp(row[14]),
+        "created_at": _decode_timestamp(r[13]),
+        "finished_at": _decode_timestamp(r[14]),
         "single": single,
         "single_unreadable": single_unreadable,
-        "attention": row[16] or "",
+        "attention": r[16] or "",
         "recoveries": recoveries,
-        "log_lines": log_lines,
-        "log_lines_unreadable": log_lines_unreadable,
         "quality_shortfall": quality_shortfall,
-        "edition": row[20] or "",
-        "tracks_missing": _tracks_missing(row[21], row[5], row[8]),
+        "edition": r[20] or "",
+        "tracks_missing": _tracks_missing(r[21], r[5], r[8]),
     }
+    if decode_logs:
+        job["log_lines"], job["log_lines_unreadable"] = decode_log_lines(r[18])
+    else:
+        job["log_lines_json"] = r[18]
+    return job
 
 
 def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
@@ -2222,35 +2231,13 @@ def load_all() -> list[dict]:
     out = []
     for r in rows:
         try:
-            recoveries, recovery_unreadable = _decode_recoveries(r[17])
-            if recovery_unreadable:
+            job = _decode_row(r, decode_logs=False)
+            if job is None:
                 raise ValueError("recovery payload is invalid")
-            execute_args, execute_args_unreadable = _decode_execute_args(r[12])
-            candidates, candidates_unreadable = _decode_candidates(r[7], r[5])
-            single, single_unreadable = _decode_single(r[15])
-            quality_shortfall, _ = _decode_object(r[19])
-            out.append({
-                "id": r[0], "title": r[1], "artist": r[2], "album_id": r[3],
-                "kind": r[4], "status": r[5], "phase": r[6],
-                "candidates": candidates,
-                "candidates_unreadable": candidates_unreadable,
-                "error": r[8], "summary": r[9] or "", "review_verb": r[10] or "Download",
-                "execute_kind": r[11] or "",
-                "execute_args": execute_args,
-                "execute_args_unreadable": execute_args_unreadable,
-                "created_at": _decode_timestamp(r[13]),
-                "finished_at": _decode_timestamp(r[14]),
-                "single": single,
-                "single_unreadable": single_unreadable,
-                "attention": r[16] or "",
-                "recoveries": recoveries,
-                "log_lines_json": r[18],
-                "quality_shortfall": quality_shortfall,
-                "edition": r[20] or "",
-                "tracks_missing": _tracks_missing(r[21], r[5], r[8]),
-            })
         except (ValueError, TypeError) as e:
             _log.info("skipping unreadable jobs.db row %s: %s", r[0], e)
+            continue
+        out.append(job)
     return out
 
 

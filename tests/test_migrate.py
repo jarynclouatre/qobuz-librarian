@@ -174,14 +174,13 @@ def _placed_plan(tmp_path, n=1, *, existing_destination_root=False,
 
 
 def test_copy_keeps_originals_and_in_place_moves_only_after_a_verified_copy(tmp_path):
-    """Copy mode leaves the originals and carries their mode, xattrs, times
-    and lyrics. In-place mode moves only after a verified copy and names what
+    """Copy mode leaves the originals and carries their mode, modification
+    time and lyrics. In-place mode moves only after a verified copy and names what
     it left behind in each source folder."""
     (tmp_path / "copy").mkdir()
     plan = _placed_plan(tmp_path / "copy")
     src = plan.placed[0].source
     src.chmod(0o640)
-    m.os.setxattr(src, "user.qobuz-migration-test", b"preserved")
     m.os.utime(
         src,
         ns=(1_600_000_000_000_000_000, 1_600_000_010_000_000_000),
@@ -198,8 +197,6 @@ def test_copy_keeps_originals_and_in_place_moves_only_after_a_verified_copy(tmp_
     assert src.exists()
     dst = plan.dest_root / plan.placed[0].dest_rel
     assert dst.stat().st_mode & 0o777 == 0o640
-    assert m.os.getxattr(dst, "user.qobuz-migration-test") == b"preserved"
-    assert dst.stat().st_atime_ns == source_times.st_atime_ns
     assert dst.stat().st_mtime_ns == source_times.st_mtime_ns
     assert dst.read_bytes() == src.read_bytes()
     assert dst.with_suffix(".lrc").read_text() == lyrics
@@ -313,8 +310,8 @@ def test_execute_never_clobbers_a_destination_or_moves_a_changed_source(
     assert not list(destination.parent.glob(".qobuz-migrate-copy-*"))
 
     monkeypatch.setattr(m, "_rename_noreplace_at", rename_noreplace)
-    artifact = m.write_results_manifest(result, plan=plan)
-    with Path(artifact["path"]).open(newline="", encoding="utf-8") as handle:
+    results = m.write_results_manifest(result, plan=plan)
+    with results.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     summary = next(row for row in rows if row["record"] == "summary")
     counters = json.loads(summary["reason"])
@@ -334,7 +331,7 @@ def _sealed_web_choice(files, dest):
         for index, path in enumerate(files, 1)
     ]
     plan = m.build_plan(items, dest)
-    manifest_artifact = m.write_manifest(plan)
+    m.write_manifest(plan)
     return [{"payload": {
         "entries": [
             (str(entry.source), str(entry.dest_rel), entry.source_receipt,
@@ -345,7 +342,6 @@ def _sealed_web_choice(files, dest):
         "source_root_receipt": plan.source_root_receipt,
         "dest_root_receipt": plan.dest_root_receipt,
         "destination_name_semantics": plan.destination_name_semantics,
-        "manifest_artifact": manifest_artifact,
         "companion_receipts": plan.companion_receipts,
     }}]
 
@@ -471,10 +467,8 @@ def test_terminal_migration_gates_a_short_move_and_leaves_a_dry_run_untouched(
     monkeypatch.setattr(
         migrate_mode.engine,
         "write_manifest",
-        lambda *a, **k: {"path": str(dest / "preview.csv")},
+        lambda *a, **k: dest / "preview.csv",
     )
-    monkeypatch.setattr(
-        migrate_mode.engine, "verify_audit_artifact", lambda *a, **k: True)
     executed = []
 
     def _fake_execute(*a, **k):
@@ -487,7 +481,7 @@ def test_terminal_migration_gates_a_short_move_and_leaves_a_dry_run_untouched(
     monkeypatch.setattr(
         migrate_mode.engine,
         "write_results_manifest",
-        lambda *a, **k: {"path": str(dest / "results.csv")},
+        lambda *a, **k: dest / "results.csv",
     )
 
     def _args(**kw):

@@ -354,7 +354,6 @@ class LiveCompletionLease:
         expectation,
         download,
         managed,
-        public_album,
         root,
         parts,
         snapshot,
@@ -366,7 +365,6 @@ class LiveCompletionLease:
         self._expectation = expectation
         self._download = download
         self._managed = managed
-        self._public_album = public_album
         self._root = root
         self._parts = parts
         self._snapshot = snapshot
@@ -610,11 +608,11 @@ def _capture_new_album_completion(
             if source is None:
                 raise LiveCompletionUnavailable(
                     "managed album namespace could not be opened")
-            public_album, root, parts, chain = source
+            _public_album, root, parts, chain = source
             lifetime.chain = chain
-            return public_album, root, parts
+            return root, parts
 
-        public_album, root, parts = _run_sigint_deferred(
+        root, parts = _run_sigint_deferred(
             open_and_adopt_chain)
         if os.fspath(root) != managed.library_root or parts != album_parts:
             raise LiveCompletionUnavailable(
@@ -658,7 +656,6 @@ def _capture_new_album_completion(
             expectation=expectation,
             download=download,
             managed=managed,
-            public_album=public_album,
             root=root,
             parts=parts,
             snapshot=snapshot,

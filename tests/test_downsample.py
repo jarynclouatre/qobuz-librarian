@@ -310,7 +310,6 @@ def test_clearing_staging_leaves_hires_alone_when_downsample_is_off(tmp_path, mo
     (album / "01 - Song.flac").write_bytes(b"x")
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
     monkeypatch.setattr(cfg, "DOWNSAMPLE_HIRES_ENABLED", False)
-    monkeypatch.setattr(rip, "cleanup_staging_residue", lambda: 0)
     monkeypatch.setattr(beets, "ask", lambda *_a, **_k: "1")
     calls = []
     monkeypatch.setattr(de, "HAVE_DOWNSAMPLE", True)

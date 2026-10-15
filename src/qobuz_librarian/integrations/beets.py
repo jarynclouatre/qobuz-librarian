@@ -93,13 +93,6 @@ def _report_import_window(active):
         except Exception:
             pass
 
-try:
-    from mutagen.flac import FLAC as _MutagenFLAC  # noqa: F401
-
-    HAVE_MUTAGEN = True
-except Exception:
-    HAVE_MUTAGEN = False
-
 
 def unsafe_path_template(value: str) -> str:
     """Why a beets path template would write outside the music library, or ""
@@ -274,235 +267,13 @@ def _merge_name_matches(parent_fd, name, held_fd, *, regular=False):
     ) == _ownership_identity(named)
 
 
-def _merge_entry_location(parent_fd, name):
+def _remove_empty_dir(name, *, dir_fd=None):
+    """Remove one folder with a plain rmdir, which refuses one holding anything."""
     try:
-        parent = os.readlink(f"/proc/self/fd/{parent_fd}")
+        os.rmdir(name, dir_fd=dir_fd)
     except OSError:
-        return str(name)
-    return os.path.join(parent, os.fsdecode(name))
-
-
-def _report_preserved_merge_entry(parent_fd, name, *, restored, durable):
-    location = _merge_entry_location(parent_fd, name)
-    if restored:
-        detail = (
-            "restored a late replacement but could not confirm its durability at"
-            if not durable
-            else "restored a late replacement at"
-        )
-    else:
-        detail = (
-            "preserved a late replacement for manual recovery at"
-            if durable
-            else "left a late replacement in uncertain recovery at"
-        )
-    log.info(fmt(C.YELLOW, f"  ⚠  merge: {detail} {location}."))
-
-
-def _restore_or_preserve_unexpected_merge_entry(parent_fd, public_name, private_name):
-    """Never silently hide a late cooperative-writer entry in quarantine."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        _report_preserved_merge_entry(
-            parent_fd, private_name, restored=False, durable=False
-        )
         return False
-    descriptor = None
-
-    def layout():
-        public_exact = descriptor is not None and _merge_name_matches(
-            parent_fd, public_name, descriptor
-        )
-        private_exact = descriptor is not None and _merge_name_matches(
-            parent_fd, private_name, descriptor
-        )
-        if public_exact and _merge_name_missing(parent_fd, private_name):
-            return "public"
-        if private_exact:
-            return "private"
-        return "changed"
-
-    def seal():
-        try:
-            os.fsync(descriptor)
-            os.fsync(parent_fd)
-            return True
-        except OSError:
-            return False
-
-    try:
-        descriptor = os.open(
-            private_name,
-            os.O_RDONLY
-            | os.O_NONBLOCK
-            | nofollow
-            | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=parent_fd,
-        )
-        held = os.fstat(descriptor)
-        if not (stat.S_ISREG(held.st_mode) or stat.S_ISDIR(held.st_mode)) or not (
-            _merge_name_matches(parent_fd, private_name, descriptor)
-        ):
-            raise OSError("late split-folder entry changed while it was captured")
-    except OSError:
-        durable = False
-        try:
-            os.fsync(parent_fd)
-            durable = True
-        except OSError:
-            pass
-        _report_preserved_merge_entry(
-            parent_fd, private_name, restored=False, durable=durable
-        )
-        if descriptor is not None:
-            os.close(descriptor)
-        return False
-
-    try:
-        try:
-            _rename_ownership_noreplace(
-                parent_fd, private_name, parent_fd, public_name
-            )
-            if layout() != "public":
-                raise OSError("late split-folder entry changed while it was restored")
-            if not seal():
-                _report_preserved_merge_entry(
-                    parent_fd, public_name, restored=True, durable=False
-                )
-                return False
-            return True
-        except BaseException as exc:
-            state = layout()
-            if state == "private":
-                durable = seal()
-                _report_preserved_merge_entry(
-                    parent_fd, private_name, restored=False, durable=durable
-                )
-            elif state == "public":
-                durable = seal()
-                if not durable:
-                    _report_preserved_merge_entry(
-                        parent_fd, public_name, restored=True, durable=False
-                    )
-            else:
-                _report_preserved_merge_entry(
-                    parent_fd, private_name, restored=False, durable=False
-                )
-            if isinstance(exc, OSError):
-                return False
-            if state == "public":
-                exc.add_note("the late split-folder entry was restored before interruption")
-            elif state == "private":
-                exc.add_note(
-                    "the late split-folder entry remains at the reported recovery path"
-                )
-            else:
-                exc.add_note("the late split-folder entry recovery state is uncertain")
-            raise
-    finally:
-        os.close(descriptor)
-
-
-def _remove_exact_empty_merge_dir(parent_fd, name, directory_fd):
-    """Privately quarantine and remove only the exact held empty directory."""
-    quarantine = f".qobuz-merge-cleanup-{secrets.token_hex(16)}"
-
-    def layout():
-        public_exact = _merge_directory_matches(directory_fd, parent_fd, name)
-        private_exact = _merge_directory_matches(directory_fd, parent_fd, quarantine)
-        if public_exact and _merge_name_missing(parent_fd, quarantine):
-            return "public"
-        if private_exact and _merge_name_missing(parent_fd, name):
-            return "private"
-        if _merge_name_missing(parent_fd, name) and _merge_name_missing(parent_fd, quarantine):
-            try:
-                if os.fstat(directory_fd).st_nlink == 0:
-                    return "removed"
-            except OSError:
-                pass
-        return "changed"
-
-    def restore_private():
-        state = layout()
-        if state == "public":
-            return True
-        if state != "private":
-            return False
-        try:
-            _rename_ownership_noreplace(parent_fd, quarantine, parent_fd, name)
-            os.fsync(parent_fd)
-            return layout() == "public"
-        except BaseException as exc:
-            restored = layout() == "public"
-            if isinstance(exc, OSError):
-                return restored
-            if not restored:
-                exc.add_note(
-                    "the interrupted empty-directory cleanup left the exact "
-                    "directory in private recovery state"
-                )
-            raise
-
-    try:
-        if not _merge_directory_matches(directory_fd, parent_fd, name) or os.listdir(directory_fd):
-            return False
-        _rename_ownership_noreplace(parent_fd, name, parent_fd, quarantine)
-        if not _merge_directory_matches(directory_fd, parent_fd, quarantine):
-            if not _merge_name_missing(parent_fd, quarantine):
-                _restore_or_preserve_unexpected_merge_entry(
-                    parent_fd, name, quarantine
-                )
-            raise OSError("split-folder directory changed during cleanup")
-        if os.listdir(directory_fd):
-            raise OSError("split-folder directory changed during cleanup")
-        os.rmdir(quarantine, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-        return True
-    except BaseException as exc:
-        state = layout()
-        if state == "private":
-            restored = restore_private()
-            state = "public" if restored else layout()
-        if isinstance(exc, OSError):
-            return False
-        if state not in {"public", "removed"}:
-            exc.add_note(
-                "the interrupted empty-directory cleanup preserved an "
-                "uncertain private recovery state"
-            )
-        raise
-
-
-def _create_exact_merge_dir(parent_fd, name):
-    """Publish a held directory without adopting a concurrently-created one."""
-    temporary = f".qobuz-merge-{secrets.token_hex(8)}"
-    child = None
-    try:
-        os.mkdir(temporary, 0o755, dir_fd=parent_fd)
-        child = _open_exact_merge_dir(parent_fd, temporary)
-        _rename_ownership_noreplace(parent_fd, temporary, parent_fd, name)
-        if not _merge_directory_matches(child, parent_fd, name):
-            raise OSError("split-folder directory changed while it was published")
-        os.fsync(child)
-        os.fsync(parent_fd)
-        return child
-    except BaseException:
-        if child is None:
-            try:
-                child = _open_exact_merge_dir(parent_fd, temporary)
-            except OSError:
-                child = None
-        if child is not None:
-            if _merge_directory_matches(child, parent_fd, name):
-                cleanup_name = name
-            elif _merge_directory_matches(child, parent_fd, temporary):
-                cleanup_name = temporary
-            else:
-                cleanup_name = None
-            if cleanup_name is not None:
-                _remove_exact_empty_merge_dir(parent_fd, cleanup_name, child)
-            os.close(child)
-        raise
+    return True
 
 
 def _open_merge_chain(root_fd, parts, *, create=False, required_device=None):
@@ -521,7 +292,9 @@ def _open_merge_chain(root_fd, parts, *, create=False, required_device=None):
             except FileNotFoundError:
                 if not create:
                     raise
-                child = _create_exact_merge_dir(chain[-1], part)
+                os.mkdir(part, 0o755, dir_fd=chain[-1])
+                child = _open_exact_merge_dir(chain[-1], part)
+                os.fsync(chain[-1])
                 was_created = True
             if required_device is not None and int(os.fstat(child).st_dev) != int(required_device):
                 os.close(child)
@@ -596,13 +369,10 @@ def _open_beets_database_anchor():
     parent_chain, parent_names = _open_absolute_merge_chain(database.parent)
     descriptor = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe beets database access is unavailable")
         try:
             descriptor = os.open(
                 database.name,
-                os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=parent_chain[-1],
             )
         except FileNotFoundError:
@@ -674,9 +444,6 @@ def _bootstrap_beets_database_anchor(anchor):
         return
     if not _beets_database_anchor_matches(anchor):
         raise OSError("configured beets database changed before creation")
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe beets database creation is unavailable")
     parent_fd = anchor["parent_chain"][-1]
     temporary = f".qobuz-beets-bootstrap-{secrets.token_hex(16)}"
     descriptor = None
@@ -684,7 +451,7 @@ def _bootstrap_beets_database_anchor(anchor):
     try:
         descriptor = os.open(
             temporary,
-            os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o600,
             dir_fd=parent_fd,
         )
@@ -780,24 +547,6 @@ def _preflight_beets_database_anchor(anchor, anchors_match=None):
         raise OSError(f"beets database preflight failed: {exc}") from exc
 
 
-def _merge_relative_directory_matches(root_fd, parts, expected_fd):
-    """Prove one held directory is still named by an exact root-relative chain."""
-    chain = []
-    try:
-        chain, _ = _open_merge_chain(root_fd, parts)
-        return _merge_chain_is_named(chain, parts) and _ownership_identity(
-            os.fstat(chain[-1])
-        ) == _ownership_identity(os.fstat(expected_fd))
-    except OSError:
-        return False
-    finally:
-        for descriptor in reversed(chain):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-
-
 def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destination_name, held_fd):
     """Restore one exact moved entry without overwriting either name."""
 
@@ -835,49 +584,6 @@ def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destinat
                 "the interrupted rollback preserved the exact entry at its last proved name"
             )
         raise
-
-
-def _hold_merge_directory(records, parent_fd, name, directory_fd, parent_parts):
-    parent_copy = directory_copy = None
-    try:
-        parent_copy = os.dup(parent_fd)
-        directory_copy = os.dup(directory_fd)
-        records.append(
-            {
-                "parent_fd": parent_copy,
-                "directory_fd": directory_copy,
-                "name": name,
-                "parent_parts": tuple(parent_parts),
-            }
-        )
-    except OSError:
-        for descriptor in (directory_copy, parent_copy):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-        raise
-
-
-def _remove_held_merge_directories(root_fd, records):
-    for record in sorted(records, key=lambda value: len(value["parent_parts"]), reverse=True):
-        if _merge_relative_directory_matches(root_fd, record["parent_parts"], record["parent_fd"]):
-            _remove_exact_empty_merge_dir(
-                record["parent_fd"],
-                record["name"],
-                record["directory_fd"],
-            )
-
-
-def _close_held_merge_directories(records):
-    for record in records:
-        for key in ("directory_fd", "parent_fd"):
-            try:
-                os.close(record[key])
-            except OSError:
-                pass
-    records.clear()
 
 
 def _under_retry_dir(p):
@@ -937,9 +643,6 @@ def _prepare_staging_tags(
     and quotes trimmed from the tags Beets uses to build library paths.
     Returns the list of original paths that were set aside.
 
-    Without mutagen every read fails; rather than quarantine the whole download
-    as "untagged" and hand beets an empty dir, leave the files untouched.
-
     ``roots`` scopes the scan to those directories; None scans the whole
     STAGING_DIR for the preflight-driven full-batch import.
     """
@@ -950,10 +653,6 @@ def _prepare_staging_tags(
         raise ValueError("managed tag rewrite authority check must be callable")
     if authority_check is not None:
         authority_check()
-    if not HAVE_MUTAGEN:
-        if managed_bindings is not None:
-            return tuple(dict(record) for record in managed_bindings)
-        return moved
     from mutagen.flac import FLAC
 
     managed_by_path = None
@@ -998,15 +697,12 @@ def _prepare_staging_tags(
                 tags = FLAC(str(f))
             else:
                 inspection_chain, inspection_names = _open_absolute_merge_chain(Path(f).parent)
-                nofollow = getattr(os, "O_NOFOLLOW", None)
-                if nofollow is None:
-                    raise OSError("safe staged-file inspection is unavailable")
                 inspection_fd = os.open(
                     Path(f).name,
                     os.O_RDONLY
-                    | nofollow
-                    | getattr(os, "O_NONBLOCK", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
+                    | os.O_NOFOLLOW
+                    | os.O_NONBLOCK
+                    | os.O_CLOEXEC,
                     dir_fd=inspection_chain[-1],
                 )
                 if _staged_identity(os.fstat(inspection_fd)) != receipt.identity:
@@ -1215,8 +911,6 @@ def fill_album_tags(album_dir):
     the count its tracks share. None when the folder's tracks disagree on the
     album or can't be read; an empty dict when it holds none.
     """
-    if not HAVE_MUTAGEN:
-        return None
     import mutagen
 
     try:
@@ -1336,7 +1030,6 @@ _OWNERSHIP_ENV_KEYS = (
 )
 _MANAGED_OWNERSHIP_MODE = "managed-v3"
 _MANAGED_SNAPSHOT_VERSION = 3
-_LEGACY_MANAGED_SNAPSHOT_VERSION = 2
 _OWNERSHIP_MAX_SOURCE_ROOTS = 16
 _OWNERSHIP_MAX_BYTES = 1024 * 1024
 _OWNERSHIP_MARKER = ".qobuz-librarian-owner"
@@ -1569,11 +1262,7 @@ def _valid_managed_snapshot(value):
             value.get("generation") in (0, 1)
             and _beets_snapshot_from_record(value["replaced_entries"]) is not None
         ))
-        and value.get("version")
-        in {
-            _LEGACY_MANAGED_SNAPSHOT_VERSION,
-            _MANAGED_SNAPSHOT_VERSION,
-        }
+        and value.get("version") == _MANAGED_SNAPSHOT_VERSION
         and type(value.get("version")) is int
         and type(value.get("generation")) is int
         and value["generation"] >= 0
@@ -1623,11 +1312,7 @@ def _ownership_relative_parts(value):
 
 
 def _open_ownership_dir(path, *, dir_fd=None):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise OSError("safe directory access is unavailable")
-    flags = os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     return os.open(path, flags, dir_fd=dir_fd)
 
 
@@ -1868,12 +1553,9 @@ def _managed_destination_matches(root, root_identity, destination):
             return False
         for part in parts[:-1]:
             chain.append(_open_ownership_dir(part, dir_fd=chain[-1]))
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            return False
         leaf_fd = os.open(
             parts[-1],
-            os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             dir_fd=chain[-1],
         )
         held = os.fstat(leaf_fd)
@@ -2302,7 +1984,7 @@ def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None
                 "nonce",
                 "owner",
             }
-            or carrier["version"] not in {1, 2}
+            or carrier["version"] != 2
             or type(carrier["version"]) is not int
             or not isinstance(carrier["path"], str)
             or not os.path.isabs(carrier["path"])
@@ -2318,10 +2000,7 @@ def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None
             )
             or carrier["nonce"] != evidence["nonce"]
             or carrier["owner"] != evidence["owner"]
-            or (
-                carrier["version"] == 2
-                and Path(carrier["path"]).name != f".qobuz-managed-beets-{carrier['nonce']}.jsonl"
-            )
+            or Path(carrier["path"]).name != f".qobuz-managed-beets-{carrier['nonce']}.jsonl"
         ):
             return None
         owner = normalise_recovery_owner(evidence["owner"])
@@ -2503,14 +2182,11 @@ def _close_managed_descriptor(descriptor):
 
 
 def _open_managed_carrier_file(parent_fd, name):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise ManagedEvidenceUnavailable("safe managed completion carrier access is unavailable")
 
     def opener(_path, flags):
         return os.open(
             name,
-            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             dir_fd=parent_fd,
         )
 
@@ -2654,7 +2330,7 @@ def _managed_carrier_history(
             return None
         previous_mappings = current_mappings
         previous_hash = snapshot["hash"]
-    if first["version"] == _MANAGED_SNAPSHOT_VERSION and len(snapshots) > 1:
+    if len(snapshots) > 1:
         launch = snapshots[1]
         if launch["sealed"] is not False or launch["mappings"] or launch["cleanup_directories"]:
             return None
@@ -2714,10 +2390,7 @@ def _managed_prelaunch_retirement_history(
     if history is None:
         return None
     final = history.final_snapshot
-    if (
-        final["version"] != _MANAGED_SNAPSHOT_VERSION
-        or final["hash"] != expected_manifest_hash
-    ):
+    if final["hash"] != expected_manifest_hash:
         return None
     if final["sealed"] is True:
         # Settled on the user's word after Beets finished: what it filed
@@ -2762,7 +2435,7 @@ def _managed_carrier_parameters(carrier_reference, expected_owner):
         or type(carrier_reference) is not dict
         or set(carrier_reference) != reference_fields
         or type(carrier_reference.get("version")) is not int
-        or carrier_reference["version"] not in {1, 2}
+        or carrier_reference["version"] != 2
         or any(
             type(carrier_reference.get(field)) is not int or carrier_reference[field] < 0
             for field in (
@@ -2806,10 +2479,7 @@ def _managed_carrier_parameters(carrier_reference, expected_owner):
         or len(carrier_path.name) <= len(".qobuz-managed-beets-.jsonl")
     ):
         return None
-    if (
-        carrier_reference["version"] == 2
-        and carrier_path.name != f".qobuz-managed-beets-{carrier_reference['nonce']}.jsonl"
-    ):
+    if carrier_path.name != f".qobuz-managed-beets-{carrier_reference['nonce']}.jsonl":
         return None
     return (
         {**carrier_reference, "owner": dict(reference_owner)},
@@ -2966,7 +2636,7 @@ def _inspect_managed_carrier_with_interrupts_deferred(
             ):
                 return unavailable
             outcome = ManagedCarrierInspectionOutcome.SEALED
-        elif final["version"] == _MANAGED_SNAPSHOT_VERSION and history.generation_count == 1:
+        elif history.generation_count == 1:
             outcome = ManagedCarrierInspectionOutcome.UNSEALED_ORIGIN
         else:
             outcome = ManagedCarrierInspectionOutcome.UNSEALED_ACTIVITY
@@ -2999,11 +2669,9 @@ def _inspect_managed_carrier_with_interrupts_deferred(
             if caught is None:
                 raise cleanup_error.with_traceback(cleanup_error.__traceback__)
             if not isinstance(cleanup_error, Exception):
-                if hasattr(cleanup_error, "add_note"):
-                    cleanup_error.add_note(f"managed carrier inspection also failed: {caught}")
+                cleanup_error.add_note(f"managed carrier inspection also failed: {caught}")
                 raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-            if hasattr(caught, "add_note"):
-                caught.add_note(f"managed carrier cleanup also failed: {cleanup_error}")
+            caught.add_note(f"managed carrier cleanup also failed: {cleanup_error}")
 
 
 def inspect_managed_carrier(carrier_reference, expected_owner):
@@ -3515,8 +3183,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
                 namespace_mutated = True
             if not parent_namespace_is_exact():
                 if deferred is not None and not isinstance(deferred, Exception):
-                    if hasattr(deferred, "add_note"):
-                        deferred.add_note("managed carrier was retained in private recovery")
+                    deferred.add_note("managed carrier was retained in private recovery")
                     raise deferred
                 return parent_namespace_changed(
                     "managed carrier parent changed during quarantine move"
@@ -3524,8 +3191,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
             if current_layout != "private":
                 restored = restore_unexpected_private()
                 if deferred is not None and not isinstance(deferred, Exception):
-                    if hasattr(deferred, "add_note"):
-                        deferred.add_note("managed carrier retirement did not take ownership")
+                    deferred.add_note("managed carrier retirement did not take ownership")
                     raise deferred
                 return ManagedCarrierRetirementResult(
                     (
@@ -3553,8 +3219,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
                 )
             if deferred is not None:
                 if not isinstance(deferred, Exception):
-                    if hasattr(deferred, "add_note"):
-                        deferred.add_note("managed carrier was retained in private recovery")
+                    deferred.add_note("managed carrier was retained in private recovery")
                     raise deferred
                 return ManagedCarrierRetirementResult(
                     ManagedCarrierRetirementOutcome.UNCERTAIN,
@@ -3586,14 +3251,13 @@ def _retire_managed_carrier_with_interrupts_deferred(
             namespace_mutated = True
         if not parent_namespace_is_exact():
             if deferred is not None and not isinstance(deferred, Exception):
-                if hasattr(deferred, "add_note"):
-                    deferred.add_note(
-                        (
-                            "managed carrier was unlinked before interruption"
-                            if current_layout == "removed"
-                            else "managed carrier remains in private recovery"
-                        )
+                deferred.add_note(
+                    (
+                        "managed carrier was unlinked before interruption"
+                        if current_layout == "removed"
+                        else "managed carrier remains in private recovery"
                     )
+                )
                 raise deferred
             return parent_namespace_changed("managed carrier parent changed during carrier unlink")
         if current_layout == "removed":
@@ -3636,8 +3300,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
                 )
             if deferred is not None:
                 if not isinstance(deferred, Exception):
-                    if hasattr(deferred, "add_note"):
-                        deferred.add_note("managed carrier was unlinked before interruption")
+                    deferred.add_note("managed carrier was unlinked before interruption")
                     raise deferred
                 return ManagedCarrierRetirementResult(
                     ManagedCarrierRetirementOutcome.UNCERTAIN,
@@ -3649,8 +3312,7 @@ def _retire_managed_carrier_with_interrupts_deferred(
                 )
             return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.RETIRED)
         if deferred is not None and not isinstance(deferred, Exception):
-            if hasattr(deferred, "add_note"):
-                deferred.add_note("managed carrier remains in private recovery")
+            deferred.add_note("managed carrier remains in private recovery")
             raise deferred
         return ManagedCarrierRetirementResult(
             ManagedCarrierRetirementOutcome.REFUSED,
@@ -3673,11 +3335,9 @@ def _retire_managed_carrier_with_interrupts_deferred(
             if caught is None:
                 raise cleanup_error.with_traceback(cleanup_error.__traceback__)
             if not isinstance(cleanup_error, Exception):
-                if hasattr(cleanup_error, "add_note"):
-                    cleanup_error.add_note(f"managed carrier retirement also failed: {caught}")
+                cleanup_error.add_note(f"managed carrier retirement also failed: {caught}")
                 raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-            if hasattr(caught, "add_note"):
-                caught.add_note(f"managed carrier cleanup also failed: {cleanup_error}")
+            caught.add_note(f"managed carrier cleanup also failed: {cleanup_error}")
 
 
 def retire_managed_carrier(
@@ -4035,7 +3695,7 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
                 "owner",
             }
             or type(carrier_reference.get("version")) is not int
-            or carrier_reference["version"] not in {1, 2}
+            or carrier_reference["version"] != 2
             or any(
                 type(carrier_reference.get(field)) is not int or carrier_reference[field] < 0
                 for field in (
@@ -4071,10 +3731,7 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
             raise ManagedEvidenceUnavailable(
                 "managed completion carrier is outside its private namespace"
             )
-        if (
-            carrier_reference["version"] == 2
-            and carrier_path.name != f".qobuz-managed-beets-{carrier_reference['nonce']}.jsonl"
-        ):
+        if carrier_path.name != f".qobuz-managed-beets-{carrier_reference['nonce']}.jsonl":
             raise ManagedEvidenceUnavailable("managed completion carrier name is malformed")
 
         parent_chain, parent_names = _open_absolute_merge_chain(parent)
@@ -4207,11 +3864,10 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
                 parent_chain=parent_chain,
             )
             cleanup_error = lifetime.close()
-        if cleanup_error is not None and hasattr(exc, "add_note"):
+        if cleanup_error is not None:
             exc.add_note(f"managed evidence cleanup also failed: {cleanup_error}")
         if cleanup_error is not None and not isinstance(cleanup_error, Exception):
-            if hasattr(cleanup_error, "add_note"):
-                cleanup_error.add_note(f"managed evidence opening also failed: {exc}")
+            cleanup_error.add_note(f"managed evidence opening also failed: {exc}")
             raise cleanup_error.with_traceback(cleanup_error.__traceback__)
         if isinstance(exc, ManagedEvidenceUnavailable):
             raise
@@ -4250,11 +3906,9 @@ def reopen_managed_evidence(carrier_reference, expected_owner):
             if caught is None:
                 raise
             if not isinstance(exc, Exception):
-                if hasattr(exc, "add_note"):
-                    exc.add_note(f"managed evidence body also failed: {caught}")
+                exc.add_note(f"managed evidence body also failed: {caught}")
                 raise
-            if hasattr(caught, "add_note"):
-                caught.add_note(f"managed evidence cleanup also failed: {exc}")
+            caught.add_note(f"managed evidence cleanup also failed: {exc}")
 
 
 def _managed_generation_zero_matches(capture):
@@ -4279,7 +3933,6 @@ def _managed_generation_zero_matches(capture):
             and int(held.st_dev) == capture["device"]
             and int(held.st_ino) == capture["inode"]
             and _valid_managed_snapshot(snapshot)
-            and snapshot["version"] == _MANAGED_SNAPSHOT_VERSION
             and snapshot["generation"] == 0
             and snapshot["previous_hash"] is None
             and snapshot["sealed"] is False
@@ -4334,8 +3987,7 @@ def _managed_launch_boundary_matches(capture):
             expected_launch.pop("replaced_entries", None)
         expected_launch["hash"] = _managed_payload_hash(expected_launch)
         return (
-            origin["version"] == _MANAGED_SNAPSHOT_VERSION
-            and origin["generation"] == 0
+            origin["generation"] == 0
             and origin["previous_hash"] is None
             and origin["sealed"] is False
             and not origin["mappings"]
@@ -4393,10 +4045,7 @@ def _open_ownership_parent(root_fd, parts):
 def _read_ownership_marker(directory_fd, expected_token, marker=None):
     if marker is not None and not _valid_ownership_identity(marker):
         return False
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        return False
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         marker_fd = os.open(_OWNERSHIP_MARKER, flags, dir_fd=directory_fd)
         try:
@@ -4413,18 +4062,11 @@ def _read_ownership_marker(directory_fd, expected_token, marker=None):
         return False
 
 
-def _read_exact_marker(directory_fd, marker, expected_token):
-    return _read_ownership_marker(directory_fd, expected_token, marker)
-
-
 def _remove_exact_ownership_marker(directory_fd, marker, expected_token):
     """Remove only the recorded marker from an already-proved directory."""
     if not _valid_ownership_identity(marker):
         return False
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        return False
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     marker_fd = None
     try:
         marker_fd = os.open(_OWNERSHIP_MARKER, flags, dir_fd=directory_fd)
@@ -4479,6 +4121,7 @@ def _reclaim_ownership_directories(root_fd, records, nonce):
         ):
             continue
         expected_token = _ownership_marker_token(nonce, relative)
+        # 1.3.3 renamed a folder to one of these while removing it.
         cleanup_names = tuple(
             os.fsencode(f".qobuz-ownership-cleanup-{phase}-{expected_token}")
             for phase in ("a", "b")
@@ -4493,10 +4136,7 @@ def _reclaim_ownership_directories(root_fd, records, nonce):
     ):
         parent_fd = None
         directory_fd = None
-        quarantine_fd = None
-        quarantine = None
         original_name = None
-        moved_to_quarantine = False
         try:
             parent_fd = _open_ownership_parent(root_fd, parts)
             for candidate in (parts[-1], temporary_parts[-1], *cleanup_names):
@@ -4517,79 +4157,22 @@ def _reclaim_ownership_directories(root_fd, records, nonce):
                 continue
 
             entries = os.listdir(directory_fd)
-            marker_present = marker is not None
-            if marker is None:
-                if not entries and _ownership_identity(os.fstat(directory_fd)) == identity:
-                    marker_present = False
-                elif entries == [_OWNERSHIP_MARKER] and _read_ownership_marker(directory_fd, token):
-                    # The process can be killed after fsyncing its nonce marker
-                    # but before appending that marker's identity to the shared
-                    # receipt. The marker capability plus the held directory's
-                    # device/inode closes that durable transition window.
-                    marker_present = True
-                else:
+            if entries == [_OWNERSHIP_MARKER]:
+                if not _read_ownership_marker(directory_fd, token, marker):
                     continue
-            elif not entries:
-                # The plug-in durably unlinks and fsyncs its marker before it
-                # can append the marker=None directory identity. A kill in
-                # that narrow window leaves the old marker receipt naming this
-                # exact dev/inode, but the directory is already empty.
-                marker_present = False
-            elif entries != [_OWNERSHIP_MARKER] or not _read_exact_marker(
-                directory_fd, marker, token
-            ):
+                marker_identity = marker or _ownership_identity(os.stat(
+                    _OWNERSHIP_MARKER, dir_fd=directory_fd, follow_symlinks=False))
+                if not _remove_exact_ownership_marker(directory_fd, marker_identity, token):
+                    continue
+            elif entries:
                 continue
-
-            # Both private phase names are derivable from the durable receipt.
-            # Always rotate to the other one before rmdir: after a process
-            # death the next attempt can find the exact directory and still
-            # gets a fresh no-replace name-swap boundary.
-            quarantine = cleanup_names[1] if original_name == cleanup_names[0] else cleanup_names[0]
-            _rename_ownership_noreplace(parent_fd, original_name, parent_fd, quarantine)
-            moved_to_quarantine = True
-            quarantine_fd = _open_ownership_dir(quarantine, dir_fd=parent_fd)
-            quarantine_stat = os.fstat(quarantine_fd)
-            if (
-                int(quarantine_stat.st_dev) != identity["device"]
-                or int(quarantine_stat.st_ino) != identity["inode"]
-            ):
-                raise OSError("ownership directory changed during cleanup")
-
-            if marker_present:
-                if os.listdir(quarantine_fd) != [_OWNERSHIP_MARKER] or not _read_ownership_marker(
-                    quarantine_fd, token, marker
-                ):
-                    raise OSError("ownership marker changed during cleanup")
-                marker_identity = marker
-                if marker_identity is None:
-                    marker_stat = os.stat(
-                        _OWNERSHIP_MARKER,
-                        dir_fd=quarantine_fd,
-                        follow_symlinks=False,
-                    )
-                    marker_identity = _ownership_identity(marker_stat)
-                if not _remove_exact_ownership_marker(quarantine_fd, marker_identity, token):
-                    raise OSError("ownership marker changed during cleanup")
-            if os.listdir(quarantine_fd):
-                raise OSError("ownership directory is not empty")
-            os.rmdir(quarantine, dir_fd=parent_fd)
-            quarantine = None
-            os.fsync(parent_fd)
-            removed += 1
+            if _remove_empty_dir(original_name, dir_fd=parent_fd):
+                os.fsync(parent_fd)
+                removed += 1
         except (OSError, TypeError, ValueError):
-            if (
-                moved_to_quarantine
-                and quarantine is not None
-                and parent_fd is not None
-                and original_name
-            ):
-                try:
-                    _rename_ownership_noreplace(parent_fd, quarantine, parent_fd, original_name)
-                    quarantine = None
-                except OSError:
-                    pass
+            pass
         finally:
-            for descriptor in (quarantine_fd, directory_fd, parent_fd):
+            for descriptor in (directory_fd, parent_fd):
                 if descriptor is not None:
                     try:
                         os.close(descriptor)
@@ -4757,7 +4340,7 @@ def _beets_python_from_launcher():
         script = os.path.realpath(launcher)
         descriptor = os.open(
             script,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
         )
         held = os.fstat(descriptor)
         if not stat.S_ISREG(held.st_mode):
@@ -5033,8 +4616,6 @@ def _beets_lock_wait():
 def _staged_compilation(paths):
     """True when every staged FLAC is tagged as a compilation or credited to
     Various Artists."""
-    if not HAVE_MUTAGEN:
-        return False
     from mutagen.flac import FLAC
 
     found = False
@@ -5194,7 +4775,7 @@ def _back_up_before_migrations(plugin_config, database_path):
 
 
 def _build_import_override_yaml(
-    plugin_config=None,
+    plugin_config,
     *,
     ownership_enabled=False,
     album_folder=None,
@@ -5292,7 +4873,7 @@ def _build_import_override_yaml(
             for _name, _template in _paths.items()
         )
 
-    preserve_effective_plugins = plugin_config is not None and not cfg.BEETS_PLUGINS
+    preserve_effective_plugins = not cfg.BEETS_PLUGINS
     if preserve_effective_plugins:
         _plugins = list(plugin_config["plugins"])
     else:
@@ -5312,17 +4893,15 @@ def _build_import_override_yaml(
         override_yaml += (
             "fetchart:\n  auto: yes\n  cautious: no\n  sources: [filesystem]\n"
         )
-    plugin_paths = [str(Path(__file__).parent / "beets_plugins")]
-    if plugin_config is not None:
-        plugin_paths.extend(plugin_config["plugin_paths"])
+    plugin_paths = [
+        str(Path(__file__).parent / "beets_plugins"),
+        *plugin_config["plugin_paths"],
+    ]
     unique_paths = list(dict.fromkeys(plugin_paths))
     override_yaml += "pluginpath:\n" + "".join(f"  - {_yaml_sq(path)}\n" for path in unique_paths)
-    if plugin_config is not None:
-        if plugin_config["musicbrainz_enabled"] is True and "musicbrainz" not in _plugins:
-            _plugins.append("musicbrainz")
-        disabled = set(plugin_config["disabled"])
-    else:
-        disabled = set()
+    if plugin_config["musicbrainz_enabled"] is True and "musicbrainz" not in _plugins:
+        _plugins.append("musicbrainz")
+    disabled = set(plugin_config["disabled"])
     disabled.discard(_ART_GUARD_PLUGIN)
     if ownership_enabled:
         disabled.discard(_OWNERSHIP_PLUGIN)
@@ -5355,11 +4934,11 @@ def _build_import_override_yaml(
 
 
 def _prepare_for_beets_run(
-    roots=None, ownership_out=None, source_files_out=None, album_dir=None,
+    roots, ownership_out=None, source_files_out=None, album_dir=None,
     places=None,
     folder=None,
 ):
-    """Common setup shared by the whole-staging and per-album entry points:
+    """Common setup shared by the path and per-album entry points:
     resolve Beets' own runtime, prep tags on the staged FLACs, and write the
     one-shot override yaml. Returns ``(override_path, cleanup_fn, runtime)``
     or three ``None`` values if a precondition failed. ``album_dir`` is an
@@ -5411,16 +4990,10 @@ def _prepare_for_beets_run(
 
     if source_files_out is not None:
         source_files_out.clear()
-        explicit_roots = bool(roots)
-        scan_roots = roots if roots else [cfg.STAGING_DIR]
         try:
             candidates = []
-            for root in scan_roots:
-                candidates.extend(
-                    path
-                    for path in root.rglob("*")
-                    if path.is_file() and (explicit_roots or not _under_retry_dir(path))
-                )
+            for root in roots:
+                candidates.extend(path for path in root.rglob("*") if path.is_file())
             for path in candidates:
                 receipt = staging_mod.capture_file(path)
                 if receipt is not None:
@@ -5428,7 +5001,7 @@ def _prepare_for_beets_run(
         except OSError:
             source_files_out.clear()
 
-    ownership_enabled = ownership_out is not None and plugin_config is not None
+    ownership_enabled = ownership_out is not None
     if ownership_out is not None:
         ownership_out.clear()
 
@@ -5471,7 +5044,7 @@ def _prepare_for_beets_run(
                     places=places if album_folder is not None else None,
                     compilation=_staged_compilation(
                         path
-                        for root in (roots or [cfg.STAGING_DIR])
+                        for root in roots
                         for path in Path(root).rglob("*.flac")
                         if not _under_retry_dir(path)
                     ),
@@ -5698,12 +5271,9 @@ def _prepare_managed_beets_run(
             capture
         ):
             raise OSError("managed Beets namespace changed after reservation")
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            raise OSError("safe managed Beets carrier creation is unavailable")
         carrier_fd = os.open(
             carrier_path.name,
-            os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o600,
             dir_fd=parent_fd,
         )
@@ -5952,29 +5522,15 @@ def relocate_disc_album_artwork(album_dir) -> bool:
 
 
 def beets_import_paths(
-    consolidate=True, *, source_files_out=None, album_dirs=None, album_dir=None,
+    consolidate=True, *, album_dirs, source_files_out=None, album_dir=None,
     protected_paths=None, folder=None,
 ):
     """Run beets on explicit staged albums and return a success bool.
 
-    With no explicit list, legacy preflight recovery derives only public audio
-    directories. Hidden per-rip roots and durable retry recovery are never
-    adopted by a whole-staging command. The fold after the import leaves
-    ``protected_paths`` alone. ``folder`` is the library folder the album is
-    filed in whether or not it exists yet.
+    The fold after the import leaves ``protected_paths`` alone. ``folder`` is
+    the library folder the album is filed in whether or not it exists yet.
     """
-    roots = [Path(directory) for directory in (album_dirs or [])]
-    if album_dirs is None:
-        roots = sorted(
-            {
-                path.parent
-                for path in cfg.STAGING_DIR.rglob("*")
-                if path.is_file()
-                and path.suffix.lower() in cfg.AUDIO_EXTS
-                and not _under_retry_dir(path)
-                and not _under_isolated_run(path)
-            }
-        )
+    roots = [Path(directory) for directory in album_dirs]
     if not roots:
         return True
     prepared_sources = source_files_out if source_files_out is not None else []
@@ -6123,12 +5679,11 @@ def beets_import_managed(
     except BaseException as exc:
         cleanup_error = _finish_beets_cleanup(cleanup)
         if cleanup_error is not None and not isinstance(cleanup_error, Exception):
-            if hasattr(cleanup_error, "add_note"):
-                cleanup_error.add_note(f"beets intent callback also failed: {exc}")
+            cleanup_error.add_note(f"beets intent callback also failed: {exc}")
             raise cleanup_error.with_traceback(cleanup_error.__traceback__)
         if isinstance(exc, Exception):
             return ManagedBeetsImportResult("refused", reference, reservation=reservation)
-        if cleanup_error is not None and hasattr(exc, "add_note"):
+        if cleanup_error is not None:
             exc.add_note(f"beets intent cleanup also failed: {cleanup_error}")
         raise
     override_path = None
@@ -6142,10 +5697,9 @@ def beets_import_managed(
     except BaseException as exc:
         cleanup_error = _finish_beets_cleanup(cleanup)
         if cleanup_error is not None and not isinstance(cleanup_error, Exception):
-            if hasattr(cleanup_error, "add_note"):
-                cleanup_error.add_note(f"beets pre-spawn validation also failed: {exc}")
+            cleanup_error.add_note(f"beets pre-spawn validation also failed: {exc}")
             raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-        if cleanup_error is not None and hasattr(exc, "add_note"):
+        if cleanup_error is not None:
             exc.add_note(f"beets pre-spawn cleanup also failed: {cleanup_error}")
         raise
     if current_intent != intent:
@@ -6283,7 +5837,7 @@ def _spawn_owned_beets_process(
             completion_error = _set_beets_event(spawn_completion)
             if owner["error"] is None:
                 owner["error"] = completion_error
-            elif completion_error is not None and hasattr(owner["error"], "add_note"):
+            elif completion_error is not None:
                 owner["error"].add_note("beets spawn completion signalling also failed")
 
         try:
@@ -6300,9 +5854,7 @@ def _spawn_owned_beets_process(
                 )
                 if owner["retirement_error"] is None:
                     owner["retirement_error"] = retirement_error
-                elif retirement_error is not None and hasattr(
-                    owner["retirement_error"], "add_note"
-                ):
+                elif retirement_error is not None:
                     owner["retirement_error"].add_note("beets process retirement also failed")
             else:
                 retirement_proven = not owner["spawn_attempted"]
@@ -6313,7 +5865,7 @@ def _spawn_owned_beets_process(
                 child_lock_fd = None
                 if owner["retirement_error"] is None:
                     owner["retirement_error"] = lease_error
-                elif lease_error is not None and hasattr(owner["retirement_error"], "add_note"):
+                elif lease_error is not None:
                     owner["retirement_error"].add_note("beets child-lock retirement also failed")
         finally:
             if child_lock_fd is not None and retirement_proven:
@@ -6322,7 +5874,7 @@ def _spawn_owned_beets_process(
                 except BaseException as exc:
                     if owner["retirement_error"] is None:
                         owner["retirement_error"] = exc
-                    elif hasattr(owner["retirement_error"], "add_note"):
+                    else:
                         owner["retirement_error"].add_note(
                             "beets guardian lock cleanup also failed"
                         )
@@ -6333,7 +5885,7 @@ def _spawn_owned_beets_process(
             completion_error = _set_beets_event(retire_completion)
             if owner["retirement_error"] is None:
                 owner["retirement_error"] = completion_error
-            elif completion_error is not None and hasattr(owner["retirement_error"], "add_note"):
+            elif completion_error is not None:
                 owner["retirement_error"].add_note(
                     "beets retirement completion signalling also failed"
                 )
@@ -6365,9 +5917,9 @@ def _spawn_owned_beets_process(
                 retirement_error = completion_error
         retirement_error = retirement_error or owner["retirement_error"] or request_error
         secondary = owner["error"]
-        if secondary is not None and secondary is not error and hasattr(error, "add_note"):
+        if secondary is not None and secondary is not error:
             error.add_note(f"beets process creation also failed: {secondary}")
-        if retirement_error is not None and hasattr(error, "add_note"):
+        if retirement_error is not None:
             error.add_note(f"beets process cleanup also failed: {retirement_error}")
         raise error.with_traceback(error.__traceback__)
     return owner.get("process")
@@ -6470,7 +6022,7 @@ def _retire_beets_process_now(proc, *, spawn_attempted, require_group_drain):
                     group_error, group_drained = _wait_for_beets_process_group_exit(process_group)
                     if error is None:
                         error = group_error
-                    elif group_error is not None and hasattr(error, "add_note"):
+                    elif group_error is not None:
                         error.add_note("beets process-group verification also failed")
                 if not group_drained and require_group_drain:
                     return error or OSError(
@@ -6494,7 +6046,7 @@ def _retire_beets_process_now(proc, *, spawn_attempted, require_group_drain):
                 group_error, group_drained = _wait_for_beets_process_group_exit(process_group)
                 if error is None:
                     error = group_error
-                elif group_error is not None and hasattr(error, "add_note"):
+                elif group_error is not None:
                     error.add_note("beets process-group verification also failed")
                 if not group_drained:
                     return error, False
@@ -6658,7 +6210,7 @@ def _run_owned_beets_capture(args, *, env, timeout, database_exclusion, before_s
         retirement_error or stream_error or (reader_errors[0] if reader_errors else None)
     )
     if caught is not None:
-        if cleanup_error is not None and hasattr(caught, "add_note"):
+        if cleanup_error is not None:
             caught.add_note(f"beets process cleanup also failed: {cleanup_error}")
         raise caught.with_traceback(caught.__traceback__)
     if cleanup_error is not None:
@@ -6725,142 +6277,21 @@ def _count_audio_under(paths, *, include_retry=False):
     return n
 
 
-def _close_beets_prune_capture(capture):
-    if not isinstance(capture, dict):
-        return
-    for root in capture.get("roots", ()):
-        for descriptor in reversed(root.get("chain", ())):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-    for descriptor in reversed(capture.get("staging_chain", ())):
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-    capture.clear()
-
-
-def _capture_beets_prune_roots(paths):
-    """Hold exact staging roots before Beets can rename or replace them."""
-    try:
-        staging_chain, staging_names = _open_absolute_merge_chain(cfg.STAGING_DIR)
-    except OSError:
-        return None
-    capture = {
-        "staging_chain": staging_chain,
-        "staging_names": staging_names,
-        "roots": [],
-    }
-    seen = set()
-    try:
-        staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
-        staging_fd = staging_chain[-1]
-        device = int(os.fstat(staging_fd).st_dev)
-        for raw in paths:
-            candidate = Path(os.path.abspath(os.fspath(raw)))
-            if candidate == staging:
-                parts = ()
-            else:
-                parts = _merge_relative_parts(staging, candidate)
-                if parts is None:
-                    continue
-            if parts in seen or (parts and parts[0] == cfg.BEETS_RETRY_DIR):
-                continue
-            seen.add(parts)
-            chain = []
-            try:
-                chain, _created = _open_merge_chain(
-                    staging_fd,
-                    parts,
-                    required_device=device,
-                )
-                if not _merge_chain_is_named(chain, parts):
-                    raise OSError("staging import root changed while it was opened")
-            except OSError:
-                for descriptor in reversed(chain):
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
-                continue
-            capture["roots"].append({"chain": chain, "parts": parts})
-        return capture
-    except BaseException:
-        _close_beets_prune_capture(capture)
-        raise
-
-
-def _hold_beets_prune_descendants(records, directory_fd, parts, device):
-    with os.scandir(directory_fd) as entries:
-        for entry in entries:
-            child_stat = entry.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(child_stat.st_mode) or int(child_stat.st_dev) != device:
-                continue
-            child = _open_exact_merge_dir(directory_fd, entry.name, child_stat)
-            child_parts = (*parts, entry.name)
-            try:
-                if child_parts[0] == cfg.BEETS_RETRY_DIR:
-                    continue
-                _hold_beets_prune_descendants(
-                    records,
-                    child,
-                    child_parts,
-                    device,
-                )
-                # The first component is the private per-run root. Its owner
-                # retires it separately after the exact import is accepted.
-                if len(child_parts) > 1:
-                    _hold_merge_directory(
-                        records,
-                        directory_fd,
-                        entry.name,
-                        child,
-                        parts,
-                    )
-            finally:
-                os.close(child)
-
-
-def _prune_captured_beets_directories(capture):
-    """Remove only held empty directories still named beneath staging."""
-    if not isinstance(capture, dict):
-        return
-    staging_chain = capture.get("staging_chain", ())
-    staging_names = capture.get("staging_names", ())
-    if not staging_chain or not _merge_chain_is_named(staging_chain, staging_names):
-        return
-    staging_fd = staging_chain[-1]
-    device = int(os.fstat(staging_fd).st_dev)
-    for root in capture.get("roots", ()):
-        chain = root.get("chain", ())
-        parts = root.get("parts", ())
-        records = []
-        try:
-            if (
-                not chain
-                or (int(os.fstat(chain[0]).st_dev), int(os.fstat(chain[0]).st_ino))
-                != (int(os.fstat(staging_fd).st_dev), int(os.fstat(staging_fd).st_ino))
-                or not _merge_chain_is_named(chain, parts)
-            ):
-                continue
-            _hold_beets_prune_descendants(records, chain[-1], parts, device)
-            # Include the explicit root and its ancestors below the first
-            # staging component. Never remove that top-level per-run root.
-            for index in range(2, len(chain)):
-                _hold_merge_directory(
-                    records,
-                    chain[index - 1],
-                    parts[index - 1],
-                    chain[index],
-                    parts[: index - 1],
-                )
-            _remove_held_merge_directories(staging_fd, records)
-        except OSError:
-            pass
-        finally:
-            _close_held_merge_directories(records)
+def _prune_empty_staging_dirs(paths):
+    """Remove the empty folders an import left under its staged roots, never
+    a top-level per-run root or anything in the retry folder."""
+    staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
+    for raw in paths:
+        root = Path(os.path.abspath(os.fspath(raw)))
+        parts = () if root == staging else _merge_relative_parts(staging, root)
+        if parts is None or parts[:1] == (cfg.BEETS_RETRY_DIR,):
+            continue
+        for directory, _subdirs, _files in os.walk(root, topdown=False):
+            relative = Path(directory).relative_to(staging).parts
+            if len(relative) > 1 and relative[0] != cfg.BEETS_RETRY_DIR:
+                _remove_empty_dir(directory)
+        for depth in range(len(parts) - 1, 1, -1):
+            _remove_empty_dir(staging.joinpath(*parts[:depth]))
 
 
 def _finish_beets_cleanup(cleanup):
@@ -6871,8 +6302,7 @@ def _finish_beets_cleanup(cleanup):
             return interrupted
         except Exception as exc:
             if interrupted is not None:
-                if hasattr(interrupted, "add_note"):
-                    interrupted.add_note(f"beets cleanup retry also failed: {exc}")
+                interrupted.add_note(f"beets cleanup retry also failed: {exc}")
                 return interrupted
             return exc
         except BaseException as exc:
@@ -6883,7 +6313,7 @@ def _finish_beets_cleanup(cleanup):
 def _beets_direct(
     override_path,
     cleanup_fn,
-    paths=None,
+    paths,
     *,
     ownership_capture=None,
     intended_audio=None,
@@ -6933,7 +6363,7 @@ def _beets_direct(
 
     cleanup_error = _finish_beets_cleanup(cleanup_fn)
     if cleanup_error is not None:
-        if caught is not None and hasattr(caught, "add_note"):
+        if caught is not None:
             caught.add_note(f"beets run cleanup also failed: {cleanup_error}")
         else:
             caught = cleanup_error
@@ -6941,7 +6371,7 @@ def _beets_direct(
     exclusion_error = exclusion.release()
     _close_beets_database_anchor(database_anchor)
     if exclusion_error is not None:
-        if caught is not None and hasattr(caught, "add_note"):
+        if caught is not None:
             caught.add_note("beets database exclusion cleanup also failed")
         else:
             log.info(
@@ -6979,7 +6409,7 @@ def _beets_direct(
 
 def _beets_direct_guarded(
     override_path,
-    paths=None,
+    paths,
     *,
     database_exclusion,
     database_anchor=None,
@@ -6990,14 +6420,11 @@ def _beets_direct_guarded(
     before_managed_spawn=None,
 ):
     """Call ``beet import`` as a direct subprocess (bundled mode), scoped to
-    the given paths (default: whole STAGING_DIR). Returns
+    the given paths. Returns
     ``(ok: bool, kind: str)`` where kind is ``"ok"`` / ``"timeout"`` /
     ``"error"`` so the caller can distinguish a retry-worthy idle-timeout
     from a permanent failure."""
-    explicit_paths = bool(paths)
-    if not paths:
-        paths = [str(cfg.STAGING_DIR)]
-    audio_before = _count_audio_under(paths, include_retry=explicit_paths)
+    audio_before = _count_audio_under(paths, include_retry=True)
     if intended_audio is not None:
         intended_audio = tuple(intended_audio)
         if managed_capture is not None:
@@ -7166,7 +6593,6 @@ def _beets_direct_guarded(
         finally:
             reader_done.set()
 
-    prune_capture = _capture_beets_prune_roots(paths)
     process_owner = {"process": None}
     proc = None
     reader = None
@@ -7246,14 +6672,11 @@ def _beets_direct_guarded(
                 retirement_error = stream_error
         if isinstance(managed_capture, dict):
             managed_capture["spawned"] = process_owner.get("spawn_attempted") is True
-        try:
-            if wait_error is None and retirement_error is None:
-                _prune_captured_beets_directories(prune_capture)
-        finally:
-            _close_beets_prune_capture(prune_capture)
+        if wait_error is None and retirement_error is None:
+            _prune_empty_staging_dirs(paths)
 
     if retirement_error is not None:
-        if wait_error is not None and hasattr(wait_error, "add_note"):
+        if wait_error is not None:
             wait_error.add_note(f"beets process cleanup also failed: {retirement_error}")
         else:
             wait_error = retirement_error
@@ -7307,13 +6730,13 @@ def _beets_direct_guarded(
     # output. beets prints "Skipping." per item (a duplicate, an unreadable
     # file), so matching that text flagged a whole album failed when a single
     # track was skipped; an exit-0 run that moved nothing is the real silent skip.
-    audio_after = _count_audio_under(paths, include_retry=explicit_paths)
+    audio_after = _count_audio_under(paths, include_retry=True)
     moved_any = audio_before > 0 and audio_after < audio_before
     # An explicit album import that finds zero audio (every track quarantined as
     # untagged before the run) imported nothing. It must not read as success, or
     # the executor marks a never-imported album done instead of parking/re-ripping.
     imported_nothing = proc.returncode == 0 and (
-        (audio_before > 0 and not moved_any) or (explicit_paths and audio_before == 0)
+        (audio_before > 0 and not moved_any) or audio_before == 0
     )
     receipt_incomplete = False
     if proc.returncode == 0 and intended_audio is not None:
@@ -7433,38 +6856,6 @@ def _report_staging_remnants():
         log.info(fmt(C.GRAY, f"       · {folder.name} ({errors.plural(n_audio, 'track')})"))
     if len(folders) > 20:
         log.info(fmt(C.GRAY, f"       … and {len(folders) - 20} more"))
-
-
-def _untracked_reimport_file():
-    return cfg.DATA_DIR / ".beets_untracked_reimport"
-
-
-def _warn_legacy_untracked_library_dirs():
-    """Surface recovery state left by the retired remove/re-import fold.
-
-    Older releases could remove album rows and then fail before their matching
-    ``beet import`` completed. Replaying those paths automatically is not safe:
-    an as-is import can still discard database-only metadata. Keep the recovery
-    file intact for a person to inspect instead.
-    """
-    f = _untracked_reimport_file()
-    if not f.exists():
-        return
-    try:
-        count = len(
-            {line.strip() for line in f.read_text(encoding="utf-8").splitlines() if line.strip()}
-        )
-    except OSError:
-        return
-    if count:
-        log.info(
-            fmt(
-                C.YELLOW,
-                f"  ⚠  Found {errors.plural(count, 'album path')} in the legacy beets recovery "
-                f"list at {f}. Automatic re-import is disabled because it can "
-                "discard database-only metadata; review those paths manually.",
-            )
-        )
 
 
 _CONSOLIDATION_PROTECT_ALL = object()
@@ -8633,7 +8024,6 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None):
     Any uncertainty leaves the duplicates intact. ``folders`` limits the fold
     to those album folders.
     """
-    _warn_legacy_untracked_library_dirs()
     try:
         database = Path(os.fspath(cfg.BEETS_DB_PATH))
         if not database.is_file():
@@ -9192,23 +8582,17 @@ def _remove_beets_rows(matches, warn, keep=frozenset()):
         warn("the database exclusion could not be released safely")
         result = ForgetBeetsEntriesResult(False)
     if caught is not None:
-        if exclusion_error is not None and hasattr(caught, "add_note"):
+        if exclusion_error is not None:
             caught.add_note("beets database exclusion cleanup also failed")
         raise caught.with_traceback(caught.__traceback__)
     return result
 
 
 def staging_preflight(args):
-    """Sweep streamrip non-audio residue, then handle any remaining leftovers."""
-    from qobuz_librarian.integrations.rip import cleanup_staging_residue
-
+    """Handle any leftovers in staging."""
     if not cfg.STAGING_DIR.exists():
         cfg.STAGING_DIR.mkdir(parents=True, exist_ok=True)
         return
-
-    n_swept = cleanup_staging_residue()
-    if n_swept:
-        vlog(f"staging_preflight: swept {errors.plural(n_swept, 'non-audio residue item')}")
 
     isolated_runs = [
         entry

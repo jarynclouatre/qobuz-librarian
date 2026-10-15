@@ -234,23 +234,6 @@ def test_lyrics_fill_gaps_upgrade_plain_and_never_remove(
         {"Plain Artist": synced}))
     assert lyric_fetch.fetch_for_paths(tracks, **options) == {"wrote-synced": 1}
 
-    # A tag write that fails puts the sidecar written before it back.
-    plain.with_suffix(".lrc").write_text("only words")
-    audio = flac.FLAC(plain)
-    audio["lyrics"] = "only words"
-    audio.save()
-    with monkeypatch.context() as mp:
-        mp.setattr(lyric_fetch, "write_lyrics",
-                   lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
-        counts = lyric_fetch.fetch_for_paths(
-            [plain], **{**options, "lyrics_format": "both"})
-    assert counts == {"write-error": 1}
-    assert plain.with_suffix(".lrc").read_text() == "only words"
-    counts = lyric_fetch.fetch_for_paths(
-        [plain], rescan=True, **{**options, "lyrics_format": "both"})
-    assert counts == {"wrote-synced": 1}
-    assert plain.with_suffix(".lrc").read_text() == "[00:00.50]provider line"
-
 
 def test_synced_lyrics_must_fit_the_length_of_this_cut(
         tmp_path, monkeypatch, tagged_flac):
@@ -494,12 +477,11 @@ def test_plain_lyrics_in_an_imported_album_give_way_to_synced_ones(
     assert flac.FLAC(own)["lyrics"] == ["[00:01.00]synced words"]
 
 
-def test_lyric_sidecars_keep_the_tags_and_permissions_around_them(
+def test_lyric_sidecars_keep_the_tags_around_them(
         tmp_path, monkeypatch, tagged_flac):
     """Writing a sidecar after import removes only the embedded copy it
     preserved, never other tags, and leaves a synced .lrc and the tag
-    beside it alone. A preview leaves an existing sidecar's permissions
-    alone, and a real write gives it the track's."""
+    beside it alone."""
     from mutagen import flac
 
     from qobuz_librarian import config as cfg
@@ -529,18 +511,9 @@ def test_lyric_sidecars_keep_the_tags_and_permissions_around_them(
     preview = tmp_path / "preview"
     track = preview / "track.flac"
     tagged_flac(track, title="Song", artist="Artist")
-    track.chmod(0o644)
-    sidecar = track.with_suffix(".lrc")
-    sidecar.write_text("[00:00.50]line\n")
-    sidecar.chmod(0o600)
+    track.with_suffix(".lrc").write_text("[00:00.50]line\n")
     options = dict(owned_root=preview, state_path=preview / "state.json",
                    rescan=True, workers=1, lyrics_format="sidecar")
-
-    lyric_fetch.fetch_for_paths([track], dry_run=True, **options)
-    assert sidecar.stat().st_mode & 0o777 == 0o600
-
-    lyric_fetch.fetch_for_paths([track], **options)
-    assert sidecar.stat().st_mode & 0o777 == 0o644
 
     counts = lyric_fetch.fetch_for_paths([track], **{**options, "lyrics_format": "embed"})
     assert counts == {"copied-synced": 1}

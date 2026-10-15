@@ -184,10 +184,6 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['instrumental'], 'track')} skipped as "
             "instrumental."))
-    if summary["policy_skipped"]:
-        log.info(fmt(C.YELLOW,
-            f"     {plural(summary['policy_skipped'], 'track')} skipped by "
-            "the current Lyrics policy."))
     if summary["unsafe"]:
         log.warning(fmt(C.RED,
             f"     {plural(summary['unsafe'], 'track path')} refused as unsafe; "

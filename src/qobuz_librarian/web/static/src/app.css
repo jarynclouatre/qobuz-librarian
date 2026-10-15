@@ -2178,34 +2178,6 @@ details.ql-mobile-drawer[open]::before {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ql-download-choice {
-  display: grid;
-  gap: var(--ql-space-3);
-  max-width: 28rem;
-  border: 1px solid var(--ql-line);
-  border-radius: var(--ql-radius);
-  background-color: var(--ql-surface);
-  padding: 0.875rem;
-}
-.ql-download-choice-copy {
-  display: grid;
-  gap: var(--ql-space-1);
-}
-.ql-download-choice p {
-  margin: 0;
-  color: var(--ql-text);
-  font-size: 0.9rem;
-  font-weight: 720;
-  line-height: 1.3;
-}
-.ql-download-choice span {
-  color: var(--ql-text-2);
-  font-size: 0.8125rem;
-  line-height: 1.38;
-}
-.ql-download-choice form {
-  margin: 0;
-}
 .ql-btn-compact {
   min-height: 1.9rem;
   padding-inline: 0.58rem;

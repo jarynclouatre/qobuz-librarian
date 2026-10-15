@@ -500,19 +500,18 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                     cleanup_error = cleanup_exc
                 if cleanup_error is not None and not isinstance(
                         cleanup_error, Exception):
-                    if hasattr(cleanup_error, "add_note"):
-                        cleanup_error.add_note(
-                            f"ownership destination preparation also "
-                            f"failed: {exc}")
+                    cleanup_error.add_note(
+                        f"ownership destination preparation also "
+                        f"failed: {exc}")
                     raise cleanup_error.with_traceback(
                         cleanup_error.__traceback__)
                 if not isinstance(exc, Exception):
-                    if cleanup_error is not None and hasattr(exc, "add_note"):
+                    if cleanup_error is not None:
                         exc.add_note(
                             f"ownership cleanup also failed: {cleanup_error}")
                     raise
                 if getattr(self, "_managed", False):
-                    if cleanup_error is not None and hasattr(exc, "add_note"):
+                    if cleanup_error is not None:
                         exc.add_note(
                             f"ownership cleanup also failed: {cleanup_error}")
                     raise exc.with_traceback(exc.__traceback__)
@@ -567,10 +566,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                         pass
                     raise
                 current = child
-            nofollow = getattr(os, "O_NOFOLLOW", None)
-            if nofollow is None:
-                raise OSError("safe source access is unavailable")
-            flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
             source_fd = os.open(parts[-1], flags, dir_fd=current)
             held = os.fstat(source_fd)
             if not stat.S_ISREG(held.st_mode):
@@ -753,13 +749,10 @@ class QobuzOwnershipPlugin(BeetsPlugin):
         self._write_locked(sealed=False, items=[])
         try:
             token = _ownership_marker_token(self._nonce, public_relative)
-            nofollow = getattr(os, "O_NOFOLLOW", None)
-            if nofollow is None:
-                raise OSError("safe marker creation is unavailable")
             marker_fd = os.open(
                 _OWNERSHIP_MARKER,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
-                | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
                 0o600,
                 dir_fd=child,
             )
@@ -1090,14 +1083,11 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             )
             if not stat.S_ISREG(named_before.st_mode):
                 raise OSError("ownership destination is not a regular file")
-            nofollow = getattr(os, "O_NOFOLLOW", None)
-            if nofollow is None:
-                raise OSError("safe destination access is unavailable")
             flags = (
                 os.O_RDONLY
-                | nofollow
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NONBLOCK", 0)
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC
+                | os.O_NONBLOCK
             )
             leaf_fd = os.open(parts[-1], flags, dir_fd=chain[-1])
             held = os.fstat(leaf_fd)

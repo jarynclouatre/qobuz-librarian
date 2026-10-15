@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable
 
-from qobuz_librarian import config, redaction
+from qobuz_librarian import config, redaction, state_file
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log
 
@@ -554,28 +554,25 @@ def sweep_streamrip_run_copies():
     """Delete the per-run config copies a killed run left behind.
 
     A run holds a lock on its copy until it deletes it, so any copy that
-    can be locked and has been written belongs to no live run. Copies an
-    earlier version kept beside the user's config go the same way."""
-    for directory in (
-            Path(config.DATA_DIR) / "streamrip-runs",
-            Path(os.path.realpath(config.STREAMRIP_CONFIG)).parent):
+    can be locked and has been written belongs to no live run."""
+    directory = Path(config.DATA_DIR) / "streamrip-runs"
+    try:
+        leftovers = sorted(directory.glob(f"{_RUN_COPY_PREFIX}*.toml"))
+    except OSError:
+        return
+    for path in leftovers:
         try:
-            leftovers = sorted(directory.glob(f"{_RUN_COPY_PREFIX}*.toml"))
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
             continue
-        for path in leftovers:
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError:
-                continue
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if os.fstat(fd).st_size:
-                    path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            finally:
-                os.close(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.fstat(fd).st_size:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
 
 _FETCHED_APP_ID = "qobuz-app-id.json"
@@ -594,17 +591,11 @@ def _fetched_app_id():
 def _keep_fetched_app_id(app_id, secrets):
     """Save the app id and secrets streamrip fetched on a run, which it would
     have saved in its config, in the app's data folder instead."""
-    import tempfile
     try:
-        directory = _streamrip_run_dir()
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".app-id.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump({"app_id": str(app_id),
-                           "secrets": [str(s) for s in secrets]}, f)
-            os.replace(tmp, directory / _FETCHED_APP_ID)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        state_file.write_json(
+            _streamrip_run_dir() / _FETCHED_APP_ID,
+            {"app_id": str(app_id), "secrets": [str(s) for s in secrets]},
+            indent=None)
     except OSError:
         pass
 

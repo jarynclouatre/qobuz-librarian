@@ -181,9 +181,6 @@ def _hold_task_item_in_parent(state, item):
     ):
         return False
     expected_parent = os.path.dirname(destination)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        return False
     descriptor = None
     try:
         path = os.path.abspath(os.fsencode(item.path))
@@ -194,7 +191,7 @@ def _hold_task_item_in_parent(state, item):
             return False
         descriptor = os.open(
             name,
-            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
             dir_fd=parent_fd,
         )
         held = os.fstat(descriptor)
@@ -510,13 +507,9 @@ def _restore_exact_file(parent_fd, public_name, private_name, held_fd):
 
 
 def _open_exact_entry(parent_fd, name):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    path_only = getattr(os, "O_PATH", None)
-    if nofollow is None or path_only is None:
-        raise OSError("safe exact entry access is unavailable")
     descriptor = os.open(
         name,
-        path_only | nofollow | getattr(os, "O_CLOEXEC", 0),
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=parent_fd,
     )
     try:
@@ -559,7 +552,7 @@ def _restore_unexpected_private_file(
                     deferred = exc
                 restored = False
         if deferred is not None and not isinstance(deferred, OSError):
-            if not restored and hasattr(deferred, "add_note"):
+            if not restored:
                 deferred.add_note(
                     "the unexpected artwork entry could not be restored")
             raise deferred
@@ -602,7 +595,7 @@ def _remove_exact_file(parent_fd, name, held_fd):
             restored = _restore_exact_file(
                 parent_fd, name, quarantine, held_fd)
             error = deferred or exc
-            if not restored and hasattr(error, "add_note"):
+            if not restored:
                 error.add_note("the exact artwork cleanup could not be restored")
             if not isinstance(error, OSError):
                 raise error
@@ -618,7 +611,7 @@ def _remove_exact_file(parent_fd, name, held_fd):
                 restored = _restore_exact_file(
                     parent_fd, name, quarantine, held_fd)
                 error = deferred or exc
-                if not restored and hasattr(error, "add_note"):
+                if not restored:
                     error.add_note(
                         "the exact artwork cleanup could not be restored")
                 if not isinstance(error, OSError):
@@ -649,13 +642,10 @@ def _remove_exact_file(parent_fd, name, held_fd):
 
 
 def _open_candidate(candidate):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe artwork source access is unavailable")
     descriptor = os.open(
         candidate.path,
-        os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_CLOEXEC", 0),
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        | os.O_CLOEXEC,
     )
     if not stat.S_ISREG(os.fstat(descriptor).st_mode):
         os.close(descriptor)
@@ -664,14 +654,11 @@ def _open_candidate(candidate):
 
 
 def _copy_candidate_to_private(parent_fd, candidate_fd):
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe artwork publication is unavailable")
     temporary = os.fsencode(f".qobuz-art-{secrets.token_hex(16)}")
     descriptor = os.open(
         temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
-        | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        | os.O_CLOEXEC,
         0o644,
         dir_fd=parent_fd,
     )
@@ -740,14 +727,11 @@ def _capture_art(state):
         return None
     parent_fd = state["parent_fd"]
     leaf = state["leaf"]
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        return None
     descriptor = None
     try:
         descriptor = os.open(
             leaf,
-            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
             dir_fd=parent_fd,
         )
         current = os.fstat(descriptor)
@@ -974,14 +958,11 @@ class QobuzArtGuardPlugin(BeetsPlugin):
         old_art = getattr(task.album, "artpath", None)
         if old_art:
             return True
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None:
-            return False
         descriptor = None
         try:
             descriptor = os.open(
                 name,
-                os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=folder_fd,
             )
             if (

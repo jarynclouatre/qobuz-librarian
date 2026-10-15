@@ -69,37 +69,6 @@ def test_failed_attempt_keeps_previous_complete_generation(monkeypatch, tmp_path
     assert generation_state.baseline_complete() is False
 
 
-def test_restart_marks_committed_unpublished_library_attempt_incomplete(
-        monkeypatch, tmp_path):
-    from qobuz_librarian.library import generation_state
-
-    class Authority:
-        @staticmethod
-        def intact():
-            return True
-
-    _isolate_generation_files(monkeypatch, tmp_path)
-    attempt = generation_state.begin_attempt()
-    publication = generation_state.commit_catalog_generation(attempt)
-    revision = generation_state.revision()
-
-    assert publication is not None
-    assert generation_state.library_publication_incomplete()
-    assert generation_state.reconcile_interrupted_library_publication(
-        Authority()
-    ) is True
-
-    state = generation_state.load()
-    assert state["generation"] == publication["generation"]
-    assert state["revision"] == revision + 1
-    assert state["latest_attempt"]["status"] == "incomplete"
-    assert state["outputs"]["library"]["status"] == "needs_refresh"
-    assert generation_state.library_publication_incomplete(state) is False
-    assert generation_state.reconcile_interrupted_library_publication(
-        Authority()
-    ) is False
-
-
 def test_long_upgrade_publish_preserves_newer_artist_revision(
         monkeypatch, tmp_path):
     from qobuz_librarian.library import generation_state

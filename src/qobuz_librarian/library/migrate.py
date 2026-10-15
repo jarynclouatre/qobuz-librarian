@@ -822,46 +822,6 @@ def _fsync_directories(*descriptors) -> None:
         os.fsync(descriptor)
 
 
-def _xattr_snapshot(descriptor) -> list:
-    """Serializable exact snapshot of all visible extended attributes.
-
-    POSIX ACLs are represented by ``system.posix_acl_*`` xattrs on Linux, so
-    this one proof covers both ordinary xattrs and the filesystem's ACL form.
-    """
-    try:
-        names = sorted(os.fsencode(name) for name in os.listxattr(descriptor))
-        return [
-            [
-                base64.b64encode(name).decode("ascii"),
-                base64.b64encode(
-                    os.getxattr(descriptor, os.fsdecode(name))).decode("ascii"),
-            ]
-            for name in names
-        ]
-    except (AttributeError, OSError, TypeError, ValueError) as exc:
-        raise OSError("migration file metadata could not be read") from exc
-
-
-def _decode_xattr_snapshot(value) -> list:
-    if not isinstance(value, list):
-        raise OSError("migration xattr receipt is malformed")
-    decoded = []
-    seen = set()
-    try:
-        for item in value:
-            if not isinstance(item, list) or len(item) != 2:
-                raise ValueError
-            name = base64.b64decode(item[0], validate=True)
-            payload = base64.b64decode(item[1], validate=True)
-            if not name or b"\x00" in name or name in seen:
-                raise ValueError
-            seen.add(name)
-            decoded.append((name, payload))
-    except (TypeError, ValueError) as exc:
-        raise OSError("migration xattr receipt is malformed") from exc
-    return decoded
-
-
 def _file_receipt(descriptor, digest=None) -> dict:
     value = os.fstat(descriptor)
     if not stat.S_ISREG(value.st_mode):
@@ -869,13 +829,9 @@ def _file_receipt(descriptor, digest=None) -> dict:
     receipt = {
         "identity": _entry_identity(value),
         "mode": int(value.st_mode),
-        "uid": int(value.st_uid),
-        "gid": int(value.st_gid),
         "size": int(value.st_size),
-        "atime_ns": int(value.st_atime_ns),
         "mtime_ns": int(value.st_mtime_ns),
         "changed_ns": int(value.st_ctime_ns),
-        "xattrs": _xattr_snapshot(descriptor),
     }
     if digest is not None:
         receipt["sha256"] = str(digest)
@@ -892,14 +848,10 @@ def _file_receipt_matches(descriptor, receipt, *, digest=None,
             or not stat.S_ISREG(value.st_mode)
             or _entry_identity(value) != expected
             or int(value.st_mode) != int(receipt["mode"])
-            or int(value.st_uid) != int(receipt["uid"])
-            or int(value.st_gid) != int(receipt["gid"])
             or int(value.st_size) != int(receipt["size"])
-            or int(value.st_atime_ns) != int(receipt["atime_ns"])
             or int(value.st_mtime_ns) != int(receipt["mtime_ns"])
             or (not allow_changed_time
                 and int(value.st_ctime_ns) != int(receipt["changed_ns"]))
-            or _xattr_snapshot(descriptor) != receipt["xattrs"]
         ):
             return False
         return (digest if digest is not None else _digest_fd(descriptor)) \
@@ -3167,12 +3119,8 @@ def _file_fidelity_matches(descriptor, receipt, *, digest=None) -> bool:
         if (
             not stat.S_ISREG(value.st_mode)
             or int(value.st_mode) != int(receipt["mode"])
-            or int(value.st_uid) != int(receipt["uid"])
-            or int(value.st_gid) != int(receipt["gid"])
             or int(value.st_size) != int(receipt["size"])
-            or int(value.st_atime_ns) != int(receipt["atime_ns"])
             or int(value.st_mtime_ns) != int(receipt["mtime_ns"])
-            or _xattr_snapshot(descriptor) != receipt["xattrs"]
         ):
             return False
         return digest is None or digest == receipt["sha256"]
@@ -3196,42 +3144,12 @@ class _PublishedCopyFailure(OSError):
 
 
 def _apply_file_metadata(destination_fd, source_receipt) -> None:
-    """Copy and verify ownership, mode, timestamps, xattrs, and Linux ACLs."""
+    """Copy and verify the mode and modification time."""
     expected = source_receipt["file"]
-    expected_xattrs = _decode_xattr_snapshot(expected["xattrs"])
-    current = os.fstat(destination_fd)
-    if (
-        int(current.st_uid) != int(expected["uid"])
-        or int(current.st_gid) != int(expected["gid"])
-    ):
-        try:
-            os.fchown(
-                destination_fd,
-                int(expected["uid"]),
-                int(expected["gid"]),
-            )
-        except (AttributeError, OSError) as exc:
-            current = os.fstat(destination_fd)
-            if (
-                int(current.st_uid) != int(expected["uid"])
-                or int(current.st_gid) != int(expected["gid"])
-            ):
-                raise OSError(
-                    "migration destination ownership could not be preserved"
-                ) from exc
     os.fchmod(destination_fd, stat.S_IMODE(int(expected["mode"])))
-
-    expected_names = {name for name, _value in expected_xattrs}
-    for existing_name in os.listxattr(destination_fd):
-        encoded = os.fsencode(existing_name)
-        if encoded not in expected_names:
-            os.removexattr(destination_fd, existing_name)
-    for name, value in expected_xattrs:
-        os.setxattr(destination_fd, os.fsdecode(name), value)
-
     os.utime(
         destination_fd,
-        ns=(int(expected["atime_ns"]), int(expected["mtime_ns"])),
+        ns=(os.fstat(destination_fd).st_atime_ns, int(expected["mtime_ns"])),
     )
     if not _file_fidelity_matches(
             destination_fd, source_receipt["file"]):
@@ -4370,176 +4288,15 @@ def _sealed_directory_chain_matches(binding, chain, descriptors) -> bool:
         return False
 
 
-def _remove_empty_sealed_directory(binding, chain, *, recoveries=None) -> bool:
-    """Remove one exact preview-sealed empty directory, or preserve it."""
+def _remove_empty_sealed_directory(binding, chain) -> bool:
     descriptors = _open_sealed_directory_chain(binding, chain)
-    target_fd = descriptors[-1]
     parent_fd = binding.root_fd if len(descriptors) == 1 else descriptors[-2]
-    name = chain[-1]["name"]
-    quarantine_name = None
-    quarantine_fd = None
-    committed = False
-
-    def _restore_held(expected_fd) -> bool:
-        return _restore_private_exact(
-            quarantine_fd, "held", parent_fd, name, expected_fd)
-
-    def _restore_any_held() -> bool:
-        held_fd = None
-        try:
-            held_fd = _open_entry_handle("held", dir_fd=quarantine_fd)
-            return _restore_held(held_fd)
-        except OSError:
-            return False
-        finally:
-            if held_fd is not None:
-                os.close(held_fd)
-
-    def _record_held_recovery(reason) -> None:
-        if (
-            recoveries is None
-            or quarantine_name is None
-            or quarantine_fd is None
-            or not _named_entry_matches(
-                quarantine_fd, "held", target_fd)
-        ):
-            return
-        original_relative = Path(
-            *(item["name"] for item in chain))
-        recovery_relative = Path(
-            *(item["name"] for item in chain[:-1]),
-            quarantine_name,
-            "held",
-        )
-        try:
-            location = _descriptor_path(quarantine_fd) / "held"
-        except OSError:
-            location = binding.path / recovery_relative
-        record = {
-            "state": "directory-guarded",
-            "location": os.fspath(location),
-            "relative": os.fspath(recovery_relative),
-            "destination": os.fspath(original_relative),
-            "reason": reason,
-            "restart": (
-                "Do not delete the recorded recovery directory. Restore it "
-                "to the recorded source path only when that path is absent, "
-                "then re-run migration."
-            ),
-        }
-        if record not in recoveries:
-            recoveries.append(record)
-
-    def _restore_or_record(reason) -> bool:
-        if _restore_held(target_fd):
-            return True
-        _record_held_recovery(reason)
-        return False
-
     try:
-        if os.listdir(target_fd):
-            return False
-        if not _sealed_directory_chain_matches(binding, chain, descriptors):
-            return False
-        quarantine_name, quarantine_fd = _reserve_private_directory(
-            parent_fd, prefix="qobuz-migrate-empty")
-        try:
-            _rename_noreplace_at(
-                parent_fd, name, quarantine_fd, "held")
-        except BaseException:
-            if _named_entry_matches(quarantine_fd, "held", target_fd):
-                _restore_or_record(
-                    "source directory rename could not be reconciled")
-            elif (
-                _named_entry_missing(parent_fd, name)
-                and not _named_entry_missing(quarantine_fd, "held")
-            ):
-                _restore_any_held()
-            raise
-        if (
-            not _named_entry_missing(parent_fd, name)
-            or not _named_entry_matches(
-                quarantine_fd, "held", target_fd)
-        ):
-            if _named_entry_missing(parent_fd, name):
-                if not _restore_any_held():
-                    _record_held_recovery(
-                        "source directory state became ambiguous")
-            raise OSError("migration source directory changed during cleanup")
-        try:
-            changed = bool(os.listdir(target_fd))
-        except BaseException as exc:
-            if not _restore_or_record(
-                    "source directory could not be inspected after rename"):
-                if isinstance(exc, OSError):
-                    return False
-                raise
-            if isinstance(exc, OSError):
-                return False
-            raise
-        if changed:
-            if not _restore_or_record(
-                    "source directory changed after it was renamed"):
-                raise OSError(
-                    "changed migration directory could not be restored")
-            return False
-        try:
-            _fsync_directories(parent_fd, quarantine_fd)
-            os.rmdir("held", dir_fd=quarantine_fd)
-        except BaseException as exc:
-            committed = _named_entry_missing(quarantine_fd, "held")
-            if committed:
-                pass
-            elif _named_entry_matches(quarantine_fd, "held", target_fd):
-                if not _restore_or_record(
-                        "empty source directory could not be restored"):
-                    raise OSError(
-                        "empty migration directory could not be restored"
-                    ) from exc
-                if isinstance(exc, OSError):
-                    return False
-                raise
-            else:
-                raise OSError(
-                    "empty migration directory cleanup was ambiguous"
-                ) from exc
-        else:
-            committed = _named_entry_missing(quarantine_fd, "held")
-            if not committed:
-                if not _restore_or_record(
-                        "empty source directory removal was not committed"):
-                    raise OSError(
-                        "empty migration directory could not be restored")
-                return False
-        try:
-            _fsync_directories(parent_fd, quarantine_fd)
-        except BaseException:
-            pass
+        os.rmdir(chain[-1]["name"], dir_fd=parent_fd)
         return True
+    except OSError:
+        return False
     finally:
-        if quarantine_fd is not None:
-            if (
-                not committed
-                and _named_entry_matches(
-                    quarantine_fd, "held", target_fd)
-            ):
-                _record_held_recovery(
-                    "source directory cleanup ended before restoration")
-            if quarantine_name is not None:
-                try:
-                    if (
-                        not os.listdir(quarantine_fd)
-                        and _named_entry_matches(
-                            parent_fd, quarantine_name, quarantine_fd)
-                    ):
-                        os.rmdir(quarantine_name, dir_fd=parent_fd)
-                        _fsync_directories(parent_fd)
-                except BaseException:
-                    pass
-            try:
-                os.close(quarantine_fd)
-            except OSError:
-                pass
         for descriptor in reversed(descriptors):
             try:
                 os.close(descriptor)
@@ -4547,8 +4304,8 @@ def _remove_empty_sealed_directory(binding, chain, *, recoveries=None) -> bool:
                 pass
 
 
-def _prune_retired_source_parents(binding, receipts, *, recoveries=None,
-                                  result=None, cancel_check=None) -> int:
+def _prune_retired_source_parents(binding, receipts, *, result=None,
+                                  cancel_check=None) -> int:
     candidates = {}
     for receipt in receipts:
         try:
@@ -4572,8 +4329,7 @@ def _prune_retired_source_parents(binding, receipts, *, recoveries=None,
                 result.cancelled = True
             break
         try:
-            if _remove_empty_sealed_directory(
-                    binding, chain, recoveries=recoveries):
+            if _remove_empty_sealed_directory(binding, chain):
                 removed += 1
                 if result is not None:
                     result.pruned += 1
@@ -4644,38 +4400,6 @@ def _canonical_digest(value) -> str:
         ensure_ascii=True,
     ).encode("ascii")
     return hashlib.sha256(payload).hexdigest()
-
-
-def _entry_evidence(entry: PlanEntry) -> dict:
-    return {
-        "source": _path_evidence(entry.source),
-        "status": entry.status,
-        "destination": (
-            _path_evidence(entry.dest_rel)
-            if entry.dest_rel is not None else None
-        ),
-        "source_receipt": entry.source_receipt,
-        "destination_receipt": entry.destination_receipt,
-        "destination_path_receipt": entry.destination_path_receipt,
-    }
-
-
-def _entry_seal(entry: PlanEntry) -> str:
-    return _canonical_digest(_entry_evidence(entry))
-
-
-def _plan_context(plan: MigrationPlan) -> dict:
-    return {
-        "source_root": (
-            _path_evidence(plan.source_root)
-            if plan.source_root is not None else None
-        ),
-        "destination_root": _path_evidence(plan.dest_root),
-        "source_root_receipt": plan.source_root_receipt,
-        "destination_root_receipt": plan.dest_root_receipt,
-        "destination_name_semantics": plan.destination_name_semantics,
-        "companion_receipts": plan.companion_receipts,
-    }
 
 
 def _validate_root_receipt(receipt, expected_path) -> None:
@@ -4754,16 +4478,10 @@ def _validate_file_receipt(receipt, *, expected_relative=None) -> None:
             or identity[2] <= 0
             or any(
                 type(file_receipt[field]) is not int
-                for field in (
-                    "mode", "uid", "gid", "size",
-                    "atime_ns", "mtime_ns", "changed_ns",
-                )
+                for field in ("mode", "size", "mtime_ns", "changed_ns")
             )
             or not stat.S_ISREG(int(file_receipt["mode"]))
-            or int(file_receipt["uid"]) < 0
-            or int(file_receipt["gid"]) < 0
             or int(file_receipt["size"]) < 0
-            or int(file_receipt["atime_ns"]) < 0
             or int(file_receipt["mtime_ns"]) < 0
             or int(file_receipt["changed_ns"]) < 0
             or not isinstance(digest, str)
@@ -4771,7 +4489,6 @@ def _validate_file_receipt(receipt, *, expected_relative=None) -> None:
             or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise OSError("migration file receipt is malformed")
-        _decode_xattr_snapshot(file_receipt["xattrs"])
     except (KeyError, TypeError, ValueError) as exc:
         raise OSError("migration file receipt is malformed") from exc
 
@@ -5364,7 +5081,6 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                     _prune_retired_source_parents(
                         source_root,
                         retired_by_folder.pop(folder, ()),
-                        recoveries=result.recoveries,
                         result=result,
                         cancel_check=cancel_check,
                     )
@@ -5383,7 +5099,6 @@ def _execute_plan(plan: MigrationPlan, *, in_place: bool = False,
             _prune_retired_source_parents(
                 source_root,
                 retired_receipts,
-                recoveries=result.recoveries,
                 result=result,
                 cancel_check=cancel_check,
             )
@@ -5435,9 +5150,8 @@ _CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 def _csv_safe_cell(value, *, path=False) -> str:
     """Return a UTF-8 and spreadsheet-safe human display value.
 
-    Machine comparison never trusts these display cells; exact byte paths and
-    receipts live in the row/context seals. Only unusual names need the compact
-    base64 form, so ordinary audit CSVs remain easy to read.
+    Only unusual names need the compact base64 form, so ordinary audit CSVs
+    remain easy to read.
     """
     if value is None:
         return ""
@@ -5469,18 +5183,7 @@ def _audit_filename(prefix) -> str:
     return f"{prefix}-{moment}-{secrets.token_hex(16)}.csv"
 
 
-def _write_csv_for_plan(plan, path, prefix, header, row_builder) -> dict:
-    if not isinstance(plan, MigrationPlan):
-        raise OSError("migration audit plan is malformed")
-    explicit_path = path is not None
-    if explicit_path:
-        path = _lexical_absolute(Path(path))
-        if (
-            path.parent != _lexical_absolute(Path(plan.dest_root))
-            or not _safe_component(path.name)
-        ):
-            raise OSError(
-                "migration audit file is outside the sealed destination")
+def _write_csv_for_plan(plan, prefix, header, rows) -> Path:
     binding = _open_root_receipt(
         plan.dest_root_receipt, create_missing=True)
     try:
@@ -5490,155 +5193,59 @@ def _write_csv_for_plan(plan, path, prefix, header, row_builder) -> dict:
         # If the preview safely created a missing destination root, everything
         # after this point binds the exact directory that now exists.
         plan.dest_root_receipt = _refresh_root_receipt(binding)
-        _resume_entries, entry_map = _validate_plan(plan, [])
-        context = _plan_context(plan)
-        context_seal = _canonical_digest(context)
-        rows = row_builder(context_seal, entry_map)
-        if not isinstance(rows, list):
-            raise OSError("migration audit rows are malformed")
-
-        attempts = 1 if explicit_path else 16
-        for attempt in range(attempts):
-            candidate_name = path.name if explicit_path else _audit_filename(prefix)
-            temporary_name = None
-            temporary_fd = None
-            published = False
-            try:
-                temporary_name, temporary_fd = _reserve_temporary_file(
-                    binding.root_fd)
-                with os.fdopen(
-                    os.dup(temporary_fd),
-                    "w",
-                    newline="",
-                    encoding="utf-8",
-                ) as file_handle:
-                    writer = csv.writer(file_handle)
-                    writer.writerow([
-                        _csv_safe_cell(value) for value in header
-                    ])
-                    for row in rows:
-                        writer.writerow([
-                            _csv_safe_cell(value) for value in row
-                        ])
-                    file_handle.flush()
-                    os.fsync(file_handle.fileno())
-                try:
-                    _rename_noreplace_at(
-                        binding.root_fd,
-                        temporary_name,
-                        binding.root_fd,
-                        candidate_name,
-                    )
-                except BaseException as exc:
-                    published = _named_entry_matches(
-                        binding.root_fd, candidate_name, temporary_fd)
-                    if _named_entry_matches(
-                            binding.root_fd, temporary_name, temporary_fd):
-                        _remove_exact_named_file(
-                            binding.root_fd, temporary_name, temporary_fd)
-                    if published:
-                        try:
-                            _fsync_directories(binding.root_fd)
-                        except OSError:
-                            pass
-                    if (
-                        not explicit_path
-                        and isinstance(exc, FileExistsError)
-                        and not published
-                        and attempt + 1 < attempts
-                    ):
-                        continue
-                    raise
-                published = True
-                if (
-                    not _named_entry_matches(
-                        binding.root_fd, candidate_name, temporary_fd)
-                    or not _named_entry_missing(
-                        binding.root_fd, temporary_name)
-                    or not binding.matches_public()
-                ):
-                    raise OSError(
-                        "migration audit-file publication was ambiguous")
-                _fsync_directories(binding.root_fd)
-                receipt = {
-                    "relative": [candidate_name],
-                    "parents": [],
-                    "file": _file_receipt(
-                        temporary_fd, _digest_fd(temporary_fd)),
-                }
-                if not _file_receipt_matches(
-                        temporary_fd, receipt["file"]):
-                    raise OSError(
-                        "migration audit file changed during publication")
-                return {
-                    "path": os.fspath(binding.path / candidate_name),
-                    "receipt": receipt,
-                    "context": context,
-                }
-            except BaseException:
-                if (
-                    temporary_fd is not None
-                    and not published
-                    and temporary_name is not None
-                    and _named_entry_matches(
-                        binding.root_fd, temporary_name, temporary_fd)
-                ):
-                    _remove_exact_named_file(
-                        binding.root_fd, temporary_name, temporary_fd)
-                raise
-            finally:
-                if temporary_fd is not None:
-                    try:
-                        os.close(temporary_fd)
-                    except OSError:
-                        pass
-        raise OSError("could not reserve a unique migration audit filename")
+        name = _audit_filename(prefix)
+        temporary_name, temporary_fd = _reserve_temporary_file(
+            binding.root_fd)
+        try:
+            with os.fdopen(
+                os.dup(temporary_fd),
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as file_handle:
+                writer = csv.writer(file_handle)
+                writer.writerow([_csv_safe_cell(value) for value in header])
+                for row in rows:
+                    writer.writerow([_csv_safe_cell(value) for value in row])
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            _rename_noreplace_at(
+                binding.root_fd, temporary_name, binding.root_fd, name)
+            _fsync_directories(binding.root_fd)
+        except BaseException:
+            if _named_entry_matches(
+                    binding.root_fd, temporary_name, temporary_fd):
+                _remove_exact_named_file(
+                    binding.root_fd, temporary_name, temporary_fd)
+            raise
+        finally:
+            os.close(temporary_fd)
+        return binding.path / name
     finally:
         binding.close()
 
 
-def _manifest_rows(plan, context_seal) -> list:
-    rows = [[
-        "context", "", "", "", "", "", "", context_seal,
-    ]]
-    for entry in plan.entries:
-        rows.append([
-            "entry",
-            entry.status,
-            entry.source_of_truth,
-            _csv_safe_cell(entry.source, path=True),
-            _csv_safe_cell(entry.dest_rel, path=True)
-            if entry.dest_rel is not None else "",
-            entry.reason,
-            _entry_seal(entry),
-            context_seal,
-        ])
-    return rows
-
-
-def write_manifest(plan: MigrationPlan, path: Optional[Path] = None) -> dict:
-    """Durably publish the full reviewed plan and return its exact receipt."""
+def write_manifest(plan: MigrationPlan) -> Path:
+    """Write the full reviewed plan beside the destination."""
     return _write_csv_for_plan(
         plan,
-        path,
         "migration-manifest",
+        ["status", "source_of_truth", "source", "destination", "reason"],
         [
-            "record", "status", "source_of_truth", "source",
-            "destination", "reason", "entry_seal", "context_seal",
+            [
+                entry.status,
+                entry.source_of_truth,
+                _csv_safe_cell(entry.source, path=True),
+                _csv_safe_cell(entry.dest_rel, path=True)
+                if entry.dest_rel is not None else "",
+                entry.reason,
+            ]
+            for entry in plan.entries
         ],
-        lambda context_seal, _entry_map: _manifest_rows(plan, context_seal),
     )
 
 
-def _result_entry_seal(entry_map, source, destination) -> str:
-    entry = entry_map.get(_plan_entry_key(source, destination))
-    return _entry_seal(entry) if entry is not None else ""
-
-
-def _results_rows(result, plan, context_seal, entry_map) -> list:
-    rows = [[
-        "context", "", "", "", "", "", "", "", context_seal,
-    ]]
+def _results_rows(result) -> list:
     companion_failures = sum(
         status == FAILED
         for _source, _destination, status, _reason
@@ -5666,7 +5273,7 @@ def _results_rows(result, plan, context_seal, entry_map) -> list:
         "recoveries": len(result.recoveries),
         "cleanup_failures": len(result.cleanup_failures),
     }
-    rows.append([
+    rows = [[
         "summary",
         state,
         "",
@@ -5679,9 +5286,7 @@ def _results_rows(result, plan, context_seal, entry_map) -> list:
         ),
         state,
         "",
-        _canonical_digest(summary),
-        context_seal,
-    ])
+    ]]
     for record, outcomes in (
         ("track", result.outcomes),
         ("companion", result.companion_outcomes),
@@ -5696,9 +5301,6 @@ def _results_rows(result, plan, context_seal, entry_map) -> list:
                 reason,
                 "",
                 "",
-                _result_entry_seal(entry_map, source, destination)
-                if record == "track" else "",
-                context_seal,
             ])
     for recovery in result.recoveries:
         rows.append([
@@ -5709,8 +5311,6 @@ def _results_rows(result, plan, context_seal, entry_map) -> list:
             recovery.get("reason", ""),
             recovery.get("state", ""),
             recovery.get("restart", ""),
-            _canonical_digest(recovery),
-            context_seal,
         ])
     for failure in result.cleanup_failures:
         rows.append([
@@ -5722,140 +5322,19 @@ def _results_rows(result, plan, context_seal, entry_map) -> list:
             failure.get("boundary", "migration teardown"),
             "Inspect the partial result and both migration roots before "
             "starting another migration.",
-            _canonical_digest(failure),
-            context_seal,
         ])
     return rows
 
 
-def write_results_manifest(
-    result: ExecResult,
-    path: Optional[Path] = None,
-    *,
-    plan: MigrationPlan,
-) -> dict:
-    """Durably publish every track, companion, and recovery outcome."""
-    if not isinstance(result, ExecResult):
-        raise OSError("migration result is malformed")
+def write_results_manifest(result: ExecResult, *, plan: MigrationPlan) -> Path:
+    """Write every track, companion, and recovery outcome beside the
+    destination."""
     return _write_csv_for_plan(
         plan,
-        path,
         "migration-results",
         [
             "record", "status", "source", "destination", "reason",
-            "state", "restart", "evidence_seal", "context_seal",
+            "state", "restart",
         ],
-        lambda context_seal, entry_map: _results_rows(
-            result, plan, context_seal, entry_map),
+        _results_rows(result),
     )
-
-
-def verify_audit_artifact(plan: MigrationPlan, artifact) -> bool:
-    """Verify an exact preview artifact authorises this selected sub-plan."""
-    binding = opened = None
-    try:
-        if not isinstance(artifact, dict):
-            return False
-        path = _lexical_absolute(Path(artifact["path"]))
-        receipt = artifact["receipt"]
-        context = artifact["context"]
-        if (
-            not isinstance(context, dict)
-            or path.parent != _lexical_absolute(plan.dest_root)
-            or not _safe_component(path.name)
-        ):
-            return False
-        _resume_entries, _entry_map = _validate_plan(
-            plan,
-            [entry for entry in plan.entries if _is_resume_collision(entry)],
-        )
-        _validate_file_receipt(receipt, expected_relative=[path.name])
-        if receipt["parents"]:
-            return False
-        if (
-            context.get("source_root") != _path_evidence(plan.source_root)
-            or context.get("destination_root")
-            != _path_evidence(plan.dest_root)
-            or context.get("source_root_receipt")
-            != plan.source_root_receipt
-            or context.get("destination_root_receipt")
-            != plan.dest_root_receipt
-            or context.get("destination_name_semantics")
-            != plan.destination_name_semantics
-        ):
-            return False
-        full_companions = context.get("companion_receipts")
-        if not isinstance(full_companions, list):
-            return False
-        full_companion_seals = set()
-        for companion in full_companions:
-            _validate_file_receipt(companion)
-            seal = _canonical_digest(companion)
-            if seal in full_companion_seals:
-                return False
-            full_companion_seals.add(seal)
-        if any(
-            _canonical_digest(companion) not in full_companion_seals
-            for companion in plan.companion_receipts
-        ):
-            return False
-
-        binding = _open_root_receipt(plan.dest_root_receipt)
-        opened = _open_file_receipt(binding, receipt)
-        with os.fdopen(
-            os.dup(opened.descriptor),
-            "r",
-            newline="",
-            encoding="utf-8",
-        ) as file_handle:
-            rows = list(csv.reader(file_handle))
-        if not opened.still_exact(receipt):
-            return False
-        expected_header = [
-            "record", "status", "source_of_truth", "source",
-            "destination", "reason", "entry_seal", "context_seal",
-        ]
-        if not rows or rows[0] != expected_header:
-            return False
-        data = rows[1:]
-        if (
-            not data
-            or len(data[0]) != len(expected_header)
-            or data[0][0] != "context"
-            or any(data[0][index] for index in range(1, 7))
-        ):
-            return False
-        context_seal = _canonical_digest(context)
-        if data[0][7] != context_seal:
-            return False
-        entry_counts = {}
-        for row in data[1:]:
-            if (
-                len(row) != len(expected_header)
-                or row[0] != "entry"
-                or row[7] != context_seal
-                or len(row[6]) != 64
-            ):
-                return False
-            entry_counts[row[6]] = entry_counts.get(row[6], 0) + 1
-        if any(count != 1 for count in entry_counts.values()):
-            return False
-        selected_seals = [_entry_seal(entry) for entry in plan.entries]
-        return (
-            len(set(selected_seals)) == len(selected_seals)
-            and all(entry_counts.get(seal) == 1 for seal in selected_seals)
-        )
-    except (
-        KeyError,
-        OSError,
-        TypeError,
-        UnicodeError,
-        ValueError,
-        csv.Error,
-    ):
-        return False
-    finally:
-        if opened is not None:
-            opened.close()
-        if binding is not None:
-            binding.close()

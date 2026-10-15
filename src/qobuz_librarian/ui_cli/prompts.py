@@ -33,7 +33,7 @@ _FETCH_LOG_MAX_BYTES = 5 * 1024 * 1024
 def _fetch_log_lock():
     """Exclusive cross-process lock for the fetch-log read-modify-write. Both web
     worker lanes and concurrent CLI runs call log_fetch on the same file; without
-    serialising the migrate/rotate/append sequence, a tmp.replace can discard an
+    serialising the rotate/append sequence, a tmp.replace can discard an
     entry another writer appended between its read and its replace, and two
     rotations can race. Returns an open fd to keep referenced (closing releases
     the lock), or None if the lock can't be taken (degrade to best-effort)."""
@@ -52,17 +52,6 @@ def log_fetch(entry):
     try:
         cfg.FETCH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         if cfg.FETCH_LOG_FILE.exists():
-            try:
-                with open(cfg.FETCH_LOG_FILE, "rb") as f:
-                    first = f.read(1)
-            except OSError:
-                first = b""
-            if first == b"[":
-                # If the legacy-array migration didn't complete, the file is
-                # still a JSON array - appending a JSONL line would leave a
-                # hybrid that can't be parsed and hides all history.
-                if not _migrate_fetch_log_to_jsonl():
-                    return
             _rotate_fetch_log_if_needed()
         with open(cfg.FETCH_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -88,84 +77,22 @@ def _rotate_fetch_log_if_needed():
         vlog(f"fetch-log rotate failed: {e}")
 
 
-def _migrate_fetch_log_to_jsonl():
-    """Rewrite a legacy JSON-array log as JSONL. Returns True when the file is
-    safe to append to afterwards (migrated, or it wasn't an array), False when
-    migration failed and the file is still a JSON array."""
-    try:
-        with open(cfg.FETCH_LOG_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            return True
-        tmp = cfg.FETCH_LOG_FILE.with_suffix(cfg.FETCH_LOG_FILE.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            for e in data:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        tmp.replace(cfg.FETCH_LOG_FILE)
-        return True
-    except Exception as e:
-        vlog(f"fetch-log migrate failed: {e}")
-        return False
-
-
 def _read_fetch_log(limit_tail=None):
-    """Return list of fetch entries; handles both JSONL (new) and
-    legacy JSON-array formats so reads keep working before migration.
+    """Return the logged fetch entries.
 
     If ``limit_tail`` is set, returns only the last N entries (oldest →
     newest). The dashboard reads with limit_tail=8 so the whole multi-MB
     JSONL doesn't get slurped on every page load."""
     if not cfg.FETCH_LOG_FILE.exists():
         return []
-    # Fast path for JSONL + tail-limit: stream from the end via
-    # deque(maxlen=N). Saves both memory and parse time on large logs.
-    if limit_tail is not None:
-        try:
-            with open(cfg.FETCH_LOG_FILE, "rb") as f:
-                first = f.read(1)
-        except OSError:
-            return []
-        if first != b"[":
-            from collections import deque
-            try:
-                with open(cfg.FETCH_LOG_FILE, encoding="utf-8") as f:
-                    last_lines = deque(f, maxlen=limit_tail)
-            except OSError:
-                return []
-            entries = []
-            for line in last_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(obj, dict):     # a non-dict line would break entry.get(...)
-                    entries.append(obj)
-            return entries
-        # legacy array format - fall through to full read (we never tail-
-        # optimised this path; once log_fetch migrates the file, it's a
-        # one-time cost).
+    from collections import deque
     try:
         with open(cfg.FETCH_LOG_FILE, encoding="utf-8") as f:
-            content = f.read()
+            lines = deque(f, maxlen=limit_tail)
     except OSError:
         return []
-    s = content.lstrip()
-    if not s:
-        return []
-    if s.startswith("["):
-        try:
-            data = json.loads(content)
-            if isinstance(data, list):
-                rows = [d for d in data if isinstance(d, dict)]
-                return rows[-limit_tail:] if limit_tail else rows
-            return []
-        except json.JSONDecodeError:
-            return []
     entries = []
-    for line in content.splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -175,7 +102,7 @@ def _read_fetch_log(limit_tail=None):
             # Skip the partial/malformed line, keep going. JSONL's whole
             # appeal is that one bad line doesn't kill the rest.
             continue
-        if isinstance(obj, dict):
+        if isinstance(obj, dict):     # a non-dict line would break entry.get(...)
             entries.append(obj)
     return entries
 
@@ -183,10 +110,7 @@ def _read_fetch_log(limit_tail=None):
 def show_recent_fetches(limit=10):
     """Print the last N entries from FETCH_LOG_FILE. Used by '?' in album-mode
     interactive query - useful on mobile when the user can't recall what they
-    last grabbed.
-
-    Reads via _read_fetch_log so both JSONL (new) and legacy JSON-array
-    logs render the same. Pre-migration users see their history unchanged."""
+    last grabbed."""
     if not cfg.FETCH_LOG_FILE.exists():
         log.info(fmt(C.GRAY, "  No downloads yet."))
         return

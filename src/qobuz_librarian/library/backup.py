@@ -1539,13 +1539,6 @@ class _CopyPublication:
             and _named_entry_matches(parent_fd, name, descriptor)
         )
 
-    def named_locations(self):
-        return [
-            (parent_fd, name)
-            for parent_fd, name in self._locations
-            if self.matches(parent_fd, name)
-        ]
-
     def intact(self) -> bool:
         return (
             self.descriptor is not None
@@ -2598,24 +2591,6 @@ def _copy_tree_manifest_at(source_root_fd, destination_root_fd, manifest,
         return False
 
 
-def _tree_stats(d: Path):
-    """(file_count, total_bytes) for tree d, or None on any stat/walk error."""
-    n_files = 0
-    n_bytes = 0
-    entries = _list_tree(d)
-    if entries is None:
-        return None
-    try:
-        for f in entries:
-            info = f.stat()
-            if stat.S_ISREG(info.st_mode):
-                n_files += 1
-                n_bytes += info.st_size
-    except OSError:
-        return None
-    return (n_files, n_bytes)
-
-
 def _file_digest(path: Path) -> str:
     """sha256 hex of a file's bytes, read in chunks so a large FLAC isn't loaded
     into memory all at once."""
@@ -2643,46 +2618,6 @@ def _fsync(path: Path) -> bool:
         return True
     except OSError:
         return False
-
-
-def _tree_digest(d: Path):
-    """{relative-path: (size, sha256)} for every regular file under tree d, or
-    None on any stat/read error, an unexpected special file, or a symlink
-    whose target points outside the tree. Content-verifies a cross-filesystem
-    copy before the source is deleted: a same-size copy that differs by even
-    one byte - a transfer glitch, a partial write that got re-padded - fails
-    the match, so it can't pass as a valid backup and let the original be
-    removed.
-    """
-    out = {}
-    entries = _list_tree(d)
-    if entries is None:
-        return None
-    try:
-        base = d.resolve()
-        for f in entries:
-            rel = str(f.relative_to(d))
-            if f.is_symlink():
-                target = os.readlink(str(f))
-                resolved = (Path(target) if os.path.isabs(target)
-                            else f.parent / target).resolve()
-                try:
-                    resolved.relative_to(base)
-                except ValueError:
-                    return None  # target escapes the tree - can't verify its bytes
-                out[rel] = ("symlink", target)
-                continue
-            if f.is_dir():
-                continue
-            if not f.is_file():
-                return None  # socket/fifo/device - refuse rather than guess
-            try:
-                out[rel] = (f.stat().st_size, _file_digest(f))
-            except OSError:
-                return None
-    except OSError:
-        return None
-    return out
 
 
 # A backup records the folder it was taken from, so a sweep can tell a backup
@@ -6401,11 +6336,6 @@ def list_retained_backups():
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
                 if not entry.is_dir():
                     continue
-                # A genuine mid-copy '.partial' (sidecar not yet written) isn't a
-                # real backup; a committed backup whose album name merely ends in
-                # '.partial' DOES carry the origin sidecar and must still surface.
-                if entry.name.endswith(".partial") and not (entry / _ORIGIN_SIDECAR).is_file():
-                    continue
                 # A deliberate undo copy (downsample originals): its origin
                 # holds the smaller rewrite on purpose, so it always looks
                 # "not redundant" here - but it isn't orphaned, and the
@@ -7183,20 +7113,11 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     )
 
         held_source = _held_directory_path(source_fd)
-        src_stats = _tree_stats(held_source)
-        if src_stats is None:
-            log.info(fmt(
-                C.RED,
-                f"  ✗  Couldn't stat source tree at {public}; refusing to "
-                "back up."))
-            return None
-        n_files, total_bytes = src_stats
-        src_digest = _tree_digest(held_source)
-        if (
-            src_digest is None
-            or not _held_snapshot_files_intact(
-                source_fd, source_snapshot, held_source_files)
-        ):
+        n_files = len(source_snapshot["files"])
+        total_bytes = sum(
+            value["size"] for value in source_snapshot["files"].values())
+        if not _held_snapshot_files_intact(
+                source_fd, source_snapshot, held_source_files):
             log.info(fmt(
                 C.RED,
                 f"  ✗  Couldn't read source tree at {public} (unreadable or "
@@ -7217,7 +7138,6 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             )
             partial_fd = _open_backup_directory(
                 partial_name, dir_fd=backup_root_fd)
-            held_partial = _held_directory_path(partial_fd)
             copied_identity = _exact_tree_snapshot(partial_fd, digests=False)
             if copied_identity is None:
                 raise OSError("backup copy could not be snapshotted")
@@ -7229,9 +7149,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             )
             copied_fidelity = _tree_fidelity_snapshot(partial_fd)
             if (
-                _tree_digest(held_partial) != src_digest
-                or _tree_digest(held_source) != src_digest
-                or _tree_fidelity_snapshot(source_fd) != source_fidelity
+                _tree_fidelity_snapshot(source_fd) != source_fidelity
                 or not _tree_copy_fidelity_matches(
                     source_fidelity, copied_fidelity)
                 or not _held_snapshot_files_intact(
@@ -7287,7 +7205,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 committed_fd is not None
                 and _backup_source_is_public(
                     music_root, source_parts, source_fds)
-                and _tree_digest(held_source) == src_digest
+                and _tree_fidelity_snapshot(source_fd) == source_fidelity
             ):
                 _remove_exact_tree_at(
                     backup_root_fd,
@@ -7319,7 +7237,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     current_source_receipt)
                 and _source_root_is_bound(
                     source_fd, current_source_receipt)
-                and _tree_digest(held_source) == src_digest
+                and _tree_fidelity_snapshot(source_fd) == source_fidelity
             )
             discarded = False
             if committed_fd is not None and source_unchanged:
@@ -7333,7 +7251,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 return _upgrade_recovery_carrier(
                     bp,
                     committed_fd,
-                    requested=len(src_digest),
+                    requested=len(source_snapshot["files"]),
                 )
             return None
 
@@ -7369,7 +7287,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             return _upgrade_recovery_carrier(
                 bp,
                 committed_fd,
-                requested=len(src_digest),
+                requested=len(source_snapshot["files"]),
             )
 
         if not _write_backup_origin_durable(committed_fd, public):
@@ -7381,7 +7299,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     current_source_receipt)
                 and _source_root_is_bound(
                     source_fd, current_source_receipt)
-                and _tree_digest(held_source) == src_digest
+                and _tree_fidelity_snapshot(source_fd) == source_fidelity
             )
             discarded = source_unchanged and _remove_exact_tree_at(
                 backup_root_fd,
@@ -7402,7 +7320,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             return _upgrade_recovery_carrier(
                 bp,
                 committed_fd,
-                requested=len(src_digest),
+                requested=len(source_snapshot["files"]),
             )
 
         result = _seal_backup_result(
@@ -7411,8 +7329,8 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             public,
             kind="upgrade",
             complete=False,
-            requested=len(src_digest),
-            backed_up=len(src_digest),
+            requested=len(source_snapshot["files"]),
+            backed_up=len(source_snapshot["files"]),
             source_receipt=current_source_receipt,
             owner=owner,
         )
@@ -7425,7 +7343,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     current_source_receipt)
                 and _source_root_is_bound(
                     source_fd, current_source_receipt)
-                and _tree_digest(held_source) == src_digest
+                and _tree_fidelity_snapshot(source_fd) == source_fidelity
             )
             discarded = source_unchanged and _remove_exact_tree_at(
                 backup_root_fd,
@@ -7446,8 +7364,8 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             return _upgrade_recovery_carrier(
                 bp,
                 committed_fd,
-                requested=len(src_digest),
-                backed_up=len(src_digest),
+                requested=len(source_snapshot["files"]),
+                backed_up=len(source_snapshot["files"]),
             )
 
         def _retained_incomplete_result():
@@ -7504,7 +7422,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             )
             or not _source_root_is_bound(
                 source_fd, current_source_receipt)
-            or _tree_digest(held_source) != src_digest
+            or _tree_fidelity_snapshot(source_fd) != source_fidelity
             or _read_backup_receipt(committed_fd) != result.receipt
             or not _held_snapshot_files_intact(
                 committed_fd, committed_snapshot, held_committed_files)
@@ -8307,17 +8225,15 @@ def downsample_outputs_in_place(backup) -> bool:
     )
 
 
-def stash_downsample_originals(files, album_dir, *, include_identity_receipts=False):
+def stash_downsample_originals(files, album_dir):
     """Copy the hi-res originals about to be rewritten in place into a
     timestamped backup, so the downsample can be undone until the retention
     sweep clears it. Returns
-    ``(backup_result_or_None, set_of_files_copied)``.
-
-    With ``include_identity_receipts=True``, returns a third mapping from each
-    copied source path to the exact regular-file identity, size, modification
-    and change times, and digest verified across its durable copy. The caller
-    can bind that receipt immediately before rewriting and refuse a replaced or
-    subsequently changed source. The default keeps the existing two-value API.
+    ``(backup_result_or_None, set_of_files_copied, receipts)``, where
+    ``receipts`` maps each copied source path to the exact regular-file
+    identity, size, modification and change times, and digest verified
+    across its durable copy. The caller can bind that receipt immediately
+    before rewriting and refuse a replaced or subsequently changed source.
 
     Copies, never moves - the originals stay put for the rewrite itself. The
     caller must leave any file NOT in the returned set untouched: the whole
@@ -8325,21 +8241,16 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
     a failed copy downgrades that file to "skipped", never to "unprotected".
     Each copy is content-verified (sha256) before it counts, because the undo
     path later trusts these bytes with an overwrite."""
-    def _result(path, copied, receipts):
-        if include_identity_receipts:
-            return path, copied, receipts
-        return path, copied
-
     files = [Path(f) for f in files]
     if not files:
-        return _result(None, set(), {})
+        return None, set(), {}
     opened = _open_backup_source(Path(album_dir))
     if opened is None:
         log.info(fmt(
             C.YELLOW,
             "  ⚠  Couldn't bind the album's real no-follow path; leaving "
             "every file untouched."))
-        return _result(None, set(), {})
+        return None, set(), {}
     public, music_root, album_parts, album_fds = opened
     album_fd = album_fds[-1]
     backup_root_fd = None
@@ -8413,7 +8324,7 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
                     backup_fd,
                     prefix="ql-downsample-empty",
                 )
-            return _result(None, set(), {})
+            return None, set(), {}
 
         for source_path in files:
             rooted = _rooted_path_parts(public, source_path)
@@ -8564,7 +8475,7 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
                     backup_fd,
                     prefix="ql-downsample-empty",
                 )
-            return _result(None, set(), {})
+            return None, set(), {}
         if (
             not retained_unbound_copy
             and _named_entry_missing(
@@ -8596,7 +8507,7 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
                 "  ⚠  A source changed while its kept copy was made. "
                 f"The recovery copy remains at {bp}; no source will be "
                 "rewritten or age-reaped automatically."))
-            return _result(result, set(), {})
+            return result, set(), {}
         result = _seal_backup_result(
             bp,
             backup_fd,
@@ -8611,15 +8522,15 @@ def stash_downsample_originals(files, album_dir, *, include_identity_receipts=Fa
                 C.YELLOW,
                 "  ⚠  The kept originals could not be verified. They remain "
                 f"at {bp}, and no original will be rewritten."))
-            return _result(result, set(), {})
+            return result, set(), {}
         if not _held_copies_match_receipt(result):
             log.info(fmt(
                 C.YELLOW,
                 "  ⚠  A kept-original copy changed before its exact receipt "
                 f"was bound. Recovery data remains at {bp}, but no source "
                 "will be rewritten."))
-            return _result(result, set(), {})
-        return _result(result, copied, receipts)
+            return result, set(), {}
+        return result, copied, receipts
     except BaseException:
         # Cancellation after a copy publication must not leave an unreceipted
         # recovery directory.  Seal whatever exact tree remains as incomplete;
@@ -11141,27 +11052,6 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
             # A full carrier adopted from a hard-killed disposal must survive
             # this sweep.  Its ordinary age policy can be reconsidered on the
             # next run, after recovery is independently visible to the user.
-            continue
-        if entry.name.endswith(".partial") and not (entry / _ORIGIN_SIDECAR).is_file():
-            # Stranded mid-copy dir from a hard kill during a cross-fs backup.
-            # A committed backup ALWAYS writes the origin sidecar (even one
-            # whose album name itself ends in '.partial'), so its absence
-            # marks a never-finished copy.
-            try:
-                stale = (time.time() - entry.stat().st_mtime) > 3600
-            except OSError:
-                stale = True
-            if stale:
-                candidate = load_backup_result(entry)
-                if (
-                    candidate is not None
-                    and _dispose_retention_candidate(candidate)
-                ):
-                    n_removed += 1
-                else:
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  Keeping unfinished backup {entry.name!r}: "
-                        "it has no exact app-owned disposal receipt."))
             continue
         m = re.match(r"^(\d{8}_\d{6})_", entry.name)
         if not m:

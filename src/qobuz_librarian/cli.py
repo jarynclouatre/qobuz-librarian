@@ -504,22 +504,6 @@ def acquire_run_lock():
     if lease is not None and lease.intact() is True:
         try:
             result = _record_startup_recovery(lease)
-            from qobuz_librarian.library import generation_state
-
-            publication_recovery = (
-                generation_state.reconcile_interrupted_library_publication(
-                    lease
-                )
-            )
-            if publication_recovery is None:
-                raise RuntimeError(
-                    "interrupted Library publication state could not be saved"
-                )
-            if publication_recovery:
-                log.warning(
-                    "Recovered a Library scan that stopped before its review "
-                    "was saved."
-                )
         except Exception as exc:
             try:
                 lease.close()
@@ -1456,7 +1440,7 @@ def main():
         raise SystemExit(run_album_mode(args, catalogue_token()))
 
     # Crash-recovery: if a previous queueing run died with decisions still in
-    # memory, we'd have left .qobuz_pending_queue.json on disk.
+    # memory, its queue journal is still on disk.
     if not resume_saved_queue:
         offer_resume_pending_queue(args, download_token)
 

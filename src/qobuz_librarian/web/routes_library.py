@@ -238,7 +238,7 @@ def _interrupted_download_note():
 def _library_header_context():
     """What the Library header and the failure notice under it read, for the
     page and for the header's poll alike."""
-    library_generation = scans._truthful_library_generation()
+    library_generation = generation_state.load()
     return {
         "qobuz_ready": qobuz_access._qobuz_ready(),
         "library_scan_state": scans._library_scan_state(),

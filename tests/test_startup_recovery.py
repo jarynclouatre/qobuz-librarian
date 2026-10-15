@@ -98,7 +98,6 @@ def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
     owned.write_bytes(b"owned original")
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
-    monkeypatch.setattr(cfg, "PENDING_QUEUE_FILE", tmp_path / "pending.json")
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
     monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
@@ -410,7 +409,6 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
     monkeypatch,
 ):
     journals_dir = tmp_path / "queue-journals"
-    monkeypatch.setattr(cfg, "PENDING_QUEUE_FILE", tmp_path / "pending.json")
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", journals_dir)
     monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
     monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
@@ -585,6 +583,7 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
         saved,
         item_id=retirement_id,
         live_evidence=evidence[retirement_id],
+        post_import_action=None,
     )
 
     saved = make_resolving(saved, complete_id)

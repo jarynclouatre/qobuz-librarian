@@ -255,9 +255,6 @@ def test_staging_park_rolls_back_a_move_interrupted_before_receipt(
     assert inspection.status == "incomplete"
     assert len(inspection.planned_trees) == 2
     assert sum(tree is not None for tree in inspection.current_trees) == 1
-    from qobuz_librarian.integrations.rip import cleanup_staging_residue
-
-    assert cleanup_staging_residue() == 0
     monkeypatch.setattr(staging_tx, "_rollback_parked", real_rollback)
 
 

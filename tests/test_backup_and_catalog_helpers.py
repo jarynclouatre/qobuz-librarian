@@ -1343,7 +1343,7 @@ def test_downsample_stash_marks_the_undo_window_that_release_requires(
     f1.write_bytes(b"HIRES-1")
     f2 = album / "CD1" / "02.flac"
     f2.write_bytes(b"HIRES-2")
-    bp, copied = bk.stash_downsample_originals([f1, f2], album)
+    bp, copied, _receipts = bk.stash_downsample_originals([f1, f2], album)
     assert copied == {f1, f2}
     assert (bp / "01.flac").read_bytes() == b"HIRES-1"
     assert (bp / "CD1" / "02.flac").read_bytes() == b"HIRES-2"

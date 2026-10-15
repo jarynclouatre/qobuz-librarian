@@ -707,24 +707,6 @@ class Job:
                     return changed
         return False
 
-    def set_all_selected(self, on: bool, cids=None) -> Optional[int]:
-        """Set selected across every candidate, or just those in ``cids`` (a
-        single page). Returns None once the job has left review, otherwise how
-        many rows changed.
-        """
-        want = set(cids) if cids is not None else None
-        n = 0
-        with self._review_action_lock, self._lock:
-            if self.status != JobStatus.AWAITING_REVIEW:
-                return None
-            for c in self.candidates:
-                if want is not None and c.get("cid") not in want:
-                    continue
-                if bool(c.get("selected")) != bool(on):
-                    c["selected"] = bool(on)
-                    n += 1
-        return n
-
     def selection_counts(self) -> dict:
         """Authoritative review tallies for the UI, computed server-side so a
         paginated page (which holds only some checkboxes) still shows the true
@@ -2288,37 +2270,10 @@ def restore_jobs(
             # safety obligation.
             status = JobStatus.FAILED
             unknown_recovery_status = True
-        job = Job(
-            id=row["id"],
-            title=row.get("title") or "",
-            artist=row.get("artist") or "",
-            album_id=row.get("album_id") or "",
-            edition=row.get("edition") or "",
-            kind=row.get("kind") or "download",
-            status=status,
-            phase=row.get("phase") or "",
-            candidates=row.get("candidates") or [],
-            error=row.get("error"),
-            summary=row.get("summary") or "",
+        if row.get("execute_kind") == "upgrade":
             # Earlier versions saved Upgrade retry reviews with the download verb.
-            review_verb=("Upgrade" if row.get("execute_kind") == "upgrade"
-                         else row.get("review_verb") or "Download"),
-            execute_kind=row.get("execute_kind") or "",
-            execute_args=row.get("execute_args") or {},
-            execute_args_unreadable=bool(row.get("execute_args_unreadable")),
-            single=row.get("single") or {},
-            attention=row.get("attention") or "",
-            quality_shortfall=row.get("quality_shortfall") or {},
-            tracks_missing=row.get("tracks_missing") or 0,
-            recoveries=row.get("recoveries") or [],
-            log_lines=list(row.get("log_lines") or []),
-            created_at=(
-                row.get("created_at")
-                if type(row.get("created_at")) in (int, float)
-                else time.time()
-            ),
-            finished_at=row.get("finished_at"),
-        )
+            row["review_verb"] = "Upgrade"
+        job = _job_from_row(row, status)
         job._durability_required = True
         if status not in TERMINAL:
             _restore_log_lines(job)
@@ -2327,9 +2282,6 @@ def restore_jobs(
             and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
             and bool(job.candidates or row.get("candidates_unreadable"))
         )
-        if row.get("single_unreadable"):
-            job._preserve_persisted_single = True
-            job._single_undo_unavailable = True
         if (status == JobStatus.RUNNING
                 and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
                 and job.finished_at is None
@@ -2651,6 +2603,11 @@ def load_historical_job(job_id: str) -> Optional[Job]:
             "could not be read. Start the scan again from its original page."
         )
         row["finished_at"] = row.get("finished_at") or time.time()
+    return _job_from_row(row, status)
+
+
+def _job_from_row(row: dict, status: JobStatus) -> Job:
+    """A Job rebuilt from one saved row."""
     job = Job(
         id=row["id"],
         title=row.get("title") or "",

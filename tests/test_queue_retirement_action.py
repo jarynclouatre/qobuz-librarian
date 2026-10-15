@@ -173,7 +173,6 @@ def queue_paths(tmp_path, monkeypatch):
     (source / "01 Test.flac").write_bytes(b"audio")
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "STAGING_DIR", staging)
-    monkeypatch.setattr(cfg, "PENDING_QUEUE_FILE", tmp_path / "pending.json")
     monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
     return tmp_path, music, source, destination, staging
 

@@ -82,8 +82,6 @@ CHECKPOINT_INTERVAL_SECONDS = 5.0
 # to the user, so map them to plain phrases (a raw "write-error" or a
 # "{'cached-synced': 4}" dict in the activity log reads like debug output).
 _OUTCOME_LABELS = {
-    "synced": "added synced lyrics", "plain": "added lyrics",
-    "fetched": "added lyrics",
     "wrote-synced": "added synced lyrics", "wrote-plain": "added lyrics",
     "dry:wrote-synced": "would add synced lyrics",
     "dry:wrote-plain": "would add lyrics",
@@ -93,16 +91,13 @@ _OUTCOME_LABELS = {
     "dry:copied-plain": "would copy its lyrics to the other format",
     "already-synced": "already had synced lyrics",
     "already-plain": "already had lyrics",
-    "cached-synced": "already had synced lyrics",
-    "cached-plain": "already had lyrics",
     "kept-existing-plain": "kept existing lyrics",
-    "not_found": "no lyrics found", "not-found": "no lyrics found",
-    "none": "no lyrics found",
+    "not-found": "no lyrics found",
     "providers-unavailable": "lyric providers unavailable",
     "write-error": "couldn't write lyrics",
     "unsafe-path": "refused an unsafe track path",
     "error": "error", "exception": "error",
-    "skipped": "skipped", "skipped-long": "skipped (too long)",
+    "skipped-long": "skipped (too long)",
     "skipped-tags": "skipped (missing tags)",
     "skipped-instrumental": "skipped (instrumental)",
 }
@@ -206,7 +201,7 @@ def _is_provider_dead(prov: str, log: Optional[logging.Logger] = None) -> bool:
         return True
 
 # Locks for concurrent execution. _state_lock guards the shared state dict
-# during save_state (iter races with mutation). _breaker_lock guards the
+# during a state save (iter races with mutation). _breaker_lock guards the
 # circuit-breaker counters/sets that all worker threads share.
 _state_lock = threading.Lock()
 _breaker_lock = threading.Lock()
@@ -431,11 +426,6 @@ def _write_state_unlocked(state: dict[str, TrackState], path: Path) -> None:
         path, {k: v.__dict__ for k, v in state.items()},
         indent=0, separators=(",", ":"),
     )
-
-
-def save_state(state: dict[str, TrackState], path: Path = DEFAULT_STATE_FILE) -> None:
-    with _state_file_lock(path):
-        _write_state_unlocked(state, path)
 
 
 def update_state(mutator, path: Path = DEFAULT_STATE_FILE) -> None:
@@ -723,18 +713,6 @@ class _BoundTrack:
             )
         except OSError:
             return False
-
-    def open_named_track(self, expected):
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if nofollow is None or not self.chain_is_named():
-            raise OSError(f"{self.path}: track directory changed")
-        flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        descriptor = os.open(self.name, flags, dir_fd=self.parent_fd)
-        if not self.exact_track_is_named(descriptor, expected):
-            os.close(descriptor)
-            raise OSError(f"{self.path}: replacement identity changed")
-        return descriptor
 
     def close(self) -> None:
         if self.track_fd is not None:
@@ -1385,36 +1363,6 @@ def write_lyrics(f, content: str, *, path=None, **save_kwargs) -> None:
         f, Path(f.filename) if path is None else Path(path), **save_kwargs)
 
 
-def _open_up_private_sidecar(parent_fd, path) -> None:
-    """Give an owner-only sidecar the track's read access.
-
-    Earlier versions wrote every .lrc as 0600, which a media server running
-    as another user cannot read.
-    """
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None or parent_fd is None:
-        return
-    try:
-        track = os.stat(Path(path).name, dir_fd=parent_fd,
-                        follow_symlinks=False)
-        descriptor = os.open(Path(path).with_suffix(".lrc").name,
-                             os.O_RDONLY | nofollow | os.O_NONBLOCK,
-                             dir_fd=parent_fd)
-    except OSError:
-        return
-    try:
-        sidecar = os.fstat(descriptor)
-        if (stat.S_ISREG(sidecar.st_mode)
-                and stat.S_IMODE(sidecar.st_mode) == 0o600
-                and stat.S_IMODE(track.st_mode) & 0o044
-                and sidecar.st_uid == os.geteuid()):
-            os.fchmod(descriptor, stat.S_IMODE(track.st_mode) & 0o666)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
 def _new_file_mode(parent_fd: int, track_name: str) -> int:
     """Permissions for a new sidecar: the track's, else what the umask allows."""
     try:
@@ -1436,14 +1384,11 @@ def _new_file_mode(parent_fd: int, track_name: str) -> int:
 def write_sidecar(
         path: Path, content: str, *, creation_out=None,
         directory_mutation_out=None, parent_fd=None,
-        parent_guard=None, track_guard=None, sidecar_identity_out=None,
-        replaces=None) -> bool:
+        parent_guard=None, track_guard=None, sidecar_identity_out=None) -> bool:
     """Write lyrics to a .lrc file next to the track (UTF-8).
 
     A non-empty .lrc already there is replaced only when it is plain and the
-    new content is synced. ``replaces``, when given, is instead the only
-    non-blank text an existing sidecar may hold for it to be replaced.
-    Return True when a sidecar was written and False when the existing file
+    new content is synced. Return True when a sidecar was written and False when the existing file
     was kept."""
     path = Path(path)
     target = path.with_suffix(".lrc")
@@ -1490,8 +1435,7 @@ def write_sidecar(
                 chunks.append(chunk)
             old = b"".join(chunks).decode("utf-8", errors="replace")
             if old.strip() and (
-                old != replaces if replaces is not None
-                else classify(old) != "plain" or classify(content) != "synced"
+                classify(old) != "plain" or classify(content) != "synced"
             ):
                 if (
                     not _guard_passes(track_guard)
@@ -1656,29 +1600,11 @@ def write_sidecar(
         os.close(owned_parent_fd)
 
 
-def _put_back_sidecar(path: Path, binding, written: str,
-                      before: Optional[str]) -> bool:
-    try:
-        if before is None:
-            return _remove_written_sidecar(path, binding, written)
-        return write_sidecar(
-            path,
-            before,
-            parent_fd=binding.parent_fd,
-            parent_guard=binding.chain_is_named,
-            track_guard=binding.exact_track_is_named,
-            replaces=written)
-    except OSError:
-        return False
-
-
-def write_output(
-        path: Path, f, content: str, fmt: str, *, binding, sidecar_before=None):
+def write_output(path: Path, f, content: str, fmt: str, *, binding):
     """Persist lyrics per fmt: 'embed' (FLAC tag), 'sidecar' (.lrc), 'both'.
 
     The sidecar is written first, and one it keeps raises before the tag
-    changes. When the tag write then fails, the sidecar goes back to
-    ``sidecar_before``, or away when there was none."""
+    changes. A tag write that then fails leaves the new sidecar in place."""
     fmt = _normalise_lyrics_format(fmt)
     if not binding.exact_track_is_named():
         raise OSError(f"{path.name}: track changed before lyric write")
@@ -1694,18 +1620,10 @@ def write_output(
     if fmt == "sidecar":
         return binding.identity
     change = {}
-    try:
-        write_lyrics(
-            f, content, path=path, identity_change_out=change,
-            parent_fd=binding.parent_fd, parent_guard=binding.chain_is_named,
-            expected_identity=binding.identity)
-    except Exception as e:
-        if fmt != "embed" and not _put_back_sidecar(
-                path, binding, content, sidecar_before):
-            raise OSError(
-                f"{e}; {path.with_suffix('.lrc').name} keeps the new lyrics"
-            ) from e
-        raise
+    write_lyrics(
+        f, content, path=path, identity_change_out=change,
+        parent_fd=binding.parent_fd, parent_guard=binding.chain_is_named,
+        expected_identity=binding.identity)
     if (
         change.get("path") != os.path.abspath(os.fspath(path))
         or change.get("before") != binding.identity
@@ -2410,7 +2328,6 @@ def should_process(
     *,
     mtime: Optional[float] = None,
     size: Optional[int] = None,
-    skip_existing_plain: bool = False,
     lyrics_format: str = "embed",
 ) -> bool:
     """
@@ -2428,8 +2345,7 @@ def should_process(
             return False
     if int(mtime) != int(st.mtime) or size != st.size:
         return True
-    if st.status == "plain" and not skip_existing_plain and (
-            st.source == "indexed" or _due(st)):
+    if st.status == "plain" and (st.source == "indexed" or _due(st)):
         # Plain lyrics are looked up again for synced ones, as soon as the
         # library index finds them and then like a track with none.
         return True
@@ -2456,41 +2372,11 @@ def _commit(state: dict[str, TrackState], key: str, st: TrackState) -> None:
         state[key] = st
 
 
-def _remove_written_sidecar(path: Path, binding: _BoundTrack, expected: str) -> bool:
-    """Delete the .lrc beside a held track while it still holds ``expected``."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        return False
-    name = path.with_suffix(".lrc").name
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(name, flags, dir_fd=binding.parent_fd)
-    try:
-        identity = _regular_identity(os.fstat(descriptor))
-        chunks = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        content = b"".join(chunks).decode("utf-8", errors="replace")
-        removed = (
-            identity is not None
-            and content == expected
-            and binding.exact_track_is_named()
-            and _unlink_held_name(
-                binding.parent_fd, name, descriptor, identity)
-        )
-        if removed:
-            _note_write(path.with_suffix(".lrc"), identity, None)
-        return removed
-    finally:
-        os.close(descriptor)
-
-
 def process_file(
     path: Path, state: dict[str, TrackState],
     providers: list[str], dry_run: bool, log: logging.Logger,
     owned_root: Path,
     synced_only: bool = False,
-    skip_existing_plain: bool = False,
     lyrics_format: str = "embed",
     rescan: bool = False,
     run: Optional[_Pass] = None,
@@ -2517,7 +2403,6 @@ def process_file(
             log,
             binding,
             synced_only=synced_only,
-            skip_existing_plain=skip_existing_plain,
             lyrics_format=lyrics_format,
             rescan=rescan,
             run=run,
@@ -2529,7 +2414,6 @@ def _process_bound_file(
     providers: list[str], dry_run: bool, log: logging.Logger,
     binding: _BoundTrack,
     synced_only: bool = False,
-    skip_existing_plain: bool = False,
     lyrics_format: str = "embed",
     rescan: bool = False,
     run: Optional[_Pass] = None,
@@ -2591,8 +2475,6 @@ def _process_bound_file(
         binding.chain_is_named,
         track_guard,
     )
-    if sidecar is not None and not dry_run:
-        _open_up_private_sidecar(binding.parent_fd, path)
     if not track_guard():
         log.warning("track changed during lyric discovery: %s", path)
         st.status = "transient"
@@ -2613,7 +2495,7 @@ def _process_bound_file(
 
     lyrics, source, kind = existing, "existing-representation", existing_kind
     if existing_kind == "synced" or (
-            existing_kind == "plain" and (skip_existing_plain or plain_waits)):
+            existing_kind == "plain" and plain_waits):
         if not fill(kind):
             st.status = kind
             commit(state, key, st)
@@ -2674,8 +2556,7 @@ def _process_bound_file(
 
     try:
         final_identity = write_output(
-            path, f, lyrics, write_format, binding=binding,
-            sidecar_before=sidecar)
+            path, f, lyrics, write_format, binding=binding)
     except Exception as e:
         log.error("write failed: %s - %s", path, e)
         if binding.exact_track_is_named():
@@ -2706,10 +2587,54 @@ def _process_bound_file(
     return action
 
 
+def _drain(items, worker, on_result, *, workers, should_stop,
+           thread_name_prefix, log):
+    """Run ``worker`` over ``items`` on a thread pool and hand each result to
+    ``on_result`` as it lands. Returns True when ``should_stop`` ended the run
+    before every item was submitted."""
+    stopped = False
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix=thread_name_prefix) as ex:
+        remaining = iter(items)
+        futures = {}
+
+        def submit_available():
+            nonlocal stopped
+            while not stopped and len(futures) < workers:
+                if should_stop and should_stop():
+                    stopped = True
+                    return
+                try:
+                    item = next(remaining)
+                except StopIteration:
+                    return
+                futures[ex.submit(worker, item)] = item
+
+        submit_available()
+        try:
+            while futures:
+                done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    item = futures.pop(fut)
+                    try:
+                        outcome = fut.result()
+                    except Exception as e:
+                        log.exception("worker raised on %s: %s", item, e)
+                        outcome = "exception"
+                    on_result(item, outcome)
+                if not stopped and should_stop and should_stop():
+                    stopped = True
+                submit_available()
+        except KeyboardInterrupt:
+            for f in futures:
+                f.cancel()
+            raise
+    return stopped
+
+
 def fetch_for_paths(
     paths: Iterable[Path],
     providers: Optional[list[str]] = None,
-    delay: float = 0.0,
     state_path: Path = DEFAULT_STATE_FILE,
     dry_run: bool = False,
     rescan: bool = False,
@@ -2717,7 +2642,6 @@ def fetch_for_paths(
     should_stop: Optional[Callable[[], bool]] = None,
     workers: int = 8,
     synced_only: bool = False,
-    skip_existing_plain: bool = False,
     lyrics_format: str = "embed",
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     *,
@@ -2758,7 +2682,6 @@ def fetch_for_paths(
     state = _StateWriter(state_path, log, dry_run=dry_run)
     candidates = [p for p in paths
                   if should_process(p, state.get(str(p)), rescan,
-                                    skip_existing_plain=skip_existing_plain,
                                     lyrics_format=lyrics_format)]
 
     counts: Counter = Counter()
@@ -2777,7 +2700,6 @@ def fetch_for_paths(
                 fp, state, providers, dry_run, log,
                 owned_root,
                 synced_only=synced_only,
-                skip_existing_plain=skip_existing_plain,
                 lyrics_format=lyrics_format,
                 rescan=rescan,
                 run=run,
@@ -2787,82 +2709,32 @@ def fetch_for_paths(
         except Exception as e:
             log.exception("unexpected error on %s: %s", fp, e)
             outcome = "exception"
-        if delay > 0 and outcome.startswith(("wrote-", "dry:", "not-found", "kept-existing")):
-            time.sleep(delay)
         return outcome
 
     completed = 0
-    stopped = False
+
+    def take(fp, outcome):
+        nonlocal completed
+        if outcome is None:
+            return
+        # Every submitted worker is drained, and counted unless a stop cut
+        # its lookups short. Once a stop is observed no replacement work is
+        # queued, so a returned summary cannot omit a worker that may write.
+        try:
+            completed += 1
+            counts[outcome] += 1
+            label = _track_label(fp, owned_root)
+            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), label)
+            if progress_cb:
+                progress_cb(completed, total, label)
+            state.save()
+        except Exception as e:
+            log.exception("post-process error on %s: %s", fp, e)
+
     try:
-        if workers == 1:
-            for fp in candidates:
-                if should_stop and should_stop():
-                    stopped = True
-                    break
-                outcome = run_one(fp)
-                if outcome is None:
-                    stopped = True
-                    break
-                completed += 1
-                counts[outcome] += 1
-                label = _track_label(fp, owned_root)
-                log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), label)
-                if progress_cb:
-                    progress_cb(completed, total, label)
-                state.save()
-        else:
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyrics") as ex:
-                remaining = iter(candidates)
-                futures = {}
-
-                def submit_available():
-                    nonlocal stopped
-                    while not stopped and len(futures) < workers:
-                        if should_stop and should_stop():
-                            stopped = True
-                            return
-                        try:
-                            fp = next(remaining)
-                        except StopIteration:
-                            return
-                        futures[ex.submit(run_one, fp)] = fp
-
-                submit_available()
-                try:
-                    while futures:
-                        done, _ = wait(
-                            tuple(futures), return_when=FIRST_COMPLETED)
-                        for fut in done:
-                            fp = futures.pop(fut)
-                            try:
-                                outcome = fut.result()
-                            except Exception as e:
-                                log.exception("worker raised on %s: %s", fp, e)
-                                outcome = "exception"
-                            if outcome is None:
-                                continue
-                            # Every submitted worker is drained, and counted unless a
-                            # stop cut its lookups short. Once a stop is observed no
-                            # replacement work is queued, so a returned summary
-                            # cannot omit a worker that may write.
-                            try:
-                                completed += 1
-                                counts[outcome] += 1
-                                label = _track_label(fp, owned_root)
-                                log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), label)
-                                if progress_cb:
-                                    progress_cb(completed, total, label)
-                                state.save()
-                            except Exception as e:
-                                log.exception("post-process error on %s: %s", fp, e)
-                        if not stopped and should_stop and should_stop():
-                            stopped = True
-                        submit_available()
-                except KeyboardInterrupt:
-                    for f in futures:
-                        f.cancel()
-                    raise
-
+        stopped = _drain(candidates, run_one, take, workers=workers,
+                         should_stop=should_stop, thread_name_prefix="lyrics",
+                         log=log)
     finally:
         state.flush()
 
@@ -2873,7 +2745,7 @@ def fetch_for_paths(
 
 
 def index_existing(
-    items: Iterable,
+    paths: Iterable[Path],
     *,
     owned_root: Path,
     state_path: Path = DEFAULT_STATE_FILE,
@@ -2890,9 +2762,6 @@ def index_existing(
     fresh import so a subsequent normal run skips already-synced files
     instead of re-checking them.
 
-    `items` is an iterable of either `Path` or `(Path, mtime, size)` tuples.
-    Tuple hints are accepted for caller compatibility, but the held descriptor's
-    verified stat remains authoritative at this mutation boundary.
     Files for which `state` already records a matching mtime+size are
     skipped without opening the FLAC, so re-running --index after adding
     new files is cheap.
@@ -2903,20 +2772,14 @@ def index_existing(
         log.warning("lyric_fetch unavailable: %s", IMPORT_ERROR)
         return Counter({"unavailable": 0})
 
-    normalized: list[tuple[Path, float, int]] = []
-    for it in items:
-        if isinstance(it, tuple):
-            p, mt, sz = it
-            normalized.append((Path(p), float(mt or 0), int(sz or 0)))
-        else:
-            normalized.append((Path(it), 0.0, 0))
+    normalized = [Path(p) for p in paths]
 
     state = _StateWriter(state_path, log)
     counts: Counter = Counter()
     total = len(normalized)
     workers = max(1, int(workers))
 
-    def index_one(fp: Path, mt_hint: float, sz_hint: int) -> str:
+    def index_one(fp: Path) -> str:
         key = str(fp)
         try:
             binding = _BoundTrack(fp, owned_root)
@@ -2961,72 +2824,25 @@ def index_existing(
              total, workers)
     progress_every = max(25, min(250, total // 50))
     completed = 0
-    stopped = False
     last_log = time.monotonic()
+
+    def take(fp, outcome):
+        nonlocal completed, last_log
+        completed += 1
+        counts[outcome] += 1
+        if progress_cb:
+            progress_cb(completed, total, fp.name)
+        if completed % progress_every == 0:
+            now = time.monotonic()
+            rate = progress_every / max(0.001, now - last_log)
+            last_log = now
+            log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
+        state.save()
+
     try:
-        if workers == 1:
-            for fp, mt, sz in normalized:
-                if should_stop and should_stop():
-                    stopped = True
-                    break
-                outcome = index_one(fp, mt, sz)
-                completed += 1
-                counts[outcome] += 1
-                if progress_cb:
-                    progress_cb(completed, total, fp.name)
-                if completed % progress_every == 0:
-                    now = time.monotonic()
-                    rate = progress_every / max(0.001, now - last_log)
-                    last_log = now
-                    log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
-                state.save()
-        else:
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyrics-idx") as ex:
-                remaining = iter(normalized)
-                futures = {}
-
-                def submit_available():
-                    nonlocal stopped
-                    while not stopped and len(futures) < workers:
-                        if should_stop and should_stop():
-                            stopped = True
-                            return
-                        try:
-                            fp, mt, sz = next(remaining)
-                        except StopIteration:
-                            return
-                        futures[ex.submit(index_one, fp, mt, sz)] = fp
-
-                submit_available()
-                try:
-                    while futures:
-                        done, _ = wait(
-                            tuple(futures), return_when=FIRST_COMPLETED)
-                        for fut in done:
-                            fp = futures.pop(fut)
-                            try:
-                                outcome = fut.result()
-                            except Exception as e:
-                                log.debug("worker raised on %s: %s", fp, e)
-                                outcome = "exception"
-                            completed += 1
-                            counts[outcome] += 1
-                            if progress_cb:
-                                progress_cb(completed, total, fp.name)
-                            if completed % progress_every == 0:
-                                now = time.monotonic()
-                                rate = progress_every / max(0.001, now - last_log)
-                                last_log = now
-                                log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
-                            state.save()
-                        if not stopped and should_stop and should_stop():
-                            stopped = True
-                        submit_available()
-                except KeyboardInterrupt:
-                    for f in futures:
-                        f.cancel()
-                    raise
-
+        stopped = _drain(normalized, index_one, take, workers=workers,
+                         should_stop=should_stop,
+                         thread_name_prefix="lyrics-idx", log=log)
     finally:
         state.flush()
 

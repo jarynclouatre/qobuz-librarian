@@ -204,23 +204,15 @@ def run_migrate_mode(args):
         log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
         return 0
 
-    # Seal the exact approved plan before execution. A preview, refusal, or
-    # decline stays read-only; an approved migration still cannot copy without
-    # a durable, non-overwriting audit record beside the destination.
+    # A preview, refusal, or decline stays read-only; an approved migration
+    # still cannot copy without its plan recorded beside the destination.
     try:
-        manifest_artifact = engine.write_manifest(plan)
-        manifest = Path(manifest_artifact["path"])
+        manifest = engine.write_manifest(plan)
         log.info(fmt(C.GRAY, f"  Full plan written to {manifest}"))
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as e:
         log.warning(fmt(C.RED,
             "  ✗  Couldn't record the approved migration safely, so nothing "
             f"was copied ({e})."))
-        return EXIT_GENERAL
-
-    if not engine.verify_audit_artifact(plan, manifest_artifact):
-        log.warning(fmt(C.RED,
-            "  ✗  The reviewed migration record changed or can no longer be "
-            "proved. Nothing was copied; scan again before approving it."))
         return EXIT_GENERAL
 
     execution_abort = None
@@ -233,8 +225,7 @@ def run_migrate_mode(args):
         execution_abort = exc
 
     try:
-        results_artifact = engine.write_results_manifest(result, plan=plan)
-        results_manifest = Path(results_artifact["path"])
+        results_manifest = engine.write_results_manifest(result, plan=plan)
         log.info(fmt(C.GRAY, f"  · Results manifest: {results_manifest}"))
     except BaseException as e:
         try:
