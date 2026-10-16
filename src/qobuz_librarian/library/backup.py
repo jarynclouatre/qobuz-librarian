@@ -587,8 +587,7 @@ def _remove_exact_tree_at(parent_fd, name, expected_fd, *, prefix,
             return False
         log.info(fmt(
             C.YELLOW,
-            "\n  ⚠  Backup removal was interrupted after its exact state "
-            "was reconciled."))
+            "\n  ⚠  Stopped while removing a folder."))
         raise
     finally:
         if (
@@ -6751,8 +6750,9 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
     Returns a complete ``BackupResult`` on success, an incomplete result when
     this call owns retained recovery data, or ``None`` only when no recovery
     was retained. The source is held through a complete no-follow chain beneath
-    MUSIC_ROOT. Cross-filesystem backups copy from that held directory, then
-    move the exact source into a private quarantine before recursive removal.
+    MUSIC_ROOT. A backup that cannot be a move copies from that held
+    directory, then moves the exact source into a private quarantine before
+    recursive removal.
     With ``set_aside`` the backup is marked as a download an upgrade set
     aside before it is complete, so it is never taken for the album.
     """
@@ -7140,10 +7140,14 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 f"  ✗  Couldn't read source tree at {public} (unreadable or "
                 "a special file); refusing to back up."))
             return None
+        why = ("its files have other hard links"
+               if _tree_has_multiply_linked_file(source_fidelity)
+               else "the backup folder is on another filesystem")
         log.info(fmt(
             C.GRAY,
-            f"  ⤷  Cross-filesystem backup: copying {errors_mod.plural(n_files, 'file')} / "
-            f"{total_bytes / 1024 / 1024:.1f} MB to {backup_root}…"))
+            f"  ⤷  Copying {errors_mod.plural(n_files, 'file')} / "
+            f"{total_bytes / 1024 / 1024:.1f} MB to {backup_root} "
+            f"instead of moving them, since {why}…"))
 
         partial_name = _PARTIAL_COPY_PREFIX + bp.name
         partial_path = _held_directory_path(backup_root_fd) / partial_name
@@ -7256,7 +7260,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 )
             raise
         except (OSError, shutil.Error) as exc:
-            log.info(fmt(C.RED, f"  ✗  Cross-filesystem backup failed: {exc}."))
+            log.info(fmt(C.RED, f"  ✗  Backup copy failed: {exc}."))
             if partial_fd is None:
                 try:
                     partial_fd = _open_backup_directory(
@@ -7399,9 +7403,13 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             )
         except BaseException:
             _retained_incomplete_result()
-            log.info(fmt(
-                C.YELLOW,
-                f"     The incomplete recovery remains at {bp}."))
+            if not _named_directory_matches(
+                    source_parent_fd, source_name, source_fd):
+                log.info(fmt(
+                    C.YELLOW,
+                    f"     The album is safe in the backup at {bp}. The next "
+                    "run puts it back unless its folder has changed since, "
+                    "and then the backup is kept."))
             raise
         if not removed:
             log.info(fmt(

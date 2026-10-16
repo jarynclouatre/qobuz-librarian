@@ -26,7 +26,7 @@
   {% set failed = downsample_failed and not downsample_running %}
   <div class="ql-work-status ql-quality-status">
     <span class="ql-status-chip {% if failed %}is-error{% elif downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
-      {% if failed %}Last run failed{% elif downsample_state.stale %}Refresh needed{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
+      {% if failed %}Last run failed{% elif downsample_state.stale %}Refresh needed{% elif downsample_state.discarded %}Review discarded{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
     </span>
     {% if downsample_state.stale or downsample_state.updated or (last_run and downsample_state.complete) %}
     <span>
@@ -91,7 +91,7 @@
     {% else %}
     <section class="ql-work-card ql-quality-entry-card">
       <div class="ql-work-card-copy">
-      {% if not downsample_state.complete %}<p class="ql-work-card-title">No Downsample results yet</p>{% endif %}
+      {% if not downsample_state.discarded and not downsample_state.complete %}<p class="ql-work-card-title">No Downsample results yet</p>{% endif %}
         <p class="ql-work-card-text">Refresh checks the files already on disk.</p>
       </div>
       <div class="ql-work-card-actions">

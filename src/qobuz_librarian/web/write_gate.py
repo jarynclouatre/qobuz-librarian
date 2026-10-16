@@ -102,8 +102,9 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
         msg = (
             "Qobuz Librarian took the run lock but could not read its saved "
             "recovery state. The lock was released, downloads and scans stay "
-            "paused, and the app tries again on its own. Check the "
-            "data-folder permissions if this notice remains."
+            "paused, and the app tries again on its own. If this notice "
+            "remains, the “Lock acquired, but durable recovery could not be "
+            "read” entry in the container log says why."
         )
     elif not runtime._run_lock_intact():
         reason = "The run lock was lost."
@@ -229,6 +230,12 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                            "not be verified safely. " + paused + "Switch to "
                            "terminal mode in Settings and run Qobuz Librarian "
                            "there; it offers to settle this.")
+            elif getattr(queue_recovery._STARTUP_RECOVERY_RESULT, "reason",
+                         None) == "startup-recovery-unsettled":
+                msg = ("Interrupted work could not be checked safely, so "
+                       "downloads and scans are paused and nothing was "
+                       "changed. The “" + startup_recovery.BLOCKED_DOWNLOAD_LOG_ENTRY
+                       + "” entry in the application log says why.")
             else:
                 msg = (f"An interrupted download{of_album} could not be "
                        "verified safely. " + paused + "Settle it from the "

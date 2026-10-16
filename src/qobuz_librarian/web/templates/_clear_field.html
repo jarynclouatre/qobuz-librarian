@@ -1,0 +1,5 @@
+{% macro clear_field(label) -%}
+<button type="button" class="ql-field-clear" data-clear-field aria-label="{{ label }}" title="{{ label }}">
+  <svg class="ql-field-clear-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#ql-clear-glyph"/></svg>
+</button>
+{%- endmacro %}

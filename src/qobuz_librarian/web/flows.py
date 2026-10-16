@@ -6,6 +6,7 @@ candidates to the job, and execution runs over the candidates the user kept.
 """
 import argparse
 import dataclasses
+import os
 import shutil
 import threading
 import time
@@ -705,6 +706,31 @@ def _scan_would_offer(c, coverage):
     )
 
 
+def _folder_gone(c):
+    """Whether the folder a Library row adds to has left the library: the
+    album folder a Gap Fill row fills, the artist folder of a missing album.
+    A folder that cannot be read is not gone."""
+    path = candidate_premise.expected_path(c)
+    if c.get("kind", "album") != "album" or not path:
+        return False
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def _music_root_listed():
+    """Whether the music folder can be read and holds anything."""
+    try:
+        with os.scandir(cfg.MUSIC_ROOT) as entries:
+            return next(entries, None) is not None
+    except OSError:
+        return False
+
+
 def fold_new_candidates(parked, cands, *, review_generation=None,
                         coverage=None):
     """Merge a refresh's finds into a parked review, keyed by Qobuz album id
@@ -717,6 +743,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     finished scan derived again, whether it looked at Gap Fill alone and the
     Qobuz ids it found on disk: a row there that the scan no longer offers is
     removed when it is unticked or on disk, and a ticked one otherwise stays.
+    A row whose folder is gone leaves too, ticked or not: its seal can never
+    match again, so Download would refuse it after every refresh.
     Candidates the user dismissed while the refresh ran are checked against a
     fresh hidden snapshot so the fold can't resurrect them. Returns
     (added, updated, removed, held_back, left_out, notes), False when the
@@ -753,6 +781,10 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         if coverage is not None:
             covered = ({name.casefold() for name in coverage[0]}, coverage[1])
             on_disk = coverage[2]
+        # A scan that read no artist folder says nothing about any of them,
+        # and neither does a music folder that cannot be listed now; the
+        # library may not be mounted.
+        drop_gone = bool(covered and covered[0]) and _music_root_listed()
         updated = 0
         removed = 0
         # A ticked row stays whatever the refresh makes of it, unless the
@@ -775,6 +807,10 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         for c in parked.candidates:
             key = _key(c)
             fresh = fresh_by_key.get(key)
+            if fresh is None and drop_gone and _folder_gone(c):
+                if listed(c):
+                    removed += 1
+                continue
             if fresh is None and covered and _scan_would_offer(c, covered):
                 album_id = str((c.get("payload") or {}).get("album_id") or "")
                 if not c.get("selected") or album_id in on_disk:
@@ -5101,6 +5137,9 @@ def run_lyric_retry(job):
                             lyrics_format=cfg.LYRICS_FORMAT,
                             state_path=cfg.LYRIC_FETCH_STATE_FILE,
                             should_stop=lambda: job.cancel_requested,
+                            # Each queued track gets an outcome and a line
+                            # in the log, even one a later pass settled.
+                            rescan=True,
                         )
                     finally:
                         reseal_after_own_writes(written)
@@ -5143,24 +5182,32 @@ def run_lyric_retry(job):
             f"{plural(len(remaining), 'track')} still queued for retry."
         )
     elif failed:
-        job.summary = f"Resolved {resolved}; {failed} failed and need review."
+        job.summary = f"Resolved {resolved}; {failed} failed."
         if remaining:
             job.summary += (
                 f" {plural(len(remaining), 'track')} still queued for retry."
             )
-        job.error = f"{failed} lyric retries failed and need review."
+        job.error = (f"{plural(failed, 'lyric retry', 'lyric retries')} failed; "
+                     "the activity log names each track and why.")
+        _mark_job_failed(job)
+    elif counts.get("unsafe-path"):
+        outside = counts["unsafe-path"]
+        job.summary = (
+            f"Resolved {resolved}. {plural(outside, 'track')} "
+            f"{'is' if outside == 1 else 'are'} outside the music folder, so "
+            f"{'its' if outside == 1 else 'their'} lyrics were not written.")
+        job.error = job.summary
         _mark_job_failed(job)
     elif remaining:
-        job.summary = (f"Resolved {resolved}. {plural(len(remaining), 'track')} "
-                       "still unresolved, will retry next time.")
-        job.error = (
-            f"{plural(len(remaining), 'lyric retry')} remain unresolved."
-        )
-        _mark_job_failed(job)
+        job.summary = (
+            f"Resolved {resolved}. Lyrics providers were unavailable for "
+            f"{plural(len(remaining), 'track')}, which "
+            f"{'stays' if len(remaining) == 1 else 'stay'} queued; Retry now "
+            "on Search tries again.")
     else:
         job.summary = f"All {plural(len(existing), 'retried track')} resolved."
     log.info(job.summary)
-    if not stopped and not failed and not remaining:
+    if not stopped and not failed and not counts.get("unsafe-path"):
         _close_completed_job(job)
 
 

@@ -29,11 +29,17 @@ def _database(database, *, tracks, artwork=None):
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB NOT NULL)"
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB NOT NULL, "
+            "album_id INTEGER DEFAULT 1)"
         )
         connection.execute(
             "CREATE TABLE albums (id INTEGER PRIMARY KEY, artpath BLOB)"
         )
+        for table in ("item_attributes", "album_attributes"):
+            connection.execute(
+                f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, "
+                "entity_id INTEGER, key TEXT, value TEXT)"
+            )
         connection.executemany(
             "INSERT INTO items (id, path) VALUES (?, ?)",
             ((index, os.fsencode(path)) for index, path in enumerate(tracks, 1)),
@@ -142,7 +148,7 @@ def test_whole_album_conflict_keeps_the_source_album_intact(
     assert _paths(database) == ([str(source_track)], str(source_art))
 
 
-def test_next_album_lookup_survives_a_collaboration_folder_moving_away(
+def test_collaboration_move_past_a_deleted_folder_drops_its_beets_rows(
     tmp_path, monkeypatch
 ):
     music, _data, database = _configure(tmp_path, monkeypatch)
@@ -151,6 +157,24 @@ def test_next_album_lookup_survives_a_collaboration_folder_moving_away(
     track = source / "01 - Track.flac"
     track.write_bytes(b"audio")
     _database(database, tracks=(track,))
+    # The user deleted the album's folder by hand, and Beets still lists it.
+    # The rest of the library shows the share is mounted.
+    (music / "Someone Else" / "Album").mkdir(parents=True)
+    deleted = music / "Artist" / "Collab"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO albums (id, artpath) VALUES (2, ?)",
+        (os.fsencode(deleted / "cover.jpg"),),
+    )
+    connection.execute(
+        "INSERT INTO items (id, path, album_id) VALUES (2, ?, 2)",
+        (os.fsencode(deleted / track.name),),
+    )
+    connection.execute(
+        "INSERT INTO item_attributes (entity_id, key, value) VALUES (2, 'k', 'v')"
+    )
+    connection.commit()
+    connection.close()
     scanner.clear_scan_caches()
     scanner._list_artist_subdirs_cached(music)
 
@@ -166,6 +190,12 @@ def test_next_album_lookup_survives_a_collaboration_folder_moving_away(
         authority.close()
 
     assert result.changed is True
+    assert (deleted / track.name).read_bytes() == b"audio"
+    assert _paths(database) == ([str(deleted / track.name)], None)
+    connection = sqlite3.connect(database)
+    assert connection.execute("SELECT id FROM albums").fetchall() == [(1,)]
+    assert connection.execute("SELECT * FROM item_attributes").fetchall() == []
+    connection.close()
     assert not (music / "Artist, Other").exists()
     assert catalog.find_album_dir_filesystem(
         {"title": "Next Album", "artist": {"name": "Artist"}}

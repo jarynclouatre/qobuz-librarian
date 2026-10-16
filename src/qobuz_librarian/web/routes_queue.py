@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from qobuz_librarian.download_result import cd_quality_note_in
 from qobuz_librarian.queue.startup_recovery import BlockedItemSettlementAction
 from qobuz_librarian.web import (
     job_labels,
@@ -122,6 +123,7 @@ async def queue_history(
         for r in rows:
             ts = r.get("finished_at") or r.get("created_at")
             r["when"], r["when_exact"] = job_labels._when_label(ts)
+            r["cd_quality_note"] = cd_quality_note_in(r.get("summary"))
             if r.get("status") == "awaiting_review":
                 # A parked review's count changes as it is worked; its own
                 # page has the live one.

@@ -40,11 +40,15 @@ def _upgrade_state_summary():
     candidates = (
         _visible_saved_review_candidates("upgrade", state.get("candidates") or [])
         if complete else [])
+    kept = review_badges.undiscarded("upgrade", state, candidates)
+    discarded = bool(candidates) and not kept
+    candidates = kept
     saved_quality_signature = str(state.get("quality_signature") or "")
     current_quality_signature = _effective_upgrade_quality_signature()
     updated_at = state.get("updated_at")
     return {
         "complete": complete,
+        "discarded": discarded,
         "candidates": candidates,
         "count": len(candidates),
         "quality_signature": saved_quality_signature,
@@ -101,9 +105,13 @@ def _downsample_state_summary():
     candidates = (
         _visible_saved_review_candidates("downsample", state.get("candidates") or [])
         if complete else [])
+    kept = review_badges.undiscarded("downsample", state, candidates)
+    discarded = bool(candidates) and not kept
+    candidates = kept
     updated_at = state.get("updated_at")
     return {
         "complete": complete,
+        "discarded": discarded,
         "candidates": candidates,
         "count": len(candidates),
         "generation": generation,

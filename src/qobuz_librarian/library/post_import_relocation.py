@@ -13,6 +13,7 @@ import errno
 import functools
 import hashlib
 import json
+import logging
 import math
 import os
 import secrets
@@ -40,10 +41,14 @@ from qobuz_librarian.library.post_import_relocation_db import (
     DatabaseRowsState,
     capture_relocation_rows,
     classify_relocation_rows,
+    forget_vanished_destination_rows,
     publish_relocation_rows,
+    require_safe_relocation_database,
     rollback_relocation_rows,
+    vanished_destination_rows,
 )
 from qobuz_librarian.library.sqlite_atomic import (
+    AtomicSQLiteWrite,
     SQLitePublicationUncertain,
     SQLiteRecoveryRequired,
     inspect_sqlite_source,
@@ -57,6 +62,8 @@ from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
 from qobuz_librarian.safefile import named_entry_missing as _name_missing
 from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace
 from qobuz_librarian.ui_cli.errors import plural
+
+log = logging.getLogger("qobuz_librarian")
 
 _NAMESPACE_NAME = ".qobuz_post_import_relocations"
 _LOCK_NAME = ".lock"
@@ -1810,6 +1817,61 @@ def _capture_database(anchor, root, payload, authority_matches) -> dict:
     )
 
 
+def _forget_vanished_destination_rows(root, mapping, destination) -> None:
+    """Drop the Beets rows of deleted files that sit where the move goes,
+    before anything is recorded or moved."""
+    timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
+    timeout = float(timeout) if timeout and timeout > 0 else 5.0
+    anchor = _open_migration_database_anchor()
+    transaction = None
+    try:
+        if anchor is None or anchor.get("descriptor") is None:
+            return
+        if not inspect_sqlite_source(
+            anchor,
+            _migration_database_anchor_matches,
+            lambda connection: vanished_destination_rows(
+                connection, mapping, music_root=root
+            ),
+            connect=sqlite3.connect,
+            timeout=timeout,
+        ):
+            return
+        transaction = AtomicSQLiteWrite(
+            anchor,
+            _migration_database_anchor_matches,
+            connect=sqlite3.connect,
+            timeout=timeout,
+        )
+        connection = transaction.open()
+        connection.execute("BEGIN IMMEDIATE")
+        require_safe_relocation_database(connection)
+        dropped = forget_vanished_destination_rows(
+            connection, mapping, music_root=root
+        )
+        if not dropped:
+            connection.rollback()
+            return
+        transaction.commit_and_publish(
+            lambda: _migration_database_anchor_matches(anchor),
+            lambda current: current.execute("PRAGMA quick_check").fetchone()
+            == ("ok",),
+        )
+        log.info(
+            "Dropped %s of files deleted outside the app from %s.",
+            plural(dropped, "Beets entry", "Beets entries"),
+            destination,
+        )
+    except sqlite3.Error as exc:
+        raise PostImportRelocationUnavailable(
+            errno.EIO, f"the Beets rows of deleted files couldn't be dropped: {exc}"
+        ) from exc
+    finally:
+        if transaction is not None:
+            transaction.close()
+        _close_migration_database_anchor(anchor)
+
+
 def _database_state(anchor, capture, authority_matches=None):
     if anchor is None or anchor.get("descriptor") is None:
         raise OSError("the Beets database needed for relocation recovery is missing")
@@ -3347,6 +3409,18 @@ def relocate_post_import_album(
                         if plan["conflicts"] else "there is nothing to relocate"
                     ),
                 )
+            _forget_vanished_destination_rows(
+                root,
+                _path_mapping(
+                    root,
+                    {
+                        "source": PurePosixPath(*source_parts).as_posix(),
+                        "destination": PurePosixPath(*destination_parts).as_posix(),
+                        "plan": plan,
+                    },
+                ),
+                destination_path,
+            )
             database_anchor = _open_migration_database_anchor()
             operation_id = secrets.token_hex(32)
             payload = {
@@ -3383,9 +3457,12 @@ def relocate_post_import_album(
                     )
                 )
             )
-            payload["database_capture"] = _capture_database(
-                database_anchor, root, payload, initial_authority
-            )
+            try:
+                payload["database_capture"] = _capture_database(
+                    database_anchor, root, payload, initial_authority
+                )
+            except sqlite3.IntegrityError as exc:
+                raise PostImportRelocationUnavailable(errno.EEXIST, str(exc)) from exc
             if not initial_authority():
                 raise OSError("relocation inputs changed during preflight")
 

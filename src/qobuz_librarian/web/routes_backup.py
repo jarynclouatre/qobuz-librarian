@@ -265,16 +265,19 @@ def _diagnostics_result_notice(kind: str, body: str) -> str:
     return rendering._ql_toast_html(kind, body, "diagnostics")
 
 
-def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
+def _stuck_backup_notice(request: Request, target: Path, headline: str,
+                         *, verified=False) -> str:
     """A refusal that names the backup's folder and offers to delete it
-    unchecked, unless it is the only copy of some of its files."""
+    unchecked, unless it is the only copy of some of its files. ``verified``
+    says the album was just found to hold every file in it."""
     location, _is_host = storage._resolve_host_path(str(target))
     counts = backup_mod.files_not_back_in_album(target)
     return _diagnostics_result_notice(
         "error",
         rendering.templates.get_template("_stuck_backup_notice.html").render(
             request=request, headline=headline, location=location,
-            name=target.name, only_copy=bool(counts and counts[0])),
+            name=target.name, only_copy=bool(counts and counts[0]),
+            verified=verified),
     )
 
 
@@ -295,7 +298,9 @@ def _restore_refused_notice(request: Request, target: Path, origin, *,
     origin_display, _is_host = storage._resolve_host_path(str(origin or ""))
     counts = (None if complete or not origin_size
               else backup_mod.files_not_back_in_album(target, compare=True))
-    if renamed:
+    verified = renamed and backup_mod.files_not_back_in_album(
+        target, compare=True, exact=True) == (0, 0)
+    if verified:
         headline = (
             f"{origin_display} already has every file in this backup, some "
             "under new names. Nothing was put back.")
@@ -324,7 +329,7 @@ def _restore_refused_notice(request: Request, target: Path, origin, *,
     else:
         headline = ("The files couldn't be moved back automatically, so the "
                     "backup was left untouched.")
-    return _stuck_backup_notice(request, target, headline)
+    return _stuck_backup_notice(request, target, headline, verified=verified)
 
 
 @contextlib.contextmanager

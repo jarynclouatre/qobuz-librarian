@@ -616,11 +616,16 @@
         var scanning = new Set(data.scanning || []);
         // A download that has finished putting the whole album on disk owns it
         // now; without this the row would fall back to offering that same
-        // download again the moment its job left the queue.
+        // download again the moment its job left the queue. Only a row this
+        // page showed queued takes it: one drawn after the download finished
+        // already says what is on disk, and the files may have gone since.
         var owned = new Set(data.owned || []);
         searchAvailabilityItems().forEach(function (item) {
           var key = item.dataset.searchKey || "";
-          if (owned.has(key)) { markSearchItemOwned(item); return; }
+          if (owned.has(key) && item.dataset.queued === "1") {
+            markSearchItemOwned(item);
+            return;
+          }
           setSearchItemAvailability(item,
             queued.has(key) ? "queued" : scanning.has(key) ? "scanning" : "available");
         });
@@ -658,13 +663,43 @@
       if (label) label.replaceChildren();
       else checkbox.remove();
     }
-    var download = item.querySelector("[data-search-download-form]");
+    // Draw the row as the server draws an owned one, so the track count the
+    // row had before the download does not stay beside "In library".
+    var own = function (el) { return el.closest("[data-search-item]") === item; };
+    var statuses = Array.prototype.filter.call(
+      item.querySelectorAll(".ql-search-quality-status"), own);
+    statuses.forEach(function (status) {
+      var notes = Array.prototype.slice.call(
+        status.querySelectorAll("[data-unavailable-note]"));
+      status.replaceWith.apply(status, [ownedLabel(), " "].concat(notes));
+    });
+    var download = Array.prototype.find.call(
+      item.querySelectorAll("[data-search-download-form]"), own);
     if (download) {
-      var owned = document.createElement("span");
-      owned.className = "ql-owned-label";
-      owned.textContent = "In library";
-      download.replaceWith(owned);
+      if (statuses.length) {
+        download.remove();
+      } else {
+        download.parentElement
+          .querySelectorAll(".ql-partial-label, .ql-other-version-label:not([data-unavailable-note])")
+          .forEach(function (label) { label.remove(); });
+        download.replaceWith(ownedLabel());
+      }
     }
+    // A tracklist fetched before the download still marks its tracks missing.
+    item.querySelectorAll("[data-tracks-toggle]").forEach(function (toggle) {
+      if (!own(toggle)) return;
+      var panel = document.getElementById(toggle.getAttribute("aria-controls"));
+      if (!panel || !panel.firstElementChild) return;
+      if (panel.classList.contains("hidden")) panel.replaceChildren();
+      else window.htmx.ajax("GET", toggle.getAttribute("hx-get"), { target: panel, swap: "innerHTML" });
+    });
+  }
+
+  function ownedLabel() {
+    var owned = document.createElement("span");
+    owned.className = "ql-owned-label";
+    owned.textContent = "In library";
+    return owned;
   }
 
   function markSearchDownloadOwned(form) {
@@ -682,13 +717,20 @@
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
-  // Disable a search-result button only after a real queue success.
+  // Disable a search-result button only after a real queue success. A press
+  // refused because the album is on disk already draws the row owned: a
+  // download that finished while the tab was hidden left it offering one.
   document.addEventListener("htmx:afterRequest", function (evt) {
     var form = evt.target;
     if (!form || !form.matches || !form.matches("form[data-queue-button]")) return;
     if (!evt.detail || !evt.detail.successful) return;
     var xhr = evt.detail.xhr;
-    if (!xhr || xhr.responseText.indexOf("ql-notice-success") === -1) return;
+    if (!xhr) return;
+    if (xhr.getResponseHeader("X-QL-Download-Outcome") === "owned") {
+      markSearchDownloadOwned(form);
+      return;
+    }
+    if (xhr.responseText.indexOf("ql-notice-success") === -1) return;
     markSearchDownloadQueued(form);
   });
 
@@ -764,6 +806,29 @@
     collapse(t);
   });
 
+  // The x in a search or filter box, and Escape in one with text, empty the
+  // box and leave the cursor in it, so a phone keeps its keyboard up. The
+  // page then reacts as it does to any emptied box.
+  function clearButtonFor(input) {
+    var next = input && input.nextElementSibling;
+    return next && next.matches("[data-clear-field]") ? next : null;
+  }
+  function clearField(input) {
+    // A filter the server applied clears the way it was set: by asking again.
+    var filtered = input.hasAttribute("data-clear-submits") && input.defaultValue;
+    input.value = "";
+    input.focus();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (filtered) input.form.requestSubmit();
+  }
+  document.addEventListener("mousedown", function (evt) {
+    if (evt.target.closest && evt.target.closest("[data-clear-field]")) evt.preventDefault();
+  });
+  document.addEventListener("click", function (evt) {
+    var button = evt.target.closest && evt.target.closest("[data-clear-field]");
+    if (button && button.previousElementSibling) clearField(button.previousElementSibling);
+  });
+
   // Global search, escape, and g-then-key navigation shortcuts.
   var gPending = false;
   var gTimer = null;
@@ -775,6 +840,11 @@
     if (evt.key === "Escape") {
       if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
       if (window.qlCloseDropdowns) window.qlCloseDropdowns();
+      if (inField && t.value && clearButtonFor(t)) {
+        evt.preventDefault();
+        clearField(t);
+        return;
+      }
       // A search box has already used Escape to clear itself; blurring on top
       // of that costs a tap to get back in and carry on typing.
       var isSearchBox = !!(t && t.tagName === "INPUT" && t.type === "search");
@@ -3798,13 +3868,6 @@
           applyFilter();
         }, 250);
       });
-      // A search input's Escape-clear and its native ✕ change the value
-      // without firing `input`, which left the box empty and the list filtered.
-      filterInput.addEventListener("search", function () {
-        cancelFilter();
-        loadGen += 1;
-        applyFilter();
-      });
     }
     // Enter in the filter or on a checkbox would submit the form through its
     // first submit button, which is Discard.
@@ -4112,6 +4175,13 @@
     // The same save as leaving the page: on desktop the list scrolls in its
     // own panel, and Back should find it where it was.
     (searchExitSave || saveSearchSnapshot)();
+    // "Search results" returns to where the list was left, as Back does.
+    if (form.matches(".ql-search-back-form")) {
+      var left = readSearchRecord(searchStateId(
+        form.querySelector('input[name="kind"]').value,
+        form.querySelector('input[name="q"]').value));
+      pendingSearchRestoreY = left && typeof left.scrollY === "number" ? left.scrollY : null;
+    }
     var generation = parseInt(form.dataset.searchSubmission || "0", 10);
     if (!generation || activeSearchRequests.some(function (xhr) {
       return xhr.qlSearchSubmission === generation;

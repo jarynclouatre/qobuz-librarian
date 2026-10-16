@@ -52,11 +52,19 @@ def processing_attention(result):
     )
 
 
+_CD_QUALITY_OPENING = "Qobuz sent a broken file at the chosen quality for "
+
+
 def cd_quality_note(tracks):
     """Say which tracks came at CD quality, and why."""
-    return (f"Qobuz sent a broken file at the chosen quality for "
-            f"{', '.join(tracks)}, so {'it' if len(tracks) == 1 else 'they'} "
-            "came at CD quality.")
+    return (f"{_CD_QUALITY_OPENING}{', '.join(tracks)}, so "
+            f"{'it' if len(tracks) == 1 else 'they'} came at CD quality.")
+
+
+def cd_quality_note_in(summary):
+    """The CD-quality note a download's summary ends with, or ""."""
+    start = (summary or "").find(_CD_QUALITY_OPENING)
+    return summary[start:] if start >= 0 else ""
 
 
 def download_attention_kind(result):

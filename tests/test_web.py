@@ -3328,7 +3328,7 @@ os._exit(92)
         kept.name]
 
 
-def test_refresh_folds_into_parked_library_review(monkeypatch):
+def test_refresh_folds_into_parked_library_review(monkeypatch, tmp_path):
     from qobuz_librarian.web import job_persistence, review_badges, scans
 
     badge_calls = []
@@ -3459,7 +3459,12 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
         # A finished scan that derived Portishead again settles the unticked
         # rows it no longer offers there and the ticked ones it found on disk.
         # It keeps the other ticked ones, sealed with the folder as it read it
-        # so the pick still downloads; another artist's rows are left alone.
+        # so the pick still downloads, but not one whose folder is gone;
+        # another artist's rows are left alone.
+        from qobuz_librarian import config as cfg
+        monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+        artist_dir = tmp_path / "Portishead"
+        artist_dir.mkdir()
         parked.add_candidate(
             kind="album",
             title="Mezzanine",
@@ -3473,8 +3478,17 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
             title="Glory Times",
             artist="Portishead",
             detail="1995 · 16-bit/44.1 kHz · 4 tracks",
-            payload={"album_id": "al4", "_artist_dir_path": "/music/Portishead",
+            payload={"album_id": "al4", "_artist_dir_path": str(artist_dir),
                      "_premise": {"seal": "old"}},
+            selected=True,
+        )
+        parked.add_candidate(
+            kind="album",
+            title="Portishead",
+            artist="Portishead",
+            detail="gap-fill: 1 of 11 tracks missing",
+            payload={"album_id": "al6", "gap_fill": 1,
+                     "album_dir": str(artist_dir / "Portishead (1997)")},
             selected=True,
         )
         parked.add_candidate(
@@ -3493,7 +3507,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch):
             title="Dummy",
             artist="Portishead",
             detail="1994 · 16-bit/44.1 kHz · 11 tracks",
-            payload={"album_id": "al1", "_artist_dir_path": "/music/Portishead",
+            payload={"album_id": "al1", "_artist_dir_path": str(artist_dir),
                      "_premise": {"seal": "fresh"}},
             selected=False,
         )

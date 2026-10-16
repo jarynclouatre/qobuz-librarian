@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_clear_field.html" import clear_field %}
 {% import "_job_labels.html" as labels %}
 {% set is_upgrade = scope == 'upgrade' %}
 {% set is_downsample = scope == 'downsample' %}
@@ -34,11 +35,15 @@
   {# Server-side filter, plain GET: works without JS and covers the whole
      set, not just the page on screen. #}
   <form method="get" class="ql-hidden-filter" role="search">
-    <input type="text" role="searchbox" name="q" value="{{ hidden_q }}" autocomplete="off"
-           placeholder="Filter by artist or album"
-           aria-label="Filter by artist or album"
-           class="ql-input ql-review-filter-input">
-    {% if hidden_q %}<a href="?" class="ql-hidden-filter-clear">Clear</a>{% endif %}
+    <div class="ql-clear-field">
+      {# An empty q means the box was just cleared, so the cursor goes back. #}
+      <input type="text" role="searchbox" name="q" value="{{ hidden_q }}" autocomplete="off" data-clear-submits
+             {% if not hidden_q and 'q' in request.query_params %}autofocus{% endif %}
+             placeholder="Filter by artist or album"
+             aria-label="Filter by artist or album"
+             class="ql-input ql-review-filter-input">
+      {{ clear_field("Clear filter") }}
+    </div>
   </form>
   {% endif %}
   {% if restore_all_action and restore_all_count %}

@@ -50,6 +50,7 @@ from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import tags as tags_mod
+from qobuz_librarian.library.post_import_relocation_db import deleted_from_library
 from qobuz_librarian.library.scanner import clear_scan_caches
 from qobuz_librarian.library.sqlite_atomic import (
     AtomicSQLiteWrite,
@@ -5463,6 +5464,8 @@ def beets_import_paths(
     roots = [Path(directory) for directory in album_dirs]
     if not roots:
         return True
+    if album_dir is None and folder is None:
+        forget_deleted_copies(roots)
     prepared_sources = source_files_out if source_files_out is not None else []
     override_path, cleanup, runtime = _prepare_for_beets_run(
         roots=roots, source_files_out=prepared_sources, album_dir=album_dir,
@@ -5515,6 +5518,8 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
     """
     if not album_dirs:
         return "ok"
+    if album_dir is None and folder is None:
+        forget_deleted_copies(album_dirs)
     prepared_sources = []
     override_path, cleanup, runtime = _prepare_for_beets_run(
         roots=album_dirs,
@@ -5571,6 +5576,8 @@ def beets_import_managed(
     roots = _normalise_managed_roots(album_dirs)
     if roots is None:
         return ManagedBeetsImportResult("refused", None)
+    if album_dir is None:
+        forget_deleted_copies(roots)
     try:
         prepared = _run_managed_sigint_deferred(
             lambda: _prepare_managed_beets_run(
@@ -8224,6 +8231,103 @@ def forget_beets_entries(paths):
             ) from exc
 
     return _remove_beets_rows(matches, _ghost_warning)
+
+
+def _staged_album_keys(album_dirs):
+    """(album artist, album) of each staged album, as Beets will file it."""
+    import mutagen
+
+    keys = set()
+    for directory in album_dirs:
+        try:
+            tracks = sorted(
+                path for path in Path(directory).rglob("*")
+                if path.suffix.lower() in cfg.AUDIO_EXTS and path.is_file())
+        except OSError:
+            continue
+        for path in tracks[:1]:
+            try:
+                tags = mutagen.File(os.fspath(path), easy=True).tags or {}
+            except Exception:
+                continue
+            artist = (tags.get("albumartist") or tags.get("artist") or [""])[0]
+            album = (tags.get("album") or [""])[0]
+            if artist and album:
+                keys.add((artist, album))
+    return keys
+
+
+def forget_deleted_copies(album_dirs):
+    """Drop the beets entries of an earlier copy of a staged album whose
+    files were all deleted outside the app.
+
+    Beets keeps the rows of a folder deleted by hand, so the album imported
+    again would be listed twice at the same paths and its import couldn't
+    be proved. Only an album with the same album artist and title counts,
+    only when every one of its tracks is gone (see
+    ``deleted_from_library``), and never one waiting in an upgrade backup
+    to be put back.
+    """
+    from qobuz_librarian.library.backup import albums_left_in_backups
+
+    keys = _staged_album_keys(album_dirs)
+    if not keys:
+        return
+
+    def inspect(connection):
+        found = []
+        for key in keys:
+            for (album_id,) in connection.execute(
+                "SELECT id FROM albums WHERE albumartist = ? AND album = ?", key
+            ).fetchall():
+                try:
+                    paths = [
+                        _catalogue_item_path(raw)
+                        for (raw,) in connection.execute(
+                            "SELECT path FROM items WHERE album_id = ?", (album_id,))
+                    ]
+                except (OSError, TypeError, ValueError):
+                    continue
+                if paths:
+                    found.append((key, paths))
+        return found
+
+    database_anchor = None
+    try:
+        database_anchor = _open_beets_database_anchor()
+        if database_anchor is None or database_anchor["descriptor"] is None:
+            return
+        found = inspect_sqlite_source(
+            database_anchor,
+            _beets_database_anchor_matches,
+            inspect,
+            connect=sqlite3.connect,
+            timeout=_beets_lock_wait(),
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return
+    finally:
+        if database_anchor is not None:
+            _close_beets_database_anchor(database_anchor)
+    if not found:
+        return
+    gone = deleted_from_library(
+        {path for _key, paths in found for path in paths}, cfg.MUSIC_ROOT)
+    try:
+        waiting = [Path(origin) for _backup, origin in albums_left_in_backups()]
+    except OSError:
+        return
+    for (artist, album), paths in found:
+        if not gone.issuperset(paths) or any(
+                folder == path or folder in path.parents
+                for path in paths for folder in waiting):
+            continue
+        if forget_beets_entries(paths).complete:
+            log.info(fmt(
+                C.GRAY,
+                f"  ⤷  Dropped the beets entries of {artist} - {album}: "
+                f"{errors.plural(len(paths), 'track')} deleted outside the app.",
+            ))
 
 
 def forget_staged_beets_rows(paths):

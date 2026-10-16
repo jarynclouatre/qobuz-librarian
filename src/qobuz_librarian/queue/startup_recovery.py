@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -2083,8 +2084,10 @@ def recover_startup_state(
         OSError,
         TypeError,
         ValueError,
+        sqlite3.Error,
         queue_state.QueueJournalError,
-    ):
+    ) as exc:
+        log.error("%s: %s.", BLOCKED_DOWNLOAD_LOG_ENTRY, exc)
         return StartupRecoveryResult(
             StartupRecoveryStatus.ATTENTION_REQUIRED,
             reason="startup-recovery-unsettled",

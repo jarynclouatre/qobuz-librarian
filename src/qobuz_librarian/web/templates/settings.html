@@ -4,8 +4,10 @@
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
 
-{% macro behaviour_notices() %}
-{% if saved %}
+{# A save lands in the section it came from; a save drawn again in place
+   says so at the top of the page. #}
+{% macro saved_notice(section) %}
+{% if saved == section or (saved == true and section == 'behaviour') %}
 <div class="ql-notice {% if queued %}ql-notice-info{% else %}ql-notice-success{% endif %} mb-6" data-flash>
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -13,6 +15,10 @@
   <span>{% if queued %}Saved. Takes effect once no job is running.{% else %}Settings saved.{% endif %}</span>
 </div>
 {% endif %}
+{% endmacro %}
+
+{% macro behaviour_notices() %}
+{{ saved_notice('behaviour') }}
 
 {% if quality_note %}
 <div class="ql-notice ql-notice-info mb-6" data-flash>
@@ -479,6 +485,7 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
+    {% if not lastfm_check %}{{ saved_notice('discover') }}{% endif %}
     {% if lastfm_check == 'ok' %}
     <div class="ql-notice ql-notice-success mb-6">
       <span>Last.fm accepted the key.</span>
@@ -532,6 +539,7 @@
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
+    {{ saved_notice('collection-backup') }}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
         <p>

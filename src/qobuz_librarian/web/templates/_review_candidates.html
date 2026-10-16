@@ -1,3 +1,4 @@
+{% from "_clear_field.html" import clear_field %}
 <div id="review-candidates"
      class="ql-review-candidates"
      data-job-id="{{ job.id }}"
@@ -65,11 +66,14 @@
   <div id="review-summary-row"
        class="ql-review-summary-row{% if not review_counts.total %} hidden{% endif %}">
     <div id="review-filter-row" class="ql-review-filter-row{% if review_counts.artists < 4 or not (_m_total or review_query) %} hidden{% endif %}">
-      <input type="search" id="review-filter" autocomplete="off"
-             value="{{ review_query }}"
-             placeholder="{% if job.execute_kind == 'migration' %}Filter by artist or folder&hellip;{% else %}Filter by artist or album&hellip;{% endif %}"
-             aria-label="{% if job.execute_kind == 'migration' %}Filter the whole review list by artist or folder{% else %}Filter the whole review list by artist or album{% endif %}"
-             class="ql-input ql-review-filter-input">
+      <div class="ql-clear-field">
+        <input type="search" id="review-filter" autocomplete="off"
+               value="{{ review_query }}"
+               placeholder="{% if job.execute_kind == 'migration' %}Filter by artist or folder&hellip;{% else %}Filter by artist or album&hellip;{% endif %}"
+               aria-label="{% if job.execute_kind == 'migration' %}Filter the whole review list by artist or folder{% else %}Filter the whole review list by artist or album{% endif %}"
+               class="ql-input ql-review-filter-input">
+        {{ clear_field("Clear filter") }}
+      </div>
     </div>
     <div class="ql-review-summary-actions">
       <div id="review-select-tools" class="ql-review-tool-group{% if not _m_total %} hidden{% endif %}">

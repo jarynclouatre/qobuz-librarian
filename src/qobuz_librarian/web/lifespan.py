@@ -419,14 +419,21 @@ async def _lifespan(_app: FastAPI):
                     "the app.")
             else:
                 runtime._LOCK_UNENFORCEABLE = False
-                result = _recover_under_web_run_lock(
-                    runtime._RUN_LOCK_HANDLE,
-                    restore_jobs=False,
-                )
-                _log.info(
-                    "Durable queue startup state: %s.",
-                    result.status.value,
-                )
+                try:
+                    result = _recover_under_web_run_lock(
+                        runtime._RUN_LOCK_HANDLE,
+                        restore_jobs=False,
+                    )
+                except Exception:
+                    _log.exception(
+                        "Lock acquired, but durable recovery could not be read; "
+                        "the lease was released and Web will retry."
+                    )
+                else:
+                    _log.info(
+                        "Durable queue startup state: %s.",
+                        result.status.value,
+                    )
         except run_lock.LockBusy as busy:
             runtime._LOCK_BUSY_PID = busy.pid
             _log.error(

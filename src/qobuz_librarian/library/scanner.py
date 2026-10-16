@@ -459,19 +459,26 @@ _ARTIST_SUBDIRS_CACHE: dict = {}
 
 def _list_artist_subdirs_cached(artist_dir: Path):
     key = str(artist_dir)
-    # Atomic get (see _has_audio_anywhere): an `in`/`[]` pair could KeyError if a
-    # concurrent clear_scan_caches() empties the dict between them.
-    cached = _ARTIST_SUBDIRS_CACHE.get(key)
-    if cached is not None:
-        return cached
     try:
+        # A folder's mtime moves whenever an entry in it is added, removed or
+        # renamed, so a listing taken before the user deleted an album outside
+        # the app is not used after it. Search keeps this cache between
+        # requests, and a removed folder still listed here was taken for
+        # another version of the album.
+        stamp = artist_dir.stat().st_mtime_ns
+        # Atomic get (see _has_audio_anywhere): an `in`/`[]` pair could
+        # KeyError if a concurrent clear_scan_caches() empties the dict
+        # between them.
+        cached = _ARTIST_SUBDIRS_CACHE.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
         subdirs = sorted((d for d in artist_dir.iterdir()
                           if _is_type(d, stat.S_ISDIR)),
                          key=lambda p: p.name.lower())
     except OSError as e:
         vlog(f"  iterdir failed for {artist_dir}: {e}")
         raise
-    _ARTIST_SUBDIRS_CACHE[key] = subdirs
+    _ARTIST_SUBDIRS_CACHE[key] = (stamp, subdirs)
     return subdirs
 
 

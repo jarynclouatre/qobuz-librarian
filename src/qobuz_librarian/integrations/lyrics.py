@@ -1205,6 +1205,9 @@ def offer_resume_lyric_retry(args):
                             providers=cfg.LYRICS_PROVIDERS or None,
                             lyrics_format=cfg.LYRICS_FORMAT,
                             state_path=cfg.LYRIC_FETCH_STATE_FILE,
+                            # Each queued file gets an outcome and a line
+                            # above, even one a later pass settled.
+                            rescan=True,
                         )
                     finally:
                         if written:
@@ -1247,7 +1250,8 @@ def offer_resume_lyric_retry(args):
                     fmt(
                         C.YELLOW,
                         f"  ⚠  Retry finished: {outcome['resolved']} resolved; "
-                        f"{outcome['failed']} failed and need review; "
+                        f"{outcome['failed']} failed (the lines above name "
+                        "each file and why); "
                         f"{outcome['remaining']} still queued for retry.",
                     )
                 )

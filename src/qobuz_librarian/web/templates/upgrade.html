@@ -24,7 +24,7 @@
   {% endif %}
   <div class="ql-work-status ql-quality-status">
     <span class="ql-status-chip {% if upgrade_state.stale %}is-warning{% elif upgrade_state.count %}is-info{% else %}is-neutral{% endif %}">
-      {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}{% if hidden_count %}Nothing left to review{% else %}No upgrades found{% endif %}{% else %}Not scanned yet{% endif %}
+      {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.discarded %}Review discarded{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}{% if hidden_count %}Nothing left to review{% else %}No upgrades found{% endif %}{% else %}Not scanned yet{% endif %}
     </span>
     {% if upgrade_state.stale or upgrade_state.updated or last_run %}
     <span>
@@ -66,7 +66,7 @@
   {% elif upgrade_state.complete %}
   <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
-      <p class="ql-work-card-text">The latest Library scan checked the whole catalogue with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}</p>
+      <p class="ql-work-card-text">{% if upgrade_state.discarded %}The next Library scan lists the discarded upgrades again.{% else %}The latest Library scan checked the whole catalogue with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}{% endif %}</p>
     </div>
     <div class="ql-work-card-actions">
       <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>

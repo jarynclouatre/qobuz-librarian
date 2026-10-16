@@ -11,7 +11,7 @@
 {%- endmacro %}
 
 {% macro unavailable_note(item) -%}
-  {% if item.unavailable %} <span class="ql-other-version-label" title="Qobuz lists these tracks but does not stream them">{{ item.unavailable }}&nbsp;not on&nbsp;Qobuz</span>{% endif %}
+  {% if item.unavailable %} <span class="ql-other-version-label" data-unavailable-note title="Qobuz lists these tracks but does not stream them">{{ item.unavailable }}&nbsp;not on&nbsp;Qobuz</span>{% endif %}
 {%- endmacro %}
 
 {% macro album_quality_status(item) -%}
@@ -314,9 +314,6 @@
   <h2 class="ql-search-context-title ql-search-query-title">“{{ q }}”</h2>
   <span class="ql-search-context-meta" data-search-count
         data-full-label="{{ search_count_label }}">{{ search_count_label }}</span>
-  {% if artist_only_count %}
-  <p class="ql-search-context-meta w-full">{{ artist_only_label }} matched only the artist name. <button type="button" class="ql-inline-link ql-inline-link-hit" data-search-by-artist="{{ q }}">Search by Artist</button> to see them.</p>
-  {% endif %}
 {%- endmacro %}
 
 {% if album_batch %}

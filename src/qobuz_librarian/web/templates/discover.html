@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_clear_field.html" import clear_field %}
 {% block title %}Discover - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
@@ -27,6 +28,7 @@
         <input type="text" name="q" value="{{ query }}" aria-label="Artist name"
                placeholder="Find artists like…" class="ql-search-input" autocomplete="off"
                enterkeyhint="search" maxlength="200">
+        {{ clear_field("Clear search") }}
       </div>
       <button type="submit" class="ql-search-submit" aria-label="Find similar">
         <svg class="ql-search-submit-icon" viewBox="0 0 24 24" aria-hidden="true">

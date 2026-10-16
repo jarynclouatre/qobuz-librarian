@@ -16,7 +16,8 @@ _STATE_LOCK = threading.RLock()
 def _empty() -> dict:
     return {
         "version": _VERSION,
-        "surfaces": {name: {"ready_at": 0.0, "seen_at": 0.0, "offered": []}
+        "surfaces": {name: {"ready_at": 0.0, "seen_at": 0.0, "offered": [],
+                            "discarded_at": 0.0}
                      for name in sorted(SURFACES)},
     }
 
@@ -51,6 +52,7 @@ def load(*, fail_closed=False) -> dict:
                 # None for a store saved before offers were kept.
                 "offered": ([str(key) for key in offered]
                             if isinstance(offered, list) else None),
+                "discarded_at": float(entry.get("discarded_at") or 0.0),
             }
         except (TypeError, ValueError):
             continue
@@ -130,6 +132,7 @@ def sync_candidates(surface: str, saved: dict, visible, *, now=None) -> None:
         return
     offered_now = sorted({_offer_key(c)
                           for c in (saved or {}).get("candidates") or []})
+    visible = undiscarded(surface, saved or {}, visible)
     with _mutation_lock() as locked:
         if not locked:
             return
@@ -214,6 +217,45 @@ def mark_seen(surface: str, generation: float) -> None:
             generation, float(entry.get("seen_at") or 0.0)
         )
         _save(state)
+
+
+def mark_discarded(surface: str, *, now=None) -> None:
+    """Remember when the user discarded the surface's saved review."""
+    if surface not in SURFACES:
+        return
+    with _mutation_lock() as locked:
+        if not locked:
+            return
+        state = _load_for_mutation()
+        if state is None:
+            return
+        entry = state["surfaces"][surface]
+        entry["discarded_at"] = _ts(now)
+        entry["ready_at"] = 0.0
+        _save(state)
+
+
+def discarded_at(surface: str) -> float:
+    if surface not in SURFACES:
+        return 0.0
+    return float(load()["surfaces"][surface].get("discarded_at") or 0.0)
+
+
+def undiscarded(surface: str, saved: dict, candidates) -> list:
+    """The candidates the surface lists after the user discarded its review:
+    those whose artist was scanned again since, as by the next refresh."""
+    at = discarded_at(surface)
+    if not at:
+        return list(candidates)
+    scanned = saved.get("artist_updated_at") or {}
+
+    def rescanned(candidate):
+        try:
+            return float(scanned.get(candidate.get("artist")) or 0) > at
+        except (TypeError, ValueError):
+            return False
+
+    return [c for c in candidates if rescanned(c)]
 
 
 def snapshot() -> dict[str, bool]:

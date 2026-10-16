@@ -2173,6 +2173,8 @@ def cancel_review(job: Job) -> Optional[bool]:
                     job.summary = previous_summary
                 job_persistence.persist(job)
                 return None
+        elif job.execute_kind in ("upgrade", "downsample"):
+            review_badges.mark_discarded(job.execute_kind)
         _start_post_job_hook_for_job(job)
         job.end_stream()
         return True

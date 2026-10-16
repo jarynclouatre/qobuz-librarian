@@ -1,4 +1,5 @@
 import os
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -342,6 +343,13 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
            "tracks": {"items": [{"id": f"x{n}", "title": f"Track {n}",
                                  "isrc": f"USSM19400{n:03d}"} for n in (1, 2)]}}
     assert catalog.find_album_folder(box)[1].name == "Illmatic (1994)"
+    # A folder deleted outside the app is gone from the next lookup, not
+    # taken for another version of the album.
+    illmatic = {**box, "id": "I1", "title": "Illmatic",
+                "release_date_original": "1994-04-19"}
+    assert catalog.find_album_folder(illmatic)[1].name == "Illmatic (1994)"
+    shutil.rmtree(root / "Nas" / "Illmatic (1994)")
+    assert catalog.find_album_folder(illmatic) == ([], None)
 
     root = tmp_path / "mix"
     monkeypatch.setattr(config, "MUSIC_ROOT", root)

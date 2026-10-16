@@ -631,11 +631,15 @@ def _make_single_track_run(album, track, token):
                 raise
         if not download_succeeded:
             j.status = job_mgr.JobStatus.FAILED
+            broken = qi.get("n_broken") and not qi.get("n_fail")
             j.error = _SINGLE_TRACK_FAILURES.get(qi.get("result"))
-            if not j.error:
+            if not j.error or broken and qi.get("result") == "incomplete":
                 j.error = (
                     "Downloaded, but the import failed. See job log."
                     if qi.get("n_ok")
+                    else "Qobuz sent a broken file at this quality, so the "
+                    "track was not added."
+                    if broken
                     else "The track was not retrieved. The job log says why."
                 )
             return

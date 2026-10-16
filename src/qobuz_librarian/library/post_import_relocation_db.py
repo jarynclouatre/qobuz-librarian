@@ -21,6 +21,8 @@ from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from typing import Any
 
+from qobuz_librarian import config as cfg
+from qobuz_librarian.library.scanner import is_library_system_folder
 from qobuz_librarian.library.sqlite_atomic import AtomicSQLiteWrite
 
 _CAPTURE_VERSION = 1
@@ -222,6 +224,110 @@ def _replacement_database_path(old_value: str | bytes, destination: str, root: s
 
 def _encoded_row(values: Iterable[Any]) -> list[dict[str, Any]]:
     return [encode_sqlite_value(value) for value in values]
+
+
+def deleted_from_library(paths, music_root, *, besides=()) -> set:
+    """The ``paths`` lstat finds missing from the music folder.
+
+    None count while the music folder holds no artist folder other than
+    ``besides``, the folders the current import made: an unmounted or
+    emptied share reads that way. A path that can't be checked counts as
+    present.
+    """
+    try:
+        staging = os.stat(cfg.STAGING_DIR)
+    except OSError:
+        staging = None
+    try:
+        with os.scandir(music_root) as entries:
+            mounted = any(
+                entry.is_dir(follow_symlinks=False)
+                and not is_library_system_folder(entry.name)
+                and entry.name not in besides
+                and not (staging is not None
+                         and os.path.samestat(entry.stat(), staging))
+                for entry in entries
+            )
+    except OSError:
+        return set()
+    if not mounted:
+        return set()
+    gone = set()
+    for path in paths:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            gone.add(path)
+        except OSError:
+            pass
+    return gone
+
+
+def vanished_destination_rows(
+    connection: sqlite3.Connection,
+    path_changes: Mapping[os.PathLike[str] | str, os.PathLike[str] | str],
+    *,
+    music_root: os.PathLike[str] | str,
+) -> list[tuple[str, int]]:
+    """The rows already at a relocation destination whose file is gone.
+
+    A folder deleted outside the app keeps its Beets rows, so an album filed
+    there again meets rows for files that no longer exist.
+    """
+    changes, root = _normalise_changes(path_changes, music_root)
+    destinations = set(changes.values())
+    found = []
+    for table, path_column in _TABLE_PATH_COLUMNS:
+        for rowid, value in connection.execute(
+            f"SELECT _rowid_, {_sql_identifier(path_column)} "
+            f"FROM {_sql_identifier(table)}"
+        ):
+            absolute = _database_absolute_path(value, root)
+            if absolute in destinations:
+                found.append((table, rowid, absolute))
+    besides = {
+        os.path.relpath(path, root).split(os.sep)[0]
+        for path in (*changes, *destinations)
+    }
+    gone = deleted_from_library(
+        {path for _table, _rowid, path in found}, root, besides=besides
+    )
+    return [(table, rowid) for table, rowid, path in found if path in gone]
+
+
+def forget_vanished_destination_rows(
+    connection: sqlite3.Connection,
+    path_changes: Mapping[os.PathLike[str] | str, os.PathLike[str] | str],
+    *,
+    music_root: os.PathLike[str] | str,
+) -> int:
+    """Delete the rows :func:`vanished_destination_rows` finds, in the
+    caller's transaction. An album left with no tracks goes too, as `beet
+    remove` would; one that keeps tracks only loses its cover path."""
+    found = vanished_destination_rows(
+        connection, path_changes, music_root=music_root
+    )
+    for table, rowid in found:
+        if table == "albums":
+            connection.execute(
+                "UPDATE albums SET artpath = NULL WHERE _rowid_ = ?", (rowid,)
+            )
+            continue
+        (album_id,) = connection.execute(
+            "SELECT album_id FROM items WHERE _rowid_ = ?", (rowid,)
+        ).fetchone()
+        connection.execute(
+            "DELETE FROM item_attributes WHERE entity_id = ?", (rowid,)
+        )
+        connection.execute("DELETE FROM items WHERE _rowid_ = ?", (rowid,))
+        if album_id is not None and connection.execute(
+            "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
+        ).fetchone() is None:
+            connection.execute(
+                "DELETE FROM album_attributes WHERE entity_id = ?", (album_id,)
+            )
+            connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+    return len(found)
 
 
 def capture_relocation_rows(
@@ -624,8 +730,11 @@ __all__ = [
     "capture_relocation_rows",
     "classify_relocation_rows",
     "decode_sqlite_value",
+    "deleted_from_library",
     "encode_sqlite_value",
+    "forget_vanished_destination_rows",
     "publish_relocation_rows",
     "rollback_relocation_rows",
     "require_safe_relocation_database",
+    "vanished_destination_rows",
 ]

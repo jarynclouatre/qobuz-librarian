@@ -168,7 +168,7 @@ _SETTINGS_ERROR_CODES = frozenset({
 
 
 @router.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request, saved: bool = False,
+async def settings_page(request: Request, saved: str = "",
                         queued: bool = False, connected: bool = False,
                         unverified: bool = False, envchecked: bool = False,
                         error: str = "",
@@ -528,7 +528,8 @@ async def save_behavior(request: Request):
             suffix += "&lastfm=rejected"
         except (lastfm.LastfmError, asyncio.TimeoutError, OSError):
             suffix += "&lastfm=down"
-    return RedirectResponse(url=f"/settings?saved=1{suffix}#{anchor}", status_code=303)
+    return RedirectResponse(url=f"/settings?saved={anchor}{suffix}#{anchor}",
+                            status_code=303)
 
 
 @router.post("/settings/password", response_class=HTMLResponse)
