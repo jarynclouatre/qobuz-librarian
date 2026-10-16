@@ -72,11 +72,13 @@ def _artist_dir_from_upgrade_result(album, result):
 
 
 def _forget_upgraded_album(album, album_dir):
-    """Drop an album upgraded just before a stop from the saved Library and
-    Upgrade views, without the Qobuz check a finished upgrade gets."""
+    """Drop an album upgraded just before a stop, or finished by the next
+    start, from the saved Upgrade view, and from Library when ``album`` is
+    given, without the Qobuz check a finished upgrade gets."""
     if (
-        generation_state.output_is_current("library")
-        and not library_scan_state.remove_album((album or {}).get("id"))
+        album is not None
+        and generation_state.output_is_current("library")
+        and not library_scan_state.remove_album(album.get("id"))
     ):
         generation_state.mark_output_status(
             "library",

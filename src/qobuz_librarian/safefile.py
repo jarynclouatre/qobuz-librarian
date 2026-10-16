@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import stat
 import tempfile
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from pathlib import Path
 
 RENAME_NOREPLACE = 1
 RENAME_EXCHANGE = 2
+AT_FDCWD = -100
 
 
 def renameat2(source_fd, source_name, destination_fd, destination_name, flags):
@@ -269,3 +271,243 @@ def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None,
     return write_atomic(path, json.JSONEncoder(
         ensure_ascii=ensure_ascii, indent=indent,
         separators=separators).iterencode(data), **options)
+
+
+def copy_metadata(source_fd, destination_fd) -> None:
+    """Give the copy its source's mode and times, and its owner, group and
+    xattrs, ACLs included, where the app may set them."""
+    value = os.fstat(source_fd)
+    try:
+        os.fchown(destination_fd, value.st_uid, value.st_gid)
+    except OSError:
+        # Without the owner the group still matters: a media server may
+        # read the music through it.
+        try:
+            os.fchown(destination_fd, -1, value.st_gid)
+        except OSError:
+            pass
+    os.fchmod(destination_fd, stat.S_IMODE(value.st_mode))
+    try:
+        names = os.listxattr(source_fd)
+    except OSError:
+        names = ()
+    for name in names:
+        try:
+            os.setxattr(destination_fd, name, os.getxattr(source_fd, name))
+        except OSError:
+            pass
+    os.utime(destination_fd, ns=(value.st_atime_ns, value.st_mtime_ns))
+
+
+def copy_file(source, destination, *, sha256=None) -> str:
+    """Copy the file `source` to the new name `destination` and return the
+    sha256 of its bytes.
+
+    The bytes go to a hidden temp name beside `destination`, synced, and
+    are renamed to it without replacing anything: FileExistsError when the
+    name is taken. A link is never followed at either end. Refuses before
+    the rename when the source changed while it was read, or its bytes do
+    not have the `sha256` given. A stop part way leaves at most the temp,
+    named `.ql-copy-` and 32 hex digits."""
+    destination = os.fspath(destination)
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                        | os.O_CLOEXEC)
+    try:
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", os.fspath(source))
+        temporary = os.path.join(os.path.dirname(destination),
+                                 f".ql-copy-{secrets.token_hex(16)}")
+        target_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            try:
+                digest = hashlib.sha256()
+                offset = 0
+                while chunk := os.pread(source_fd, 1024 * 1024, offset):
+                    write_all(target_fd, chunk)
+                    digest.update(chunk)
+                    offset += len(chunk)
+                copy_metadata(source_fd, target_fd)
+                os.fsync(target_fd)
+            finally:
+                os.close(target_fd)
+            if stat_identity(os.fstat(source_fd)) != stat_identity(before):
+                raise OSError(errno.EAGAIN, "changed while it was copied",
+                              os.fspath(source))
+            if sha256 is not None and digest.hexdigest() != sha256:
+                raise OSError(errno.EIO, "copy differs from its record",
+                              os.fspath(source))
+            rename_noreplace(AT_FDCWD, temporary, AT_FDCWD, destination)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(source_fd)
+    fsync_dir(os.path.dirname(destination))
+    return digest.hexdigest()
+
+
+def _raise(error):
+    raise error
+
+
+def snapshot_tree(root):
+    """Every entry below `root` by relative path, with its stat_identity.
+
+    Taken with lstat: a link is recorded as a link and never followed. None
+    when `root` is not a folder itself or part of it cannot be read."""
+    snapshot = {}
+    try:
+        if not stat.S_ISDIR(os.lstat(root).st_mode):
+            return None
+        for parent, folders, files in os.walk(root, onerror=_raise):
+            for name in (*folders, *files):
+                path = os.path.join(parent, name)
+                snapshot[os.path.relpath(path, root)] = stat_identity(
+                    os.lstat(path))
+    except OSError:
+        return None
+    return snapshot
+
+
+def fsync_tree(root) -> bool:
+    """Flush every regular file below `root` to disk, then every folder from
+    `root` down and the folder holding it. Links are not followed. False
+    when any of it fails."""
+    try:
+        for parent, _folders, files in os.walk(root, onerror=_raise):
+            for name in files:
+                path = os.path.join(parent, name)
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    continue
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW
+                                     | os.O_NONBLOCK | os.O_CLOEXEC)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            fsync_dir(parent, strict=True)
+        fsync_dir(os.path.dirname(os.path.abspath(root)), strict=True)
+    except OSError:
+        return False
+    return True
+
+
+def delete_verified(path, expected, *, sync=True) -> bool:
+    """Unlink `path` while lstat still gives the `expected` stat_identity.
+
+    True once the name is gone, also when it was already missing."""
+    try:
+        if stat_identity(os.lstat(path)) != tuple(expected):
+            return False
+        os.unlink(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if sync:
+        fsync_dir(os.path.dirname(os.fspath(path)))
+    return True
+
+
+def delete_tree_verified(root, snapshot) -> list[str]:
+    """Delete what below `root` still matches `snapshot`, then each folder
+    that is left empty, deepest first, and `root` itself.
+
+    Hidden files go last in each folder and stay while anything else is
+    left there, so a folder keeps its own metadata with what is left. A file
+    added or changed since the snapshot stays, and so does every folder
+    above it. A file with another name in the tree may have a new ctime
+    once that name is gone, and then needs the bytes it had. Returns the
+    relative paths left, "." for `root`."""
+    root = os.fspath(root)
+    left = []
+    names = {}
+    for relative, value in snapshot.items():
+        if not stat.S_ISDIR(value[2]):
+            names.setdefault(tuple(value[:2]), []).append(relative)
+    # The bytes of each file with more names here, read before the first
+    # goes: unlinking it moves the others' ctime, so they are matched on
+    # these instead.
+    digests = {}
+    for relative in sorted(snapshot, key=lambda name: (
+            -name.count(os.sep), os.path.basename(name).startswith("."))):
+        path = os.path.join(root, relative)
+        expected = snapshot[relative]
+        key = tuple(expected[:2])
+        if os.path.basename(relative).startswith(".") and _holds_others(
+                root, os.path.dirname(relative), snapshot, left):
+            removed = False
+        elif stat.S_ISDIR(expected[2]):
+            removed = _remove_dir(path)
+        else:
+            if len(names[key]) > 1 and key not in digests:
+                digests[key] = _digest_of(path, expected)
+            elif len(names[key]) > 1:
+                try:
+                    current = stat_identity(os.lstat(path))
+                except OSError:
+                    current = None
+                if (
+                    current is not None
+                    and current[:5] == tuple(expected[:5])
+                    and digests[key] is not None
+                    and _digest_of(path, current) == digests[key]
+                ):
+                    expected = current
+            removed = delete_verified(path, expected, sync=False)
+            if not removed and key in digests:
+                digests[key] = None
+        if not removed:
+            left.append(relative)
+    if not _remove_dir(root):
+        left.append(".")
+    fsync_dir(os.path.dirname(root))
+    return sorted(left)
+
+
+def _digest_of(path, expected):
+    """The sha256 of the file at `path` while it has the `expected`
+    stat_identity, else None."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW
+                             | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if stat_identity(os.fstat(descriptor)) != tuple(expected):
+            return None
+        return digest_fd(descriptor)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _holds_others(root, folder, snapshot, left) -> bool:
+    """Whether `folder` holds anything but hidden entries of the snapshot,
+    or keeps anything at any depth below it."""
+    inside = os.path.join(folder, "") if folder else ""
+    if any(kept.startswith(inside) for kept in left):
+        return True
+    try:
+        names = os.listdir(os.path.join(root, folder))
+    except OSError:
+        return True
+    return any(not name.startswith(".")
+               or os.path.join(folder, name) not in snapshot
+               for name in names)
+
+
+def _remove_dir(path) -> bool:
+    try:
+        os.rmdir(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True

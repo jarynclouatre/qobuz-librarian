@@ -915,7 +915,9 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
     # Killed right after the import, an upgrade left beets two albums for
     # the same files and the new files without the lyrics the old ones had.
     # Started with the library unmounted, it dropped the import's entries and
-    # the next start undid the upgrade.
+    # the next start undid the upgrade. Killed part way through carrying the
+    # album's other files, it left a partial copy in the album. Once finished,
+    # the album stayed in the saved Upgrade list as a changed candidate.
     import os
     import sqlite3
 
@@ -923,6 +925,7 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
 
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import backup as backup_mod
+    from qobuz_librarian.quality import upgrade_state
 
     music = tmp_path / "music"
     album = music / "Feist" / "Multi (2023)"
@@ -944,6 +947,8 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
              for n, (item_id, path) in enumerate(items, 1)])
 
     old = tracks(LYRICS="the words")
+    (album / "cover.jpg").write_bytes(b"cover")
+    (album / "booklet.pdf").write_bytes(b"booklet")
     with sqlite3.connect(database) as connection:
         connection.execute(
             "CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, added REAL)")
@@ -960,6 +965,8 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
     entries = beets.capture_beets_album_entries(album)
     backup = backup_mod.backup_album_dir(album)
     new = tracks()
+    (album / "cover.jpg").write_bytes(b"cover")
+    (album / f".ql-copy-{'0' * 32}").write_bytes(b"boo")
     with sqlite3.connect(database) as connection:
         rows(connection, 20, [(11, new[0]), (12, new[1])], 5000.0)
     connection.close()
@@ -967,16 +974,19 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
     unmounted = tmp_path / "unmounted"
     music.rename(unmounted)
     music.mkdir()
-    forgotten = []
+    forgotten, dropped = [], []
     monkeypatch.setattr(proc, "forget_imported_beets_entries",
                         lambda *args: forgotten.append(args))
+    monkeypatch.setattr(upgrade_state, "remove_album_dir",
+                        lambda path: dropped.append(path) or True)
 
     assert proc.finish_interrupted_upgrades() == ([], [])
 
-    assert forgotten == []
+    assert forgotten == [] and dropped == []
     music.rmdir()
     unmounted.rename(music)
     assert proc.finish_interrupted_upgrades() == ([album], [])
+    assert dropped == [album]
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT id, added FROM albums").fetchall() == [(10, 1000.0)]
@@ -984,4 +994,7 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
             (11, 10, 1001.0), (12, 10, 1002.0)]
     connection.close()
     assert [FLAC(path)["lyrics"] for path in new] == [["the words"]] * 2
+    assert sorted(path.name for path in album.iterdir()) == [
+        "01.flac", "02.flac", "booklet.pdf", "cover.jpg"]
+    assert (album / "booklet.pdf").read_bytes() == b"booklet"
     assert not backup.path.exists()

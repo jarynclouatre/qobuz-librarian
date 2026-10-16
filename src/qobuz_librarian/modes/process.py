@@ -146,6 +146,8 @@ def _recover_incomplete_upgrade_backup(backup, album_dir, *, operation):
     if recovered:
         log.info(fmt(
             C.GREEN,
+            f"  ✓  {album_dir} is as it was; its copy in the backup folder "
+            "was removed." if outcome.restored == 0 else
             f"  ✓  Restored the original folder after the interrupted "
             f"{operation}."))
         return outcome
@@ -803,11 +805,13 @@ def finish_interrupted_upgrades():
     """Settle each upgrade a hard stop cut short once its download began to
     import. A download that checks out against the original is kept, with
     the user's tags and companions carried onto it and its tracks in the
-    album's beets entry; anything else gives way to the original, and the
-    entries the import added are dropped. An album still in its backup is
-    left to the start-up put-back, and one whose parent folder is gone, as
-    an unmounted library reads, is left alone. Returns the album folders
-    upgraded and those put back."""
+    album's beets entry, and leaves the saved Upgrade list; anything else
+    gives way to the original, and the entries the import added are
+    dropped. An album still in its backup is left to the start-up put-back,
+    and one whose parent folder is gone, as an unmounted library reads, is
+    left alone. Returns the album folders upgraded and those put back."""
+    from qobuz_librarian.modes.upgrade import _forget_upgraded_album
+
     finished, put_back = [], []
     for backup, note in interrupted_upgrades():
         try:
@@ -825,8 +829,9 @@ def finish_interrupted_upgrades():
             continue
         if _finish_upgrade(backup, album_dir, entries):
             log.info(fmt(C.GRAY,
-                f"  ✓  Finished the upgrade of {album_dir} that a restart "
-                "interrupted."))
+                f"  ✓  Finished the upgrade of {album_dir} that an earlier "
+                "run left unfinished."))
+            _forget_upgraded_album(None, album_dir)
             finished.append(album_dir)
             continue
         try:
@@ -837,8 +842,8 @@ def finish_interrupted_upgrades():
         if aside is None:
             continue
         log.info(fmt(C.YELLOW,
-            f"  ⟲  Put back the original album in {album_dir}; the upgrade "
-            "a restart interrupted could not be finished."))
+            f"  ⟲  Put back the original album in {album_dir}; an earlier "
+            "run's upgrade of it could not be finished."))
         if aside is not True:
             log.info(fmt(C.GRAY, f"     The new download was set aside at {aside}."))
         forget_imported_beets_entries(entries, album_dir, staged)

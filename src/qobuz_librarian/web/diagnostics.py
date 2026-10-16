@@ -283,7 +283,7 @@ def _diagnostics():
     """Read-only health checks surfaced on the Settings page."""
     checks = []
 
-    def _tree_size(path) -> int:
+    def _tree_size(path, skip_names=()) -> int:
         """Best-effort total bytes of regular files under a directory tree.
 
         Skips whatever it can't stat rather than giving up on the whole
@@ -291,7 +291,10 @@ def _diagnostics():
         """
         total = 0
         try:
-            for parent, _dirs, names in os.walk(path):
+            for parent, dirs, names in os.walk(path):
+                if parent == os.fspath(path):
+                    dirs[:] = [name for name in dirs if name not in skip_names]
+                    names = [name for name in names if name not in skip_names]
                 for name in names:
                     try:
                         value = os.stat(os.path.join(parent, name),
@@ -335,7 +338,8 @@ def _diagnostics():
             checks.append({"label": label, "ok": False,
                            "detail": f"{display} unreadable: {e}"})
             return
-        size = f" · {format_size(_tree_size(p))}" if show_size else ""
+        size = (f" · {format_size(_tree_size(p, skip_names))}"
+                if show_size else "")
         checks.append({"label": label, "ok": True, "mono": True,
                        "detail": f"{display}: {plural(n, *unit)}{size}{note}"})
 
@@ -409,7 +413,9 @@ def _diagnostics():
             if waiting else "")
     _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
                show_size=True, unit=("kept backup", "kept backups"),
-               dirs_only=True, note=note)
+               dirs_only=True, note=note,
+               skip_names={item[0].name for item in retained or ()
+                           if backup_mod.is_disposal_leftover(item[0])})
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))
@@ -446,6 +452,7 @@ def _diagnostics():
     stranded = []
     copies = []
     left_in_backups = []
+    restores = []
     stranded_error = False
     if cfg.UPGRADE_BACKUP_DIR.exists():
         try:
@@ -455,6 +462,7 @@ def _diagnostics():
                 elif entry.is_dir() and entry.name.startswith(".ql-backup-copy-"):
                     copies.append(entry)
             left_in_backups = backup_mod.albums_left_in_backups()
+            restores = backup_mod.unfinished_restores()
         except OSError as exc:
             stranded_error = True
             _log.warning(
@@ -465,7 +473,7 @@ def _diagnostics():
             "ok": False,
             "detail": "Could not inspect this folder; its status is unknown.",
         })
-    elif stranded or copies or left_in_backups:
+    elif stranded or copies or left_in_backups or restores:
         found = []
         if left_in_backups:
             n = len(left_in_backups)
@@ -481,6 +489,15 @@ def _diagnostics():
                 f"{plural(len(copies), 'unfinished album copy', 'unfinished album copies')} "
                 f"in {cfg.UPGRADE_BACKUP_DIR}, left when a backup stopped "
                 "while copying; compare each with its album before removing it")
+        if restores:
+            found.append(
+                f"{plural(len(restores), 'folder')} left beside "
+                f"{'its album' if len(restores) == 1 else 'their albums'} "
+                "when a restore stopped: "
+                + "; ".join(storage._resolve_host_path(str(folder))[0]
+                            for folder in restores)
+                + ". Compare each with its album and backup before "
+                "removing it")
         checks.append({"label": "Unfinished upgrade backups", "ok": False,
                        "detail": ". ".join(found)})
     else:
@@ -510,28 +527,32 @@ def _diagnostics():
         })
     orphans = inventory["orphans"]
     interrupted_disposals = [
-        item for item in orphans
-        if item[0].name.startswith(".ql-dispose-backup-")
+        item for item in orphans if backup_mod.is_disposal_leftover(item[0])
     ]
     orphans = [
         item for item in orphans
-        if not item[0].name.startswith(".ql-dispose-backup-")
+        if not backup_mod.is_disposal_leftover(item[0])
         and not item[2].removable
     ]
     if interrupted_disposals:
         checks.append({
-            "label": "Interrupted backup cleanup",
+            "label": "Unfinished backup deletion",
             "ok": False,
-            "detail": f"{plural(len(interrupted_disposals), 'backup')} kept "
-                      "recovery data; review the location shown below before "
-                      "removing anything.",
+            "detail": f"{plural(len(interrupted_disposals), 'backup deletion')} "
+                      "did not finish. Remove what is left below.",
         })
     if orphans:
+        # A kept backup that needs review has no Remove, and a download an
+        # upgrade set aside has only Delete.
+        one = len(orphans) == 1
+        action = "Restore or remove" if all(
+            classification.status != "retained"
+            and not backup_mod.is_set_aside_replacement(path)
+            for path, _origin, classification in orphans) else "Review"
         checks.append({"label": "Backups needing review", "ok": False,
                        "detail": f"{plural(len(orphans), 'backup')} "
-                                 f"{'was' if len(orphans) == 1 else 'were'} "
-                                 "kept. Restore or remove "
-                                 f"{'it' if len(orphans) == 1 else 'them'} "
+                                 f"{'was' if one else 'were'} kept. "
+                                 f"{action} {'it' if one else 'them'} "
                                  "below."})
     elif not any(d["label"] == "Backups needing review" for d in checks):
         checks.append({"label": "Backups needing review", "ok": True,
@@ -625,32 +646,54 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         else:
             dest = "its album folder"
             album = ""
-        if path.name.startswith(".ql-dispose-backup-"):
-            held = path / "held"
-            try:
-                location = (
-                    held
-                    if stat.S_ISDIR(
-                        held.stat(follow_symlinks=False).st_mode)
-                    else path
-                )
-            except OSError:
-                location = path
-            display_location, _is_host_path = storage._resolve_host_path(location)
-            detail = (
-                f"Recovery files for {dest} were kept at "
-                f"{html.escape(display_location)}. Review them before removing "
-                "anything."
-            )
+        if backup_mod.is_disposal_leftover(path):
+            # Its Remove is the one a backup of its kind has, run on what is
+            # left.
+            location = html.escape(storage._resolve_host_path(str(path))[0])
+            if not origin:
+                detail = ("Deleting a backup did not finish, and the app can't "
+                          "tell which album it came from. What is left of it "
+                          "is in this folder:")
+                route, action = "/backups/discard-unchecked", "Delete anyway"
+                confirm = (f"Delete what is left of this backup at {location} "
+                           "without checking it? The app can't tell which "
+                           "album it came from, so this may be the only copy "
+                           "of its files. It cannot be undone.")
+            elif backup_mod.leftover_holds_originals(path):
+                detail = (f"Deleting the hi-res originals of {dest} did not "
+                          "finish. What is left of them is in this folder:")
+                route, action = "/backups/release-originals", "Remove"
+                confirm = ("Delete what is left of these hi-res originals? "
+                           "They are deleted only after the app checks that "
+                           "the album still holds each of these tracks. They "
+                           "are the only copies left at the original quality.")
+            else:
+                detail = (f"Deleting a backup of {dest} did not finish. What "
+                          "is left of it is in this folder:")
+                route, action = "/backups/discard", "Remove"
+                confirm = ("Delete what is left of this backup? It is deleted "
+                           f"only after the app checks that {dest} holds every "
+                           "file in it, or a verified copy of each track. If a "
+                           "track here has lyrics the album's copy lacks, "
+                           "Remove copies them onto it first, so they are kept.")
             rows.append(
                 f'<div class="ql-diagnostic-row">'
                 f'<span class="ql-diagnostic-status '
                 f'ql-diagnostic-status-error" '
                 f'aria-label="Needs attention">!</span>'
                 f'<div class="min-w-0"><div '
-                f'class="ql-diagnostic-label">Interrupted backup cleanup'
+                f'class="ql-diagnostic-label">Unfinished backup deletion'
                 f'</div><div class="ql-diagnostic-detail">{detail}</div>'
-                f'</div></div>'
+                f'<div class="ql-diagnostic-detail ql-diagnostic-detail-mono">'
+                f'{location}</div>'
+                f'<form hx-post="{route}" '
+                f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
+                f'<input type="hidden" name="_csrf_token" value="{tok}">'
+                f'<input type="hidden" name="backup" value="{name}">'
+                f'<button type="submit" class="ql-btn ql-btn-sm" '
+                f'data-confirm="{confirm}" data-confirm-action="{action}" '
+                f'data-irreversible>{action}</button>'
+                f'</form></div></div>'
             )
             continue
         if (backup_mod.is_set_aside_replacement(path)

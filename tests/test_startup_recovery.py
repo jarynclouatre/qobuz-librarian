@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import run_lock
+from qobuz_librarian import run_lock, safefile
 from qobuz_librarian.completion import (
     AlbumInventory,
     CompletionEvidence,
@@ -242,27 +242,19 @@ def test_giving_up_a_restart_blocked_gap_fill_puts_the_owned_tracks_back(
 
 
 @pytest.mark.parametrize(
+    ("crash_point", "ambiguous", "persisted_disposal", "expected_state"),
     (
-        "crash_point",
-        "change_replacement",
-        "ambiguous",
-        "persisted_disposal",
-        "expected_state",
-    ),
-    (
-        ("before-move", False, False, True, "none"),
-        ("before-delete", False, False, True, "restored"),
-        ("before-delete", True, False, True, "restored"),
-        ("after-unlink", False, False, True, "disposed"),
-        ("after-unlink", False, True, True, "attention"),
-        ("before-delete", False, False, False, "visible"),
+        ("before-move", False, True, "none"),
+        ("before-delete", False, True, "disposed"),
+        ("after-unlink", False, True, "disposed"),
+        ("after-unlink", True, True, "attention"),
+        ("before-delete", False, False, "visible"),
     ),
 )
 def test_restart_reconciles_exact_backup_disposal_quarantine(
     tmp_path,
     monkeypatch,
     crash_point,
-    change_replacement,
     ambiguous,
     persisted_disposal,
     expected_state,
@@ -278,7 +270,7 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
     monkeypatch.setattr(backup_module.cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(backup_module.cfg, "UPGRADE_BACKUP_DIR", backups)
     owner = {"operation_id": "a" * 64, "item_id": "b" * 64}
-    if crash_point == "before-delete" and not change_replacement and persisted_disposal:
+    if crash_point == "before-delete" and persisted_disposal:
         backup = backup_module.backup_album_dir(
             album, owner=owner, on_intent=lambda _record: None,
         )
@@ -327,21 +319,21 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
     child = os.fork()
     if child == 0:
         if crash_point == "before-move":
-            backup_module._rename_exact_noreplace_at = (
+            backup_module._rename_noreplace_at = (
                 lambda *_args, **_kwargs: os._exit(91)
             )
         elif crash_point == "before-delete":
-            backup_module._delete_exact_tree_contents = (
+            backup_module.delete_tree_verified = (
                 lambda *_args, **_kwargs: os._exit(91)
             )
         else:
-            original_unlink = backup_module._unlink_exact_at
+            original_delete = safefile.delete_verified
 
             def crash_after_unlink(*args, **kwargs):
-                original_unlink(*args, **kwargs)
+                original_delete(*args, **kwargs)
                 os._exit(91)
 
-            backup_module._unlink_exact_at = crash_after_unlink
+            safefile.delete_verified = crash_after_unlink
         backup_module.dispose_backup(
             backup,
             replacement_path=album,
@@ -356,52 +348,44 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
 
     _pid, status = os.waitpid(child, 0)
     assert os.waitstatus_to_exitcode(status) == 91
-    quarantine = backups / disposal["quarantine_name"]
+    quarantine = backups / (
+        disposal["quarantine_name"] if persisted_disposal
+        else ".ql-dispose-backup-" + backup.path.name)
     if crash_point == "before-move":
         assert backup.path.is_dir()
-        assert quarantine.is_dir()
-        assert not tuple(quarantine.iterdir())
+        assert not quarantine.exists()
     else:
         assert not backup.path.exists()
-        assert (quarantine / "held").is_dir()
+        assert quarantine.is_dir()
 
     if expected_state == "visible":
         backup_module._only_copy_cache = None
         assert any((path, origin) == (quarantine, album) and not result.removable
                    for path, origin, result in backup_module.list_retained_backups())
+        # The album holds other bytes now, so this is the original's only copy.
+        assert not backup_module.discard_redundant_backup(quarantine)
+        assert not backup_module.discard_replaced_backup(quarantine)
+        assert (quarantine / "01.flac").read_bytes() == b"original"
         return
 
-    if change_replacement:
-        replacement.write_bytes(b"changed replacement")
     if ambiguous:
-        (quarantine / "held" / "unexpected").write_bytes(b"not owned")
+        (quarantine / "unexpected").write_bytes(b"not owned")
     reconciled = backup_module.reconcile_library_backup_disposal(
-        carrier,
-        disposal,
-        replacement_path=album,
-        expected_replacement_receipt=replacement_receipt,
-        expected_owner=owner,
-    )
+        carrier, disposal, expected_owner=owner)
 
     assert reconciled.state == expected_state
+    assert replacement.read_bytes() == b"replacement"
     if expected_state == "none":
-        assert not quarantine.exists()
         assert (backup.path / "01.flac").read_bytes() == b"original"
-        assert replacement.read_bytes() == b"replacement"
     elif expected_state == "attention":
-        assert quarantine.is_dir()
-        assert (quarantine / "held" / "unexpected").read_bytes() == b"not owned"
+        left = sorted(path.name for path in quarantine.iterdir())
+        assert [name for name in left if not name.startswith(".")] == [
+            "unexpected"]
+        assert ".ql_backup_origin" in left
         assert not backup.path.exists()
-        assert replacement.read_bytes() == b"replacement"
-    elif expected_state == "restored":
-        assert not quarantine.exists()
-        assert (backup.path / "01.flac").read_bytes() == b"original"
-        assert replacement.read_bytes() == (
-            b"changed replacement" if change_replacement else b"replacement")
     else:
         assert not quarantine.exists()
         assert not backup.path.exists()
-        assert replacement.read_bytes() == b"replacement"
 
 
 def test_startup_recovery_is_fail_closed_and_settles_exact_work(

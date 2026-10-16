@@ -1332,6 +1332,7 @@ def main():
         except Exception as e:
             vlog(f"interrupted upgrade settle error: {e}")
         try:
+            backup_mod.settle_interrupted_restores()
             for path, origin in backup_mod.albums_left_in_backups():
                 backup = backup_mod.album_backup_to_put_back(path, origin)
                 if backup is not None and backup_mod.restore_upgrade_backup(

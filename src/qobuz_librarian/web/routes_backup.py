@@ -358,15 +358,24 @@ def _library_held(request: Request, operation: str, verb: str):
         job_mgr.end_library_operation(operation_token)
 
 
-def _backup_target(backup):
+def _backup_target(backup, *, leftover=False):
     """The retained backup a diagnostics button names, or None when it is gone
-    or the name is not a bare folder name the page could have listed."""
+    or the name is not a bare folder name the page could have listed. With
+    ``leftover``, what is left of a backup whose deletion did not finish
+    counts as one too."""
     name = (backup or "").strip()
     target = Path(str(cfg.UPGRADE_BACKUP_DIR)) / name
-    if (not name or name != Path(name).name or name.startswith(".")
+    if (not name or name != Path(name).name
+            or name.startswith(".") and not (
+                leftover and backup_mod.is_disposal_leftover(target))
             or not target.is_dir()):
         return None
     return target
+
+
+def _listed_location(target) -> str:
+    # Recovery records name a backup where it was listed.
+    return str(Path(str(cfg.UPGRADE_BACKUP_DIR)) / backup_mod.backup_name(target))
 
 
 async def _run_diagnostics_action(request: Request, action, arg):
@@ -380,7 +389,7 @@ async def _run_diagnostics_action(request: Request, action, arg):
 
 
 def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
-    target = _backup_target(backup)
+    target = _backup_target(backup, leftover=True)
     if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
@@ -397,12 +406,28 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
                 "and was kept.")
         elif backup_mod.discard_backup_unchecked(target):
             note = _diagnostics_result_notice(
-                "success", "Deleted the backup.")
+                "success", "Removed what was left of the backup."
+                if backup_mod.is_disposal_leftover(target)
+                else "Deleted the backup.")
         else:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
     return note + diagnostics._diagnostics_fragment(request)
+
+
+def _refresh_tool_lists(origin, reason):
+    # The album on disk is now the older version, so the saved Upgrade and
+    # Downsample candidates for its artist no longer describe it.
+    try:
+        flows._refresh_downsample_artist_state(Path(origin).parent)
+    except Exception:
+        _log.exception("downsample state refresh failed after restore")
+    try:
+        if generation_state.output_is_current("upgrade"):
+            generation_state.mark_output_status("upgrade", "stale", reason=reason)
+    except Exception:
+        _log.exception("upgrade state invalidation failed after restore")
 
 
 def _restore_backup_sync(request: Request, backup: str) -> str:
@@ -462,22 +487,11 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 except OSError:
                     _log.exception(
                         "couldn't clear the downsample cap for %s", origin)
-                try:
-                    flows._refresh_downsample_artist_state(Path(origin).parent)
-                except Exception:
-                    _log.exception("downsample state refresh failed after undo")
-                try:
-                    if generation_state.output_is_current("upgrade"):
-                        generation_state.mark_output_status(
-                            "upgrade",
-                            "stale",
-                            reason=(
-                                "Upgrade needs refresh after Downsample was "
-                                "undone."
-                            ),
-                        )
-                except Exception:
-                    _log.exception("upgrade state invalidation failed after undo")
+                _refresh_tool_lists(
+                    origin, "Upgrade needs refresh after Downsample was undone.")
+            elif n:
+                _refresh_tool_lists(
+                    origin, "Upgrade needs refresh after a backup was restored.")
             if n and not carried.exists():
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _diagnostics_result_notice(
@@ -500,6 +514,9 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                     "untouched; check the log.")
         elif kind == "upgrade":
             ok = backup_mod.restore_upgrade_backup(carried, origin)
+            if ok:
+                _refresh_tool_lists(
+                    origin, "Upgrade needs refresh after a backup was restored.")
             if ok and job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", f"Restored the album to "
@@ -544,7 +561,7 @@ def _discard_replaced(carried, lyrics) -> bool:
 
 
 def _discard_backup_sync(request: Request, backup: str) -> str:
-    target = _backup_target(backup)
+    target = _backup_target(backup, leftover=True)
     if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
                                 "It may already be restored or cleaned up.")
@@ -552,13 +569,13 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
     with _library_held(request, "Backup removal", "Remove") as refusal:
         if refusal:
             return refusal
-        carried = backup_mod.load_backup_result(target)
+        carried = backup_mod.removal_candidate(target)
         lyrics = []
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
         elif (
             resolution_plan := job_mgr.prepare_recovery_resolution(
-                str(carried.path), carried.receipt)
+                _listed_location(target), carried.receipt)
         ) is None:
             note = _diagnostics_result_notice(
                 "error", "The saved recovery records could not be checked, "
@@ -587,6 +604,16 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                     "the recovery until the data volume has been checked.")
         else:
             refusal = backup_mod.removal_refusal(target)
+            if (backup_mod.is_disposal_leftover(target)
+                    and refusal.reason != "lyrics"):
+                # It has no Restore, so the refusal offers what a refused
+                # Restore of a backup offers.
+                return _stuck_backup_notice(
+                    request, target,
+                    (refusal.detail if not refusal.removable else
+                     "Couldn't verify that the album still holds every file "
+                     "this backup does.") + " What is left of the backup "
+                    "was kept.") + diagnostics._diagnostics_fragment(request)
             if not refusal.removable:
                 body = (f"{html.escape(refusal.detail)} The backup was left "
                         "untouched.")
@@ -604,7 +631,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
 
 
 def _release_undo_copy_sync(request: Request, backup: str) -> str:
-    target = _backup_target(backup)
+    target = _backup_target(backup, leftover=True)
     if target is None:
         return (_diagnostics_result_notice("error", "Those originals aren't there "
                                 "anymore. They may already be restored or "
@@ -613,12 +640,12 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
     with _library_held(request, "Backup removal", "Delete") as refusal:
         if refusal:
             return refusal
-        carried = backup_mod.load_backup_result(target)
+        carried = backup_mod.removal_candidate(target)
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
         elif (
             resolution_plan := job_mgr.prepare_recovery_resolution(
-                str(carried.path), carried.receipt)
+                _listed_location(target), carried.receipt)
         ) is None:
             note = _diagnostics_result_notice(
                 "error", "The saved recovery records could not be checked, "
@@ -637,6 +664,10 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                     "saved recovery status could not be updated. History may "
                     "keep flagging the recovery until the data volume has "
                     "been checked.")
+        elif backup_mod.is_disposal_leftover(target):
+            note = _diagnostics_result_notice(
+                "error", "Couldn't confirm the album still holds every one of "
+                "these tracks, so what is left of the originals was kept.")
         else:
             note = _diagnostics_result_notice(
                 "error", "Couldn't confirm the album still holds every one of "

@@ -380,8 +380,6 @@ def finish_library_backup_settlement(
         result = reconcile_library_backup_disposal(
             data["carrier"],
             data["disposal"],
-            replacement_path=replacement,
-            expected_replacement_receipt=data["replacement_receipt"],
             expected_owner=owner_data,
         )
         authority_check()

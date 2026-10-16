@@ -3084,15 +3084,22 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
     """The Restore form posts a bare directory name; anything path-shaped is
     a probe, not a backup the diagnostics list rendered, so it must not
     resolve outside the backup dir or restore anything. Restore moves the
-    files home and clears the job's recovery, and Discard keeps a backup
-    whose files differ from the library's copy. A hard stop between an
+    files home, clears the job's recovery and sends Upgrade back for a
+    refresh, and Discard keeps a backup whose files differ from the
+    library's copy. A hard stop between an
     upgrade's or repair's backup and its import left the folder missing,
     with nothing but a Diagnostics row to say so; taking the lock puts it
     back once staging is free."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import backup as backup_mod
+    from qobuz_librarian.library import generation_state
     from qobuz_librarian.web import job_persistence, lifespan, runtime
 
+    marked = []
+    monkeypatch.setattr(generation_state, "output_is_current",
+                        lambda *_a, **_k: True)
+    monkeypatch.setattr(generation_state, "mark_output_status",
+                        lambda *a, **_k: marked.append(a))
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "probe" / "backups")
     (tmp_path / "probe" / "backups").mkdir(parents=True)
     r = client.post("/backups/restore", data={"backup": "../../etc"})
@@ -3126,6 +3133,7 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
         assert job.recoveries == []
         assert job.attention == ""
         assert job_persistence.load_one(job.id)["recoveries"] == []
+        assert ("upgrade", "stale") in marked
 
         kept = backup_mod.backup_album_dir(origin)
         origin.mkdir(parents=True)
@@ -3212,9 +3220,9 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
 
     # A hard stop can also land while the album is half way into its
     # backup: renamed but not yet sealed, or copied to another filesystem
-    # with its folder part removed, or Ctrl-C there, which lets the removal
-    # finish. All come back on the next start, and the reviews of the ones
-    # rebuilt from the copy are sealed again.
+    # with its folder part removed, or Ctrl-C there. All come back on the
+    # next start, and the reviews of the ones filled in from the copy are
+    # sealed again.
     moved = root / "music" / "Artist" / "Moved (2022)"
     copied = root / "music" / "Artist" / "Copied (2023)"
     interrupted = root / "music" / "Artist" / "Interrupted (2025)"
@@ -3241,14 +3249,15 @@ elif album.endswith("Renamed (2024)"):
     os._exit(92)
 elif album.endswith("Sealed (2026)"):
     backup_mod._same_filesystem = lambda *_args: False
-    rename = backup_mod._rename_exact_noreplace_at
+    rename = backup_mod._rename_noreplace_at
 
     def rename_then_stop(source_fd, source_name, *args):
         rename(source_fd, source_name, *args)
-        if source_name.startswith(backup_mod._PARTIAL_COPY_PREFIX):
+        if os.path.basename(source_name).startswith(
+                backup_mod._PARTIAL_COPY_PREFIX):
             os._exit(91)
 
-    backup_mod._rename_exact_noreplace_at = rename_then_stop
+    backup_mod._rename_noreplace_at = rename_then_stop
 elif album.endswith("Interrupted (2025)"):
     backup_mod._same_filesystem = lambda *_args: False
     unlink = os.unlink
@@ -3264,14 +3273,15 @@ elif album.endswith("Interrupted (2025)"):
     except KeyboardInterrupt:
         os._exit(91)
 else:
+    from qobuz_librarian import safefile
     backup_mod._same_filesystem = lambda *_args: False
-    unlink = backup_mod._unlink_exact_at
+    unlink = safefile.delete_verified
 
-    def unlink_then_stop(*args):
-        unlink(*args)
+    def unlink_then_stop(*args, **kwargs):
+        unlink(*args, **kwargs)
         os._exit(91)
 
-    backup_mod._unlink_exact_at = unlink_then_stop
+    safefile.delete_verified = unlink_then_stop
 backup_mod.backup_album_dir(Path(album))
 os._exit(92)
 """
@@ -3282,9 +3292,10 @@ os._exit(92)
              str(root / "backups"), str(album)],
             env={**os.environ, "DATA_DIR": child_home, "HOME": child_home})
         assert stopped.returncode == 91
-        assert not album.exists()
-    only_copy = next(path for path, origin in backup_mod.albums_left_in_backups()
-                     if origin == interrupted)
+    assert not moved.exists()
+    assert len(list(copied.iterdir())) == len(list(interrupted.iterdir())) == 1
+    only_copy = next(path for path in (root / "backups").iterdir()
+                     if backup_mod._read_backup_origin(path) == interrupted)
     assert not backup_mod.discard_backup_unchecked(only_copy)
     resealed = []
     monkeypatch.setattr(backup_mod, "on_restored",

@@ -577,6 +577,7 @@ def _put_back_albums() -> None:
     global _put_back_pending
     _put_back_pending = False
     try:
+        backup_mod.settle_interrupted_restores()
         for path, origin in backup_mod.albums_left_in_backups():
             backup = backup_mod.album_backup_to_put_back(path, origin)
             if backup is None:

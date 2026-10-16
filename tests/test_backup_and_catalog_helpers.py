@@ -78,18 +78,16 @@ def test_backup_refuses_anything_it_cannot_protect_and_leaves_the_album(
     album.mkdir(parents=True)
     original = b"REAL-FLAC-AUDIO-CONTENT"
     (album / "01.flac").write_bytes(original)
-    real_copytree = shutil.copytree
+    real_copy_file = bk.copy_file
 
-    def corrupt_copytree(src, dst, *a, **k):
-        real_copytree(src, dst, *a, **k)
-        for f in (root / "backups").rglob("*"):
-            if f.is_file():
-                f.write_bytes(b"\x00" * f.stat().st_size)
-        return dst
+    def corrupt_copy(source, destination, **kwargs):
+        digest = real_copy_file(source, destination, **kwargs)
+        destination.write_bytes(b"\x00" * destination.stat().st_size)
+        return digest
 
     with monkeypatch.context() as patch:
         patch.setattr(bk, "_same_filesystem", lambda a, b: False)
-        patch.setattr(bk.shutil, "copytree", corrupt_copytree)
+        patch.setattr(bk, "copy_file", corrupt_copy)
         assert backup_album_dir(album) is None
     assert (album / "01.flac").read_bytes() == original
 
@@ -392,24 +390,33 @@ def test_cross_fs_restore_verifies_the_music_and_ignores_backup_sidecars(
     original = root / "Album"
     backup_result = _seal_test_backup(
         bkmod, backup, original, kind="upgrade")
-    real_copy_tree = bkmod._copy_tree_manifest_at
+    real_copy_file = bkmod.copy_file
+    corrupt = tmp_path / "corrupt.flac"
+    corrupt.write_bytes(b"corrupt")
 
-    def corrupt_staged_copy(source_fd, destination_fd, manifest, held):
-        copied = real_copy_tree(source_fd, destination_fd, manifest, held)
-        if copied:
-            staged = bkmod._held_directory_path(destination_fd) / "track1.flac"
-            staged.with_name("corrupt").write_bytes(b"corrupt")
-            os.replace(staged.with_name("corrupt"), staged)
-        return copied
+    def corrupt_staged_copy(source, destination, **kwargs):
+        if source.name == "track1.flac":
+            source = corrupt
+        return real_copy_file(source, destination, **kwargs)
 
-    monkeypatch.setattr(
-        bkmod, "_copy_tree_manifest_at", corrupt_staged_copy)
+    monkeypatch.setattr(bkmod, "copy_file", corrupt_staged_copy)
 
     assert restore_upgrade_backup(backup_result, original) is False
     assert backup.exists()
     assert (backup / "track1.flac").exists() and (backup / "track2.flac").exists()
     assert not original.exists()
     assert not list(root.glob(".ql-restore-stage-*"))
+
+    # A hard stop part way through the copy leaves it under the one name
+    # this backup's restore uses, which the next restore clears.
+    monkeypatch.setattr(bkmod, "copy_file", real_copy_file)
+    stage = root / (".ql-restore-stage-" + backup.name)
+    stage.mkdir()
+    shutil.copyfile(backup / "track2.flac", stage / "track2.flac")
+    (stage / (".ql-copy-" + "0" * 32)).write_bytes(b"a" * 10)
+    assert restore_upgrade_backup(backup_result, original) is True
+    assert (original / "track1.flac").read_bytes() == b"a" * 50_000
+    assert not stage.exists() and not backup.exists()
 
 
 def test_backup_receipt_survives_metadata_drift_and_a_copied_volume(
@@ -936,8 +943,7 @@ def test_backup_disposal_needs_an_exact_complete_proof(tmp_path, monkeypatch):
         def unreadable(path, *args, **kwargs):
             if not isinstance(path, int):
                 value = os.fspath(path)
-                if ("/qobuz-librarian-disposal-proof-" in value
-                        and value.endswith("/backup" + suffix)):
+                if value == os.fspath(backup.path) + suffix:
                     faults.append(path)
                     raise OSError(5, "I/O error", value)
             return real_stat(path, *args, **kwargs)
