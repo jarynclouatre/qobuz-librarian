@@ -30,7 +30,7 @@ from pathlib import Path
 from qobuz_librarian import config
 from qobuz_librarian.api import album_cache
 from qobuz_librarian.api import search as qobuz_search
-from qobuz_librarian.api.auth import QobuzError
+from qobuz_librarian.api.auth import QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
@@ -653,6 +653,12 @@ def compute_missing(qobuz_tracks, existing_tracks):
     return missing, present
 
 
+def unstreamable(track) -> bool:
+    """Whether Qobuz lists the track but will not serve it, so no download
+    can fetch it."""
+    return track.get("streamable") is False
+
+
 def _release_title(record):
     title = (record.get("title") or "").strip()
     version = (record.get("version") or "").strip()
@@ -1109,15 +1115,25 @@ def search_result_ownership(album, fetch_album):
     """How the library holds an album search result, as Search marks it.
 
     ``fetch_album`` returns the result's full payload by id; it is called only
-    when a folder on disk may hold the album. Owned needs the edition and all
-    its tracks, not just the songs on another mix. ``ownership_unknown``
-    stays set when the check could not finish.
+    when a folder on disk may hold the album, or when the album cache says
+    Qobuz did not stream one of its tracks, since it may stream it now. An
+    album the cache does not hold gets no "not on Qobuz" count. Owned needs
+    the edition and all its tracks, not just the songs on another mix.
+    ``ownership_unknown`` stays set when the check could not finish.
     """
     res = {"ownership_unknown": True}
     folder = (find_album_dir_filesystem(album)
               or find_album_dir_filesystem(album, exact_edition=True))
     if folder is None:
         res["ownership_unknown"] = False
+        cached = (album_cache.get(album["id"]) or {}).get("tracks") or {}
+        if any(unstreamable(t) for t in cached.get("items") or []):
+            try:
+                fresh = fetch_album(album["id"]).get("tracks") or {}
+            except (QobuzError, QobuzUnavailable):
+                fresh = {}
+            res["unavailable"] = sum(
+                1 for t in fresh.get("items") or [] if unstreamable(t))
         return res
     exact_album = fetch_album(album["id"])
     qobuz_tracks = (exact_album.get("tracks") or {}).get("items") or []
@@ -1136,6 +1152,10 @@ def search_result_ownership(album, fetch_album):
     res["disk_year"] = _dir_year(matched_folder.name)
     held = held_by_other_versions(exact_album, existing, matched_folder, missing)
     gaps = [t for t in missing if not any(t is h for h in held)]
+    # No download fetches a track Qobuz does not stream, so it is no gap to
+    # offer; the mark says how many there are.
+    res["unavailable"] = sum(1 for t in gaps if unstreamable(t))
+    gaps = [t for t in gaps if not unstreamable(t)]
     bonus = bonus_versions(gaps, present)
     if gaps and len(bonus) == len(gaps):
         # Only other versions of songs on disk are missing: the album is
@@ -1145,7 +1165,7 @@ def search_result_ownership(album, fetch_album):
     elif gaps:
         res["partial"] = True
         res["folder"] = str(matched_folder.relative_to(config.MUSIC_ROOT))
-        res["have_tracks"] = len(qobuz_tracks) - len(gaps)
+        res["have_tracks"] = len(qobuz_tracks) - len(gaps) - res["unavailable"]
         res["want_tracks"] = len(qobuz_tracks)
     elif held:
         # Every song is on disk, some as another master: a Download here is a

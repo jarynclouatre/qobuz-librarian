@@ -1,8 +1,13 @@
 """Interpret the unresolved tracks in a download result."""
 
 
-def incomplete_track_counts(result):
-    """Return retryable and lossy-only missing-track counts."""
+def track_shortfall(result):
+    """Return the failed, damaged, lossy-only and not-streamed track counts.
+
+    Failed tracks can arrive on another try; a damaged one is a broken file
+    Qobuz sent at the chosen quality, which another try may get again. Qobuz
+    has lossy-only tracks only in a lossy format and does not stream the
+    others at all."""
     n_broken = result.get("n_broken")
     if n_broken is None:
         # Results saved before damaged tracks were counted on their own.
@@ -11,7 +16,47 @@ def incomplete_track_counts(result):
     n_lossy_only = result.get("n_lossy_only")
     if n_lossy_only is None:
         n_lossy_only = max(result.get("n_lossy", 0) - n_broken, 0)
-    return result.get("n_fail", 0) + n_broken, n_lossy_only
+    n_unavailable = result.get("n_unavailable", 0)
+    return (result.get("n_fail", 0) - n_unavailable, n_broken, n_lossy_only,
+            n_unavailable)
+
+
+def incomplete_track_counts(result):
+    """Return how many missing tracks another try could fetch, and how many
+    need another source."""
+    n_failed, n_broken, n_lossy_only, n_unavailable = track_shortfall(result)
+    return n_failed + n_broken, n_lossy_only + n_unavailable
+
+
+def shortfall_fields(result):
+    """The missing-track fields a finished download reports, and the tracks
+    that came at CD quality because Qobuz sent a broken file."""
+    _, n_broken, n_lossy_only, n_unavailable = track_shortfall(result)
+    return {
+        "n_broken": n_broken,
+        "n_lossy_only": n_lossy_only,
+        "n_unavailable": n_unavailable,
+        "unavailable_tracks": result.get("unavailable_tracks", []),
+        "cd_quality_tracks": result.get("cd_quality_tracks", []),
+    }
+
+
+def processing_attention(result):
+    """Whether the work after the download left something to look at."""
+    return bool(
+        result.get("downsample_errors", 0)
+        or result.get("downsample_flush_warnings", 0)
+        or result.get("downsample_cancelled")
+        or result.get("consolidation_interrupted")
+        or result.get("siblings_preserved")
+    )
+
+
+def cd_quality_note(tracks):
+    """Say which tracks came at CD quality, and why."""
+    return (f"Qobuz sent a broken file at the chosen quality for "
+            f"{', '.join(tracks)}, so {'it' if len(tracks) == 1 else 'they'} "
+            "came at CD quality.")
 
 
 def download_attention_kind(result):
@@ -32,13 +77,7 @@ def download_attention_kind(result):
     verdict = result.get("quality_verdict") or {}
     if verdict.get("under") and not verdict.get("recovered"):
         return "quality"
-    if (
-        result.get("downsample_errors", 0)
-        or result.get("downsample_flush_warnings", 0)
-        or result.get("downsample_cancelled")
-        or result.get("consolidation_interrupted")
-        or result.get("siblings_preserved")
-    ):
+    if processing_attention(result):
         return "processing"
     if result.get("result") == "partial":
         return "partial"
@@ -53,11 +92,14 @@ def failure_cause(result):
         return "Qobuz couldn't deliver every track"
     if result.get("n_ok"):
         return "the import failed"
-    retryable, lossy_only = incomplete_track_counts(result)
+    retryable, _ = incomplete_track_counts(result)
+    _, _, lossy_only, unavailable = track_shortfall(result)
+    if unavailable and not retryable:
+        return "Qobuz does not stream the missing tracks"
     if lossy_only and not retryable:
         return "Qobuz only had lossy files"
     if result.get("n_broken") and not result.get("n_fail"):
-        return "the tracks arrived damaged"
+        return "Qobuz sent broken files"
     if retryable:
         return "no track arrived"
     return ""
@@ -78,6 +120,8 @@ def download_job_outcome(result):
     """The status ("done" or "failed") and attention a download earns."""
     kind = download_attention_kind(result)
     if tracks_missing(result):
+        if processing_attention(result):
+            return "failed", "processing"
         return "done", kind
     if kind == "backup" or (result.get("result") == "partial" and result.get("imported")):
         return "failed", kind
@@ -85,7 +129,8 @@ def download_job_outcome(result):
               "skipped_has_extras", "dry_run", "user_skipped",
               "lossy_only", "no_tracks", "cancelled"}
     if result.get("result") not in benign and not result.get("imported"):
-        return "failed", ""
+        # No later try fetches what Qobuz cannot supply, so it is not retried.
+        return "failed", "lossy" if kind == "lossy" else ""
     return "done", ""
 
 

@@ -12,11 +12,13 @@ from qobuz_librarian.quality.decision import album_max_quality, track_targets
 from qobuz_librarian.ui_cli.logging import log
 
 
-def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None):
+def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None, exempt=()):
     """Decide whether the staged rip came in below min(source, cap), each
-    track against what Qobuz offers for it."""
+    track against what Qobuz offers for it. ``exempt`` names the files that
+    came at CD quality on purpose."""
     target = album_max_quality(qobuz_album, tier=effective_tier)
-    staged = [t for d in staged_dirs for t in read_album_dir(d)]
+    staged = [t for d in staged_dirs for t in read_album_dir(d)
+              if t.get("path") not in exempt]
     quals, n_unknown, n_below = [], 0, 0
     for t, (bits_wanted, rate_wanted) in zip(
             staged, track_targets(staged, qobuz_album, effective_tier)):
@@ -38,9 +40,10 @@ def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None):
 
 
 def verify_and_recover(qobuz_album, staged_dirs, *, redownload_at_max,
-                       effective_tier, allow_retry=True):
+                       effective_tier, allow_retry=True, exempt=()):
     """Verify the staged rip and retry once at the max tier when safe."""
-    sf = rip_shortfall(staged_dirs, qobuz_album, effective_tier=effective_tier)
+    sf = rip_shortfall(staged_dirs, qobuz_album, effective_tier=effective_tier,
+                       exempt=exempt)
     recovered = retried = False
     if sf["under"] and effective_tier < 4 and allow_retry:
         retried = True

@@ -322,16 +322,17 @@ def _run_rip(cmd, timeout, live_output):
             if err_buf:
                 text = " ".join(s.strip() for s in err_buf if s.strip())
                 text = re.sub(r"\s+", " ", text)
-                m = re.search(r"Persistent error downloading track '([^']+)', skipping", text)
-                if m:
-                    log.info(fmt(C.RED, f"    ✗ skipped: {m.group(1)} (network)"))
-                else:
-                    m = re.search(r"Error downloading track '([^']+)', retrying", text)
-                    if m:
-                        log.info(fmt(C.YELLOW, f"    ⟳ retry: {m.group(1)}"))
-                    else:
-                        short = text[:100] + ("…" if len(text) > 100 else "")
-                        log.info(fmt(C.RED, "    ✗ " + short))
+                skipped = re.search(r"Persistent error downloading track '([^']+)', skipping", text)
+                retrying = re.search(r"Error downloading track '([^']+)', retrying", text)
+                if skipped:
+                    log.info(fmt(C.RED, f"    ✗ skipped: {skipped.group(1)}"))
+                elif retrying:
+                    log.info(fmt(C.YELLOW, f"    ⟳ retry: {retrying.group(1)}"))
+                elif "not available for stream" not in text:
+                    # The download already said how many tracks Qobuz does
+                    # not stream.
+                    short = text[:100] + ("…" if len(text) > 100 else "")
+                    log.info(fmt(C.RED, "    ✗ " + short))
             in_error = False
             err_buf = []
 

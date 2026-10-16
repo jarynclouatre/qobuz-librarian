@@ -22,7 +22,7 @@ from qobuz_librarian.completion import (
     normalise_album_id,
 )
 from qobuz_librarian.download import album_track_slots, downloads_whole_album
-from qobuz_librarian.library.catalog import is_lossless_album
+from qobuz_librarian.library.catalog import is_lossless_album, unstreamable
 from qobuz_librarian.quality.decision import album_max_quality
 
 
@@ -117,6 +117,9 @@ def plan_durable_new_album(
     if (
         not isinstance(tracks, list)
         or not slots
+        # The lane only completes an album that arrives whole, so one Qobuz
+        # cannot stream whole goes the way that keeps the tracks it can.
+        or any(unstreamable(track) for track in tracks)
         or bool(item.get("force_track_by_track"))
         or bool(item.get("siblings_to_delete"))
         or callable(item.get("pre_import_retag"))

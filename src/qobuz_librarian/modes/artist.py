@@ -27,6 +27,7 @@ from qobuz_librarian.library.catalog import (
     find_expanded_edition,
     find_extras_in_existing,
     match_dir_to_catalog,
+    unstreamable,
 )
 from qobuz_librarian.library.discovery import (
     ArtistSearchUnavailable,
@@ -453,6 +454,13 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 "not filled (--include-bonus)"))
             results.append({"dir": ad, "result": "already_complete",
                             "n_total": n_total, "n_bonus": len(bonus)})
+            continue
+        if all(unstreamable(t) for t in missing):
+            log.info(fmt(C.GREEN,
+                f"    ✓  Every track Qobuz streams is present; "
+                f"{plural(len(missing), 'track')} not available on Qobuz"))
+            results.append({"dir": ad, "result": "already_complete",
+                            "n_total": n_total, "n_unavailable": len(missing)})
             continue
 
         # Partial: offer to fill the gap, unless the web review already got a

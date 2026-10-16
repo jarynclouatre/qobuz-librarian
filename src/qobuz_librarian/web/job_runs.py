@@ -341,9 +341,11 @@ def _make_download_run(
             # A parked library review may still offer this album, so drop it
             # there so the stale review can't download it a second time.
             flows.prune_library_review_candidates(album)
-            retryable, lossy_only = download_result.incomplete_track_counts(r)
-            # Nothing missing at all is what search calls "Owned"; a gap of
-            # either kind leaves the row offering the download it still needs.
+            retryable, _ = download_result.incomplete_track_counts(r)
+            _, _, lossy_only, _ = download_result.track_shortfall(r)
+            # Nothing missing but tracks Qobuz does not stream is what search
+            # calls "Owned"; any other gap leaves the row offering the
+            # download it still needs.
             j.landed_complete = not retryable and not lossy_only
             if retryable:
                 flows._fold_partial_gap_fill(

@@ -827,6 +827,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 "partial": bool(res.get("partial")),
                 "have_tracks": res.get("have_tracks"),
                 "want_tracks": res.get("want_tracks"),
+                "unavailable": res.get("unavailable", 0),
                 "folder": res.get("folder", ""),
                 "ownership_unknown": res["ownership_unknown"],
             })
@@ -865,7 +866,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                       "quality", "hires", "lossy", "bit_depth",
                       "sample_rate", "cover", "version", "queued", "scanning",
                       "as_new_edition", "folder", "ownership_unknown",
-                      "bonus_versions"):
+                      "bonus_versions", "unavailable"):
                 g[f] = rep[f]
             g["partial"] = rep["partial"] and not g["owned"]
             g["have_tracks"] = rep["have_tracks"]
@@ -1176,7 +1177,8 @@ def _album_tracklist(album_id, token):
             "title": title,
             "version": "" if version.casefold() in title.casefold() else version,
             "length": _track_length(t.get("duration")),
-            "owned": str(t.get("id")) in present_ids})
+            "owned": str(t.get("id")) in present_ids,
+            "unavailable": catalog.unstreamable(t)})
     return tracks
 
 

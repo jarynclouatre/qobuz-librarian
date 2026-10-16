@@ -22,7 +22,7 @@ catalog over a bare-name twin, cached to disk).
 import json
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
@@ -55,6 +55,7 @@ from qobuz_librarian.library.catalog import (
     find_qobuz_album_for_dir,
     holds_recordings,
     is_lossless_album,
+    unstreamable,
 )
 from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
@@ -797,6 +798,7 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                     held(album)
                 continue
             missing, present = compute_missing(tracks, existing)
+            missing = [t for t in missing if not unstreamable(t)]
             # Resolution matched on folder-name similarity alone, so a
             # different but similarly-named album that merely shares a title
             # (an "Intro") can land here.
@@ -884,9 +886,14 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                                catalog=catalog, prefer_hires=opts.prefer_hires)
                for ad in album_dirs if skip_dir is None or not skip_dir(ad)]
     for m in matches:
-        if m.status == "partial" and _gap_held_by_siblings(m, matches):
-            m = DirMatch("complete", m.album_dir, m.qobuz_album,
-                         existing=m.existing)
+        if m.status == "partial":
+            # A track Qobuz does not stream is no gap a fill could close.
+            fetchable = [t for t in m.missing if not unstreamable(t)]
+            if not fetchable or _gap_held_by_siblings(m, matches):
+                m = DirMatch("complete", m.album_dir, m.qobuz_album,
+                             existing=m.existing)
+            elif len(fetchable) < len(m.missing):
+                m = replace(m, missing=fetchable)
         classify_owned_match(result, m, hidden, single_store, artist_name,
                              handled_ids, resolved_dirs,
                              include_hidden=include_hidden)

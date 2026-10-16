@@ -1381,8 +1381,8 @@ async def job_retry(request: Request, job_id: str):
         )
     if (job.execute_args or {}).get("retry_disabled") == "lossy":
         return _land(
-            error="Qobuz only has the missing tracks in lossy quality. This "
-                  "album needs another source, so it cannot be retried here.",
+            error="Qobuz cannot supply the missing tracks, so this album "
+                  "needs another source and cannot be retried here.",
         )
     if (job.execute_args or {}).get("retry_disabled") == "backup":
         return _land(

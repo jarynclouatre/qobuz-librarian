@@ -13,6 +13,7 @@ from qobuz_librarian import post_job_hook
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
+from qobuz_librarian.download_result import cd_quality_note
 from qobuz_librarian.integrations.beets import (
     beets_entry_ids,
     forget_replaced_beets_entries,
@@ -1040,6 +1041,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                        else max(n_fail_final, len(verified_truncated))),
             "imported": repaired,
             "backup": recovery_result(),
+            "cd_quality_tracks": qi.get("cd_quality_tracks", []) if repaired else [],
         }
     finally:
         args.no_upgrade = saved_no_upgrade
@@ -1063,10 +1065,11 @@ def _report_repair_recovery(backup, *, reason=""):
 
 
 def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
-                        quiet=False):
+                        quiet=False, cd_quality=None):
     """Scan one album dir by ISRC, report, confirm, and repair. Returns
     "repaired" | "would_repair" | "clean" | "attention" | "skipped" | "failed" |
-    "recovery".
+    "recovery", and adds a repaired album's tracks that came at CD quality to
+    ``cd_quality``.
     """
     if not quiet:
         section(f"Repair scan, {truncate(album_dir.name, 60)}")
@@ -1249,6 +1252,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             token,
             args,
         )
+        if cd_quality is not None:
+            cd_quality.extend(result.get("cd_quality_tracks") or [])
         return "attention" if unverified else "repaired"
     return "failed"
 
@@ -1279,6 +1284,8 @@ def _report_repair_run(tally, started, *, interrupted=False, clause=None):
     ) if count]
     summary = ("Stopped early. " if interrupted else "") + (
         f"{', '.join(parts)}." if parts else "No damaged tracks found.")
+    if tally.get("cd_quality"):
+        summary += f" {cd_quality_note(tally['cd_quality'])}"
     failed = tally.get("failed", 0)
     error = (f"Finished with {plural(failed, 'error')}." if failed
              else f"Needs attention: {clause}." if clause else None)
@@ -1343,6 +1350,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     "skipped": 0,
                     "failed": 0,
                     "recovery": 0,
+                    "cd_quality": [],
                 }
                 interrupted = False
                 try:
@@ -1357,7 +1365,8 @@ def run_album_repair_mode(args, token, *, loop=False):
                         try:
                             status = _scan_report_repair(
                                 aldir, adir.name, args, token,
-                                deep=True, quiet=True)
+                                deep=True, quiet=True,
+                                cd_quality=tally["cd_quality"])
                         except AuthLost:
                             print()
                             die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
@@ -1426,14 +1435,16 @@ def run_album_repair_mode(args, token, *, loop=False):
             if album_dir is None:
                 return 0
 
+            cd_quality = []
             try:
                 status = _scan_report_repair(
-                    album_dir, artist_dir.name, args, token
+                    album_dir, artist_dir.name, args, token,
+                    cd_quality=cd_quality,
                 )
             except AuthLost:
                 die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
             if status in {"repaired", "attention", "failed", "recovery"}:
-                _report_repair_run({status: 1}, started, clause={
+                _report_repair_run({status: 1, "cd_quality": cd_quality}, started, clause={
                     "attention": "the album did not finish cleanly",
                     "recovery": "the album kept a recovery backup",
                 }.get(status))

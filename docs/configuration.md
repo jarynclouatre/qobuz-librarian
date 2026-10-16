@@ -95,6 +95,8 @@ Defaults to tier `4`, the best Qobuz serves per release (24-bit up to 192 kHz, e
 | `3` | 24-bit ≤96 kHz | Hi-res, smaller cap |
 | `2` | 16-bit / 44.1 kHz | CD lossless, smallest |
 
+When Qobuz sends a track as a broken file at tier `3` or `4` but its CD-quality file is whole, that one track comes at CD quality instead of going missing; never lossy. The log and History name it, and Upgrade leaves the album alone for a while, since it would only get the same broken file.
+
 To keep hi-res masters smaller, pull tier `4` and either enable import-time downsampling (`DOWNSAMPLE_HIRES_ENABLED`) or run **Downsample** on demand.
 
 ## beets & streamrip config

@@ -189,7 +189,11 @@ def get_album(album_id, token):
         except QobuzError:
             pass
         else:
-            if cached_items and len(cached_items) >= _listed_track_total(cached):
+            # Qobuz starts streaming a track on its release date and can
+            # restore one it stopped, so an album with a track it did not
+            # stream is asked for again.
+            if (cached_items and len(cached_items) >= _listed_track_total(cached)
+                    and not any(t.get("streamable") is False for t in cached_items)):
                 return cached
     album, track_items = _validated_album(
         qobuz_get(

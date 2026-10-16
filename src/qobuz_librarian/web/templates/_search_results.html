@@ -10,14 +10,18 @@
   {% if item.bonus_versions %} <span class="ql-other-version-label" title="Other versions of songs already in the folder">+{{ item.bonus_versions }}&nbsp;bonus&nbsp;version{{ 's' if item.bonus_versions != 1 else '' }}</span>{% endif %}
 {%- endmacro %}
 
+{% macro unavailable_note(item) -%}
+  {% if item.unavailable %} <span class="ql-other-version-label" title="Qobuz lists these tracks but does not stream them">{{ item.unavailable }}&nbsp;not on&nbsp;Qobuz</span>{% endif %}
+{%- endmacro %}
+
 {% macro album_quality_status(item) -%}
-  {% if item.owned %}<span class="ql-owned-label">In library</span>{{ bonus_note(item) }}
+  {% if item.owned %}<span class="ql-owned-label">In library</span>{{ bonus_note(item) }}{{ unavailable_note(item) }}
   {% else %}
   <span class="ql-search-quality-status">
     {{ quality_badge(item) }}
     {% if item.partial %}<span class="ql-partial-label">{{ item.have_tracks }} of {{ item.want_tracks }} tracks</span>
     {% elif item.other_have %}<span class="ql-other-version-label" title="{{ item.other_folder }}">{{ item.other_have }}&nbsp;of&nbsp;{{ item.other_want }}&nbsp;tracks&nbsp;owned in&nbsp;another&nbsp;version</span>
-    {% elif item.as_new_edition and item.folder %}<span class="ql-other-version-label" title="{{ item.folder }}">Other&nbsp;version in&nbsp;library</span>{% endif %}
+    {% elif item.as_new_edition and item.folder %}<span class="ql-other-version-label" title="{{ item.folder }}">Other&nbsp;version in&nbsp;library</span>{% endif %}{{ unavailable_note(item) }}
   </span>
   {% endif %}
 {%- endmacro %}
@@ -150,7 +154,7 @@
     <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
     <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
     <span role="cell">{{ album_quality_status(g) }}</span>
-    <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, as_new_edition=g.as_new_edition, small=True, queued=g.queued, scanning=g.scanning, ownership_unknown=g.ownership_unknown, missing=g.partial and g.want_tracks - g.have_tracks, folder=g.folder) }}{% endif %}</span>
+    <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, as_new_edition=g.as_new_edition, small=True, queued=g.queued, scanning=g.scanning, ownership_unknown=g.ownership_unknown, missing=g.partial and g.want_tracks - g.have_tracks - g.unavailable, folder=g.folder) }}{% endif %}</span>
   </div>
   <div id="search-tracks-{{ gi }}" class="ql-tracklist-panel hidden" data-search-order="{{ gi }}"
        data-owned="{{ 1 if g.owned else 0 }}"></div>
@@ -181,7 +185,7 @@
       <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
       <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
       <span role="cell">{{ album_quality_status(e) }}</span>
-      <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=(g.owned and not e.partial) or e.as_new_edition, small=True, queued=e.queued, scanning=e.scanning, ownership_unknown=e.ownership_unknown, missing=e.partial and e.want_tracks - e.have_tracks, folder=e.folder) }}{% endif %}</span>
+      <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=(g.owned and not e.partial) or e.as_new_edition, small=True, queued=e.queued, scanning=e.scanning, ownership_unknown=e.ownership_unknown, missing=e.partial and e.want_tracks - e.have_tracks - e.unavailable, folder=e.folder) }}{% endif %}</span>
     </div>
     <div id="search-tracks-{{ gi }}-{{ loop.index0 }}" class="ql-tracklist-panel hidden"
          data-owned="{{ 1 if e.owned else 0 }}"></div>
@@ -243,11 +247,11 @@
           </div>
         </div>
         <div class="ql-grid-version-action">
-          {% if e.owned %}<span class="ql-owned-label">In library</span>{{ bonus_note(e) }}
+          {% if e.owned %}<span class="ql-owned-label">In library</span>{{ bonus_note(e) }}{{ unavailable_note(e) }}
           {% else %}
           {% if e.partial %}<span class="ql-partial-label">{{ e.have_tracks }} of {{ e.want_tracks }} tracks</span>
-          {% elif e.as_new_edition and e.folder %}<span class="ql-other-version-label" title="{{ e.folder }}">Other&nbsp;version in&nbsp;library</span>{% endif %}
-          {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=(g.owned and not e.partial) or e.as_new_edition, small=True, queued=e.queued, scanning=e.scanning, ownership_unknown=e.ownership_unknown, missing=e.partial and e.want_tracks - e.have_tracks, folder=e.folder) }}
+          {% elif e.as_new_edition and e.folder %}<span class="ql-other-version-label" title="{{ e.folder }}">Other&nbsp;version in&nbsp;library</span>{% endif %}{{ unavailable_note(e) }}
+          {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=(g.owned and not e.partial) or e.as_new_edition, small=True, queued=e.queued, scanning=e.scanning, ownership_unknown=e.ownership_unknown, missing=e.partial and e.want_tracks - e.have_tracks - e.unavailable, folder=e.folder) }}
           {% endif %}
         </div>
       </div>
@@ -258,7 +262,7 @@
     {% endif %}
     <div class="ql-grid-footer">
       {{ album_quality_status(g) }}
-      {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, as_new_edition=g.as_new_edition, small=True, queued=g.queued, scanning=g.scanning, ownership_unknown=g.ownership_unknown, missing=g.partial and g.want_tracks - g.have_tracks, folder=g.folder) }}{% endif %}
+      {% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, as_new_edition=g.as_new_edition, small=True, queued=g.queued, scanning=g.scanning, ownership_unknown=g.ownership_unknown, missing=g.partial and g.want_tracks - g.have_tracks - g.unavailable, folder=g.folder) }}{% endif %}
     </div>
   </div>
   {% endfor %}

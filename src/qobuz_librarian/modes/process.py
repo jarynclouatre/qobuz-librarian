@@ -21,7 +21,11 @@ from qobuz_librarian.download import (
     run_album_download,
     validated_staged_album_dirs,
 )
-from qobuz_librarian.download_result import incomplete_track_counts, tracks_missing
+from qobuz_librarian.download_result import (
+    shortfall_fields,
+    track_shortfall,
+    tracks_missing,
+)
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations.beets import (
     _ART_EXTS,
@@ -117,6 +121,7 @@ from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     confirm,
+    download_question,
     log_fetch,
     print_album_summary,
     prompt_edition_pick,
@@ -1320,8 +1325,16 @@ def process_album(album, args, *, allow_force=True, label=None,
                             auto_upgrade=auto_upgrade_active,
                             existing_quality_label=upgrade_existing_label)
 
-    if not missing:
-        log.info(fmt(C.GREEN, "\n  ✓  Already complete. Nothing to download.\n"))
+    # A gap of only tracks Qobuz does not stream is nothing to download.
+    unstreamed = [] if not present or use_force or force_tracks or auto_upgrade_active else [
+        track for track in missing if catalog.unstreamable(track)]
+    if not missing or len(unstreamed) == len(missing):
+        if missing:
+            log.info(fmt(C.GREEN,
+                f"\n  ✓  Every track Qobuz streams is here; "
+                f"{plural(len(missing), 'track')} not available on Qobuz.\n"))
+        else:
+            log.info(fmt(C.GREEN, "\n  ✓  Already complete. Nothing to download.\n"))
         log_fetch({
             "ts": datetime.now(timezone.utc).isoformat(),
             "album_id": album.get("id"),
@@ -1330,6 +1343,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             "result": "already_complete",
             "tracks_total": len(qobuz_tracks),
             "tracks_downloaded": 0,
+            "tracks_unavailable": len(missing),
         })
         consolidation_interrupted = False
         if args.consolidate:
@@ -1341,6 +1355,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         return {
             "result": "already_complete",
             "n_total": len(qobuz_tracks),
+            "unavailable_tracks": [track.get("title") or "?" for track in missing],
             "consolidation_interrupted": consolidation_interrupted,
         }
 
@@ -1355,9 +1370,8 @@ def process_album(album, args, *, allow_force=True, label=None,
     # decide; defaulting yes would mean every enter-press starts a download
     # they may not want. Press y to proceed.
     if not already_confirmed:
-        proceed = confirm(
-            f"\n  Proceed with downloading {plural(len(missing), 'track')}?",
-            default_yes=False, auto_yes=args.yes, on_eof=None)
+        proceed = confirm(download_question(missing),
+                          default_yes=False, auto_yes=args.yes, on_eof=None)
         if proceed is None:
             return {"result": "no_answer", "n_missing": len(missing)}
         if not proceed:
@@ -1586,6 +1600,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                 "n_fail": n_fail,
                 "n_lossy": n_lossy,
                 "n_broken": download_result.get("n_broken", 0),
+                "n_unavailable": download_result.get("n_unavailable", 0),
+                "upgrade_put_back": True,
             }
             return early_result
 
@@ -1643,7 +1659,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                     album, staged_dirs,
                     redownload_at_max=_redownload_at_max,
                     effective_tier=effective_tier,
-                    allow_retry=download_result.get("gap_fill_backup_path") is None)
+                    allow_retry=download_result.get("gap_fill_backup_path") is None,
+                    exempt=download_result.get("_cd_quality_paths", ()))
                 if quality_verdict["retried"]:
                     staged_dirs_for_import = (
                         quality_verdict.get("staged_dirs") or staged_dirs_for_import
@@ -1677,6 +1694,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                             "n_fail": n_fail,
                             "n_lossy": n_lossy,
                             "n_broken": download_result.get("n_broken", 0),
+                            "n_unavailable": download_result.get("n_unavailable", 0),
+                            "upgrade_put_back": True,
                         }
                         return early_result
                 if quality_verdict["recovered"]:
@@ -2253,7 +2272,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                      f"{plural(len(resolved), 'staging path')} for "
                      "next-launch retry")
 
-    n_retryable, n_truly_lossy = incomplete_track_counts(download_result)
+    n_failed, n_damaged, n_truly_lossy, n_unavailable = track_shortfall(download_result)
+    n_retryable = n_failed + n_damaged
+    n_unretryable = n_truly_lossy + n_unavailable
+    unavailable_tracks = download_result.get("unavailable_tracks", [])
     downsample_attention = bool(
         downsample_outcome["downsample_errors"]
         or downsample_outcome["downsample_flush_warnings"]
@@ -2282,16 +2304,15 @@ def process_album(album, args, *, allow_force=True, label=None,
     else:
         section("Result")
         log.info("")
-        # A damaged file that could not be tied to its track is already that
-        # track's failure; don't count the same song twice.
-        n_damaged = max(n_retryable - n_fail, 0)
         log.info(f"  {fmt(C.GREEN if n_ok else C.GRAY,    '✓ downloaded:')}    {n_ok}")
         if n_truly_lossy:
             log.info(f"  {fmt(C.YELLOW, '⚠ lossy on Qobuz:')} {n_truly_lossy}")
         if n_damaged:
-            log.info(f"  {fmt(C.YELLOW, '⚠ damaged:')}       {n_damaged}")
-        if n_fail:
-            log.info(f"  {fmt(C.RED, '✗ failed:')}        {n_fail}")
+            log.info(f"  {fmt(C.YELLOW, '⚠ broken file:')}   {n_damaged}")
+        if n_unavailable:
+            log.info(f"  {fmt(C.YELLOW, '⚠ not on Qobuz:')}  {n_unavailable}")
+        if n_failed:
+            log.info(f"  {fmt(C.RED, '✗ failed:')}        {n_failed}")
         if downsample_outcome["downsample_errors"]:
             log.info(
                 f"  {fmt(C.RED, '✗ downsample failed:')} "
@@ -2326,15 +2347,20 @@ def process_album(album, args, *, allow_force=True, label=None,
                 "\n  only available lossy on Qobuz (would need another source):"))
             for t in truly_lossy[:10]:
                 log.info(f"     {truncate(t, 60)}")
+        if unavailable_tracks:
+            log.info(fmt(C.YELLOW,
+                "\n  not available on Qobuz (would need another source):"))
+            for t in unavailable_tracks:
+                log.info(f"     {truncate(t, 60)}")
         if n_damaged:
             log.info(fmt(C.YELLOW,
-                "\n  arrived damaged and were discarded (another run fetches them again):"))
+                "\n  Qobuz sent a broken file at this quality, discarded:"))
             for t in broken_tracks[:10]:
                 log.info(f"     {truncate(t, 60)}")
         log.info("")
 
     if n_ok and (
-        n_retryable or n_truly_lossy or downsample_attention
+        n_retryable or n_unretryable or downsample_attention
         or upgrade_unverified
         or catalogue_unverified
         or recovery_unverified
@@ -2353,7 +2379,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         result_status = "not_imported"
     elif n_ok:
         result_status = "downloaded"
-    elif n_retryable or n_truly_lossy:
+    elif n_retryable or n_unretryable:
         result_status = "failed"
     else:
         result_status = "nothing_landed"
@@ -2370,9 +2396,11 @@ def process_album(album, args, *, allow_force=True, label=None,
         "tracks_downloaded": n_ok,
         "tracks_lossy_deleted": n_lossy,
         "tracks_failed": n_fail,
+        "tracks_unavailable": n_unavailable,
         "failed_titles": failed_tracks,
         "lossy_titles": lossy_tracks,
         "broken_titles": broken_tracks,
+        "unavailable_titles": unavailable_tracks,
         **downsample_outcome,
         "imported": imported,
         "force": bool(use_force),
@@ -2401,8 +2429,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "result": result_status,
         "rate_limited": download_result.get("rate_limited", False),
         "n_ok": n_ok, "n_fail": n_fail, "n_lossy": n_lossy,
-        "n_broken": max(n_retryable - n_fail, 0),
-        "n_lossy_only": n_truly_lossy,
+        **shortfall_fields(download_result),
         "failed_tracks": failed_tracks,
         "lossy_tracks": truly_lossy,
         "broken_tracks": broken_tracks,
@@ -2423,16 +2450,15 @@ def process_album(album, args, *, allow_force=True, label=None,
     }
     n_missing = tracks_missing(outcome)
     if n_missing:
-        if not n_truly_lossy:
-            remedy = (f"Downloading the album again fetches "
-                      f"{'it' if n_retryable == 1 else 'them'}.")
-        elif not n_retryable:
-            remedy = (f"Qobuz has {'it' if n_truly_lossy == 1 else 'them'} "
-                      "only in a lossy format.")
-        else:
-            remedy = (f"Downloading the album again fetches {n_retryable}; "
-                      f"{n_truly_lossy} {'is' if n_truly_lossy == 1 else 'are'} "
-                      "only lossy on Qobuz.")
+        reasons = []
+        if n_retryable:
+            reasons.append(f"downloading the album again fetches {n_retryable}")
+        for count, why in ((n_truly_lossy, "only lossy"),
+                           (n_unavailable, "not available")):
+            if count:
+                reasons.append(
+                    f"{count} {'is' if count == 1 else 'are'} {why} on Qobuz")
         log.info(fmt(C.YELLOW,
-            f"  ⚠  Imported, {plural(n_missing, 'track')} missing. {remedy}"))
+            f"  ⚠  Imported, {plural(n_missing, 'track')} missing: "
+            f"{'; '.join(reasons)}."))
     return outcome

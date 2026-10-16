@@ -13,6 +13,11 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.cli import parse_qobuz_url
+from qobuz_librarian.download_result import (
+    processing_attention,
+    track_shortfall,
+    tracks_missing,
+)
 from qobuz_librarian.library import catalog
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import is_lossless_album
@@ -42,6 +47,7 @@ from qobuz_librarian.ui_cli.errors import (
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     confirm,
+    download_question,
     interactive_query,
     print_album_summary,
     prompt_album_selection,
@@ -71,11 +77,11 @@ def _one_shot_exit_code(result):
         or (verdict.get("under") and not verdict.get("recovered"))
     ):
         return EXIT_GENERAL
-    return (
-        0
-        if result.get("result") in _SETTLED_ONE_SHOT_RESULTS
-        else EXIT_GENERAL
-    )
+    settled = result.get("result") in _SETTLED_ONE_SHOT_RESULTS or (
+        # Short only of tracks Qobuz does not stream: as done as it can be.
+        tracks_missing(result) and track_shortfall(result)[:3] == (0, 0, 0)
+        and not processing_attention(result))
+    return 0 if settled else EXIT_GENERAL
 
 
 def _download_album_now(
@@ -137,7 +143,7 @@ def _download_album_now(
                     ))
                     return {"result": "dry_run", "n_missing": len(missing)}
                 proceed = confirm(
-                    f"\n  Proceed with downloading {plural(len(missing), 'track')}?",
+                    download_question(missing),
                     default_yes=False,
                     auto_yes=bool(getattr(args, "yes", False)),
                     on_eof=None,

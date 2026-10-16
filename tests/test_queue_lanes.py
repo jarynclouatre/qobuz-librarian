@@ -209,3 +209,32 @@ def test_durable_attention_stop_leaves_the_flush_returning(
     assert queue == [parked, waiting]
     loaded = queue_state.load_queue_journal()
     assert loaded.journal.items[0].phase is queue_state.QueuePhase.BLOCKED
+
+
+def test_new_album_qobuz_cannot_finish_imports_the_tracks_that_arrive(
+        lease, stub_download, monkeypatch):
+    """The crash-safe lane completes only an album that arrives whole and
+    discards the rest. A new album it could not finish is fetched again on
+    the standard path, which keeps the tracks that arrive."""
+    from qobuz_librarian.queue.durable_runner import (
+        DurableAlbumResult,
+        DurableAlbumStatus,
+    )
+
+    album = _album()
+    tracks = album["tracks"]["items"]
+    item = _build_queue_item(
+        album=album, album_dir=None, label="new",
+        missing=tracks, present=[], upgrade_only=False, auto_upgrade=False)
+    assert executor.plan_durable_new_album(item, _args()) is not None
+
+    def short_of_one(_queue, item, _args, **_kw):
+        item.update(n_ok=len(tracks) - 1, n_broken=1, n_lossy=1)
+        return DurableAlbumResult(
+            status=DurableAlbumStatus.INCOMPLETE, reason="download-incomplete")
+
+    monkeypatch.setattr(executor, "execute_durable_new_album", short_of_one)
+    results, _ = executor._execute_download_queue([item], _args(), "token")
+
+    assert stub_download == ["new"]
+    assert [r["imported"] for r in results] == [True]

@@ -50,8 +50,11 @@ def _patch(monkeypatch, *, rip, added, cleanup, cancel=False):
 
 
 def test_full_album_with_present_tracks_counts_fail_against_total(monkeypatch, tmp_path):
+    from qobuz_librarian.download_result import incomplete_track_counts
+
     tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in range(1, 11)]
     tracks[8]["title"] = "T1"
+    tracks[9]["streamable"] = False
     missing = tracks
     present = tracks[:4]
     album = tmp_path / "Artist" / "Album (2020)"
@@ -59,8 +62,14 @@ def test_full_album_with_present_tracks_counts_fail_against_total(monkeypatch, t
     landed = [tmp_path / f"{i:02d} - T{i}.flac" for i in range(1, 9)]
     for p in landed:
         p.write_bytes(b"x")
+    rips = []
+
+    def rip(url, **_k):
+        rips.append(url)
+        return (0, "")
+
     _patch(monkeypatch,
-           rip=lambda *a, **k: (0, ""),
+           rip=rip,
            added=lambda _s: landed,
            cleanup=lambda f: (list(f), [], []))
     monkeypatch.setattr(dl, "backup_gap_fill_files", lambda paths, d: None)
@@ -71,8 +80,13 @@ def test_full_album_with_present_tracks_counts_fail_against_total(monkeypatch, t
     assert r["download_full_album"] is True
     assert r["n_ok"] == 8
     assert r["n_fail"] == 2
-    assert r["failed_tracks"] == ["T1", "T10"]
+    assert r["failed_tracks"] == ["T1"]
+    assert r["unavailable_tracks"] == ["T10"]
     assert r["n_ok"] + r["n_lossy"] + r["n_fail"] == 10
+    # A track Qobuz does not stream is not retried, and Retry is not offered
+    # for it.
+    assert "https://play.qobuz.com/track/10" not in rips
+    assert incomplete_track_counts(r) == (1, 1)
 
 
 def test_lossy_track_retried_once_and_recovers(monkeypatch, tmp_path):
@@ -145,6 +159,46 @@ def test_untagged_broken_track_on_deluxe_twin_disc_is_retried(monkeypatch, tmp_p
 
     assert rips == ["https://play.qobuz.com/track/101"] * 2
     assert (r["n_ok"], r["n_fail"]) == (1, 0)
+
+
+def test_track_broken_at_hires_comes_at_cd_quality_and_never_lossy(monkeypatch, tmp_path):
+    # Sinatra's "What Is This Thing Called Love" arrives empty at 24/192 every
+    # time and whole at CD quality; a lossy answer is refused.
+    tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in (1, 2)]
+    files = {name: tmp_path / f"{name}.flac" for name in
+             ("hires", "retry", "cd", "lossy-hires", "lossy-retry", "lossy-cd")}
+    for path in files.values():
+        path.write_bytes(b"x")
+    tiers = []
+
+    def rip(url, quality=None, **_k):
+        tiers.append(quality)
+        return (0, "")
+
+    order = ["hires", None, "retry", "cd", "lossy-hires", None, "lossy-retry", "lossy-cd"]
+    deltas = iter([[files[name]] if name else [] for name in order])
+    cleans = iter([([], [], [files["hires"]]), ([], [], []), ([], [], [files["retry"]]),
+                   ([files["cd"]], [], []), ([], [], [files["lossy-hires"]]), ([], [], []),
+                   ([], [], [files["lossy-retry"]]), ([], [files["lossy-cd"]], [])])
+    _patch(monkeypatch, rip=rip,
+           added=lambda _s: next(deltas, []),
+           cleanup=lambda _f: next(cleans, ([], [], [])))
+    monkeypatch.setattr(dl, "read_audio_meta", lambda _p: {})
+    monkeypatch.setattr(dl, "_single_track_rip_identities", lambda *_a: {})
+    monkeypatch.setattr(dl, "_pair_files_to_tracks",
+                        lambda paths, targets, *_a: list(zip(paths, targets)))
+    capped = []
+    monkeypatch.setattr(dl, "mark_album_capped", lambda *a: capped.append(a[0]))
+
+    r = dl.run_album_download(album=_album(tracks), missing=tracks[:1], present=tracks[1:],
+                              album_dir=None, snapshot=set(), quality=4)
+    assert tiers == [4, 4, 2]
+    assert (r["n_ok"], r["n_broken"], r["cd_quality_tracks"]) == (1, 0, ["cd"])
+    assert capped == ["ALB"]
+
+    r = dl.run_album_download(album=_album(tracks), missing=tracks[:1], present=tracks[1:],
+                              album_dir=None, snapshot=set(), quality=4)
+    assert (r["n_ok"], r["n_broken"], r["cd_quality_tracks"]) == (0, 1, [])
 
 
 def test_track_by_track_twins_on_two_discs_keep_their_own_files(monkeypatch, tmp_path):

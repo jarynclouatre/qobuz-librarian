@@ -53,9 +53,14 @@ from qobuz_librarian.library.backup import (
     backup_gap_fill_files,
     library_backup_record,
 )
-from qobuz_librarian.library.catalog import edition_files, find_extras_in_existing
+from qobuz_librarian.library.catalog import (
+    edition_files,
+    find_extras_in_existing,
+    unstreamable,
+)
 from qobuz_librarian.library.scanner import read_album_dir, read_audio_meta
 from qobuz_librarian.library.tags import normalize, strip_edition_suffix
+from qobuz_librarian.quality.decision import mark_album_capped
 from qobuz_librarian.recovery import normalise_recovery_owner
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import plural
@@ -885,7 +890,7 @@ def exact_download_coverage(result, album):
         if not all(type(value) is int and value >= 0 for value in raw_counts) or any(
             type(result.get(name)) is not list or bool(result[name])
             for name in ("failed_tracks", "lossy_tracks", "broken_tracks")
-        ):
+        ) or result.get("unavailable_tracks"):
             return None
         return DownloadCoverage(
             album_id=album_id,
@@ -1043,10 +1048,12 @@ def run_album_download(
 
     Writes into ``result`` (created if None) as it goes - ``gap_fill_backup_path``
     the moment the backup is taken, then n_ok / n_fail / n_lossy /
-    failed_tracks / lossy_tracks / rate_limited / elapsed / download_full_album /
-    full_album_rc at the end - and returns it. Honours is_cancel_requested() to
-    stop early; raises AuthLost on auth loss and OSError(ENOSPC) on a full disk
-    for the caller to handle."""
+    n_unavailable / failed_tracks / lossy_tracks / unavailable_tracks /
+    rate_limited / elapsed / download_full_album / full_album_rc at the end -
+    and returns it. A track Qobuz does not stream is never fetched on its own;
+    it counts in n_fail and again in n_unavailable. Honours
+    is_cancel_requested() to stop early; raises AuthLost on auth loss and
+    OSError(ENOSPC) on a full disk for the caller to handle."""
     recovery_owner = normalise_recovery_owner(recovery_owner)
     if required_backup_kind not in {None, "upgrade", "gap-fill"}:
         raise ValueError("required backup kind is invalid")
@@ -1121,13 +1128,16 @@ def run_album_download(
     # A track URL never gets a Disc N folder, so the second of two twins
     # would overwrite the first.
     disc_folders = not download_full_album and _disc_twins(missing)
+    to_fetch = [track for track in missing if not unstreamable(track)]
+    if not to_fetch:
+        download_full_album = False
 
-    def _rip_track(track):
+    def _rip_track(track, tier=None):
         before = snapshot_staging()
         rc, out = _rip(
             f"https://play.qobuz.com/track/{track.get('id')}",
             timeout=cfg.RIP_TIMEOUT,
-            quality=quality,
+            quality=quality if tier is None else tier,
         )
         audio = [f for f in _run_files_since(before) if f.suffix.lower() in cfg.AUDIO_EXTS]
         if disc_folders:
@@ -1176,6 +1186,12 @@ def run_album_download(
             else f"{len(missing)} of {n_tracks_total} tracks missing"
         )
         log.info(fmt(C.GRAY, f"  Track by track ({why})"))
+    if len(to_fetch) < len(missing):
+        n_unavailable = len(missing) - len(to_fetch)
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  {plural(n_unavailable, 'track')} "
+            f"{'is' if n_unavailable == 1 else 'are'} not available on Qobuz "
+            "and cannot be downloaded."))
 
     # Free-space preflight.
     if cfg.MIN_FREE_STAGING_MB > 0:
@@ -1309,6 +1325,7 @@ def run_album_download(
         # rip exits 0 even when it skipped tracks after persistent retries;
         # count the ERROR markers so a "succeeded" line can't hide a gap.
         n_errors = len(re.findall(r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?ERROR\b", out, re.MULTILINE))
+        n_errors = max(n_errors - (len(missing) - len(to_fetch)), 0)
         if rc != 0:
             # Cancelling also ends rip with a non-zero exit, which is not a failure.
             if not is_cancel_requested():
@@ -1326,7 +1343,7 @@ def run_album_download(
             log.info(fmt(C.GREEN, "  ✓  Download succeeded."))
     else:
         section("Downloading missing tracks")
-        for i, t in enumerate(missing, 1):
+        for i, t in enumerate(to_fetch, 1):
             if is_cancel_requested():
                 break
             # Show the version + track number so an EP of same-titled remixes
@@ -1338,10 +1355,10 @@ def run_album_download(
             tnum = t.get("track_number")
             tnum_prefix = f"#{tnum:>2} · " if tnum else ""
             log.info(
-                fmt(C.BLUE, f"\n  [{i}/{len(missing)}]")
+                fmt(C.BLUE, f"\n  [{i}/{len(to_fetch)}]")
                 + f"  {fmt(C.WHITE, truncate(tnum_prefix + ttl, 60))}"
             )
-            report_progress("Downloading", i, len(missing), ttl)
+            report_progress("Downloading", i, len(to_fetch), ttl)
             rc, out, track_audio = _rip_track(t)
             rip_identities.update(_single_track_rip_identities(track_audio, t, qobuz_tracks))
             if detect_auth_lost(out):
@@ -1383,10 +1400,10 @@ def run_album_download(
             # throttle signals, pause longer before the next so we stop pounding
             # the limit.
             last_out = out
-            if i < len(missing):
+            if i < len(to_fetch):
                 _cool_down(out)
 
-    new_files = _run_files_since(snapshot)
+    new_files = _run_files_since(snapshot) if staging_run is not None else []
     audio_new = [f for f in new_files if f.suffix.lower() in cfg.AUDIO_EXTS]
     vlog(f"  {plural(len(new_files), 'new file')} in staging "
          f"({len(audio_new)} audio)")
@@ -1407,15 +1424,19 @@ def run_album_download(
     # track the track URL has lossless.
     discarded = lossy + broken
     resolved_rejects = []
+    broken_twice = set()
     if discarded and attempted_tracks and not is_cancel_requested():
         retry_pairs = _pair_files_to_tracks(
             discarded, attempted_tracks, file_identities, qobuz_tracks
         )
         if retry_pairs:
+            n_broken = sum(1 for path, _ in retry_pairs if path in broken)
+            kind = ("broken" if n_broken == len(retry_pairs)
+                    else "lossy" if not n_broken else "lossy or broken")
             log.info(
                 fmt(
                     C.GRAY,
-                    f"  ↻  Retrying {plural(len(retry_pairs), 'lossy/incomplete track')} "
+                    f"  ↻  Retrying {plural(len(retry_pairs), f'{kind} track')} "
                     "once via per-track URL",
                 )
             )
@@ -1442,6 +1463,8 @@ def run_album_download(
                 retry_kept, retry_lossy, retry_broken = _sort_audio(retry_audio)
                 # A second reject of the same track is surplus to the first.
                 resolved_rejects.extend(retry_lossy + retry_broken)
+                if retry_broken:
+                    broken_twice.add(id(t))
                 matches = _pair_files_to_tracks(retry_kept, [t], retry_identities, qobuz_tracks)
                 if not matches:
                     continue
@@ -1469,7 +1492,8 @@ def run_album_download(
             )
         }
         failed_track_objs = [
-            track for track in attempted_tracks if id(track) not in landed_ids
+            track for track in attempted_tracks
+            if id(track) not in landed_ids and not unstreamable(track)
         ]
 
     # A HARD failure (rip errored with no file landing at all - distinct from
@@ -1543,6 +1567,54 @@ def run_album_download(
                 n_ok = len(kept)
                 log.info(fmt(C.GREEN, f"  ✓  Retry recovered {plural(recovered, 'failed download')}"))
 
+    # Qobuz serves some tracks broken at a hi-res tier while their CD-quality
+    # stream is whole; a track its retry also got broken comes at CD quality
+    # rather than missing.
+    # The crash-safe lane's completion proof holds every track to the chosen
+    # quality, so only the standard path does this.
+    cd_quality = []
+    tier = quality if quality is not None else cfg.STREAMRIP_QUALITY
+    if (broken and tier > 2 and recovery_owner is None and not rate_limited
+            and not is_cancel_requested()):
+        for rejected, t in _pair_files_to_tracks(
+            list(broken), attempted_tracks, file_identities, qobuz_tracks
+        ):
+            if rate_limited:
+                break
+            if id(t) not in broken_twice:
+                continue
+            _cool_down(last_out)
+            if is_cancel_requested():
+                break
+            rc, out, cd_audio = _rip_track(t, tier=2)
+            if detect_auth_lost(out):
+                raise AuthLost("rip output contained auth-lost markers")
+            if detect_disk_full(out):
+                raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
+            rate_limited = rate_limited or detect_rate_limited(out)
+            last_out = out
+            cd_identities = _single_track_rip_identities(cd_audio, t, qobuz_tracks)
+            cd_kept, cd_lossy, cd_broken = _sort_audio(cd_audio)
+            resolved_rejects.extend(cd_lossy + cd_broken)
+            matches = _pair_files_to_tracks(cd_kept, [t], cd_identities, qobuz_tracks)
+            if not matches or not _remove_reject(broken, rejected):
+                continue
+            resolved_rejects.append(rejected)
+            kept.append(matches[0][0])
+            file_identities.update(cd_identities)
+            retried_clean_targets.add(id(t))
+            cd_quality.append(matches[0][0])
+        if cd_quality:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Qobuz sent a broken file at this quality for "
+                f"{plural(len(cd_quality), 'track')}, so "
+                f"{'it' if len(cd_quality) == 1 else 'they'} came at CD quality:"))
+            for path in cd_quality:
+                log.info(fmt(C.GRAY, f"     {_reject_label(path)}"))
+            # Upgrade would only fetch the same broken file again.
+            mark_album_capped(album_id, album, {
+                "n_below": len(cd_quality), "n_at": 0, "n_above": 0})
+
     # Reconcile completeness by unique Qobuz track identity, never by the raw
     # number of audio names that appeared.
     lossy_tracks = lossy + broken
@@ -1559,11 +1631,16 @@ def run_album_download(
     } - clean_target_ids
     expected_target_ids = {id(track) for track in attempted_tracks}
     missing_target_ids = expected_target_ids - clean_target_ids - rejected_target_ids
+    unavailable = [
+        track for track in attempted_tracks
+        if id(track) in missing_target_ids and unstreamable(track)
+    ]
+    failed_target_ids = missing_target_ids - {id(track) for track in unavailable}
     n_ok = len(clean_target_ids)
     n_lossy = len(rejected_target_ids)
-    n_fail = max(len(missing_target_ids), 1 if unmatched_clean else 0)
+    n_fail = max(len(failed_target_ids), 1 if unmatched_clean else 0) + len(unavailable)
     failed_tracks = [
-        track.get("title") or "?" for track in attempted_tracks if id(track) in missing_target_ids
+        track.get("title") or "?" for track in attempted_tracks if id(track) in failed_target_ids
     ]
 
     if not download_full_album and failed_track_objs:
@@ -1609,9 +1686,8 @@ def run_album_download(
         if is_cancel_requested():
             note = f"The stop cut {plural(len(broken), 'track')} short:"
         else:
-            note = (f"{plural(len(broken), 'track')} arrived damaged and "
-                    f"{'was' if len(broken) == 1 else 'were'} discarded "
-                    "(another run fetches them again):")
+            note = ("Qobuz sent a broken file at this quality for "
+                    f"{plural(len(broken), 'track')}, discarded:")
         log.info(fmt(C.YELLOW, f"  ⚠  {note}"))
         for d in broken[:5]:
             log.info(fmt(C.GRAY, f"     {_reject_label(d)}"))
@@ -1658,9 +1734,13 @@ def run_album_download(
             "n_fail": n_fail,
             "n_lossy": n_lossy,
             "n_broken": len(broken_target_ids),
+            "n_unavailable": len(unavailable),
             "failed_tracks": failed_tracks,
+            "unavailable_tracks": [track.get("title") or "?" for track in unavailable],
             "lossy_tracks": lossy_track_labels,
             "broken_tracks": broken_track_labels,
+            "cd_quality_tracks": [_reject_label(path) for path in cd_quality],
+            "_cd_quality_paths": [str(path) for path in cd_quality],
             "rate_limited": rate_limited,
             "elapsed": time.time() - t_start,
             "download_full_album": download_full_album,

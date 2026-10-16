@@ -36,6 +36,7 @@ from qobuz_librarian.download import (
 from qobuz_librarian.download_result import (
     download_job_outcome,
     incomplete_track_counts,
+    shortfall_fields,
 )
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.integrations.beets import (
@@ -2047,7 +2048,7 @@ def _resolve_queue_item(
 
     n_ok = item.get("n_ok", 0)
     n_fail = item.get("n_fail", 0)
-    n_retryable, n_lossy_only = incomplete_track_counts(item)
+    n_retryable, n_unretryable = incomplete_track_counts(item)
     outcome_attention = _queue_outcome_needs_attention(item)
     # A stop marker (cancel or an undeliverable album discarded the staged
     # files; disk-full / I/O / auth stopped the batch) must keep its label.
@@ -2059,11 +2060,11 @@ def _resolve_queue_item(
             "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
             "stale_candidate"):
         status = _stop
-    elif n_ok and (n_retryable or n_lossy_only or outcome_attention):
+    elif n_ok and (n_retryable or n_unretryable or outcome_attention):
         status = "partial"
     elif n_ok:
         status = "downloaded"
-    elif n_retryable or n_lossy_only:
+    elif n_retryable or n_unretryable:
         status = "failed"
     else:
         status = "nothing_landed"
@@ -2084,6 +2085,7 @@ def _resolve_queue_item(
             "failed_titles": item.get("failed_tracks", []),
             "lossy_titles": item.get("lossy_tracks", []),
             "broken_titles": item.get("broken_tracks", []),
+            "unavailable_titles": item.get("unavailable_tracks", []),
             "downsample_errors": item.get("downsample_errors", 0),
             "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
             "downsample_flush_warnings": item.get(
@@ -2111,8 +2113,7 @@ def _resolve_queue_item(
         "n_ok": n_ok,
         "n_fail": n_fail,
         "n_lossy": item.get("n_lossy", 0),
-        "n_broken": max(n_retryable - n_fail, 0),
-        "n_lossy_only": n_lossy_only,
+        **shortfall_fields(item),
         "failed_tracks": item.get("failed_tracks", []),
         "lossy_tracks": item.get("lossy_tracks", []),
         "broken_tracks": item.get("broken_tracks", []),
@@ -2741,11 +2742,11 @@ def _durable_completed_result(item, post_dir):
     item["_siblings_preserved"] = []
     n_ok = item.get("n_ok", 0)
     n_fail = item.get("n_fail", 0)
-    n_retryable, n_lossy_only = incomplete_track_counts(item)
+    n_retryable, n_unretryable = incomplete_track_counts(item)
     outcome_attention = _queue_outcome_needs_attention(item)
-    if n_ok and (n_retryable or n_lossy_only or outcome_attention):
+    if n_ok and (n_retryable or n_unretryable or outcome_attention):
         status = "partial"
-    elif n_retryable or n_lossy_only:
+    elif n_retryable or n_unretryable:
         status = "failed"
     else:
         status = "downloaded"
@@ -2764,6 +2765,7 @@ def _durable_completed_result(item, post_dir):
         "failed_titles": item.get("failed_tracks", []),
         "lossy_titles": item.get("lossy_tracks", []),
         "broken_titles": item.get("broken_tracks", []),
+        "unavailable_titles": item.get("unavailable_tracks", []),
         "downsample_errors": item.get("downsample_errors", 0),
         "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
         "downsample_flush_warnings": item.get(
@@ -2785,8 +2787,7 @@ def _durable_completed_result(item, post_dir):
         "n_ok": n_ok,
         "n_fail": n_fail,
         "n_lossy": item.get("n_lossy", 0),
-        "n_broken": max(n_retryable - n_fail, 0),
-        "n_lossy_only": n_lossy_only,
+        **shortfall_fields(item),
         "failed_tracks": item.get("failed_tracks", []),
         "lossy_tracks": item.get("lossy_tracks", []),
         "broken_tracks": item.get("broken_tracks", []),
@@ -3402,7 +3403,16 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 results.append(_resolve_queue_item(
                     item, args, False, authority=authority))
                 continue
-            if outcome.status is DurableAlbumStatus.INCOMPLETE:
+            # A new album has nothing in the library to put back, so when
+            # some of its tracks arrived it is fetched again on the standard
+            # path, which imports the tracks it gets like any partial album.
+            refetch = (
+                outcome.status is DurableAlbumStatus.INCOMPLETE
+                and plan.library_backup_kind is None
+                and item.get("n_ok", 0) > 0
+                and not item.get("rate_limited")
+            )
+            if outcome.status is DurableAlbumStatus.INCOMPLETE and not refetch:
                 # Qobuz could not serve the whole album. The partial download
                 # is gone and nothing is left waiting on recovery, so the rest
                 # of the queue carries on.
@@ -3413,7 +3423,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 results.append(_resolve_queue_item(
                     item, args, False, authority=authority))
                 continue
-            if outcome.status is not DurableAlbumStatus.COMPLETE:
+            if outcome.status not in (
+                DurableAlbumStatus.COMPLETE, DurableAlbumStatus.INCOMPLETE,
+            ):
                 results.append({
                     "dir": outcome.post_dir,
                     "result": outcome.status.value,
@@ -3431,12 +3443,16 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     "stopping the queue.",
                 ))
                 break
-            if not removed or outcome.post_dir is None:
-                raise DurableAlbumUnavailable(
-                    "the completed durable album was not finalised exactly"
-                )
-            _record_durable_completion(item, outcome.post_dir, idx)
-            continue
+            if outcome.status is DurableAlbumStatus.COMPLETE:
+                if not removed or outcome.post_dir is None:
+                    raise DurableAlbumUnavailable(
+                        "the completed durable album was not finalised exactly"
+                    )
+                _record_durable_completion(item, outcome.post_dir, idx)
+                continue
+            log.info(fmt(C.YELLOW,
+                "    ⚠  Qobuz didn't deliver every track; downloading the "
+                "album again to keep the tracks that arrive."))
 
         _seal_queue_item_siblings(item)
         if item["auto_upgrade"] and album_dir and album_dir.exists():
@@ -3541,8 +3557,11 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         if retry_kept:
                             retire_empty_download_staging(item)
                             for key in ("n_ok", "n_fail", "n_lossy", "n_broken",
-                                        "failed_tracks", "lossy_tracks",
-                                        "broken_tracks", "elapsed",
+                                        "n_unavailable", "failed_tracks",
+                                        "lossy_tracks", "broken_tracks",
+                                        "unavailable_tracks", "elapsed",
+                                        "cd_quality_tracks",
+                                        "_cd_quality_paths",
                                         "gap_fill_backup_path", "_staging_run",
                                         "_staging_run_retained",
                                         "_expected_track_keys",
@@ -3567,7 +3586,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         album, album_dirs,
                         redownload_at_max=_redownload_at_max,
                         effective_tier=effective_tier,
-                        allow_retry=item.get("gap_fill_backup_path") is None)
+                        allow_retry=item.get("gap_fill_backup_path") is None,
+                        exempt=item.get("_cd_quality_paths", ()))
                 except (KeyboardInterrupt, AuthLost, OSError) as exc:
                     _handle_download_exception(item, exc)
                     continue

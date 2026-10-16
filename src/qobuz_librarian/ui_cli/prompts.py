@@ -164,19 +164,30 @@ def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, quiet=False):
         print(fmt(C.YELLOW, "  Answer y or n."))
 
 
+def download_question(missing):
+    """The confirm before downloading an album's missing tracks, counting only
+    those Qobuz streams."""
+    unstreamed = sum(1 for t in missing if catalog.unstreamable(t))
+    note = f" ({unstreamed} not on Qobuz)" if unstreamed else ""
+    return (f"\n  Proceed with downloading "
+            f"{plural(len(missing) - unstreamed, 'track')}{note}?")
+
+
 def _ownership_note(res):
     """Search's library mark for one result, or ""."""
+    unavailable = res.get("unavailable") or 0
+    gap = fmt(C.GRAY, f" · {unavailable} not on Qobuz") if unavailable else ""
     if res.get("owned"):
         bonus = res.get("bonus_versions") or 0
         extra = (fmt(C.GRAY, f" +{bonus} bonus version{'s' if bonus != 1 else ''}")
                  if bonus else "")
-        return fmt(C.GREEN, " • In library") + extra
+        return fmt(C.GREEN, " • In library") + extra + gap
     if res.get("partial"):
         return fmt(C.YELLOW,
-                   f" • {res['have_tracks']} of {res['want_tracks']} tracks")
+                   f" • {res['have_tracks']} of {res['want_tracks']} tracks") + gap
     if res.get("as_new_edition") and res.get("folder"):
         return fmt(C.CYAN, " • Other version in library")
-    return ""
+    return fmt(C.GRAY, f" • {unavailable} not on Qobuz") if unavailable else ""
 
 
 def prompt_album_selection(albums, prefer_hires=False, can_load_more=False,
@@ -543,7 +554,9 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
     log.info(f"  {fmt(C.BOLD + C.WHITE, artist)} {fmt(C.GRAY, '-')} "
              f"{fmt(C.BOLD + C.WHITE, title)}  {fmt(C.GRAY, f'({year})')}")
     log.info(f"  {fmt(C.GRAY, 'quality:')}  {qual}")
-    log.info(f"  {fmt(C.GRAY, 'tracks:')}   {n_total}")
+    unstreamed = sum(1 for t in missing if catalog.unstreamable(t))
+    note = fmt(C.GRAY, f"  ({unstreamed} not on Qobuz)") if unstreamed else ""
+    log.info(f"  {fmt(C.GRAY, 'tracks:')}   {n_total}{note}")
 
     if auto_upgrade:
         # If process_album passed us the existing-quality label, show the
@@ -582,6 +595,7 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
         log.info(fmt(C.GRAY, "  Missing tracks:"))
         for t in missing[:25]:
             n = t.get("track_number") or "?"
-            log.info(f"     {n:>2}.  {truncate(t.get('title') or '?', 60)}")
+            note = fmt(C.GRAY, "  (not on Qobuz)") if catalog.unstreamable(t) else ""
+            log.info(f"     {n:>2}.  {truncate(t.get('title') or '?', 60)}{note}")
         if len(missing) > 25:
             log.info(fmt(C.GRAY, f"     … and {len(missing) - 25} more"))

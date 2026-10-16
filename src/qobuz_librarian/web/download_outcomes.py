@@ -65,7 +65,16 @@ _DOWNLOAD_SUMMARY_LABELS = {
 
 
 def _summarize_download_result(r):
-    """One-line job summary from process_album's result dict.
+    """One-line job summary from process_album's result dict, naming any
+    track that came at CD quality."""
+    summary = _download_summary(r)
+    if summary and (r or {}).get("imported") and r.get("cd_quality_tracks"):
+        summary += f" {download_result.cd_quality_note(r['cd_quality_tracks'])}"
+    return summary
+
+
+def _download_summary(r):
+    """The job summary without the CD-quality note.
 
     Picks a phrase per result kind for the documented non-success branches,
     or builds the "N tracks downloaded" tally for an actual rip. Returns
@@ -122,6 +131,11 @@ def _summarize_download_result(r):
             if r.get("siblings_preserved") and not (retryable or lossy_only):
                 parts.append("sibling cleanup needs review")
         return ", ".join(parts) + "."
+    if kind == "already_complete" and r.get("unavailable_tracks"):
+        n = len(r["unavailable_tracks"])
+        return (f"Every track Qobuz streams is in the library; "
+                f"{plural(n, 'track')} {'is' if n == 1 else 'are'} not "
+                "available on Qobuz.")
     if kind in _DOWNLOAD_SUMMARY_LABELS:
         return _DOWNLOAD_SUMMARY_LABELS[kind]
     if not r.get("imported"):
@@ -145,6 +159,20 @@ def _summarize_download_result(r):
     return ", ".join(parts) + "."
 
 
+def beyond_retry(lossy_only, unavailable):
+    """Say which missing tracks no retry can fetch, or ""."""
+    parts = []
+    if lossy_only:
+        parts.append(
+            f"{plural(lossy_only, 'track')} "
+            f"{'is' if lossy_only == 1 else 'are'} only available lossy on Qobuz")
+    if unavailable:
+        parts.append(
+            f"{plural(unavailable, 'track')} "
+            f"{'is' if unavailable == 1 else 'are'} not available on Qobuz")
+    return " and ".join(parts)
+
+
 def _undeliverable_album_error(r):
     """Say how short the album came, and what the user can do about it."""
     landed = r.get("n_ok", 0)
@@ -155,11 +183,15 @@ def _undeliverable_album_error(r):
         opening = f"Qobuz delivered {landed} of {plural(landed + short, 'track')}"
     else:
         opening = "Qobuz couldn't deliver every track"
-    return (
-        f"{opening}, so nothing was added to your library and the part that "
-        "downloaded was discarded. Try again later; if it stops at the same "
-        "track every time, Qobuz can't serve that track."
-    )
+    text = (f"{opening}, so nothing was added to your library and the part "
+            "that downloaded was discarded.")
+    if r.get("n_broken"):
+        text += (" Qobuz sent a broken file at this quality for "
+                 f"{plural(r['n_broken'], 'track')}.")
+        if not r.get("n_fail"):
+            return text
+    return (f"{text} Try again later; if it stops at the same track every "
+            "time, Qobuz can't serve that track.")
 
 
 def download_error(result, *, job_controls=True):
@@ -171,7 +203,8 @@ def download_error(result, *, job_controls=True):
     def hint(text):
         return f" {text}" if job_controls else ""
 
-    retryable, lossy_only = download_result.incomplete_track_counts(result)
+    retryable, _ = download_result.incomplete_track_counts(result)
+    _, _, lossy_only, unavailable = download_result.track_shortfall(result)
     status, kind = download_result.download_job_outcome(result)
     if kind == "backup":
         if result.get("catalogue_unverified"):
@@ -220,11 +253,11 @@ def download_error(result, *, job_controls=True):
             + hint("Check the job log before retrying.")
         )
     if kind == "lossy":
+        kept = (" Your original album was kept."
+                if result.get("upgrade_put_back") else "")
         return (
-            f"{plural(lossy_only, 'track')} "
-            f"{'is' if lossy_only == 1 else 'are'} only available "
-            "lossy on Qobuz. The album is incomplete and needs another "
-            "source."
+            f"{beyond_retry(lossy_only, unavailable)}. The album is "
+            "incomplete and needs another source." + kept
         )
     if kind:
         if not retryable:
@@ -233,38 +266,38 @@ def download_error(result, *, job_controls=True):
                 "work." + hint("Check the job log before retrying.")
             )
         damaged = result.get("n_broken", 0)
+        not_arrived = retryable - damaged
         causes = []
         if damaged:
-            causes.append(f"{plural(damaged, 'track')} arrived damaged")
-        if retryable > damaged:
-            causes.append(f"{plural(retryable - damaged, 'track')} did not arrive")
-        error = f"{' and '.join(causes)}." + hint(
-            f"Retry fetches {'it' if retryable == 1 else 'them'}.")
-        if lossy_only:
-            error += (
-                f" {plural(lossy_only, 'track')} can only be found "
-                "lossy on Qobuz and needs another source."
-            )
+            causes.append(
+                "Qobuz sent a broken file at this quality for "
+                f"{plural(damaged, 'track')}")
+        if not_arrived:
+            causes.append(f"{plural(not_arrived, 'track')} did not arrive")
+        error = f"{' and '.join(causes)}."
+        if not_arrived:
+            error += hint(f"Retry fetches {'it' if not_arrived == 1 else 'them'}.")
+        if lossy_only or unavailable:
+            error += f" {beyond_retry(lossy_only, unavailable)}."
         return error
     if status == "failed":
         if result.get("rate_limited"):
             return "Qobuz rate-limited this download. Try again later."
         if result.get("result") == "incomplete":
             return _undeliverable_album_error(result)
-        if result.get("n_fail"):
-            return (f"{plural(result['n_fail'], 'track')} failed."
-                    + hint("See job log."))
+        n_failed = result.get("n_fail", 0) - unavailable
+        other = beyond_retry(lossy_only, unavailable)
+        other = f" {other}." if other else ""
+        if n_failed:
+            return (f"{plural(n_failed, 'track')} failed."
+                    + hint("See job log.") + other)
         if result.get("n_ok"):
             return "Downloaded, but the import failed." + hint("See job log.")
         if retryable:
             return (
                 f"{plural(retryable, 'track')} did not arrive as a "
                 "complete file, so nothing was added to your library."
-                + hint("The job log names them."))
-        if lossy_only:
-            return (
-                f"Qobuz offered {plural(lossy_only, 'track')} only in a "
-                "lossy format, so nothing was added to your library.")
+                + hint("The job log names them.") + other)
         if result.get("result") in _DOWNLOAD_SUMMARY_LABELS:
             return _DOWNLOAD_SUMMARY_LABELS[result["result"]]
         return "No tracks were retrieved." + hint("The job log says why.")

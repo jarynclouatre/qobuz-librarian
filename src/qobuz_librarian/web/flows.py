@@ -18,9 +18,11 @@ from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzAccess, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import (
+    cd_quality_note,
     download_attention_kind,
     failure_cause,
     incomplete_track_counts,
+    track_shortfall,
 )
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
@@ -76,7 +78,13 @@ from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log
-from qobuz_librarian.web import job_persistence, review_badges, settings_store, storage
+from qobuz_librarian.web import (
+    download_outcomes,
+    job_persistence,
+    review_badges,
+    settings_store,
+    storage,
+)
 from qobuz_librarian.web import jobs as job_mgr
 
 
@@ -2912,6 +2920,7 @@ def execute_albums(job, chosen, token):
     partial = 0
     retryable_tracks = 0
     lossy_only_tracks = 0
+    unavailable_tracks = 0
     attention_counts = {
         "backup": 0,
         "quality": 0,
@@ -3115,13 +3124,15 @@ def execute_albums(job, chosen, token):
             # finished, and surface the remainder NOW (after the prune, which
             # would otherwise drop the fresh candidate as a same-id stale one)
             # instead of leaving it invisible until the next manual refresh.
-            retryable, lossy_only = incomplete_track_counts(result)
+            retryable, unretryable = incomplete_track_counts(result)
             if attention_kind == "backup":
                 attention_counts["backup"] += 1
-            elif retryable or lossy_only:
+            elif retryable or unretryable:
+                _, _, lossy_only, unavailable = track_shortfall(result)
                 partial += 1
                 retryable_tracks += retryable
                 lossy_only_tracks += lossy_only
+                unavailable_tracks += unavailable
                 if is_nr_run and retryable:
                     _remember_review_save(
                         _return_picks([cand], "new_releases"))
@@ -3253,10 +3264,9 @@ def execute_albums(job, chosen, token):
                     f"{plural(retryable_tracks, 'track')} can be retried from "
                     f"{destination}."
                 )
-        if lossy_only_tracks:
+        if lossy_only_tracks or unavailable_tracks:
             messages.append(
-                f"{plural(lossy_only_tracks, 'track')} can only be found "
-                "lossy on Qobuz and needs another source."
+                f"{download_outcomes.beyond_retry(lossy_only_tracks, unavailable_tracks)}."
             )
         job.error = " ".join(messages)
     _apply_non_track_attention()
@@ -3355,6 +3365,7 @@ def execute_upgrades(job, chosen, token):
     ok = 0
     kept = 0
     companion_notes = []
+    cd_quality_tracks = []
     put_back_notes = []
     catalogue_failed = 0
     quality_attention = 0
@@ -3446,6 +3457,7 @@ def execute_upgrades(job, chosen, token):
             ok += 1
             job._imported_any = True
             _note_album_done(job)
+            cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
             if result.get("companions_kept"):
                 companion_notes.append((
                     f"{cand.get('artist', '')} - {cand.get('title') or '?'}",
@@ -3561,6 +3573,8 @@ def execute_upgrades(job, chosen, token):
                 f"complete; backup retained).")
     msg += _kept_companions_note(companion_notes)
     msg += _put_back_note(put_back_notes)
+    if cd_quality_tracks:
+        msg += f" {cd_quality_note(cd_quality_tracks)}"
     if catalogue_failed:
         msg += (f" {plural(catalogue_failed, 'replacement')} needs catalogue "
                 "attention; backup retained.")
@@ -4796,6 +4810,7 @@ def execute_repairs(job, chosen, token):
     fixed = 0
     unverified = 0
     failed = 0
+    cd_quality_tracks = []
     failed_cands = []
     interrupted = 0
     processed = 0
@@ -4912,11 +4927,13 @@ def execute_repairs(job, chosen, token):
             # it had just been replaced.
             unverified += 1
             job._imported_any = True
+            cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
         elif (result and result.get("n_ok", 0) > 0 and result.get("imported")
                 and result.get("n_fail", 0) == 0):
             fixed += 1
             job._imported_any = True
             _note_album_done(job)
+            cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
         else:
             failed += 1
             failed_cands.append(cand)
@@ -4970,6 +4987,8 @@ def execute_repairs(job, chosen, token):
     job.summary = (f"{'Finished. ' if not (failed or unverified) else ''}"
                    f"Repaired {fixed}/{plural(len(chosen), 'album')}."
                    f"{kept}{unproven}")
+    if cd_quality_tracks:
+        job.summary += f" {cd_quality_note(cd_quality_tracks)}"
     log.info(job.summary)
     retry_saved = _return_picks(
         failed_cands,
