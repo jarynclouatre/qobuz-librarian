@@ -3,8 +3,6 @@
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
 
-{% import "_job_labels.html" as labels %}
-
 <div class="ql-dashboard">
   <div class="ql-dashboard-title">
     <h1>Search</h1>
@@ -183,7 +181,6 @@
     {% endif %}
   </div>
 
-  {% set queued_jobs = pending | selectattr('status.value', 'equalto', 'pending') | list %}
   <div class="ql-search-workspace">
     <section class="ql-panel ql-search-panel" {% if not creds_ok %}data-qobuz-setup-card{% endif %}>
       {% if not creds_ok %}
@@ -254,6 +251,10 @@
         {% if search_artist_id %}
         <input type="hidden" name="artist_id" value="{{ search_artist_id }}" data-deep-link>
         <input type="hidden" name="artist_name" value="{{ search_artist_name }}" data-deep-link>
+        {% if search_back %}
+        <input type="hidden" name="back_kind" value="{{ search_back.kind }}" data-deep-link>
+        <input type="hidden" name="back_q" value="{{ search_back.q }}" data-deep-link>
+        {% endif %}
         {% endif %}
         {% if search_album_id %}
         <input type="hidden" name="album_id" value="{{ search_album_id }}" data-deep-link>
@@ -326,83 +327,6 @@
       </div>
       {% endif %}
     </div>
-
-    {# Always in the DOM (hidden when idle): the strip is the htmx target
-       that lets a queued download surface Background work without a reload;
-       a target that only renders once jobs exist can never appear. #}
-    <section id="dashboard-active" class="ql-active-strip{% if not (active_jobs or queued_jobs) %} hidden{% endif %}">
-    {% if active_jobs or queued_jobs %}
-      <div class="ql-active-strip-header">
-        <h2>Background work</h2>
-        <a href="/queue" class="ql-active-strip-link">Open queue</a>
-      </div>
-      <div class="ql-active-list">
-        {% for j in active_jobs %}
-        {% set _detail = labels.phase_detail(j, labels.job_activity(j)) | trim %}
-        <div class="ql-active-row"
-             data-job-card data-job-id="{{ j.id }}" data-job-surface="dashboard"
-             data-job-status="{{ j.status.value }}" data-job-kind="{{ j.execute_kind or j.kind }}"{% if j.importing %} data-job-importing="1"{% endif %}>
-          <div class="ql-active-main">
-            <div class="ql-row-status">
-              <span class="ql-status-chip">{{ labels.job_activity(j) }}</span>
-              <span id="dash-reconnect-{{ j.id }}" class="ql-status-chip ql-status-chip--wrap is-warning hidden">Reconnecting</span>
-            </div>
-            <a href="/jobs/{{ j.id }}" class="ql-row-title ql-row-link">
-              {% if j.artist %}{{ j.artist }} · {% endif %}{{ j.display_title }}
-            </a>
-            <p id="dash-prog-{{ j.id }}" class="ql-row-meta">
-              {%- if j.progress_total > 0 -%}
-              {% if _detail %}{{ _detail }} {% endif %}{{ j.progress_current }} / {{ j.progress_total }}{% if j.progress_unit %} {{ j.progress_unit }}{{ 's' if j.progress_total != 1 }}{% endif %}
-              {%- else -%}
-              {{ _detail }}
-              {%- endif -%}
-            </p>
-          </div>
-          {% if j.id == cancel_protected_job_id %}
-          <div class="ql-row-action">
-            <span class="ql-status-chip is-warning"
-                  title="This job resumes an interrupted download and cannot be cancelled.">Recovery protected</span>
-          </div>
-          {% elif j.importing %}
-          <div class="ql-row-action">
-            <span class="ql-status-chip"
-                  title="Import has started and cannot be stopped.">Finishing</span>
-          </div>
-          {% else %}
-          <form action="/jobs/{{ j.id }}/cancel" method="post" class="ql-row-action">
-            <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-            <button type="submit" class="ql-btn ql-btn-sm"
-                    title="Cancel job" aria-label="Cancel job"
-                    data-confirm="{{ labels.cancel_confirm(j) }}"
-                    data-confirm-action="Stop job" data-confirm-dismiss="Keep running" data-irreversible>Cancel</button>
-          </form>
-          {% endif %}
-        </div>
-        {% endfor %}
-        {% if queued_jobs %}
-        {% set _wait = namespace(paused=none, qobuz=false) %}
-        {% for qj in queued_jobs %}
-        {% set qw = (queue_waits or {}).get(qj.id) %}
-        {% if qw and qw.paused_for and not _wait.paused %}{% set _wait.paused = qw.paused_for %}{% endif %}
-        {% if qw and qw.for_qobuz %}{% set _wait.qobuz = true %}{% endif %}
-        {% endfor %}
-        {% set _first_wait = (queue_waits or {}).get(queued_jobs[0].id) %}
-        <div class="ql-active-row">
-          <div class="ql-active-main">
-            <p class="ql-row-title">{{ queued_jobs | length }} job{{ 's' if queued_jobs|length != 1 }} queued</p>
-            {% if _wait.paused %}
-            <p class="ql-row-meta">Waiting until {% if _wait.paused.album %}“{{ _wait.paused.album }}”{% else %}the interrupted download{% endif %} is retried or given up.</p>
-            {% elif _wait.qobuz %}
-            <p class="ql-row-meta">Waiting for Qobuz.</p>
-            {% elif queued_jobs | length == 1 %}
-            <p class="ql-row-meta">{% if _first_wait %}Behind {{ _first_wait.position }} job{{ 's' if _first_wait.position != 1 }}.{% else %}Next.{% endif %}</p>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-      </div>
-    {% endif %}
-    </section>
   </div>
 </div>
 

@@ -2217,12 +2217,6 @@
             receipt.appendChild(link);
           }
           showToast(receipt, failed ? "error" : (queued || duplicates ? "success" : "info"));
-          // Surface the Background-work strip without a reload. It's the
-          // page's persistent signal that something is now running.
-          if (queued && window.htmx && document.getElementById("dashboard-active")) {
-            window.htmx.ajax("GET", "/",
-              { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
-          }
           if (queued && window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
         });
       }
@@ -2311,22 +2305,19 @@
       ? "Downloading" : "Running";
   }
 
-  // Dashboard and queue progress cards.
+  // Queue progress cards.
   function wireStreamCard(card) {
     if (card.dataset.sseWired === "1") return;
     card.dataset.sseWired = "1";
     var id = card.dataset.jobId;
-    var surface = card.dataset.jobSurface;   // "dashboard" | "queue"
     var status = card.dataset.jobStatus;
     var kind = card.dataset.jobKind || "";
     var runFallback = jobActivityFallback(kind, status);
-    if (!id || !surface) return;
+    if (!id) return;
     var importing = card.dataset.jobImporting === "1";
-    var progId = (surface === "dashboard" ? "dash-prog-" : "card-prog-") + id;
-    var containerId = surface === "dashboard" ? "dashboard-active"
-                    : "queue-body";
-    var reconnect = document.getElementById(
-      (surface === "dashboard" ? "dash-reconnect-" : "card-reconnect-") + id);
+    var progId = "card-prog-" + id;
+    var containerId = "queue-body";
+    var reconnect = document.getElementById("card-reconnect-" + id);
     // Same silent-stream problem as the job page: a socket that dies without
     // closing never raises an error, so watch the gap since the last event.
     var SILENT_STREAM_MS = 25000;
@@ -2376,13 +2367,8 @@
         window.addEventListener("online", refreshSurface, { once: true });
         return;
       }
-      if (surface === "dashboard") {
-        window.htmx.ajax("GET", "/",
-          { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
-      } else {
-        window.htmx.ajax("GET", "/queue",
-          { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
-      }
+      window.htmx.ajax("GET", "/queue",
+        { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
     }
     function openStream() {
       if (src) { try { src.close(); } catch (e) {} }
@@ -2427,16 +2413,8 @@
       var el = document.getElementById(progId);
       if (!el) return;
       var verb = status === "scanning" ? "Scanning" : (p.phase || runFallback);
-      // The dashboard row carries a chip saying the same activity, so a phase
-      // that only repeats it leaves nothing but the count, and nothing at all
-      // where there is no count. Queue rows have no chip and keep their verb.
-      if (surface === "dashboard"
-          && verb.toLowerCase().indexOf(runFallback.toLowerCase()) === 0) {
-        el.textContent = p.total > 0 ? fmtProgress(p, "", false) : "";
-      } else {
-        var txt = fmtProgress(p, verb, surface !== "dashboard");
-        if (txt) el.textContent = txt;
-      }
+      var txt = fmtProgress(p, verb);
+      if (txt) el.textContent = txt;
       var bar = document.getElementById("card-bar-" + id);
       if (bar && p.total > 0) {
         var fill = bar.querySelector("i");
@@ -4311,7 +4289,8 @@
         var form = document.querySelector(".ql-search-form");
         var params = new URL(location.href).searchParams;
         var values = {};
-        ["q", "kind", "artist_id", "artist_name", "album_id"].forEach(function (key) {
+        ["q", "kind", "artist_id", "artist_name", "album_id", "back_kind",
+          "back_q"].forEach(function (key) {
           values[key] = params.get(key) || "";
         });
         window.htmx.ajax("POST", "/search", {
@@ -4349,19 +4328,13 @@
     if (!form) return;
     form.querySelectorAll("[data-deep-link]").forEach(function (el) { el.remove(); });
   });
-  // One album downloaded from a search row gets the same treatment as a bulk
-  // download: bring up the Background-work strip. Its toast clears after a few
-  // seconds, and without the strip the page the user is standing on stops
-  // mentioning the download at all.
+  // One album downloaded from a search row updates the Queue badge at once,
+  // like a bulk download, instead of at the next poll.
   document.addEventListener("htmx:afterRequest", function (e) {
     var source = e.target;
     if (!source || !source.closest) return;
     if (!source.closest("[data-search-download-form]")) return;
     if (e.detail && e.detail.successful === false) return;
-    if (window.htmx && document.getElementById("dashboard-active")) {
-      window.htmx.ajax("GET", "/",
-        { target: "#dashboard-active", swap: "outerHTML", select: "#dashboard-active" });
-    }
     if (window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
   });
   cleanFlashUrl();

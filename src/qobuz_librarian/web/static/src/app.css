@@ -92,8 +92,7 @@
 .ql-history-attention.hidden,
 .ql-tab-attention.hidden,
 .ql-review-tool.hidden,
-.ql-discover-album.hidden,
-.ql-active-strip.hidden {
+.ql-discover-album.hidden {
   display: none;
 }
 .ql-btn.hidden {
@@ -1078,91 +1077,11 @@ details.ql-mobile-drawer[open]::before {
   height: 5.75rem;
   color: var(--ql-text-3);
 }
-/* Background work under the results: a short list after a hairline, each
-   job one title and one quiet line, its state a coloured word. */
-.ql-active-strip {
-  display: grid;
-  gap: var(--ql-space-1);
-  border-top: 1px solid var(--ql-line-soft);
-  padding-top: var(--ql-space-2);
-}
-.ql-active-strip-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--ql-space-4);
-}
-.ql-active-strip-header h2 {
-  margin: 0;
-  color: var(--ql-text-3);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  line-height: 1.25;
-}
-.ql-active-strip-link {
-  display: inline-flex;
-  min-height: 2.75rem;
-  align-items: center;
-  color: var(--ql-text-2);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  text-decoration: underline;
-  text-decoration-color: var(--ql-line);
-  text-underline-offset: 0.18em;
-}
-.ql-active-strip-link:hover {
-  color: var(--ql-text);
-  text-decoration-color: currentColor;
-}
-.ql-active-main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.125rem 0.5rem;
-}
-.ql-active-main > .ql-row-title {
-  order: -1;
-  flex-basis: 100%;
-}
-.ql-active-main > .ql-row-status {
-  margin: 0;
-}
-.ql-active-main > .ql-row-meta {
-  margin: 0;
-}
-/* The queued summary is one line: the count, then what it waits for. */
-.ql-active-row:not([data-job-card]) .ql-active-main > .ql-row-title {
-  flex-basis: auto;
-}
-.ql-active-strip .ql-status-chip,
 .ql-activity-actions > .ql-status-chip,
 .ql-status-chip.ql-job-import-chip {
   padding: 0;
   background: none;
   font-size: 0.8125rem;
-}
-.ql-active-list {
-  display: grid;
-}
-.ql-active-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.875rem;
-  padding-block: var(--ql-space-3);
-}
-.ql-active-row + .ql-active-row {
-  border-top: 1px solid var(--ql-line-soft);
-}
-.ql-active-list > .ql-active-row:first-child {
-  padding-top: 0;
-}
-.ql-active-list > .ql-active-row:last-child {
-  padding-bottom: 0;
-}
-.ql-active-main {
-  min-width: 0;
 }
 .ql-connect-cta,
 .ql-auth-panel {
@@ -3095,17 +3014,6 @@ details.ql-mobile-drawer[open]::before {
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
-/* The dashboard row drops this line when its chip has already said the same
-   thing; the element stays so a later phase can fill it back in. */
-.ql-row-meta:empty {
-  display: none;
-}
-.ql-row-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.375rem;
-  margin-bottom: 0.35rem;
-}
 /* A status is a word in its own colour on a faint wash of it: no outline, so
    it never reads as a button beside the row's real controls. */
 .ql-status-chip {
@@ -3194,9 +3102,6 @@ details.ql-mobile-drawer[open]::before {
   min-height: 1.1rem;
   padding-inline: 0.32rem;
   font-size: 0.625rem;
-}
-.ql-row-action {
-  flex: none;
 }
 .ql-review-candidates {
   padding-bottom: 7.5rem;

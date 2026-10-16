@@ -373,7 +373,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             "durable_recovery_control",
             queue_recovery._durable_recovery_control(),
         )
-    if name in {"job.html", "_job_body.html", "queue.html", "index.html"}:
+    if name in {"job.html", "_job_body.html", "queue.html"}:
         context.setdefault(
             "cancel_protected_job_id",
             job_mgr.durable_recovery_job_id(),

@@ -45,7 +45,6 @@ from qobuz_librarian.web import (
     download_admission,
     download_outcomes,
     flows,
-    job_labels,
     job_runs,
     new_release_checks,
     qobuz_access,
@@ -262,7 +261,8 @@ def _maybe_resume_library_scan():
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, q: str = "", kind: str = "artist",
-                    artist_id: str = "", artist_name: str = "", album_id: str = ""):
+                    artist_id: str = "", artist_name: str = "", album_id: str = "",
+                    back_kind: str = "", back_q: str = ""):
     active_jobs = [j for j in job_mgr.registry.pending_and_running()
                    if j.status in (job_mgr.JobStatus.RUNNING, job_mgr.JobStatus.SCANNING)]
 
@@ -322,18 +322,17 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_artist_id = str(artist_id or "").strip()[:64]
     search_artist_name = str(artist_name or "").strip()[:200]
     search_album_id = str(album_id or "").strip()[:64] if search_kind == "album" else ""
+    search_back = _search_origin(back_kind, back_q[:200]) if search_artist_id else None
     pending = job_mgr.registry.pending_and_running()
     return rendering._tr(request, "index.html", {
-        "active_jobs": active_jobs,
         "pending": pending,
-        "queue_waits": {j.id: job_labels._queue_wait(j) for j in pending},
-        "review": job_mgr.registry.awaiting_review(),
         "creds_token_valid": qobuz_access._token_valid_for(),
         "search_q": search_q,
         "search_kind": search_kind,
         "search_artist_id": search_artist_id,
         "search_artist_name": search_artist_name,
         "search_album_id": search_album_id,
+        "search_back": search_back,
         "auto_search": bool(search_q or search_album_id),
         "have_lyrics": lyric_fetch.AVAILABLE,
         "page": "dashboard",
@@ -606,8 +605,20 @@ async def _search_catalog(kind, query, token):
     if kind == "album":
         kept = _filter_artist_only_albums(raw, query)
         artist_only_count = len(raw) - len(kept)
-        raw = kept
+        raw = sorted(kept, key=lambda a: not _titled(a, query))
     return raw, artist_only_count, error
+
+
+def _titled(album, query):
+    """Whether ``album`` is titled exactly what was searched, so it leads
+    the results wherever Qobuz ranked it."""
+    def key(text):
+        return tags.normalize(tags.strip_leading_article(text.strip()))
+
+    wanted = key(query)
+    title = album.get("title") or ""
+    return bool(wanted) and wanted in (
+        key(title), key(tags.strip_album_decorations(title)))
 
 
 async def _track_results(raw, query, token, queued_tracks):
@@ -953,12 +964,24 @@ def _search_error(exc, query):
     return "Search failed. Try again."
 
 
+def _search_origin(kind, q):
+    """The album or track search an artist page was opened from, which its
+    Search results link goes back to."""
+    kind = str(kind or "").strip().lower()
+    q = str(q or "").strip()
+    if kind in ("album", "track") and q:
+        return {"kind": kind, "q": q}
+    return None
+
+
 @router.post("/search", response_class=HTMLResponse)
 async def do_search(request: Request, q: str = Form("", max_length=500),
                     kind: str = Form("album"),
                     artist_id: str = Form(""),
                     artist_name: str = Form(""),
-                    album_id: str = Form("")):
+                    album_id: str = Form(""),
+                    back_kind: str = Form(""),
+                    back_q: str = Form("", max_length=500)):
     results = []
     album_groups = []
     artist_results = []
@@ -972,6 +995,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     artist_id = str(artist_id or "").strip()
     artist_name = str(artist_name or "").strip()
     album_id = str(album_id or "").strip()
+    back = _search_origin(back_kind, back_q)
     if not rendering._is_htmx(request):
         return RedirectResponse(url="/", status_code=303)
     if query or (kind == "album" and album_id):
@@ -1047,7 +1071,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     ctx = {"q": query, "results": results, "album_groups": album_groups,
            "album_total": album_total, "album_more": album_more,
            "artist_results": artist_results, "selected_artist": selected_artist,
-           "error": error, "kind": kind,
+           "error": error, "kind": kind, "list_kind": kind,
+           "back": back or {"kind": "artist", "q": query},
            "search_count_label": search_count_label,
            "artist_only_count": artist_only_count,
            "artist_only_label": plural(artist_only_count, "album"),
@@ -1066,6 +1091,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 params["artist_id"] = artist_id
                 if artist_name:
                     params["artist_name"] = artist_name
+                if back:
+                    params["back_kind"] = back["kind"]
+                    params["back_q"] = back["q"]
             if kind == "album" and album_id:
                 params["album_id"] = album_id
             resp.headers["HX-Push-Url"] = "/?" + urllib.parse.urlencode(params)

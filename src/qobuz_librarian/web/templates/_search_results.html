@@ -79,7 +79,9 @@
     <input type="hidden" name="kind" value="{{ kind }}">
     <input type="hidden" name="q" value="{{ name }}">
     <input type="hidden" name="{{ kind }}_id" value="{{ id }}">
-    {% if kind == 'artist' %}<input type="hidden" name="artist_name" value="{{ name }}">{% endif %}
+    {% if kind == 'artist' %}<input type="hidden" name="artist_name" value="{{ name }}">
+    {% if list_kind != 'artist' and q %}<input type="hidden" name="back_kind" value="{{ list_kind }}">
+    <input type="hidden" name="back_q" value="{{ q }}">{% endif %}{% endif %}
     <button type="submit" class="ql-result-link">{{ name }}</button>
   </form>
   {% else %}{{ name }}{% endif %}
@@ -459,13 +461,13 @@
     <div class="ql-search-context">
       <div class="ql-search-context-main">
         {% if selected_artist %}
-        {% if q %}
+        {% if back.q %}
         <form method="post" action="/search"
               hx-post="/search" hx-target="#search-results" hx-swap="innerHTML"
               class="ql-search-back-form" data-search-artist-id="{{ selected_artist.id }}">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <input type="hidden" name="kind" value="artist">
-          <input type="hidden" name="q" value="{{ q }}">
+          <input type="hidden" name="kind" value="{{ back.kind }}">
+          <input type="hidden" name="q" value="{{ back.q }}">
           <button type="submit" class="ql-search-back">&larr; Search results</button>
         </form>
         {% endif %}
